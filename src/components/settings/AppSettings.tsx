@@ -11,6 +11,15 @@ import { IconTelevision } from "central-icons/IconTelevision";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import {
+  INTERFACE_LOCALE_OPTIONS,
+  type InterfaceLocale,
+  type MessageKey,
+  setInterfaceLocale,
+  type TFunction,
+  useLocale,
+  useT,
+} from "../../i18n";
+import {
   CLOVY_COMMUNITY_URL,
   dictationHotkeyStatus,
   dictationHelperCommand,
@@ -144,58 +153,73 @@ import {
   type DateFormatPreference,
 } from "../../lib/date-format";
 
-const THEME_OPTIONS: readonly {
+function themeOptions(t: TFunction): readonly {
   value: ThemePreference;
   label: ReactNode;
   ariaLabel: string;
-}[] = [
-  {
-    value: "system",
-    label: (
-      <>
-        <IconTelevision size={14} />
-        System
-      </>
-    ),
-    ariaLabel: "Match system theme",
-  },
-  {
-    value: "light",
-    label: (
-      <>
-        <IconSun size={14} />
-        Light
-      </>
-    ),
-    ariaLabel: "Use light theme",
-  },
-  {
-    value: "dark",
-    label: (
-      <>
-        <IconMoonStar size={14} />
-        Dark
-      </>
-    ),
-    ariaLabel: "Use dark theme",
-  },
-];
+}[] {
+  return [
+    {
+      value: "system",
+      label: (
+        <>
+          <IconTelevision size={14} />
+          {t("settings.theme.system")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.systemAria"),
+    },
+    {
+      value: "light",
+      label: (
+        <>
+          <IconSun size={14} />
+          {t("settings.theme.light")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.lightAria"),
+    },
+    {
+      value: "dark",
+      label: (
+        <>
+          <IconMoonStar size={14} />
+          {t("settings.theme.dark")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.darkAria"),
+    },
+  ];
+}
 
-const FONT_SCALE_OPTIONS: readonly {
+const FONT_SCALE_LABEL_KEYS = {
+  default: "settings.textSize.default",
+  large: "settings.textSize.large",
+  larger: "settings.textSize.larger",
+} as const satisfies Record<FontScaleId, MessageKey>;
+
+function fontScaleOptions(t: TFunction): readonly {
   value: FontScaleId;
   label: ReactNode;
   ariaLabel: string;
-}[] = FONT_SCALE_PRESETS.map((preset) => ({
-  value: preset.id,
-  label: preset.label,
-  ariaLabel: `${preset.label} text size`,
-}));
+}[] {
+  return FONT_SCALE_PRESETS.map((preset) => {
+    const label = t(FONT_SCALE_LABEL_KEYS[preset.id]);
+    return {
+      value: preset.id,
+      label,
+      ariaLabel: t("settings.textSize.optionAria", { size: label }),
+    };
+  });
+}
 
-const DATE_FORMAT_OPTIONS = [
-  { value: "system", label: "System" },
-  { value: "month-first", label: "Jul 9" },
-  { value: "day-first", label: "9 Jul" },
-] satisfies { value: DateFormatPreference; label: string }[];
+function dateFormatOptions(t: TFunction) {
+  return [
+    { value: "system", label: t("settings.dateFormat.system") },
+    { value: "month-first", label: t("settings.dateFormat.monthFirst") },
+    { value: "day-first", label: t("settings.dateFormat.dayFirst") },
+  ] satisfies { value: DateFormatPreference; label: string }[];
+}
 
 const RELEASE_CHANNEL_OPTIONS: readonly {
   value: ReleaseChannel;
@@ -489,6 +513,8 @@ export function AppSettings({
     message: string;
   }>();
   const [micOpen, setMicOpen] = useState(false);
+  const t = useT();
+  const interfaceLocale = useLocale();
   const [theme, setTheme] = useState<ThemePreference>(() => getStoredTheme());
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
   const fontScale = useFontScaleId();
@@ -1766,23 +1792,47 @@ export function AppSettings({
           <section className="settings-group" aria-labelledby="appearance-heading">
             <SettingsPageHeader
               id="appearance-heading"
-              title="Appearance"
-              blurb="Choose the theme, accent color, text size, and date format Clovy uses."
+              title={t("settings.appearance.title")}
+              blurb={t("settings.appearance.blurb")}
             />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Theme</h3>
+                    <h3 className="settings-row-title">{t("settings.interfaceLanguage.title")}</h3>
                     <p className="settings-row-description">
-                      Match the system or force light or dark mode.
+                      {t("settings.interfaceLanguage.description")}
                     </p>
                   </div>
                   <div className="settings-row-control">
+                    <Select
+                      value={interfaceLocale}
+                      options={INTERFACE_LOCALE_OPTIONS.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                        lang: option.value,
+                      }))}
+                      placeholder="English"
+                      ariaLabel={t("settings.interfaceLanguage.aria", {
+                        language:
+                          INTERFACE_LOCALE_OPTIONS.find(
+                            (option) => option.value === interfaceLocale,
+                          )?.label ?? "English",
+                      })}
+                      onChange={(value) => setInterfaceLocale(value as InterfaceLocale)}
+                    />
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <h3 className="settings-row-title">{t("settings.theme.title")}</h3>
+                    <p className="settings-row-description">{t("settings.theme.description")}</p>
+                  </div>
+                  <div className="settings-row-control">
                     <SegmentedControl<ThemePreference>
-                      aria-label="App theme"
+                      aria-label={t("settings.theme.aria")}
                       value={theme}
-                      options={THEME_OPTIONS}
+                      options={themeOptions(t)}
                       onValueChange={(next) => {
                         setTheme(next);
                         setStoredTheme(next);
@@ -1792,26 +1842,22 @@ export function AppSettings({
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Text size</h3>
-                    <p className="settings-row-description">
-                      Make text across the app larger. Affects every label, note, and conversation.
-                    </p>
+                    <h3 className="settings-row-title">{t("settings.textSize.title")}</h3>
+                    <p className="settings-row-description">{t("settings.textSize.description")}</p>
                   </div>
                   <div className="settings-row-control">
                     <SegmentedControl<FontScaleId>
-                      aria-label="Text size"
+                      aria-label={t("settings.textSize.title")}
                       value={fontScale}
-                      options={FONT_SCALE_OPTIONS}
+                      options={fontScaleOptions(t)}
                       onValueChange={setStoredFontScale}
                     />
                   </div>
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Accent</h3>
-                    <p className="settings-row-description">
-                      The brand color used across buttons, highlights, and the recorder.
-                    </p>
+                    <h3 className="settings-row-title">{t("settings.accent.title")}</h3>
+                    <p className="settings-row-description">{t("settings.accent.description")}</p>
                   </div>
                   <div className="settings-row-control">
                     <Select
@@ -1824,10 +1870,11 @@ export function AppSettings({
                         color: preset.value,
                       }))}
                       placeholder="Clay"
-                      ariaLabel={`Accent color: ${
-                        BRAND_PRESETS.find((preset) => preset.id === brand)?.label ??
-                        BRAND_PRESETS[0].label
-                      }`}
+                      ariaLabel={t("settings.accent.aria", {
+                        color:
+                          BRAND_PRESETS.find((preset) => preset.id === brand)?.label ??
+                          BRAND_PRESETS[0].label,
+                      })}
                       onChange={(id) => {
                         setBrand(id as BrandId);
                         setStoredBrand(id as BrandId);
@@ -1837,20 +1884,21 @@ export function AppSettings({
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Date format</h3>
+                    <h3 className="settings-row-title">{t("settings.dateFormat.title")}</h3>
                     <p className="settings-row-description">
-                      Choose how older session dates appear in the sidebar.
+                      {t("settings.dateFormat.description")}
                     </p>
                   </div>
                   <div className="settings-row-control">
                     <Select
                       value={dateFormat}
-                      options={DATE_FORMAT_OPTIONS}
-                      placeholder="System"
-                      ariaLabel={`Date format: ${
-                        DATE_FORMAT_OPTIONS.find((option) => option.value === dateFormat)?.label ??
-                        "System"
-                      }`}
+                      options={dateFormatOptions(t)}
+                      placeholder={t("settings.dateFormat.system")}
+                      ariaLabel={t("settings.dateFormat.aria", {
+                        format:
+                          dateFormatOptions(t).find((option) => option.value === dateFormat)
+                            ?.label ?? t("settings.dateFormat.system"),
+                      })}
                       onChange={(value) => {
                         const next = value as DateFormatPreference;
                         setDateFormat(next);
