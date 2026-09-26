@@ -16,6 +16,7 @@ import type { CSSProperties, ReactNode, RefObject } from "react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FundingTier } from "../account/FundingNotice";
 import { Switch } from "../ui/Switch";
+import { formatDate, t as translate, useT } from "../../i18n";
 import type {
   FolderDto,
   LiveTranscriptEventDto,
@@ -103,14 +104,10 @@ type NoteEditorProps = {
   onTabChange: (tab: "notes" | "transcription") => void;
 };
 
-const TABS = [
-  { value: "notes", label: "Notes" },
-  { value: "transcription", label: "Transcription" },
-] as const;
-const NOTE_TITLE_PLACEHOLDER = "New note";
-
 function sourceLabel(source?: string) {
-  return source === "system" ? "System" : "Microphone";
+  return source === "system"
+    ? translate("notes.editor.source.system")
+    : translate("notes.editor.source.microphone");
 }
 
 /** Normalise a turn's source to one of the two filterable buckets — an
@@ -131,12 +128,6 @@ type ProcessingStageStatus = Extract<
   "validating" | "transcribing" | "generating"
 >;
 
-const SOURCE_FILTERS = [
-  { value: "all", label: "All" },
-  { value: "microphone", label: "Microphone" },
-  { value: "system", label: "System" },
-] as const;
-
 const RECORD_CONSENT_REVEAL_DELAY_MS = 420;
 const RECORD_CONSENT_AUTO_HIDE_MS = 5000;
 
@@ -156,22 +147,28 @@ function calendarEventSchedule(startAt: string, endAt: string) {
   const start = new Date(startAt);
   const end = new Date(endAt);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
-  const day = new Intl.DateTimeFormat(undefined, {
+  const dayOptions: Intl.DateTimeFormatOptions = {
     weekday: "short",
     month: "short",
     day: "numeric",
-  });
-  const time = new Intl.DateTimeFormat(undefined, {
+  };
+  const timeOptions: Intl.DateTimeFormatOptions = {
     hour: "numeric",
     minute: "2-digit",
-  });
+  };
   return {
-    range: `${time.format(start)} to ${time.format(end)}`,
+    range: translate("notes.editor.calendar.range", {
+      start: formatDate(start, timeOptions),
+      end: formatDate(end, timeOptions),
+    }),
     // An event that runs past midnight names both days so the range stays honest.
     date:
       start.toDateString() === end.toDateString()
-        ? day.format(start)
-        : `${day.format(start)} to ${day.format(end)}`,
+        ? formatDate(start, dayOptions)
+        : translate("notes.editor.calendar.range", {
+            start: formatDate(start, dayOptions),
+            end: formatDate(end, dayOptions),
+          }),
   };
 }
 
@@ -209,6 +206,7 @@ function googleCalendarEventUrl(event: NoteCalendarEventDto): string | null {
  * plain external anchor, routed through the OS browser by the global
  * interceptor in lib/external-links.ts. */
 function CalendarEventChip({ event }: { event: NoteCalendarEventDto }) {
+  const t = useT();
   const schedule = calendarEventSchedule(event.startAt, event.endAt);
   const url = googleCalendarEventUrl(event);
 
@@ -217,7 +215,7 @@ function CalendarEventChip({ event }: { event: NoteCalendarEventDto }) {
       interactive
       className="note-calendar-chip"
       tabIndex={0}
-      aria-label={`Matched to ${event.title} in Google Calendar`}
+      aria-label={t("notes.editor.calendar.matched", { title: event.title })}
       tip={
         <div className="note-calendar-card">
           <div className="note-calendar-card-header">
@@ -228,8 +226,8 @@ function CalendarEventChip({ event }: { event: NoteCalendarEventDto }) {
                 href={url}
                 target="_blank"
                 rel="noreferrer"
-                aria-label="Open in Google Calendar"
-                title="Open in Google Calendar"
+                aria-label={t("notes.editor.calendar.open")}
+                title={t("notes.editor.calendar.open")}
               >
                 <IconArrowUpRight size={14} />
               </a>
@@ -298,6 +296,17 @@ export function NoteEditor({
   onNavigateToFolder,
   onTabChange,
 }: NoteEditorProps) {
+  const t = useT();
+  const tabs = [
+    { value: "notes", label: t("notes.editor.tabs.notes") },
+    { value: "transcription", label: t("notes.editor.tabs.transcription") },
+  ] as const;
+  const sourceFilters = [
+    { value: "all", label: t("notes.editor.source.all") },
+    { value: "microphone", label: t("notes.editor.source.microphone") },
+    { value: "system", label: t("notes.editor.source.system") },
+  ] as const;
+  const noteTitlePlaceholder = t("notes.editor.titlePlaceholder");
   const content = note.editedContent ?? note.generatedContent ?? "";
   const activeTab = note.activeTab ?? "notes";
   const sourceTranscripts = orderedVisibleSourceTranscripts(note);
@@ -494,14 +503,14 @@ export function NoteEditor({
       <header className="editor-header">
         <input
           className="note-title"
-          aria-label="Note title"
-          placeholder={NOTE_TITLE_PLACEHOLDER}
+          aria-label={t("notes.editor.titleLabel")}
+          placeholder={noteTitlePlaceholder}
           value={note.title}
           onChange={(event) => onTitleChange(event.currentTarget.value)}
           onBlur={() => onFlushNote(note.id)}
         />
         <div className="note-title-print" aria-hidden="true">
-          {note.title.trim() || NOTE_TITLE_PLACEHOLDER}
+          {note.title.trim() || noteTitlePlaceholder}
         </div>
         {/* Metadata reads as the title's caption: sits below it, above the
             Notes/Transcription toggle. Navigation lives in the toolbar above. */}
@@ -526,9 +535,9 @@ export function NoteEditor({
           </div>
         </div>
         <SegmentedControl
-          aria-label="Note views"
+          aria-label={t("notes.editor.views")}
           value={activeTab}
-          options={TABS}
+          options={tabs}
           onValueChange={onTabChange}
         />
       </header>
@@ -548,7 +557,7 @@ export function NoteEditor({
             className="note-transcription-warning"
             tone="warning"
             role="alert"
-            aria-label="Transcription warning"
+            aria-label={t("notes.editor.transcriptionWarning")}
             body={userFacingFailureMessage(note.lastError)}
           />
         ) : null}
@@ -574,9 +583,9 @@ export function NoteEditor({
                 {hasBothSources ? (
                   <SegmentedControl
                     className="transcript-source-filter"
-                    aria-label="Filter transcript by source"
+                    aria-label={t("notes.editor.filterBySource")}
                     value={sourceFilter}
-                    options={SOURCE_FILTERS}
+                    options={sourceFilters}
                     onValueChange={setSourceFilter}
                   />
                 ) : null}
@@ -589,7 +598,7 @@ export function NoteEditor({
               <div className="transcript-processing" role="status" aria-live="polite">
                 <DotSpinner className="transcript-processing-spinner" />
                 <span className="transcript-processing-label shimmer">
-                  Listening for transcript preview...
+                  {t("notes.editor.listeningPreview")}
                 </span>
               </div>
             ) : showTranscriptProcessing && processingStatus ? (
@@ -620,11 +629,11 @@ export function NoteEditor({
               <div className="transcript-empty">
                 <p>
                   {recordingActive
-                    ? "Transcript preview will appear here while you record."
+                    ? t("notes.editor.previewWhileRecording")
                     : (processingText ??
                       (note.processingStatus === "failed"
-                        ? "No transcript was produced."
-                        : (note.lastError ?? "No transcript is available yet.")))}
+                        ? t("notes.editor.noTranscriptProduced")
+                        : (note.lastError ?? t("notes.editor.noTranscriptYet"))))}
                 </p>
               </div>
             )}
@@ -637,11 +646,7 @@ export function NoteEditor({
                 markdown={content}
                 onChange={onContentChange}
                 onBlur={onFlushNote}
-                emptyPlaceholder={
-                  processingLock
-                    ? ""
-                    : "Hit record to capture a conversation, or just start typing your thoughts here"
-                }
+                emptyPlaceholder={processingLock ? "" : t("notes.editor.emptyPlaceholder")}
               />
             </div>
             {/* The badge is the whole wait state now — no skeleton, since the
@@ -664,11 +669,11 @@ export function NoteEditor({
             (recordingBlockedReason ? (
               <InlineNotice
                 className="record-funding-blocked"
-                aria-label="Recording needs credits"
+                aria-label={t("notes.editor.recordingNeedsCredits")}
                 body={recordingBlockedReason}
                 actions={
                   <button type="button" className="btn btn-secondary" onClick={onTopUp}>
-                    {topUpLabel ?? "Upgrade"}
+                    {topUpLabel ?? t("notes.editor.upgrade")}
                   </button>
                 }
               />
@@ -678,12 +683,12 @@ export function NoteEditor({
           <InlineNotice
             className="record-mic-blocked"
             role="alert"
-            aria-label="Microphone access required"
+            aria-label={t("notes.editor.micRequired")}
             icon={<IconMicrophoneOff size={14} aria-hidden />}
-            body="Microphone access is blocked. You can still write notes here."
+            body={t("notes.editor.micBlocked")}
             actions={
               <button type="button" className="btn btn-secondary" onClick={onEnableMicrophone}>
-                Enable
+                {t("common.enable")}
               </button>
             }
           />
@@ -703,14 +708,14 @@ export function NoteEditor({
                   <InlineNotice
                     className="record-consent-note-surface record-consent-note-surface-actions meeting-end-notice"
                     role="status"
-                    aria-label="Meeting ended, recording stops soon"
-                    body="Meeting ended."
+                    aria-label={t("notes.editor.meetingEndedLabel")}
+                    body={t("notes.editor.meetingEnded")}
                     actions={
                       <>
                         <button
                           type="button"
                           className="btn btn-ghost meeting-end-stop"
-                          aria-label="Stop recording now"
+                          aria-label={t("notes.editor.stopNowLabel")}
                           style={
                             {
                               "--meeting-end-remaining": Math.min(
@@ -722,9 +727,11 @@ export function NoteEditor({
                           }
                           onClick={() => onStopNowAfterMeetingEnd?.(meetingEndCountdown.sessionId)}
                         >
-                          Stop now
+                          {t("notes.editor.stopNow")}
                           <span className="meeting-end-seconds" aria-hidden>
-                            {meetingEndCountdown.secondsRemaining}s
+                            {t("notes.editor.secondsShort", {
+                              seconds: meetingEndCountdown.secondsRemaining,
+                            })}
                           </span>
                         </button>
                         <button
@@ -734,7 +741,7 @@ export function NoteEditor({
                             onKeepRecordingAfterMeetingEnd?.(meetingEndCountdown.sessionId)
                           }
                         >
-                          Keep recording
+                          {t("notes.editor.keepRecording")}
                         </button>
                       </>
                     }
@@ -751,7 +758,7 @@ export function NoteEditor({
                 >
                   <InlineNotice
                     className="record-consent-note-surface"
-                    aria-label="Recording source warning"
+                    aria-label={t("notes.editor.sourceWarning")}
                     body={recordingForNote.warnings[0].message}
                   />
                 </motion.div>
@@ -770,15 +777,15 @@ export function NoteEditor({
                 >
                   <InlineNotice
                     className="record-consent-note-surface record-consent-note-surface-actions"
-                    aria-label="Recording consent reminder"
-                    body="Make sure everyone has agreed to be recorded."
+                    aria-label={t("notes.editor.consentLabel")}
+                    body={t("notes.editor.consentBody")}
                     actions={
                       <button
                         type="button"
                         className="btn btn-ghost"
                         onClick={() => setConsentReminderVisible(false)}
                       >
-                        Dismiss
+                        {t("notes.editor.dismiss")}
                       </button>
                     }
                   />
@@ -801,7 +808,7 @@ export function NoteEditor({
                   <div className="record-options-panel-inner">
                     {systemUnsupported ? (
                       <p className="record-options-unsupported">
-                        System audio requires macOS 14.2 or later.
+                        {t("notes.editor.systemAudioRequires")}
                       </p>
                     ) : (
                       <div className="record-options-row" data-locked={systemLocked || undefined}>
@@ -814,7 +821,7 @@ export function NoteEditor({
                           }
                         />
                         <span id="record-options-system" className="record-options-label">
-                          Capture system audio
+                          {t("notes.editor.captureSystemAudio")}
                         </span>
                         {systemAvailability === "denied" ? (
                           <button
@@ -822,7 +829,7 @@ export function NoteEditor({
                             className="btn btn-ghost record-options-enable"
                             onClick={onEnableSystemAudio}
                           >
-                            Enable
+                            {t("common.enable")}
                           </button>
                         ) : null}
                       </div>
@@ -894,7 +901,7 @@ export function NoteEditor({
                             <button
                               type="button"
                               className="record-button"
-                              aria-label="Recording needs credits"
+                              aria-label={t("notes.editor.recordingNeedsCredits")}
                               disabled={recordButtonDisabled}
                               onClick={onStartRecording}
                             >
@@ -905,8 +912,16 @@ export function NoteEditor({
                           <button
                             type="button"
                             className="record-button"
-                            aria-label={recordingDisabled ? "Recording in progress" : "Record"}
-                            title={recordingDisabled ? "Recording in progress" : "Record"}
+                            aria-label={
+                              recordingDisabled
+                                ? t("notes.editor.recordingInProgress")
+                                : t("notes.editor.record")
+                            }
+                            title={
+                              recordingDisabled
+                                ? t("notes.editor.recordingInProgress")
+                                : t("notes.editor.record")
+                            }
                             disabled={recordButtonDisabled}
                             onClick={onStartRecording}
                           >
@@ -917,7 +932,7 @@ export function NoteEditor({
                           <button
                             type="button"
                             className="record-options-trigger"
-                            aria-label="Recording options"
+                            aria-label={t("notes.editor.recordingOptions")}
                             aria-expanded={optionsOpen}
                             data-rotated={optionsOpen}
                             onClick={() => setOptionsOpen((value) => !value)}
@@ -953,6 +968,7 @@ function FolderChip({
   onCreateAndAssign: (name: string) => void;
   onNavigateToFolder?: (folderId: string) => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
@@ -989,14 +1005,14 @@ function FolderChip({
         onClick={() => setOpen((value) => !value)}
       >
         <IconProjects size={14} />
-        {currentFolder?.name ?? "Project"}
+        {currentFolder?.name ?? t("notes.folderChip.project")}
       </button>
       {currentFolder && onNavigateToFolder ? (
         <button
           type="button"
           className="move-to-folder-open"
-          aria-label={`Open ${currentFolder.name}`}
-          title={`Open ${currentFolder.name}`}
+          aria-label={t("notes.folderChip.open", { name: currentFolder.name })}
+          title={t("notes.folderChip.open", { name: currentFolder.name })}
           onClick={() => {
             setOpen(false);
             onNavigateToFolder(currentFolder.id);
@@ -1012,7 +1028,7 @@ function FolderChip({
             <input
               ref={searchRef}
               type="search"
-              placeholder="Search or create project"
+              placeholder={t("notes.folderChip.searchOrCreate")}
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
               onKeyDown={(event) => {
@@ -1027,7 +1043,7 @@ function FolderChip({
               <button
                 type="button"
                 className="search-clear"
-                aria-label="Clear search"
+                aria-label={t("notes.folderChip.clearSearch")}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
                   setQuery("");
@@ -1060,7 +1076,7 @@ function FolderChip({
                 );
               })
             ) : trimmed.length === 0 ? (
-              <p className="move-to-folder-empty">No projects yet.</p>
+              <p className="move-to-folder-empty">{t("notes.folderChip.noProjects")}</p>
             ) : null}
           </div>
           {/* Create sits under the results: matches, if any, come first — the
@@ -1077,7 +1093,9 @@ function FolderChip({
                 }}
               >
                 <IconPlusMedium size={14} />
-                <span className="move-to-folder-item-name">Create “{trimmed}”</span>
+                <span className="move-to-folder-item-name">
+                  {t("notes.folderChip.create", { name: trimmed })}
+                </span>
                 <span aria-hidden />
               </button>
             </>
@@ -1099,6 +1117,7 @@ function ProcessingProgressIndicator({
   queuedTooltipId?: string;
   className?: string;
 }) {
+  const t = useT();
   const reduceMotion = useReducedMotion();
   const classes = ["note-processing-progress", className].filter(Boolean).join(" ");
 
@@ -1132,8 +1151,7 @@ function ProcessingProgressIndicator({
         <span className="note-generating-count" tabIndex={0} aria-describedby={queuedTooltipId}>
           +{queuedRecordings}
           <span className="note-generating-tip" id={queuedTooltipId} role="tooltip">
-            {queuedRecordings} more recording
-            {queuedRecordings > 1 ? "s" : ""} queued
+            {t("notes.editor.queuedRecordings", { count: queuedRecordings })}
           </span>
         </span>
       ) : null}
@@ -1158,22 +1176,22 @@ function processingStageStatus(status: NoteDto["processingStatus"]): ProcessingS
 function processingStageMessage(status: ProcessingStageStatus): string {
   switch (status) {
     case "validating":
-      return "Preparing audio";
+      return translate("notes.editor.stage.validating");
     case "transcribing":
-      return "Transcribing audio";
+      return translate("notes.editor.stage.transcribing");
     case "generating":
-      return "Generating notes";
+      return translate("notes.editor.stage.generating");
   }
 }
 
 function processingMessage(status: NoteDto["processingStatus"]): string | null {
   switch (status) {
     case "validating":
-      return "Preparing audio...";
+      return translate("notes.editor.processing.validating");
     case "transcribing":
-      return "Transcribing audio...";
+      return translate("notes.editor.processing.transcribing");
     case "generating":
-      return "Generating notes...";
+      return translate("notes.editor.processing.generating");
     default:
       return null;
   }
@@ -1212,7 +1230,10 @@ function transcriptCoverageNoticeText(note: NoteDto): string | null {
   const missingMs = Math.max(0, detectedSpeechMs - transcribedMs);
   const missingMinutes = Math.max(1, Math.floor(missingMs / 60_000));
   const detectedMinutes = Math.max(1, Math.floor(detectedSpeechMs / 60_000));
-  return `Parts of this recording could not be transcribed. About ${missingMinutes} of ${detectedMinutes} minutes of detected speech are missing from this transcript.`;
+  return translate("notes.editor.coverageNotice", {
+    missing: missingMinutes,
+    detected: detectedMinutes,
+  });
 }
 
 // A source that recorded pure silence fails transcription with a targeted
@@ -1313,6 +1334,7 @@ function TranscriptTurn({
   transcript: RenderedTranscriptTurn;
   preview?: boolean;
 }) {
+  const t = useT();
   const textRef = useRef<HTMLParagraphElement>(null);
   const { copied, showCopiedFeedback } = useCopyFeedback();
   const [expanded, setExpanded] = useState(false);
@@ -1363,7 +1385,9 @@ function TranscriptTurn({
         <div className="transcript-turn-meta">
           <span className="transcript-turn-source">{sourceLabel(transcript.source)}</span>
           {turnTime ? <time>{turnTime}</time> : null}
-          {preview ? <span className="transcript-turn-preview">Live preview</span> : null}
+          {preview ? (
+            <span className="transcript-turn-preview">{t("notes.editor.livePreview")}</span>
+          ) : null}
         </div>
         {hasText ? (
           <p ref={textRef} className="transcript-turn-text" data-expanded={expanded || undefined}>
@@ -1376,18 +1400,23 @@ function TranscriptTurn({
             className="transcript-turn-more"
             onClick={() => setExpanded((value) => !value)}
           >
-            {expanded ? "Show less" : "Show more"}
+            {expanded ? t("notes.editor.showLess") : t("notes.editor.showMore")}
           </button>
         ) : null}
         {errorMessage ? <p className="source-transcript-error">{errorMessage}</p> : null}
       </div>
       {canCopy ? (
-        <HoverTip compact width={104} tip={copied ? "Copied" : "Copy"} forceOpen={copied}>
+        <HoverTip
+          compact
+          width={104}
+          tip={copied ? t("common.copied") : t("common.copy")}
+          forceOpen={copied}
+        >
           <button
             type="button"
             className="transcript-turn-copy"
             data-copied={copied || undefined}
-            aria-label={copied ? "Copied" : "Copy turn"}
+            aria-label={copied ? t("common.copied") : t("notes.editor.copyTurn")}
             onClick={() => void handleCopy()}
           >
             <CopyStateIcon copied={copied} />
@@ -1400,12 +1429,13 @@ function TranscriptTurn({
 
 function sourceTurnFailureMessage(message?: string) {
   if (message && isInvalidClovyResponseMessage(message)) {
-    return "Audio for this part could not be transcribed.";
+    return translate("notes.editor.audioPartFailed");
   }
   return userFacingFailureMessage(message) ?? "";
 }
 
 function CopyTranscriptButton({ text }: { text: string }) {
+  const t = useT();
   const { copied, showCopiedFeedback } = useCopyFeedback();
 
   async function handleCopy() {
@@ -1419,16 +1449,21 @@ function CopyTranscriptButton({ text }: { text: string }) {
   }
 
   return (
-    <HoverTip compact width={104} tip={copied ? "Copied" : "Copy"} forceOpen={copied}>
+    <HoverTip
+      compact
+      width={104}
+      tip={copied ? t("common.copied") : t("common.copy")}
+      forceOpen={copied}
+    >
       <button
         type="button"
         className="transcript-copy"
         onClick={() => void handleCopy()}
         data-copied={copied || undefined}
-        aria-label={copied ? "Transcript copied" : "Copy transcript"}
+        aria-label={copied ? t("notes.editor.transcriptCopied") : t("notes.editor.copyTranscript")}
       >
         <CopyStateIcon copied={copied} />
-        Copy
+        {t("common.copy")}
       </button>
     </HoverTip>
   );
@@ -1436,10 +1471,10 @@ function CopyTranscriptButton({ text }: { text: string }) {
 
 function formatFullDate(value: string) {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Today";
-  return new Intl.DateTimeFormat(undefined, {
+  if (Number.isNaN(date.getTime())) return translate("common.today");
+  return formatDate(date, {
     weekday: "short",
     month: "short",
     day: "numeric",
-  }).format(date);
+  });
 }

@@ -33,6 +33,7 @@ import {
   osAccountsUpgradeSession,
 } from "../../lib/tauri";
 import type { AccountStatus, SubscriptionPlan } from "../../lib/tauri";
+import { type TFunction, useT } from "../../i18n";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Spinner } from "../ui/Spinner";
 
@@ -124,6 +125,7 @@ export function TierMiniCard({ tier }: { tier: FundingTier }) {
  * Owns the checkout / billing / in-place-upgrade logic that FundingGate used
  * to hold so every placement stays behaviorally identical. */
 export function FundingNotice({ account, onRefresh, textFundingContext, active = true }: Props) {
+  const t = useT();
   const [openedPortal, setOpenedPortal] = useState(false);
   const [checking, setChecking] = useState(false);
   // The Max upgrade can end in a saved-card charge, so it only fires from an
@@ -150,34 +152,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
   const { billingRecovery, topUpRequired, proUpgradeRequired, maxTopUpRequired, tier } =
     deriveFunding(account);
 
-  const copy: NoticeCopy = billingRecovery
-    ? {
-        body: "Your payment needs attention. Update billing to keep using Clovy.",
-        cta: "Manage billing",
-        waiting: "Waiting for your billing update",
-        reopen: "Reopen billing",
-      }
-    : proUpgradeRequired
-      ? {
-          // No waiting/reopen copy: the in-place upgrade never opens the
-          // browser (openedPortal stays false). Failures show inside the
-          // confirm dialog, which stays open as the retry affordance.
-          body: "You have used your Pro credits for this cycle. Max has 5x the monthly usage.",
-          cta: "Upgrade to Max",
-        }
-      : maxTopUpRequired
-        ? {
-            body: "Your credit balance is below zero. Top up to keep using Clovy.",
-            cta: "Top up credits",
-            waiting: "Waiting for your top-up",
-            reopen: "Reopen account portal",
-          }
-        : {
-            body: "Your starter credits are used up. Upgrade to keep using Clovy.",
-            cta: "Upgrade to Pro",
-            waiting: "Waiting for your upgrade",
-            reopen: "Reopen checkout",
-          };
+  const copy = noticeCopy(t, { billingRecovery, proUpgradeRequired, maxTopUpRequired });
   // The Max upsell only belongs on the Free/subscribe path; a depleted Pro
   // user already has exactly one path (upgrade to Max), and depleted Max
   // users top up. Neither shows a second affordance.
@@ -394,7 +369,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
               : openedPortal
                 ? copy.waiting
                 : autoVeniceRecovery
-                  ? "Auto can route beyond Venice, so it uses Clovy credits. Your Venice API key applies only when you select a Venice model."
+                  ? t("account.funding.autoVenice")
                   : copy.body}
       </p>
       <div className="funding-notice-actions">
@@ -406,7 +381,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
                 className="btn btn-ghost"
                 onClick={() => void handleCancelBrowserWait()}
               >
-                I closed the Stripe page
+                {t("account.funding.closedStripe")}
               </button>
             ) : null}
             <button
@@ -415,7 +390,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
               disabled={checking}
               onClick={() => void handleCheckNow()}
             >
-              {checking ? "Checking..." : "Check again"}
+              {checking ? t("account.funding.checking") : t("account.funding.checkAgain")}
             </button>
           </>
         ) : grantNotConfirmed ? (
@@ -436,7 +411,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
                 setConfirmingUpgrade(true);
               }}
             >
-              Upgrade to Max
+              {t("account.billing.upgradeMax")}
             </button>
           </>
         ) : openedPortal ? (
@@ -450,7 +425,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
               disabled={checking}
               onClick={() => void handleCheckNow()}
             >
-              {checking ? "Checking..." : "Check again"}
+              {checking ? t("account.funding.checking") : t("account.funding.checkAgain")}
             </button>
           </>
         ) : autoVeniceRecovery ? (
@@ -460,7 +435,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
               className="btn btn-ghost"
               onClick={textFundingContext?.onSelectVeniceModel}
             >
-              Select a Venice model
+              {t("account.funding.selectVenice")}
             </button>
             <button
               type="button"
@@ -478,7 +453,7 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
                 className="btn btn-ghost"
                 onClick={() => void handleOpenPortal("max")}
               >
-                Or go Max
+                {t("account.funding.goMax")}
               </button>
             ) : null}
             <button
@@ -518,12 +493,15 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
  * mounted while collapsed (visibility + inert handle focus and a11y) so the
  * grid-rows height animation runs both ways. */
 export function FundingChip({ account, onRefresh }: Props) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const { billingRecovery, tier } = deriveFunding(account);
   // One line only: a hint would truncate at sidebar widths and repeat what
   // the reveal says anyway. The title names the state; expanding explains.
-  const title = billingRecovery ? "Payment needs attention" : "Out of credits";
+  const title = billingRecovery
+    ? t("account.funding.paymentAttention")
+    : t("account.funding.outOfCredits");
 
   useEffect(() => {
     if (!open) return;
@@ -577,6 +555,40 @@ export function FundingChip({ account, onRefresh }: Props) {
       </div>
     </div>
   );
+}
+
+function noticeCopy(
+  t: TFunction,
+  state: { billingRecovery: boolean; proUpgradeRequired: boolean; maxTopUpRequired: boolean },
+): NoticeCopy {
+  if (state.billingRecovery) {
+    return {
+      body: t("account.funding.recoveryBody"),
+      cta: t("account.billing.manage"),
+      waiting: t("account.funding.recoveryWaiting"),
+      reopen: t("account.funding.recoveryReopen"),
+    };
+  }
+  if (state.proUpgradeRequired) {
+    // No waiting/reopen copy: the in-place upgrade never opens the
+    // browser (openedPortal stays false). Failures show inside the
+    // confirm dialog, which stays open as the retry affordance.
+    return { body: t("account.funding.proBody"), cta: t("account.billing.upgradeMax") };
+  }
+  if (state.maxTopUpRequired) {
+    return {
+      body: t("account.funding.topUpBody"),
+      cta: t("account.funding.topUpCta"),
+      waiting: t("account.funding.topUpWaiting"),
+      reopen: t("account.funding.topUpReopen"),
+    };
+  }
+  return {
+    body: t("account.funding.starterBody"),
+    cta: t("account.billing.upgradePro"),
+    waiting: t("account.funding.starterWaiting"),
+    reopen: t("account.funding.starterReopen"),
+  };
 }
 
 function messageFromError(error: unknown) {

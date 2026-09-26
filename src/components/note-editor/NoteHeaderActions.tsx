@@ -7,6 +7,7 @@ import { IconReference } from "central-icons/IconReference";
 import { IconTrashCan } from "central-icons/IconTrashCan";
 import { useEffect, useRef, useState } from "react";
 
+import { useT } from "../../i18n";
 import { noteReferenceToken } from "../agent/composer/noteReference";
 import { toast } from "../ui/Toaster";
 
@@ -42,6 +43,7 @@ export function NoteHeaderActions({
   /** Opens the delete-note confirmation. */
   onDelete?: () => void;
 }) {
+  const t = useT();
   return (
     <div className="note-header-actions">
       <button
@@ -49,19 +51,19 @@ export function NoteHeaderActions({
         className="note-header-ask"
         aria-expanded={askClovyOpen || undefined}
         data-working={askClovyWorking || undefined}
-        title={askClovyWorking ? "Clovy is working on your question" : undefined}
+        title={askClovyWorking ? t("notes.header.askWorking") : undefined}
         onClick={() => onAskClovy?.()}
       >
         <IconBubble3 size={14} aria-hidden />
-        Ask Clovy
+        {t("notes.header.ask")}
         {askClovyWorking ? <span className="note-header-ask-dot" aria-hidden /> : null}
       </button>
       {onShare ? (
         <button
           type="button"
           className="icon-button note-header-share"
-          aria-label="Share note"
-          title="Share"
+          aria-label={t("notes.header.shareNote")}
+          title={t("notes.header.share")}
           onClick={onShare}
         >
           <IconArrowShareRight size={16} />
@@ -91,6 +93,7 @@ function NoteOverflowMenu({
   onDownloadAudio?: () => void;
   onDelete?: () => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -113,7 +116,7 @@ function NoteOverflowMenu({
   async function handleCopyReference() {
     try {
       await navigator.clipboard.writeText(noteReferenceToken({ id: noteId, title: noteTitle }));
-      toast("Reference for Clovy copied");
+      toast(t("notes.header.referenceCopied"));
     } catch {
       // Clipboard API can fail in restricted contexts; stay silent so retrying
       // the same menu action remains the least disruptive recovery.
@@ -125,7 +128,7 @@ function NoteOverflowMenu({
       <button
         type="button"
         className="icon-button note-actions-menu-trigger"
-        aria-label="Note actions"
+        aria-label={t("notes.header.actions")}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
@@ -143,7 +146,7 @@ function NoteOverflowMenu({
             }}
           >
             <IconReference size={14} />
-            Copy reference for Clovy
+            {t("notes.header.copyReference")}
           </button>
           {onExportPdf ? (
             <button
@@ -155,7 +158,7 @@ function NoteOverflowMenu({
               }}
             >
               <IconFilePdf size={14} />
-              Export as PDF
+              {t("notes.header.exportPdf")}
             </button>
           ) : null}
           {onDownloadAudio ? (
@@ -168,7 +171,7 @@ function NoteOverflowMenu({
               }}
             >
               <IconAudio size={14} />
-              Download audio
+              {t("notes.header.downloadAudio")}
             </button>
           ) : null}
           {onDelete ? (
@@ -182,7 +185,7 @@ function NoteOverflowMenu({
               }}
             >
               <IconTrashCan size={14} />
-              Delete note
+              {t("notes.header.deleteNote")}
             </button>
           ) : null}
         </div>

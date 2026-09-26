@@ -1,3 +1,4 @@
+import { type MessageKey, t } from "../i18n/translate";
 import type { VeniceModelDto } from "./tauri";
 
 // Clovy's default video model. Mirrors DEFAULT_VIDEO_MODEL in the Rust providers
@@ -9,20 +10,32 @@ type VideoModelDefinition = Omit<
   "provider" | "modelType" | "capabilities" | "traits"
 > &
   Pick<VeniceModelDto, "privacy"> &
-  Partial<Pick<VeniceModelDto, "capabilities" | "traits">>;
+  Partial<Pick<VeniceModelDto, "capabilities" | "traits">> & {
+    /** Catalog key for the description, read in the interface language. */
+    descriptionKey?: MessageKey;
+  };
 
 function videoModel({
   traits = [],
   capabilities = [],
+  descriptionKey,
   ...model
 }: VideoModelDefinition): VeniceModelDto {
-  return {
+  const entry: VeniceModelDto = {
     provider: "venice",
     modelType: "video",
     capabilities,
     traits,
     ...model,
   };
+  if (descriptionKey) {
+    Object.defineProperty(entry, "description", {
+      enumerable: true,
+      configurable: true,
+      get: () => t(descriptionKey),
+    });
+  }
+  return entry;
 }
 
 // Curated Venice text-to-video models for the settings picker. Video models are
@@ -49,20 +62,20 @@ export const VIDEO_MODELS: VeniceModelDto[] = [
   videoModel({
     id: "wan-2.2-a14b-text-to-video",
     name: "Wan 2.2 A14B",
-    description: "Default text-to-video model for fast 5 second 720p clips.",
+    descriptionKey: "lib.videoModels.wan22",
     privacy: "private",
     traits: ["default", "fastest"],
   }),
   videoModel({
     id: "grok-imagine-text-to-video-private",
     name: "Grok Imagine",
-    description: "Photorealistic clips with audio.",
+    descriptionKey: "lib.videoModels.grokImagine",
     privacy: "private",
   }),
   videoModel({
     id: "ltx-2-19b-full-text-to-video",
     name: "LTX Video 2.0 19B",
-    description: "Higher-detail open-source model with audio.",
+    descriptionKey: "lib.videoModels.ltx2",
     privacy: "private",
     traits: ["highest_quality"],
   }),

@@ -6,6 +6,7 @@ import { IconEyeSlash } from "central-icons/IconEyeSlash";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 
+import { useT, useTRich } from "../../i18n";
 import { describeShareError, isShareNotFoundError } from "../../lib/errors";
 import {
   buildLinkShareFragment,
@@ -59,6 +60,8 @@ export function ShareDialog({
   onLinkChange?: (url: string | null) => void;
   item: ShareDialogItem;
 }) {
+  const t = useT();
+  const tr = useTRich();
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [shareId, setShareId] = useState<string | null>(null);
@@ -232,12 +235,12 @@ export function ShareDialog({
           copyExistingLink(shareId, inviteId, linkMaterialB64, passwordProtected),
         );
       } catch {
-        setError("Couldn't copy the link. Try again.");
+        setError(t("notes.share.copyLinkFailed"));
       }
       return;
     }
     if (requirePasscode && passcode.length < MIN_PASSCODE_LENGTH) {
-      setError(`Use at least ${MIN_PASSCODE_LENGTH} characters for the passcode.`);
+      setError(t("notes.share.passcodeTooShort", { min: MIN_PASSCODE_LENGTH }));
       return;
     }
 
@@ -297,7 +300,7 @@ export function ShareDialog({
             ),
           );
         } catch {
-          setError("Link created, but couldn't copy it. Select Copy to try again.");
+          setError(t("notes.share.createdCopyFailed"));
         }
       }
     } catch (createError) {
@@ -321,6 +324,7 @@ export function ShareDialog({
     requirePasscode,
     runClipboardCopy,
     shareId,
+    t,
   ]);
 
   const handleCopyPasscode = useCallback(async () => {
@@ -331,9 +335,9 @@ export function ShareDialog({
       await runClipboardCopy(() => writeClipboardText(passcode));
       showCopyFeedback("passcode");
     } catch {
-      setError("Couldn't copy the passcode. Try again.");
+      setError(t("notes.share.copyPasscodeFailed"));
     }
-  }, [clearCopyFeedback, passcode, runClipboardCopy, showCopyFeedback]);
+  }, [clearCopyFeedback, passcode, runClipboardCopy, showCopyFeedback, t]);
 
   const handleStopSharing = useCallback(async () => {
     if (!shareId) return false;
@@ -365,7 +369,10 @@ export function ShareDialog({
     if (!busyRef.current) onClose();
   }, [onClose]);
 
-  const itemNoun = item.kind === "note" ? "note" : "session";
+  const isNote = item.kind === "note";
+  const itemTitle =
+    item.title || (isNote ? t("notes.share.untitledNote") : t("notes.share.untitledSession"));
+  const shareLinkLabel = t("notes.share.linkFor", { title: itemTitle });
   const hasLink = Boolean(shareId && inviteId && linkMaterialB64);
   const requiresPasscode = requirePasscode || passwordProtected;
   const shareUrl =
@@ -387,8 +394,12 @@ export function ShareDialog({
         open={open}
         onClose={handleClose}
         disableBackdropClose={busy}
-        title={`Share ${itemNoun}`}
-        description={`Anyone with the link${requiresPasscode ? " and passcode" : ""} can view an encrypted snapshot of "${item.title || `Untitled ${itemNoun}`}".${requiresPasscode ? " Clovy never stores the passcode." : ""}`}
+        title={isNote ? t("notes.share.titleNote") : t("notes.share.titleSession")}
+        description={
+          requiresPasscode
+            ? t("notes.share.descriptionPasscode", { title: itemTitle })
+            : t("notes.share.description", { title: itemTitle })
+        }
         width={480}
         className="share-dialog"
         footer={
@@ -399,7 +410,7 @@ export function ShareDialog({
               disabled={busy}
               onClick={() => setConfirmAction("stop")}
             >
-              Stop sharing
+              {t("notes.share.stopSharing")}
             </button>
           ) : !loading && !legacyShare ? (
             <button
@@ -408,19 +419,19 @@ export function ShareDialog({
               disabled={busy || loadFailed}
               onClick={() => void handleCopyLink()}
             >
-              {busy ? "Creating link..." : "Create link"}
+              {busy ? t("notes.share.creatingLink") : t("notes.share.createLink")}
             </button>
           ) : undefined
         }
       >
         <div className="dialog-body share-dialog-body">
-          {loading ? <p className="share-dialog-caption">Loading share...</p> : null}
+          {loading ? <p className="share-dialog-caption">{t("notes.share.loading")}</p> : null}
           {!loading && legacyShare ? (
             <InlineNotice
               tone="info"
-              aria-label="Legacy share notice"
+              aria-label={t("notes.share.legacyLabel")}
               icon={<IconCircleInfo size={14} aria-hidden />}
-              body="This item uses the previous invite-only sharing model. Stop sharing it to create a simpler link."
+              body={t("notes.share.legacyBody")}
             />
           ) : null}
           {!loading && !legacyShare && !hasLink ? (
@@ -428,10 +439,10 @@ export function ShareDialog({
               <div className="share-option-row">
                 <div className="share-option-info">
                   <span className="share-option-title" id="share-passcode-label">
-                    Require a passcode
+                    {t("notes.share.requirePasscode")}
                   </span>
                   <span className="share-option-description">
-                    Clovy never stores the passcode. Send it separately.
+                    {t("notes.share.requirePasscodeHint")}
                   </span>
                 </div>
                 <Switch
@@ -447,7 +458,7 @@ export function ShareDialog({
               {requirePasscode ? (
                 <div className="share-option-row">
                   <label className="share-option-title" htmlFor="share-passcode">
-                    Passcode
+                    {t("notes.share.passcode")}
                   </label>
                   <div className="share-passcode-control">
                     <input
@@ -457,13 +468,19 @@ export function ShareDialog({
                       autoComplete="new-password"
                       disabled={loadFailed}
                       value={passcode}
-                      placeholder="At least 8 characters"
+                      placeholder={t("notes.share.passcodePlaceholder", {
+                        min: MIN_PASSCODE_LENGTH,
+                      })}
                       onChange={(event) => setPasscode(event.currentTarget.value)}
                     />
                     <button
                       type="button"
                       className="icon-button share-passcode-reveal"
-                      aria-label={revealPasscode ? "Hide passcode" : "Show passcode"}
+                      aria-label={
+                        revealPasscode
+                          ? t("notes.share.hidePasscode")
+                          : t("notes.share.showPasscode")
+                      }
                       aria-pressed={revealPasscode}
                       onClick={() => setRevealPasscode((value) => !value)}
                     >
@@ -477,11 +494,11 @@ export function ShareDialog({
           {hasLink && shareUrl ? (
             <div className="share-link-block">
               {passwordProtected ? (
-                <DialogField label="Link" htmlFor="share-link-url">
+                <DialogField label={t("notes.share.link")} htmlFor="share-link-url">
                   <CopyLinkField
                     id="share-link-url"
                     value={shareUrl}
-                    label={`Share link for ${item.title || `Untitled ${itemNoun}`}`}
+                    label={shareLinkLabel}
                     copied={copied === "link"}
                     disabled={busy || copying}
                     onCopy={() => void handleCopyLink()}
@@ -490,14 +507,14 @@ export function ShareDialog({
               ) : (
                 <CopyLinkField
                   value={shareUrl}
-                  label={`Share link for ${item.title || `Untitled ${itemNoun}`}`}
+                  label={shareLinkLabel}
                   copied={copied === "link"}
                   disabled={busy || copying}
                   onCopy={() => void handleCopyLink()}
                 />
               )}
               {passwordProtected && passcode ? (
-                <DialogField label="Passcode" htmlFor="share-passcode-view">
+                <DialogField label={t("notes.share.passcode")} htmlFor="share-passcode-view">
                   <div className="copy-link-field share-passcode-field">
                     <input
                       id="share-passcode-view"
@@ -510,7 +527,11 @@ export function ShareDialog({
                     <button
                       type="button"
                       className="icon-button share-passcode-field-reveal"
-                      aria-label={revealPasscode ? "Hide passcode" : "Show passcode"}
+                      aria-label={
+                        revealPasscode
+                          ? t("notes.share.hidePasscode")
+                          : t("notes.share.showPasscode")
+                      }
                       aria-pressed={revealPasscode}
                       onClick={() => setRevealPasscode((value) => !value)}
                     >
@@ -519,7 +540,9 @@ export function ShareDialog({
                     <HoverTip
                       compact
                       width={112}
-                      tip={copied === "passcode" ? "Copied" : "Copy passcode"}
+                      tip={
+                        copied === "passcode" ? t("common.copied") : t("notes.share.copyPasscode")
+                      }
                       forceOpen={copied === "passcode"}
                       suppressed={busy || copying}
                       className="copy-link-action-tip"
@@ -527,7 +550,11 @@ export function ShareDialog({
                       <button
                         type="button"
                         className="copy-link-action"
-                        aria-label={copied === "passcode" ? "Passcode copied" : "Copy passcode"}
+                        aria-label={
+                          copied === "passcode"
+                            ? t("notes.share.passcodeCopied")
+                            : t("notes.share.copyPasscode")
+                        }
                         data-copied={copied === "passcode" ? "true" : undefined}
                         disabled={busy || copying}
                         onClick={() => void handleCopyPasscode()}
@@ -541,23 +568,25 @@ export function ShareDialog({
               {passwordProtected && passcode ? (
                 <InlineNotice
                   tone="warning"
-                  aria-label="One-time passcode notice"
+                  aria-label={t("notes.share.oneTimeLabel")}
                   icon={<IconExclamationTriangle size={14} aria-hidden />}
-                  body="This is the only time the passcode is shown. Copy it now and send it separately from the link."
+                  body={t("notes.share.oneTimeBody")}
                 />
               ) : null}
               {passwordProtected && !passcode ? (
                 <p className="share-dialog-caption">
-                  The passcode can't be shown again. To set a new one,{" "}
-                  <button
-                    type="button"
-                    className="share-passcode-reset"
-                    disabled={busy}
-                    onClick={() => setConfirmAction("reset")}
-                  >
-                    reset this link
-                  </button>
-                  .
+                  {tr("notes.share.passcodeGone", {
+                    reset: (chunks) => (
+                      <button
+                        type="button"
+                        className="share-passcode-reset"
+                        disabled={busy}
+                        onClick={() => setConfirmAction("reset")}
+                      >
+                        {chunks}
+                      </button>
+                    ),
+                  })}
                 </p>
               ) : null}
             </div>
@@ -566,7 +595,7 @@ export function ShareDialog({
             <InlineNotice
               tone="destructive"
               role="alert"
-              aria-label="Share error"
+              aria-label={t("notes.share.errorLabel")}
               icon={<IconExclamationCircle size={14} aria-hidden />}
               body={error}
             />
@@ -577,14 +606,22 @@ export function ShareDialog({
         open={confirmAction !== null}
         onClose={() => setConfirmAction(null)}
         onConfirm={confirmAction === "reset" ? handleResetLink : handleStopSharing}
-        title={confirmAction === "reset" ? "Reset link" : "Stop sharing"}
+        title={
+          confirmAction === "reset" ? t("notes.share.resetLink") : t("notes.share.stopSharing")
+        }
         description={
           confirmAction === "reset"
-            ? "The current link will stop opening for everyone. You can then create a new link with a new passcode."
-            : `This shared ${itemNoun} will stop opening for everyone. This cannot erase content people already viewed or copied.`
+            ? t("notes.share.resetDescription")
+            : isNote
+              ? t("notes.share.stopDescriptionNote")
+              : t("notes.share.stopDescriptionSession")
         }
-        confirmLabel={confirmAction === "reset" ? "Reset link" : "Stop sharing"}
-        confirmBusyLabel={confirmAction === "reset" ? "Resetting..." : "Stopping..."}
+        confirmLabel={
+          confirmAction === "reset" ? t("notes.share.resetLink") : t("notes.share.stopSharing")
+        }
+        confirmBusyLabel={
+          confirmAction === "reset" ? t("notes.share.resetting") : t("notes.share.stopping")
+        }
         destructive
       />
     </>

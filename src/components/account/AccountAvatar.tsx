@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
+import { t } from "../../i18n";
 import { ACCOUNT_AVATAR_CHANGED_EVENT } from "../../lib/events";
 import { osAccountsSetAvatarSeed } from "../../lib/tauri";
 import type { AccountStatus } from "../../lib/tauri";
@@ -86,7 +87,7 @@ export function accountDisplayName(account: AccountStatus) {
     account.user?.displayName?.trim() ||
     account.user?.email?.trim() ||
     account.user?.handle?.trim() ||
-    "Account"
+    t("account.fallbackName")
   );
 }
 

@@ -7,6 +7,7 @@ import {
 } from "../components/agent/session-persistence";
 import { NoteHeaderActions } from "../components/note-editor/NoteHeaderActions";
 import { toast } from "../components/ui/Toaster";
+import { t, useLocale } from "../i18n";
 import { exportNoteAsPdf } from "../lib/note-pdf";
 import { useNoteChat } from "../components/note-chat/useNoteChat";
 import { useExperimentalFlags } from "../lib/experimental-flags";
@@ -153,7 +154,7 @@ import {
   AGENT_MENU_BAR_SESSION_LIMIT,
   AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS,
   CHECK_FOR_UPDATES_EVENT,
-  RECOVERY_FUNDING_DISABLED_REASON,
+  recoveryFundingDisabledReason,
   SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
   SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS,
   UP_TO_DATE_DISMISS_MS,
@@ -212,6 +213,9 @@ import { useAppState } from "./use-app-state";
 import { renderAppAccountGate } from "./app-account-gates";
 
 export function App() {
+  // Subscribes the shell to the interface language: the render helpers and
+  // tab titles below read `t` at render time.
+  const locale = useLocale();
   const { companionPairingEnabled } = useExperimentalFlags();
   const {
     currentDataPartitionName,
@@ -680,9 +684,9 @@ export function App() {
     if (!selectedNote) return;
     try {
       const result = await downloadNoteAudio(selectedNote.id);
-      toast.success("Audio downloaded", {
+      toast.success(t("app.audio.downloaded"), {
         action: {
-          label: "Show file",
+          label: t("app.audio.showFile"),
           onClick: () => {
             void revealPath(result.path).catch((err: unknown) => {
               toast.error(messageFromError(err));
@@ -834,11 +838,13 @@ export function App() {
   // The label of the active settings section, so a tab parked on the Settings
   // view reads e.g. "MCP servers" instead of the generic "Settings". Only the
   // active tab is on the live settings view, so the section label applies to it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `locale` re-derives translated labels when the interface language changes.
   const settingsSectionLabel = useMemo(
     () => SETTINGS_TABS.find((tab) => tab.id === settingsTab)?.label,
-    [settingsTab],
+    [settingsTab, locale],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `locale` re-derives translated labels when the interface language changes.
   const tabItems = useMemo<TabItem[]>(
     () =>
       tabs.map((tab) => ({
@@ -851,12 +857,12 @@ export function App() {
           tab.id === activeTabId ? settingsSectionLabel : undefined,
         ),
       })),
-    [tabs, state.notes, state.folders, agentSessions, activeTabId, settingsSectionLabel],
+    [tabs, state.notes, state.folders, agentSessions, activeTabId, settingsSectionLabel, locale],
   );
 
   function handleRecovery(sessionId: string, action: "validate" | "discard") {
     if (action === "validate" && fundingRequired) {
-      setError(RECOVERY_FUNDING_DISABLED_REASON);
+      setError(recoveryFundingDisabledReason());
       return;
     }
     const recoveryNoteId = state.activeRecoveries.find(
@@ -1008,7 +1014,7 @@ export function App() {
       .catch((error) => {
         relaunchingUpdateRef.current = false;
         setRelaunchingUpdate(false);
-        setUpdateStatus(`Relaunch failed: ${messageFromError(error)}`, true);
+        setUpdateStatus(t("app.update.relaunchFailed", { message: messageFromError(error) }), true);
       });
   }, [noteSaveController, setUpdateStatus]);
 
@@ -1924,7 +1930,7 @@ export function App() {
       agentMenuBarSessionsRef.current = agentMenuBarSessionsRef.current.map(renameSession);
       publishAgentMenuBarState();
       void renameAgentSession(sessionId, next).catch(() => {
-        setError("Could not save the session name. It may revert after a restart.");
+        setError(t("app.session.renameFailed"));
       });
       rememberSessionManuallyTitled(sessionId);
       window.dispatchEvent(
@@ -2003,7 +2009,7 @@ export function App() {
     for (const folder of folders) {
       dispatch({ type: "folderCreated", folder });
     }
-    toast.success(`${folders.length} ${folders.length === 1 ? "project" : "projects"} added`);
+    toast.success(t("app.projects.added", { count: folders.length }));
   }
 
   async function handleRenameFolder(folderId: string, name: string, description?: string) {
@@ -2416,7 +2422,7 @@ export function App() {
     (selectedNote?.id === recordingNoteId
       ? selectedNote?.title
       : state.notes.find((note) => note.id === recordingNoteId)?.title
-    )?.trim() || "New note";
+    )?.trim() || t("app.newNote");
   // The dev console demo (window.__globalRecorderPill) force-shows the recorder
   // presence with synthetic status; otherwise it tracks the real recording.
   const recorderPresenceStatus =

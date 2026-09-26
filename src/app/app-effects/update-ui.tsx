@@ -1,11 +1,16 @@
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import type { CSSProperties } from "react";
+import { type TFunction, useT } from "../../i18n";
 import type { AgentSessionStatusDetail } from "../../lib/agent-events";
 import type { ClovyUpdate } from "../../lib/updater";
 import { ClovyMark } from "../../components/brand/ClovyLogo";
 import { Spinner } from "../../components/ui/Spinner";
-import type { UpdateInstallProgress, UpdatePromptPayload } from "../update-decision";
+import {
+  UP_TO_DATE_STATUS,
+  type UpdateInstallProgress,
+  type UpdatePromptPayload,
+} from "../update-decision";
 
 export function updateMenuBarSessionStatus(
   sessionId: string,
@@ -90,7 +95,8 @@ function UpdateRelaunchCard({
   relaunching: boolean;
   onRelaunch: () => void;
 }) {
-  const meta = status ?? updateVersionLabel(payload.version);
+  const t = useT();
+  const meta = displayedUpdateStatus(status, t) ?? updateVersionLabel(payload.version);
 
   return (
     <aside className="update-popover" role={failed ? "alert" : "status"} aria-live="polite">
@@ -98,7 +104,7 @@ function UpdateRelaunchCard({
         type="button"
         className="update-relaunch-card"
         disabled={relaunching}
-        aria-label={`Relaunch to update to Clovy ${payload.version}`}
+        aria-label={t("app.update.relaunchAria", { version: payload.version })}
         onClick={onRelaunch}
       >
         {/* One motion cue per card: while relaunching the mark slot swaps to the
@@ -108,7 +114,7 @@ function UpdateRelaunchCard({
         </span>
         <span className="update-relaunch-copy">
           <span className="update-relaunch-title">
-            {relaunching ? "Relaunching..." : "Relaunch to update"}
+            {relaunching ? t("app.update.relaunching") : t("app.update.relaunch")}
           </span>
           <span className={status ? "update-relaunch-status" : undefined}>{meta}</span>
         </span>
@@ -137,6 +143,7 @@ function UpdateStatusCard({
   progress: UpdateInstallProgress | null;
   onDismiss: () => void;
 }) {
+  const t = useT();
   const percent = updateProgressPercent(progress);
   const progressWidth =
     progress?.state === "installing" && percent === undefined ? "100%" : `${percent ?? 0}%`;
@@ -159,12 +166,12 @@ function UpdateStatusCard({
         <span
           className={failed ? "update-status-text update-status-text-failed" : "update-status-text"}
         >
-          {status}
+          {displayedUpdateStatus(status, t)}
         </span>
         <button
           type="button"
           className="update-status-close"
-          aria-label={preparing ? "Hide update progress" : "Dismiss update status"}
+          aria-label={preparing ? t("app.update.hideProgress") : t("app.update.dismissStatus")}
           onClick={onDismiss}
         >
           <IconCrossSmall size={12} aria-hidden />
@@ -211,6 +218,12 @@ function updateProgressPercent(progress: UpdateInstallProgress | null) {
     100,
     Math.round(((progress.downloadedBytes ?? 0) / progress.contentLength) * 100),
   );
+}
+
+// The up-to-date status is an English sentinel in state (the auto-dismiss
+// reducer matches on it); translate it only for display.
+function displayedUpdateStatus(status: string | null, t: TFunction) {
+  return status === UP_TO_DATE_STATUS ? t("app.update.upToDate") : status;
 }
 
 function updateVersionLabel(version: string) {

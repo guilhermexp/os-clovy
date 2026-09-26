@@ -1,3 +1,5 @@
+import { t } from "../i18n/translate";
+
 /** Human-readable message from a thrown value — Tauri command errors arrive
  * as objects with a `message` field, everything else falls back to String. */
 export function messageFromError(err: unknown) {
@@ -57,10 +59,10 @@ export function isShareNotFoundError(err: unknown): boolean {
 export function describeShareError(err: unknown): string {
   const message = messageFromError(err);
   if (message === "sharing_unavailable") {
-    return "Sharing isn't available on this Clovy server yet. Try again after the next update.";
+    return t("lib.errors.sharingUnavailable");
   }
   if (message === "share_not_found") {
-    return "This share no longer exists. It may have been stopped.";
+    return t("lib.errors.shareNotFound");
   }
   return message;
 }

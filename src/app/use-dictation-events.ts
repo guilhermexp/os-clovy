@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
+import { t } from "../i18n";
 import {
   markAgentNewSessionPending,
   type AgentNewSessionDetail,
@@ -38,7 +39,7 @@ export function useDictationEvents(dependencies: UseDictationEventsDependencies)
           prompt,
           title: titleFromPrompt(prompt),
           status: "received",
-          summary: "Clovy is starting.",
+          summary: t("app.session.starting"),
         });
         markAgentNewSessionPending(prompt);
         setActiveView("agent");

@@ -1,31 +1,50 @@
 import type { AccountStatus } from "./tauri";
+import { subscribeInterfaceLocale, SUPPORTED_LOCALES } from "../i18n/locale";
+import { type MessageKey, t } from "../i18n/translate";
 import { errorCode } from "./errors";
 
 // Single source of truth for Max upgrade confirm and status copy. The plan
 // change returns before payment is confirmed and the credit grant lands, so
 // only the grant poll may advance the copy from waiting to active.
-export const MAX_UPGRADE_CONFIRM_TITLE = "Upgrade to Max?";
-export const MAX_UPGRADE_CONFIRM_BODY =
-  "Max is $100 per month. A secure Stripe page will open in your browser to review and confirm. Your billing cycle restarts today.";
+//
+// The copy follows the interface language: each binding is re-read from the
+// catalog whenever the language changes (ES module bindings are live, so
+// importers always see the current text), keeping the exported names stable.
+export let MAX_UPGRADE_CONFIRM_TITLE = t("lib.maxUpgrade.confirmTitle");
+export let MAX_UPGRADE_CONFIRM_BODY = t("lib.maxUpgrade.confirmBody");
 // The PATCH transport charges the saved card without a browser review, so it
 // carries its own consent copy: consenting to the hosted (Stripe review)
 // wording never authorizes an immediate charge.
-export const MAX_UPGRADE_CHARGE_CONFIRM_BODY =
-  "Max is $100 per month, charged to your saved card now. Your billing cycle restarts today.";
-export const MAX_UPGRADE_CONFIRM_LABEL = "Upgrade now";
-export const MAX_UPGRADE_BUSY_LABEL = "Upgrading...";
-export const MAX_UPGRADE_BROWSER_STATUS = "Waiting for you to confirm in the browser";
-export const MAX_UPGRADE_WAITING_STATUS = "Upgrade started. Waiting for payment confirmation.";
-export const MAX_UPGRADE_READY_STATUS = "Max is active.";
-export const MAX_UPGRADE_SLOW_STATUS =
-  "Payment not confirmed yet. Check billing in your account portal.";
+export let MAX_UPGRADE_CHARGE_CONFIRM_BODY = t("lib.maxUpgrade.chargeConfirmBody");
+export let MAX_UPGRADE_CONFIRM_LABEL = t("lib.maxUpgrade.confirmLabel");
+export let MAX_UPGRADE_BUSY_LABEL = t("lib.maxUpgrade.busyLabel");
+export let MAX_UPGRADE_BROWSER_STATUS = t("lib.maxUpgrade.browserStatus");
+export let MAX_UPGRADE_WAITING_STATUS = t("lib.maxUpgrade.waitingStatus");
+export let MAX_UPGRADE_READY_STATUS = t("lib.maxUpgrade.readyStatus");
+export let MAX_UPGRADE_SLOW_STATUS = t("lib.maxUpgrade.slowStatus");
 // A hosted round trip that outlasts its poll window usually means the user is
 // still reviewing (or abandoned) the Stripe page, not that payment failed, so
 // this copy stays non-terminal and points at the retry.
-export const MAX_UPGRADE_HOSTED_SLOW_STATUS =
-  "Still waiting for payment confirmation. If you closed the Stripe page, you can try again.";
-export const MAX_UPGRADE_PORTAL_LABEL = "Open billing";
-export const MAX_UPGRADE_STALE_ACTION_NOTICE = "Your plan changed - pick an option again";
+export let MAX_UPGRADE_HOSTED_SLOW_STATUS = t("lib.maxUpgrade.hostedSlowStatus");
+export let MAX_UPGRADE_PORTAL_LABEL = t("lib.maxUpgrade.portalLabel");
+export let MAX_UPGRADE_STALE_ACTION_NOTICE = t("lib.maxUpgrade.staleActionNotice");
+
+function refreshMaxUpgradeCopy() {
+  MAX_UPGRADE_CONFIRM_TITLE = t("lib.maxUpgrade.confirmTitle");
+  MAX_UPGRADE_CONFIRM_BODY = t("lib.maxUpgrade.confirmBody");
+  MAX_UPGRADE_CHARGE_CONFIRM_BODY = t("lib.maxUpgrade.chargeConfirmBody");
+  MAX_UPGRADE_CONFIRM_LABEL = t("lib.maxUpgrade.confirmLabel");
+  MAX_UPGRADE_BUSY_LABEL = t("lib.maxUpgrade.busyLabel");
+  MAX_UPGRADE_BROWSER_STATUS = t("lib.maxUpgrade.browserStatus");
+  MAX_UPGRADE_WAITING_STATUS = t("lib.maxUpgrade.waitingStatus");
+  MAX_UPGRADE_READY_STATUS = t("lib.maxUpgrade.readyStatus");
+  MAX_UPGRADE_SLOW_STATUS = t("lib.maxUpgrade.slowStatus");
+  MAX_UPGRADE_HOSTED_SLOW_STATUS = t("lib.maxUpgrade.hostedSlowStatus");
+  MAX_UPGRADE_PORTAL_LABEL = t("lib.maxUpgrade.portalLabel");
+  MAX_UPGRADE_STALE_ACTION_NOTICE = t("lib.maxUpgrade.staleActionNotice");
+}
+
+if (typeof window !== "undefined") subscribeInterfaceLocale(refreshMaxUpgradeCopy);
 
 export const MAX_GRANT_POLL_INTERVAL_MS = 2500;
 // The PATCH transport only waits on the credit-grant webhook; the hosted
@@ -103,12 +122,20 @@ export function maxUpgradeWaitStatus(wait: MaxGrantWait): string {
   return MAX_UPGRADE_WAITING_STATUS;
 }
 
-const MAX_UPGRADE_WAIT_STATUSES = new Set<string>([
-  MAX_UPGRADE_BROWSER_STATUS,
-  MAX_UPGRADE_WAITING_STATUS,
-  MAX_UPGRADE_SLOW_STATUS,
-  MAX_UPGRADE_HOSTED_SLOW_STATUS,
-]);
+const MAX_UPGRADE_WAIT_STATUS_KEYS: MessageKey[] = [
+  "lib.maxUpgrade.browserStatus",
+  "lib.maxUpgrade.waitingStatus",
+  "lib.maxUpgrade.slowStatus",
+  "lib.maxUpgrade.hostedSlowStatus",
+];
+
+// Every language's wording counts, so a phase line snapshotted before a
+// language switch is still recognized and swapped for the live one.
+const MAX_UPGRADE_WAIT_STATUSES = new Set<string>(
+  SUPPORTED_LOCALES.flatMap((locale) =>
+    MAX_UPGRADE_WAIT_STATUS_KEYS.map((key) => t(key, undefined, locale)),
+  ),
+);
 
 /** Whether a status/notice string is one of the wait-phase lines. The wait's
  * phase advances by in-place mutation, which identity-based reconciliation

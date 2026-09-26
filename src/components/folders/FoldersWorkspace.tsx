@@ -29,6 +29,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { formatDate as formatIntlDate, t as translate, useT, useTRich } from "../../i18n";
 import { LEGACY_NOTE_DND_MIME, NOTE_DND_MIME } from "../../lib/dnd";
 import { useDismiss } from "../../lib/use-dismiss";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
@@ -98,11 +99,31 @@ export function FoldersWorkspace(props: FoldersWorkspaceProps) {
 
 type SortKey = "updated" | "created" | "name" | "nameDesc";
 
-const SORT_OPTIONS: { value: SortKey; label: string }[] = [
-  { value: "updated", label: "Recent" },
-  { value: "created", label: "Created" },
-  { value: "name", label: "A to Z" },
-  { value: "nameDesc", label: "Z to A" },
+const SORT_OPTIONS: { value: SortKey; readonly label: string }[] = [
+  {
+    value: "updated",
+    get label() {
+      return translate("notes.projects.sort.updated");
+    },
+  },
+  {
+    value: "created",
+    get label() {
+      return translate("notes.projects.sort.created");
+    },
+  },
+  {
+    value: "name",
+    get label() {
+      return translate("notes.projects.sort.name");
+    },
+  },
+  {
+    value: "nameDesc",
+    get label() {
+      return translate("notes.projects.sort.nameDesc");
+    },
+  },
 ];
 
 function FolderList({
@@ -117,6 +138,7 @@ function FolderList({
   onDeleteFolder,
   onAssignNoteToFolder,
 }: FoldersWorkspaceProps) {
+  const t = useT();
   // __emptyStates() preview (dev console): render the page as a fresh
   // install would see it, real data untouched underneath.
   const folders = useForcedEmptyStates() ? NO_FOLDERS : allFolders;
@@ -212,10 +234,10 @@ function FolderList({
       </div>
     ) : folders.length === 0 ? (
       <EmptyState
-        label="Create your first project"
+        label={t("notes.projects.empty.label")}
         icon={<IconFolderOpen size={28} />}
-        title="Give your work a home"
-        description="A project collects the meeting notes and agent sessions for one effort, so everything about it lives in one place."
+        title={t("notes.projects.empty.title")}
+        description={t("notes.projects.empty.description")}
         action={
           <div className="folders-empty-actions">
             <button
@@ -224,34 +246,32 @@ function FolderList({
               onClick={() => setImportOpen(true)}
             >
               <IconCodeAssistant size={14} />
-              Add Claude Code projects
+              {t("notes.projects.empty.addClaude")}
             </button>
             <button type="button" className="primary-action" onClick={() => setCreateOpen(true)}>
               <IconFolderAddRight size={14} />
-              Create a new project
+              {t("notes.projects.empty.create")}
             </button>
           </div>
         }
       />
     ) : (
       <div className="folders-empty">
-        <p>No projects match “{query.trim()}”.</p>
+        <p>{t("notes.projects.noMatch", { query: query.trim() })}</p>
       </div>
     );
 
   return (
-    <section className="folders-workspace" aria-label="Projects">
+    <section className="folders-workspace" aria-label={t("notes.projects.title")}>
       <header className="folders-header">
         <div className="folders-heading">
-          <h1>Projects</h1>
-          <p className="folders-subtitle">
-            Group meeting notes and agent sessions around the work they belong to.
-          </p>
+          <h1>{t("notes.projects.title")}</h1>
+          <p className="folders-subtitle">{t("notes.projects.subtitle")}</p>
         </div>
         <div className="folders-header-actions">
           <button type="button" className="primary-action" onClick={() => setImportOpen(true)}>
             <IconCodeAssistant size={14} />
-            Add existing
+            {t("notes.projects.addExisting")}
           </button>
           <button
             type="button"
@@ -259,7 +279,7 @@ function FolderList({
             onClick={() => setCreateOpen(true)}
           >
             <IconFolderAddRight size={14} />
-            New project
+            {t("notes.projects.newProject")}
           </button>
         </div>
       </header>
@@ -269,8 +289,8 @@ function FolderList({
           <IconMagnifyingGlass size={14} />
           <input
             type="search"
-            aria-label="Search projects"
-            placeholder="Search"
+            aria-label={t("notes.move.searchProjects")}
+            placeholder={t("common.search")}
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
           />
@@ -307,9 +327,9 @@ function FolderList({
           if (!deleteFolderTarget) return;
           return onDeleteFolder(deleteFolderTarget.id, false);
         }}
-        title={`Delete "${deleteFolderTarget?.name ?? ""}"?`}
-        description="Meeting notes and sessions in this project stay in your library."
-        confirmLabel="Delete project"
+        title={t("notes.projects.delete.title", { name: deleteFolderTarget?.name ?? "" })}
+        description={t("notes.projects.delete.description")}
+        confirmLabel={t("notes.projectSettings.delete")}
         destructive
       />
 
@@ -338,6 +358,7 @@ function FolderList({
 }
 
 function SortDropdown({ value, onChange }: { value: SortKey; onChange: (value: SortKey) => void }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -355,7 +376,7 @@ function SortDropdown({ value, onChange }: { value: SortKey; onChange: (value: S
         onClick={() => setOpen((prev) => !prev)}
       >
         <IconSortArrowUpDown size={13} />
-        <span>{current?.label ?? "Sort"}</span>
+        <span>{current?.label ?? t("notes.projects.sort.label")}</span>
         <IconChevronDownSmall size={12} />
       </button>
       {open ? (
@@ -403,6 +424,7 @@ function FolderCard({
   onOpenMenu: (anchor: HTMLElement) => void;
   onDropNote: (noteId: string) => void;
 }) {
+  const t = useT();
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const dragDepth = useRef(0);
   const [dropActive, setDropActive] = useState(false);
@@ -438,7 +460,7 @@ function FolderCard({
       data-drop-active={dropActive || undefined}
       role="button"
       tabIndex={0}
-      aria-label={`Open ${folder.name}`}
+      aria-label={t("notes.folderChip.open", { name: folder.name })}
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -494,7 +516,7 @@ function FolderCard({
             <span className="folder-card-footer-icon" aria-hidden>
               <IconNoteText size={11} />
             </span>
-            {notes.length} {notes.length === 1 ? "meeting note" : "meeting notes"}
+            {t("notes.projects.noteCount", { count: notes.length })}
           </span>
           {sessions.length > 0 ? (
             <>
@@ -503,19 +525,19 @@ function FolderCard({
                 <span className="folder-card-footer-icon" aria-hidden>
                   <IconBubble3 size={11} />
                 </span>
-                {sessions.length} {sessions.length === 1 ? "session" : "sessions"}
+                {t("notes.projects.sessionCount", { count: sessions.length })}
               </span>
             </>
           ) : null}
           <span className="metadata-dot" aria-hidden />
-          <span>Updated {formatRelative(lastUpdated)}</span>
+          <span>{t("notes.projects.updated", { when: formatRelative(lastUpdated) })}</span>
         </p>
       </div>
       <button
         ref={menuButtonRef}
         type="button"
         className="folder-card-menu"
-        aria-label={`Actions for ${folder.name}`}
+        aria-label={t("notes.list.actionsFor", { title: folder.name })}
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -548,6 +570,7 @@ function FolderCardMenu({
   onEdit: (folderId: string) => void;
   onRequestDelete: (folderId: string) => void;
 }) {
+  const t = useT();
   const folder = folders.find((item) => item.id === folderId);
   if (!folder) return null;
 
@@ -560,11 +583,11 @@ function FolderCardMenu({
     >
       <button type="button" role="menuitem" onClick={() => onOpen(folder.id)}>
         <IconFolderOpen size={14} />
-        Open
+        {t("common.open")}
       </button>
       <button type="button" role="menuitem" onClick={() => onEdit(folder.id)}>
         <IconPencil size={14} />
-        Edit details
+        {t("notes.projects.editDetails")}
       </button>
       <button
         type="button"
@@ -576,7 +599,7 @@ function FolderCardMenu({
         }}
       >
         <IconTrashCan size={14} />
-        Delete
+        {t("common.delete")}
       </button>
     </div>
   );
@@ -608,6 +631,7 @@ function FolderDetail({
   onOpenSessionMoveDialog,
   onManageProjectMemory,
 }: FoldersWorkspaceProps & { folder: FolderDto }) {
+  const t = useT();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(folder.name);
   const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
@@ -695,17 +719,17 @@ function FolderDetail({
   return (
     <section className="folder-detail" aria-label={folder.name}>
       <BreadcrumbBar
-        backLabel={folderBackTarget?.label ?? "Back to projects"}
+        backLabel={folderBackTarget?.label ?? t("notes.projects.back")}
         onBack={folderBackTarget?.onBack ?? (() => onSelectFolder(undefined))}
         items={[
-          { label: "Projects", onClick: () => onSelectFolder(undefined) },
+          { label: t("notes.projects.title"), onClick: () => onSelectFolder(undefined) },
           { label: folder.name, icon: <IconProjects size={13} /> },
         ]}
         actions={
           <button
             type="button"
             className="ghost-icon-button"
-            aria-label={`Actions for ${folder.name}`}
+            aria-label={t("notes.list.actionsFor", { title: folder.name })}
             aria-haspopup="menu"
             aria-expanded={menu !== null}
             onClick={(event) => {
@@ -759,7 +783,7 @@ function FolderDetail({
               className="folder-detail-title"
               tabIndex={0}
               role="button"
-              aria-label="Rename project"
+              aria-label={t("notes.projects.rename")}
               onClick={() => setEditingTitle(true)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
@@ -784,18 +808,18 @@ function FolderDetail({
             <span className="folder-detail-meta-pill" aria-hidden>
               <IconNoteText size={12} />
             </span>
-            {folderNotes.length} {folderNotes.length === 1 ? "meeting note" : "meeting notes"}
+            {t("notes.projects.noteCount", { count: folderNotes.length })}
             {folderSessions.length > 0 ? (
               <>
                 <span className="metadata-dot" aria-hidden />
                 <span className="folder-detail-meta-pill" aria-hidden>
                   <IconBubble3 size={12} />
                 </span>
-                {folderSessions.length} {folderSessions.length === 1 ? "session" : "sessions"}
+                {t("notes.projects.sessionCount", { count: folderSessions.length })}
               </>
             ) : null}
             <span className="metadata-dot" aria-hidden />
-            Updated {formatDate(lastUpdated)}
+            {t("notes.projects.updated", { when: formatDate(lastUpdated) })}
           </p>
         </header>
 
@@ -806,7 +830,7 @@ function FolderDetail({
             {folderSessions.length > 0 ? (
               <>
                 <div className="folder-actions-row">
-                  <h2 className="folder-notes-title">Sessions</h2>
+                  <h2 className="folder-notes-title">{t("notes.projects.sessions")}</h2>
                 </div>
                 <FolderSessionList
                   folder={folder}
@@ -820,7 +844,7 @@ function FolderDetail({
             {folderNotes.length > 0 ? (
               <>
                 <div className="folder-actions-row">
-                  <h2 className="folder-notes-title">Meeting notes</h2>
+                  <h2 className="folder-notes-title">{t("notes.list.title")}</h2>
                 </div>
                 <FolderNoteList
                   folder={folder}
@@ -858,7 +882,7 @@ function FolderDetail({
             }}
           >
             <IconSettingsGear4 size={14} />
-            Project settings
+            {t("notes.projectSettings.title")}
           </button>
           <button
             type="button"
@@ -870,7 +894,7 @@ function FolderDetail({
             }}
           >
             <IconTrashCan size={14} />
-            Delete project
+            {t("notes.projectSettings.delete")}
           </button>
         </div>
       ) : null}
@@ -898,9 +922,9 @@ function FolderDetail({
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
         onConfirm={() => onDeleteFolder(folder.id, false)}
-        title={`Delete "${folder.name}"?`}
-        description="Meeting notes and sessions in this project stay in your library."
-        confirmLabel="Delete project"
+        title={t("notes.projects.delete.title", { name: folder.name })}
+        description={t("notes.projects.delete.description")}
+        confirmLabel={t("notes.projectSettings.delete")}
         destructive
       />
       <ProjectSettingsDialog
@@ -987,8 +1011,9 @@ function FolderSessionRow({
   onOpenMove: () => void;
   onRemoveFromFolder: () => void;
 }) {
+  const t = useT();
   const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
-  const title = session.title.trim() || "Untitled session";
+  const title = session.title.trim() || t("notes.share.untitledSession");
 
   useEffect(() => {
     if (!menu) return;
@@ -1016,7 +1041,9 @@ function FolderSessionRow({
           <span className="folder-note-body">
             <span className="folder-note-title">{title}</span>
             <span className="folder-note-subtitle">
-              {session.source === "legacy_routine" ? "Imported routine history" : "Conversation"}
+              {session.source === "legacy_routine"
+                ? t("notes.add.sessions.importedRoutine")
+                : t("notes.add.sessions.conversation")}
             </span>
           </span>
         </button>
@@ -1025,7 +1052,7 @@ function FolderSessionRow({
           <button
             type="button"
             className="folder-note-menu"
-            aria-label={`Actions for ${title}`}
+            aria-label={t("notes.list.actionsFor", { title })}
             aria-haspopup="menu"
             aria-expanded={menu !== null}
             onClick={(event) => {
@@ -1061,7 +1088,7 @@ function FolderSessionRow({
               }}
             >
               <IconMoveFolder size={14} />
-              Change project
+              {t("notes.projects.changeProject")}
             </button>
             <button
               type="button"
@@ -1072,7 +1099,7 @@ function FolderSessionRow({
               }}
             >
               <IconFolderDelete size={14} />
-              Remove from project
+              {t("notes.projects.removeFromProject")}
             </button>
           </div>
         ) : null}
@@ -1098,6 +1125,7 @@ function FolderAddMenu({
   hasNotesElsewhere: boolean;
   hasSessionsElsewhere: boolean;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -1121,7 +1149,7 @@ function FolderAddMenu({
       <button
         type="button"
         className="folder-add-trigger"
-        aria-label="Add to project"
+        aria-label={t("notes.projects.addToProject")}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={(event) => {
@@ -1146,7 +1174,7 @@ function FolderAddMenu({
             }}
           >
             <IconBubble3 size={14} />
-            New session
+            {t("notes.projects.newSession")}
           </button>
           <button
             type="button"
@@ -1157,7 +1185,7 @@ function FolderAddMenu({
             }}
           >
             <IconNoteText size={14} />
-            New meeting note
+            {t("notes.projects.newMeetingNote")}
           </button>
           {hasNotesElsewhere || hasSessionsElsewhere ? (
             <div className="context-menu-separator" role="separator" />
@@ -1173,7 +1201,7 @@ function FolderAddMenu({
               }}
             >
               <IconBubbleAnnotation3 size={14} />
-              Add existing session
+              {t("notes.projects.addExistingSession")}
             </button>
           ) : null}
           {hasNotesElsewhere ? (
@@ -1186,7 +1214,7 @@ function FolderAddMenu({
               }}
             >
               <IconPageSearch size={14} />
-              Add existing meeting note
+              {t("notes.projects.addExistingNote")}
             </button>
           ) : null}
         </div>
@@ -1210,6 +1238,7 @@ function FolderNoteRow({
   onRemoveFromFolder: () => void;
   onDelete: () => void;
 }) {
+  const t = useT();
   const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -1237,9 +1266,13 @@ function FolderNoteRow({
             <IconNoteText size={14} />
           </span>
           <span className="folder-note-body">
-            <span className="folder-note-title">{note.title.trim() || "New note"}</span>
+            <span className="folder-note-title">
+              {note.title.trim() || t("notes.editor.titlePlaceholder")}
+            </span>
             <span className="folder-note-subtitle">
-              {note.preview.trim() ? note.preview : `Updated ${formatRelative(note.updatedAt)}`}
+              {note.preview.trim()
+                ? note.preview
+                : t("notes.projects.updated", { when: formatRelative(note.updatedAt) })}
             </span>
           </span>
         </button>
@@ -1248,7 +1281,9 @@ function FolderNoteRow({
           <button
             type="button"
             className="folder-note-menu"
-            aria-label={`Actions for ${note.title.trim() || "this meeting note"}`}
+            aria-label={t("notes.list.actionsFor", {
+              title: note.title.trim() || t("notes.projects.thisMeetingNote"),
+            })}
             aria-haspopup="menu"
             aria-expanded={menu !== null}
             onClick={(event) => {
@@ -1284,7 +1319,7 @@ function FolderNoteRow({
               }}
             >
               <IconMoveFolder size={14} />
-              Change project
+              {t("notes.projects.changeProject")}
             </button>
             <button
               type="button"
@@ -1295,7 +1330,7 @@ function FolderNoteRow({
               }}
             >
               <IconFolderDelete size={14} />
-              Remove from project
+              {t("notes.projects.removeFromProject")}
             </button>
             <div className="context-menu-separator" role="separator" />
             <button
@@ -1308,7 +1343,7 @@ function FolderNoteRow({
               }}
             >
               <IconTrashCan size={14} />
-              Delete meeting note
+              {t("notes.projects.deleteMeetingNote")}
             </button>
           </div>
         ) : null}
@@ -1317,9 +1352,11 @@ function FolderNoteRow({
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
         onConfirm={onDelete}
-        title={`Delete "${note.title.trim() || "New note"}"?`}
-        description="This cannot be undone."
-        confirmLabel="Delete meeting note"
+        title={t("notes.list.delete.title", {
+          title: note.title.trim() || t("notes.editor.titlePlaceholder"),
+        })}
+        description={t("notes.list.delete.description")}
+        confirmLabel={t("notes.projects.deleteMeetingNote")}
         destructive
       />
     </li>
@@ -1335,34 +1372,38 @@ function FolderEmptyState({
   onCreateNote: () => void;
   onOpenSettings: () => void;
 }) {
+  const t = useT();
+  const tr = useTRich();
   return (
     <EmptyState
-      label="Add to this project"
+      label={t("notes.projects.detailEmpty.label")}
       icon={<IconFolderOpen size={28} />}
-      title="Nothing here yet"
-      description="Start an agent session or capture a meeting note. Everything you add stays in this project."
+      title={t("notes.projects.detailEmpty.title")}
+      description={t("notes.projects.detailEmpty.description")}
       action={
         <>
           <div className="folder-empty-cta">
             <button type="button" className="primary-action" onClick={onCreateSession}>
               <IconBubble3 size={13} />
-              New session
+              {t("notes.projects.newSession")}
             </button>
             <button type="button" className="primary-action primary-solid" onClick={onCreateNote}>
               <IconPlusMedium size={13} />
-              New meeting note
+              {t("notes.projects.newMeetingNote")}
             </button>
           </div>
           <p className="folder-empty-nudge">
-            Want Clovy to follow instructions or remember details here? Set it up in{" "}
-            <button
-              type="button"
-              className="settings-inline-link folder-empty-nudge-link"
-              onClick={onOpenSettings}
-            >
-              project settings
-            </button>
-            .
+            {tr("notes.projects.detailEmpty.nudge", {
+              settings: (chunks) => (
+                <button
+                  type="button"
+                  className="settings-inline-link folder-empty-nudge-link"
+                  onClick={onOpenSettings}
+                >
+                  {chunks}
+                </button>
+              ),
+            })}
           </p>
         </>
       }
@@ -1379,11 +1420,17 @@ function formatRelative(iso: string): string {
   const minute = 60_000;
   const hour = 60 * minute;
   const day = 24 * hour;
-  if (diff < minute) return "just now";
-  if (diff < hour) return `${Math.floor(diff / minute)}m ago`;
-  if (diff < day) return `${Math.floor(diff / hour)}h ago`;
-  if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
-  return new Date(iso).toLocaleDateString(undefined, {
+  if (diff < minute) return translate("notes.projects.relative.justNow");
+  if (diff < hour) {
+    return translate("notes.projects.relative.minutes", { count: Math.floor(diff / minute) });
+  }
+  if (diff < day) {
+    return translate("notes.projects.relative.hours", { count: Math.floor(diff / hour) });
+  }
+  if (diff < 7 * day) {
+    return translate("notes.projects.relative.days", { count: Math.floor(diff / day) });
+  }
+  return formatIntlDate(new Date(iso), {
     month: "short",
     day: "numeric",
   });
@@ -1394,7 +1441,7 @@ function formatDate(iso: string): string {
   if (Number.isNaN(date.getTime())) return "";
   const now = new Date();
   const sameYear = date.getFullYear() === now.getFullYear();
-  return date.toLocaleDateString(undefined, {
+  return formatIntlDate(date, {
     month: "short",
     day: "numeric",
     year: sameYear ? undefined : "numeric",
@@ -1413,16 +1460,16 @@ function formatNoteTime(iso: string): string {
     date.getMonth() === now.getMonth() &&
     date.getDate() === now.getDate();
   if (sameDay) {
-    return date.toLocaleTimeString(undefined, {
+    return formatIntlDate(date, {
       hour: "numeric",
       minute: "2-digit",
     });
   }
   const diffDays = Math.floor((now.getTime() - date.getTime()) / (24 * 60 * 60 * 1000));
   if (diffDays < 7) {
-    return date.toLocaleDateString(undefined, { weekday: "short" });
+    return formatIntlDate(date, { weekday: "short" });
   }
-  return date.toLocaleDateString(undefined, {
+  return formatIntlDate(date, {
     month: "short",
     day: "numeric",
   });

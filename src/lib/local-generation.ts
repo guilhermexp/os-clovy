@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import type { LocalGenerationSettingsDto, VeniceModelDto } from "./tauri";
 
 // Bring-your-own local text generation. The model catalog is derived
@@ -44,7 +45,7 @@ export function unavailableLocalGenerationOption(optionId: string): VeniceModelD
     id: optionId,
     name: `Local: ${modelId}`,
     modelType: "text",
-    description: "This local model is no longer configured.",
+    description: t("lib.localGeneration.unavailableDescription"),
     pricing: { display: "Local" },
     traits: ["local"],
     capabilities: [],

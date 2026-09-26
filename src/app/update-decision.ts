@@ -1,5 +1,6 @@
 // DownloadEvent is owned by the IPC boundary (lib/updater.ts); re-exported here
 // so existing importers keep working without app/ reaching back up into lib/.
+import { t } from "../i18n";
 import type { DownloadEvent } from "../lib/updater";
 export type { DownloadEvent };
 
@@ -15,6 +16,8 @@ export const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 // The manual-check success status. Shared so the reporter and the auto-dismiss
 // effect that matches on it (App), plus the dev demo, can't drift apart.
+// It stays an English sentinel in state; the update card renders it through
+// t("app.update.upToDate") so it follows the interface language.
 export const UP_TO_DATE_STATUS = "Clovy is up to date.";
 
 export type UpdateStatusDisplayState = {
@@ -209,5 +212,5 @@ function normalizeNotes(notes?: string) {
 function messageFromUnknown(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
-  return "An unknown error occurred.";
+  return t("app.update.unknownError");
 }

@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import type { AgentItemDto } from "./agent-runtime-contract";
 import { stripProjectContext } from "./agent-project-context";
 
@@ -187,7 +188,7 @@ export function companionAgentMessagesFromItems(
     if (item.kind !== "message" || item.status !== "complete") return [];
     const text = (item.role === "user" ? stripProjectContext(item.text) : item.text).trim();
     if (!text) return [];
-    const suffix = "\n\n[Message truncated on companion]";
+    const suffix = `\n\n${t("lib.companion.messageTruncated")}`;
     const message: CompanionAgentMessageView = {
       id: item.id,
       role: item.role,

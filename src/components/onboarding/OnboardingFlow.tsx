@@ -1,5 +1,6 @@
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { useEffect, useState } from "react";
+import { useT } from "../../i18n";
 import {
   onboardingArea,
   onboardingResumeStep,
@@ -83,6 +84,7 @@ function browserOnboardingDemoStep(): StepId | null {
 }
 
 export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props) {
+  const t = useT();
   const capabilities = fallbackDictationCapabilities();
   const steps = ONBOARDING_STEPS;
   const [stepIndex, setStepIndex] = useState(() => {
@@ -165,15 +167,15 @@ export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props)
             type="button"
             className="onboarding-back"
             onClick={goBack}
-            aria-label="Back"
-            title="Back"
+            aria-label={t("common.back")}
+            title={t("common.back")}
           >
             <IconChevronLeftSmall size={18} aria-hidden />
           </button>
         ) : null}
         <nav
           className="onboarding-progress"
-          aria-label={`Setup progress: step ${stepIndex + 1} of ${steps.length}`}
+          aria-label={t("onboarding.progress", { step: stepIndex + 1, total: steps.length })}
         >
           {steps.map((id, index) => (
             <span

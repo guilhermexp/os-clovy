@@ -20,30 +20,38 @@ import {
   type CompanionPairingStatus,
   type LinkedCompanionDevice,
 } from "../../lib/tauri";
+import {
+  formatDate as formatLocaleDate,
+  intlLocale,
+  type MessageKey,
+  t as translate,
+  useT,
+} from "../../i18n";
 import { Switch } from "../ui/Switch";
 
-const capabilityLabels: Record<CompanionCapability, string> = {
-  notesRead: "Read notes",
-  notesEdit: "Edit notes",
-  agentRead: "Read agent sessions",
-  agentChat: "Chat with Clovy",
-  agentCancel: "Cancel agent runs",
-  modelRead: "View agent models",
-  modelEdit: "Change agent models",
-  mediaRead: "Read generated media",
-  settingsRead: "Read safe settings",
-  settingsEditSafe: "Edit safe settings",
-  recordingControlExisting: "Control an existing recording",
-  appFocus: "Focus Clovy on this Mac",
-  filesUpload: "Add phone attachments",
-  filesBrowse: "Browse shared Mac folders",
-  devicesReadSelf: "Read this device",
-  devicesRevokeSelf: "Unlink this device",
-  computerUseApprove: "Approve Computer use actions",
+const capabilityLabels: Record<CompanionCapability, MessageKey> = {
+  notesRead: "settingsPanels.devices.cap.notesRead",
+  notesEdit: "settingsPanels.devices.cap.notesEdit",
+  agentRead: "settingsPanels.devices.cap.agentRead",
+  agentChat: "settingsPanels.devices.cap.agentChat",
+  agentCancel: "settingsPanels.devices.cap.agentCancel",
+  modelRead: "settingsPanels.devices.cap.modelRead",
+  modelEdit: "settingsPanels.devices.cap.modelEdit",
+  mediaRead: "settingsPanels.devices.cap.mediaRead",
+  settingsRead: "settingsPanels.devices.cap.settingsRead",
+  settingsEditSafe: "settingsPanels.devices.cap.settingsEditSafe",
+  recordingControlExisting: "settingsPanels.devices.cap.recordingControlExisting",
+  appFocus: "settingsPanels.devices.cap.appFocus",
+  filesUpload: "settingsPanels.devices.cap.filesUpload",
+  filesBrowse: "settingsPanels.devices.cap.filesBrowse",
+  devicesReadSelf: "settingsPanels.devices.cap.devicesReadSelf",
+  devicesRevokeSelf: "settingsPanels.devices.cap.devicesRevokeSelf",
+  computerUseApprove: "settingsPanels.devices.cap.computerUseApprove",
 };
 const companionCapabilities = Object.keys(capabilityLabels) as CompanionCapability[];
 
 export function LinkedDevicesSection() {
+  const t = useT();
   const [devices, setDevices] = useState<LinkedCompanionDevice[]>([]);
   const [browseRoots, setBrowseRoots] = useState<CompanionBrowseRoot[]>([]);
   const [computerUseApprovals, setComputerUseApprovals] =
@@ -113,7 +121,7 @@ export function LinkedDevicesSection() {
     if (!pairing) return;
     const timeout = window.setTimeout(
       () => {
-        endPairing("The pairing code expired. Show a new code to try again.");
+        endPairing(translate("settingsPanels.devices.codeExpiredError"));
       },
       Math.max(0, pairing.expiresAtMs - Date.now()),
     );
@@ -145,7 +153,7 @@ export function LinkedDevicesSection() {
   const copyPairingCode = async () => {
     if (!pairing) return;
     if (pairing.expiresAtMs <= Date.now()) {
-      setError("The pairing code expired. Show a new code to try again.");
+      setError(t("settingsPanels.devices.codeExpiredError"));
       return;
     }
     setError(undefined);
@@ -162,7 +170,7 @@ export function LinkedDevicesSection() {
       }
       setPairingCodeCopied(true);
     } catch {
-      setError("Couldn't copy the pairing code. Try again.");
+      setError(t("settingsPanels.devices.copyFailed"));
     }
   };
 
@@ -196,7 +204,8 @@ export function LinkedDevicesSection() {
   };
 
   const revoke = async (device: LinkedCompanionDevice) => {
-    if (!window.confirm(`Unlink ${device.displayName}? It will lose access immediately.`)) return;
+    if (!window.confirm(t("settingsPanels.devices.unlinkConfirm", { name: device.displayName })))
+      return;
     setBusy(true);
     setError(undefined);
     try {
@@ -225,11 +234,7 @@ export function LinkedDevicesSection() {
   };
 
   const removeBrowseRoot = async (root: CompanionBrowseRoot) => {
-    if (
-      !window.confirm(
-        `Stop sharing ${root.name}? Linked devices will lose access to this folder immediately.`,
-      )
-    ) {
+    if (!window.confirm(t("settingsPanels.devices.stopSharingConfirm", { name: root.name }))) {
       return;
     }
     setBusy(true);
@@ -260,12 +265,9 @@ export function LinkedDevicesSection() {
     <section className="settings-group companion-settings" aria-labelledby="linked-devices-heading">
       <header className="settings-page-header">
         <h2 id="linked-devices-heading" className="settings-page-title">
-          Linked devices
+          {t("settingsPanels.devices.title")}
         </h2>
-        <p className="settings-page-blurb">
-          Link an iPhone or iPad from this signed-in Mac. Every link needs explicit approval here,
-          and the companion never receives your account session.
-        </p>
+        <p className="settings-page-blurb">{t("settingsPanels.devices.blurb")}</p>
       </header>
 
       {error ? (
@@ -276,11 +278,8 @@ export function LinkedDevicesSection() {
 
       <div className="settings-card companion-pairing-card">
         <div className="settings-row-info">
-          <h3 className="settings-row-title">Link a companion</h3>
-          <p className="settings-row-description">
-            Pairing codes expire after five minutes. The relay cannot read the pairing secret or any
-            linked traffic.
-          </p>
+          <h3 className="settings-row-title">{t("settingsPanels.devices.linkTitle")}</h3>
+          <p className="settings-row-description">{t("settingsPanels.devices.linkDescription")}</p>
         </div>
         {!pairing ? (
           <button
@@ -289,7 +288,7 @@ export function LinkedDevicesSection() {
             disabled={busy}
             onClick={() => void startPairing()}
           >
-            Show pairing code
+            {t("settingsPanels.devices.showCode")}
           </button>
         ) : (
           <div className="companion-pairing-flow">
@@ -297,33 +296,46 @@ export function LinkedDevicesSection() {
               <img
                 className="companion-pairing-qr"
                 src={qrSource}
-                alt="Clovy Companion pairing code"
+                alt={t("settingsPanels.devices.qrAlt")}
               />
             ) : null}
             <div className="companion-pairing-copy" aria-live="polite">
-              <strong>{pairingLabel(status?.state)}</strong>
-              <span>Expires {new Date(pairing.expiresAtMs).toLocaleTimeString()}</span>
+              <strong>{pairingLabel(t, status?.state)}</strong>
+              <span>
+                {t("settingsPanels.devices.expires", {
+                  time: new Date(pairing.expiresAtMs).toLocaleTimeString(intlLocale()),
+                })}
+              </span>
               <details className="companion-manual-pairing">
-                <summary>Enter a code instead</summary>
-                <p>In Clovy Companion, choose Enter pairing code, then type or paste this code.</p>
+                <summary>{t("settingsPanels.devices.enterCodeInstead")}</summary>
+                <p>{t("settingsPanels.devices.enterCodeHelp")}</p>
                 <code>{pairing.pairingCode}</code>
                 <button
                   type="button"
                   className="primary-action"
                   onClick={() => void copyPairingCode()}
                 >
-                  {pairingCodeCopied ? "Pairing code copied" : "Copy pairing code"}
+                  {pairingCodeCopied
+                    ? t("settingsPanels.devices.codeCopied")
+                    : t("settingsPanels.devices.copyCode")}
                 </button>
-                <p>Copied codes may remain in clipboard history. They expire after five minutes.</p>
+                <p>{t("settingsPanels.devices.clipboardNote")}</p>
               </details>
               {status?.state === "waitingForApproval" ? (
                 <>
-                  <span>{status.mobileDisplayName ?? "A companion"} is asking to link.</span>
-                  <span>This device will receive these capabilities:</span>
-                  <ul className="companion-capabilities" aria-label="Capabilities to approve">
+                  <span>
+                    {status.mobileDisplayName
+                      ? t("settingsPanels.devices.askingToLink", { name: status.mobileDisplayName })
+                      : t("settingsPanels.devices.companionAskingToLink")}
+                  </span>
+                  <span>{t("settingsPanels.devices.willReceive")}</span>
+                  <ul
+                    className="companion-capabilities"
+                    aria-label={t("settingsPanels.devices.capabilitiesToApprove")}
+                  >
                     {companionCapabilities.map((capability) => (
                       <li className="companion-capability" key={capability}>
-                        {capabilityLabels[capability]}
+                        {t(capabilityLabels[capability])}
                       </li>
                     ))}
                   </ul>
@@ -333,7 +345,7 @@ export function LinkedDevicesSection() {
                     disabled={busy || !status.mobileDeviceId}
                     onClick={() => void approve()}
                   >
-                    Approve this device
+                    {t("settingsPanels.devices.approveDevice")}
                   </button>
                 </>
               ) : null}
@@ -344,7 +356,7 @@ export function LinkedDevicesSection() {
                   endPairing();
                 }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           </div>
@@ -353,11 +365,9 @@ export function LinkedDevicesSection() {
 
       <div className="settings-card companion-browse-card">
         <div className="settings-row-info">
-          <h3 className="settings-row-title">Mac folders</h3>
+          <h3 className="settings-row-title">{t("settingsPanels.devices.macFolders")}</h3>
           <p className="settings-row-description">
-            Linked devices can browse file names and details only inside folders you add here. Files
-            are read only when you attach one to a Clovy message. Folder contents cannot be
-            downloaded to the companion.
+            {t("settingsPanels.devices.macFoldersDescription")}
           </p>
         </div>
         <button
@@ -366,10 +376,13 @@ export function LinkedDevicesSection() {
           disabled={busy || browseRoots.length >= 16}
           onClick={() => void addBrowseRoot()}
         >
-          Add folder
+          {t("settingsPanels.devices.addFolder")}
         </button>
         {browseRoots.length ? (
-          <ul className="companion-root-list" aria-label="Folders shared with linked devices">
+          <ul
+            className="companion-root-list"
+            aria-label={t("settingsPanels.devices.sharedFoldersAria")}
+          >
             {browseRoots.map((root) => (
               <li className="companion-root-row" key={root.id}>
                 <div className="settings-row-info">
@@ -382,13 +395,13 @@ export function LinkedDevicesSection() {
                   disabled={busy}
                   onClick={() => void removeBrowseRoot(root)}
                 >
-                  Stop sharing
+                  {t("settingsPanels.devices.stopSharing")}
                 </button>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="settings-row-description">No Mac folders are shared with linked devices.</p>
+          <p className="settings-row-description">{t("settingsPanels.devices.noFolders")}</p>
         )}
       </div>
 
@@ -396,18 +409,20 @@ export function LinkedDevicesSection() {
         <div className="settings-rows">
           <div className="settings-row">
             <div className="settings-row-info">
-              <h3 className="settings-row-title">Approve Computer use from linked devices</h3>
+              <h3 className="settings-row-title">
+                {t("settingsPanels.devices.approveComputerUse")}
+              </h3>
               <p className="settings-row-description">
                 {computerUseApprovals?.available === false
-                  ? "Enable experimental Computer use before allowing linked approvals."
-                  : "Let a linked device approve one specific Computer use action at a time. Requests expire after 60 seconds, remain visible on this Mac, and never bypass Clovy's safety policy."}
+                  ? t("settingsPanels.devices.computerUseUnavailable")
+                  : t("settingsPanels.devices.computerUseDescription")}
               </p>
             </div>
             <div className="settings-row-control">
               <Switch
                 checked={computerUseApprovals?.enabled ?? false}
                 disabled={busy || !computerUseApprovals?.available}
-                aria-label="Approve Computer use from linked devices"
+                aria-label={t("settingsPanels.devices.approveComputerUse")}
                 onCheckedChange={(enabled) => void setComputerUseApprovalEnabled(enabled)}
               />
             </div>
@@ -425,7 +440,7 @@ export function LinkedDevicesSection() {
                   <div>
                     {editingId === device.id ? (
                       <input
-                        aria-label="Device name"
+                        aria-label={t("settingsPanels.devices.deviceName")}
                         className="settings-text-input companion-name-input"
                         maxLength={128}
                         value={draftName}
@@ -435,8 +450,12 @@ export function LinkedDevicesSection() {
                       <h3 className="settings-row-title">{device.displayName}</h3>
                     )}
                     <p className="settings-row-description">
-                      Linked {formatDate(device.linkedAt)}
-                      {device.lastSeenAt ? ` · Last seen ${formatDate(device.lastSeenAt)}` : ""}
+                      {t("settingsPanels.devices.linkedAt", { date: formatDate(device.linkedAt) })}
+                      {device.lastSeenAt
+                        ? t("settingsPanels.devices.lastSeenSuffix", {
+                            date: formatDate(device.lastSeenAt),
+                          })
+                        : ""}
                     </p>
                   </div>
                   <div className="companion-device-actions">
@@ -448,14 +467,14 @@ export function LinkedDevicesSection() {
                           disabled={busy || !draftName.trim()}
                           onClick={() => void saveName(device.id)}
                         >
-                          Save
+                          {t("common.save")}
                         </button>
                         <button
                           type="button"
                           className="primary-action"
                           onClick={() => setEditingId(undefined)}
                         >
-                          Cancel
+                          {t("common.cancel")}
                         </button>
                       </>
                     ) : (
@@ -468,7 +487,7 @@ export function LinkedDevicesSection() {
                             setDraftName(device.displayName);
                           }}
                         >
-                          Rename
+                          {t("common.rename")}
                         </button>
                         <button
                           type="button"
@@ -476,32 +495,33 @@ export function LinkedDevicesSection() {
                           disabled={busy}
                           onClick={() => void revoke(device)}
                         >
-                          Unlink
+                          {t("settingsPanels.devices.unlink")}
                         </button>
                       </>
                     )}
                   </div>
                 </div>
-                <ul className="companion-capabilities" aria-label="Granted capabilities">
+                <ul
+                  className="companion-capabilities"
+                  aria-label={t("settingsPanels.devices.grantedCapabilities")}
+                >
                   {device.capabilities.map((capability) => (
                     <li className="companion-capability" key={capability}>
-                      {capabilityLabels[capability]}
+                      {t(capabilityLabels[capability])}
                     </li>
                   ))}
                 </ul>
                 {device.capabilities.includes("filesUpload") ? (
                   <p className="settings-row-description">
-                    This device can add bounded phone attachments. Unlink it to revoke this access.
+                    {t("settingsPanels.devices.filesUploadNote")}
                   </p>
                 ) : null}
               </article>
             ))
         ) : (
           <div className="settings-card companion-empty-device">
-            <h3 className="settings-row-title">No linked devices</h3>
-            <p className="settings-row-description">
-              Link a companion above to access Clovy when you are away from this Mac.
-            </p>
+            <h3 className="settings-row-title">{t("settingsPanels.devices.emptyTitle")}</h3>
+            <p className="settings-row-description">{t("settingsPanels.devices.emptyBody")}</p>
           </div>
         )}
       </div>
@@ -509,15 +529,15 @@ export function LinkedDevicesSection() {
   );
 }
 
-function pairingLabel(state?: CompanionPairingStatus["state"]) {
-  if (state === "waitingForApproval") return "Approve the device on this Mac";
-  if (state === "approved") return "Device approved";
-  if (state === "expired") return "Pairing code expired";
-  return "Scan this code in Clovy Companion";
+function pairingLabel(t: ReturnType<typeof useT>, state?: CompanionPairingStatus["state"]) {
+  if (state === "waitingForApproval") return t("settingsPanels.devices.stateWaiting");
+  if (state === "approved") return t("settingsPanels.devices.stateApproved");
+  if (state === "expired") return t("settingsPanels.devices.stateExpired");
+  return t("settingsPanels.devices.stateScan");
 }
 
 function formatDate(value: string) {
-  return new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return formatLocaleDate(new Date(value), { dateStyle: "medium", timeStyle: "short" });
 }
 
 function errorMessage(error: unknown) {
@@ -525,5 +545,5 @@ function errorMessage(error: unknown) {
     const message = (error as { message?: unknown }).message;
     if (typeof message === "string") return message;
   }
-  return "Linked devices are unavailable right now.";
+  return translate("settingsPanels.devices.unavailable");
 }

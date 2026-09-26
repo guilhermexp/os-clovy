@@ -9,6 +9,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useT } from "../i18n";
 
 type WorkspaceLoader<Props extends object> = {
   Component: ComponentType<Props>;
@@ -88,12 +89,13 @@ class WorkspaceLoadErrorBoundary extends Component<
 }
 
 function WorkspaceLoadFailure({ onRetry }: { onRetry: () => void }) {
+  const t = useT();
   return (
     <section className="workspace-fallback workspace-load-error" role="alert">
-      <h2>Couldn't open this view</h2>
-      <p>Clovy couldn't load this part of the app. Try again.</p>
+      <h2>{t("app.workspace.loadFailedTitle")}</h2>
+      <p>{t("app.workspace.loadFailedBody")}</p>
       <button type="button" className="primary-action primary-solid" onClick={onRetry}>
-        Try again
+        {t("common.tryAgain")}
       </button>
     </section>
   );
@@ -180,8 +182,13 @@ export function prefetchRemainingWorkspacesAfterPaint() {
 }
 
 function WorkspaceFallback() {
+  const t = useT();
   return (
-    <section className="workspace-fallback" aria-label="Loading view" aria-busy="true">
+    <section
+      className="workspace-fallback"
+      aria-label={t("app.workspace.loading")}
+      aria-busy="true"
+    >
       <span className="workspace-fallback-title" />
       <div className="workspace-fallback-lines" aria-hidden="true">
         <span />

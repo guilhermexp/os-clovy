@@ -8,6 +8,9 @@
  * (combined day-of-month + day-of-week restrictions, stepped ranges) — is
  * returned unchanged rather than risk describing a schedule wrongly. */
 
+import { getInterfaceLocale } from "../i18n/locale";
+import { formatDate, formatList, t } from "../i18n/translate";
+
 type CronField =
   | { kind: "any" }
   | { kind: "step"; step: number }
@@ -71,7 +74,9 @@ export function humanizeSchedule(schedule: string): string {
 }
 
 export function compactScheduleLabel(schedule: string): string {
-  return humanizeSchedule(schedule).replace(/\bat (?=\d{1,2}:\d{2}\b)/, "");
+  const label = humanizeSchedule(schedule);
+  if (!isEnglish()) return label.replace(/(^|\s)às (?=\d{1,2}:\d{2}\b)/, "$1");
+  return label.replace(/\bat (?=\d{1,2}:\d{2}\b)/, "");
 }
 
 function parseField(raw: string, min: number, max: number, names?: string[]): CronField | null {
@@ -133,26 +138,32 @@ function phrase(
     dayOfMonth.kind === "any" && month.kind === "any" && dayOfWeek.kind === "any";
 
   if (unrestrictedDate) {
-    if (minute.kind === "any" && hour.kind === "any") return "Every minute";
-    if (minute.kind === "step" && hour.kind === "any") return `Every ${minute.step} minutes`;
+    if (minute.kind === "any" && hour.kind === "any") return t("lib.schedule.everyMinute");
+    if (minute.kind === "step" && hour.kind === "any")
+      return t("lib.schedule.everyNMinutes", { count: minute.step });
     const fixedMinute = singleValue(minute);
     if (fixedMinute !== null && hour.kind === "any")
       return fixedMinute === 0
-        ? "Every hour"
-        : `Every hour at :${String(fixedMinute).padStart(2, "0")}`;
-    if (fixedMinute === 0 && hour.kind === "step") return `Every ${hour.step} hours`;
+        ? t("lib.schedule.everyHour")
+        : t("lib.schedule.everyHourAtMinute", { minute: String(fixedMinute).padStart(2, "0") });
+    if (fixedMinute === 0 && hour.kind === "step")
+      return t("lib.schedule.everyNHours", { count: hour.step });
     const time = timeText(minute, hour);
-    return time ? `Every day at ${time}` : null;
+    return time ? t("lib.schedule.everyDayAt", { time }) : null;
   }
 
   const time = timeText(minute, hour);
   if (!time) return null;
 
   if (dayOfWeek.kind === "values" && dayOfMonth.kind === "any" && month.kind === "any")
-    return `${dayPhrase(dayOfWeek.values)} at ${time}`;
+    return dayPhrase(dayOfWeek.values, time);
 
   if (dayOfMonth.kind === "values" && dayOfWeek.kind === "any" && month.kind === "any")
-    return `Monthly on the ${joinAnd(dayOfMonth.values.map(ordinal))} at ${time}`;
+    return t("lib.schedule.monthlyAt", {
+      count: dayOfMonth.values.length,
+      days: joinAnd(dayOfMonth.values.map(ordinal)),
+      time,
+    });
 
   if (
     month.kind === "values" &&
@@ -160,12 +171,31 @@ function phrase(
     dayOfMonth.kind === "values" &&
     dayOfWeek.kind === "any"
   ) {
-    const monthName = MONTH_NAMES[month.values[0] - 1];
-    const dates = dayOfMonth.values.map((day) => `${monthName} ${day}`);
-    return `Every year on ${joinAnd(dates)} at ${time}`;
+    const monthIndex = month.values[0] - 1;
+    const dates = dayOfMonth.values.map((day) => monthDayText(monthIndex, day));
+    return t("lib.schedule.yearlyAt", { dates: joinAnd(dates), time });
   }
 
   return null;
+}
+
+function isEnglish(): boolean {
+  return getInterfaceLocale() === "en";
+}
+
+/** "Jan 5" in English (unchanged), the locale's own short month-day
+ * ("5 de jan.") elsewhere. */
+function monthDayText(monthIndex: number, day: number): string {
+  if (isEnglish()) return `${MONTH_NAMES[monthIndex]} ${day}`;
+  return formatDate(new Date(2000, monthIndex, day), { month: "short", day: "numeric" });
+}
+
+/** Weekday name for a cron day (0 = Sunday). English keeps its fixed names;
+ * other languages take the name from Intl ("segunda-feira"). */
+function dayName(day: number): string {
+  if (isEnglish()) return DAY_NAMES[day];
+  // 2023-01-01 was a Sunday, so day N of that week is weekday N.
+  return formatDate(new Date(2023, 0, 1 + day), { weekday: "long" });
 }
 
 /** A concrete clock time needs one minute value and one or more hour values;
@@ -176,19 +206,31 @@ function timeText(minute: CronField, hour: CronField): string | null {
   return joinAnd(hour.values.map((h) => formatClockTime(h, fixedMinute)));
 }
 
-function dayPhrase(days: number[]): string {
-  if (sameValues(days, [1, 2, 3, 4, 5])) return "Weekdays";
-  if (sameValues(days, [0, 6])) return "Weekends";
-  if (days.length === 1) return `Every ${DAY_NAMES[days[0]]}`;
+function dayPhrase(days: number[], time: string): string {
+  if (sameValues(days, [1, 2, 3, 4, 5])) return t("lib.schedule.weekdaysAt", { time });
+  if (sameValues(days, [0, 6])) return t("lib.schedule.weekendsAt", { time });
+  if (days.length === 1) {
+    const day = dayName(days[0]);
+    // Portuguese weekend day names are masculine ("Todo sábado"), the rest
+    // feminine ("Toda segunda-feira"); English reads the same either way.
+    return days[0] === 0 || days[0] === 6
+      ? t("lib.schedule.everyWeekendDayAt", { day, time })
+      : t("lib.schedule.everyWeekdayAt", { day, time });
+  }
   const contiguous = days.every((value, index) => index === 0 || value === days[index - 1] + 1);
   if (contiguous && days.length >= 3)
-    return `Every ${DAY_NAMES[days[0]]} to ${DAY_NAMES[days[days.length - 1]]}`;
-  return `Every ${joinAnd(days.map((day) => DAY_NAMES[day]))}`;
+    return t("lib.schedule.dayRangeAt", {
+      from: dayName(days[0]),
+      to: dayName(days[days.length - 1]),
+      time,
+    });
+  return t("lib.schedule.daysAt", { days: joinAnd(days.map(dayName)), time });
 }
 
 function formatClockTime(hourOfDay: number, minute: number): string {
-  return new Date(2000, 0, 1, hourOfDay, minute).toLocaleTimeString(undefined, {
-    hour: "numeric",
+  // Brazilian clocks read zero-padded 24-hour times ("09:00").
+  return formatDate(new Date(2000, 0, 1, hourOfDay, minute), {
+    hour: isEnglish() ? "numeric" : "2-digit",
     minute: "2-digit",
   });
 }
@@ -203,6 +245,7 @@ function sameValues(left: number[], right: number[]): boolean {
 
 function joinAnd(parts: string[]): string {
   if (parts.length <= 1) return parts[0] ?? "";
+  if (!isEnglish()) return formatList(parts, { type: "conjunction" });
   if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
   return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
 }
@@ -276,6 +319,8 @@ export function draftFromSchedule(schedule: string): ScheduleDraft {
 }
 
 function ordinal(value: number): string {
+  // Portuguese reads plain day numbers ("nos dias 1 e 15").
+  if (!isEnglish()) return String(value);
   const tens = value % 100;
   if (tens >= 11 && tens <= 13) return `${value}th`;
   const suffix = { 1: "st", 2: "nd", 3: "rd" }[value % 10] ?? "th";

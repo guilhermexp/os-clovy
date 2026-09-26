@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useT } from "../../i18n";
 import { ClovyAppTile } from "../brand/ClovyLogo";
 import { BrandPrimaryButton } from "../ui/BrandPrimaryButton";
 
@@ -46,11 +47,11 @@ export function StepCard({
  * optional quiet skip beneath. Never two competing buttons.
  */
 export function StepActions({
-  continueLabel = "Continue",
+  continueLabel,
   continueDisabled,
   onContinue,
   onSkip,
-  skipLabel = "Skip for now",
+  skipLabel,
 }: {
   continueLabel?: string;
   continueDisabled?: boolean;
@@ -58,14 +59,15 @@ export function StepActions({
   onSkip?: () => void;
   skipLabel?: string;
 }) {
+  const t = useT();
   return (
     <div className="welcome-providers">
       <BrandPrimaryButton disabled={continueDisabled} onClick={onContinue}>
-        {continueLabel}
+        {continueLabel ?? t("common.continue")}
       </BrandPrimaryButton>
       {onSkip ? (
         <button type="button" className="onboarding-skip" onClick={onSkip}>
-          {skipLabel}
+          {skipLabel ?? t("onboarding.skipForNow")}
         </button>
       ) : null}
     </div>

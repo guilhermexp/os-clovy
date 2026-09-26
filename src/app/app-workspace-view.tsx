@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { FundingNotice, fundingTierOf } from "../components/account/FundingNotice";
 import { markAgentNewSessionPending } from "../components/agent/session-persistence";
 import { AgentSessionsList } from "../components/agent/AgentSessionsList";
@@ -10,11 +11,11 @@ import { agentRuntimeBindings, retryProcessing } from "../lib/tauri";
 import { selectSessionProjectContext } from "../lib/agent-project-context";
 import { messageFromError } from "../lib/errors";
 import {
-  COMPOSER_FUNDING_DISABLED_REASON,
-  NOTE_RETRY_FUNDING_DISABLED_REASON,
-  RECOVERY_FUNDING_DISABLED_REASON,
-  RECORDING_FUNDING_DISABLED_REASON,
-  ROUTINE_FUNDING_DISABLED_REASON,
+  composerFundingDisabledReason,
+  noteRetryFundingDisabledReason,
+  recoveryFundingDisabledReason,
+  recordingFundingDisabledReason,
+  routineFundingDisabledReason,
 } from "./app-shell";
 import type { RenderAppWorkspaceDependencies } from "./app-workspace-view-types";
 import {
@@ -202,7 +203,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     />
   ) : activeView === "routines" ? (
     <RoutinesViewRoute
-      creditActionsDisabledReason={fundingRequired ? ROUTINE_FUNDING_DISABLED_REASON : undefined}
+      creditActionsDisabledReason={fundingRequired ? routineFundingDisabledReason() : undefined}
       onCreateRoutine={(prompt) => {
         markAgentNewSessionPending(prompt);
         setActiveAgentSession(undefined);
@@ -239,11 +240,11 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             setActiveAgentSession(session);
             setActiveView("agent");
           } catch (cause) {
-            setError(messageFromError(cause) || `Could not open ${title}.`);
+            setError(messageFromError(cause) || t("app.workspace.couldNotOpen", { title }));
           }
         })();
       }}
-      creditActionsDisabledReason={fundingRequired ? COMPOSER_FUNDING_DISABLED_REASON : undefined}
+      creditActionsDisabledReason={fundingRequired ? composerFundingDisabledReason() : undefined}
       renderFundingNotice={
         fundingRequired
           ? (textFundingContext) => (
@@ -267,7 +268,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       initialSession={activeAgentSessionSeed}
       initialSessionId={activeAgentSessionId}
       onSessionSelected={setActiveAgentSession}
-      creditActionsDisabledReason={fundingRequired ? COMPOSER_FUNDING_DISABLED_REASON : undefined}
+      creditActionsDisabledReason={fundingRequired ? composerFundingDisabledReason() : undefined}
       renderFundingNotice={
         fundingRequired
           ? (textFundingContext) => (
@@ -298,11 +299,11 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       origin={
         agentOriginFolder
           ? {
-              backLabel: `Back to ${agentOriginFolder.name}`,
+              backLabel: t("app.breadcrumb.backTo", { name: agentOriginFolder.name }),
               onBack: handleReturnToAgentOriginFolder,
               crumbs: [
                 {
-                  label: "Projects",
+                  label: t("app.nav.projects"),
                   onClick: () => {
                     setActiveView("folders");
                     dispatch({
@@ -322,11 +323,11 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             }
           : agentOrigin?.kind === "routines"
             ? {
-                backLabel: "Back to routines",
+                backLabel: t("app.breadcrumb.backToRoutines"),
                 onBack: handleReturnToRoutines,
                 crumbs: [
                   {
-                    label: "Routines",
+                    label: t("app.nav.routines"),
                     onClick: handleReturnToRoutines,
                   },
                 ],
@@ -336,7 +337,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
                 // project: the crumb shows the session's home (back still
                 // returns to where the user came from).
                 {
-                  backLabel: "Back to sessions",
+                  backLabel: t("app.breadcrumb.backToSessions"),
                   onBack: handleReturnToAgentsList,
                   crumbs: [
                     {
@@ -347,11 +348,11 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
                   ],
                 }
               : {
-                  backLabel: "Back to sessions",
+                  backLabel: t("app.breadcrumb.backToSessions"),
                   onBack: handleReturnToAgentsList,
                   crumbs: [
                     {
-                      label: "Sessions",
+                      label: t("app.nav.sessions"),
                       onClick: handleReturnToAgentsList,
                     },
                   ],
@@ -417,7 +418,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       folderBackTarget={
         folderReturnTarget
           ? {
-              label: `Back to ${folderReturnTarget.label}`,
+              label: t("app.breadcrumb.backTo", { name: folderReturnTarget.label }),
               onBack: () => void handleReturnToNote(folderReturnTarget.noteId),
             }
           : undefined
@@ -497,7 +498,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
                         "Notes" root. */}
       {originFolder ? (
         <BreadcrumbBar
-          backLabel={`Back to ${originFolder.name}`}
+          backLabel={t("app.breadcrumb.backTo", { name: originFolder.name })}
           onBack={() => {
             setActiveView("folders");
             dispatch({
@@ -520,7 +521,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
               },
             },
             {
-              label: selectedNote.title.trim() || "New note",
+              label: selectedNote.title.trim() || t("app.newNote"),
               action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
             },
           ]}
@@ -528,21 +529,21 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
         />
       ) : originAllNotes ? (
         <BreadcrumbBar
-          backLabel="Back to meeting notes"
+          backLabel={t("app.breadcrumb.backToMeetingNotes")}
           onBack={() => {
             setActiveView("all-notes");
             setOriginAllNotes(false);
           }}
           items={[
             {
-              label: "Meeting notes",
+              label: t("app.nav.meetingNotes"),
               onClick: () => {
                 setActiveView("all-notes");
                 setOriginAllNotes(false);
               },
             },
             {
-              label: selectedNote.title.trim() || "New note",
+              label: selectedNote.title.trim() || t("app.newNote"),
               action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
             },
           ]}
@@ -551,9 +552,9 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       ) : (
         <BreadcrumbBar
           items={[
-            { label: "Notes", onClick: () => setActiveView("all-notes") },
+            { label: t("app.nav.notes"), onClick: () => setActiveView("all-notes") },
             {
-              label: selectedNote.title.trim() || "New note",
+              label: selectedNote.title.trim() || t("app.newNote"),
               action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
             },
           ]}
@@ -568,15 +569,15 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
           recordingStatus={selectedNoteId === recordingNoteId ? state.recordingStatus : undefined}
           meetingEndCountdown={selectedNoteId === recordingNoteId ? meetingEndCountdown : null}
           recordingDisabled={Boolean(state.recordingStatus && selectedNoteId !== recordingNoteId)}
-          recordingBlockedReason={fundingRequired ? RECORDING_FUNDING_DISABLED_REASON : undefined}
+          recordingBlockedReason={fundingRequired ? recordingFundingDisabledReason() : undefined}
           fundingNotice={
             fundingRequired ? (
               <FundingNotice account={fundingAccount} onRefresh={refreshFundingAccount} />
             ) : undefined
           }
           fundingTier={fundingTierOf(fundingAccount)}
-          retryBlockedReason={fundingRequired ? NOTE_RETRY_FUNDING_DISABLED_REASON : undefined}
-          recoveryBlockedReason={fundingRequired ? RECOVERY_FUNDING_DISABLED_REASON : undefined}
+          retryBlockedReason={fundingRequired ? noteRetryFundingDisabledReason() : undefined}
+          recoveryBlockedReason={fundingRequired ? recoveryFundingDisabledReason() : undefined}
           liveTranscript={selectedNoteLiveTranscript}
           sourceMode={sourceMode}
           sourceReadiness={sourceReadiness}
@@ -609,7 +610,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
           onRetry={async () => {
             if (!selectedNote) return;
             if (fundingRequired) {
-              setError(NOTE_RETRY_FUNDING_DISABLED_REASON);
+              setError(noteRetryFundingDisabledReason());
               return;
             }
             try {
@@ -641,7 +642,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             dispatch({ type: "folderSelected", folderId });
             setFolderReturnTarget({
               noteId: selectedNote.id,
-              label: selectedNote.title.trim() || "New note",
+              label: selectedNote.title.trim() || t("app.newNote"),
             });
             setOriginFolderId(undefined);
           }}
@@ -657,6 +658,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       </div>
     </div>
   ) : (
-    <section className="editor-empty" aria-label="Opening note" />
+    <section className="editor-empty" aria-label={t("app.workspace.openingNote")} />
   );
 }

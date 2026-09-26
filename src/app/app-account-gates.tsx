@@ -1,4 +1,5 @@
 import type { Dispatch, ReactNode, SetStateAction } from "react";
+import { t } from "../i18n";
 import { AccountGate, AccountStatusFailure } from "../components/account/AccountGate";
 import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import { Spinner } from "../components/ui/Spinner";
@@ -40,8 +41,8 @@ export function renderAppAccountGate({
           onPointerDown={handleTitlebarPointerDown}
         />
         <div className="welcome-screen welcome-screen-loading">
-          <Spinner size="lg" aria-label="Starting Clovy" />
-          <p>Starting Clovy...</p>
+          <Spinner size="lg" aria-label={t("app.gate.startingAria")} />
+          <p>{t("app.gate.starting")}</p>
         </div>
       </main>
     );

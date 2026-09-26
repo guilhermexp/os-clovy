@@ -14,6 +14,7 @@ import {
   type AgentMcpServerDto,
   type AgentMcpTransport,
 } from "../../lib/agent-mcp";
+import { type TFunction, useT } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import { Dialog } from "../ui/Dialog";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
@@ -52,7 +53,7 @@ const EMPTY_DRAFT: Draft = {
   oauth: false,
 };
 
-function parseSecretMap(raw: string, label: string): Record<string, string> {
+function parseSecretMap(raw: string, label: string, t: TFunction): Record<string, string> {
   if (!raw.trim()) return {};
   const value: unknown = JSON.parse(raw);
   if (
@@ -61,12 +62,13 @@ function parseSecretMap(raw: string, label: string): Record<string, string> {
     typeof value !== "object" ||
     Object.values(value).some((entry) => typeof entry !== "string")
   ) {
-    throw new Error(`${label} must be a JSON object whose values are strings.`);
+    throw new Error(t("settingsPanels.mcp.secretMapInvalid", { label }));
   }
   return value as Record<string, string>;
 }
 
 export function AgentMcpServersSection() {
+  const t = useT();
   const [servers, setServers] = useState<AgentMcpServerDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -130,7 +132,7 @@ export function AgentMcpServersSection() {
       const tools = await testAgentMcpServer(server.id);
       setTestResults((current) => ({
         ...current,
-        [server.id]: `${tools.length} ${tools.length === 1 ? "tool" : "tools"} available`,
+        [server.id]: t("settingsPanels.mcp.toolsAvailable", { count: tools.length }),
       }));
     } catch (testError) {
       setTestResults((current) => ({
@@ -145,11 +147,17 @@ export function AgentMcpServersSection() {
   async function connectOauth(server: AgentMcpServerDto) {
     setBusyId(server.id);
     setError(undefined);
-    setTestResults((current) => ({ ...current, [server.id]: "Waiting for browser sign-in" }));
+    setTestResults((current) => ({
+      ...current,
+      [server.id]: t("settingsPanels.mcp.waitingForBrowser"),
+    }));
     try {
       const connected = await connectAgentMcpOauth(server.id);
       setServers((current) => current.map((item) => (item.id === connected.id ? connected : item)));
-      setTestResults((current) => ({ ...current, [server.id]: "OAuth connected" }));
+      setTestResults((current) => ({
+        ...current,
+        [server.id]: t("settingsPanels.mcp.oauthConnected"),
+      }));
     } catch (connectError) {
       setTestResults((current) => ({
         ...current,
@@ -192,8 +200,8 @@ export function AgentMcpServersSection() {
     setSaveError(undefined);
     try {
       const secretBundle = {
-        env: parseSecretMap(draft.env, "Environment"),
-        headers: parseSecretMap(draft.headers, "Headers"),
+        env: parseSecretMap(draft.env, t("settingsPanels.mcp.environment"), t),
+        headers: parseSecretMap(draft.headers, t("settingsPanels.mcp.headers"), t),
       };
       const metadata = { ...(editing?.metadata ?? {}) };
       if (draft.oauth) {
@@ -264,16 +272,14 @@ export function AgentMcpServersSection() {
     <section className="settings-group" aria-labelledby="mcp-servers-heading">
       <div className="settings-group-header">
         <h3 id="mcp-servers-heading" className="settings-group-heading">
-          Custom MCP servers
+          {t("settingsPanels.mcp.heading")}
         </h3>
         <button type="button" className="btn btn-secondary" onClick={openCreate}>
           <IconPlusMedium size={14} />
-          Add server
+          {t("settingsPanels.mcp.addServer")}
         </button>
       </div>
-      <p className="settings-group-description">
-        Add local or remote tools to Clovy. Credentials stay in your system keychain.
-      </p>
+      <p className="settings-group-description">{t("settingsPanels.mcp.description")}</p>
 
       {error ? (
         <InlineNotice
@@ -281,7 +287,7 @@ export function AgentMcpServersSection() {
           body={error}
           actions={
             <button type="button" className="btn btn-secondary" onClick={() => void load()}>
-              Try again
+              {t("common.tryAgain")}
             </button>
           }
         />
@@ -291,15 +297,13 @@ export function AgentMcpServersSection() {
         <div className="settings-rows">
           {loading ? (
             <div className="settings-row">
-              <p className="settings-row-description">Loading MCP servers...</p>
+              <p className="settings-row-description">{t("settingsPanels.mcp.loading")}</p>
             </div>
           ) : servers.length === 0 ? (
             <div className="settings-row">
               <div className="settings-row-info">
-                <h4 className="settings-row-title">No custom servers</h4>
-                <p className="settings-row-description">
-                  Connected plugins still work. Add a custom server when you need another tool.
-                </p>
+                <h4 className="settings-row-title">{t("settingsPanels.mcp.emptyTitle")}</h4>
+                <p className="settings-row-description">{t("settingsPanels.mcp.emptyBody")}</p>
               </div>
             </div>
           ) : (
@@ -309,7 +313,9 @@ export function AgentMcpServersSection() {
                   <h4 className="settings-row-title">{server.name}</h4>
                   <p className="settings-row-description">
                     {server.transport === "stdio" ? server.command : server.url}
-                    {server.metadata.needsReview === true ? " - Needs review" : ""}
+                    {server.metadata.needsReview === true
+                      ? t("settingsPanels.mcp.needsReviewSuffix")
+                      : ""}
                     {testResults[server.id] ? ` · ${testResults[server.id]}` : ""}
                   </p>
                 </div>
@@ -321,13 +327,15 @@ export function AgentMcpServersSection() {
                       disabled={busyId === server.id}
                       onClick={() => void connectOauth(server)}
                     >
-                      {server.metadata.oauthConnected === true ? "Reconnect" : "Connect"}
+                      {server.metadata.oauthConnected === true
+                        ? t("settingsPanels.mcp.reconnect")
+                        : t("settingsPanels.mcp.connect")}
                     </button>
                   ) : null}
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label={`Configure ${server.name}`}
+                    aria-label={t("settingsPanels.mcp.configureName", { name: server.name })}
                     disabled={busyId === server.id}
                     onClick={() => openEdit(server)}
                   >
@@ -336,7 +344,7 @@ export function AgentMcpServersSection() {
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label={`Test ${server.name}`}
+                    aria-label={t("settingsPanels.mcp.testName", { name: server.name })}
                     disabled={busyId === server.id}
                     onClick={() => void test(server)}
                   >
@@ -345,7 +353,7 @@ export function AgentMcpServersSection() {
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label={`Delete ${server.name}`}
+                    aria-label={t("settingsPanels.mcp.deleteName", { name: server.name })}
                     disabled={busyId === server.id}
                     onClick={() => setToDelete(server)}
                   >
@@ -354,7 +362,7 @@ export function AgentMcpServersSection() {
                   <Switch
                     checked={server.enabled}
                     disabled={busyId === server.id}
-                    aria-label={`${server.name} enabled`}
+                    aria-label={t("settingsPanels.mcp.enabledName", { name: server.name })}
                     onCheckedChange={(enabled) => void toggle(server, enabled)}
                   />
                 </div>
@@ -370,11 +378,13 @@ export function AgentMcpServersSection() {
           setAddOpen(false);
           setEditing(undefined);
         }}
-        title={editing ? `Configure ${editing.name}` : "Add MCP server"}
-        description={
+        title={
           editing
-            ? "Blank secret fields keep the credentials already saved in your system keychain."
-            : "Clovy discovers tools directly from this server. Secret values are saved only in your system keychain."
+            ? t("settingsPanels.mcp.configureName", { name: editing.name })
+            : t("settingsPanels.mcp.addTitle")
+        }
+        description={
+          editing ? t("settingsPanels.mcp.editDescription") : t("settingsPanels.mcp.addDescription")
         }
         footer={
           <>
@@ -386,7 +396,7 @@ export function AgentMcpServersSection() {
                 setEditing(undefined);
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -394,7 +404,7 @@ export function AgentMcpServersSection() {
               disabled={!draft.name.trim()}
               onClick={() => void save()}
             >
-              {editing ? "Save changes" : "Add server"}
+              {editing ? t("settingsPanels.mcp.saveChanges") : t("settingsPanels.mcp.addServer")}
             </button>
           </>
         }
@@ -402,13 +412,10 @@ export function AgentMcpServersSection() {
         <div className="dialog-body">
           {saveError ? <InlineNotice tone="warning" body={saveError} /> : null}
           {editing?.metadata.legacyAuth === "oauth" ? (
-            <InlineNotice
-              tone="warning"
-              body="This server used OAuth previously. Save any configuration changes, then use Connect to sign in again. Tokens stay in your system keychain."
-            />
+            <InlineNotice tone="warning" body={t("settingsPanels.mcp.legacyOauth")} />
           ) : null}
           <label className="dialog-field">
-            Name
+            {t("settingsPanels.mcp.name")}
             <input
               className="dialog-input"
               value={draft.name}
@@ -418,7 +425,7 @@ export function AgentMcpServersSection() {
             />
           </label>
           <label className="dialog-field">
-            Transport
+            {t("settingsPanels.mcp.transport")}
             <select
               className="dialog-input"
               value={draft.transport}
@@ -429,14 +436,14 @@ export function AgentMcpServersSection() {
                 }))
               }
             >
-              <option value="stdio">Local process (stdio)</option>
+              <option value="stdio">{t("settingsPanels.mcp.transportStdio")}</option>
               <option value="streamable_http">Streamable HTTP</option>
             </select>
           </label>
           {draft.transport === "stdio" ? (
             <>
               <label className="dialog-field">
-                Command
+                {t("settingsPanels.mcp.command")}
                 <input
                   className="dialog-input"
                   value={draft.command}
@@ -446,7 +453,7 @@ export function AgentMcpServersSection() {
                 />
               </label>
               <label className="dialog-field">
-                Arguments, one per line
+                {t("settingsPanels.mcp.arguments")}
                 <textarea
                   className="dialog-textarea"
                   value={draft.args}
@@ -476,12 +483,12 @@ export function AgentMcpServersSection() {
                     setDraft((current) => ({ ...current, oauth: event.target.checked }))
                   }
                 />
-                Authenticate with OAuth
+                {t("settingsPanels.mcp.authenticateOauth")}
               </label>
             </>
           )}
           <label className="dialog-field">
-            Environment variables (JSON)
+            {t("settingsPanels.mcp.envVars")}
             <textarea
               className="dialog-textarea"
               placeholder={'{"TOKEN":"..."}'}
@@ -490,7 +497,7 @@ export function AgentMcpServersSection() {
             />
           </label>
           <label className="dialog-field">
-            HTTP headers (JSON)
+            {t("settingsPanels.mcp.httpHeaders")}
             <textarea
               className="dialog-textarea"
               placeholder={'{"Authorization":"Bearer ..."}'}
@@ -501,10 +508,10 @@ export function AgentMcpServersSection() {
             />
           </label>
           <label className="dialog-field">
-            Allowed tools, one per line
+            {t("settingsPanels.mcp.allowedTools")}
             <textarea
               className="dialog-textarea"
-              placeholder="Leave blank to allow every discovered tool"
+              placeholder={t("settingsPanels.mcp.allowedToolsPlaceholder")}
               value={draft.includeTools}
               onChange={(event) =>
                 setDraft((current) => ({ ...current, includeTools: event.target.value }))
@@ -512,7 +519,7 @@ export function AgentMcpServersSection() {
             />
           </label>
           <label className="dialog-field">
-            Blocked tools, one per line
+            {t("settingsPanels.mcp.blockedTools")}
             <textarea
               className="dialog-textarea"
               value={draft.excludeTools}
@@ -522,7 +529,7 @@ export function AgentMcpServersSection() {
             />
           </label>
           <label className="dialog-field">
-            Tools that require approval, one per line
+            {t("settingsPanels.mcp.approvalTools")}
             <textarea
               className="dialog-textarea"
               value={draft.approvalTools}
@@ -535,10 +542,12 @@ export function AgentMcpServersSection() {
           <div className="settings-card">
             <div className="settings-rows">
               <div className="settings-row">
-                <span className="settings-row-title">Require approval for every tool</span>
+                <span className="settings-row-title">
+                  {t("settingsPanels.mcp.requireApprovalAll")}
+                </span>
                 <Switch
                   checked={draft.requiresApproval}
-                  aria-label="Require approval for every tool"
+                  aria-label={t("settingsPanels.mcp.requireApprovalAll")}
                   onCheckedChange={(value) =>
                     setDraft((current) => ({ ...current, requiresApproval: value }))
                   }
@@ -546,12 +555,13 @@ export function AgentMcpServersSection() {
               </div>
               <div className="settings-row">
                 <span className="settings-row-title">
-                  Allow in sandboxed sessions
-                  {draft.transport === "stdio" ? " on macOS" : ""}
+                  {draft.transport === "stdio"
+                    ? t("settingsPanels.mcp.allowSandboxedMacos")
+                    : t("settingsPanels.mcp.allowSandboxed")}
                 </span>
                 <Switch
                   checked={draft.allowSandboxed}
-                  aria-label="Allow in sandboxed sessions"
+                  aria-label={t("settingsPanels.mcp.allowSandboxed")}
                   onCheckedChange={(value) =>
                     setDraft((current) => ({ ...current, allowSandboxed: value }))
                   }
@@ -565,10 +575,14 @@ export function AgentMcpServersSection() {
         open={Boolean(toDelete)}
         onClose={() => setToDelete(undefined)}
         onConfirm={() => (toDelete ? remove(toDelete) : undefined)}
-        title={toDelete ? `Delete ${toDelete.name}?` : "Delete MCP server?"}
-        description="Clovy will remove this server and its keychain credentials. This cannot be undone."
-        confirmLabel="Delete server"
-        confirmBusyLabel="Deleting..."
+        title={
+          toDelete
+            ? t("settingsPanels.mcp.deleteTitleName", { name: toDelete.name })
+            : t("settingsPanels.mcp.deleteTitle")
+        }
+        description={t("settingsPanels.mcp.deleteDescription")}
+        confirmLabel={t("settingsPanels.mcp.deleteServer")}
+        confirmBusyLabel={t("settingsPanels.mcp.deleting")}
         destructive
       />
     </section>

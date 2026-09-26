@@ -1,6 +1,7 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconShuffle } from "central-icons/IconShuffle";
 import { useEffect, useRef, useState } from "react";
+import { formatDate, t as translate, useT } from "../../i18n";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { toast } from "../ui/Toaster";
 import { hasLiveSubscription } from "../../lib/account-gate";
@@ -47,9 +48,6 @@ import {
 import type { AccountStatus, SubscriptionPlan } from "../../lib/tauri";
 import { AccountAvatar, useAccountAvatar } from "./AccountAvatar";
 
-const FREE_PLAN_NAME = "Free plan";
-const PRO_PLAN_NAME = "Pro plan";
-const MAX_PLAN_NAME = "Max plan";
 const FREE_PLAN_CREDITS = 2000;
 
 type Props = {
@@ -60,14 +58,15 @@ type Props = {
 };
 
 export function AccountSettings({ account, loading, onAccountChanged, onRefresh }: Props) {
+  const t = useT();
   return (
     <div className="settings-page">
       <header className="settings-header">
-        <h1 className="settings-title">Account</h1>
+        <h1 className="settings-title">{t("account.title")}</h1>
         <p className="settings-description">
           {account.localDev
-            ? "Local mode is active. Clovy uses your local Clovy API without OpenSoftware sign-in or billing."
-            : "Sign in with OpenSoftware to use your shared identity and balance across the network."}
+            ? t("account.settings.localDescription")
+            : t("account.settings.description")}
         </p>
       </header>
 
@@ -83,6 +82,7 @@ export function AccountSettings({ account, loading, onAccountChanged, onRefresh 
 }
 
 export function AccountSettingsSection({ account, loading, onAccountChanged }: Props) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [accountStatus, setAccountStatus] = useState<string>();
@@ -114,19 +114,17 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
       }
       if (!mountedRef.current) return;
       toast.success(
-        accountRef.current.localDev ? "Avatar updated on this device" : "Avatar updated everywhere",
+        accountRef.current.localDev
+          ? t("account.settings.avatarUpdatedDevice")
+          : t("account.settings.avatarUpdatedEverywhere"),
       );
     } catch (error) {
       if (mountedRef.current && (accountRef.current.signedIn || accountRef.current.localDev)) {
         const code = errorCode(error);
         if (code === "account_permission_required") {
-          toast.warning(
-            "Avatar changed on this device, but it couldn't sync. Sign out and sign in again to update your account permissions.",
-          );
+          toast.warning(t("account.settings.avatarPermission"));
         } else if (code === "avatar_sync_unavailable") {
-          toast.warning(
-            "Avatar changed on this device, but syncing isn't available in this OS Accounts environment yet.",
-          );
+          toast.warning(t("account.settings.avatarSyncUnavailable"));
         } else {
           toast.error(messageFromError(error));
         }
@@ -138,11 +136,13 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
 
   async function handleSignIn() {
     setBusy(true);
-    setAccountStatus("Opening your browser to sign in…");
+    setAccountStatus(t("account.settings.openingBrowser"));
     try {
       const next = await osAccountsLogin();
       onAccountChanged(next);
-      setAccountStatus(next.signedIn ? `Signed in as ${displayName(next)}.` : undefined);
+      setAccountStatus(
+        next.signedIn ? t("account.settings.signedInAs", { name: displayName(next) }) : undefined,
+      );
     } catch (error) {
       setAccountStatus(messageFromError(error));
     } finally {
@@ -165,7 +165,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
     try {
       await osAccountsLogout({ clearBrowserSession: true });
       onAccountChanged({ signedIn: false, configured: account.configured });
-      setAccountStatus("Signed out.");
+      setAccountStatus(t("account.settings.signedOut"));
     } catch (error) {
       setAccountStatus(messageFromError(error));
     } finally {
@@ -176,7 +176,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
   return (
     <section className="settings-group" aria-labelledby="account-heading">
       <h2 id="account-heading" className="settings-group-heading">
-        Account
+        {t("account.title")}
       </h2>
       {accountStatus ? <p className="settings-status">{accountStatus}</p> : null}
       <div className="settings-card">
@@ -185,21 +185,21 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
             <div className="settings-row-info">
               <h3 className="settings-row-title">
                 {account.localDev
-                  ? "Local mode"
+                  ? t("account.settings.localMode")
                   : loading
-                    ? "Checking sign-in..."
+                    ? t("account.settings.checkingSignIn")
                     : account.signedIn
                       ? displayName(account)
-                      : "Not signed in"}
+                      : t("account.settings.notSignedIn")}
               </h3>
               <p className="settings-row-description">
                 {account.localDev
-                  ? "Requests use your local Clovy API. No OpenSoftware account is used."
+                  ? t("account.settings.localRequests")
                   : account.signedIn
                     ? (account.user?.email ?? `@${account.user?.handle ?? "account"}`)
                     : account.configured
-                      ? "Your login is managed by OpenSoftware."
-                      : "OpenSoftware sign-in is not configured for this build."}
+                      ? t("account.settings.managedBy")
+                      : t("account.signInNotConfigured")}
               </p>
             </div>
             <div className="settings-row-control">
@@ -210,7 +210,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
                   disabled={busy || avatarBusy}
                   onClick={() => void handleSignOut()}
                 >
-                  Sign out
+                  {t("account.settings.signOut")}
                 </button>
               ) : busy ? (
                 <button
@@ -218,7 +218,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
                   className="btn btn-secondary"
                   onClick={() => void handleCancel()}
                 >
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               ) : (
                 <button
@@ -227,7 +227,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
                   disabled={loading || !account.configured}
                   onClick={() => void handleSignIn()}
                 >
-                  Sign in with OpenSoftware
+                  {t("account.settings.signIn")}
                 </button>
               )}
             </div>
@@ -235,13 +235,13 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
           {canManageAvatar ? (
             <div className="settings-row">
               <div className="settings-row-info">
-                <h3 className="settings-row-title">Avatar</h3>
+                <h3 className="settings-row-title">{t("account.settings.avatar")}</h3>
                 <p className="settings-row-description">
                   {account.localDev
-                    ? "A generated pattern saved on this device."
+                    ? t("account.settings.avatarLocal")
                     : avatarLocalOnly
-                      ? "This pattern is saved only on this device."
-                      : "A generated pattern synced with your OpenSoftware account."}
+                      ? t("account.settings.avatarLocalOnly")
+                      : t("account.settings.avatarSynced")}
                 </p>
               </div>
               <div className="settings-row-control">
@@ -253,7 +253,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
                   onClick={() => void handleRefreshAvatar()}
                 >
                   <IconShuffle size={14} />
-                  Refresh
+                  {t("account.settings.refresh")}
                 </button>
               </div>
             </div>
@@ -268,6 +268,7 @@ export function BillingSettingsSection({
   account,
   onRefresh,
 }: Pick<Props, "account" | "onRefresh">) {
+  const t = useT();
   const [refreshing, setRefreshing] = useState(false);
   const [maxGrantWait, setMaxGrantWait] = useState<MaxGrantWait | undefined>(() =>
     maxGrantWaitForAccount(account.user?.id),
@@ -293,7 +294,7 @@ export function BillingSettingsSection({
   async function handleUpgrade(plan: SubscriptionPlan) {
     try {
       await osAccountsUpgrade(plan);
-      setBillingStatus("Opened checkout in your browser.");
+      setBillingStatus(t("account.billing.checkoutOpened"));
     } catch (error) {
       setBillingStatus(messageFromError(error));
     }
@@ -440,7 +441,7 @@ export function BillingSettingsSection({
   async function handleManageSubscription() {
     try {
       await osAccountsOpenPortal();
-      setBillingStatus("Opened your account portal in the browser.");
+      setBillingStatus(t("account.billing.portalOpened"));
     } catch (error) {
       setBillingStatus(messageFromError(error));
     }
@@ -511,11 +512,9 @@ export function BillingSettingsSection({
   return (
     <section className="settings-group" aria-labelledby="billing-heading">
       <h2 id="billing-heading" className="settings-group-heading">
-        Billing
+        {t("account.billing.title")}
       </h2>
-      <p className="settings-group-description">
-        Manage usage and subscription details in OpenSoftware.
-      </p>
+      <p className="settings-group-description">{t("account.billing.description")}</p>
       {billingStatus ? <p className="settings-status">{billingStatus}</p> : null}
       {import.meta.env.DEV && demoPlan === "all" ? (
         <div className="billing-demo-gallery">
@@ -577,6 +576,7 @@ function BillingCard({
   onChangePlan,
   onManage,
 }: BillingCardProps) {
+  const t = useT();
   const subscription = account.subscription;
   const liveSubscription = hasLiveSubscription(account);
   const usageRemainingPercent = usagePercentFromBalance(account.balance, subscription);
@@ -600,36 +600,42 @@ function BillingCard({
   // grant land. Keep the card on Pro until the grant poll confirms the credit balance
   // change, so "Max plan" and "Active" cannot leak early as a paired claim.
   const onMaxPlan = onPaidPlan && subscription?.plan === "max" && !maxGrantPending;
-  const planName = onPaidPlan ? (onMaxPlan ? MAX_PLAN_NAME : PRO_PLAN_NAME) : FREE_PLAN_NAME;
+  const planName = onPaidPlan
+    ? onMaxPlan
+      ? t("account.billing.maxPlan")
+      : t("account.billing.proPlan")
+    : t("account.billing.freePlan");
   const planDetail = !onPaidPlan
-    ? "No credit card required."
+    ? t("account.billing.noCard")
     : billingRecovery
-      ? "Update billing in your account portal."
+      ? t("account.billing.updateInPortal")
       : liveSubscription && subscription?.status === "trialing"
-        ? (describeEnd("Billing starts", subscription.trialEnd) ?? "Free trial")
-        : (describeEnd("Renews", subscription?.currentPeriodEnd) ?? "Active");
+        ? (describeEnd("account.billing.billingStarts", subscription.trialEnd) ??
+          t("account.billing.freeTrial"))
+        : (describeEnd("account.billing.renews", subscription?.currentPeriodEnd) ??
+          t("account.billing.active"));
   const ctas: { label: string; onClick: () => void; title?: string }[] = onPaidPlan
     ? onMaxPlan || (maxGrantPending && !maxGrantRetry)
-      ? [{ label: "Manage billing", onClick: onManage }]
+      ? [{ label: t("account.billing.manage"), onClick: onManage }]
       : // Pro subscribers keep billing management and can upgrade their
         // existing subscription in place; this is their path beyond Pro.
         // A slow grant wait keeps the retry path here too - the status line
         // points at trying again, so the affordance must exist.
         [
-          { label: "Manage billing", onClick: onManage },
+          { label: t("account.billing.manage"), onClick: onManage },
           {
-            label: "Upgrade to Max",
+            label: t("account.billing.upgradeMax"),
             onClick: () => onChangePlan("max"),
-            title: "For those who want to go beyond Pro",
+            title: t("account.billing.beyondPro"),
           },
         ]
     : canUpgrade
       ? [
-          { label: "Upgrade to Pro", onClick: () => onUpgrade("pro") },
+          { label: t("account.billing.upgradePro"), onClick: () => onUpgrade("pro") },
           {
-            label: "Upgrade to Max",
+            label: t("account.billing.upgradeMax"),
             onClick: () => onUpgrade("max"),
-            title: "For those who want to go beyond Pro",
+            title: t("account.billing.beyondPro"),
           },
         ]
       : [];
@@ -660,14 +666,14 @@ function BillingCard({
 
       <div className="billing-usage">
         <div className="billing-usage-head">
-          <span className="billing-usage-label">Usage remaining</span>
+          <span className="billing-usage-label">{t("account.billing.usageRemaining")}</span>
           <span className="billing-usage-right">
             <span className="billing-usage-value">{formatPercent(usageRemainingPercent)}</span>
             <button
               type="button"
               className="icon-button"
-              aria-label="Refresh usage"
-              title="Refresh usage"
+              aria-label={t("account.billing.refreshUsage")}
+              title={t("account.billing.refreshUsage")}
               disabled={refreshing || !account.signedIn}
               onClick={onRefresh}
             >
@@ -682,7 +688,7 @@ function BillingCard({
         <div
           className={`usage-remaining-progress${lowUsage ? " is-low" : ""}`}
           role="progressbar"
-          aria-label="Usage remaining"
+          aria-label={t("account.billing.usageRemaining")}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={usageRemainingPercent}
@@ -701,7 +707,8 @@ function BillingCard({
 
 function displayName(account: AccountStatus) {
   return (
-    account.user?.displayName ?? (account.user?.handle ? `@${account.user.handle}` : "Signed in")
+    account.user?.displayName ??
+    (account.user?.handle ? `@${account.user.handle}` : translate("account.settings.signedIn"))
   );
 }
 
@@ -739,7 +746,10 @@ function usagePercentFromBalance(
 
 /** "Ends June 24" from an accounts-API timestamp, or undefined when the
  * date is missing or unparseable so callers can fall back to plain copy. */
-function describeEnd(verb: string, timestamp?: string) {
+function describeEnd(
+  key: "account.billing.billingStarts" | "account.billing.renews",
+  timestamp?: string,
+) {
   if (!timestamp) return undefined;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return undefined;
@@ -747,12 +757,12 @@ function describeEnd(verb: string, timestamp?: string) {
   // isn't in the current calendar year, so "Renews March 15" can't mean
   // either 3 or 15 months away.
   const showYear = date.getFullYear() !== new Date().getFullYear();
-  const formatted = new Intl.DateTimeFormat(undefined, {
+  const formatted = formatDate(date, {
     month: "long",
     day: "numeric",
     ...(showYear ? { year: "numeric" } : {}),
-  }).format(date);
-  return `${verb} ${formatted}`;
+  });
+  return translate(key, { date: formatted });
 }
 
 function messageFromError(error: unknown) {

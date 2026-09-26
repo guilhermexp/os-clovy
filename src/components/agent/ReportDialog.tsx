@@ -3,6 +3,7 @@ import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconPaperclip1 } from "central-icons/IconPaperclip1";
 import { useId, useMemo, useState } from "react";
 
+import { useLocale, useT } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import { recordPositiveFeedbackSent } from "../../lib/referral-nudge";
 import { submitIssueReport } from "../../lib/tauri";
@@ -31,6 +32,8 @@ export function ReportDialog({
   onCategoryChange,
   onClose,
 }: ReportDialogProps) {
+  const t = useT();
+  const locale = useLocale();
   const [description, setDescription] = useState("");
   const [attachmentPaths, setAttachmentPaths] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -38,6 +41,9 @@ export function ReportDialog({
   const [includeFailureDetails, setIncludeFailureDetails] = useState(true);
   const [error, setError] = useState<string>();
   const descriptionId = useId();
+  // Category labels resolve in the interface language, so rebuild on a
+  // locale change.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: locale is the rebuild trigger
   const categoryOptions = useMemo(
     () =>
       REPORT_CATEGORIES.map((item) => ({
@@ -50,7 +56,7 @@ export function ReportDialog({
           </>
         ),
       })),
-    [],
+    [locale],
   );
   const trimmedDescription = description.trim();
   const canSubmit = Boolean(trimmedDescription || attachmentPaths.length);
@@ -58,7 +64,7 @@ export function ReportDialog({
     category === "bug" && Boolean(storedSessionId) && attachmentPaths.length < 20;
 
   async function pickAttachments() {
-    const selected = await openFileDialog({ multiple: true, title: "Add report files" });
+    const selected = await openFileDialog({ multiple: true, title: t("agent.report.pickerTitle") });
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
     setAttachmentPaths((current) =>
@@ -84,7 +90,7 @@ export function ReportDialog({
       if (category === "feedback") recordPositiveFeedbackSent();
       setSent(true);
     } catch (cause) {
-      setError(`The issue report could not be sent. ${messageFromError(cause)}`);
+      setError(t("agent.report.sendFailed", { error: messageFromError(cause) }));
     } finally {
       setSubmitting(false);
     }
@@ -94,13 +100,13 @@ export function ReportDialog({
     <Dialog
       open
       onClose={onClose}
-      title="Issue report"
+      title={t("agent.report.title")}
       className="report-dialog"
       initialFocusSelector=".dialog-textarea"
       footer={
         sent ? (
           <button type="button" className="primary-action primary-solid" onClick={onClose}>
-            Done
+            {t("common.done")}
           </button>
         ) : (
           <>
@@ -111,7 +117,7 @@ export function ReportDialog({
               onClick={() => void pickAttachments()}
             >
               <IconPaperclip1 size={16} aria-hidden />
-              Add files
+              {t("agent.report.addFiles")}
             </button>
             <button
               type="button"
@@ -121,7 +127,7 @@ export function ReportDialog({
               onClick={() => void send()}
             >
               {submitting ? <DotSpinner className="report-dialog-submit-spinner" /> : null}
-              {submitting ? "Sending" : "Send report"}
+              {submitting ? t("agent.report.sending") : t("agent.report.send")}
             </button>
           </>
         )
@@ -129,7 +135,7 @@ export function ReportDialog({
     >
       {sent ? (
         <p className="report-dialog-sent" role="status">
-          Your report was sent to the Clovy team. Thank you for helping improve Clovy.
+          {t("agent.report.sent")}
         </p>
       ) : (
         <div className="dialog-body report-dialog-drop">
@@ -138,9 +144,9 @@ export function ReportDialog({
             onValueChange={onCategoryChange}
             options={categoryOptions}
             className="report-dialog-category"
-            aria-label="Report category"
+            aria-label={t("agent.report.category")}
           />
-          <DialogField label="Description" htmlFor={descriptionId}>
+          <DialogField label={t("agent.report.description")} htmlFor={descriptionId}>
             <textarea
               id={descriptionId}
               className="dialog-textarea"
@@ -162,15 +168,11 @@ export function ReportDialog({
                 disabled={!canAttachFailureDetails || submitting}
                 onChange={(event) => setIncludeFailureDetails(event.currentTarget.checked)}
               />
-              <span>
-                Include recent failure details (clovy-agent-diagnostics.txt). This contains a stable
-                error code and technical stored session and run IDs, not conversation content or
-                tool output.
-              </span>
+              <span>{t("agent.report.diagnostics")}</span>
             </label>
           ) : null}
           {attachmentPaths.length ? (
-            <ul className="report-dialog-file-list" aria-label="Attached files">
+            <ul className="report-dialog-file-list" aria-label={t("agent.report.attachedFiles")}>
               {attachmentPaths.map((path) => {
                 const name = path.split(/[\\/]/).pop() || path;
                 return (
@@ -179,7 +181,7 @@ export function ReportDialog({
                     <span className="report-dialog-file-name">{name}</span>
                     <button
                       type="button"
-                      aria-label={`Remove ${name}`}
+                      aria-label={t("agent.report.removeFile", { name })}
                       disabled={submitting}
                       onClick={() =>
                         setAttachmentPaths((current) => current.filter((item) => item !== path))

@@ -48,6 +48,7 @@ import {
   type RoutineBrowserAccess,
 } from "../../lib/tauri";
 import { messageFromError } from "../../lib/errors";
+import { useT } from "../../i18n";
 import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { HoverTip } from "../ui/HoverTip";
 import { Switch } from "../ui/Switch";
@@ -112,6 +113,7 @@ export function RoutineDetail({
   onRetryLoad,
   retrying,
 }: RoutineDetailProps) {
+  const t = useT();
   const { browserUseEnabled } = useExperimentalFlags();
   const { policy } = useConnectorPolicy();
   const [name, setName] = useState(routine.name);
@@ -267,7 +269,7 @@ export function RoutineDetail({
       browserAccessChanged ||
       (modeChanged && storedTrust != null);
     if (connectorPolicyNeeded && !policy) {
-      toast.error("Connector policy is still loading. Try again.");
+      toast.error(t("routines.policyLoading"));
       return;
     }
     const updates: RoutineUpdates = {};
@@ -288,14 +290,14 @@ export function RoutineDetail({
         (entry) => entry.provider === "google" && entry.status === "connected",
       );
       if (!triggerAccount) {
-        toast.error("Connect a Google account before using an event trigger.");
+        toast.error(t("routines.detail.connectGoogleFirst"));
         return;
       }
       // The account must hold the scope this trigger's daemon polls, or the
       // routine saves but never fires (the Gmail/calendar call fails).
       const scopeIssue = policy
         ? triggerScopeWarning(policy, trigger, triggerAccount.scopes)
-        : "Connector policy is still loading. Try again.";
+        : t("routines.policyLoading");
       if (scopeIssue) {
         toast.error(scopeIssue);
         return;
@@ -470,7 +472,7 @@ export function RoutineDetail({
               await pauseRoutine(routine.job_id);
             } catch (restoreError) {
               toast.error(
-                `Clovy could not restore the previous inactive state: ${messageFromError(restoreError)}`,
+                t("routines.detail.restoreFailed", { error: messageFromError(restoreError) }),
               );
             }
             throw deleteError;
@@ -515,16 +517,19 @@ export function RoutineDetail({
   return (
     <section className="routine-detail" aria-label={routine.name}>
       <BreadcrumbBar
-        backLabel="Back to routines"
+        backLabel={t("routines.backToRoutines")}
         onBack={onBack}
-        items={[{ label: "Routines", onClick: onBack }, { label: name.trim() || routine.name }]}
+        items={[
+          { label: t("routines.title"), onClick: onBack },
+          { label: name.trim() || routine.name },
+        ]}
         actions={
           <div className="routine-detail-actions">
             <div className="agent-session-menu-wrap" ref={menuWrapRef}>
               <button
                 type="button"
                 className="btn btn-ghost routine-detail-menu-trigger"
-                aria-label="Routine actions"
+                aria-label={t("routines.detail.actions")}
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
                 onClick={() => setMenuOpen((open) => !open)}
@@ -544,7 +549,7 @@ export function RoutineDetail({
                     }}
                   >
                     <IconTrashCan size={14} />
-                    Delete routine
+                    {t("routines.deleteRoutine")}
                   </button>
                 </div>
               ) : null}
@@ -559,7 +564,7 @@ export function RoutineDetail({
               onClick={() => void runNow()}
             >
               <IconPlay size={13} aria-hidden />
-              {queued ? "Queued" : "Run now"}
+              {queued ? t("routines.detail.queued") : t("routines.runNow")}
             </button>
             <button
               type="button"
@@ -567,7 +572,7 @@ export function RoutineDetail({
               disabled={!dirty || !prompt.trim() || saving || busy}
               onClick={() => void save()}
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? t("routines.detail.saving") : t("common.save")}
             </button>
           </div>
         }
@@ -578,8 +583,8 @@ export function RoutineDetail({
           <input
             className="routine-detail-name"
             value={name}
-            placeholder="Routine name"
-            aria-label="Routine name"
+            placeholder={t("routines.routineName")}
+            aria-label={t("routines.routineName")}
             onChange={(event) => setName(event.currentTarget.value)}
           />
           {!completed ? (
@@ -590,7 +595,9 @@ export function RoutineDetail({
               <Switch
                 checked={routine.state === "scheduled"}
                 disabled={busy}
-                aria-label={`${name.trim() || routine.name} active`}
+                aria-label={t("routines.detail.activeToggle", {
+                  name: name.trim() || routine.name,
+                })}
                 onCheckedChange={onToggleActive}
               />
             </div>
@@ -599,25 +606,27 @@ export function RoutineDetail({
 
         <div className="routine-detail-meta">
           {routine.state === "scheduled" ? (
-            <span className="routine-meta-pill routine-meta-pill-warm">Active</span>
+            <span className="routine-meta-pill routine-meta-pill-warm">
+              {t("routines.detail.active")}
+            </span>
           ) : null}
           {routineUnrestricted(routine) ? (
             <HoverTip
-              tip="This routine runs with full access: when it fires, Clovy can run commands and change any file your account can. Routines without this badge run sandboxed and cannot touch your files."
+              tip={t("routines.unrestrictedTip")}
               className="routine-meta-pill routine-meta-pill-warm"
               tabIndex={0}
             >
               <IconShieldCrossed size={11} aria-hidden />
-              Unrestricted
+              {t("routines.mode.unrestricted")}
             </HoverTip>
           ) : null}
           {paused ? (
             <span className="routine-meta-pill">
               <IconPause size={12} aria-hidden />
-              Paused
+              {t("routines.paused")}
             </span>
           ) : null}
-          {completed ? <span className="routine-meta-pill">Completed</span> : null}
+          {completed ? <span className="routine-meta-pill">{t("routines.completed")}</span> : null}
           <span className="routine-meta-pill">
             <IconCalendarRepeat size={12} aria-hidden />
             {storedTrigger
@@ -625,7 +634,9 @@ export function RoutineDetail({
               : compactScheduleLabel(routine.schedule)}
           </span>
           {completed && routine.last_run_at ? (
-            <span className="routine-meta-pill">Last ran {formatRunTime(routine.last_run_at)}</span>
+            <span className="routine-meta-pill">
+              {t("routines.lastRan", { time: formatRunTime(routine.last_run_at) })}
+            </span>
           ) : null}
         </div>
 
@@ -641,14 +652,14 @@ export function RoutineDetail({
                 aria-busy={retrying || undefined}
               >
                 <IconArrowRotateClockwise size={14} className="balance-refresh-icon" aria-hidden />
-                Try again
+                {t("common.tryAgain")}
               </button>
             ) : null}
           </div>
         ) : null}
         {failure ? (
           <div className="routine-detail-failure" role="status">
-            <strong>Last run failed.</strong> {failure}
+            <strong>{t("routines.detail.lastRunFailed")}</strong> {failure}
           </div>
         ) : null}
 
@@ -661,7 +672,7 @@ export function RoutineDetail({
             } as CSSProperties
           }
           role="tablist"
-          aria-label="Routine sections"
+          aria-label={t("routines.detail.sections")}
         >
           <button
             ref={detailsTabRef}
@@ -672,7 +683,7 @@ export function RoutineDetail({
             aria-controls="routine-details-panel"
             onClick={() => setActiveTab("details")}
           >
-            Details
+            {t("routines.detail.details")}
           </button>
           <button
             ref={historyTabRef}
@@ -683,7 +694,7 @@ export function RoutineDetail({
             aria-controls="routine-history-panel"
             onClick={() => setActiveTab("history")}
           >
-            Run history
+            {t("routines.runHistory")}
           </button>
         </div>
 
@@ -696,7 +707,7 @@ export function RoutineDetail({
           >
             <section className="settings-group" aria-labelledby="routine-schedule">
               <h2 id="routine-schedule" className="settings-group-heading">
-                When
+                {t("routines.section.when")}
               </h2>
               <div className="settings-card">
                 <TriggerPicker
@@ -724,37 +735,37 @@ export function RoutineDetail({
 
             <section className="settings-group" aria-labelledby="routine-instructions">
               <h2 id="routine-instructions" className="settings-group-heading">
-                Instructions
+                {t("routines.section.instructions")}
               </h2>
               <GrowingTextarea
                 className="routine-detail-instructions"
                 value={prompt}
-                aria-label="Instructions"
+                aria-label={t("routines.section.instructions")}
                 onChange={(event) => setPrompt(event.currentTarget.value)}
               />
             </section>
 
             <section className="settings-group" aria-labelledby="routine-access">
               <h2 id="routine-access" className="settings-group-heading">
-                Access
+                {t("routines.section.access")}
               </h2>
               <div className="settings-card">
                 <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
                 {browserUseEnabled ? (
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <div className="settings-row-title">Browser use</div>
+                      <div className="settings-row-title">{t("routines.detail.browserUse")}</div>
                       <div className="settings-row-description">
                         {managedTransportEnabled
-                          ? "Allow this routine to browse public pages anonymously when Browser use is enabled. Consequential actions stay blocked."
-                          : "Browser use for routines is temporarily unavailable."}
+                          ? t("routines.detail.browserUseDescription")
+                          : t("routines.detail.browserUseUnavailable")}
                       </div>
                     </div>
                     <div className="settings-row-control">
                       <Switch
                         checked={browserAccess}
                         disabled={storedBrowserAccess === null || !managedTransportEnabled}
-                        aria-label="Allow browser use for this routine"
+                        aria-label={t("routines.detail.browserUseToggle")}
                         onCheckedChange={setBrowserAccess}
                       />
                     </div>
@@ -762,9 +773,7 @@ export function RoutineDetail({
                 ) : null}
                 {routine.script ? (
                   <p className="routine-detail-script-note">
-                    This routine has an attached script ({routine.script}) that runs outside the
-                    sandbox, so it always has full access. Switching it to Sandboxed removes the
-                    script when you save.
+                    {t("routines.detail.scriptNote", { script: routine.script })}
                   </p>
                 ) : null}
               </div>
@@ -772,7 +781,7 @@ export function RoutineDetail({
 
             <section className="settings-group" aria-labelledby="routine-trust">
               <h2 id="routine-trust" className="settings-group-heading">
-                Actions
+                {t("routines.section.actions")}
               </h2>
               <div className="settings-card">
                 <TrustModePicker
@@ -792,16 +801,14 @@ export function RoutineDetail({
             className="routine-detail-body"
             role="tabpanel"
             aria-labelledby="routine-history-tab"
-            aria-label="Run history"
+            aria-label={t("routines.runHistory")}
           >
             {runs.length > 0 ? (
               <div className="settings-card routines-runs-card">
                 <RoutineRunList runs={runs} label={() => routine.name} onOpen={onOpenRun} />
               </div>
             ) : (
-              <p className="routines-runs-empty">
-                No runs yet. When this routine fires, its session appears here.
-              </p>
+              <p className="routines-runs-empty">{t("routines.detail.noRuns")}</p>
             )}
           </section>
         )}

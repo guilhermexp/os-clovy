@@ -22,6 +22,7 @@ import {
   setAgentSoundsEnabled,
   type AgentSoundsChangedDetail,
 } from "../../lib/agent-sound-settings";
+import { t as translate, useT } from "../../i18n";
 import { Dialog } from "../ui/Dialog";
 import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
@@ -41,6 +42,7 @@ export function AgentSettingsSection({
   folders?: FolderDto[];
   onFoldersImported?: (folders: FolderDto[]) => void;
 } = {}) {
+  const t = useT();
   const [hudEnabled, setHudEnabledState] = useState(getAgentHudEnabled);
   const [hudPlacement, setHudPlacementState] = useState(getAgentHudPlacement);
   const [soundsEnabled, setSoundsEnabledState] = useState(getAgentSoundsEnabled);
@@ -125,55 +127,55 @@ export function AgentSettingsSection({
       <section className="settings-group" aria-labelledby="agent-heading">
         <SettingsPageHeader
           id="agent-heading"
-          title="Agent"
-          blurb="Configure Clovy's personality and local agent experience."
+          title={t("settingsPanels.agent.title")}
+          blurb={t("settingsPanels.agent.blurb")}
         />
         <ClovyPersonalitySettingsSection />
       </section>
 
       <section className="settings-group" aria-labelledby="agent-experience-heading">
         <h2 id="agent-experience-heading" className="settings-group-heading">
-          Experience
+          {t("settingsPanels.agent.experience")}
         </h2>
         <p className="settings-group-description">
-          Control how Clovy keeps you informed while she works.
+          {t("settingsPanels.agent.experienceDescription")}
         </p>
         <div className="settings-card">
           <div className="settings-rows">
             <div className="settings-row">
               <div className="settings-row-info">
-                <h3 className="settings-row-title">Sessions HUD</h3>
+                <h3 className="settings-row-title">{t("settingsPanels.agent.hudTitle")}</h3>
                 <p className="settings-row-description">
-                  Show a small pill with live session status while you are in other apps.
+                  {t("settingsPanels.agent.hudDescription")}
                 </p>
               </div>
               <div className="settings-row-control">
                 <Switch
                   checked={hudEnabled}
                   onCheckedChange={changeHud}
-                  aria-label="Show sessions HUD"
+                  aria-label={t("settingsPanels.agent.hudShow")}
                 />
               </div>
             </div>
             {hudEnabled ? (
               <div className="settings-row">
                 <div className="settings-row-info">
-                  <h3 className="settings-row-title">HUD position</h3>
+                  <h3 className="settings-row-title">{t("settingsPanels.agent.hudPosition")}</h3>
                   <p className="settings-row-description">
-                    The screen corner where the pill parks.
+                    {t("settingsPanels.agent.hudPositionDescription")}
                   </p>
                 </div>
                 <div className="settings-row-control">
                   <Select
                     value={hudPlacement}
                     options={[
-                      { value: "top-left", label: "Top left" },
-                      { value: "top-right", label: "Top right" },
-                      { value: "bottom-left", label: "Bottom left" },
-                      { value: "bottom-right", label: "Bottom right" },
+                      { value: "top-left", label: t("settingsPanels.agent.topLeft") },
+                      { value: "top-right", label: t("settingsPanels.agent.topRight") },
+                      { value: "bottom-left", label: t("settingsPanels.agent.bottomLeft") },
+                      { value: "bottom-right", label: t("settingsPanels.agent.bottomRight") },
                     ]}
-                    placeholder="Top right"
-                    ariaLabel="Sessions HUD position"
+                    placeholder={t("settingsPanels.agent.topRight")}
+                    ariaLabel={t("settingsPanels.agent.hudPositionAria")}
                     onChange={(value) => changeHudPlacement(value as AgentHudPlacement)}
                   />
                 </div>
@@ -181,9 +183,9 @@ export function AgentSettingsSection({
             ) : null}
             <div className="settings-row">
               <div className="settings-row-info">
-                <h3 className="settings-row-title">Agent sounds</h3>
+                <h3 className="settings-row-title">{t("settingsPanels.agent.sounds")}</h3>
                 <p className="settings-row-description">
-                  Play a sound when a session finishes or needs you.
+                  {t("settingsPanels.agent.soundsDescription")}
                 </p>
               </div>
               <div className="settings-row-control">
@@ -193,7 +195,7 @@ export function AgentSettingsSection({
                     setSoundsEnabledState(enabled);
                     setAgentSoundsEnabled(enabled);
                   }}
-                  aria-label="Play agent sounds"
+                  aria-label={t("settingsPanels.agent.soundsAria")}
                 />
               </div>
             </div>
@@ -203,11 +205,9 @@ export function AgentSettingsSection({
 
       <section className="settings-group" aria-labelledby="agent-skills-heading">
         <h2 id="agent-skills-heading" className="settings-group-heading">
-          Skills
+          {t("settingsPanels.agent.skills")}
         </h2>
-        <p className="settings-group-description">
-          Choose which skills Clovy can load during a session.
-        </p>
+        <p className="settings-group-description">{t("settingsPanels.agent.skillsDescription")}</p>
         <div className="settings-card">
           <div className="settings-rows">
             {skills?.map((skill) => (
@@ -223,19 +223,25 @@ export function AgentSettingsSection({
                       className="btn btn-ghost"
                       onClick={() => void editSkill(skill)}
                     >
-                      Edit
+                      {t("common.edit")}
                     </button>
                   ) : null}
                   <Switch
                     checked={skill.enabled}
                     disabled={savingSkillId === skill.id}
                     onCheckedChange={(enabled) => void changeSkill(skill, enabled)}
-                    aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
+                    aria-label={
+                      skill.enabled
+                        ? t("settingsPanels.agent.disableSkill", { name: skill.name })
+                        : t("settingsPanels.agent.enableSkill", { name: skill.name })
+                    }
                   />
                 </div>
               </div>
             ))}
-            {skills?.length === 0 ? <p className="settings-empty">No skills found.</p> : null}
+            {skills?.length === 0 ? (
+              <p className="settings-empty">{t("settingsPanels.agent.noSkills")}</p>
+            ) : null}
           </div>
         </div>
         {error ? (
@@ -247,8 +253,12 @@ export function AgentSettingsSection({
       <Dialog
         open={Boolean(editingSkill)}
         onClose={() => setEditingSkill(undefined)}
-        title={editingSkill ? `Edit ${editingSkill.name}` : "Edit skill"}
-        description="Update the managed instructions Clovy loads for this skill."
+        title={
+          editingSkill
+            ? t("settingsPanels.agent.editSkillName", { name: editingSkill.name })
+            : t("settingsPanels.agent.editSkill")
+        }
+        description={t("settingsPanels.agent.editSkillDescription")}
         footer={
           <>
             <button
@@ -256,7 +266,7 @@ export function AgentSettingsSection({
               className="primary-action"
               onClick={() => setEditingSkill(undefined)}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -264,14 +274,14 @@ export function AgentSettingsSection({
               disabled={skillSaving}
               onClick={() => void saveSkill()}
             >
-              {skillSaving ? "Saving..." : "Save skill"}
+              {skillSaving ? t("common.saving") : t("settingsPanels.agent.saveSkill")}
             </button>
           </>
         }
       >
         <textarea
           className="settings-skill-editor"
-          aria-label="Skill instructions"
+          aria-label={t("settingsPanels.agent.skillInstructions")}
           value={skillDraft}
           onChange={(event) => setSkillDraft(event.currentTarget.value)}
           rows={18}
@@ -287,5 +297,5 @@ function messageFromError(error: unknown) {
     ? error.message
     : typeof error === "string"
       ? error
-      : "Unable to update agent settings.";
+      : translate("settingsPanels.agent.updateError");
 }

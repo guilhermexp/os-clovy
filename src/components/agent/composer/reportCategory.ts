@@ -5,8 +5,11 @@
  * for restored older drafts.
  */
 
+import { t } from "../../../i18n";
+
 export type ReportCategory = "bug" | "feedback" | "feature";
 
+// Sent to the server as the report body (team-facing), so it stays English.
 export const ISSUE_REPORT_ATTACHMENTS_ONLY_DESCRIPTION =
   "No description was typed; see the attachments.";
 
@@ -25,23 +28,41 @@ export type ReportCategoryDef = {
 export const REPORT_CATEGORIES: ReportCategoryDef[] = [
   {
     key: "bug",
-    label: "Bug report",
-    hint: "Something isn't working right",
-    placeholder: "What happened, and what did you expect instead?",
+    get label() {
+      return t("chat.report.bug.label");
+    },
+    get hint() {
+      return t("chat.report.bug.hint");
+    },
+    get placeholder() {
+      return t("chat.report.bug.placeholder");
+    },
     keywords: ["bug", "issue", "report", "broken", "problem", "error", "crash"],
   },
   {
     key: "feedback",
-    label: "Feedback",
-    hint: "Share a thought with the team",
-    placeholder: "What should the Clovy team hear from you?",
+    get label() {
+      return t("chat.report.feedback.label");
+    },
+    get hint() {
+      return t("chat.report.feedback.hint");
+    },
+    get placeholder() {
+      return t("chat.report.feedback.placeholder");
+    },
     keywords: ["feedback", "thoughts", "comment", "suggestion"],
   },
   {
     key: "feature",
-    label: "Feature request",
-    hint: "Ask for something new",
-    placeholder: "What would you like Clovy to do?",
+    get label() {
+      return t("chat.report.feature.label");
+    },
+    get hint() {
+      return t("chat.report.feature.hint");
+    },
+    get placeholder() {
+      return t("chat.report.feature.placeholder");
+    },
     keywords: ["feature", "request", "idea", "wish", "want"],
   },
 ];

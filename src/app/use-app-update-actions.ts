@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { t } from "../i18n";
 import { checkClovyUpdate, type ClovyUpdate } from "../lib/updater";
 import {
   checkForClovyUpdate,
@@ -35,7 +36,7 @@ export function useAppUpdateActions(dependencies: UseAppUpdateActionsDependencie
       setPreparingUpdate(true);
       setReadyUpdate(null);
       setUpdateProgress(null);
-      setUpdateStatus(mode === "manual" ? "Downloading update..." : null);
+      setUpdateStatus(mode === "manual" ? t("app.update.downloading") : null);
 
       void prepareClovyUpdate({
         update: payload.update,
@@ -43,7 +44,9 @@ export function useAppUpdateActions(dependencies: UseAppUpdateActionsDependencie
           setUpdateProgress(progress);
           if (mode === "manual" && !updateProgressHiddenRef.current) {
             setUpdateStatus(
-              progress.state === "installing" ? "Preparing update..." : "Downloading update...",
+              progress.state === "installing"
+                ? t("app.update.preparing")
+                : t("app.update.downloading"),
             );
           }
         },
@@ -61,7 +64,7 @@ export function useAppUpdateActions(dependencies: UseAppUpdateActionsDependencie
           updateProgressHiddenRef.current = false;
           setPreparingUpdate(false);
           setUpdateProgress(null);
-          setUpdateStatus(`Update failed: ${message}`, true);
+          setUpdateStatus(t("app.update.failed", { message }), true);
         },
       });
     },
@@ -77,7 +80,7 @@ export function useAppUpdateActions(dependencies: UseAppUpdateActionsDependencie
       if (preparingUpdateRef.current) {
         if (mode === "manual") {
           updateProgressHiddenRef.current = false;
-          setUpdateStatus("Downloading update...");
+          setUpdateStatus(t("app.update.downloading"));
         }
         return;
       }
@@ -85,7 +88,7 @@ export function useAppUpdateActions(dependencies: UseAppUpdateActionsDependencie
       const showsStatus = updateCheckShowsStatus(mode);
       if (showsStatus) {
         setCheckingUpdate(true);
-        setUpdateStatus("Checking for updates...");
+        setUpdateStatus(t("app.update.checking"));
       } else if (mode === "launch") setUpdateStatus(null);
       void checkForClovyUpdate(
         {
@@ -96,7 +99,7 @@ export function useAppUpdateActions(dependencies: UseAppUpdateActionsDependencie
           reportNoUpdate: () => setUpdateStatus(UP_TO_DATE_STATUS),
           reportFailure: (message) => {
             if (mode !== "periodic") {
-              setUpdateStatus(`Update check failed: ${message}`, true);
+              setUpdateStatus(t("app.update.checkFailed", { message }), true);
             }
           },
         },
