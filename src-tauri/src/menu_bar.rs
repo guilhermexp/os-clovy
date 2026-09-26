@@ -1,3 +1,4 @@
+use crate::interface_locale::{self, MenuStrings};
 use serde::Deserialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -180,6 +181,23 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Rebuilds the tray menu and tooltip in the current interface language from
+/// the last-seen agent state. Called after the locale changes.
+pub fn relocalize(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let state = LAST_AGENT_STATE
+        .lock()
+        .ok()
+        .and_then(|last| last.clone())
+        .unwrap_or_default();
+    if let Ok(menu) = build_menu(app, &state) {
+        let _ = tray.set_menu(Some(menu));
+    }
+    update_tray(app, &tray, &state);
+}
+
 /// Re-renders the tray from the current cached agent state and the recording
 /// flags. Used by the dictation and recording listeners, which only change a
 /// flag and never the menu or agent state.
@@ -249,21 +267,28 @@ where
     M: Manager<R>,
 {
     let menu = Menu::new(manager)?;
+    let text = interface_locale::strings(interface_locale::current());
 
-    let show_item = MenuItem::with_id(manager, MENU_SHOW_ID, "Open Clovy", true, None::<&str>)?;
-    let settings_item =
-        MenuItem::with_id(manager, MENU_SETTINGS_ID, "Settings...", true, None::<&str>)?;
+    let show_item =
+        MenuItem::with_id(manager, MENU_SHOW_ID, text.open_clovy(), true, None::<&str>)?;
+    let settings_item = MenuItem::with_id(
+        manager,
+        MENU_SETTINGS_ID,
+        text.settings(),
+        true,
+        None::<&str>,
+    )?;
     let new_session_item = MenuItem::with_id(
         manager,
         MENU_NEW_SESSION_ID,
-        "New session...",
+        text.new_session(),
         true,
         None::<&str>,
     )?;
     let status_item = MenuItem::with_id(
         manager,
         MENU_STATUS_ID,
-        escape_menu_text(status_label(state)),
+        escape_menu_text(status_label(&text, state)),
         false,
         None::<&str>,
     )?;
@@ -277,9 +302,9 @@ where
             MENU_SHOW_AGENT_HUD_ID
         },
         if state.agent_hud_enabled {
-            "Hide sessions HUD"
+            text.hide_sessions_hud()
         } else {
-            "Show sessions HUD"
+            text.show_sessions_hud()
         },
         true,
         None::<&str>,
@@ -293,7 +318,7 @@ where
         let last_status_item = MenuItem::with_id(
             manager,
             MENU_LAST_STATUS_ID,
-            escape_menu_text(last_status_label(last_status)),
+            escape_menu_text(last_status_label(&text, last_status)),
             false,
             None::<&str>,
         )?;
@@ -304,7 +329,7 @@ where
         let session_item = MenuItem::with_id(
             manager,
             format!("{MENU_SESSION_ID_PREFIX}{}", session.id),
-            escape_menu_text(session_label(session)),
+            escape_menu_text(session_label(&text, session)),
             true,
             None::<&str>,
         )?;
@@ -315,7 +340,8 @@ where
     menu.append(&settings_item)?;
     menu.append(&PredefinedMenuItem::separator(manager)?)?;
 
-    let quit_item = MenuItem::with_id(manager, MENU_QUIT_ID, "Quit Clovy", true, None::<&str>)?;
+    let quit_item =
+        MenuItem::with_id(manager, MENU_QUIT_ID, text.quit_clovy(), true, None::<&str>)?;
     menu.append(&quit_item)?;
 
     Ok(menu)
@@ -390,45 +416,34 @@ fn tray_tooltip(
     dictation_active: bool,
     recording_active: bool,
 ) -> String {
-    let status = status_label(state);
+    let text = interface_locale::strings(interface_locale::current());
+    let status = status_label(&text, state);
     // Sentence case, plain hyphens — matches the existing tooltip and the repo
     // copy specs.
-    let activity = match (recording_active, dictation_active) {
-        (true, true) => "Recording and dictating - ",
-        (true, false) => "Recording - ",
-        (false, true) => "Dictating - ",
-        (false, false) => "",
-    };
+    let activity = text.activity(recording_active, dictation_active);
     format!("Clovy - {activity}{status}")
 }
 
-fn status_label(state: &AgentMenuBarState) -> String {
+fn status_label(text: &MenuStrings, state: &AgentMenuBarState) -> String {
     if state.needs_user_count > 0 {
-        let waiting = pluralize(state.needs_user_count, "session", "sessions");
-        let needs_approval = if state.needs_user_count == 1 {
-            "needs approval"
-        } else {
-            "need approval"
-        };
+        let waiting = text.sessions(state.needs_user_count);
+        let needs_approval = text.needs_approval(state.needs_user_count);
         if state.active_count > state.needs_user_count {
             let working_count = state.active_count - state.needs_user_count;
             return format!(
-                "{waiting} {needs_approval}, {} working",
-                pluralize(working_count, "session", "sessions")
+                "{waiting} {needs_approval}, {}",
+                text.working(working_count)
             );
         }
         return format!("{waiting} {needs_approval}");
     }
     if state.active_count > 0 {
-        return format!(
-            "{} working",
-            pluralize(state.active_count, "session", "sessions")
-        );
+        return text.working(state.active_count);
     }
-    "No active sessions".to_string()
+    text.no_active_sessions().to_string()
 }
 
-fn last_status_label(last_status: &AgentMenuBarLastStatus) -> String {
+fn last_status_label(text: &MenuStrings, last_status: &AgentMenuBarLastStatus) -> String {
     let title = last_status
         .title
         .as_deref()
@@ -439,50 +454,29 @@ fn last_status_label(last_status: &AgentMenuBarLastStatus) -> String {
         .as_deref()
         .map(normalize_menu_text)
         .filter(|value| !value.is_empty());
-    let status = readable_status(&last_status.status);
+    let status = text.readable_status(&last_status.status);
 
     match (title, summary) {
-        (Some(title), Some(summary)) => format!("Last: {title} - {summary}"),
-        (Some(title), None) => format!("Last: {title} - {status}"),
-        (None, Some(summary)) => format!("Last: {summary}"),
-        (None, None) => format!("Last: {status}"),
+        (Some(title), Some(summary)) => text.last(&format!("{title} - {summary}")),
+        (Some(title), None) => text.last(&format!("{title} - {status}")),
+        (None, Some(summary)) => text.last(&summary),
+        (None, None) => text.last(status),
     }
 }
 
-fn session_label(session: &AgentMenuBarSession) -> String {
+fn session_label(text: &MenuStrings, session: &AgentMenuBarSession) -> String {
     let title = normalize_menu_text(&session.title);
     let title = if title.is_empty() {
-        "Untitled session".to_string()
+        text.untitled_session().to_string()
     } else {
         title
     };
     let prefix = match session.status {
-        AgentMenuBarSessionStatus::WaitingForUser => "Needs Approval - ",
-        AgentMenuBarSessionStatus::Running => "Working - ",
+        AgentMenuBarSessionStatus::WaitingForUser => text.session_prefix_needs_approval(),
+        AgentMenuBarSessionStatus::Running => text.session_prefix_working(),
         AgentMenuBarSessionStatus::Idle => "",
     };
     format!("{prefix}{title}")
-}
-
-fn readable_status(status: &str) -> &'static str {
-    match status {
-        "received" => "Received",
-        "starting" => "Starting",
-        "running" => "Working",
-        "waitingForUser" => "Needs Approval",
-        "completed" => "Completed",
-        "failed" => "Failed",
-        "cancelled" => "Cancelled",
-        _ => "Updated",
-    }
-}
-
-fn pluralize(count: usize, singular: &str, plural: &str) -> String {
-    if count == 1 {
-        format!("1 {singular}")
-    } else {
-        format!("{count} {plural}")
-    }
 }
 
 fn normalize_menu_text(value: &str) -> String {
@@ -513,6 +507,54 @@ mod tests {
         assert_eq!(
             tray_tooltip(&s, true, true),
             "Clovy - Recording and dictating - No active sessions"
+        );
+    }
+
+    #[test]
+    fn tray_labels_follow_the_interface_language() {
+        use crate::interface_locale::{strings, UiLocale};
+        let state = AgentMenuBarState {
+            active_count: 3,
+            needs_user_count: 1,
+            ..AgentMenuBarState::default()
+        };
+        assert_eq!(
+            status_label(&strings(UiLocale::En), &state),
+            "1 session needs approval, 2 sessions working"
+        );
+        assert_eq!(
+            status_label(&strings(UiLocale::PtBr), &state),
+            "1 sessão precisa de aprovação, 2 sessões trabalhando"
+        );
+        assert_eq!(
+            status_label(&strings(UiLocale::PtBr), &AgentMenuBarState::default()),
+            "Nenhuma sessão ativa"
+        );
+        let session = AgentMenuBarSession {
+            id: "s1".into(),
+            title: "  ".into(),
+            status: AgentMenuBarSessionStatus::WaitingForUser,
+        };
+        assert_eq!(
+            session_label(&strings(UiLocale::PtBr), &session),
+            "Precisa de aprovação - Sessão sem título"
+        );
+        assert_eq!(
+            session_label(&strings(UiLocale::En), &session),
+            "Needs Approval - Untitled session"
+        );
+        let last = AgentMenuBarLastStatus {
+            title: None,
+            status: "completed".into(),
+            summary: None,
+        };
+        assert_eq!(
+            last_status_label(&strings(UiLocale::PtBr), &last),
+            "Última: Concluída"
+        );
+        assert_eq!(
+            last_status_label(&strings(UiLocale::En), &last),
+            "Last: Completed"
         );
     }
 

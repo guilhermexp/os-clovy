@@ -27,6 +27,7 @@ pub mod extension_host;
 pub mod feature_flags;
 mod filesystem;
 pub mod image_safety;
+pub mod interface_locale;
 pub mod macos_menu_icons;
 pub mod meeting_calendar_context;
 pub mod meeting_detection;
@@ -49,7 +50,7 @@ use serde::Deserialize;
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Listener, Manager};
 
 const CHECK_FOR_UPDATES_MENU_ID: &str = "check_for_updates";
 const CHECK_FOR_UPDATES_EVENT: &str = "clovy://check-for-updates";
@@ -455,6 +456,7 @@ pub fn run() {
             agent_runtime::tools::seed_bundled_skills(app.handle());
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
+            setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
             providers::setup(app);
             setup_video_asset_scope(app);
@@ -581,12 +583,35 @@ mod tests {
 }
 
 fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
+    install_app_menu(app.handle())
+}
+
+/// Mirrors the webview's interface language into the native menus. The
+/// frontend emits the tag on startup and whenever the user changes it; menus
+/// are rebuilt on the main thread only when the language actually changed.
+fn setup_interface_locale_listener(app: &tauri::App) {
+    let handle = app.handle().clone();
+    app.listen_any(interface_locale::INTERFACE_LOCALE_EVENT, move |event| {
+        let locale = interface_locale::UiLocale::from_payload(event.payload());
+        if !interface_locale::set_current(locale) {
+            return;
+        }
+        let main_thread_handle = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let _ = install_app_menu(&main_thread_handle);
+            menu_bar::relocalize(&main_thread_handle);
+        });
+    });
+}
+
+fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
+    use interface_locale::PredefinedLabel as Label;
     use tauri::menu::{
         AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
         WINDOW_SUBMENU_ID,
     };
 
-    let handle = app.handle();
+    let text = interface_locale::strings(interface_locale::current());
     let pkg_info = handle.package_info();
     let config = handle.config();
     let about_metadata = AboutMetadata {
@@ -606,11 +631,11 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
         pkg_info.name.clone(),
         true,
         &[
-            &PredefinedMenuItem::about(handle, None, Some(about_metadata))?,
+            &PredefinedMenuItem::about(handle, text.predefined_about(), Some(about_metadata))?,
             &MenuItem::with_id(
                 handle,
                 CHECK_FOR_UPDATES_MENU_ID,
-                "Check for Updates",
+                text.check_for_updates(),
                 true,
                 None::<&str>,
             )?,
@@ -618,37 +643,37 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
             &MenuItem::with_id(
                 handle,
                 OPEN_SETTINGS_MENU_ID,
-                "Settings...",
+                text.settings(),
                 true,
                 Some("CmdOrCtrl+,"),
             )?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::services(handle, None)?,
+            &PredefinedMenuItem::services(handle, text.predefined(Label::Services))?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::hide(handle, None)?,
-            &PredefinedMenuItem::hide_others(handle, None)?,
-            &PredefinedMenuItem::show_all(handle, None)?,
+            &PredefinedMenuItem::hide(handle, text.predefined(Label::Hide))?,
+            &PredefinedMenuItem::hide_others(handle, text.predefined(Label::HideOthers))?,
+            &PredefinedMenuItem::show_all(handle, text.predefined(Label::ShowAll))?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::quit(handle, None)?,
+            &PredefinedMenuItem::quit(handle, text.predefined(Label::Quit))?,
         ],
     )?;
 
     let file_menu = Submenu::with_items(
         handle,
-        "File",
+        text.file(),
         true,
         &[
             &MenuItem::with_id(
                 handle,
                 CLOSE_TAB_MENU_ID,
-                "Close tab",
+                text.close_tab(),
                 true,
                 Some("CmdOrCtrl+W"),
             )?,
             &MenuItem::with_id(
                 handle,
                 CLOSE_WINDOW_MENU_ID,
-                "Close window",
+                text.close_window(),
                 true,
                 Some("CmdOrCtrl+Shift+W"),
             )?,
@@ -656,35 +681,38 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let edit_menu = Submenu::with_items(
         handle,
-        "Edit",
+        text.edit(),
         true,
         &[
-            &PredefinedMenuItem::undo(handle, None)?,
-            &PredefinedMenuItem::redo(handle, None)?,
+            &PredefinedMenuItem::undo(handle, text.predefined(Label::Undo))?,
+            &PredefinedMenuItem::redo(handle, text.predefined(Label::Redo))?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::cut(handle, None)?,
-            &PredefinedMenuItem::copy(handle, None)?,
-            &PredefinedMenuItem::paste(handle, None)?,
-            &PredefinedMenuItem::select_all(handle, None)?,
+            &PredefinedMenuItem::cut(handle, text.predefined(Label::Cut))?,
+            &PredefinedMenuItem::copy(handle, text.predefined(Label::Copy))?,
+            &PredefinedMenuItem::paste(handle, text.predefined(Label::Paste))?,
+            &PredefinedMenuItem::select_all(handle, text.predefined(Label::SelectAll))?,
         ],
     )?;
     let view_menu = Submenu::with_items(
         handle,
-        "View",
+        text.view(),
         true,
-        &[&PredefinedMenuItem::fullscreen(handle, None)?],
+        &[&PredefinedMenuItem::fullscreen(
+            handle,
+            text.predefined(Label::Fullscreen),
+        )?],
     )?;
     let window_menu = Submenu::with_id_and_items(
         handle,
         WINDOW_SUBMENU_ID,
-        "Window",
+        text.window(),
         true,
         &[
-            &PredefinedMenuItem::minimize(handle, None)?,
-            &PredefinedMenuItem::maximize(handle, None)?,
+            &PredefinedMenuItem::minimize(handle, text.predefined(Label::Minimize))?,
+            &PredefinedMenuItem::maximize(handle, text.predefined(Label::Maximize))?,
         ],
     )?;
-    let help_menu = Submenu::with_id_and_items(handle, HELP_SUBMENU_ID, "Help", true, &[])?;
+    let help_menu = Submenu::with_id_and_items(handle, HELP_SUBMENU_ID, text.help(), true, &[])?;
 
     let menu = Menu::with_items(
         handle,
@@ -697,8 +725,8 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
             &help_menu,
         ],
     )?;
-    app.set_menu(menu)?;
-    macos_menu_icons::install_settings_symbol_on_app_menu();
+    handle.set_menu(menu)?;
+    macos_menu_icons::install_settings_symbol_on_app_menu(text.settings());
     Ok(())
 }
 
