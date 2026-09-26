@@ -538,6 +538,19 @@ structured markdown note, currently via a Venice chat-completion call. Always
 follows a successful note transcription; not used in dictation.
 _Avoid_: notes generation, AI summarisation.
 
+**Interface language** vs **transcription language**:
+The **interface language** is the language Clovy's own chrome is written in
+(labels, dialogs, toasts, HUDs, native app and menu bar menus): English or
+Português (Brasil), chosen in Settings > Appearance and stored per machine as
+`os-clovy:interface-locale`. The **transcription language** is the optional
+language hint sent with dictation and note transcription (Settings >
+Dictation). The two are independent: changing one never changes the other, and
+neither translates user content or model output. See
+[docs/i18n.md](docs/i18n.md) and
+[ADR-0056](docs/adr/0056-interface-language-uses-an-in-repo-typed-catalog.md).
+_Avoid_: "language" alone when the context does not make clear which one;
+"locale" for the transcription hint.
+
 **Image generation**:
 Producing a new image from a text **prompt** (text-to-image), via Venice. The
 user reaches it two ways: an explicit `/image` command (a fast, no-model shot),
