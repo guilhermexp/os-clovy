@@ -6,6 +6,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import type { RefObject } from "react";
 import { createPortal } from "react-dom";
 
+import { t as translate, useT } from "../../../i18n";
 import {
   modelIsPrivate,
   modelSupportsTools,
@@ -55,16 +56,19 @@ export function ComposerModelPicker({
   triggerRef: RefObject<HTMLButtonElement>;
   onToggleOpen: () => void;
 }) {
+  const t = useT();
   const descriptionId = useId();
   if (!model) return null;
   const effortOption = effort ? thinkingOptionForLevel(effort) : undefined;
   const description = [
-    detail ? `Preference: ${detail}.` : null,
-    effortOption ? `Effort: ${effortOption.label}.` : null,
+    detail ? t("chat.model.preferenceSentence", { detail }) : null,
+    effortOption ? t("chat.model.effortSentence", { effort: effortOption.label }) : null,
   ]
     .filter(Boolean)
     .join(" ");
-  const title = [`Model: ${model.name}.`, description].filter(Boolean).join(" ");
+  const title = [t("chat.model.modelSentence", { name: model.name }), description]
+    .filter(Boolean)
+    .join(" ");
 
   if (readOnly) {
     return (
@@ -87,7 +91,7 @@ export function ComposerModelPicker({
         ref={triggerRef}
         type="button"
         className="agent-composer-model-trigger"
-        aria-label={`Model: ${model.name}`}
+        aria-label={t("chat.model.modelLabel", { name: model.name })}
         aria-describedby={description ? descriptionId : undefined}
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -283,6 +287,7 @@ export function ComposerModelPopover({
   onSelect: (modelId: string, costQuality?: number) => void;
   onSelectThinking?: (level: ThinkingLevel) => void;
 }) {
+  const t = useT();
   const flyoutRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   // "Private" catalog filter. Local to the popover on purpose: it resets when
@@ -556,7 +561,7 @@ export function ComposerModelPopover({
       ref={popoverRef}
       className="agent-composer-model-popover"
       role="dialog"
-      aria-label="Choose text model"
+      aria-label={t("chat.model.chooseTextModel")}
       // Opening/closing the detail flyout is owned by the safe-polygon listener;
       // leaving the popover drops a not-yet-fired open intent and lifts any
       // bridging suppression left by an abandoned re-target, so row hover
@@ -566,13 +571,15 @@ export function ComposerModelPopover({
         setBridging(false);
       }}
     >
-      <p className="agent-composer-model-title">Suggested</p>
+      <p className="agent-composer-model-title">{t("chat.model.suggested")}</p>
       {veniceApiKeyConfigured && model.id === AUTO_MODEL_ID ? (
-        <p className="agent-composer-model-auto-note">
-          Auto is billed to Clovy credits and does not use your Venice API key.
-        </p>
+        <p className="agent-composer-model-auto-note">{t("chat.model.autoBillingNote")}</p>
       ) : null}
-      <div className="agent-composer-model-menu" role="listbox" aria-label="Suggested text models">
+      <div
+        className="agent-composer-model-menu"
+        role="listbox"
+        aria-label={t("chat.model.suggestedTextModels")}
+      >
         {suggested.length ? (
           suggested.map(({ key, model: option, costQuality: presetCostQuality }) => (
             <button
@@ -617,7 +624,7 @@ export function ComposerModelPopover({
             </button>
           ))
         ) : (
-          <p className="agent-composer-model-empty">Loading suggested models.</p>
+          <p className="agent-composer-model-empty">{t("chat.model.loadingSuggested")}</p>
         )}
       </div>
       <button
@@ -648,7 +655,7 @@ export function ComposerModelPopover({
           searchRef.current?.focus();
         }}
       >
-        <span className="agent-composer-model-row-name">All models</span>
+        <span className="agent-composer-model-row-name">{t("chat.model.allModels")}</span>
         <IconChevronRightSmall size={12} aria-hidden className="agent-composer-model-row-chevron" />
       </button>
       {thinkingLevel && onSelectThinking ? (
@@ -663,7 +670,7 @@ export function ComposerModelPopover({
           onClick={() => onFlyoutChange({ kind: "effort" })}
         >
           <span className="agent-composer-model-row-copy">
-            <span className="agent-composer-model-row-name">Effort</span>
+            <span className="agent-composer-model-row-name">{t("chat.model.effort")}</span>
             <span className="agent-composer-model-row-detail">
               {thinkingOptionForLevel(thinkingLevel).label}
             </span>
@@ -709,7 +716,7 @@ export function ComposerModelPopover({
           ref={flyoutRef}
           className="agent-composer-model-flyout agent-composer-model-all-panel"
           role="group"
-          aria-label="All text models"
+          aria-label={t("chat.model.allTextModels")}
           // Leaving the catalog panel abandons any pending re-target hover, so
           // also lift the bridging suppression here to keep row hover alive.
           onPointerLeave={() => {
@@ -723,16 +730,16 @@ export function ComposerModelPopover({
                 ref={searchRef}
                 value={search}
                 onChange={(event) => onSearchChange(event.currentTarget.value)}
-                placeholder="Search models"
-                aria-label="Search models"
+                placeholder={t("chat.model.searchModels")}
+                aria-label={t("chat.model.searchModels")}
               />
             </label>
             <div className="agent-composer-model-filter">
-              <span>Private</span>
+              <span>{t("chat.model.private")}</span>
               <Switch
                 checked={privateOnly}
                 onCheckedChange={setPrivateOnly}
-                aria-label="Only show private models"
+                aria-label={t("chat.model.onlyPrivate")}
               />
             </div>
             <div className="agent-composer-model-list-wrap scroll-fade" {...fade.props}>
@@ -740,7 +747,7 @@ export function ComposerModelPopover({
                 ref={listRef}
                 className="agent-composer-model-list"
                 role="listbox"
-                aria-label="All text models"
+                aria-label={t("chat.model.allTextModels")}
                 onScroll={() => {
                   fade.update();
                   cancelHoverIntent();
@@ -773,9 +780,9 @@ export function ComposerModelPopover({
                   <p className="agent-composer-model-empty">
                     {privateOnly
                       ? query
-                        ? "No private models match your search."
-                        : "No private models available."
-                      : "No models match your search."}
+                        ? t("chat.model.noPrivateMatches")
+                        : t("chat.model.noPrivateAvailable")
+                      : t("chat.model.noMatches")}
                   </p>
                 )}
               </div>
@@ -788,10 +795,10 @@ export function ComposerModelPopover({
           ref={flyoutRef}
           className="agent-composer-model-flyout"
           role="radiogroup"
-          aria-label="Reasoning effort"
+          aria-label={t("chat.model.reasoningEffort")}
         >
           <div className="agent-composer-model-surface">
-            <p className="agent-composer-model-title">Effort</p>
+            <p className="agent-composer-model-title">{t("chat.model.effort")}</p>
             {THINKING_LEVELS.map((option) => (
               <button
                 key={option.id}
@@ -856,16 +863,17 @@ export function heroPrivacyFootnote(
   model: VeniceModelDto | undefined,
   badge: ModelPrivacyBadge | undefined,
 ): string {
-  if (!model) return "Clovy runs locally.";
+  if (!model) return translate("chat.privacy.runsLocally");
+  const name = model.name;
   switch (badge?.mode) {
     case "e2ee":
-      return `Clovy runs locally. Calls to ${model.name} are end-to-end encrypted.`;
+      return translate("chat.privacy.e2ee", { name });
     case "private":
-      return `Clovy runs locally. Calls to ${model.name} are private.`;
+      return translate("chat.privacy.private", { name });
     case "anonymous":
-      return `Clovy runs locally. Calls to ${model.name} are anonymized.`;
+      return translate("chat.privacy.anonymous", { name });
     default:
-      return `Clovy runs locally. You're running ${model.name}.`;
+      return translate("chat.privacy.running", { name });
   }
 }
 
@@ -933,17 +941,17 @@ export function PrivacyModeBadge({ badge }: { badge?: ModelPrivacyBadge }) {
 // recorded mode, so the session — not the runtime's current state — is the
 // honest unit to label.
 export function UnrestrictedBadge() {
-  const description =
-    "This session runs without the file sandbox: Clovy can change any file your account can. Sandboxed sessions keep their jail and run alongside on a separate, jailed runtime.";
+  const t = useT();
+  const description = t("chat.sandbox.unrestrictedDescription");
   return (
     <HoverTip
       tip={description}
       className="agent-safety-badge agent-sandbox-badge"
       tabIndex={0}
-      aria-label={`Unrestricted - ${description}`}
+      aria-label={t("chat.sandbox.unrestrictedAria", { description })}
     >
       <IconShieldCrossed size={13} aria-hidden />
-      Unrestricted
+      {t("chat.sandbox.unrestricted")}
     </HoverTip>
   );
 }

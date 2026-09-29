@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import { AUTO_MODEL_ID } from "./agent-model-selection";
 import type { ProviderModelMode, VeniceModelDto } from "./tauri";
 
@@ -31,6 +32,8 @@ export function dispatchProviderModelSettingsChanged(detail: ProviderModelSettin
   );
 }
 
+// English reference copy (the badge itself reads the interface language from
+// the `lib.modelPrivacy.*` catalog keys at call time).
 export const E2EE_MODEL_DESCRIPTION =
   "Private model with end-to-end encryption. Your prompt is encrypted on your device and only decrypted inside a hardware-secured enclave (TEE); the response is encrypted before it leaves the enclave. No prompt data is ever readable by the model provider or its infrastructure.";
 export const PRIVATE_MODEL_DESCRIPTION =
@@ -102,22 +105,22 @@ export function modelPrivacyBadge(
   if (flags.e2ee) {
     return {
       mode: "e2ee",
-      label: "E2EE",
-      description: E2EE_MODEL_DESCRIPTION,
+      label: t("lib.modelPrivacy.e2eeLabel"),
+      description: t("lib.modelPrivacy.e2eeDescription"),
     };
   }
   if (flags.private) {
     return {
       mode: "private",
-      label: "Private mode",
-      description: PRIVATE_MODEL_DESCRIPTION,
+      label: t("lib.modelPrivacy.privateLabel"),
+      description: t("lib.modelPrivacy.privateDescription"),
     };
   }
   if (flags.anonymous) {
     return {
       mode: "anonymous",
-      label: "Anonymous mode",
-      description: ANONYMOUS_MODEL_DESCRIPTION,
+      label: t("lib.modelPrivacy.anonymousLabel"),
+      description: t("lib.modelPrivacy.anonymousDescription"),
     };
   }
   return undefined;

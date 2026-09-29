@@ -11,6 +11,16 @@ import { IconTelevision } from "central-icons/IconTelevision";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import {
+  INTERFACE_LOCALE_OPTIONS,
+  type InterfaceLocale,
+  type MessageKey,
+  setInterfaceLocale,
+  t as translate,
+  type TFunction,
+  useLocale,
+  useT,
+} from "../../i18n";
+import {
   CLOVY_COMMUNITY_URL,
   dictationHotkeyStatus,
   dictationHelperCommand,
@@ -56,11 +66,7 @@ import type {
 } from "../../lib/tauri";
 import { AccountSettingsSection, BillingSettingsSection } from "../account/AccountSettings";
 import { KeycapShortcut } from "../shortcuts/KeycapShortcut";
-import {
-  MODIFIER_REQUIRED_MESSAGE,
-  chordFromKeyEvent,
-  shortcutFromCapturePayload,
-} from "../shortcuts/use-shortcut-capture";
+import { chordFromKeyEvent, shortcutFromCapturePayload } from "../shortcuts/use-shortcut-capture";
 import {
   Select,
   selectPopoverPlacement,
@@ -137,6 +143,7 @@ import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
 import { PrivacySettingsSection } from "./PrivacySettingsSection";
+import { SETTINGS_TABS, type SettingsTab } from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
 import {
   getStoredDateFormat,
@@ -144,75 +151,94 @@ import {
   type DateFormatPreference,
 } from "../../lib/date-format";
 
-const THEME_OPTIONS: readonly {
+function themeOptions(t: TFunction): readonly {
   value: ThemePreference;
   label: ReactNode;
   ariaLabel: string;
-}[] = [
-  {
-    value: "system",
-    label: (
-      <>
-        <IconTelevision size={14} />
-        System
-      </>
-    ),
-    ariaLabel: "Match system theme",
-  },
-  {
-    value: "light",
-    label: (
-      <>
-        <IconSun size={14} />
-        Light
-      </>
-    ),
-    ariaLabel: "Use light theme",
-  },
-  {
-    value: "dark",
-    label: (
-      <>
-        <IconMoonStar size={14} />
-        Dark
-      </>
-    ),
-    ariaLabel: "Use dark theme",
-  },
-];
+}[] {
+  return [
+    {
+      value: "system",
+      label: (
+        <>
+          <IconTelevision size={14} />
+          {t("settings.theme.system")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.systemAria"),
+    },
+    {
+      value: "light",
+      label: (
+        <>
+          <IconSun size={14} />
+          {t("settings.theme.light")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.lightAria"),
+    },
+    {
+      value: "dark",
+      label: (
+        <>
+          <IconMoonStar size={14} />
+          {t("settings.theme.dark")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.darkAria"),
+    },
+  ];
+}
 
-const FONT_SCALE_OPTIONS: readonly {
+const FONT_SCALE_LABEL_KEYS = {
+  default: "settings.textSize.default",
+  large: "settings.textSize.large",
+  larger: "settings.textSize.larger",
+} as const satisfies Record<FontScaleId, MessageKey>;
+
+function fontScaleOptions(t: TFunction): readonly {
   value: FontScaleId;
   label: ReactNode;
   ariaLabel: string;
-}[] = FONT_SCALE_PRESETS.map((preset) => ({
-  value: preset.id,
-  label: preset.label,
-  ariaLabel: `${preset.label} text size`,
-}));
+}[] {
+  return FONT_SCALE_PRESETS.map((preset) => {
+    const label = t(FONT_SCALE_LABEL_KEYS[preset.id]);
+    return {
+      value: preset.id,
+      label,
+      ariaLabel: t("settings.textSize.optionAria", { size: label }),
+    };
+  });
+}
 
-const DATE_FORMAT_OPTIONS = [
-  { value: "system", label: "System" },
-  { value: "month-first", label: "Jul 9" },
-  { value: "day-first", label: "9 Jul" },
-] satisfies { value: DateFormatPreference; label: string }[];
+function dateFormatOptions(t: TFunction) {
+  return [
+    { value: "system", label: t("settings.dateFormat.system") },
+    { value: "month-first", label: t("settings.dateFormat.monthFirst") },
+    { value: "day-first", label: t("settings.dateFormat.dayFirst") },
+  ] satisfies { value: DateFormatPreference; label: string }[];
+}
 
-const RELEASE_CHANNEL_OPTIONS: readonly {
+function releaseChannelOptions(t: TFunction): readonly {
   value: ReleaseChannel;
   label: ReactNode;
-}[] = [
-  { value: "stable", label: "Stable" },
-  { value: "rc", label: "Release candidate" },
-];
+}[] {
+  return [
+    { value: "stable", label: t("settings.releaseChannel.stable") },
+    { value: "rc", label: t("settings.releaseChannel.rc") },
+  ];
+}
 
-const AUTO_PREFERENCE_OPTIONS: readonly {
+function autoPreferenceOptions(t: TFunction): readonly {
   value: AutoPreference;
   label: ReactNode;
-}[] = [
-  { value: "cost", label: "Economy" },
-  { value: "balanced", label: "Balanced" },
-  { value: "quality", label: "Quality" },
-];
+}[] {
+  return [
+    { value: "cost", label: t("settings.autoPreference.cost") },
+    { value: "balanced", label: t("settings.autoPreference.balanced") },
+    { value: "quality", label: t("settings.autoPreference.quality") },
+  ];
+}
 
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
   command: false,
@@ -309,34 +335,9 @@ function providerModelSettingsSnapshot(response: ProviderModelSettingsSnapshot) 
 
 const MIC_TEST_DURATION_SECONDS = 5;
 
-export type SettingsTab =
-  | "general"
-  | "appearance"
-  | "billing"
-  | "shortcuts"
-  | "dictation"
-  | "audio"
-  | "models"
-  | "agent"
-  | "memory"
-  | "connectors"
-  | "linked-devices"
-  | "about";
-
-export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
-  { id: "general", label: "General" },
-  { id: "appearance", label: "Appearance" },
-  { id: "billing", label: "Billing" },
-  { id: "shortcuts", label: "Shortcuts" },
-  { id: "dictation", label: "Dictation" },
-  { id: "audio", label: "Audio" },
-  { id: "models", label: "Models" },
-  { id: "agent", label: "Agent" },
-  { id: "memory", label: "Memory" },
-  { id: "connectors", label: "Plugins" },
-  { id: "linked-devices", label: "Linked devices" },
-  { id: "about", label: "About" },
-];
+export type { SettingsTab };
+// Same list (and translated `label` getters) as the sidebar's settings nav.
+export { SETTINGS_TABS };
 
 export function appSettingsTabsForCompanionPairing(companionPairingEnabled: boolean) {
   return SETTINGS_TABS.filter((tab) => companionPairingEnabled || tab.id !== "linked-devices");
@@ -489,6 +490,8 @@ export function AppSettings({
     message: string;
   }>();
   const [micOpen, setMicOpen] = useState(false);
+  const t = useT();
+  const interfaceLocale = useLocale();
   const [theme, setTheme] = useState<ThemePreference>(() => getStoredTheme());
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
   const fontScale = useFontScaleId();
@@ -569,8 +572,8 @@ export function AppSettings({
         };
   const modifierRequiredMessage =
     capabilities.platform === "windows"
-      ? "Shortcut must include Ctrl, Alt, Shift, or Win."
-      : MODIFIER_REQUIRED_MESSAGE;
+      ? t("settings.shortcuts.modifierRequiredWindows")
+      : t("settings.shortcuts.modifierRequiredMac");
 
   useEffect(() => {
     if (!experimentalFlags.loaded || runtimeFlagStatusLoadedRef.current) return;
@@ -921,7 +924,7 @@ export function AppSettings({
       const path = stringPayload(helperEvent.payload?.path);
       if (!path) {
         setMicTestState("error");
-        setMicTestError("Microphone test did not return a playable sample.");
+        setMicTestError(translate("settings.micTest.noSample"));
         return;
       }
       setMicTestState("ready");
@@ -934,7 +937,7 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "mic_test_error") {
-      const message = helperEvent.payload?.message ?? "Microphone test could not record.";
+      const message = helperEvent.payload?.message ?? translate("settings.micTest.couldNotRecord");
       setMicTestState("error");
       setMicTestStartedAt(undefined);
       setMicTestError(message);
@@ -943,13 +946,13 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "fn_monitor_unavailable") {
-      setStatus(helperEvent.payload?.message ?? "Global shortcut monitoring is unavailable.");
+      setStatus(helperEvent.payload?.message ?? translate("settings.shortcuts.monitorUnavailable"));
       return;
     }
     if (helperEvent.type === "helper_unavailable") {
       setHelperUnavailable({
         reason: stringPayload(helperEvent.payload?.reason) ?? "restarting",
-        message: helperEvent.payload?.message ?? "Dictation stopped and is restarting.",
+        message: helperEvent.payload?.message ?? translate("settings.helper.restarting"),
       });
       return;
     }
@@ -959,7 +962,7 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "hotkey_trigger_unavailable") {
-      const message = helperEvent.payload?.message ?? "Dictation shortcut is unavailable.";
+      const message = helperEvent.payload?.message ?? translate("settings.shortcuts.unavailable");
       const kind = shortcutKindPayload(helperEvent.payload?.kind);
       setHelperUnavailable(undefined);
       setShortcutError(message);
@@ -968,11 +971,11 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "shortcut_capture_started") {
-      setStatus("Press the shortcut to record it.");
+      setStatus(translate("settings.shortcuts.pressToRecord"));
       return;
     }
     if (helperEvent.type === "shortcut_capture_error") {
-      const message = helperEvent.payload?.message ?? "Shortcut could not be captured.";
+      const message = helperEvent.payload?.message ?? translate("settings.shortcuts.captureFailed");
       const kind = shortcutKindPayload(helperEvent.payload?.kind) ?? capturingShortcutRef.current;
       setCapturingShortcut(undefined);
       setShortcutError(message);
@@ -984,20 +987,20 @@ export function AppSettings({
       setCapturingShortcut(undefined);
       setShortcutError(undefined);
       setShortcutErrorKind(undefined);
-      setStatus("Shortcut capture ended.");
+      setStatus(translate("settings.shortcuts.captureEnded"));
       return;
     }
     if (helperEvent.type === "shortcut_captured") {
       const kind = capturingShortcutRef.current;
       if (!kind) {
-        setShortcutError("Shortcut capture returned without an active target.");
-        setStatus("Shortcut capture returned without an active target.");
+        setShortcutError(translate("settings.shortcuts.noTarget"));
+        setStatus(translate("settings.shortcuts.noTarget"));
         return;
       }
       const shortcut = shortcutFromCapturePayload(helperEvent.payload?.shortcut, 1);
       if (!shortcut) {
-        setShortcutError("Shortcut capture returned invalid data.");
-        setStatus("Shortcut capture returned invalid data.");
+        setShortcutError(translate("settings.shortcuts.invalidData"));
+        setStatus(translate("settings.shortcuts.invalidData"));
         return;
       }
       setShortcutError(undefined);
@@ -1006,7 +1009,7 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "error") {
-      setStatus(helperEvent.payload?.message ?? "Settings helper failed.");
+      setStatus(helperEvent.payload?.message ?? translate("settings.helper.failed"));
     }
   }
 
@@ -1018,7 +1021,11 @@ export function AppSettings({
       const next = await setDictationMicrophone(id, name);
       setSettings(next);
       setMicOpen(false);
-      setStatus(name ? `Microphone set to ${name}.` : "Microphone set to auto-detect.");
+      setStatus(
+        name
+          ? translate("settings.audio.microphoneSet", { name })
+          : translate("settings.audio.microphoneAuto"),
+      );
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -1034,7 +1041,12 @@ export function AppSettings({
       setCapturingShortcut(undefined);
       setShortcutError(undefined);
       setShortcutErrorKind(undefined);
-      setStatus(`${shortcutKindLabel(kind)} set to ${shortcutForKind(next, kind).label}.`);
+      setStatus(
+        translate("settings.shortcuts.set", {
+          shortcut: shortcutKindLabel(kind),
+          label: shortcutForKind(next, kind).label,
+        }),
+      );
     } catch (error) {
       setShortcutError(messageFromError(error));
       setShortcutErrorKind(kind);
@@ -1123,15 +1135,7 @@ export function AppSettings({
       setProviderSettings(next);
       setEffectiveProviderSettings(next);
       dispatchProviderModelSettingsChanged({ mode, modelId });
-      setStatus(
-        mode === "transcription"
-          ? "Transcription model updated."
-          : mode === "image"
-            ? "Image model updated."
-            : mode === "video"
-              ? "Video model updated."
-              : "Text model updated.",
-      );
+      setStatus(translate(`settings.models.updated.${mode}`));
       return true;
     } catch (error) {
       setStatus(messageFromError(error));
@@ -1154,7 +1158,7 @@ export function AppSettings({
           ...current,
           costQuality: next.costQuality,
         }));
-        setStatus("Automatic model preference updated.");
+        setStatus(translate("settings.autoPreference.updated"));
       },
       (error) => {
         if (version !== latestCostQualitySaveRef.current) return;
@@ -1241,7 +1245,7 @@ export function AppSettings({
 
   async function handleSaveLocalModel() {
     const saved = await commitLocalGenerationSettings();
-    if (saved) setLocalModelStatus("Local model saved.");
+    if (saved) setLocalModelStatus(translate("settings.localModel.saved"));
   }
 
   // Flips the provider to the saved local endpoint. The backend enables from
@@ -1256,7 +1260,7 @@ export function AppSettings({
       });
       setLocalEnableConfirm(false);
       setLocalModelSetupVisible(true);
-      setLocalModelStatus("Local model enabled.");
+      setLocalModelStatus(translate("settings.localModel.enabled"));
     } catch (error) {
       setLocalModelStatus(messageFromError(error));
     }
@@ -1275,9 +1279,7 @@ export function AppSettings({
       // The confirm affordance lives behind More options; reveal it so the
       // status message's instruction is reachable.
       setShowMoreTextOptions(true);
-      setLocalModelStatus(
-        "This endpoint is not on this machine. Requests will leave your device. Confirm in More options to enable it.",
-      );
+      setLocalModelStatus(translate("settings.localModel.remoteConfirmInMore"));
       return;
     }
     void commitLocalGenerationEnabled();
@@ -1288,7 +1290,7 @@ export function AppSettings({
     const modelId = localGenerationDraft.modelId.trim();
     if (!baseUrl || !modelId) {
       setLocalModelSetupVisible(true);
-      setLocalModelStatus("Enter a local endpoint and model ID first.");
+      setLocalModelStatus(translate("settings.localModel.enterFirst"));
       return;
     }
     // A remote endpoint takes a deliberate second step: the first flip reveals
@@ -1316,7 +1318,7 @@ export function AppSettings({
         mode: "generation",
         modelId: next.generationModel,
       });
-      setLocalModelStatus("Local model disabled.");
+      setLocalModelStatus(translate("settings.localModel.disabled"));
     } catch (error) {
       setLocalModelStatus(messageFromError(error));
     }
@@ -1325,14 +1327,14 @@ export function AppSettings({
   async function saveVeniceApiKey() {
     const apiKey = veniceApiKeyDraft.trim();
     if (!apiKey) {
-      setStatus("Enter a Venice API key before saving.");
+      setStatus(translate("settings.venice.enterKey"));
       return;
     }
     try {
       const next = await setVeniceApiKey(apiKey);
       setProviderSettings(next);
       setVeniceApiKeyDraft("");
-      setStatus("Venice API key saved.");
+      setStatus(translate("settings.venice.saved"));
       // The workspace's model picker shows a billing note while a key is
       // saved, so let it refresh its provider settings snapshot.
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId: next.generationModel });
@@ -1360,7 +1362,9 @@ export function AppSettings({
         apiKey: localGenerationDraft.apiKey,
       });
       setLocalProbeModels(result.models);
-      setLocalModelStatus(`Connected. ${result.models.length} models available.`);
+      setLocalModelStatus(
+        translate("settings.localModel.connected", { count: result.models.length }),
+      );
     } catch (error) {
       setLocalModelStatus(messageFromError(error));
     }
@@ -1371,7 +1375,7 @@ export function AppSettings({
       const next = await clearVeniceApiKey();
       setProviderSettings(next);
       setVeniceApiKeyDraft("");
-      setStatus("Venice API key removed.");
+      setStatus(translate("settings.venice.removed"));
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId: next.generationModel });
     } catch (error) {
       setStatus(messageFromError(error));
@@ -1384,8 +1388,8 @@ export function AppSettings({
       setProviderSettings(next);
       setStatus(
         enabled
-          ? "Live transcription on: the transcript streams while you record."
-          : "Live transcription off: the transcript appears after the recording ends.",
+          ? translate("settings.liveTranscription.on")
+          : translate("settings.liveTranscription.off"),
       );
     } catch (error) {
       setStatus(messageFromError(error));
@@ -1396,11 +1400,7 @@ export function AppSettings({
     try {
       const next = await setImageSafeMode(enabled);
       setProviderSettings(next);
-      setStatus(
-        enabled
-          ? "Safe mode on: adult content is blurred."
-          : "Safe mode off: images are not filtered.",
-      );
+      setStatus(enabled ? translate("settings.safeMode.on") : translate("settings.safeMode.off"));
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -1413,21 +1413,24 @@ export function AppSettings({
       setLanguageOpen(false);
       setStatus(
         language
-          ? `Default transcription language set to ${languageLabel(language)}.`
-          : "Default transcription language set to auto-detect.",
+          ? translate("settings.dictation.languageSet", { language: languageLabel(language) })
+          : translate("settings.dictation.languageAuto"),
       );
     } catch (error) {
       setStatus(messageFromError(error));
     }
   }
 
-  const microphoneName = settings.microphone.name ?? "Auto-detect";
+  const microphoneName = settings.microphone.name ?? t("settings.audio.autoDetect");
   const microphoneDescription = settings.microphone.id
-    ? "Input device used for dictation."
+    ? t("settings.audio.microphoneDescription")
     : defaultMicrophone?.name
-      ? `Auto-detect uses ${defaultMicrophone.name}.`
-      : "Auto-detect uses the current system input.";
-  const microphoneOptions = [{ id: undefined, name: "Auto-detect" }, ...microphones];
+      ? t("settings.audio.autoDetectUses", { name: defaultMicrophone.name })
+      : t("settings.audio.autoDetectSystem");
+  const microphoneOptions = [
+    { id: undefined, name: t("settings.audio.autoDetect") },
+    ...microphones,
+  ];
   const selectedMicrophoneIndex = Math.max(
     0,
     microphoneOptions.findIndex((option) => (option.id ?? "") === (settings.microphone.id ?? "")),
@@ -1636,7 +1639,7 @@ export function AppSettings({
       companion_pairing: experimentalFlags.companion_pairing,
       companion_computer_use_approvals: experimentalFlags.companion_computer_use_approvals,
     })
-      .then(() => toast("Experiments are unlocked"))
+      .then(() => toast(translate("settings.experiments.unlocked")))
       .catch((error) => setExperimentalError(messageFromError(error)))
       .finally(() => {
         experimentalUnlockingRef.current = false;
@@ -1703,13 +1706,11 @@ export function AppSettings({
       {controlled ? null : (
         <>
           <header className="settings-header">
-            <h1 className="settings-title">Settings</h1>
-            <p className="settings-description">
-              Manage audio, dictation, AI models, and agent capabilities.
-            </p>
+            <h1 className="settings-title">{t("common.settings")}</h1>
+            <p className="settings-description">{t("settings.page.description")}</p>
           </header>
 
-          <nav className="settings-nav" role="tablist" aria-label="Settings sections">
+          <nav className="settings-nav" role="tablist" aria-label={t("settings.page.navAria")}>
             {settingsTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -1736,8 +1737,8 @@ export function AppSettings({
         {activeTab === "general" ? (
           <>
             <SettingsPageHeader
-              title="General"
-              blurb="Your account and everyday Clovy preferences."
+              title={t("settings.tabs.general")}
+              blurb={t("settings.general.blurb")}
             />
             <AccountSettingsSection
               account={account}
@@ -1766,23 +1767,47 @@ export function AppSettings({
           <section className="settings-group" aria-labelledby="appearance-heading">
             <SettingsPageHeader
               id="appearance-heading"
-              title="Appearance"
-              blurb="Choose the theme, accent color, text size, and date format Clovy uses."
+              title={t("settings.appearance.title")}
+              blurb={t("settings.appearance.blurb")}
             />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Theme</h3>
+                    <h3 className="settings-row-title">{t("settings.interfaceLanguage.title")}</h3>
                     <p className="settings-row-description">
-                      Match the system or force light or dark mode.
+                      {t("settings.interfaceLanguage.description")}
                     </p>
                   </div>
                   <div className="settings-row-control">
+                    <Select
+                      value={interfaceLocale}
+                      options={INTERFACE_LOCALE_OPTIONS.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                        lang: option.value,
+                      }))}
+                      placeholder="English"
+                      ariaLabel={t("settings.interfaceLanguage.aria", {
+                        language:
+                          INTERFACE_LOCALE_OPTIONS.find(
+                            (option) => option.value === interfaceLocale,
+                          )?.label ?? "English",
+                      })}
+                      onChange={(value) => setInterfaceLocale(value as InterfaceLocale)}
+                    />
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <h3 className="settings-row-title">{t("settings.theme.title")}</h3>
+                    <p className="settings-row-description">{t("settings.theme.description")}</p>
+                  </div>
+                  <div className="settings-row-control">
                     <SegmentedControl<ThemePreference>
-                      aria-label="App theme"
+                      aria-label={t("settings.theme.aria")}
                       value={theme}
-                      options={THEME_OPTIONS}
+                      options={themeOptions(t)}
                       onValueChange={(next) => {
                         setTheme(next);
                         setStoredTheme(next);
@@ -1792,26 +1817,22 @@ export function AppSettings({
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Text size</h3>
-                    <p className="settings-row-description">
-                      Make text across the app larger. Affects every label, note, and conversation.
-                    </p>
+                    <h3 className="settings-row-title">{t("settings.textSize.title")}</h3>
+                    <p className="settings-row-description">{t("settings.textSize.description")}</p>
                   </div>
                   <div className="settings-row-control">
                     <SegmentedControl<FontScaleId>
-                      aria-label="Text size"
+                      aria-label={t("settings.textSize.title")}
                       value={fontScale}
-                      options={FONT_SCALE_OPTIONS}
+                      options={fontScaleOptions(t)}
                       onValueChange={setStoredFontScale}
                     />
                   </div>
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Accent</h3>
-                    <p className="settings-row-description">
-                      The brand color used across buttons, highlights, and the recorder.
-                    </p>
+                    <h3 className="settings-row-title">{t("settings.accent.title")}</h3>
+                    <p className="settings-row-description">{t("settings.accent.description")}</p>
                   </div>
                   <div className="settings-row-control">
                     <Select
@@ -1824,10 +1845,11 @@ export function AppSettings({
                         color: preset.value,
                       }))}
                       placeholder="Clay"
-                      ariaLabel={`Accent color: ${
-                        BRAND_PRESETS.find((preset) => preset.id === brand)?.label ??
-                        BRAND_PRESETS[0].label
-                      }`}
+                      ariaLabel={t("settings.accent.aria", {
+                        color:
+                          BRAND_PRESETS.find((preset) => preset.id === brand)?.label ??
+                          BRAND_PRESETS[0].label,
+                      })}
                       onChange={(id) => {
                         setBrand(id as BrandId);
                         setStoredBrand(id as BrandId);
@@ -1837,20 +1859,21 @@ export function AppSettings({
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Date format</h3>
+                    <h3 className="settings-row-title">{t("settings.dateFormat.title")}</h3>
                     <p className="settings-row-description">
-                      Choose how older session dates appear in the sidebar.
+                      {t("settings.dateFormat.description")}
                     </p>
                   </div>
                   <div className="settings-row-control">
                     <Select
                       value={dateFormat}
-                      options={DATE_FORMAT_OPTIONS}
-                      placeholder="System"
-                      ariaLabel={`Date format: ${
-                        DATE_FORMAT_OPTIONS.find((option) => option.value === dateFormat)?.label ??
-                        "System"
-                      }`}
+                      options={dateFormatOptions(t)}
+                      placeholder={t("settings.dateFormat.system")}
+                      ariaLabel={t("settings.dateFormat.aria", {
+                        format:
+                          dateFormatOptions(t).find((option) => option.value === dateFormat)
+                            ?.label ?? t("settings.dateFormat.system"),
+                      })}
                       onChange={(value) => {
                         const next = value as DateFormatPreference;
                         setDateFormat(next);
@@ -1872,23 +1895,27 @@ export function AppSettings({
           <section className="settings-group" aria-labelledby="shortcuts-heading">
             <SettingsPageHeader
               id="shortcuts-heading"
-              title="Shortcuts"
-              blurb="Set the keyboard shortcuts that start dictation and control Clovy."
+              title={t("settings.tabs.shortcuts")}
+              blurb={t("settings.shortcuts.blurb")}
             />
             {helperUnavailable ? (
               <InlineNotice
                 role="alert"
-                aria-label="Dictation unavailable"
-                eyebrow={updateReadyToRelaunch ? "Relaunch to finish updating" : "Dictation paused"}
+                aria-label={t("settings.helper.unavailableAria")}
+                eyebrow={
+                  updateReadyToRelaunch
+                    ? t("settings.helper.relaunchEyebrow")
+                    : t("settings.helper.pausedEyebrow")
+                }
                 body={
                   updateReadyToRelaunch
-                    ? "Dictation is paused until you relaunch to finish updating."
+                    ? t("settings.helper.pausedUntilRelaunch")
                     : helperUnavailable.message
                 }
                 actions={
                   updateReadyToRelaunch && onRelaunch ? (
                     <button type="button" className="btn btn-secondary" onClick={onRelaunch}>
-                      Relaunch Clovy
+                      {t("settings.helper.relaunch")}
                     </button>
                   ) : undefined
                 }
@@ -1899,8 +1926,8 @@ export function AppSettings({
                 {capabilities.shortcuts ? (
                   <>
                     <ShortcutRow
-                      title="Push to talk"
-                      description="Hold this shortcut to dictate, then release to paste."
+                      title={t("settings.shortcuts.pushToTalk")}
+                      description={t("settings.shortcuts.pushToTalkDescription")}
                       shortcut={settings.pushToTalkShortcut}
                       defaultShortcut={defaultShortcuts.push_to_talk}
                       capturing={capturingShortcut === "push_to_talk"}
@@ -1915,8 +1942,8 @@ export function AppSettings({
                     />
 
                     <ShortcutRow
-                      title="Toggle dictation"
-                      description="Press this shortcut to start or stop dictation."
+                      title={t("settings.shortcuts.toggle")}
+                      description={t("settings.shortcuts.toggleDescription")}
                       shortcut={settings.toggleShortcut}
                       defaultShortcut={defaultShortcuts.toggle}
                       capturing={capturingShortcut === "toggle"}
@@ -1931,9 +1958,11 @@ export function AppSettings({
                 ) : (
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Dictation shortcuts unavailable</h3>
+                      <h3 className="settings-row-title">
+                        {t("settings.shortcuts.unavailableTitle")}
+                      </h3>
                       <p className="settings-row-description">
-                        Global dictation shortcuts are not available on this device.
+                        {t("settings.shortcuts.unavailableDescription")}
                       </p>
                     </div>
                   </div>
@@ -1948,23 +1977,23 @@ export function AppSettings({
             <section className="settings-group" aria-labelledby="dictation-heading">
               <SettingsPageHeader
                 id="dictation-heading"
-                title="Dictation"
-                blurb="Choose the language, microphone, and behavior for dictation."
+                title={t("settings.tabs.dictation")}
+                blurb={t("settings.dictation.blurb")}
               />
               <div className="settings-card">
                 <div className="settings-rows">
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Language</h3>
+                      <h3 className="settings-row-title">{t("common.language")}</h3>
                       <p className="settings-row-description">
-                        Default language hint for note transcription and dictation.
+                        {t("settings.dictation.languageDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control" ref={languageWrapRef}>
                       <button
                         type="button"
                         className="select-trigger settings-language-select"
-                        aria-label="Default transcription language"
+                        aria-label={t("settings.dictation.languageAria")}
                         aria-haspopup="listbox"
                         aria-expanded={languageOpen}
                         onClick={() => setLanguageOpen((value) => !value)}
@@ -2016,18 +2045,18 @@ export function AppSettings({
           <section className="settings-group" aria-labelledby="audio-heading">
             <SettingsPageHeader
               id="audio-heading"
-              title="Audio"
+              title={t("settings.tabs.audio")}
               blurb={
                 capabilities.platform === "windows"
-                  ? "Control how Clovy captures microphone audio on this device."
-                  : "Control how Clovy captures meeting and system audio."
+                  ? t("settings.audio.blurbWindows")
+                  : t("settings.audio.blurb")
               }
             />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Microphone</h3>
+                    <h3 className="settings-row-title">{t("settings.audio.microphone")}</h3>
                     <p className="settings-row-description">{microphoneDescription}</p>
                   </div>
                   <div className="settings-row-control" ref={micWrapRef}>
@@ -2095,7 +2124,7 @@ export function AppSettings({
                     onStart={() => void startMicTest()}
                     onStartOver={() => void startOverMicTest()}
                     onPlaybackError={() => {
-                      setMicTestError("Microphone test recorded, but playback is unavailable.");
+                      setMicTestError(t("settings.micTest.playbackUnavailable"));
                     }}
                     onPlayingChange={setMicTestPlaying}
                   />
@@ -2104,9 +2133,9 @@ export function AppSettings({
                 {systemUnavailable ? null : (
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">System audio</h3>
+                      <h3 className="settings-row-title">{t("settings.audio.systemAudio")}</h3>
                       <p className="settings-row-description">
-                        Capture audio from other apps along with your microphone.
+                        {t("settings.audio.systemAudioDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2116,13 +2145,13 @@ export function AppSettings({
                           className="btn btn-secondary"
                           onClick={onEnableSystemAudio}
                         >
-                          Enable
+                          {t("common.enable")}
                         </button>
                       ) : null}
                       <Switch
                         checked={systemOn}
                         disabled={checkingSourceReadiness || systemLocked}
-                        aria-label="Capture system audio for notes"
+                        aria-label={t("settings.audio.systemAudioAria")}
                         onCheckedChange={(next) =>
                           onSourceModeChange(next ? "microphonePlusSystem" : "microphoneOnly")
                         }
@@ -2138,19 +2167,17 @@ export function AppSettings({
         {activeTab === "models" ? (
           <>
             <SettingsPageHeader
-              title="Models"
-              blurb="Choose the models Clovy uses for voice, text, image, and video."
+              title={t("settings.tabs.models")}
+              blurb={t("settings.models.blurb")}
             />
             <section
               className="settings-group settings-models-group"
               aria-labelledby="voice-models-heading"
             >
               <h2 id="voice-models-heading" className="settings-group-heading">
-                Voice
+                {t("settings.models.voice")}
               </h2>
-              <p className="settings-group-description">
-                Choose the model Clovy uses for note transcription and dictation.
-              </p>
+              <p className="settings-group-description">{t("settings.models.voiceDescription")}</p>
               {showingPartitionModels ? (
                 <p className="settings-models-profile-note">
                   Showing models for the current data set: {currentDataPartitionLabel}. Switch to
@@ -2162,8 +2189,8 @@ export function AppSettings({
                   <ModelRow
                     mode="transcription"
                     beforeDivider
-                    title="Transcription"
-                    description="Speech-to-text for note recordings and dictation."
+                    title={t("settings.models.transcription")}
+                    description={t("settings.models.transcriptionDescription")}
                     value={modelValueForMode("transcription")}
                     options={transcriptionOptions}
                     open={pickerMode === "transcription"}
@@ -2187,14 +2214,16 @@ export function AppSettings({
                   <button
                     type="button"
                     className="settings-more-options-trigger settings-more-options-row"
-                    aria-label="More options for voice"
+                    aria-label={t("settings.models.moreVoiceAria")}
                     aria-expanded={showMoreVoiceOptions}
                     aria-controls="voice-more-options-panel"
                     onClick={() => setShowMoreVoiceOptions((open) => !open)}
                   >
                     <span className="settings-row-info">
-                      <span className="settings-row-title">More options</span>
-                      <span className="settings-row-description">Advanced voice settings</span>
+                      <span className="settings-row-title">{t("common.moreOptions")}</span>
+                      <span className="settings-row-description">
+                        {t("settings.models.moreVoiceDescription")}
+                      </span>
                     </span>
                     <IconChevronDownSmall
                       className="settings-more-options-chevron"
@@ -2206,17 +2235,17 @@ export function AppSettings({
                     <div id="voice-more-options-panel" className="settings-more-options-panel">
                       <div className="settings-row">
                         <div className="settings-row-info">
-                          <h3 className="settings-row-title">Live transcription</h3>
+                          <h3 className="settings-row-title">
+                            {t("settings.liveTranscription.title")}
+                          </h3>
                           <p className="settings-row-description">
-                            Show a live transcript while you record. This transcribes audio twice,
-                            so it may use extra credits; turning it off shows the transcript only
-                            after the recording ends.
+                            {t("settings.liveTranscription.description")}
                           </p>
                         </div>
                         <div className="settings-row-control">
                           <Switch
                             checked={providerSettings.liveTranscription}
-                            aria-label="Show a live transcript while recording"
+                            aria-label={t("settings.liveTranscription.aria")}
                             onCheckedChange={toggleLiveTranscription}
                           />
                         </div>
@@ -2232,10 +2261,10 @@ export function AppSettings({
               aria-labelledby="text-models-heading"
             >
               <h2 id="text-models-heading" className="settings-group-heading">
-                Text
+                {t("settings.models.text")}
               </h2>
               <p className="settings-group-description">
-                Choose the model Clovy uses for generated notes and agent responses.
+                {t("settings.models.textGroupDescription")}
               </p>
               {showingPartitionModels ? (
                 <p className="settings-models-profile-note">
@@ -2248,8 +2277,8 @@ export function AppSettings({
                   <ModelRow
                     mode="generation"
                     beforeDivider={providerSettings.generationModel !== "open-software/auto"}
-                    title="Text"
-                    description="Used for generated notes and agent responses."
+                    title={t("settings.models.text")}
+                    description={t("settings.models.textDescription")}
                     value={modelValueForMode("generation")}
                     options={generationOptions}
                     costQuality={providerSettings.costQuality}
@@ -2277,22 +2306,23 @@ export function AppSettings({
                   {providerSettings.generationModel === "open-software/auto" ? (
                     <div className="settings-row settings-row-before-divider">
                       <div className="settings-row-info">
-                        <span className="settings-row-title">Auto preference</span>
+                        <span className="settings-row-title">
+                          {t("settings.autoPreference.title")}
+                        </span>
                         <span className="settings-row-description">
-                          Choose how Clovy balances model quality and usage cost.
+                          {t("settings.autoPreference.description")}
                         </span>
                         {providerSettings.veniceApiKeyConfigured ? (
                           <span className="settings-row-description settings-row-substatus">
-                            Auto does not use your Venice API key for notes or chat. Choose a Venice
-                            model above to use your key for notes and new chats.
+                            {t("settings.autoPreference.veniceNote")}
                           </span>
                         ) : null}
                       </div>
                       <div className="settings-row-control">
                         <SegmentedControl<AutoPreference>
-                          aria-label="Auto preference"
+                          aria-label={t("settings.autoPreference.title")}
                           value={autoPreferenceFromCostQuality(providerSettings.costQuality)}
-                          options={AUTO_PREFERENCE_OPTIONS}
+                          options={autoPreferenceOptions(t)}
                           onValueChange={(preference) =>
                             applyCostQuality(AUTO_PREFERENCE_VALUES[preference])
                           }
@@ -2304,14 +2334,16 @@ export function AppSettings({
                   <button
                     type="button"
                     className="settings-more-options-trigger settings-more-options-row"
-                    aria-label="More options for text"
+                    aria-label={t("settings.models.moreTextAria")}
                     aria-expanded={showMoreTextOptions}
                     aria-controls="text-more-options-panel"
                     onClick={() => setShowMoreTextOptions((open) => !open)}
                   >
                     <span className="settings-row-info">
-                      <span className="settings-row-title">More options</span>
-                      <span className="settings-row-description">Advanced text settings</span>
+                      <span className="settings-row-title">{t("common.moreOptions")}</span>
+                      <span className="settings-row-description">
+                        {t("settings.models.moreTextDescription")}
+                      </span>
                     </span>
                     <IconChevronDownSmall
                       className="settings-more-options-chevron"
@@ -2330,16 +2362,15 @@ export function AppSettings({
                       />
                       <div className="settings-row settings-local-model-toggle-row">
                         <div className="settings-row-info">
-                          <h3 className="settings-row-title">Use local model</h3>
+                          <h3 className="settings-row-title">{t("settings.localModel.title")}</h3>
                           <p className="settings-row-description">
-                            Route generated notes and agent responses through your own
-                            OpenAI-compatible endpoint.
+                            {t("settings.localModel.description")}
                           </p>
                         </div>
                         <div className="settings-row-control">
                           <Switch
                             checked={localModelEnabled}
-                            aria-label="Use local text model"
+                            aria-label={t("settings.localModel.aria")}
                             onCheckedChange={handleLocalToggle}
                           />
                         </div>
@@ -2348,15 +2379,16 @@ export function AppSettings({
                       {showLocalModelFields ? (
                         <div className="settings-row settings-row-stack settings-local-model-fields-row">
                           <div className="settings-row-info">
-                            <h3 className="settings-row-title">Endpoint</h3>
+                            <h3 className="settings-row-title">
+                              {t("settings.localModel.endpoint")}
+                            </h3>
                             <p className="settings-row-description">
-                              Add the base URL, model ID, and optional API key for your local text
-                              model.
+                              {t("settings.localModel.endpointDescription")}
                             </p>
                           </div>
                           <div className="settings-row-control settings-local-model-fields">
                             <label className="settings-field">
-                              <span>Base URL</span>
+                              <span>{t("settings.localModel.baseUrl")}</span>
                               <input
                                 value={localGenerationDraft.baseUrl}
                                 onChange={(event) => {
@@ -2375,7 +2407,7 @@ export function AppSettings({
                               />
                             </label>
                             <label className="settings-field">
-                              <span>Model ID</span>
+                              <span>{t("settings.localModel.modelId")}</span>
                               <input
                                 value={localGenerationDraft.modelId}
                                 onChange={(event) => {
@@ -2399,7 +2431,7 @@ export function AppSettings({
                               </datalist>
                             </label>
                             <label className="settings-field">
-                              <span>Local API key</span>
+                              <span>{t("settings.localModel.apiKey")}</span>
                               <input
                                 type="password"
                                 value={localGenerationDraft.apiKey}
@@ -2411,7 +2443,7 @@ export function AppSettings({
                                   }));
                                   setLocalModelStatus(undefined);
                                 }}
-                                placeholder="Optional"
+                                placeholder={t("settings.localModel.optional")}
                                 autoCapitalize="none"
                                 autoCorrect="off"
                                 spellCheck={false}
@@ -2419,8 +2451,7 @@ export function AppSettings({
                             </label>
                             {localNonLoopback ? (
                               <p className="settings-local-model-warning" role="note">
-                                This endpoint is not on this machine. Requests will leave your
-                                device.
+                                {t("settings.localModel.remoteWarning")}
                               </p>
                             ) : null}
                             <div className="settings-local-model-actions">
@@ -2429,14 +2460,14 @@ export function AppSettings({
                                 className="btn btn-secondary"
                                 onClick={() => void testLocalConnection()}
                               >
-                                Test connection
+                                {t("settings.localModel.test")}
                               </button>
                               <button
                                 type="button"
                                 className="btn btn-secondary"
                                 onClick={() => void handleSaveLocalModel()}
                               >
-                                Save local model
+                                {t("settings.localModel.save")}
                               </button>
                             </div>
                             {localModelStatus ? (
@@ -2447,15 +2478,14 @@ export function AppSettings({
                             {localEnableConfirm ? (
                               <div className="settings-local-model-confirm" role="alert">
                                 <p className="settings-row-error">
-                                  This endpoint is not on this machine. Requests will leave your
-                                  device.
+                                  {t("settings.localModel.remoteWarning")}
                                 </p>
                                 <button
                                   type="button"
                                   className="btn btn-secondary"
                                   onClick={() => void enableLocalGeneration()}
                                 >
-                                  Enable anyway
+                                  {t("settings.localModel.enableAnyway")}
                                 </button>
                               </div>
                             ) : null}
@@ -2480,10 +2510,14 @@ export function AppSettings({
                 // never silently dropped; the status line carries the error.
                 if (!switched) throw new Error("venice_model_switch_failed");
               }}
-              title="Auto does not use your Venice API key"
-              description={`Notes and chat are billed to Clovy credits while Auto is selected. Switch to ${veniceKeySwitchTarget?.name ?? "a Venice model"} to use your key for notes and new chats.`}
-              confirmLabel={`Use ${veniceKeySwitchTarget?.name ?? "a Venice model"}`}
-              cancelLabel="Keep Auto"
+              title={t("settings.venice.autoDialogTitle")}
+              description={t("settings.venice.autoDialogDescription", {
+                model: veniceKeySwitchTarget?.name ?? t("settings.venice.aVeniceModel"),
+              })}
+              confirmLabel={t("settings.venice.useModel", {
+                model: veniceKeySwitchTarget?.name ?? t("settings.venice.aVeniceModel"),
+              })}
+              cancelLabel={t("settings.venice.keepAuto")}
             />
 
             {IMAGE_GENERATION_ENABLED || VIDEO_GENERATION_ENABLED ? (
@@ -2492,10 +2526,10 @@ export function AppSettings({
                 aria-labelledby="media-generation-heading"
               >
                 <h2 id="media-generation-heading" className="settings-group-heading">
-                  Image and video
+                  {t("settings.models.imageAndVideo")}
                 </h2>
                 <p className="settings-group-description">
-                  Choose the models Clovy uses when you ask it to generate an image or video.
+                  {t("settings.models.mediaDescription")}
                 </p>
                 {showingPartitionModels ? (
                   <p className="settings-models-profile-note">
@@ -2509,8 +2543,8 @@ export function AppSettings({
                       <ModelRow
                         mode="image"
                         beforeDivider={!VIDEO_GENERATION_ENABLED}
-                        title="Image"
-                        description="Used when you generate an image from chat."
+                        title={t("settings.models.image")}
+                        description={t("settings.models.imageDescription")}
                         value={modelValueForMode("image")}
                         options={imageOptions}
                         open={pickerMode === "image"}
@@ -2533,8 +2567,8 @@ export function AppSettings({
                       <ModelRow
                         mode="video"
                         beforeDivider
-                        title="Video"
-                        description="Used when you generate a video from chat."
+                        title={t("settings.models.video")}
+                        description={t("settings.models.videoDescription")}
                         value={modelValueForMode("video")}
                         options={videoOptions}
                         open={pickerMode === "video"}
@@ -2557,15 +2591,15 @@ export function AppSettings({
                     <button
                       type="button"
                       className="settings-more-options-trigger settings-more-options-row"
-                      aria-label="More options for image and video"
+                      aria-label={t("settings.models.moreMediaAria")}
                       aria-expanded={showMoreImageOptions}
                       aria-controls="image-more-options-panel"
                       onClick={() => setShowMoreImageOptions((open) => !open)}
                     >
                       <span className="settings-row-info">
-                        <span className="settings-row-title">More options</span>
+                        <span className="settings-row-title">{t("common.moreOptions")}</span>
                         <span className="settings-row-description">
-                          Advanced image and video settings
+                          {t("settings.models.moreMediaDescription")}
                         </span>
                       </span>
                       <IconChevronDownSmall
@@ -2578,17 +2612,17 @@ export function AppSettings({
                       <div id="image-more-options-panel" className="settings-more-options-panel">
                         <div className="settings-row">
                           <div className="settings-row-info">
-                            <h3 className="settings-row-title">Safe mode</h3>
+                            <h3 className="settings-row-title">{t("settings.safeMode.title")}</h3>
                             <p className="settings-row-description">
                               {VIDEO_GENERATION_ENABLED
-                                ? "Blur adult content in generated and edited images, and hold back video prompts that request it (videos cannot be blurred). On by default; your image and video work stays private either way."
-                                : "Blur adult content in generated and edited images. On by default; your image work stays private either way."}
+                                ? t("settings.safeMode.descriptionWithVideo")
+                                : t("settings.safeMode.description")}
                             </p>
                           </div>
                           <div className="settings-row-control">
                             <Switch
                               checked={providerSettings.imageSafeMode}
-                              aria-label="Blur adult content in images"
+                              aria-label={t("settings.safeMode.aria")}
                               onCheckedChange={toggleImageSafeMode}
                             />
                           </div>
@@ -2638,14 +2672,16 @@ export function AppSettings({
           <section className="settings-group" aria-labelledby="about-heading">
             <SettingsPageHeader
               id="about-heading"
-              title="About"
-              blurb="Version, release channel, and other details about this copy of Clovy."
+              title={t("settings.tabs.about")}
+              blurb={t("settings.about.blurb")}
             />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row settings-row-meta">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title settings-meta-label">Release version</h3>
+                    <h3 className="settings-row-title settings-meta-label">
+                      {t("settings.about.releaseVersion")}
+                    </h3>
                   </div>
                   <div className="settings-row-control">
                     <button
@@ -2660,7 +2696,9 @@ export function AppSettings({
 
                 <div className="settings-row settings-row-meta">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title settings-meta-label">Commit</h3>
+                    <h3 className="settings-row-title settings-meta-label">
+                      {t("settings.about.commit")}
+                    </h3>
                   </div>
                   <div className="settings-row-control">
                     <span className="settings-meta-value settings-meta-value-mono">
@@ -2673,9 +2711,9 @@ export function AppSettings({
                   <>
                     <div className="settings-row">
                       <div className="settings-row-info">
-                        <h3 className="settings-row-title">Updates</h3>
+                        <h3 className="settings-row-title">{t("settings.about.updates")}</h3>
                         <p className="settings-row-description">
-                          Check whether a newer version of Clovy is available.
+                          {t("settings.about.updatesDescription")}
                         </p>
                       </div>
                       <div className="settings-row-control">
@@ -2684,23 +2722,23 @@ export function AppSettings({
                           className="btn btn-secondary"
                           onClick={onCheckForUpdates}
                         >
-                          Check for updates
+                          {t("settings.about.checkForUpdates")}
                         </button>
                       </div>
                     </div>
 
                     <div className="settings-row">
                       <div className="settings-row-info">
-                        <h3 className="settings-row-title">Release channel</h3>
+                        <h3 className="settings-row-title">{t("settings.releaseChannel.title")}</h3>
                         <p className="settings-row-description">
-                          Stable is recommended. Release candidate gets early builds for testing.
+                          {t("settings.releaseChannel.description")}
                         </p>
                       </div>
                       <div className="settings-row-control">
                         <SegmentedControl<ReleaseChannel>
-                          aria-label="Release channel"
+                          aria-label={t("settings.releaseChannel.title")}
                           value={releaseChannel}
-                          options={RELEASE_CHANNEL_OPTIONS}
+                          options={releaseChannelOptions(t)}
                           onValueChange={handleReleaseChannelChange}
                         />
                       </div>
@@ -2709,9 +2747,12 @@ export function AppSettings({
                     {reconcileVersion ? (
                       <div className="settings-row">
                         <InlineNotice
-                          aria-label="Switch to stable now"
-                          eyebrow="Switch to stable now?"
-                          body={`Installs ${reconcileVersion}, replacing your release candidate build. You'll get ${baseVersion()} when it reaches stable.`}
+                          aria-label={t("settings.releaseChannel.switchAria")}
+                          eyebrow={t("settings.releaseChannel.switchEyebrow")}
+                          body={t("settings.releaseChannel.switchBody", {
+                            version: reconcileVersion,
+                            base: baseVersion(),
+                          })}
                           actions={
                             <>
                               <button
@@ -2719,14 +2760,14 @@ export function AppSettings({
                                 className="btn btn-ghost"
                                 onClick={() => setReconcileVersion(undefined)}
                               >
-                                Not now
+                                {t("settings.releaseChannel.notNow")}
                               </button>
                               <button
                                 type="button"
                                 className="btn btn-secondary"
                                 onClick={confirmReconcileToStable}
                               >
-                                Switch to stable
+                                {t("settings.releaseChannel.switch")}
                               </button>
                             </>
                           }
@@ -2738,10 +2779,11 @@ export function AppSettings({
 
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Community</h3>
+                    <h3 className="settings-row-title">{t("settings.about.community")}</h3>
                     <p className="settings-row-description">
-                      Join us in the Clovy community on Telegram at{" "}
-                      {CLOVY_COMMUNITY_URL.replace("https://", "")}.
+                      {t("settings.about.communityDescription", {
+                        url: CLOVY_COMMUNITY_URL.replace("https://", ""),
+                      })}
                     </p>
                   </div>
                   <div className="settings-row-control">
@@ -2750,17 +2792,16 @@ export function AppSettings({
                       className="btn btn-secondary"
                       onClick={() => void clovyOpenCommunityPage().catch(() => undefined)}
                     >
-                      Join community
+                      {t("settings.about.joinCommunity")}
                     </button>
                   </div>
                 </div>
 
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Server verification</h3>
+                    <h3 className="settings-row-title">{t("settings.about.verification")}</h3>
                     <p className="settings-row-description">
-                      Clovy&apos;s server runs in a confidential VM. See exactly what code is
-                      running and how to verify it yourself.
+                      {t("settings.about.verificationDescription")}
                     </p>
                   </div>
                   <div className="settings-row-control">
@@ -2769,7 +2810,7 @@ export function AppSettings({
                       className="btn btn-secondary"
                       onClick={() => void clovyOpenVerifyPage().catch(() => undefined)}
                     >
-                      Verify server
+                      {t("settings.about.verify")}
                     </button>
                   </div>
                 </div>
@@ -2777,10 +2818,9 @@ export function AppSettings({
                 {onReportIssue ? (
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Report an issue</h3>
+                      <h3 className="settings-row-title">{t("settings.about.reportIssue")}</h3>
                       <p className="settings-row-description">
-                        Describe the problem, attach files if you have them, and send the report to
-                        the Clovy team.
+                        {t("settings.about.reportIssueDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2789,7 +2829,7 @@ export function AppSettings({
                         className="btn btn-secondary"
                         onClick={() => onReportIssue("bug")}
                       >
-                        Report an issue
+                        {t("settings.about.reportIssue")}
                       </button>
                     </div>
                   </div>
@@ -2801,10 +2841,9 @@ export function AppSettings({
                   // reloads into the wizard.
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Replay onboarding</h3>
+                      <h3 className="settings-row-title">{t("settings.about.replayOnboarding")}</h3>
                       <p className="settings-row-description">
-                        Dev only. Forget that onboarding finished and reload into the first-run
-                        wizard.
+                        {t("settings.about.replayOnboardingDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2813,7 +2852,7 @@ export function AppSettings({
                         className="btn btn-secondary"
                         onClick={() => replayOnboarding()}
                       >
-                        Replay onboarding
+                        {t("settings.about.replayOnboarding")}
                       </button>
                     </div>
                   </div>
@@ -2826,10 +2865,9 @@ export function AppSettings({
                 <div className="settings-rows">
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Experiments</h3>
+                      <h3 className="settings-row-title">{t("settings.experiments.title")}</h3>
                       <p className="settings-row-description">
-                        Runtime overrides for features that ship dark. They apply to this install
-                        only.
+                        {t("settings.experiments.description")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2839,24 +2877,23 @@ export function AppSettings({
                         disabled={experimentalOperation !== undefined}
                         onClick={() => void updateExperimentalFlags({ unlocked: false })}
                       >
-                        Hide again
+                        {t("settings.experiments.hide")}
                       </button>
                     </div>
                   </div>
 
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Browser use</h3>
+                      <h3 className="settings-row-title">{t("settings.experiments.browserUse")}</h3>
                       <p className="settings-row-description">
-                        Enable Browser use on this install while the public feature remains off.
-                        Turning it off applies fully after Clovy restarts.
+                        {t("settings.experiments.browserUseDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
                       <Switch
                         checked={experimentalFlags.browser_use}
                         disabled={experimentalOperation !== undefined}
-                        aria-label="Enable experimental Browser use"
+                        aria-label={t("settings.experiments.browserUseAria")}
                         onCheckedChange={(browser_use) =>
                           void updateExperimentalFlags({ browser_use })
                         }
@@ -2866,21 +2903,21 @@ export function AppSettings({
 
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Companion pairing</h3>
+                      <h3 className="settings-row-title">{t("settings.experiments.companion")}</h3>
                       <p className="settings-row-description">
                         {experimentalFlags.companion_pairing ===
                         experimentalFlags.companionPairingEnabled
-                          ? "Enable Linked devices and the Clovy Companion runtime on this install. Changes apply after Clovy restarts."
+                          ? t("settings.experiments.companionDescription")
                           : experimentalFlags.companionPairingEnabled
-                            ? "Companion pairing remains available until Clovy restarts. It is saved as off for the next launch."
-                            : "Companion pairing is saved as on and will become available after Clovy restarts."}
+                            ? t("settings.experiments.companionPendingOff")
+                            : t("settings.experiments.companionPendingOn")}
                       </p>
                     </div>
                     <div className="settings-row-control">
                       <Switch
                         checked={experimentalFlags.companion_pairing}
                         disabled={experimentalOperation !== undefined}
-                        aria-label="Enable experimental Companion pairing"
+                        aria-label={t("settings.experiments.companionAria")}
                         onCheckedChange={(companion_pairing) =>
                           void updateExperimentalFlags({ companion_pairing })
                         }
@@ -2891,9 +2928,11 @@ export function AppSettings({
                   {experimentalRestartNeeded ? (
                     <div className="settings-row">
                       <div className="settings-row-info">
-                        <h3 className="settings-row-title">Agent runtime</h3>
+                        <h3 className="settings-row-title">
+                          {t("settings.experiments.agentRuntime")}
+                        </h3>
                         <p className="settings-row-description">
-                          Restart the agent to apply the Browser use change.
+                          {t("settings.experiments.agentRuntimeDescription")}
                         </p>
                       </div>
                       <div className="settings-row-control">
@@ -2903,7 +2942,9 @@ export function AppSettings({
                           disabled={experimentalOperation === "restart"}
                           onClick={() => void restartAgentForExperimentalFlags()}
                         >
-                          {experimentalOperation === "restart" ? "Restarting..." : "Restart agent"}
+                          {experimentalOperation === "restart"
+                            ? t("settings.experiments.restarting")
+                            : t("settings.experiments.restart")}
                         </button>
                       </div>
                     </div>
@@ -2911,10 +2952,9 @@ export function AppSettings({
 
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Browser extension (unpacked)</h3>
+                      <h3 className="settings-row-title">{t("settings.experiments.extension")}</h3>
                       <p className="settings-row-description">
-                        Open chrome://extensions, turn on Developer mode, choose Load unpacked, and
-                        select the revealed folder.
+                        {t("settings.experiments.extensionDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2925,8 +2965,8 @@ export function AppSettings({
                         onClick={() => void unpackExperimentalExtension()}
                       >
                         {experimentalOperation === "unpack"
-                          ? "Unpacking..."
-                          : "Unpack and reveal folder"}
+                          ? t("settings.experiments.unpacking")
+                          : t("settings.experiments.unpack")}
                       </button>
                     </div>
                   </div>
@@ -2957,6 +2997,7 @@ type PermissionStatusView = {
  * from what System Settings shows. Hidden in browser previews, where no
  * autostart backend exists. */
 function StartupSettingsSection() {
+  const t = useT();
   const [enabled, setEnabled] = useState<boolean>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
@@ -2969,7 +3010,7 @@ function StartupSettingsSection() {
         if (!cancelled) setEnabled(value);
       })
       .catch(() => {
-        if (!cancelled) setError("Could not read the login item state.");
+        if (!cancelled) setError(translate("settings.startup.readError"));
       });
     return () => {
       cancelled = true;
@@ -2983,7 +3024,7 @@ function StartupSettingsSection() {
       await setAutostartEnabled(next);
       setEnabled(next);
     } catch {
-      setError("Could not update the login item. Try again.");
+      setError(translate("settings.startup.updateError"));
     } finally {
       setSaving(false);
     }
@@ -2994,25 +3035,23 @@ function StartupSettingsSection() {
   return (
     <section className="settings-group" aria-labelledby="startup-heading">
       <h2 id="startup-heading" className="settings-group-heading">
-        Startup
+        {t("settings.startup.title")}
       </h2>
-      <p className="settings-group-description">
-        Dictation shortcuts and meeting detection only work while Clovy is running.
-      </p>
+      <p className="settings-group-description">{t("settings.startup.description")}</p>
       <div className="settings-card">
         <div className="settings-rows">
           <div className="settings-row">
             <div className="settings-row-info">
-              <h3 className="settings-row-title">Open Clovy at login</h3>
+              <h3 className="settings-row-title">{t("settings.startup.openAtLogin")}</h3>
               <p className="settings-row-description">
-                Start Clovy automatically when you sign in to your computer.
+                {t("settings.startup.openAtLoginDescription")}
               </p>
             </div>
             <div className="settings-row-control">
               <Switch
                 checked={enabled === true}
                 disabled={saving || enabled === undefined}
-                aria-label="Open Clovy at login"
+                aria-label={t("settings.startup.openAtLogin")}
                 onCheckedChange={(next) => void toggle(next)}
               />
             </div>
@@ -3041,26 +3080,30 @@ function PermissionsSettingsSection({
   onEnableAccessibility?: () => void;
   onEnableSystemAudio: () => void;
 }) {
+  const t = useT();
   const macLikePlatform = fallbackDictationCapabilities().platform === "macos";
   const systemAudioSupportedPlatform = isSystemAudioSupportedPlatform();
   return (
     <section className="settings-group" aria-labelledby="permissions-heading">
       <h2 id="permissions-heading" className="settings-group-heading">
-        {macLikePlatform ? "System permissions" : "Audio access"}
+        {macLikePlatform
+          ? t("settings.permissions.systemTitle")
+          : t("settings.permissions.audioAccessTitle")}
       </h2>
       <p className="settings-group-description">
         {macLikePlatform
-          ? "macOS access used for recording audio, pasting dictation, and capturing system sound."
+          ? t("settings.permissions.macDescription")
           : systemAudioSupportedPlatform
-            ? "Audio sources available for recording microphone and app audio."
-            : "Audio sources available for recording microphone audio."}
+            ? t("settings.permissions.systemAudioDescription")
+            : t("settings.permissions.micOnlyDescription")}
       </p>
       <div className="settings-card">
         <div className="settings-rows">
           <PermissionRow
-            title="Microphone"
-            description="Record dictation and note audio."
+            title={t("settings.audio.microphone")}
+            description={t("settings.permissions.microphoneDescription")}
             status={permissionStatus(
+              t,
               microphonePermissionStatus ?? microphoneReadiness?.permissionState,
             )}
             onManage={onEnableMicrophone}
@@ -3069,26 +3112,26 @@ function PermissionsSettingsSection({
           {macLikePlatform ? (
             <>
               <PermissionRow
-                title="Accessibility"
-                description="Paste dictated text into the active app."
-                status={permissionStatus(accessibilityPermissionStatus)}
+                title={t("settings.permissions.accessibility")}
+                description={t("settings.permissions.accessibilityDescription")}
+                status={permissionStatus(t, accessibilityPermissionStatus)}
                 onManage={onEnableAccessibility}
               />
 
               {systemAudioSupportedPlatform ? (
                 <PermissionRow
-                  title="System audio"
-                  description="Record audio from other apps when system audio is enabled."
-                  status={sourcePermissionStatus(systemReadiness, macLikePlatform)}
+                  title={t("settings.audio.systemAudio")}
+                  description={t("settings.permissions.systemAudioRowDescription")}
+                  status={sourcePermissionStatus(t, systemReadiness, macLikePlatform)}
                   onManage={onEnableSystemAudio}
                 />
               ) : null}
             </>
           ) : systemAudioSupportedPlatform ? (
             <PermissionRow
-              title="System audio"
-              description="Record audio from other apps when system audio is enabled."
-              status={sourcePermissionStatus(systemReadiness, macLikePlatform)}
+              title={t("settings.audio.systemAudio")}
+              description={t("settings.permissions.systemAudioRowDescription")}
+              status={sourcePermissionStatus(t, systemReadiness, macLikePlatform)}
             />
           ) : null}
         </div>
@@ -3103,7 +3146,7 @@ function PermissionRow({
   status,
   onManage,
   actionLabel,
-  actionText = "Manage",
+  actionText,
 }: {
   title: string;
   description: string;
@@ -3112,6 +3155,7 @@ function PermissionRow({
   actionLabel?: string;
   actionText?: string;
 }) {
+  const t = useT();
   const actionDisabled = status.tone === "unsupported" || !onManage;
   return (
     <div className="settings-row">
@@ -3134,10 +3178,10 @@ function PermissionRow({
             type="button"
             className="btn btn-secondary"
             disabled={actionDisabled}
-            aria-label={actionLabel ?? `Manage ${title} permission`}
+            aria-label={actionLabel ?? t("settings.permissions.manageAria", { name: title })}
             onClick={onManage}
           >
-            {actionText}
+            {actionText ?? t("settings.permissions.manage")}
           </button>
         ) : null}
       </div>
@@ -3152,44 +3196,50 @@ function PermissionStatusIcon({ tone }: { tone: PermissionStatusTone }) {
   return <IconExclamationCircle size={16} />;
 }
 
-function permissionStatus(state?: string): PermissionStatusView {
+function permissionStatus(t: TFunction, state?: string): PermissionStatusView {
   switch (state) {
     case "granted":
-      return { label: "Allowed", tone: "allowed" };
+      return { label: t("settings.permissions.status.allowed"), tone: "allowed" };
     case "denied":
-      return { label: "Blocked", tone: "blocked" };
+      return { label: t("settings.permissions.status.blocked"), tone: "blocked" };
     case "restricted":
-      return { label: "Restricted", tone: "blocked" };
+      return { label: t("settings.permissions.status.restricted"), tone: "blocked" };
     case "missing":
-      return { label: "Needs access", tone: "attention" };
+      return { label: t("settings.permissions.status.needsAccess"), tone: "attention" };
     case "not_determined":
-      return { label: "Not requested", tone: "attention" };
+      return { label: t("settings.permissions.status.notRequested"), tone: "attention" };
     case "unavailable":
-      return { label: "No microphone found", tone: "attention" };
+      return { label: t("settings.permissions.status.noMicrophone"), tone: "attention" };
     case "unsupported":
-      return { label: "Unsupported", tone: "unsupported" };
+      return { label: t("settings.permissions.status.unsupported"), tone: "unsupported" };
     case "unknown":
-      return { label: "Unknown", tone: "unknown" };
+      return { label: t("settings.permissions.status.unknown"), tone: "unknown" };
     default:
-      return { label: "Checking", tone: "unknown" };
+      return { label: t("settings.permissions.status.checking"), tone: "unknown" };
   }
 }
 
 function sourcePermissionStatus(
+  t: TFunction,
   source: RecordingSourceReadinessDto["sources"][number] | undefined,
   macLikePlatform: boolean,
 ): PermissionStatusView {
-  if (!source) return { label: "Checking", tone: "unknown" };
+  if (!source) return { label: t("settings.permissions.status.checking"), tone: "unknown" };
   // The two halves are independent: permissionState is the platform grant or
   // endpoint status, while `ready` says whether this device can actually
   // capture. A microphone-only check never asks for the grant/status, and a
   // granted source can still be uncapturable.
   if (source.permissionState === "granted") {
     return source.ready
-      ? { label: macLikePlatform ? "Allowed" : "Available", tone: "allowed" }
-      : { label: "Unavailable", tone: "attention" };
+      ? {
+          label: macLikePlatform
+            ? t("settings.permissions.status.allowed")
+            : t("settings.permissions.status.available"),
+          tone: "allowed",
+        }
+      : { label: t("settings.permissions.status.unavailable"), tone: "attention" };
   }
-  return permissionStatus(source.permissionState);
+  return permissionStatus(t, source.permissionState);
 }
 
 function stringPayload(value: unknown) {
@@ -3252,8 +3302,9 @@ function ModelRow({
   readOnly?: boolean;
   summarySuppressed?: boolean;
 }) {
+  const t = useT();
   const model = selectedModel(options, value);
-  const modelLabel = `${title.toLowerCase()} model`;
+  const modelLabel = t(`settings.models.modelLabel.${mode}`);
   return (
     <div
       className={`settings-row settings-model-row${
@@ -3278,7 +3329,7 @@ function ModelRow({
             type="button"
             className="model-summary-button"
             onClick={readOnly ? undefined : onToggle}
-            aria-label={`Change ${modelLabel}`}
+            aria-label={t("settings.models.changeAria", { model: modelLabel })}
             aria-haspopup="dialog"
             aria-expanded={readOnly ? false : open}
             disabled={readOnly}
@@ -3306,12 +3357,8 @@ function ModelRow({
             popoverRef={popoverRef}
             searchRef={searchRef}
             className="settings-model-popover"
-            title={
-              modelLabel === "text model"
-                ? undefined
-                : modelLabel[0].toUpperCase() + modelLabel.slice(1)
-            }
-            ariaLabel={`Choose ${modelLabel}`}
+            title={mode === "generation" ? undefined : t(`settings.models.popoverTitle.${mode}`)}
+            ariaLabel={t("settings.models.chooseAria", { model: modelLabel })}
             onFlyoutChange={onFlyoutChange}
             onSearchChange={onSearchChange}
             onSelect={onSelect}
@@ -3349,30 +3396,30 @@ function VeniceApiKeyRow({
   onSave: () => void;
   onRemove: () => void;
 }) {
+  const t = useT();
   const canSave = value.trim().length > 0;
   return (
     <div id={id} className="settings-row settings-row-venice-key">
       <div className="settings-row-info">
-        <h3 className="settings-row-title">Venice API key</h3>
-        <p className="settings-row-description">
-          Use your own key for Venice models so Clovy credits are not used. Stored locally and sent
-          only for Venice requests. For least privilege, use an inference-only key.
-        </p>
+        <h3 className="settings-row-title">{t("settings.venice.title")}</h3>
+        <p className="settings-row-description">{t("settings.venice.description")}</p>
         {configured ? (
-          <p className="settings-row-description settings-row-substatus">Key saved.</p>
+          <p className="settings-row-description settings-row-substatus">
+            {t("settings.venice.keySaved")}
+          </p>
         ) : null}
       </div>
       <div className="settings-row-control settings-secret-control">
         <label className="settings-field settings-secret-field">
-          <span>API key</span>
+          <span>{t("settings.venice.apiKey")}</span>
           <input
             type="password"
             className="dialog-input"
             value={value}
             autoComplete="off"
             spellCheck={false}
-            placeholder={configured ? "Saved key hidden" : "Venice API key"}
-            aria-label="Venice API key"
+            placeholder={configured ? t("settings.venice.savedHidden") : t("settings.venice.title")}
+            aria-label={t("settings.venice.title")}
             onChange={(event) => onValueChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && canSave) onSave();
@@ -3380,11 +3427,11 @@ function VeniceApiKeyRow({
           />
         </label>
         <button type="button" className="btn btn-secondary" disabled={!canSave} onClick={onSave}>
-          Save
+          {t("common.save")}
         </button>
         {configured ? (
           <button type="button" className="btn btn-secondary" onClick={onRemove}>
-            Remove
+            {t("common.remove")}
           </button>
         ) : null}
       </div>
@@ -3417,6 +3464,7 @@ function ShortcutRow({
   onCancel: () => void;
   platform: "macos" | "windows" | "unsupported";
 }) {
+  const t = useT();
   const canReset = !capturing && !shortcutsMatch(shortcut, defaultShortcut) && !disabled;
 
   return (
@@ -3434,16 +3482,16 @@ function ShortcutRow({
           disabled={disabled}
           onClick={capturing ? onCancel : onChange}
         >
-          {capturing ? "Cancel" : "Change"}
+          {capturing ? t("common.cancel") : t("settings.shortcuts.change")}
         </button>
         {canReset ? (
           <button
             type="button"
             className="btn btn-secondary"
-            aria-label={`Reset ${title} shortcut to default`}
+            aria-label={t("settings.shortcuts.resetAria", { name: title })}
             onClick={onReset}
           >
-            Reset
+            {t("settings.shortcuts.reset")}
           </button>
         ) : null}
       </div>
@@ -3456,7 +3504,9 @@ function shortcutKindPayload(value: unknown): DictationShortcutKind | undefined 
 }
 
 function shortcutKindLabel(kind: DictationShortcutKind) {
-  return kind === "toggle" ? "Toggle dictation" : "Push to talk";
+  return kind === "toggle"
+    ? translate("settings.shortcuts.toggle")
+    : translate("settings.shortcuts.pushToTalk");
 }
 
 function shortcutForKind(settings: DictationSettingsDto, kind: DictationShortcutKind) {

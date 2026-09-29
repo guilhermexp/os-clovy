@@ -1,4 +1,5 @@
 import { useCallback, useRef } from "react";
+import { t } from "../i18n";
 import {
   checkRecordingSourceReadiness,
   createNote,
@@ -18,10 +19,7 @@ import {
   revealMainWindowForMeetingStartError,
   startingRecordingStatus,
 } from "./app-helpers";
-import {
-  MEETING_START_REQUEST_EXPIRED_MESSAGE,
-  RECORDING_FUNDING_DISABLED_REASON,
-} from "./app-shell";
+import { meetingStartRequestExpiredMessage, recordingFundingDisabledReason } from "./app-shell";
 import type { UseRecordingStartActionsDependencies } from "./use-recording-start-actions-types";
 
 export function useRecordingStartActions(dependencies: UseRecordingStartActionsDependencies) {
@@ -57,7 +55,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
       options: { startAlreadyClaimed?: boolean; sourceMode?: RecordingSourceMode } = {},
     ): Promise<boolean> => {
       if (fundingRequired) {
-        setError(RECORDING_FUNDING_DISABLED_REASON);
+        setError(recordingFundingDisabledReason());
         return false;
       }
       const startAlreadyClaimed = options.startAlreadyClaimed ?? false;
@@ -92,7 +90,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
           setRecordingNote(undefined);
           recordingStatusRef.current = undefined;
           dispatch({ type: "recordingStatusCleared" });
-          setError(micSource?.message ?? "Microphone is not ready.");
+          setError(micSource?.message ?? t("app.recording.micNotReady"));
           return false;
         }
 
@@ -159,7 +157,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
     async (requestId: string, noteId: string) => {
       if (fundingRequired) {
         revealMainWindowForMeetingStartError();
-        setError(RECORDING_FUNDING_DISABLED_REASON);
+        setError(recordingFundingDisabledReason());
         return true;
       }
       const competingRecording = recordingStatusRef.current;
@@ -182,7 +180,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
           calendarContextNoteUpdatesRef.current.delete(noteId);
           revealMainWindowForMeetingStartError();
           if (outcome.error.code === "meeting_start_expired") {
-            setError(MEETING_START_REQUEST_EXPIRED_MESSAGE);
+            setError(meetingStartRequestExpiredMessage());
           } else {
             setError(messageFromError(outcome.error));
           }
@@ -256,7 +254,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
   const handleStartAgentRecording = useCallback(
     async (requestedSourceMode: RecordingSourceMode) => {
       if (fundingRequired) {
-        throw new Error(RECORDING_FUNDING_DISABLED_REASON);
+        throw new Error(recordingFundingDisabledReason());
       }
       if (recordingStartInFlightRef.current || recordingStatusRef.current) {
         throw new Error(
@@ -296,7 +294,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         } else {
           handleEmptyNotesAfterDelete();
         }
-        throw new Error("Recording did not start.");
+        throw new Error(t("app.recording.didNotStart"));
       } catch (err) {
         if (createdNoteId && !handedStartClaimToRecorder) {
           try {

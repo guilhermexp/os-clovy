@@ -1,3 +1,4 @@
+import { type MessageKey, t } from "../i18n/translate";
 import type { VeniceModelDto } from "./tauri";
 
 // Clovy's default image model. Mirrors DEFAULT_IMAGE_MODEL in the Rust providers
@@ -9,20 +10,32 @@ type ImageModelDefinition = Omit<
   "provider" | "modelType" | "capabilities" | "traits"
 > &
   Pick<VeniceModelDto, "privacy"> &
-  Partial<Pick<VeniceModelDto, "capabilities" | "traits">>;
+  Partial<Pick<VeniceModelDto, "capabilities" | "traits">> & {
+    /** Catalog key for the description, read in the interface language. */
+    descriptionKey?: MessageKey;
+  };
 
 function imageModel({
   traits = [],
   capabilities = [],
+  descriptionKey,
   ...model
 }: ImageModelDefinition): VeniceModelDto {
-  return {
+  const entry: VeniceModelDto = {
     provider: "venice",
     modelType: "image",
     capabilities,
     traits,
     ...model,
   };
+  if (descriptionKey) {
+    Object.defineProperty(entry, "description", {
+      enumerable: true,
+      configurable: true,
+      get: () => t(descriptionKey),
+    });
+  }
+  return entry;
 }
 
 // Curated Venice image models for the settings picker. Image models are not
@@ -36,7 +49,7 @@ export const IMAGE_MODELS: VeniceModelDto[] = [
   imageModel({
     id: "venice-sd35",
     name: "Venice SD3.5",
-    description: "Venice's default Stable Diffusion 3.5 image model.",
+    descriptionKey: "lib.imageModels.veniceSd35",
     privacy: "private",
     traits: ["eliza-default"],
   }),
@@ -53,7 +66,7 @@ export const IMAGE_MODELS: VeniceModelDto[] = [
   imageModel({
     id: "flux-2-pro",
     name: "FLUX 2 Pro",
-    description: "High-detail FLUX model for photorealistic results.",
+    descriptionKey: "lib.imageModels.flux2Pro",
     privacy: "anonymized",
   }),
   imageModel({
@@ -186,7 +199,7 @@ export const IMAGE_MODELS: VeniceModelDto[] = [
   imageModel({
     id: "qwen-image",
     name: "Qwen Image",
-    description: "Strong text rendering and prompt adherence.",
+    descriptionKey: "lib.imageModels.qwenImage",
     privacy: "anonymized",
     traits: ["highest_quality"],
   }),
@@ -204,7 +217,7 @@ export const IMAGE_MODELS: VeniceModelDto[] = [
   imageModel({
     id: "chroma",
     name: "Chroma",
-    description: "Versatile general-purpose image model.",
+    descriptionKey: "lib.imageModels.chroma",
     privacy: "private",
   }),
   imageModel({

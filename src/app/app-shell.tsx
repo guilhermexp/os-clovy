@@ -6,6 +6,7 @@ import { IconProjects } from "central-icons/IconProjects";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconZap } from "central-icons/IconZap";
 import type { ReactNode } from "react";
+import { t } from "../i18n";
 import type { FolderDto, NoteDto, NoteListItemDto } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import { navEquals, type TabNav } from "./tabs/tabs";
@@ -32,16 +33,14 @@ export const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 export const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 export const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
 export const MEETING_START_LISTENER_RETRY_DELAYS_MS = [250, 1_000, 5_000] as const;
-export const MEETING_START_REQUEST_EXPIRED_MESSAGE =
-  "Recording did not start in time. Open meeting notes and select Record to try again.";
-export const COMPOSER_FUNDING_DISABLED_REASON =
-  "Add credits to send messages or generate images and videos.";
-export const RECORDING_FUNDING_DISABLED_REASON =
-  "Add credits before starting a recording. You can still browse and edit.";
-export const NOTE_RETRY_FUNDING_DISABLED_REASON = "Add credits before retrying note generation.";
-export const RECOVERY_FUNDING_DISABLED_REASON =
-  "Add credits before recovering this recording. Your saved audio will stay available.";
-export const ROUTINE_FUNDING_DISABLED_REASON = "Add credits before running a routine.";
+// Funding and start-expiry copy is read at call time so it follows the
+// interface language.
+export const meetingStartRequestExpiredMessage = () => t("app.recording.startExpired");
+export const composerFundingDisabledReason = () => t("app.funding.composer");
+export const recordingFundingDisabledReason = () => t("app.funding.recording");
+export const noteRetryFundingDisabledReason = () => t("app.funding.noteRetry");
+export const recoveryFundingDisabledReason = () => t("app.funding.recovery");
+export const routineFundingDisabledReason = () => t("app.funding.routine");
 // Floor for the note card so the sidebar can't be dragged wide enough to
 // crush it into a sliver — it always keeps a usable width plus its gutters.
 export const MAIN_PANEL_MIN_WIDTH = 420;
@@ -108,20 +107,20 @@ export function tabMeta(
   switch (nav.view) {
     case "home":
       return {
-        title: "Home",
+        title: t("app.nav.home"),
         icon: <IconHomeOpen size={TAB_ICON_SIZE} />,
       };
     case "meetings": {
       const note = nav.noteId ? notes.find((n) => n.id === nav.noteId) : undefined;
       return {
-        title: note?.title?.trim() || "New note",
+        title: note?.title?.trim() || t("app.newNote"),
         icon: <IconNoteText size={TAB_ICON_SIZE} />,
       };
     }
     case "folders": {
       const folder = nav.folderId ? folders.find((f) => f.id === nav.folderId) : undefined;
       return {
-        title: folder?.name?.trim() || "Projects",
+        title: folder?.name?.trim() || t("app.nav.projects"),
         icon: <IconProjects size={TAB_ICON_SIZE} />,
       };
     }
@@ -130,40 +129,41 @@ export function tabMeta(
         ? sessions.find((s) => s.id === nav.agentSessionId)
         : undefined;
       return {
-        title: agentSessionTabTitle(session) || nav.agentSessionTitle?.trim() || "New session",
+        title:
+          agentSessionTabTitle(session) || nav.agentSessionTitle?.trim() || t("app.newSession"),
         icon: <IconBubble3 size={TAB_ICON_SIZE} />,
       };
     }
     case "agent-sessions":
       return {
-        title: "Sessions",
+        title: t("app.nav.sessions"),
         icon: <IconBubble3 size={TAB_ICON_SIZE} />,
       };
     case "all-notes":
       return {
-        title: "All notes",
+        title: t("app.nav.allNotes"),
         icon: <IconNoteText size={TAB_ICON_SIZE} />,
       };
     case "routines":
       return {
-        title: "Routines",
+        title: t("app.nav.routines"),
         icon: <IconZap size={TAB_ICON_SIZE} />,
       };
     case "dictation":
       return {
-        title: "Dictation",
+        title: t("app.nav.dictation"),
         icon: <IconMicrophone size={TAB_ICON_SIZE} />,
       };
     case "settings":
       return {
         // Surface the active settings section (e.g. "MCP servers") in the tab
         // strip so the label says what you are looking at, not just "Settings".
-        title: settingsSectionLabel?.trim() || "Settings",
+        title: settingsSectionLabel?.trim() || t("common.settings"),
         icon: <IconSettingsGear4 size={TAB_ICON_SIZE} />,
       };
     default:
       return {
-        title: "Notes",
+        title: t("app.nav.notes"),
         icon: <IconNoteText size={TAB_ICON_SIZE} />,
       };
   }

@@ -13,6 +13,7 @@ import {
 } from "react";
 import type { RefObject } from "react";
 import { createPortal } from "react-dom";
+import { type MessageKey, type TFunction, useT } from "../../i18n";
 import { modelAvailableForMode, modelIsPrivate, modelPrivacyBadge } from "../../lib/model-privacy";
 import { modelMatchesQuery } from "../../lib/model-search";
 import {
@@ -65,25 +66,51 @@ export function autoPreferenceFromCostQuality(value: number): AutoPreference {
 // values.
 const AUTO_PREFERENCE_DETAILS: readonly {
   value: AutoPreference;
-  label: string;
-  description: string;
+  label: MessageKey;
+  description: MessageKey;
 }[] = [
   {
     value: "cost",
-    label: "Economy",
-    description: "Favors cheaper models to stretch your credits.",
+    label: "settingsPanels.picker.economy",
+    description: "settingsPanels.picker.economyDescription",
   },
   {
     value: "balanced",
-    label: "Balanced",
-    description: "Weighs quality against cost on every request.",
+    label: "settingsPanels.picker.balanced",
+    description: "settingsPanels.picker.balancedDescription",
   },
   {
     value: "quality",
-    label: "Quality",
-    description: "Routes to the strongest model for the job.",
+    label: "settingsPanels.picker.quality",
+    description: "settingsPanels.picker.qualityDescription",
   },
 ];
+
+const MODE_LABEL_KEYS = {
+  generation: {
+    choose: "settingsPanels.picker.chooseText",
+    suggested: "settingsPanels.picker.suggestedText",
+    all: "settingsPanels.picker.allText",
+  },
+  transcription: {
+    choose: "settingsPanels.picker.chooseTranscription",
+    suggested: "settingsPanels.picker.suggestedTranscription",
+    all: "settingsPanels.picker.allTranscription",
+  },
+  image: {
+    choose: "settingsPanels.picker.chooseImage",
+    suggested: "settingsPanels.picker.suggestedImage",
+    all: "settingsPanels.picker.allImage",
+  },
+  video: {
+    choose: "settingsPanels.picker.chooseVideo",
+    suggested: "settingsPanels.picker.suggestedVideo",
+    all: "settingsPanels.picker.allVideo",
+  },
+} as const satisfies Record<
+  ProviderModelMode,
+  { choose: MessageKey; suggested: MessageKey; all: MessageKey }
+>;
 
 // Row hovers should feel quick while moving through models, but still keep a
 // tiny intent delay so a pointer sweep does not flash every card open.
@@ -103,10 +130,10 @@ export function ModelPickerPopover({
   popoverRef,
   searchRef,
   className,
-  title = "Suggested",
-  ariaLabel = `Choose ${modelModeLabel(mode)} model`,
-  suggestedListLabel = `Suggested ${modelModeLabel(mode)} models`,
-  allModelsLabel = `All ${modelModeLabel(mode)} models`,
+  title: titleProp,
+  ariaLabel: ariaLabelProp,
+  suggestedListLabel: suggestedListLabelProp,
+  allModelsLabel: allModelsLabelProp,
   veniceApiKeyConfigured = false,
   catalogLoaded,
   suggestedModelIds,
@@ -179,6 +206,12 @@ export function ModelPickerPopover({
   thinkingLevel?: ThinkingLevel;
   onSelectThinking?: (level: ThinkingLevel) => void;
 }) {
+  const t = useT();
+  const modeLabels = MODE_LABEL_KEYS[mode];
+  const title = titleProp ?? t("settingsPanels.picker.suggested");
+  const ariaLabel = ariaLabelProp ?? t(modeLabels.choose);
+  const suggestedListLabel = suggestedListLabelProp ?? t(modeLabels.suggested);
+  const allModelsLabel = allModelsLabelProp ?? t(modeLabels.all);
   const flyoutRef = useRef<HTMLDivElement | null>(null);
   const focusEffortChoiceRef = useRef(false);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -394,12 +427,12 @@ export function ModelPickerPopover({
         {
           key: `${id}:host:${index}`,
           model: option,
-          reason: option.description ?? "Suggested for this surface.",
+          reason: option.description ?? t("settingsPanels.picker.suggestedForSurface"),
           costQuality: undefined,
         },
       ];
     });
-  }, [mode, selectable, suggestedModelIds]);
+  }, [mode, selectable, suggestedModelIds, t]);
   const autoEnabled = onCostQualityChange !== undefined && model?.id === AUTO_MODEL_ID;
   const autoPreference = autoPreferenceFromCostQuality(costQuality ?? 100);
   // Toggling stays inside the popover: turning Auto off lands on the leading
@@ -442,16 +475,18 @@ export function ModelPickerPopover({
   const rootFade = useScrollFade(rootListRef);
   const rootQuery = (rootSearch ?? "").trim().toLowerCase();
   const rootQueryActive = Boolean(rootSearchRef) && Boolean(rootQuery);
+  const autoPreferenceLabel = autoPreferenceLabelFor(t, autoPreference);
+  // English terms stay searchable in every language; the localized row names
+  // join them so a query typed in the interface language matches too.
   const rootControlTerms = [
-    ...(onCostQualityChange && showAutoToggle ? ["auto", "automatic"] : []),
+    ...(onCostQualityChange && showAutoToggle
+      ? ["auto", "automatic", t("settingsPanels.picker.automaticTerm")]
+      : []),
     ...(onCostQualityChange && autoEnabled && showAutoPreference
-      ? [
-          "preference",
-          AUTO_PREFERENCE_DETAILS.find((option) => option.value === autoPreference)?.label ?? "",
-        ]
+      ? ["preference", t("settingsPanels.picker.preference"), autoPreferenceLabel]
       : []),
     ...(thinkingLevel && onSelectThinking
-      ? ["effort", thinkingOptionForLevel(thinkingLevel).label]
+      ? ["effort", t("settingsPanels.picker.effort"), thinkingOptionForLevel(thinkingLevel).label]
       : []),
   ];
   const rootControlQueryTerms = rootQuery.split(/\s+/);
@@ -485,11 +520,14 @@ export function ModelPickerPopover({
   const resolvedRootActive = Math.min(rootActive, Math.max(rootResults.length - 1, 0));
   const rootStatusId = `${rootListId}-status`;
   const matchingModelsStatus = rootResults.length
-    ? `${rootResults.length} matching ${rootResults.length === 1 ? "model" : "models"}. Use the arrow keys to review ${rootResults.length === 1 ? "it" : "models"}.`
-    : "No results match your search.";
+    ? t("settingsPanels.picker.matchingModels", { count: rootResults.length })
+    : t("settingsPanels.picker.noResults");
   const rootSearchStatus = rootQueryActive
     ? rootControlsMatch
-      ? `${rootVisibleControlCount} ${rootVisibleControlCount === 1 ? "setting" : "settings"} shown. Press Tab to review ${rootVisibleControlCount === 1 ? "it" : "settings"}. ${matchingModelsStatus}`
+      ? t("settingsPanels.picker.settingsShown", {
+          count: rootVisibleControlCount,
+          models: matchingModelsStatus,
+        })
       : matchingModelsStatus
     : undefined;
   useEffect(() => {
@@ -631,16 +669,16 @@ export function ModelPickerPopover({
             ref={searchRef}
             value={search}
             onChange={(event) => onSearchChange(event.currentTarget.value)}
-            placeholder="Search models"
-            aria-label="Search models"
+            placeholder={t("settingsPanels.models.search")}
+            aria-label={t("settingsPanels.models.search")}
           />
         </label>
         <div className="agent-composer-model-filter">
-          <span>Private</span>
+          <span>{t("settingsPanels.models.private")}</span>
           <Switch
             checked={privateOnly}
             onCheckedChange={setPrivateOnly}
-            aria-label="Only show private models"
+            aria-label={t("settingsPanels.picker.privateOnly")}
           />
         </div>
         <div className="agent-composer-model-list-wrap scroll-fade" {...fade.props}>
@@ -682,9 +720,9 @@ export function ModelPickerPopover({
               <p className="agent-composer-model-empty" role="status" aria-live="polite">
                 {privateOnly
                   ? query
-                    ? "No private models match your search."
-                    : "No private models available."
-                  : "No models match your search."}
+                    ? t("settingsPanels.picker.noPrivateMatch")
+                    : t("settingsPanels.picker.noPrivate")
+                  : t("settingsPanels.picker.noModelsMatch")}
               </p>
             )}
           </div>
@@ -704,7 +742,7 @@ export function ModelPickerPopover({
         id={rootListId}
         className="agent-composer-model-list"
         role="listbox"
-        aria-label="Matching models"
+        aria-label={t("settingsPanels.picker.matchingModelsAria")}
         onScroll={rootFade.update}
       >
         {rootResults.map(({ key, model: option, costQuality: presetCostQuality }, index) => (
@@ -739,7 +777,7 @@ export function ModelPickerPopover({
     </div>
   ) : rootControlsMatch ? null : (
     <p className="agent-composer-model-empty agent-composer-model-root-empty">
-      No results match your search.
+      {t("settingsPanels.picker.noResults")}
     </p>
   );
   return (
@@ -763,8 +801,8 @@ export function ModelPickerPopover({
             ref={rootSearchRef}
             value={rootSearch ?? ""}
             onChange={(event) => onRootSearchChange?.(event.currentTarget.value)}
-            placeholder="Search models"
-            aria-label="Search models"
+            placeholder={t("settingsPanels.models.search")}
+            aria-label={t("settingsPanels.models.search")}
             role="combobox"
             aria-autocomplete="list"
             aria-expanded={rootQueryActive && rootResults.length > 0}
@@ -842,12 +880,12 @@ export function ModelPickerPopover({
                       checked={autoEnabled}
                       disabled={autoEnabled && !autoOffTarget}
                       onCheckedChange={toggleAuto}
-                      aria-label="Choose the model automatically"
+                      aria-label={t("settingsPanels.picker.autoAria")}
                     />
                   </div>
                   {veniceApiKeyConfigured ? (
                     <p className="agent-composer-model-auto-note">
-                      Auto is billed to Clovy credits and does not use your Venice API key.
+                      {t("settingsPanels.picker.autoBillingNote")}
                     </p>
                   ) : null}
                 </>
@@ -881,13 +919,10 @@ export function ModelPickerPopover({
                     onFlyoutChange({ kind: "auto" });
                   }}
                 >
-                  <span className="agent-composer-model-row-name">Preference</span>
-                  <span className="agent-composer-model-row-value">
-                    {
-                      AUTO_PREFERENCE_DETAILS.find((option) => option.value === autoPreference)
-                        ?.label
-                    }
+                  <span className="agent-composer-model-row-name">
+                    {t("settingsPanels.picker.preference")}
                   </span>
+                  <span className="agent-composer-model-row-value">{autoPreferenceLabel}</span>
                   <IconChevronRightSmall
                     size={16}
                     aria-hidden
@@ -903,7 +938,7 @@ export function ModelPickerPopover({
                   ref={flyoutRef}
                   className="agent-composer-model-flyout agent-composer-model-auto-panel"
                   role="group"
-                  aria-label="Auto preference"
+                  aria-label={t("settingsPanels.picker.autoPreference")}
                   onPointerLeave={() => {
                     cancelHoverIntent();
                     setBridging(false);
@@ -920,9 +955,9 @@ export function ModelPickerPopover({
                         onClick={() => onCostQualityChange(AUTO_PREFERENCE_VALUES[option.value])}
                       >
                         <span className="agent-composer-model-choice-copy">
-                          <span className="agent-composer-model-row-name">{option.label}</span>
+                          <span className="agent-composer-model-row-name">{t(option.label)}</span>
                           <span className="agent-composer-model-choice-desc">
-                            {option.description}
+                            {t(option.description)}
                           </span>
                         </span>
                         {option.value === autoPreference ? (
@@ -971,7 +1006,9 @@ export function ModelPickerPopover({
                     onFlyoutChange({ kind: "effort" });
                   }}
                 >
-                  <span className="agent-composer-model-row-name">Effort</span>
+                  <span className="agent-composer-model-row-name">
+                    {t("settingsPanels.picker.effort")}
+                  </span>
                   <span className="agent-composer-model-row-value">
                     <ThinkingLevelMeter level={thinkingLevel} />
                     {thinkingOptionForLevel(thinkingLevel).label}
@@ -988,7 +1025,7 @@ export function ModelPickerPopover({
                   ref={flyoutRef}
                   className="agent-composer-model-flyout agent-composer-model-effort-panel"
                   role="group"
-                  aria-label="Thinking level"
+                  aria-label={t("settingsPanels.picker.thinkingLevel")}
                   onKeyDown={(event) => {
                     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
                     const choices = Array.from(
@@ -1106,7 +1143,9 @@ export function ModelPickerPopover({
                     </button>
                   ))
                 ) : (
-                  <p className="agent-composer-model-empty">Loading suggested models.</p>
+                  <p className="agent-composer-model-empty">
+                    {t("settingsPanels.picker.loadingSuggested")}
+                  </p>
                 )}
               </div>
               <button
@@ -1137,7 +1176,9 @@ export function ModelPickerPopover({
                   searchRef.current?.focus();
                 }}
               >
-                <span className="agent-composer-model-row-name">All models</span>
+                <span className="agent-composer-model-row-name">
+                  {t("settingsPanels.picker.allModels")}
+                </span>
                 <IconChevronRightSmall
                   size={16}
                   aria-hidden
@@ -1339,7 +1380,7 @@ function ModelPickerOptionText({ model }: { model: VeniceModelDto }) {
   );
 }
 
-function modelModeLabel(mode: ProviderModelMode) {
-  if (mode === "generation") return "text";
-  return mode;
+function autoPreferenceLabelFor(t: TFunction, preference: AutoPreference) {
+  const detail = AUTO_PREFERENCE_DETAILS.find((option) => option.value === preference);
+  return detail ? t(detail.label) : "";
 }

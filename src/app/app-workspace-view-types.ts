@@ -148,5 +148,5 @@ export type RenderAppWorkspaceDependencies = {
   sourceReadiness: RecordingSourceReadinessDto | undefined;
   state: NotesState;
   takeNewTabIntent: () => boolean;
-  topUpLabel: "Top up credits" | "Upgrade to Max" | "Upgrade";
+  topUpLabel: string;
 };

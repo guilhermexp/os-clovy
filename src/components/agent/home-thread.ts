@@ -17,6 +17,7 @@ import {
   writeClovyHomeStoredSessionId,
 } from "../../lib/clovy-home";
 import type { ClovyHomeChatResponse } from "../../lib/tauri";
+import { t } from "../../i18n";
 
 export type HomeTaskHandoff = ClovyHomeTaskRequest & {
   id: string;
@@ -238,7 +239,7 @@ export function recoverInterruptedHomeTaskHandoffs(storedSessionId: string): Hom
     return {
       ...handoff,
       status: "failed" as const,
-      error: "Session creation was interrupted. Try again.",
+      error: t("agent.home.handoffInterrupted"),
     };
   });
   if (changed) persistHomeTaskHandoffs(storedSessionId, recovered);
@@ -319,7 +320,7 @@ export function homeConversationGreetingReply(message: string): string | undefin
     .trim()
     .replace(/\s+/g, " ");
   return HOME_CONVERSATION_GREETING.test(normalized) || isHomeConversationHelloFrom(visibleMessage)
-    ? "Hey! What can I help with?"
+    ? t("agent.home.reply.greeting")
     : undefined;
 }
 

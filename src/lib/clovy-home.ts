@@ -1,3 +1,5 @@
+import { formatDate, intlLocale, t } from "../i18n/translate";
+
 export const CLOVY_HOME_SESSION_IDS_STORAGE_KEY = "clovy:home:session-ids:v1";
 export const CLOVY_HOME_CHECK_INS_STORAGE_KEY = "clovy:home:check-ins:v1";
 export const CLOVY_HOME_TASK_HANDOFFS_STORAGE_KEY = "clovy:home:task-handoffs:v1";
@@ -529,7 +531,7 @@ export function stripClovyHomeContextFromPreview(preview: string | undefined): s
   if (
     CLOVY_HOME_CONTEXT_MARKERS.some(([openMarker]) => preview.trimStart().startsWith(openMarker))
   ) {
-    return "Home message";
+    return t("lib.home.message");
   }
   return preview;
 }
@@ -621,21 +623,32 @@ export function clovyHomeDayKey(iso: string): string {
 export function clovyHomeDayLabel(iso: string, now = new Date()): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  // Brazilian clocks read zero-padded 24-hour times ("09:00").
+  const time = formatDate(date, {
+    hour: intlLocale() === undefined ? "numeric" : "2-digit",
+    minute: "2-digit",
+  });
   const startOfDay = (value: Date) =>
     new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
-  if (dayDiff <= 0) return `Today at ${time}`;
-  if (dayDiff === 1) return `Yesterday at ${time}`;
-  if (dayDiff < 7) return `${date.toLocaleDateString(undefined, { weekday: "long" })} at ${time}`;
+  if (dayDiff <= 0) return t("lib.home.todayAt", { time });
+  if (dayDiff === 1) return t("lib.home.yesterdayAt", { time });
+  if (dayDiff < 7) return dayAt(formatDate(date, { weekday: "long" }), time);
   const sameYear = date.getFullYear() === now.getFullYear();
-  const day = date.toLocaleDateString(
-    undefined,
+  const day = formatDate(
+    date,
     sameYear
       ? { month: "long", day: "numeric" }
       : { month: "long", day: "numeric", year: "numeric" },
   );
-  return `${day} at ${time}`;
+  return dayAt(day, time);
+}
+
+/** "{day} at {time}", capitalized so a lowercase weekday or date
+ * ("segunda-feira") still opens the label like "Today" does. */
+function dayAt(day: string, time: string): string {
+  const label = t("lib.home.dayAt", { day, time });
+  return `${label.charAt(0).toLocaleUpperCase()}${label.slice(1)}`;
 }
 
 /** The live greeting for the Home surface, derived from the CURRENT clock
@@ -660,28 +673,22 @@ export function clovyHomeGreetingParts(
   const hour = now.getHours();
   const firstName = firstNameFromDisplayName(context.displayName);
   const personalized = (salutation: string) =>
-    firstName ? `${salutation}, ${firstName}` : salutation;
+    firstName ? t("lib.home.greetingWithName", { salutation, name: firstName }) : salutation;
   if (hour >= 5 && hour < 12) {
     return {
-      salutation: personalized("Good morning"),
-      question: context.returning
-        ? "What should we pick up today?"
-        : "What would you like help with today?",
+      salutation: personalized(t("lib.home.goodMorning")),
+      question: context.returning ? t("lib.home.pickUpToday") : t("lib.home.helpToday"),
     };
   }
   if (hour >= 12 && hour < 18) {
     return {
-      salutation: personalized("Good afternoon"),
-      question: context.returning
-        ? "What should we pick up this afternoon?"
-        : "What would you like help with this afternoon?",
+      salutation: personalized(t("lib.home.goodAfternoon")),
+      question: context.returning ? t("lib.home.pickUpAfternoon") : t("lib.home.helpAfternoon"),
     };
   }
   return {
-    salutation: personalized("Good evening"),
-    question: context.returning
-      ? "What should we pick up this evening?"
-      : "What would you like help with this evening?",
+    salutation: personalized(t("lib.home.goodEvening")),
+    question: context.returning ? t("lib.home.pickUpEvening") : t("lib.home.helpEvening"),
   };
 }
 
@@ -690,17 +697,29 @@ export function clovyHomeGreetingParts(
 export function clovyHomeNudgePrompts(now = new Date()): readonly string[] {
   const hour = now.getHours();
   if (hour >= 5 && hour < 12) {
-    return ["Plan my day", "Think through a decision", "Help me get something done"];
+    return [
+      t("lib.home.nudge.planMyDay"),
+      t("lib.home.nudge.thinkThroughDecision"),
+      t("lib.home.nudge.getSomethingDone"),
+    ];
   }
   if (hour >= 12 && hour < 18) {
-    return ["Plan the rest of my day", "Work through a blocker", "Help me prioritize"];
+    return [
+      t("lib.home.nudge.planRestOfDay"),
+      t("lib.home.nudge.workThroughBlocker"),
+      t("lib.home.nudge.prioritize"),
+    ];
   }
-  return ["Review my day", "Plan tomorrow", "Think through a decision"];
+  return [
+    t("lib.home.nudge.reviewMyDay"),
+    t("lib.home.nudge.planTomorrow"),
+    t("lib.home.nudge.thinkThroughDecision"),
+  ];
 }
 
 function checkInText(now: Date): string {
   const greeting = clovyHomeGreetingParts(now);
-  return `${greeting.salutation}. ${greeting.question}`;
+  return t("lib.home.checkIn", { salutation: greeting.salutation, question: greeting.question });
 }
 
 export function clovyHomeDailyCheckIn(profile: string, now = new Date()): ClovyHomeCheckIn {

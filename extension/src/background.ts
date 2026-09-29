@@ -12,6 +12,7 @@ import {
 } from "./pairing";
 import { NATIVE_HOST_NAMES, parseBrowserRequest, PROTOCOL_VERSION } from "./protocol";
 import { BrowserController, withRequestId } from "./browser";
+import { tx } from "./i18n";
 
 let port: chrome.runtime.Port | null = null;
 let nativeHostIndex = 0;
@@ -116,24 +117,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             state: browser.shareState(tabId),
             shareId: browser.pendingShareId(tabId),
           }
-        : { success: false, message: "No active browser tab was found." },
+        : { success: false, message: tx("noActiveTab") },
     );
     return;
   }
   if (message?.type === "shareTab") {
     const tabId = message.tabId;
     if (state.status !== "paired") {
-      sendResponse({ success: false, message: "Connect the Clovy app before sharing a tab." });
+      sendResponse({ success: false, message: tx("connectBeforeSharing") });
       return;
     }
     try {
-      if (typeof tabId !== "number") throw new Error("No active browser tab was found.");
+      if (typeof tabId !== "number") throw new Error(tx("noActiveTab"));
       const shareId = browser.offerTab(tabId);
       sendResponse({ success: true, shareId });
     } catch (error) {
       sendResponse({
         success: false,
-        message: error instanceof Error ? error.message : "The tab could not be shared.",
+        message: error instanceof Error ? error.message : tx("sharingFailed"),
       });
     }
     return;
@@ -141,7 +142,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "revokeTabShare") {
     const tabId = message.tabId;
     if (typeof tabId !== "number") {
-      sendResponse({ success: false, message: "No active browser tab was found." });
+      sendResponse({ success: false, message: tx("noActiveTab") });
       return;
     }
     void browser.revokeSharedTab(tabId).then((revoked) => {

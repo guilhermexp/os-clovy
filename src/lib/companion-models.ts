@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import { agentModelSelection, agentRunModelId, AUTO_MODEL_ID } from "./agent-model-selection";
 import { modelAvailableForMode, modelPrivacyBadge } from "./model-privacy";
 import { pricingLabel } from "./model-pricing";
@@ -8,7 +9,9 @@ const AUTO_MODEL: CompanionModelOption = {
   id: AUTO_MODEL_ID,
   name: "Auto",
   provider: "",
-  description: "Chooses the best available model for each request.",
+  get description() {
+    return t("lib.companion.autoDescription");
+  },
   routing: "automatic",
 };
 

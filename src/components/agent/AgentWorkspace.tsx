@@ -116,6 +116,7 @@ import {
   ProjectContextSignatureStore,
   stripProjectContext,
 } from "../../lib/agent-project-context";
+import { formatNumber, intlLocale, t as translate, useT } from "../../i18n";
 import { AgentChatTurnRow } from "./chat-turns/AgentChatTurnRow";
 import {
   AgentArtifactPanel,
@@ -125,10 +126,11 @@ import {
 import { AgentSessionBar } from "./chat-turns/AgentSessionBar";
 import { AgentThinking } from "./AgentThinking";
 import {
-  advanceHeroGreeting,
+  advanceHeroGreetingIndex,
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_SHORTCUTS,
+  heroGreeting,
   rememberUnrestrictedAcknowledged,
   SANDBOX_OPTIONS,
   unrestrictedAcknowledged,
@@ -220,7 +222,9 @@ const AGENT_AUTO_MODEL: VeniceModelDto = {
   provider: "",
   id: AUTO_MODEL_ID,
   name: "Auto",
-  description: "Chooses the best available model for each request.",
+  get description() {
+    return translate("agent.autoModel.description");
+  },
   modelType: "text",
   privacy: "private",
   traits: [],
@@ -269,18 +273,22 @@ function titleFromPrompt(prompt: string) {
 }
 
 function queuedAttachmentStatus(attachments: readonly string[]) {
-  const count = attachments.length;
-  return `${count} attachment${count === 1 ? "" : "s"} queued for next turn`;
+  return translate("agent.queued.attachments", { count: attachments.length });
 }
 
 function queuedFollowUpStatus(queued: QueuedAgentFollowUp, failed: boolean) {
   const withAttachmentStatus = (status: string) =>
-    queued.attachments.length ? `${status}. ${queuedAttachmentStatus(queued.attachments)}` : status;
+    queued.attachments.length
+      ? translate("agent.queued.withAttachments", {
+          status,
+          attachments: queuedAttachmentStatus(queued.attachments),
+        })
+      : status;
   if (failed) {
     return withAttachmentStatus(
       queued.delivery === "attachments"
-        ? "Couldn't send queued attachments"
-        : "Couldn't send queued follow-up",
+        ? translate("agent.queued.attachmentsFailed")
+        : translate("agent.queued.followUpFailed"),
     );
   }
   if (queued.delivery === "attachments") {
@@ -288,10 +296,12 @@ function queuedFollowUpStatus(queued: QueuedAgentFollowUp, failed: boolean) {
   }
   if (queued.steering) {
     const steeringStatus =
-      queued.steering === "accepted" ? "Steering active run" : "Sending to active run";
+      queued.steering === "accepted"
+        ? translate("agent.queued.steering")
+        : translate("agent.queued.sending");
     return withAttachmentStatus(steeringStatus);
   }
-  return withAttachmentStatus("Queued follow-up");
+  return withAttachmentStatus(translate("agent.queued.followUp"));
 }
 
 function queuedFollowUpText(queued: QueuedAgentFollowUp) {
@@ -324,7 +334,7 @@ function artifactView(artifact: AgentArtifactDto): AgentArtifact {
   return {
     name: artifact.name,
     path: artifact.path,
-    rootLabel: "Clovy workspace",
+    rootLabel: translate("agent.artifacts.rootLabel"),
     size: artifact.sizeBytes,
   };
 }
@@ -344,6 +354,7 @@ export function AgentWorkspace({
   resolveSessionProjectContext,
   creditActionsDisabledReason,
 }: AgentWorkspaceProps = {}) {
+  const t = useT();
   const { companionPairingEnabled } = useExperimentalFlags();
   const initialAgentSession = initialSession;
   const pendingRequestRef = useRef(pendingNewSessionRequest());
@@ -572,7 +583,7 @@ export function AgentWorkspace({
   const [retryingFailureIds, setRetryingFailureIds] = useState<Record<string, true>>({});
   const [branchingItemId, setBranchingItemId] = useState<string>();
   const [thinkingOpen, setThinkingOpen] = useState<Record<string, boolean>>({});
-  const [heroGreeting] = useState(advanceHeroGreeting);
+  const [heroGreetingIndex] = useState(advanceHeroGreetingIndex);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const [composerClearance, setComposerClearance] = useState(0);
@@ -1325,7 +1336,7 @@ export function AgentWorkspace({
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (dropOwnerRef.current) {
-      setError("Wait for files to finish attaching, then send again.");
+      setError(t("agent.error.waitForAttachments"));
       return;
     }
     const queuedSubmission = queuedSubmissionSnapshotRef.current;
@@ -1858,21 +1869,21 @@ export function AgentWorkspace({
   async function submitHomeMessage(event?: FormEvent) {
     event?.preventDefault();
     if (recoverableHomeSubmissionRef.current) {
-      setError("Retry or discard the unsent Home message before sending another.");
+      setError(t("agent.home.error.unsentPending"));
       return;
     }
     if (dropOwnerRef.current) {
-      setError("Wait for files to finish attaching, then send again.");
+      setError(t("agent.error.waitForAttachments"));
       return;
     }
     if (!selectedIdRef.current && homeSessionPromiseRef.current) {
-      setError("Wait for Home to finish starting, then send again.");
+      setError(t("agent.home.error.starting"));
       return;
     }
     const message = draftRef.current.trim();
     if (!message || submitting || textActionsDisabledReason) return;
     if (Array.from(message).length > 64_000) {
-      setError("Home messages must be 64,000 characters or less.");
+      setError(t("agent.home.error.tooLong"));
       return;
     }
     const submittedHomeStoredSessionId = selectedIdRef.current;
@@ -1920,7 +1931,9 @@ export function AgentWorkspace({
         readHomeTaskHandoffs(storedSessionId),
       );
       const greetingReply = homeConversationGreetingReply(message);
-      const directConversationReply = acknowledgesTaskHandoff ? "Got it." : greetingReply;
+      const directConversationReply = acknowledgesTaskHandoff
+        ? t("agent.home.reply.gotIt")
+        : greetingReply;
       commitHomeDirectTurns(storedSessionId, [...priorDirectTurns, userTurn]);
       clearAgentSessionDraftRevision(storedSessionId, submittedHomeDraftRevision);
       requestSubmittedMessageScroll();
@@ -2049,8 +2062,10 @@ export function AgentWorkspace({
                   {
                     type: "text",
                     text: rejectedStaleTask
-                      ? "I'm here. What can I help with?"
-                      : response.content?.trim() || streamedContent.trim() || "I'm here.",
+                      ? t("agent.home.reply.imHereHelp")
+                      : response.content?.trim() ||
+                        streamedContent.trim() ||
+                        t("agent.home.reply.imHere"),
                     status: "complete",
                   },
                 ],
@@ -2244,8 +2259,8 @@ export function AgentWorkspace({
       const result = await agentRuntimeBindings.compactSession(selectedId);
       setCompactResult(
         result.compacted
-          ? `Context compacted. ${result.removedItems} earlier items were replaced with a summary.`
-          : "There is not enough earlier context to compact yet.",
+          ? t("agent.compact.done", { count: result.removedItems })
+          : t("agent.compact.nothing"),
       );
       await hydrate(selectedId);
     } catch (cause) {
@@ -2275,7 +2290,10 @@ export function AgentWorkspace({
   }
 
   async function pickAttachments() {
-    const selected = await openFileDialog({ multiple: true, title: "Attach files" });
+    const selected = await openFileDialog({
+      multiple: true,
+      title: t("agent.composer.attachFiles"),
+    });
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
     setComposerAttachments((current) => [...new Set([...current, ...paths])].slice(0, 8));
@@ -2283,7 +2301,7 @@ export function AgentWorkspace({
 
   async function addDroppedAttachments(files: File[]) {
     if (dropOwnerRef.current) {
-      setError("Wait for the current files to finish attaching, then drop these files again.");
+      setError(t("agent.error.dropBusy"));
       return;
     }
     const owner = crypto.randomUUID();
@@ -2308,7 +2326,7 @@ export function AgentWorkspace({
       }
       if (attachmentsRef.current.length + paths.length > 8) {
         void discardStagedAgentAttachments(paths).catch(() => undefined);
-        setError("You can attach up to 8 files at a time.");
+        setError(t("agent.error.tooManyFiles"));
         return;
       }
       setComposerAttachments((current) => [...new Set([...current, ...paths])]);
@@ -2486,13 +2504,13 @@ export function AgentWorkspace({
   const recoverableSubmissionRow = recoverableSubmission ? (
     <div className="agent-follow-up-row" role="status">
       <span className="agent-follow-up-copy">
-        <span className="agent-follow-up-announcement">Unsent message</span>
+        <span className="agent-follow-up-announcement">{t("agent.unsent.label")}</span>
         <span className="agent-follow-up-text">{recoverableSubmission.prompt}</span>
       </span>
       <span className="agent-follow-up-actions">
         <button
           type="button"
-          aria-label="Retry unsent message"
+          aria-label={t("agent.unsent.retry")}
           disabled={running || waiting || submitting || Boolean(textActionsDisabledReason)}
           onClick={() => {
             recoverableSubmissionSnapshotRef.current = recoverableSubmission;
@@ -2504,7 +2522,7 @@ export function AgentWorkspace({
         </button>
         <button
           type="button"
-          aria-label="Discard unsent message"
+          aria-label={t("agent.unsent.discard")}
           onClick={() => {
             if (recoverableSubmissionSnapshotRef.current?.id === recoverableSubmission.id) {
               recoverableSubmissionSnapshotRef.current = undefined;
@@ -2523,13 +2541,13 @@ export function AgentWorkspace({
   const recoverableHomeSubmissionRow = recoverableHomeSubmission ? (
     <div className="agent-follow-up-row" role="status">
       <span className="agent-follow-up-copy">
-        <span className="agent-follow-up-announcement">Unsent Home message</span>
+        <span className="agent-follow-up-announcement">{t("agent.unsentHome.label")}</span>
         <span className="agent-follow-up-text">{recoverableHomeSubmission.prompt}</span>
       </span>
       <span className="agent-follow-up-actions">
         <button
           type="button"
-          aria-label="Retry unsent Home message"
+          aria-label={t("agent.unsentHome.retry")}
           disabled={
             homeSessionCreating || Boolean(draftRef.current.trim()) || attachments.length > 0
           }
@@ -2544,7 +2562,7 @@ export function AgentWorkspace({
         </button>
         <button
           type="button"
-          aria-label="Discard unsent Home message"
+          aria-label={t("agent.unsentHome.discard")}
           onClick={() => {
             void discardStagedAgentAttachments(recoverableHomeSubmission.attachments).catch(
               () => undefined,
@@ -2660,7 +2678,7 @@ export function AgentWorkspace({
     <>
       <section
         className="agent-workspace"
-        aria-label={homeMode ? "Home" : "Session"}
+        aria-label={homeMode ? t("agent.workspace.homeLabel") : t("agent.workspace.sessionLabel")}
         data-hero={heroMode ? "true" : undefined}
         data-home={homeMode ? "true" : undefined}
       >
@@ -2714,7 +2732,7 @@ export function AgentWorkspace({
             className="agent-scroll"
             style={{ "--agent-composer-clearance": `${composerClearance}px` } as CSSProperties}
           >
-            <main className="agent-main" aria-label="Home conversation">
+            <main className="agent-main" aria-label={t("agent.home.conversationLabel")}>
               <div className="agent-timeline" data-home="true">
                 {homeConversationTurns.map((turn, index) => {
                   const previous = index > 0 ? homeConversationTurns[index - 1] : undefined;
@@ -2779,7 +2797,7 @@ export function AgentWorkspace({
                   </>
                 ) : null}
                 {homeConversationTurns.length === 0 ? (
-                  <section className="agent-home-nudges" aria-label="Suggestions">
+                  <section className="agent-home-nudges" aria-label={t("agent.home.suggestions")}>
                     {homeNudgePrompts.map((prompt) => (
                       <button key={prompt} type="button" onClick={() => setComposerDraft(prompt)}>
                         {prompt}
@@ -2797,14 +2815,18 @@ export function AgentWorkspace({
             </main>
           </div>
         ) : heroMode ? (
-          <main className="agent-main" aria-label="Agent task details" data-hero="true">
+          <main
+            className="agent-main"
+            aria-label={t("agent.workspace.taskDetails")}
+            data-hero="true"
+          >
             {error ? (
               <div className="agent-composer-notice" role="alert">
                 {error}
               </div>
             ) : null}
             <div className="agent-hero-heading">
-              <h2 className="agent-hero-title">{heroGreeting}</h2>
+              <h2 className="agent-hero-title">{heroGreeting(heroGreetingIndex)}</h2>
             </div>
             {recoverableSubmissionRow}
             {composer}
@@ -2841,7 +2863,7 @@ export function AgentWorkspace({
             className="agent-scroll"
             style={{ "--agent-composer-clearance": `${composerClearance}px` } as CSSProperties}
           >
-            <main className="agent-main" aria-label="Agent task details">
+            <main className="agent-main" aria-label={t("agent.workspace.taskDetails")}>
               <div className="agent-timeline">
                 {visibleTurns.map((turn) => (
                   <AgentChatTurnRow
@@ -2895,8 +2917,8 @@ export function AgentWorkspace({
                         type="button"
                         aria-label={
                           queuedFollowUp.delivery === "attachments"
-                            ? "Retry queued attachments"
-                            : "Retry queued follow-up"
+                            ? t("agent.queued.retryAttachments")
+                            : t("agent.queued.retryFollowUp")
                         }
                         disabled={
                           running || waiting || submitting || Boolean(textActionsDisabledReason)
@@ -2919,8 +2941,8 @@ export function AgentWorkspace({
                       type="button"
                       aria-label={
                         queuedFollowUp.delivery === "attachments"
-                          ? "Remove queued attachments"
-                          : "Remove queued follow-up"
+                          ? t("agent.queued.removeAttachments")
+                          : t("agent.queued.removeFollowUp")
                       }
                       onClick={() => {
                         if (!selectedId) return;
@@ -2997,12 +3019,12 @@ export function AgentWorkspace({
               >
                 <div className="agent-usage-header">
                   <h2 id={usageTitleId} className="agent-usage-title">
-                    Usage
+                    {t("agent.usage.title")}
                   </h2>
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label="Close usage"
+                    aria-label={t("agent.usage.close")}
                     onClick={() => setUsageOpen(false)}
                   >
                     <IconCrossSmall size={14} />
@@ -3010,14 +3032,14 @@ export function AgentWorkspace({
                 </div>
                 <div className="agent-usage-body">
                   <div className="agent-usage-row">
-                    <span className="agent-usage-primary">Model</span>
+                    <span className="agent-usage-primary">{t("agent.usage.model")}</span>
                     <span className="agent-usage-value">
                       {usageModel?.name ?? sessionDisplayModel}
                     </span>
                   </div>
                   {projection.run?.usage?.provider || usageModel?.provider ? (
                     <div className="agent-usage-row">
-                      <span className="agent-usage-primary">Provider</span>
+                      <span className="agent-usage-primary">{t("agent.usage.provider")}</span>
                       <span className="agent-usage-value">
                         {projection.run?.usage?.provider ?? usageModel?.provider}
                       </span>
@@ -3025,7 +3047,7 @@ export function AgentWorkspace({
                   ) : null}
                   {projection.run?.usage?.privacyLevel || usageModel?.privacy ? (
                     <div className="agent-usage-row">
-                      <span className="agent-usage-primary">Privacy</span>
+                      <span className="agent-usage-primary">{t("agent.usage.privacy")}</span>
                       <span className="agent-usage-value">
                         {projection.run?.usage?.privacyLevel ?? usageModel?.privacy}
                       </span>
@@ -3033,13 +3055,15 @@ export function AgentWorkspace({
                   ) : null}
                   {projection.run?.usage?.endpoint ? (
                     <div className="agent-usage-row">
-                      <span className="agent-usage-primary">Route</span>
+                      <span className="agent-usage-primary">{t("agent.usage.route")}</span>
                       <span className="agent-usage-value">{projection.run.usage.endpoint}</span>
                     </div>
                   ) : null}
                   {projection.run?.reasoningEffort ? (
                     <div className="agent-usage-row">
-                      <span className="agent-usage-primary">Reasoning effort</span>
+                      <span className="agent-usage-primary">
+                        {t("agent.usage.reasoningEffort")}
+                      </span>
                       <span className="agent-usage-value">{projection.run.reasoningEffort}</span>
                     </div>
                   ) : null}
@@ -3047,48 +3071,56 @@ export function AgentWorkspace({
                     <>
                       {projection.run.usage.inputTokens !== undefined ? (
                         <div className="agent-usage-row">
-                          <span className="agent-usage-primary">Input</span>
+                          <span className="agent-usage-primary">{t("agent.usage.input")}</span>
                           <span className="agent-usage-value">
-                            {projection.run.usage.inputTokens.toLocaleString()}
+                            {formatNumber(projection.run.usage.inputTokens)}
                           </span>
                         </div>
                       ) : null}
                       {projection.run.usage.outputTokens !== undefined ? (
                         <div className="agent-usage-row">
-                          <span className="agent-usage-primary">Output</span>
+                          <span className="agent-usage-primary">{t("agent.usage.output")}</span>
                           <span className="agent-usage-value">
-                            {projection.run.usage.outputTokens.toLocaleString()}
+                            {formatNumber(projection.run.usage.outputTokens)}
                           </span>
                         </div>
                       ) : null}
                       {projection.run.usage.totalTokens !== undefined ? (
                         <div className="agent-usage-row">
-                          <span className="agent-usage-primary">Total</span>
+                          <span className="agent-usage-primary">{t("agent.usage.total")}</span>
                           <span className="agent-usage-value">
-                            {projection.run.usage.totalTokens.toLocaleString()}
+                            {formatNumber(projection.run.usage.totalTokens)}
                           </span>
                         </div>
                       ) : null}
                       {projection.run.usage.inputTokens === undefined &&
                       projection.run.usage.outputTokens === undefined &&
                       projection.run.usage.totalTokens === undefined ? (
-                        <p className="agent-usage-empty">
-                          Token counts were not reported for this request.
-                        </p>
+                        <p className="agent-usage-empty">{t("agent.usage.noTokenCounts")}</p>
                       ) : null}
                       {contextPercent !== undefined && contextUsed !== undefined && contextLimit ? (
                         <div className="agent-usage-context">
                           <div className="agent-usage-row">
-                            <span className="agent-usage-primary">Latest request context</span>
+                            <span className="agent-usage-primary">
+                              {t("agent.usage.latestContext")}
+                            </span>
                             <span className="agent-usage-value">
-                              {contextUsed.toLocaleString()} of {contextLimit.toLocaleString()} (
-                              {contextPercent.toFixed(1)}%)
+                              {t("agent.usage.contextValue", {
+                                used: formatNumber(contextUsed),
+                                limit: formatNumber(contextLimit),
+                                percent: intlLocale()
+                                  ? formatNumber(contextPercent, {
+                                      minimumFractionDigits: 1,
+                                      maximumFractionDigits: 1,
+                                    })
+                                  : contextPercent.toFixed(1),
+                              })}
                             </span>
                           </div>
                           <div
                             className="agent-usage-context-track"
                             role="progressbar"
-                            aria-label="Context used"
+                            aria-label={t("agent.usage.contextUsed")}
                             aria-valuemin={0}
                             aria-valuemax={100}
                             aria-valuenow={Math.round(contextPercent)}
@@ -3099,24 +3131,39 @@ export function AgentWorkspace({
                       ) : null}
                       {estimatedCredits !== undefined ? (
                         <div className="agent-usage-row">
-                          <span className="agent-usage-primary">Estimated charge</span>
+                          <span className="agent-usage-primary">
+                            {t("agent.usage.estimatedCharge")}
+                          </span>
                           <span className="agent-usage-value">
-                            {estimatedCredits.toLocaleString(undefined, {
-                              maximumFractionDigits: estimatedCredits < 1 ? 3 : 1,
-                            })}{" "}
-                            credits (about ${(estimatedCredits / 1_000).toFixed(4)})
+                            {t("agent.usage.chargeValue", {
+                              credits: formatNumber(estimatedCredits, {
+                                maximumFractionDigits: estimatedCredits < 1 ? 3 : 1,
+                              }),
+                              usd: intlLocale()
+                                ? formatNumber(estimatedCredits / 1_000, {
+                                    style: "currency",
+                                    currency: "USD",
+                                    minimumFractionDigits: 4,
+                                    maximumFractionDigits: 4,
+                                  })
+                                : `$${(estimatedCredits / 1_000).toFixed(4)}`,
+                            })}
                           </span>
                         </div>
                       ) : null}
                       {toolUsage.size > 0 ? (
                         <div className="agent-usage-tools">
-                          <p className="agent-usage-section-title">Tools</p>
+                          <p className="agent-usage-section-title">{t("agent.usage.tools")}</p>
                           {[...toolUsage.entries()].map(([name, usage]) => (
                             <div className="agent-usage-row" key={name}>
                               <span className="agent-usage-primary">{name}</span>
                               <span className="agent-usage-value">
-                                {usage.calls} {usage.calls === 1 ? "call" : "calls"}
-                                {usage.failures > 0 ? `, ${usage.failures} failed` : ""}
+                                {usage.failures > 0
+                                  ? t("agent.usage.toolCallsWithFailures", {
+                                      count: usage.calls,
+                                      failures: usage.failures,
+                                    })
+                                  : t("agent.usage.toolCalls", { count: usage.calls })}
                               </span>
                             </div>
                           ))}
@@ -3124,7 +3171,7 @@ export function AgentWorkspace({
                       ) : null}
                     </>
                   ) : (
-                    <p className="agent-usage-empty">No usage reported for this session yet.</p>
+                    <p className="agent-usage-empty">{t("agent.usage.empty")}</p>
                   )}
                 </div>
               </aside>
@@ -3165,8 +3212,8 @@ export function AgentWorkspace({
         onClose={() => {
           if (!compacting) setCompactOpen(false);
         }}
-        title="Compact context?"
-        description="Clovy will replace older conversation turns with one visible summary and keep recent turns unchanged."
+        title={t("agent.compact.title")}
+        description={t("agent.compact.description")}
         footer={
           <>
             <button
@@ -3175,7 +3222,7 @@ export function AgentWorkspace({
               disabled={compacting}
               onClick={() => setCompactOpen(false)}
             >
-              {compactResult ? "Close" : "Cancel"}
+              {compactResult ? t("common.close") : t("common.cancel")}
             </button>
             {!compactResult ? (
               <button
@@ -3184,7 +3231,7 @@ export function AgentWorkspace({
                 disabled={compacting}
                 onClick={() => void compactContext()}
               >
-                {compacting ? "Compacting" : "Compact context"}
+                {compacting ? t("agent.compact.compacting") : t("agent.compact.action")}
               </button>
             ) : null}
           </>
@@ -3270,6 +3317,7 @@ function AgentComposer({
   hero?: boolean;
   showModelPicker?: boolean;
 }) {
+  const t = useT();
   const editorRef = useRef<ComposerEditorHandle>(null);
   const [editorDraftOwnerId, setEditorDraftOwnerId] = useState(draftOwnerId);
   const ownerTransitionHandledRef = useRef(false);
@@ -3461,7 +3509,7 @@ function AgentComposer({
         ) : null}
         <ComposerEditor
           ref={editorRef}
-          placeholder={hero ? "Ask Clovy anything, run / commands" : "Send a message"}
+          placeholder={hero ? t("agent.composer.heroPlaceholder") : t("agent.composer.placeholder")}
           changeKey={editorDraftOwnerId}
           onChange={(text, _category, changedDraftOwnerId) => {
             publishedDraftRef.current = text;
@@ -3497,8 +3545,8 @@ function AgentComposer({
             type="button"
             ref={attachTriggerRef}
             className="agent-composer-attach"
-            aria-label="Add files or notes"
-            title="Add"
+            aria-label={t("agent.composer.addFilesOrNotes")}
+            title={t("common.add")}
             aria-haspopup="menu"
             aria-expanded={attachOpen}
             data-open={attachOpen || undefined}
@@ -3514,7 +3562,7 @@ function AgentComposer({
               data-unrestricted={safetyMode === "unrestricted" ? "true" : undefined}
               aria-haspopup="menu"
               aria-expanded={safetyOpen}
-              title="Change what Clovy can touch"
+              title={t("agent.safety.triggerTitle")}
               onClick={() => setSafetyOpen((open) => !open)}
             >
               {safetyMode === "sandboxed" ? (
@@ -3522,7 +3570,9 @@ function AgentComposer({
               ) : (
                 <IconShieldCrossed size={14} />
               )}
-              {safetyMode === "sandboxed" ? "Sandboxed" : "Unrestricted"}
+              {safetyMode === "sandboxed"
+                ? t("agent.safety.sandboxed")
+                : t("agent.safety.unrestricted")}
               <IconChevronDownSmall size={12} aria-hidden />
             </button>
           ) : null}
@@ -3549,8 +3599,8 @@ function AgentComposer({
             <button
               type="button"
               className="agent-composer-mic"
-              aria-label="Dictate"
-              title={disabledReason ?? "Start dictation"}
+              aria-label={t("agent.composer.dictate")}
+              title={disabledReason ?? t("agent.composer.startDictation")}
               disabled={Boolean(disabledReason)}
               onClick={() => {
                 editorRef.current?.focus();
@@ -3565,9 +3615,9 @@ function AgentComposer({
                   <button
                     type="submit"
                     className="agent-composer-send"
-                    aria-label="Steer active run"
+                    aria-label={t("agent.composer.steer")}
                     disabled={attaching}
-                    title={attaching ? "Wait for files to finish attaching" : undefined}
+                    title={attaching ? t("agent.composer.waitForAttachments") : undefined}
                   >
                     <IconArrowUp size={18} />
                   </button>
@@ -3575,7 +3625,7 @@ function AgentComposer({
                 <button
                   type="button"
                   className="agent-composer-stop"
-                  aria-label="Stop Clovy"
+                  aria-label={t("agent.composer.stop")}
                   disabled={stopping}
                   onClick={() => void onStop()}
                 >
@@ -3586,7 +3636,7 @@ function AgentComposer({
               <button
                 type="button"
                 className="agent-composer-stop"
-                aria-label="Stop Clovy"
+                aria-label={t("agent.composer.stop")}
                 disabled={stopping}
                 onClick={() => void onStop()}
               >
@@ -3596,7 +3646,7 @@ function AgentComposer({
               <button
                 type="submit"
                 className="agent-composer-send"
-                aria-label="Send message"
+                aria-label={t("agent.composer.send")}
                 disabled={
                   submitting ||
                   attaching ||
@@ -3604,7 +3654,7 @@ function AgentComposer({
                   !hasEditorContent ||
                   Boolean(disabledReason)
                 }
-                title={attaching ? "Wait for files to finish attaching" : disabledReason}
+                title={attaching ? t("agent.composer.waitForAttachments") : disabledReason}
               >
                 {submitting ? <Spinner /> : <IconArrowUp size={18} />}
               </button>
@@ -3617,7 +3667,7 @@ function AgentComposer({
           ref={attachMenuRef}
           className="agent-attach-menu"
           role="menu"
-          aria-label="Add files or notes"
+          aria-label={t("agent.composer.addFilesOrNotes")}
         >
           <button
             type="button"
@@ -3630,7 +3680,7 @@ function AgentComposer({
             <span className="agent-attach-menu-icon">
               <IconFileText size={16} aria-hidden />
             </span>
-            <span className="agent-attach-menu-label">Attach files</span>
+            <span className="agent-attach-menu-label">{t("agent.composer.attachFiles")}</span>
           </button>
           <button
             type="button"
@@ -3643,7 +3693,7 @@ function AgentComposer({
             <span className="agent-attach-menu-icon">
               <IconNoteText size={16} aria-hidden />
             </span>
-            <span className="agent-attach-menu-label">Reference a note</span>
+            <span className="agent-attach-menu-label">{t("agent.composer.referenceNote")}</span>
           </button>
         </div>
       ) : null}
@@ -3652,9 +3702,9 @@ function AgentComposer({
           ref={safetyMenuRef}
           className="agent-sandbox-menu"
           role="menu"
-          aria-label="Safety mode"
+          aria-label={t("agent.safety.menuLabel")}
         >
-          <p className="agent-sandbox-menu-title">Choose what Clovy can touch</p>
+          <p className="agent-sandbox-menu-title">{t("agent.safety.menuTitle")}</p>
           {SANDBOX_OPTIONS.map((option) => {
             const value: AgentSafetyMode = option.unrestricted ? "unrestricted" : "sandboxed";
             return (
@@ -3727,8 +3777,8 @@ function AgentComposer({
       <Dialog
         open={confirmUnrestricted}
         onClose={() => setConfirmUnrestricted(false)}
-        title="Turn on unrestricted?"
-        description="Clovy will be able to change any file your account can, not just its own workspace. This comes with risks like data loss if something goes wrong."
+        title={t("agent.safety.confirmTitle")}
+        description={t("agent.safety.confirmDescription")}
         footer={
           <>
             <button
@@ -3736,7 +3786,7 @@ function AgentComposer({
               className="primary-action"
               onClick={() => setConfirmUnrestricted(false)}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -3747,7 +3797,7 @@ function AgentComposer({
                 setConfirmUnrestricted(false);
               }}
             >
-              Turn on unrestricted
+              {t("agent.safety.confirmAction")}
             </button>
           </>
         }
@@ -3765,6 +3815,7 @@ function AgentScrollToLatestButton({
   scrollRef: RefObject<HTMLDivElement>;
   onJump: () => void;
 }) {
+  const t = useT();
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
@@ -3790,7 +3841,7 @@ function AgentScrollToLatestButton({
       type="button"
       className="agent-scroll-to-latest"
       data-visible={visible ? "true" : undefined}
-      aria-label="Scroll to latest"
+      aria-label={t("agent.composer.scrollToLatest")}
       aria-hidden={visible ? undefined : true}
       tabIndex={visible ? undefined : -1}
       onClick={onJump}

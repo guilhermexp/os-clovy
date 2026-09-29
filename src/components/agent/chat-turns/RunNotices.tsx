@@ -1,20 +1,19 @@
+import { useT } from "../../../i18n";
 import type { AgentChatPart } from "../../../lib/agent-chat-runtime";
 
 export function ContextOverflowNoticePart() {
-  return (
-    <div className="agent-system-notice">
-      This conversation is too large for the selected model.
-    </div>
-  );
+  const t = useT();
+  return <div className="agent-system-notice">{t("chat.notice.contextOverflow")}</div>;
 }
 
 export function CreditsNoticePart({ onTopUp }: { onTopUp?: () => void; [key: string]: unknown }) {
+  const t = useT();
   return (
     <div className="agent-system-notice">
-      You need more credits to continue.
+      {t("chat.notice.needCredits")}
       {onTopUp ? (
         <button type="button" onClick={onTopUp}>
-          Add credits
+          {t("chat.notice.addCredits")}
         </button>
       ) : null}
     </div>
@@ -29,18 +28,19 @@ export function UpstreamProviderFailureNoticePart({
   kind?: "upstream-provider" | "tool" | "runtime";
   [key: string]: unknown;
 }) {
+  const t = useT();
   const message =
     kind === "tool"
-      ? "A tool Clovy used could not finish this request."
+      ? t("chat.notice.toolFailed")
       : kind === "runtime"
-        ? "Clovy stopped unexpectedly."
-        : "The model service could not finish this request.";
+        ? t("chat.notice.runtimeStopped")
+        : t("chat.notice.upstreamFailed");
   return (
     <div className="agent-system-notice">
       {message}
       {onRetry ? (
         <button type="button" onClick={onRetry}>
-          Try again
+          {t("common.tryAgain")}
         </button>
       ) : null}
     </div>

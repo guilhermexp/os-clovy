@@ -8,6 +8,7 @@ import { IconTrashCan } from "central-icons/IconTrashCan";
 import { IconAnalytics } from "central-icons/IconAnalytics";
 import { IconConcise } from "central-icons/IconConcise";
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../../../i18n";
 import { ShareLinkCopyAction } from "../../share/ShareLinkCopyAction";
 import { BackButton } from "../../ui/BackButton";
 import { Dialog } from "../../ui/Dialog";
@@ -58,6 +59,7 @@ export function AgentSessionBar({
   onMoveToProject?: () => void;
   onDelete?: () => void;
 }) {
+  const t = useT();
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(title ?? "");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -95,7 +97,7 @@ export function AgentSessionBar({
   return (
     <div className="detail-bar agent-session-bar" data-tauri-drag-region>
       {origin ? <BackButton label={origin.backLabel} onClick={origin.onBack} /> : null}
-      <nav className="detail-breadcrumb" aria-label="Breadcrumb">
+      <nav className="detail-breadcrumb" aria-label={t("chat.session.breadcrumb")}>
         <ol>
           {origin ? (
             origin.crumbs.map((crumb, index) => (
@@ -117,7 +119,7 @@ export function AgentSessionBar({
             ))
           ) : (
             <li>
-              <span className="detail-breadcrumb-label">Session</span>
+              <span className="detail-breadcrumb-label">{t("chat.session.session")}</span>
             </li>
           )}
           {title !== undefined ? (
@@ -128,7 +130,7 @@ export function AgentSessionBar({
               {renaming ? (
                 <input
                   className="agent-session-rename"
-                  aria-label="Session name"
+                  aria-label={t("chat.session.name")}
                   autoFocus
                   value={draft}
                   onChange={(event) => setDraft(event.currentTarget.value)}
@@ -146,7 +148,9 @@ export function AgentSessionBar({
                 />
               ) : (
                 <span className="detail-breadcrumb-current-group">
-                  <span className="detail-breadcrumb-current">{title || "Untitled session"}</span>
+                  <span className="detail-breadcrumb-current">
+                    {title || t("chat.session.untitled")}
+                  </span>
                   {shareUrl ? <ShareLinkCopyAction url={shareUrl} /> : null}
                 </span>
               )}
@@ -156,7 +160,7 @@ export function AgentSessionBar({
               <span className="detail-breadcrumb-separator" aria-hidden>
                 /
               </span>
-              <span className="detail-breadcrumb-current">New session</span>
+              <span className="detail-breadcrumb-current">{t("chat.session.new")}</span>
             </li>
           ) : null}
         </ol>
@@ -168,7 +172,7 @@ export function AgentSessionBar({
             className="agent-project-instructions"
             onClick={() => setInstructionsOpen(true)}
           >
-            Project instructions
+            {t("chat.session.projectInstructions")}
           </button>
         ) : null}
         {fullMode ? <UnrestrictedBadge /> : null}
@@ -176,8 +180,8 @@ export function AgentSessionBar({
           <button
             type="button"
             className="agent-session-files"
-            aria-label={`View files (${artifactCount})`}
-            title="View files"
+            aria-label={t("chat.session.viewFilesCount", { count: artifactCount })}
+            title={t("chat.session.viewFiles")}
             aria-pressed={artifactsOpen}
             onClick={onToggleArtifacts}
           >
@@ -192,7 +196,7 @@ export function AgentSessionBar({
               ref={menuTriggerRef}
               type="button"
               className="icon-button agent-session-menu-trigger"
-              aria-label="Session actions"
+              aria-label={t("chat.session.actions")}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((open) => !open)}
@@ -212,7 +216,7 @@ export function AgentSessionBar({
                     }}
                   >
                     <IconPencil size={14} />
-                    Rename
+                    {t("common.rename")}
                   </button>
                 ) : null}
                 {onShare ? (
@@ -225,7 +229,7 @@ export function AgentSessionBar({
                     }}
                   >
                     <IconShareOs size={14} />
-                    Share
+                    {t("chat.session.share")}
                   </button>
                 ) : null}
                 {onUsage ? (
@@ -239,7 +243,7 @@ export function AgentSessionBar({
                     }}
                   >
                     <IconAnalytics size={14} />
-                    Usage
+                    {t("chat.session.usage")}
                   </button>
                 ) : null}
                 {onCompact ? (
@@ -252,7 +256,7 @@ export function AgentSessionBar({
                     }}
                   >
                     <IconConcise size={14} />
-                    Compact context
+                    {t("chat.session.compactContext")}
                   </button>
                 ) : null}
                 {onMoveToProject ? (
@@ -265,7 +269,7 @@ export function AgentSessionBar({
                     }}
                   >
                     {inProject ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
-                    {inProject ? "Change project" : "Add to project"}
+                    {inProject ? t("chat.session.changeProject") : t("chat.session.addToProject")}
                   </button>
                 ) : null}
                 {onDelete && (onRename || onShare || onMoveToProject) ? (
@@ -282,7 +286,7 @@ export function AgentSessionBar({
                     }}
                   >
                     <IconTrashCan size={14} />
-                    Delete session
+                    {t("chat.session.delete")}
                   </button>
                 ) : null}
               </div>
@@ -293,19 +297,23 @@ export function AgentSessionBar({
       <Dialog
         open={instructionsOpen}
         onClose={() => setInstructionsOpen(false)}
-        title={`${projectContext?.name ?? "Project"} instructions`}
+        title={
+          projectContext?.name
+            ? t("chat.session.namedProjectInstructions", { name: projectContext.name })
+            : t("chat.session.projectInstructions")
+        }
         footer={
           <button
             type="button"
             className="primary-action"
             onClick={() => setInstructionsOpen(false)}
           >
-            Close
+            {t("common.close")}
           </button>
         }
       >
         <div className="agent-project-instructions-content">
-          {projectContext?.instructions?.trim() || "No project instructions have been added."}
+          {projectContext?.instructions?.trim() || t("chat.session.noProjectInstructions")}
         </div>
       </Dialog>
     </div>

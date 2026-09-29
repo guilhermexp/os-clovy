@@ -2,10 +2,12 @@ import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-ma
 import { IconChainLink1 } from "central-icons/IconChainLink1";
 import { useEffect, useRef, useState } from "react";
 
+import { useT } from "../../i18n";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
 import { HoverTip } from "../ui/HoverTip";
 
 export function ShareLinkCopyAction({ url }: { url: string }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const copyingRef = useRef(false);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
@@ -47,14 +49,14 @@ export function ShareLinkCopyAction({ url }: { url: string }) {
     <HoverTip
       compact
       width={128}
-      tip={copied ? "Copied" : "Copy share link"}
+      tip={copied ? t("common.copied") : t("notes.share.copyShareLink")}
       forceOpen={copied}
       className="detail-breadcrumb-share-tip"
     >
       <button
         type="button"
         className="detail-breadcrumb-share"
-        aria-label={copied ? "Share link copied" : "Copy share link"}
+        aria-label={copied ? t("notes.share.shareLinkCopied") : t("notes.share.copyShareLink")}
         data-copied={copied ? "true" : undefined}
         onClick={() => void copyShareLink()}
       >

@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import type { AgentChatTurn } from "./agent-chat-runtime";
 
 export const UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY =
@@ -22,7 +23,9 @@ const UPSTREAM_PROVIDER_RECOVERY_PROMPTS = [
 ];
 
 export function displayedUpstreamProviderRecoveryText(content: string) {
-  return UPSTREAM_PROVIDER_RECOVERY_PROMPTS.includes(content.trim()) ? "Try again" : content;
+  return UPSTREAM_PROVIDER_RECOVERY_PROMPTS.includes(content.trim())
+    ? t("lib.upstream.tryAgain")
+    : content;
 }
 
 /** A session preview can truncate mid-prompt, so the preview is replaced when
@@ -33,7 +36,7 @@ export function displayedUpstreamProviderRecoveryPreview(preview: string | undef
   const trimmed = preview?.trimStart();
   return trimmed &&
     UPSTREAM_PROVIDER_RECOVERY_PROMPTS.some((prompt) => prompt.startsWith(trimmed.trimEnd()))
-    ? "Try again"
+    ? t("lib.upstream.tryAgain")
     : preview;
 }
 

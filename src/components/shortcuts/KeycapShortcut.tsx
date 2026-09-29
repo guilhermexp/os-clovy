@@ -1,3 +1,4 @@
+import { useT } from "../../i18n";
 import { isWindowsPlatform } from "../../lib/platform";
 
 /**
@@ -40,18 +41,27 @@ export function KeycapShortcut({
   capturing?: boolean;
   platform?: "macos" | "windows" | "unsupported";
 }) {
+  const t = useT();
   if (capturing) {
-    return <span className="keycap-frame keycap-frame-capturing">Press shortcut...</span>;
+    return (
+      <span className="keycap-frame keycap-frame-capturing">
+        {t("shell.shortcut.pressShortcut")}
+      </span>
+    );
   }
   const windows = platform === "windows" || (platform === undefined && isWindowsPlatform());
   const keyGlyphs = windows ? WINDOWS_KEY_GLYPHS : MAC_KEY_GLYPHS;
   const keys = label.split("+").filter(Boolean);
   return (
-    <span className="keycap-frame" aria-label={`Shortcut ${label}`}>
+    <span className="keycap-frame" aria-label={t("shell.shortcut.ariaLabel", { label })}>
       {keys.map((key, idx) => {
         const mapped = keyGlyphs[key.toLowerCase()];
         return (
-          <kbd key={`${key}-${idx}`} className="keycap" title={mapped?.name}>
+          <kbd
+            key={`${key}-${idx}`}
+            className="keycap"
+            title={mapped?.name === "Function" ? t("shell.shortcut.keyFunction") : mapped?.name}
+          >
             {mapped ? mapped.glyph : key}
           </kbd>
         );

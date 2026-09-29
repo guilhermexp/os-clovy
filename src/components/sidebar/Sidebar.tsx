@@ -106,6 +106,7 @@ import {
   type DateFormatChangedDetail,
   type DateFormatPreference,
 } from "../../lib/date-format";
+import { intlLocale, type MessageKey, type TFunction, useT } from "../../i18n";
 import { buildSidebarSessionLists } from "./sidebar-session-lists";
 import {
   positionSidebarContextMenu,
@@ -245,67 +246,76 @@ type SidebarDevStateSnapshot = {
 };
 
 const SETTINGS_SIDEBAR_GROUPS: {
-  title: string;
-  items: { id: SettingsTab; label: string; icon: ReactNode }[];
+  id: string;
+  title: MessageKey;
+  items: { id: SettingsTab; label: MessageKey; icon: ReactNode }[];
 }[] = [
   {
-    title: "Personal",
+    id: "personal",
+    title: "shell.settingsNav.group.personal",
     items: [
       {
         id: "general",
-        label: "General",
+        label: "shell.settingsNav.general",
         icon: <IconSettingsGear4 size={16} />,
       },
       {
         id: "appearance",
-        label: "Appearance",
+        label: "shell.settingsNav.appearance",
         icon: <IconColorPalette size={16} />,
       },
       {
         id: "billing",
-        label: "Billing",
+        label: "shell.settingsNav.billing",
         icon: <IconCreditCard1 size={16} />,
       },
       {
         id: "shortcuts",
-        label: "Shortcuts",
+        label: "shell.settingsNav.shortcuts",
         icon: <IconShortcut size={16} />,
       },
     ],
   },
   {
-    title: "Audio",
+    id: "audio",
+    title: "shell.settingsNav.group.audio",
     items: [
       {
         id: "dictation",
-        label: "Dictation",
+        label: "shell.settingsNav.dictation",
         icon: <IconMicrophoneSparkle size={16} />,
       },
-      { id: "audio", label: "Audio", icon: <IconAudio size={16} /> },
+      { id: "audio", label: "shell.settingsNav.audio", icon: <IconAudio size={16} /> },
     ],
   },
   {
-    title: "AI",
+    id: "ai",
+    title: "shell.settingsNav.group.ai",
     items: [
-      { id: "models", label: "Models", icon: <IconBrain2 size={16} /> },
-      { id: "agent", label: "Agent", icon: <IconRobot2 size={16} /> },
+      { id: "models", label: "shell.settingsNav.models", icon: <IconBrain2 size={16} /> },
+      { id: "agent", label: "shell.settingsNav.agent", icon: <IconRobot2 size={16} /> },
       {
         id: "memory",
-        label: "Memory",
+        label: "shell.settingsNav.memory",
         icon: <IconBrainSideview size={16} />,
       },
       {
         id: "connectors",
-        label: "Plugins",
+        label: "shell.settingsNav.plugins",
         icon: <IconPlugin1 size={16} />,
       },
     ],
   },
   {
-    title: "App",
+    id: "app",
+    title: "shell.settingsNav.group.app",
     items: [
-      { id: "linked-devices", label: "Linked devices", icon: <IconPhone size={16} /> },
-      { id: "about", label: "About", icon: <IconCircleInfo size={16} /> },
+      {
+        id: "linked-devices",
+        label: "shell.settingsNav.linkedDevices",
+        icon: <IconPhone size={16} />,
+      },
+      { id: "about", label: "shell.settingsNav.about", icon: <IconCircleInfo size={16} /> },
     ],
   },
 ];
@@ -347,11 +357,12 @@ export function Sidebar({
   onRemoveSessionFromFolder,
   recoverableNoteIds,
   recordingStatus,
-  recordingTitle = "New note",
+  recordingTitle,
   onOpenRecording,
   collapsed = false,
   footerAccessory,
 }: SidebarProps) {
+  const t = useT();
   const [query, setQuery] = useState("");
   const commandInputRef = useRef<HTMLInputElement>(null);
   const [commandPromptOpen, setCommandPromptOpen] = useState(false);
@@ -542,7 +553,7 @@ export function Sidebar({
         referralCopyResetTimerRef.current = undefined;
       }, 1600);
     } catch {
-      setReferralCopyError("Could not copy the link. Select it and copy manually.");
+      setReferralCopyError(t("shell.referral.copyFailed"));
     }
   }
 
@@ -562,11 +573,11 @@ export function Sidebar({
 
     const recentItems: CommandPromptItem[] = [
       ...notes.slice(0, 5).map((note) => {
-        const title = note.title.trim() || "New note";
+        const title = note.title.trim() || t("shell.sidebar.newNote");
         return {
           id: `note:${note.id}`,
           label: title,
-          meta: "Meeting note",
+          meta: t("shell.command.meetingNote"),
           icon: <IconNoteText size={15} />,
           searchText: normalizeCommandQuery(`${title} ${note.preview}`),
           action: () => onSelectNote(note.id),
@@ -576,11 +587,11 @@ export function Sidebar({
         .filter((session) => !completedSessionIds[session.id])
         .slice(0, 5)
         .map((session) => {
-          const title = session.title.trim() || "Untitled";
+          const title = session.title.trim() || t("common.untitled");
           return {
             id: `agent:${session.id}`,
             label: title,
-            meta: "Session",
+            meta: t("shell.command.session"),
             icon: <IconBubble3 size={15} />,
             searchText: normalizeCommandQuery(`${title} agent session`),
             action: () => {
@@ -598,18 +609,20 @@ export function Sidebar({
         ? [
             {
               id: "quick:home",
-              label: "Go to Home",
+              label: t("shell.command.goHome"),
               icon: <IconHomeOpen size={15} />,
-              searchText: normalizeCommandQuery("home clovy june personal assistant conversation"),
+              searchText: normalizeCommandQuery(
+                `home clovy june personal assistant conversation ${t("shell.command.goHome")}`,
+              ),
               action: () => onChangeView("home"),
             } satisfies CommandPromptItem,
           ]
         : []),
       {
         id: "quick:new-session",
-        label: "New session",
+        label: t("shell.sidebar.newSession"),
         icon: <IconPlusMedium size={15} />,
-        searchText: normalizeCommandQuery("new session agent"),
+        searchText: normalizeCommandQuery(`new session agent ${t("shell.sidebar.newSession")}`),
         action: handleNewAgentSession,
       },
       // "Open recording" only makes sense while a recording is live, mirroring
@@ -618,39 +631,47 @@ export function Sidebar({
         ? [
             {
               id: "quick:open-recording",
-              label: "Open recording",
+              label: t("shell.recording.open"),
               icon: <IconAudio size={15} />,
-              searchText: normalizeCommandQuery("open recording meeting audio"),
+              searchText: normalizeCommandQuery(
+                `open recording meeting audio ${t("shell.recording.open")}`,
+              ),
               action: onOpenRecording,
             } satisfies CommandPromptItem,
           ]
         : []),
       {
         id: "quick:meetings",
-        label: "Go to Meeting notes",
+        label: t("shell.command.goMeetingNotes"),
         icon: <IconNoteText size={15} />,
-        searchText: normalizeCommandQuery("meeting notes meetings go to"),
+        searchText: normalizeCommandQuery(
+          `meeting notes meetings go to ${t("shell.command.goMeetingNotes")}`,
+        ),
         action: () => onChangeView("notes"),
       },
       {
         id: "quick:projects",
-        label: "Go to Projects",
+        label: t("shell.command.goProjects"),
         icon: <IconProjects size={15} />,
-        searchText: normalizeCommandQuery("projects folders go to"),
+        searchText: normalizeCommandQuery(
+          `projects folders go to ${t("shell.command.goProjects")}`,
+        ),
         action: () => onChangeView("folders"),
       },
       {
         id: "quick:dictation",
-        label: "Go to Dictation",
+        label: t("shell.command.goDictation"),
         icon: <IconMicrophone size={15} />,
-        searchText: normalizeCommandQuery("dictation go to"),
+        searchText: normalizeCommandQuery(`dictation go to ${t("shell.command.goDictation")}`),
         action: () => onChangeView("dictation"),
       },
       {
         id: "quick:connectors",
-        label: "Go to connectors",
+        label: t("shell.command.goConnectors"),
         icon: <IconPlugin1 size={15} />,
-        searchText: normalizeCommandQuery("connectors plugins computer use google linear go to"),
+        searchText: normalizeCommandQuery(
+          `connectors plugins computer use google linear go to ${t("shell.command.goConnectors")}`,
+        ),
         action: () => {
           onSettingsTabChange?.("connectors");
           onChangeView("settings");
@@ -658,9 +679,11 @@ export function Sidebar({
       },
       {
         id: "quick:settings",
-        label: "Open settings",
+        label: t("shell.command.openSettings"),
         icon: <IconSettingsGear4 size={15} />,
-        searchText: normalizeCommandQuery("open settings preferences"),
+        searchText: normalizeCommandQuery(
+          `open settings preferences ${t("shell.command.openSettings")}`,
+        ),
         action: () => onChangeView("settings"),
       },
       // Per-tab settings jumps surface only once a query is typed so ten
@@ -676,13 +699,13 @@ export function Sidebar({
             .map(
               (tab): CommandPromptItem => ({
                 id: `quick:settings-${tab.id}`,
-                label: `Settings -> ${tab.label}`,
+                label: t("shell.command.settingsTab", { label: tab.label }),
                 icon: <IconSettingsGear4 size={15} />,
                 searchText: normalizeCommandQuery(
                   tab.id === "general"
-                    ? "settings general account permissions privacy"
+                    ? `settings general account permissions privacy ${tab.label}`
                     : tab.id === "appearance"
-                      ? "settings appearance theme accent text size dark light mode"
+                      ? `settings appearance theme accent text size dark light mode ${tab.label}`
                       : `settings ${tab.label}`,
                 ),
                 action: () => {
@@ -701,11 +724,12 @@ export function Sidebar({
       ...(onReportIssue
         ? REPORT_MENU_ITEMS.map((item): CommandPromptItem => {
             const def = reportCategoryDef(item.category);
+            const label = t(item.label);
             return {
               id: `support:report-${item.category}`,
-              label: item.label,
+              label,
               icon: <CategoryIcon category={item.category} size={15} />,
-              searchText: normalizeCommandQuery(`${item.label} ${def?.keywords.join(" ") ?? ""}`),
+              searchText: normalizeCommandQuery(`${label} ${def?.keywords.join(" ") ?? ""}`),
               action: () => onReportIssue(item.category),
             };
           })
@@ -714,9 +738,11 @@ export function Sidebar({
         ? [
             {
               id: "support:invite-friends",
-              label: "Invite friends",
+              label: t("shell.identity.inviteFriends"),
               icon: <IconGift1 size={15} />,
-              searchText: normalizeCommandQuery("invite friends referral share"),
+              searchText: normalizeCommandQuery(
+                `invite friends referral share ${t("shell.identity.inviteFriends")}`,
+              ),
               action: () => openReferralDialog(),
             } satisfies CommandPromptItem,
           ]
@@ -725,9 +751,11 @@ export function Sidebar({
         ? [
             {
               id: "support:sign-out",
-              label: "Sign out",
+              label: t("shell.identity.signOut"),
               icon: <IconArrowBoxRight size={15} />,
-              searchText: normalizeCommandQuery("sign out log out logout"),
+              searchText: normalizeCommandQuery(
+                `sign out log out logout ${t("shell.identity.signOut")}`,
+              ),
               action: onSignOut,
             } satisfies CommandPromptItem,
           ]
@@ -735,9 +763,9 @@ export function Sidebar({
     ].filter(matches);
 
     return [
-      { title: "Recents", items: recentItems },
-      { title: "Quick actions", items: quickItems },
-      { title: "Support", items: supportItems },
+      { title: t("shell.command.group.recents"), items: recentItems },
+      { title: t("shell.command.group.quickActions"), items: quickItems },
+      { title: t("shell.command.group.support"), items: supportItems },
     ].filter((group) => group.items.length > 0);
   }, [
     account.localDev,
@@ -756,6 +784,7 @@ export function Sidebar({
     onSettingsTabChange,
     onSignOut,
     recordingStatus,
+    t,
   ]);
 
   const commandPromptItems = commandPromptGroups.flatMap((group) => group.items);
@@ -1123,7 +1152,7 @@ export function Sidebar({
           {recordingStatus ? (
             <SidebarRecordingIndicator
               status={recordingStatus}
-              title={recordingTitle}
+              title={recordingTitle ?? t("shell.sidebar.newNote")}
               onOpen={onOpenRecording}
             />
           ) : null}
@@ -1152,8 +1181,8 @@ export function Sidebar({
               type="search"
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
-              placeholder="Search"
-              aria-label="Search"
+              placeholder={t("common.search")}
+              aria-label={t("common.search")}
               readOnly
             />
             <span className="sidebar-search-kbd" aria-hidden="true">
@@ -1161,7 +1190,7 @@ export function Sidebar({
             </span>
           </label>
 
-          <nav className="sidebar-nav" aria-label="Primary">
+          <nav className="sidebar-nav" aria-label={t("shell.sidebar.primaryNav")}>
             {homeEnabled ? (
               <button
                 type="button"
@@ -1173,7 +1202,7 @@ export function Sidebar({
                 <span className="sidebar-nav-icon">
                   <IconHomeOpen size={15} />
                 </span>
-                <span className="sidebar-nav-label">Home</span>
+                <span className="sidebar-nav-label">{t("shell.sidebar.home")}</span>
               </button>
             ) : null}
             <button
@@ -1186,7 +1215,7 @@ export function Sidebar({
               <span className="sidebar-nav-icon">
                 <IconPlusMedium size={15} />
               </span>
-              <span className="sidebar-nav-label">New session</span>
+              <span className="sidebar-nav-label">{t("shell.sidebar.newSession")}</span>
               <kbd className="sidebar-nav-shortcut" aria-hidden="true">
                 {newSessionShortcut}
               </kbd>
@@ -1205,7 +1234,7 @@ export function Sidebar({
               <span className="sidebar-nav-icon">
                 <IconNoteText size={15} />
               </span>
-              <span className="sidebar-nav-label">Meeting notes</span>
+              <span className="sidebar-nav-label">{t("shell.sidebar.meetingNotes")}</span>
             </button>
             <button
               type="button"
@@ -1217,7 +1246,7 @@ export function Sidebar({
               <span className="sidebar-nav-icon">
                 <IconProjects size={15} />
               </span>
-              <span className="sidebar-nav-label">Projects</span>
+              <span className="sidebar-nav-label">{t("shell.sidebar.projects")}</span>
             </button>
             <button
               type="button"
@@ -1229,7 +1258,7 @@ export function Sidebar({
               <span className="sidebar-nav-icon">
                 <IconMicrophone size={16} />
               </span>
-              <span className="sidebar-nav-label">Dictation</span>
+              <span className="sidebar-nav-label">{t("shell.sidebar.dictation")}</span>
             </button>
             <button
               type="button"
@@ -1241,26 +1270,26 @@ export function Sidebar({
               <span className="sidebar-nav-icon">
                 <IconZap size={16} />
               </span>
-              <span className="sidebar-nav-label">Routines</span>
+              <span className="sidebar-nav-label">{t("shell.sidebar.routines")}</span>
             </button>
           </nav>
 
           {pinnedAgentSessions.length > 0 ? (
             <section
               className="sidebar-section sidebar-pinned-section"
-              aria-label="Pinned agent sessions"
+              aria-label={t("shell.sidebar.pinnedSessionsLabel")}
             >
               <div
                 className={`section-title${hasMorePinnedAgentSessions ? " section-title-with-action" : ""}`}
               >
-                <span className="section-title-label">Pinned</span>
+                <span className="section-title-label">{t("shell.sidebar.pinned")}</span>
                 {hasMorePinnedAgentSessions ? (
                   <button
                     type="button"
                     className="section-view-all"
                     onClick={() => onChangeView("agent-sessions")}
                   >
-                    View all
+                    {t("shell.sidebar.viewAll")}
                   </button>
                 ) : null}
               </div>
@@ -1292,7 +1321,7 @@ export function Sidebar({
 
           <section
             className="sidebar-section sidebar-agent-section"
-            aria-label="Sessions"
+            aria-label={t("shell.sidebar.sessions")}
             data-active={activeView === "agent" || activeView === "agent-sessions"}
           >
             <div className="section-title section-title-with-action">
@@ -1301,7 +1330,7 @@ export function Sidebar({
                 className="section-title-label section-title-open"
                 onClick={() => onChangeView("agent-sessions")}
               >
-                Sessions
+                {t("shell.sidebar.sessions")}
               </button>
               {/* Same destination as the header — the hover affordance just
                * makes the "this opens a list" behavior legible. */}
@@ -1310,7 +1339,7 @@ export function Sidebar({
                 className="section-view-all"
                 onClick={() => onChangeView("agent-sessions")}
               >
-                View all
+                {t("shell.sidebar.viewAll")}
               </button>
             </div>
             <div className="notes-nav-wrap">
@@ -1340,10 +1369,10 @@ export function Sidebar({
                 ) : (
                   <div className="sidebar-empty">
                     {agentSessions.length === 0
-                      ? "No sessions yet"
+                      ? t("shell.sidebar.noSessions")
                       : filteredAgentSessions.length === 0
-                        ? "No matches"
-                        : "No other sessions"}
+                        ? t("shell.sidebar.noMatches")
+                        : t("shell.sidebar.noOtherSessions")}
                   </div>
                 )}
               </div>
@@ -1469,9 +1498,11 @@ export function Sidebar({
         onConfirm={() =>
           agentSessionToDelete ? handleDeleteAgentSession(agentSessionToDelete) : undefined
         }
-        title={`Delete "${agentSessionToDelete?.title || "Untitled session"}"?`}
-        description={agentSessionDeleteError || "This agent session cannot be restored."}
-        confirmLabel="Delete session"
+        title={t("shell.deleteSession.title", {
+          title: agentSessionToDelete?.title || t("shell.sidebar.untitledSession"),
+        })}
+        description={agentSessionDeleteError || t("shell.deleteSession.description")}
+        confirmLabel={t("shell.deleteSession.confirm")}
         destructive
       />
     </aside>
@@ -1487,6 +1518,7 @@ function SidebarRecordingIndicator({
   title: string;
   onOpen?: () => void;
 }) {
+  const t = useT();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const recording = status.state === "recording";
   useRecordingPresenceBounds(buttonRef);
@@ -1502,8 +1534,8 @@ function SidebarRecordingIndicator({
       className="sidebar-recording-indicator"
       data-state={status.state}
       onClick={onOpen}
-      aria-label={`Open recording: ${title}`}
-      title="Open recording"
+      aria-label={t("shell.recording.openNamed", { title })}
+      title={t("shell.recording.open")}
     >
       <span className="sidebar-recording-dot" aria-hidden />
       <Waveform level={meterLevel} sessionId={status.sessionId} active={recording} />
@@ -1524,7 +1556,8 @@ function NoteRow({
   onSelect: () => void;
   onOpenMenu: (anchor: HTMLElement) => void;
 }) {
-  const title = note.title.trim() || "New note";
+  const t = useT();
+  const title = note.title.trim() || t("shell.sidebar.newNote");
   const menuRef = useRef<HTMLButtonElement>(null);
   const [dragging, setDragging] = useState(false);
 
@@ -1582,8 +1615,8 @@ function NoteRow({
           {recoverable ? (
             <span
               className="note-row-recovery-dot"
-              aria-label="Interrupted recording"
-              title="Interrupted recording"
+              aria-label={t("shell.sidebar.interruptedRecording")}
+              title={t("shell.sidebar.interruptedRecording")}
             />
           ) : null}
         </span>
@@ -1592,7 +1625,7 @@ function NoteRow({
         ref={menuRef}
         type="button"
         className="note-row-menu"
-        aria-label={`Actions for ${title}`}
+        aria-label={t("shell.sidebar.actionsFor", { title })}
         draggable={false}
         onClick={(event) => {
           event.preventDefault();
@@ -1686,6 +1719,7 @@ function SettingsSidebarNav({
   onSelectTab: (tab: SettingsTab) => void;
   onBack: () => void;
 }) {
+  const t = useT();
   // Hide the admin-surfaces-PR tabs until stabilized, keeping the pre-PR billing
   // rule (billing is hidden in local dev). Empty groups drop out so their
   // headers don't render.
@@ -1700,19 +1734,22 @@ function SettingsSidebarNav({
   })).filter((group) => group.items.length > 0);
 
   return (
-    <section className="sidebar-section sidebar-settings-section" aria-label="Settings">
+    <section className="sidebar-section sidebar-settings-section" aria-label={t("common.settings")}>
       <button type="button" className="sidebar-nav-item sidebar-settings-back" onClick={onBack}>
         <span className="sidebar-nav-icon">
           <IconChevronLeftSmall size={15} />
         </span>
-        <span className="sidebar-nav-label">Back to app</span>
+        <span className="sidebar-nav-label">{t("shell.settingsNav.back")}</span>
       </button>
       {groups.map((group) => (
-        <div key={group.title} className="sidebar-settings-group">
+        <div key={group.id} className="sidebar-settings-group">
           <div className="section-title">
-            <span className="section-title-label">{group.title}</span>
+            <span className="section-title-label">{t(group.title)}</span>
           </div>
-          <nav className="sidebar-nav" aria-label={`${group.title} settings`}>
+          <nav
+            className="sidebar-nav"
+            aria-label={t("shell.settingsNav.groupLabel", { group: t(group.title) })}
+          >
             {group.items.map((tab) => (
               <button
                 key={tab.id}
@@ -1725,7 +1762,7 @@ function SettingsSidebarNav({
                 <span className="sidebar-nav-icon" aria-hidden>
                   {tab.icon}
                 </span>
-                <span className="sidebar-nav-label">{tab.label}</span>
+                <span className="sidebar-nav-label">{t(tab.label)}</span>
               </button>
             ))}
           </nav>
@@ -1756,6 +1793,7 @@ function CommandPrompt({
   onClose: () => void;
   onSelect: (item: CommandPromptItem) => void;
 }) {
+  const t = useT();
   const resultsRef = useRef<HTMLDivElement>(null);
   const fade = useScrollFade(resultsRef);
   // Native-overlay scrollbar feel, same as the main content areas: the custom
@@ -1838,7 +1876,12 @@ function CommandPrompt({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="command-prompt" role="dialog" aria-modal="true" aria-label="Search">
+      <div
+        className="command-prompt"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("common.search")}
+      >
         <label className="command-prompt-search">
           <input
             ref={inputRef}
@@ -1846,8 +1889,8 @@ function CommandPrompt({
             value={query}
             onChange={(event) => onQueryChange(event.currentTarget.value)}
             onKeyDown={onKeyDown}
-            placeholder="Search meeting notes, sessions, or jump to..."
-            aria-label="Search"
+            placeholder={t("shell.command.placeholder")}
+            aria-label={t("common.search")}
             aria-activedescendant={
               items[activeIndex] ? `command-prompt-item-${activeIndex}` : undefined
             }
@@ -1856,7 +1899,7 @@ function CommandPrompt({
             <button
               type="button"
               className="command-prompt-clear"
-              aria-label="Clear search"
+              aria-label={t("shell.command.clearSearch")}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 onQueryChange("");
@@ -1900,7 +1943,9 @@ function CommandPrompt({
                 </section>
               ))
             ) : (
-              <div className="command-prompt-empty">No results for "{query.trim()}"</div>
+              <div className="command-prompt-empty">
+                {t("shell.command.noResults", { query: query.trim() })}
+              </div>
             )}
           </div>
         </div>
@@ -1941,12 +1986,13 @@ function ReferralDialog({
   onRetry: () => void;
   onCopy: () => void;
 }) {
+  const t = useT();
   const pendingFriends = summary?.pendingCount ?? 0;
   return (
     <Dialog
       open={open}
       onClose={onClose}
-      title="Give a month, get a month"
+      title={t("shell.referral.title")}
       className="referral-dialog"
       width={640}
     >
@@ -1957,38 +2003,36 @@ function ReferralDialog({
           </span>
           <span className="referral-hero-eyebrow">
             <IconGift1 size={13} />
-            Refer a friend
+            {t("shell.referral.eyebrow")}
           </span>
-          <p className="referral-hero-title">Give a month, get a month</p>
-          <p className="referral-hero-copy">
-            Share Clovy with a friend. They get a free month, and when they subscribe, so do you.
-          </p>
+          <p className="referral-hero-title">{t("shell.referral.title")}</p>
+          <p className="referral-hero-copy">{t("shell.referral.copy")}</p>
         </div>
         <div className="referral-panel">
           {loading ? (
             <div className="referral-dialog-status" role="status">
-              <DotSpinner /> Loading referral link
+              <DotSpinner /> {t("shell.referral.loading")}
             </div>
           ) : unavailable ? (
             // Deployment doesn't offer referrals — retrying can't fix that, so
             // there's no "Try again", just a calm note.
             <div className="referral-dialog-status">
-              <p>Invite links aren't available yet. Check back soon.</p>
+              <p>{t("shell.referral.unavailable")}</p>
             </div>
           ) : error ? (
             <div className="referral-error-card">
-              <span className="referral-error-title">Invite link unavailable</span>
+              <span className="referral-error-title">{t("shell.referral.errorTitle")}</span>
               <p>{error}</p>
               <button type="button" className="btn btn-secondary" onClick={onRetry}>
-                Try again
+                {t("common.tryAgain")}
               </button>
             </div>
           ) : summary ? (
             <>
-              <span className="referral-panel-title">Share your invite link</span>
+              <span className="referral-panel-title">{t("shell.referral.shareTitle")}</span>
               <CopyLinkField
                 value={summary.url}
-                label="Invite link"
+                label={t("shell.referral.linkLabel")}
                 copied={copied}
                 onCopy={onCopy}
               />
@@ -1996,13 +2040,12 @@ function ReferralDialog({
               <div className="referral-stats">
                 <div>
                   <span className="referral-stat-value">{summary.qualifiedCount}</span>
-                  <span className="referral-stat-label">Friends referred</span>
+                  <span className="referral-stat-label">{t("shell.referral.friendsReferred")}</span>
                 </div>
               </div>
               {pendingFriends > 0 ? (
                 <p className="referral-progress-note">
-                  {pendingFriends} invited {pendingFriends === 1 ? "friend is" : "friends are"}{" "}
-                  waiting to subscribe.
+                  {t("shell.referral.pending", { count: pendingFriends })}
                 </p>
               ) : null}
             </>
@@ -2017,10 +2060,10 @@ function ReferralDialog({
 // popover whose actions open the settings page or sign out.
 // The report shortcuts in the account menu: the same set as the composer's
 // "+" popover, minus attaching a file. Action-phrased to read as menu verbs.
-const REPORT_MENU_ITEMS: { category: ReportCategory; label: string }[] = [
-  { category: "bug", label: "Report a bug" },
-  { category: "feedback", label: "Send feedback" },
-  { category: "feature", label: "Request a feature" },
+const REPORT_MENU_ITEMS: { category: ReportCategory; label: MessageKey }[] = [
+  { category: "bug", label: "shell.identity.reportBug" },
+  { category: "feedback", label: "shell.identity.sendFeedback" },
+  { category: "feature", label: "shell.identity.requestFeature" },
 ];
 function SidebarIdentity({
   account,
@@ -2041,6 +2084,7 @@ function SidebarIdentity({
   onReportIssue?: (category: ReportCategory) => void;
   onSignOut?: () => void;
 }) {
+  const t = useT();
   const wrapRef = useRef<HTMLDivElement>(null);
   const name = accountDisplayName(account);
 
@@ -2053,7 +2097,7 @@ function SidebarIdentity({
         className="sidebar-nav-item sidebar-identity"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        aria-label={`${name}, account menu`}
+        aria-label={t("shell.identity.menuLabel", { name })}
         onClick={onToggleMenu}
       >
         <AccountAvatar account={account} className="sidebar-nav-icon" />
@@ -2069,12 +2113,12 @@ function SidebarIdentity({
               onClick={onInviteFriends}
             >
               <IconGift1 size={14} />
-              Invite friends
+              {t("shell.identity.inviteFriends")}
             </button>
           ) : null}
           <button type="button" role="menuitem" onClick={onOpenSettings}>
             <IconSettingsGear4 size={14} />
-            Settings
+            {t("common.settings")}
           </button>
           {onReportIssue
             ? REPORT_MENU_ITEMS.map((item) => (
@@ -2087,7 +2131,7 @@ function SidebarIdentity({
                   <span className="sidebar-report-icon" data-category={item.category}>
                     <CategoryIcon category={item.category} size={14} />
                   </span>
-                  {item.label}
+                  {t(item.label)}
                 </button>
               ))
             : null}
@@ -2096,7 +2140,7 @@ function SidebarIdentity({
               <div className="context-menu-separator" role="separator" />
               <button type="button" role="menuitem" onClick={onSignOut}>
                 <IconArrowBoxRight size={14} />
-                Sign out
+                {t("shell.identity.signOut")}
               </button>
             </>
           ) : null}
@@ -2159,9 +2203,10 @@ function AgentSessionRow({
   onRenameEnd: () => void;
   onOpenMenu: (anchor: HTMLElement) => void;
 }) {
-  const title = session.title || "Untitled session";
+  const t = useT();
+  const title = session.title || t("shell.sidebar.untitledSession");
   const status = waiting ? "waitingForUser" : working ? "running" : undefined;
-  const time = formatSessionTime(session.updatedAt, dateFormat);
+  const time = formatSessionTime(session.updatedAt, dateFormat, t);
   const menuRef = useRef<HTMLButtonElement>(null);
   const [menuFocused, setMenuFocused] = useState(false);
 
@@ -2200,15 +2245,19 @@ function AgentSessionRow({
         <span
           className="agent-session-meta agent-session-status"
           role="status"
-          aria-label="Needs you"
+          aria-label={t("shell.session.needsYou")}
         >
-          <span className="agent-sidebar-working" data-status="waitingForUser" title="Needs you" />
+          <span
+            className="agent-sidebar-working"
+            data-status="waitingForUser"
+            title={t("shell.session.needsYou")}
+          />
         </span>
       ) : working ? (
         <span
           className="agent-session-meta agent-session-status"
           role="status"
-          aria-label="Working"
+          aria-label={t("shell.session.working")}
         >
           <DotSpinner className="agent-sidebar-spinner" />
         </span>
@@ -2216,9 +2265,13 @@ function AgentSessionRow({
         <span
           className="agent-session-meta agent-session-status"
           role="status"
-          aria-label="New reply"
+          aria-label={t("shell.session.newReply")}
         >
-          <span className="agent-sidebar-working" data-status="unread" title="New reply" />
+          <span
+            className="agent-sidebar-working"
+            data-status="unread"
+            title={t("shell.session.newReply")}
+          />
         </span>
       ) : time ? (
         <span className="agent-session-meta agent-session-time">{time}</span>
@@ -2228,7 +2281,7 @@ function AgentSessionRow({
           ref={menuRef}
           type="button"
           className="note-row-menu agent-session-row-menu"
-          aria-label={`Actions for ${title}`}
+          aria-label={t("shell.sidebar.actionsFor", { title })}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           disabled={deleting}
@@ -2280,6 +2333,7 @@ function AgentSessionContextMenu({
   onDelete: () => void;
   onClose: () => void;
 }) {
+  const t = useT();
   return (
     <SidebarContextMenu anchor={anchor} onClose={onClose}>
       <button
@@ -2291,7 +2345,7 @@ function AgentSessionContextMenu({
         }}
       >
         <IconPencil size={14} />
-        Rename
+        {t("common.rename")}
       </button>
       <button
         type="button"
@@ -2302,7 +2356,7 @@ function AgentSessionContextMenu({
         }}
       >
         {pinned ? <IconUnpin size={14} /> : <IconPin size={14} />}
-        {pinned ? "Unpin" : "Pin"}
+        {pinned ? t("shell.menu.unpin") : t("shell.menu.pin")}
       </button>
       {onMoveToProject ? (
         <button
@@ -2314,7 +2368,7 @@ function AgentSessionContextMenu({
           }}
         >
           {folderId ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
-          {folderId ? "Change project" : "Add to project"}
+          {folderId ? t("shell.menu.changeProject") : t("shell.menu.addToProject")}
         </button>
       ) : null}
       {folderId && onRemoveFromProject ? (
@@ -2327,7 +2381,7 @@ function AgentSessionContextMenu({
           }}
         >
           <IconFolderDelete size={14} />
-          Remove from project
+          {t("shell.menu.removeFromProject")}
         </button>
       ) : null}
       {onToggleArchived ? (
@@ -2340,7 +2394,7 @@ function AgentSessionContextMenu({
           }}
         >
           {archived ? <IconArrowUndoUp size={14} /> : <IconArchive size={14} />}
-          {archived ? "Unarchive" : "Archive"}
+          {archived ? t("shell.menu.unarchive") : t("shell.menu.archive")}
         </button>
       ) : null}
       <div className="context-menu-separator" role="separator" />
@@ -2355,7 +2409,7 @@ function AgentSessionContextMenu({
         }}
       >
         <IconTrashCan size={14} />
-        Delete
+        {t("common.delete")}
       </button>
     </SidebarContextMenu>
   );
@@ -2364,18 +2418,18 @@ function AgentSessionContextMenu({
 // Compact trailing timestamp for agent session rows: "now", "5m", "3h", "2d"
 // while recent, then "May 2". sessionTimestamp falls back to the epoch when a
 // session has no dates at all, which we render as nothing rather than 1970.
-function formatSessionTime(iso: string, dateFormat: DateFormatPreference): string {
+function formatSessionTime(iso: string, dateFormat: DateFormatPreference, t: TFunction): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime()) || date.getTime() === 0) return "";
   const diffMs = Date.now() - date.getTime();
-  if (diffMs < 60_000) return "now";
+  if (diffMs < 60_000) return t("shell.time.now");
   const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return t("shell.time.minutes", { count: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
+  if (hours < 24) return t("shell.time.hours", { count: hours });
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d`;
-  return formatCalendarDate(date, dateFormat);
+  if (days < 7) return t("shell.time.days", { count: days });
+  return formatCalendarDate(date, dateFormat, intlLocale());
 }
 
 function NoteContextMenu({
@@ -2395,6 +2449,7 @@ function NoteContextMenu({
   onDeleteNote: (noteId: string) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const note = notes.find((item) => item.id === noteId);
   const currentFolderId = note?.folderIds[0];
   const hasFolder = Boolean(currentFolderId);
@@ -2409,7 +2464,7 @@ function NoteContextMenu({
         }}
       >
         {hasFolder ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
-        {hasFolder ? "Change project" : "Add to project"}
+        {hasFolder ? t("shell.menu.changeProject") : t("shell.menu.addToProject")}
       </button>
       {hasFolder && currentFolderId ? (
         <button
@@ -2421,7 +2476,7 @@ function NoteContextMenu({
           }}
         >
           <IconFolderDelete size={14} />
-          Remove from project
+          {t("shell.menu.removeFromProject")}
         </button>
       ) : null}
       <div className="context-menu-separator" role="separator" />
@@ -2435,7 +2490,7 @@ function NoteContextMenu({
         }}
       >
         <IconTrashCan size={14} />
-        Delete note
+        {t("shell.menu.deleteNote")}
       </button>
     </SidebarContextMenu>
   );
@@ -2549,7 +2604,7 @@ function SidebarContextMenu({
 function relativeDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString(undefined, {
+  return date.toLocaleString(intlLocale(), {
     month: "short",
     day: "numeric",
     hour: "numeric",

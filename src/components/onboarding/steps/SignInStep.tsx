@@ -7,45 +7,61 @@ import { IconTelegram } from "central-icons/IconTelegram";
 import { fallbackDictationCapabilities } from "../../../lib/platform";
 import { clovyOpenCommunityPage, osAccountsCancelLogin, osAccountsLogin } from "../../../lib/tauri";
 import type { AccountStatus } from "../../../lib/tauri";
+import {
+  INTERFACE_LOCALE_OPTIONS,
+  type InterfaceLocale,
+  type MessageKey,
+  setInterfaceLocale,
+  useLocale,
+  useT,
+  useTRich,
+} from "../../../i18n";
 import { OsMark } from "../../account/AccountGate";
+import { Select } from "../../ui/Select";
 import { OnboardingPrimaryButton, StepCard } from "../StepChrome";
+
+type WelcomePoint = {
+  icon: typeof IconSparkle;
+  title: MessageKey;
+  detail: MessageKey;
+};
 
 // Desktop platforms with bundled helpers can introduce the full agent,
 // dictation, and notes surface. Unsupported platforms narrow the welcome
 // promise until native helpers are turnkey there.
-const CLOVY_POINTS = [
+const CLOVY_POINTS: WelcomePoint[] = [
   {
     icon: IconSparkle,
-    title: "Delegate real work",
-    detail: "Give Clovy a task and come back to the result.",
+    title: "onboarding.signIn.point.delegate.title",
+    detail: "onboarding.signIn.point.delegate.detail",
   },
   {
     icon: IconMicrophone,
-    title: "Write with your voice",
-    detail: "Turn speech into polished text in any app.",
+    title: "onboarding.signIn.point.voice.title",
+    detail: "onboarding.signIn.point.voice.detail",
   },
   {
     icon: IconCalendar1,
-    title: "Capture meetings",
-    detail: "Keep clear notes without inviting a bot.",
+    title: "onboarding.signIn.point.meetings.title",
+    detail: "onboarding.signIn.point.meetings.detail",
   },
   {
     icon: IconLock,
-    title: "Private by default",
-    detail: "Zero-retention models protect what you share.",
+    title: "onboarding.signIn.point.private.title",
+    detail: "onboarding.signIn.point.private.detail",
   },
 ];
 
-const WINDOWS_CLOVY_POINTS = [
+const WINDOWS_CLOVY_POINTS: WelcomePoint[] = [
   {
     icon: IconSparkle,
-    title: "Keep work together",
-    detail: "Bring meeting notes and projects into one place.",
+    title: "onboarding.signIn.point.together.title",
+    detail: "onboarding.signIn.point.together.detail",
   },
   {
     icon: IconMicrophone,
-    title: "Capture meetings",
-    detail: "Turn microphone recordings into clear notes.",
+    title: "onboarding.signIn.point.meetings.title",
+    detail: "onboarding.signIn.point.recordings.detail",
   },
   CLOVY_POINTS[3],
 ];
@@ -65,6 +81,8 @@ export function SignInStep({
   onAccountChanged: (next: AccountStatus) => void;
   onContinue: () => void;
 }) {
+  const t = useT();
+  const tr = useTRich();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>();
   const capabilities = fallbackDictationCapabilities();
@@ -95,7 +113,7 @@ export function SignInStep({
         onAccountChanged(next);
         onContinue();
       } else {
-        setStatus("Sign-in did not complete. Please try again.");
+        setStatus(t("onboarding.signIn.incomplete"));
       }
     } catch (error) {
       setStatus(messageFromError(error));
@@ -106,8 +124,8 @@ export function SignInStep({
 
   return (
     <StepCard
-      title="Welcome to Clovy"
-      subtitle="Private AI for everyday life and work."
+      title={t("onboarding.signIn.title")}
+      subtitle={t("onboarding.signIn.subtitle")}
       mark
       wide
       className={introClassName}
@@ -119,8 +137,8 @@ export function SignInStep({
               <Icon size={15} />
             </span>
             <div>
-              <span className="onboarding-point-label">{title}</span>
-              <span className="onboarding-point-detail">{detail}</span>
+              <span className="onboarding-point-label">{t(title)}</span>
+              <span className="onboarding-point-detail">{t(detail)}</span>
             </div>
           </li>
         ))}
@@ -132,7 +150,7 @@ export function SignInStep({
           onClick={() => void clovyOpenCommunityPage().catch(() => undefined)}
         >
           <IconTelegram size={16} aria-hidden />
-          <span>Join the Clovy community on Telegram</span>
+          <span>{t("onboarding.signIn.community")}</span>
         </button>
       </p>
       {account.configured ? (
@@ -144,41 +162,70 @@ export function SignInStep({
               aria-live="polite"
             >
               <span className="welcome-progress-label">
-                <span>Complete sign-in in browser</span>
+                <span>{t("onboarding.signIn.waiting")}</span>
               </span>
               <button
                 type="button"
                 className="welcome-cancel-btn"
                 onClick={() => void cancelInFlight()}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           ) : (
             <OnboardingPrimaryButton onClick={() => void handleSignIn()}>
               <OsMark />
-              <span>Continue with OpenSoftware</span>
+              <span>{t("onboarding.signIn.continue")}</span>
             </OnboardingPrimaryButton>
           )}
         </div>
       ) : (
-        <p className="welcome-status welcome-status-info">
-          OpenSoftware sign-in is not configured for this build.
-        </p>
+        <p className="welcome-status welcome-status-info">{t("onboarding.signIn.notConfigured")}</p>
       )}
       {status ? <p className="welcome-status">{status}</p> : null}
       <p className="welcome-terms">
-        By continuing, you agree to the{" "}
-        <a href="https://accounts.opensoftware.co/terms" target="_blank" rel="noreferrer">
-          Terms
-        </a>{" "}
-        and{" "}
-        <a href="https://accounts.opensoftware.co/privacy" target="_blank" rel="noreferrer">
-          Privacy Policy
-        </a>
-        .
+        {tr("onboarding.signIn.terms", {
+          terms: (chunks) => (
+            <a href="https://accounts.opensoftware.co/terms" target="_blank" rel="noreferrer">
+              {chunks}
+            </a>
+          ),
+          privacy: (chunks) => (
+            <a href="https://accounts.opensoftware.co/privacy" target="_blank" rel="noreferrer">
+              {chunks}
+            </a>
+          ),
+        })}
       </p>
+      <InterfaceLanguageChooser />
     </StepCard>
+  );
+}
+
+/**
+ * A quiet interface-language switch on the welcome screen, so a new user can
+ * read the rest of onboarding in their language before anything else. Same
+ * store as Settings > Interface language; each option is named natively.
+ */
+function InterfaceLanguageChooser() {
+  const t = useT();
+  const locale = useLocale();
+  const current = INTERFACE_LOCALE_OPTIONS.find((option) => option.value === locale);
+  return (
+    <div className="onboarding-language">
+      <Select
+        className="onboarding-language-select"
+        value={locale}
+        options={INTERFACE_LOCALE_OPTIONS.map((option) => ({
+          value: option.value,
+          label: option.label,
+          lang: option.value,
+        }))}
+        placeholder="English"
+        ariaLabel={t("onboarding.language.aria", { language: current?.label ?? "English" })}
+        onChange={(value) => setInterfaceLocale(value as InterfaceLocale)}
+      />
+    </div>
   );
 }
 

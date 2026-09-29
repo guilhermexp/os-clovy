@@ -1,8 +1,5 @@
-import {
-  type AgentChatPart,
-  type AgentChatTurn,
-  UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
-} from "./agent-chat-runtime";
+import { t } from "../i18n/translate";
+import type { AgentChatPart, AgentChatTurn } from "./agent-chat-runtime";
 import {
   AGENT_RUNTIME_PROTOCOL_VERSION,
   type AgentItemDto,
@@ -471,7 +468,7 @@ export function agentItemsToChatTurns(items: AgentItemDto[]): AgentChatTurn[] {
                     : item.category === "runtime"
                       ? "runtime"
                       : "upstream-provider",
-                text: UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+                text: t("lib.upstream.noticeBody"),
                 retryable: item.retryable,
               },
             ],

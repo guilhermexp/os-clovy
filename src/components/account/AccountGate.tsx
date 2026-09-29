@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useT, useTRich } from "../../i18n";
 import { fallbackDictationCapabilities } from "../../lib/platform";
 import { osAccountsCancelLogin, osAccountsLogin } from "../../lib/tauri";
 import type { AccountStatus } from "../../lib/tauri";
@@ -17,6 +18,7 @@ type AccountStatusFailureProps = {
 };
 
 export function AccountStatusFailure({ message, onRetry }: AccountStatusFailureProps) {
+  const t = useT();
   const [retrying, setRetrying] = useState(false);
 
   async function handleRetry() {
@@ -32,11 +34,11 @@ export function AccountStatusFailure({ message, onRetry }: AccountStatusFailureP
     <div className="welcome-screen">
       <div className="welcome-card">
         <ClovyAppTile className="welcome-brand-mark" />
-        <h1 className="welcome-title">Clovy could not finish starting</h1>
+        <h1 className="welcome-title">{t("account.gate.startFailed")}</h1>
         <p className="welcome-subtitle">{message}</p>
         <div className="welcome-providers">
           <BrandPrimaryButton disabled={retrying} onClick={() => void handleRetry()}>
-            {retrying ? "Trying again..." : "Try again"}
+            {retrying ? t("account.gate.tryingAgain") : t("common.tryAgain")}
           </BrandPrimaryButton>
         </div>
       </div>
@@ -45,11 +47,13 @@ export function AccountStatusFailure({ message, onRetry }: AccountStatusFailureP
 }
 
 export function AccountGate({ account, loading, onAccountChanged }: Props) {
+  const t = useT();
+  const tr = useTRich();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>();
   const subtitle = fallbackDictationCapabilities().available
-    ? "Record conversations, turn them into notes, and dictate with your OpenSoftware account."
-    : "Record conversations and turn them into notes with your OpenSoftware account.";
+    ? t("account.gate.subtitleDictation")
+    : t("account.gate.subtitle");
 
   const cancelInFlight = useCallback(async () => {
     try {
@@ -74,7 +78,7 @@ export function AccountGate({ account, loading, onAccountChanged }: Props) {
       if (next.signedIn) {
         onAccountChanged(next);
       } else {
-        setStatus("Sign-in did not complete. Please try again.");
+        setStatus(t("account.gate.signInIncomplete"));
       }
     } catch (error) {
       setStatus(messageFromError(error));
@@ -87,7 +91,7 @@ export function AccountGate({ account, loading, onAccountChanged }: Props) {
     <div className="welcome-screen">
       <div className="welcome-card">
         <ClovyAppTile className="welcome-brand-mark" />
-        <h1 className="welcome-title">Welcome to Clovy</h1>
+        <h1 className="welcome-title">{t("account.gate.welcome")}</h1>
         <p className="welcome-subtitle">{subtitle}</p>
 
         {account.configured ? (
@@ -99,44 +103,45 @@ export function AccountGate({ account, loading, onAccountChanged }: Props) {
                 aria-live="polite"
               >
                 <span className="welcome-progress-label">
-                  <span>Complete sign-in in browser</span>
+                  <span>{t("account.gate.completeInBrowser")}</span>
                 </span>
                 <button
                   type="button"
                   className="welcome-cancel-btn"
                   onClick={() => void cancelInFlight()}
                 >
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               </div>
             ) : (
               <BrandPrimaryButton disabled={loading} onClick={() => void handleSignIn()}>
                 <OsMark />
-                <span>Continue with OpenSoftware</span>
+                <span>{t("account.gate.continue")}</span>
               </BrandPrimaryButton>
             )}
           </div>
         ) : (
-          <p className="welcome-status welcome-status-info">
-            OpenSoftware sign-in is not configured for this build.
-          </p>
+          <p className="welcome-status welcome-status-info">{t("account.signInNotConfigured")}</p>
         )}
 
         {status ? <p className="welcome-status">{status}</p> : null}
 
         <p className="welcome-terms">
-          By continuing, you agree to the{" "}
           {/* opensoftware.network serves nothing; the accounts portal is the
               live domain we control, so legal pages can be published there
               without shipping a new desktop build. */}
-          <a href="https://accounts.opensoftware.co/terms" target="_blank" rel="noreferrer">
-            Terms
-          </a>{" "}
-          and{" "}
-          <a href="https://accounts.opensoftware.co/privacy" target="_blank" rel="noreferrer">
-            Privacy Policy
-          </a>
-          .
+          {tr("account.gate.terms", {
+            terms: (chunks) => (
+              <a href="https://accounts.opensoftware.co/terms" target="_blank" rel="noreferrer">
+                {chunks}
+              </a>
+            ),
+            privacy: (chunks) => (
+              <a href="https://accounts.opensoftware.co/privacy" target="_blank" rel="noreferrer">
+                {chunks}
+              </a>
+            ),
+          })}
         </p>
       </div>
     </div>

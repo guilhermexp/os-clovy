@@ -54,6 +54,7 @@ import {
   routineTrustSet,
   type ConnectorPolicyCatalog,
 } from "../../lib/tauri";
+import { t as translate, useT } from "../../i18n";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { HoverTip } from "../ui/HoverTip";
 import { RoutineCreate, type RoutineCreateInput } from "./RoutineCreate";
@@ -116,6 +117,7 @@ export function RoutinesView({
   onOpenRun,
   creditActionsDisabledReason,
 }: RoutinesViewProps) {
+  const t = useT();
   const { policy } = useConnectorPolicy();
   const [allRoutines, setRoutines] = useState<RoutineJob[]>([]);
   const [loadingState, setLoading] = useState(true);
@@ -290,9 +292,9 @@ export function RoutinesView({
       const jobId = routineIdFromSession(run);
       const routine = jobId ? routinesById.get(jobId) : undefined;
       const sessionTitle = isReplaceableRoutineRunTitle(run.title) ? "" : run.title?.trim();
-      return routine?.name || sessionTitle || "Routine run";
+      return routine?.name || sessionTitle || t("routines.run.fallbackLabel");
     },
-    [routinesById],
+    [routinesById, t],
   );
 
   const filteredRuns = useMemo(() => {
@@ -384,7 +386,7 @@ export function RoutinesView({
       let created: RoutineJob;
       if (connectorAware) {
         if (!policy) {
-          setCreateError("Connector policy is still loading. Try again.");
+          setCreateError(t("routines.policyLoading"));
           return;
         }
         created = await createRoutine({
@@ -432,7 +434,10 @@ export function RoutinesView({
             await removeRoutine(created.job_id);
           } catch (cleanupError) {
             throw new Error(
-              `${describeRoutineError(setupError)} Clovy also could not remove the partially created routine: ${describeRoutineError(cleanupError)}`,
+              t("routines.view.cleanupFailed", {
+                error: describeRoutineError(setupError),
+                cleanupError: describeRoutineError(cleanupError),
+              }),
             );
           }
           throw setupError;
@@ -554,9 +559,9 @@ export function RoutinesView({
         open={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
         onConfirm={confirmDelete}
-        title={`Delete “${pendingDelete?.name ?? ""}”?`}
-        description="Clovy will stop running this routine. This can’t be undone."
-        confirmLabel="Delete"
+        title={t("routines.view.deleteTitle", { name: pendingDelete?.name ?? "" })}
+        description={t("routines.view.deleteDescription")}
+        confirmLabel={t("common.delete")}
         destructive
       />
     </>
@@ -605,18 +610,18 @@ export function RoutinesView({
   }
 
   return (
-    <section className="routines-workspace" aria-label="Routines">
+    <section className="routines-workspace" aria-label={t("routines.title")}>
       <header className="folders-header">
         <div className="folders-heading">
           <h1>
-            Routines
+            {t("routines.title")}
             {routines.length > 0 ? <span className="folders-count">{routines.length}</span> : null}
           </h1>
-          <p className="folders-subtitle">Automations Clovy runs for you on a schedule.</p>
+          <p className="folders-subtitle">{t("routines.view.subtitle")}</p>
         </div>
         <button type="button" className="primary-action primary-solid" onClick={() => openCreate()}>
           <IconPlusMedium size={13} />
-          New routine
+          {t("routines.newRoutine")}
         </button>
       </header>
 
@@ -626,7 +631,7 @@ export function RoutinesView({
             <IconMagnifyingGlass size={14} />
             <input
               type="search"
-              placeholder="Search"
+              placeholder={t("common.search")}
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
@@ -634,10 +639,10 @@ export function RoutinesView({
           <button
             type="button"
             className="icon-button routines-refresh"
-            aria-label="Refresh"
+            aria-label={t("routines.view.refresh")}
             aria-busy={refreshing}
             disabled={refreshing}
-            title="Refresh"
+            title={t("routines.view.refresh")}
             onClick={refreshNow}
           >
             <IconArrowRotateClockwise
@@ -659,7 +664,7 @@ export function RoutinesView({
 
       {loading ? (
         <div className="folders-empty">
-          <p>Loading routines…</p>
+          <p>{t("routines.view.loading")}</p>
         </div>
       ) : routines.length === 0 ? (
         <div className="routines-hero">
@@ -667,10 +672,10 @@ export function RoutinesView({
         </div>
       ) : filtered.length === 0 ? (
         <div className="folders-empty">
-          <p>No routines match “{query.trim()}”.</p>
+          <p>{t("routines.view.noMatch", { query: query.trim() })}</p>
         </div>
       ) : (
-        <ul className="routines-list" aria-label="Routines">
+        <ul className="routines-list" aria-label={t("routines.title")}>
           {filtered.map((routine) => (
             <RoutineRow
               key={routine.job_id}
@@ -698,19 +703,17 @@ export function RoutinesView({
       (query.trim()
         ? filteredRuns.length > 0
         : routines.length > 0 || runs.length > 0 || runsUnavailable) ? (
-        <section className="routines-runs" aria-label="Run history">
+        <section className="routines-runs" aria-label={t("routines.runHistory")}>
           <header className="routines-runs-header">
             <h2>
-              Run history
+              {t("routines.runHistory")}
               {runs.length > 0 ? <span className="folders-count">{runs.length}</span> : null}
             </h2>
           </header>
           {runsUnavailable ? (
-            <p className="routines-runs-empty">Run history is unavailable right now.</p>
+            <p className="routines-runs-empty">{t("routines.view.runsUnavailable")}</p>
           ) : runs.length === 0 ? (
-            <p className="routines-runs-empty">
-              No runs yet. When a routine fires, its session appears here.
-            </p>
+            <p className="routines-runs-empty">{t("routines.view.noRuns")}</p>
           ) : (
             <div className="routines-runs-panel">
               <RoutineRunList runs={filteredRuns} label={runLabel} onOpen={onOpenRun} />
@@ -720,9 +723,9 @@ export function RoutinesView({
       ) : null}
 
       {!loading && routines.length > 0 && !query.trim() ? (
-        <section className="routines-starters" aria-label="Starter routines">
+        <section className="routines-starters" aria-label={t("routines.view.starters")}>
           <header className="routines-section-header">
-            <h2>Starter routines</h2>
+            <h2>{t("routines.view.starters")}</h2>
           </header>
           <TemplateGrid onPick={openCreate} />
         </section>
@@ -735,6 +738,7 @@ export function RoutinesView({
 }
 
 function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void }) {
+  const t = useT();
   return (
     <ul className="routines-template-grid">
       {ROUTINE_TEMPLATES.map((template) => (
@@ -749,10 +753,10 @@ function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void 
                 // The list rows spell the badge out; cards just flash the
                 // warm shield and let the tip carry the explanation.
                 <HoverTip
-                  tip="This starter needs full access: when it fires, Clovy can run commands and change any file your account can. You confirm that before creating it."
+                  tip={t("routines.view.starterUnrestrictedTip")}
                   className="routines-item-badge routines-item-badge-warm routines-badge-compact"
                   tabIndex={0}
-                  aria-label="Unrestricted"
+                  aria-label={t("routines.mode.unrestricted")}
                 >
                   <IconShieldCrossed size={11} aria-hidden />
                 </HoverTip>
@@ -765,7 +769,9 @@ function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void 
                 {template.trustMode ? (
                   <span className="routines-template-trust">
                     {" "}
-                    Trust: {TRUST_MODE_META[template.trustMode].label.toLowerCase()}.
+                    {t("routines.trust.summary", {
+                      trust: TRUST_MODE_META[template.trustMode].label.toLowerCase(),
+                    })}
                   </span>
                 ) : null}
               </p>
@@ -774,7 +780,7 @@ function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void 
           <button
             type="button"
             className="icon-button routines-template-add"
-            aria-label={`Add ${template.name}`}
+            aria-label={t("routines.view.addTemplate", { name: template.name })}
             onClick={() => onPick(template)}
           >
             <IconPlusMedium size={13} aria-hidden />
@@ -802,6 +808,7 @@ function RoutineRow({
   runNowDisabledReason?: string;
   onDelete: () => void;
 }) {
+  const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const paused = routine.state === "paused";
@@ -811,9 +818,11 @@ function RoutineRow({
   // routine's baseline and would read as noise.
   const trustMode = policy ? routineTrustModeFromToolsets(policy, routine.enabled_toolsets) : null;
   const trustBadge = trustMode === "approval" || trustMode === "autonomous" ? trustMode : null;
-  const status = paused ? "Paused" : completed ? "Completed" : null;
+  const status = paused ? t("routines.paused") : completed ? t("routines.completed") : null;
   const activity =
-    completed && routine.last_run_at ? `Last ran ${formatRunTime(routine.last_run_at)}` : null;
+    completed && routine.last_run_at
+      ? t("routines.lastRan", { time: formatRunTime(routine.last_run_at) })
+      : null;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -847,12 +856,12 @@ function RoutineRow({
             <span className="routines-item-name">{routine.name}</span>
             {routineUnrestricted(routine) ? (
               <HoverTip
-                tip="This routine runs with full access: when it fires, Clovy can run commands and change any file your account can. Routines without this badge run sandboxed and cannot touch your files."
+                tip={t("routines.unrestrictedTip")}
                 className="routines-item-badge routines-item-badge-warm"
                 tabIndex={0}
               >
                 <IconShieldCrossed size={11} aria-hidden />
-                Unrestricted
+                {t("routines.mode.unrestricted")}
               </HoverTip>
             ) : null}
             {trustBadge ? (
@@ -865,7 +874,9 @@ function RoutineRow({
               </HoverTip>
             ) : null}
             {routine.last_status === "error" ? (
-              <span className="routines-item-badge routines-item-badge-error">Last run failed</span>
+              <span className="routines-item-badge routines-item-badge-error">
+                {t("routines.view.lastRunFailed")}
+              </span>
             ) : null}
           </span>
         </span>
@@ -888,7 +899,7 @@ function RoutineRow({
           <button
             type="button"
             className="icon-button routines-item-menu-trigger"
-            aria-label={`Actions for ${routine.name}`}
+            aria-label={t("routines.view.actionsFor", { name: routine.name })}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
             onClick={() => setMenuOpen((open) => !open)}
@@ -906,7 +917,7 @@ function RoutineRow({
                 }}
               >
                 <IconPencil size={14} />
-                Edit
+                {t("common.edit")}
               </button>
               <button
                 type="button"
@@ -919,7 +930,7 @@ function RoutineRow({
                 }}
               >
                 <IconPlay size={14} />
-                Run now
+                {t("routines.runNow")}
               </button>
               <hr className="context-menu-separator" />
               <button
@@ -933,7 +944,7 @@ function RoutineRow({
                 }}
               >
                 <IconTrashCan size={14} />
-                Delete routine
+                {t("routines.deleteRoutine")}
               </button>
             </span>
           ) : null}
@@ -962,9 +973,9 @@ function timeValue(iso: string | null | undefined) {
 function describeRoutineError(err: unknown) {
   const message = messageFromError(err);
   if (/\bAPI returned 5\d\d\b/i.test(message)) {
-    return "Clovy ran into a problem with that request.";
+    return translate("routines.view.serverError");
   }
-  return message || "Routines are unavailable. Try again.";
+  return message || translate("routines.view.unavailable");
 }
 
 function RoutineErrorBanner({
@@ -976,6 +987,7 @@ function RoutineErrorBanner({
   onRetry?: () => void;
   retrying?: boolean;
 }) {
+  const t = useT();
   return (
     <div className="error-banner routines-error-banner" role="alert">
       <p>{message}</p>
@@ -988,25 +1000,35 @@ function RoutineErrorBanner({
           aria-busy={retrying || undefined}
         >
           <IconArrowRotateClockwise size={14} className="balance-refresh-icon" aria-hidden />
-          Try again
+          {t("common.tryAgain")}
         </button>
       ) : null}
     </div>
   );
 }
 
+// Titles and descriptions are getters so the menu follows the interface
+// language (read at render time, never frozen at import).
 const ROUTINE_EXECUTION_MODE_OPTIONS = [
   {
     unrestricted: false,
     icon: <IconShieldCheck size={16} aria-hidden />,
-    title: "Sandboxed",
-    description: "The routine can read the web and memory but cannot touch your files.",
+    get title() {
+      return translate("routines.mode.sandboxed");
+    },
+    get description() {
+      return translate("routines.mode.sandboxedOption");
+    },
   },
   {
     unrestricted: true,
     icon: <IconShieldCrossed size={16} aria-hidden />,
-    title: "Unrestricted",
-    description: "When it fires, Clovy can change any file your account can.",
+    get title() {
+      return translate("routines.mode.unrestricted");
+    },
+    get description() {
+      return translate("routines.mode.unrestrictedOption");
+    },
   },
 ] as const;
 
@@ -1032,6 +1054,7 @@ function DescribeBar({
   onUnrestrictedChange: (unrestricted: boolean) => void;
   onSubmit: () => void;
 }) {
+  const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
   const rootRef = useRef<HTMLFormElement>(null);
 
@@ -1060,7 +1083,7 @@ function DescribeBar({
       <form
         ref={rootRef}
         className="routines-describe-composer"
-        aria-label="Describe a routine to Clovy"
+        aria-label={t("routines.describe.formLabel")}
         onSubmit={(event) => {
           event.preventDefault();
           onSubmit();
@@ -1068,9 +1091,9 @@ function DescribeBar({
       >
         <div className="agent-composer-box">
           <GrowingTextarea
-            aria-label="Describe a routine"
+            aria-label={t("routines.describe.inputLabel")}
             value={draft}
-            placeholder="Have Clovy help you set up a routine"
+            placeholder={t("routines.describe.placeholder")}
             onChange={(event) => onDraftChange(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing) return;
@@ -1087,7 +1110,7 @@ function DescribeBar({
               data-unrestricted={unrestricted ? "true" : undefined}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
-              title="Change what this routine can touch"
+              title={t("routines.describe.changeAccess")}
               onClick={() => setMenuOpen((open) => !open)}
             >
               {unrestricted ? (
@@ -1095,7 +1118,7 @@ function DescribeBar({
               ) : (
                 <IconShieldCheck size={14} aria-hidden />
               )}
-              {unrestricted ? "Unrestricted" : "Sandboxed"}
+              {unrestricted ? t("routines.mode.unrestricted") : t("routines.mode.sandboxed")}
               <IconChevronDownSmall size={12} aria-hidden />
             </button>
             <div className="agent-composer-actions">
@@ -1103,7 +1126,7 @@ function DescribeBar({
                 type="submit"
                 className="agent-composer-send"
                 disabled={!draft.trim() || Boolean(disabledReason)}
-                aria-label="Ask Clovy to set it up"
+                aria-label={t("routines.describe.send")}
                 title={disabledReason}
               >
                 <IconArrowUp size={16} />
@@ -1112,15 +1135,11 @@ function DescribeBar({
           </div>
         </div>
         {menuOpen ? (
-          <div
-            className="agent-sandbox-menu"
-            role="menu"
-            aria-label="What can this routine change?"
-          >
-            <p className="agent-sandbox-menu-title">What can this routine change?</p>
+          <div className="agent-sandbox-menu" role="menu" aria-label={t("routines.mode.question")}>
+            <p className="agent-sandbox-menu-title">{t("routines.mode.question")}</p>
             {ROUTINE_EXECUTION_MODE_OPTIONS.map((option) => (
               <button
-                key={option.title}
+                key={String(option.unrestricted)}
                 type="button"
                 role="menuitemradio"
                 aria-checked={unrestricted === option.unrestricted}

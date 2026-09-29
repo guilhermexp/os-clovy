@@ -1,3 +1,4 @@
+import { type MessageKey, t } from "../i18n/translate";
 import { modelSupportsImageInput, modelSupportsTools } from "./model-privacy";
 import type { ProviderModelMode, VeniceModelDto } from "./tauri";
 
@@ -26,9 +27,9 @@ const PREFERRED_VISION_FALLBACK_IDS = ["kimi-k2-6"];
  */
 export function autoPillDesignation(costQuality: number | undefined): string | undefined {
   if (costQuality === undefined) return undefined;
-  if (costQuality < 34) return "Economy";
-  if (costQuality > 66) return "Quality";
-  return "Balanced";
+  if (costQuality < 34) return t("lib.suggested.autoEconomy");
+  if (costQuality > 66) return t("lib.suggested.autoQuality");
+  return t("lib.suggested.autoBalanced");
 }
 
 /**
@@ -66,79 +67,43 @@ export function autoPillDesignation(costQuality: number | undefined): string | u
  */
 export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
   generation: [
-    {
-      id: "zai-org-glm-5-2",
-      reason:
-        "Default pick: latest GLM flagship with strong reasoning, tool use, structured output, and zero data retention.",
-    },
-    {
-      id: "kimi-k3",
-      reason:
-        "Newest Kimi flagship: multimodal reasoning, tool use, and a 1M-token context window in anonymous mode.",
-    },
-    {
-      id: "kimi-k2-6",
-      reason:
-        "Private Kimi option: multimodal reasoning, tool use, and a 256K-token context window with zero data retention.",
-    },
-    {
-      id: "zai-org-glm-5-1",
-      reason:
-        "Stable GLM alternate: previous GLM flagship with top-tier agentic coding, tool use, and zero data retention.",
-    },
+    suggestion("zai-org-glm-5-2", "lib.suggested.glm52"),
+    suggestion("kimi-k3", "lib.suggested.kimiK3"),
+    suggestion("kimi-k2-6", "lib.suggested.kimiK26"),
+    suggestion("zai-org-glm-5-1", "lib.suggested.glm51"),
   ],
   transcription: [
-    {
-      id: "nvidia/parakeet-tdt-0.6b-v3",
-      reason:
-        "Fast and accurate for everyday dictation and meetings, zero data retention, lowest price tier.",
-    },
-    {
-      id: "openai/whisper-large-v3",
-      reason: "Best multilingual accuracy at the same low price, with zero data retention.",
-    },
+    suggestion("nvidia/parakeet-tdt-0.6b-v3", "lib.suggested.parakeet"),
+    suggestion("openai/whisper-large-v3", "lib.suggested.whisper"),
   ],
   // Image models come from the curated local list in lib/image-models.ts, not
   // a fetched catalog; these picks are the shortlist the picker surfaces above
   // "All models". The default (DEFAULT_IMAGE_MODEL, venice-sd35) stays first so
   // it is always visible without expanding.
   image: [
-    {
-      id: "venice-sd35",
-      reason:
-        "Default pick: Venice's Stable Diffusion 3.5 model, a private all-rounder for everyday images.",
-    },
-    {
-      id: "z-image-turbo",
-      reason: "Fastest pick: quick, low-cost generations with zero data retention.",
-    },
-    {
-      id: "qwen-image",
-      reason: "Quality pick: strong text rendering and prompt adherence for detailed images.",
-    },
-    {
-      id: "lustify-v8",
-      reason: "Uncensored pick: the least restricted image model, with zero data retention.",
-    },
+    suggestion("venice-sd35", "lib.suggested.veniceSd35"),
+    suggestion("z-image-turbo", "lib.suggested.zImageTurbo"),
+    suggestion("qwen-image", "lib.suggested.qwenImage"),
+    suggestion("lustify-v8", "lib.suggested.lustifyV8"),
   ],
   // Video is a small curated local list (lib/video-models.ts); all three
   // private-tier models are suggested so they show without expanding "All
   // models". The default (DEFAULT_VIDEO_MODEL, wan-2.2-a14b) stays first.
   video: [
-    {
-      id: "wan-2.2-a14b-text-to-video",
-      reason: "Default pick: fast 5 second 720p clips, the lowest-cost option.",
-    },
-    {
-      id: "grok-imagine-text-to-video-private",
-      reason: "Photorealistic pick: lifelike clips with audio, zero data retention.",
-    },
-    {
-      id: "ltx-2-19b-full-text-to-video",
-      reason: "Quality pick: higher-detail open-source model with audio.",
-    },
+    suggestion("wan-2.2-a14b-text-to-video", "lib.suggested.wan22"),
+    suggestion("grok-imagine-text-to-video-private", "lib.suggested.grokImagineVideo"),
+    suggestion("ltx-2-19b-full-text-to-video", "lib.suggested.ltx2"),
   ],
 };
+
+function suggestion(id: string, reasonKey: MessageKey): SuggestedModel {
+  return {
+    id,
+    get reason() {
+      return t(reasonKey);
+    },
+  };
+}
 
 // The Auto toggle's last-resort landing when the catalog is empty or still
 // loading: the leading curated pick, which mirrors DEFAULT_GENERATION_MODEL

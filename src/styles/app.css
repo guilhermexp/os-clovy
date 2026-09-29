@@ -9464,6 +9464,11 @@ button.agent-user-attachment:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* The sans face's line box is exactly 1em, so the ellipsis clip would shave
+     the accent off capitals like the Á in "Áudio". Grow the clip box without
+     moving the text. */
+  padding-block: 0.2em;
+  margin-block: -0.2em;
 }
 
 .sidebar-nav-shortcut {
@@ -25081,6 +25086,45 @@ button.memory-project:hover {
   outline: none;
   color: var(--foreground);
   box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* Interface-language switch on the welcome screen: a content-hugging ghost
+ * select in the same muted voice as the community link, never a bordered
+ * field competing with the sign-in action. */
+.onboarding-language {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--sp-2);
+}
+
+.onboarding-language-select .select-trigger {
+  min-width: 0;
+  height: var(--control-sm);
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border-color: transparent;
+  border-radius: var(--r-pill);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.onboarding-language-select .select-trigger:hover,
+.onboarding-language-select .select-trigger[aria-expanded="true"] {
+  border-color: transparent;
+  background: color-mix(in oklch, var(--brand) 10%, transparent);
+  color: var(--foreground);
+}
+
+.onboarding-language-select .select-trigger > span:first-child {
+  flex: none;
+}
+
+.onboarding-language-select .select-trigger svg {
+  position: static;
+  transform: none;
 }
 
 .onboarding-skip {

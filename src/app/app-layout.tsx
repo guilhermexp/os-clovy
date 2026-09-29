@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import type { CSSProperties } from "react";
+import { t } from "../i18n";
 import { FundingChip, FundingNotice } from "../components/account/FundingNotice";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
@@ -34,7 +35,7 @@ import { handleSidebarResizeStart } from "./sidebar-resize";
 import { UpdateHub } from "./app-effects/update-ui";
 import { SidebarToggleGlyph, handleTitlebarPointerDown } from "./app-helpers";
 import {
-  COMPOSER_FUNDING_DISABLED_REASON,
+  composerFundingDisabledReason,
   SIDEBAR_COLLAPSE_WIDTH,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -187,7 +188,7 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
       <button
         type="button"
         className="chrome-sidebar-toggle"
-        aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+        aria-label={sidebarCollapsed ? t("app.sidebar.show") : t("app.sidebar.hide")}
         aria-pressed={sidebarCollapsed}
         onClick={() => {
           setSidebarTransition("none");
@@ -302,7 +303,7 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         className="sidebar-resize-handle"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize sidebar"
+        aria-label={t("app.sidebar.resize")}
         onPointerDown={(event) =>
           handleSidebarResizeStart(event, sidebarWidth, {
             collapseWidth: SIDEBAR_COLLAPSE_WIDTH,
@@ -414,7 +415,7 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
             chat={noteChat}
             recordingActive={captureActive}
             creditActionsDisabledReason={
-              fundingRequired ? COMPOSER_FUNDING_DISABLED_REASON : undefined
+              fundingRequired ? composerFundingDisabledReason() : undefined
             }
             renderFundingNotice={
               fundingRequired
@@ -444,9 +445,9 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
             setConfirmDeleteNote(false);
             if (selectedNote) await handleDeleteNote(selectedNote.id);
           }}
-          title="Delete note?"
-          description="This permanently deletes the note and its transcript. This can't be undone."
-          confirmLabel="Delete note"
+          title={t("app.deleteNote.title")}
+          description={t("app.deleteNote.description")}
+          confirmLabel={t("app.deleteNote.confirm")}
           destructive
         />
         {selectedNote ? (
@@ -473,8 +474,8 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
       <Dialog
         open={recordingInactivityPrompt !== null}
         onClose={handleKeepRecordingAfterInactivityPrompt}
-        title="Still in a meeting?"
-        description="Clovy has not heard meeting audio for a while."
+        title={t("app.inactivity.title")}
+        description={t("app.inactivity.description")}
         width={420}
         footer={
           <>
@@ -483,22 +484,21 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
               className="primary-action"
               onClick={handlePauseRecordingAfterInactivityPrompt}
             >
-              Pause recording
+              {t("app.inactivity.pause")}
             </button>
             <button
               type="button"
               className="primary-action primary-solid"
               onClick={handleKeepRecordingAfterInactivityPrompt}
             >
-              Keep recording
+              {t("app.inactivity.keep")}
             </button>
           </>
         }
       >
         <div className="dialog-body">
           <p className="recording-inactivity-copy">
-            Clovy will pause this recording in {recordingInactivitySecondsRemaining} seconds if you
-            do not answer.
+            {t("app.inactivity.countdown", { count: recordingInactivitySecondsRemaining })}
           </p>
         </div>
       </Dialog>

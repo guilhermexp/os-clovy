@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { IconRecord } from "central-icons/IconRecord";
 import { InlineNotice } from "../ui/InlineNotice";
+import { formatNumber, intlLocale, useT } from "../../i18n";
 import type { RecoverableRecordingDto } from "../../lib/tauri";
 
 type NoteRecoveryPromptProps = {
@@ -18,6 +19,7 @@ export function NoteRecoveryPrompt({
   disabled,
   recoverBlockedReason,
 }: NoteRecoveryPromptProps) {
+  const t = useT();
   const isRecoveryBlocked = Boolean(recoverBlockedReason);
   const bodyRef = useRef<HTMLSpanElement>(null);
   const [bodyIsSingleLine, setBodyIsSingleLine] = useState(false);
@@ -55,12 +57,12 @@ export function NoteRecoveryPrompt({
       ]
         .filter(Boolean)
         .join(" ")}
-      aria-label="Recoverable recording"
+      aria-label={t("recorder.recovery.aria")}
       icon={<IconRecord size={14} aria-hidden />}
       bodyRef={bodyRef}
       body={
         <>
-          This recording was interrupted. We saved {formatBytes(recovery.bytesFound)} of audio.
+          {t("recorder.recovery.body", { size: formatBytes(recovery.bytesFound) })}
           {recoverBlockedReason ? (
             <>
               {" "}
@@ -77,7 +79,7 @@ export function NoteRecoveryPrompt({
             disabled={disabled}
             onClick={() => onDiscard(recovery.sessionId)}
           >
-            Discard
+            {t("recorder.recovery.discard")}
           </button>
           <button
             type="button"
@@ -86,7 +88,7 @@ export function NoteRecoveryPrompt({
             title={recoverBlockedReason}
             onClick={() => onRecover(recovery.sessionId)}
           >
-            Recover
+            {t("recorder.recovery.recover")}
           </button>
         </>
       }
@@ -109,8 +111,20 @@ function hasOneRenderedLine(element: HTMLElement): boolean {
   return lineTops.length === 1;
 }
 
+// One decimal, no grouping. English keeps the old toFixed(1) exactly; other
+// languages take their own decimal separator (1,5 MB in pt-BR).
+const ONE_DECIMAL: Intl.NumberFormatOptions = {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+  useGrouping: false,
+};
+
+function oneDecimal(value: number): string {
+  return intlLocale() ? formatNumber(value, ONE_DECIMAL) : value.toFixed(1);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024) return `${oneDecimal(bytes / 1024)} KB`;
+  return `${oneDecimal(bytes / (1024 * 1024))} MB`;
 }

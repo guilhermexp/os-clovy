@@ -6,6 +6,7 @@ import { App } from "./app/App";
 import { Toaster } from "./components/ui/Toaster";
 import { installNativeContextMenuGuard } from "./lib/native-context-menu";
 import { replayOnboarding } from "./lib/onboarding";
+import { initInterfaceLocale } from "./i18n";
 import { initTheme } from "./lib/theme";
 import { initBrand } from "./lib/brand";
 import { initFontScale, installFontScaleShortcuts } from "./lib/font-scale";
@@ -35,6 +36,7 @@ if (import.meta.env.DEV) {
   window.june = devtools;
 }
 
+initInterfaceLocale();
 initTheme();
 initBrand();
 initFontScale();

@@ -1,5 +1,6 @@
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { useEffect, useState } from "react";
+import { type TFunction, useT } from "../../i18n";
 import type { ReferralNudgeMoment } from "../../lib/referral-nudge";
 import { ClovyMark } from "../brand/ClovyLogo";
 
@@ -20,24 +21,27 @@ export type { ReferralNudgeMoment };
 /** Fired on click-through; the sidebar owns the referral dialog and listens. */
 export const OPEN_REFERRAL_DIALOG_EVENT = "clovy:open-referral-dialog";
 
-const MOMENT_COPY: Record<ReferralNudgeMoment, { title: string; body: string }> = {
-  meetings: {
-    title: "Five meetings, all captured",
-    body: "Know someone who lives in meetings? They get a free month of Clovy, and when they subscribe, so do you.",
-  },
-  agent: {
-    title: "Give a month, get a month",
-    body: "Share Clovy with a friend. They get a free month, and when they subscribe, so do you.",
-  },
-  dictation: {
-    title: "Twenty-five dictations in",
-    body: "Know someone who types too much? They get a free month of Clovy, and when they subscribe, so do you.",
-  },
-  feedback: {
-    title: "Glad you're enjoying Clovy",
-    body: "Share it with a friend. They get a free month, and when they subscribe, so do you.",
-  },
-};
+function momentCopy(t: TFunction, moment: ReferralNudgeMoment): { title: string; body: string } {
+  switch (moment) {
+    case "meetings":
+      return {
+        title: t("account.referral.meetingsTitle"),
+        body: t("account.referral.meetingsBody"),
+      };
+    case "agent":
+      return { title: t("account.referral.agentTitle"), body: t("account.referral.agentBody") };
+    case "dictation":
+      return {
+        title: t("account.referral.dictationTitle"),
+        body: t("account.referral.dictationBody"),
+      };
+    case "feedback":
+      return {
+        title: t("account.referral.feedbackTitle"),
+        body: t("account.referral.feedbackBody"),
+      };
+  }
+}
 
 /** Matches the card's --t-med exit transition. */
 const EXIT_MS = 160;
@@ -53,8 +57,9 @@ export function ReferralNudge({
 }) {
   // Dismiss plays a short fade-down before the caller unmounts the card;
   // click-through is immediate (the opening dialog covers the exit).
+  const t = useT();
   const [leaving, setLeaving] = useState(false);
-  const copy = MOMENT_COPY[moment];
+  const copy = momentCopy(t, moment);
 
   function dismiss() {
     if (leaving) return;
@@ -89,7 +94,7 @@ export function ReferralNudge({
       <button
         type="button"
         className="referral-nudge-dismiss"
-        aria-label="Dismiss"
+        aria-label={t("account.referral.dismiss")}
         onClick={dismiss}
       >
         <IconCrossMedium size={14} />
@@ -104,7 +109,7 @@ export function ReferralNudge({
           onClick={onInvite}
           disabled={leaving}
         >
-          Invite friends
+          {t("account.referral.invite")}
         </button>
       </div>
     </aside>

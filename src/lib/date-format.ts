@@ -1,3 +1,5 @@
+import { intlLocale } from "../i18n/translate";
+
 export const DATE_FORMAT_STORAGE_KEY = "clovy:date-format";
 export const DATE_FORMAT_CHANGED_EVENT = "clovy:date-format-changed";
 
@@ -32,7 +34,7 @@ export function setStoredDateFormat(preference: DateFormatPreference) {
 export function formatCalendarDate(
   date: Date,
   preference: DateFormatPreference,
-  locales?: Intl.LocalesArgument,
+  locales: Intl.LocalesArgument = intlLocale(),
 ) {
   const normalizedPreference = normalizeDateFormatPreference(preference);
   const formatter = new Intl.DateTimeFormat(locales, {

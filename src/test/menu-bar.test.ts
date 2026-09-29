@@ -50,6 +50,16 @@ describe("buildAgentMenuBarState", () => {
     });
   });
 
+  it("sends an untitled session with an empty title so the native menu localizes it", () => {
+    const state = buildAgentMenuBarState({
+      sessions: [{ ...sessions[0], title: "   " }],
+      workingSessionIds: new Set(),
+      waitingSessionIds: new Set(),
+    });
+
+    expect(state.sessions[0]?.title).toBe("");
+  });
+
   it("keeps waiting sessions visible before recent idle sessions", () => {
     const recentIdleSessions: AgentSessionDto[] = Array.from({ length: 6 }, (_, index) => ({
       id: `idle-${index}`,

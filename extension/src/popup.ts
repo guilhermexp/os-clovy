@@ -1,6 +1,7 @@
 // Popup: renders the pairing state the background worker holds. Copy follows
 // the repo rules: sentence case, no em dashes, no all caps.
 
+import { browserLocale, type ExtensionMessageKey, tx } from "./i18n";
 import type { PairingState } from "./pairing";
 
 type PopupCopy = { title: string; detail: string; retry: boolean };
@@ -15,42 +16,44 @@ type ShareResponse = {
 let pairingState: PairingState | undefined;
 let activeShareId: string | undefined;
 
-const copy: Record<Exclude<PairingState["status"], "incompatible">, PopupCopy> = {
-  disconnected: {
-    title: "Not connected",
-    detail: "Clovy is not connected to this browser yet.",
-    retry: true,
-  },
-  connecting: {
-    title: "Connecting",
-    detail: "Reaching the Clovy app...",
-    retry: false,
-  },
-  handshaking: {
-    title: "Connecting",
-    detail: "Confirming versions with the Clovy app...",
-    retry: false,
-  },
-  paired: {
-    title: "Connected to Clovy",
-    detail: "Clovy can open its own tabs in this browser when you ask it to.",
-    retry: false,
-  },
-  unreachable: {
-    title: "Clovy is not running",
-    detail: "Open the Clovy app, then try again.",
-    retry: true,
-  },
+type CopyKeys = { title: ExtensionMessageKey; detail: ExtensionMessageKey; retry: boolean };
+
+const copyKeys: Record<Exclude<PairingState["status"], "incompatible">, CopyKeys> = {
+  disconnected: { title: "notConnectedTitle", detail: "notConnectedDetail", retry: true },
+  connecting: { title: "connectingTitle", detail: "connectingDetail", retry: false },
+  handshaking: { title: "connectingTitle", detail: "handshakingDetail", retry: false },
+  paired: { title: "pairedTitle", detail: "pairedDetail", retry: false },
+  unreachable: { title: "unreachableTitle", detail: "unreachableDetail", retry: true },
 };
+
+function copyFor(status: Exclude<PairingState["status"], "incompatible">): PopupCopy {
+  const keys = copyKeys[status];
+  return { title: tx(keys.title), detail: tx(keys.detail), retry: keys.retry };
+}
 
 function incompatibleCopy(state: Extract<PairingState, { status: "incompatible" }>): PopupCopy {
   const detail =
     state.remedy === "updateApp"
-      ? "This extension is newer than the Clovy app. Update Clovy, then try again."
+      ? tx("updateApp")
       : state.remedy === "updateExtension"
-        ? "The Clovy app is newer than this extension. Update the Clovy extension, then try again."
-        : "This extension and the Clovy app speak different versions. Update both, then try again.";
-  return { title: "Update required", detail, retry: true };
+        ? tx("updateExtension")
+        : tx("updateBoth");
+  return { title: tx("updateRequiredTitle"), detail, retry: true };
+}
+
+/** Static popup.html copy is authored in English; localize it once on load. */
+function localizeStaticCopy() {
+  document.documentElement.lang = browserLocale();
+  const set = (id: string, key: ExtensionMessageKey) => {
+    const element = document.getElementById(id);
+    if (element) element.textContent = tx(key);
+  };
+  set("detail", "checking");
+  set("retry", "tryAgain");
+  set("share-heading", "shareHeading");
+  set("share-detail", "shareIntro");
+  set("share", "shareButton");
+  set("revoke-share", "stopSharing");
 }
 
 function render(state: PairingState) {
@@ -59,7 +62,7 @@ function render(state: PairingState) {
   const detail = document.getElementById("detail");
   const retry = document.getElementById("retry") as HTMLButtonElement | null;
   if (!dot || !title || !detail || !retry) return;
-  const entry = state.status === "incompatible" ? incompatibleCopy(state) : copy[state.status];
+  const entry = state.status === "incompatible" ? incompatibleCopy(state) : copyFor(state.status);
   dot.dataset.status = state.status;
   title.textContent = entry.title;
   detail.textContent = entry.detail;
@@ -85,16 +88,16 @@ function renderShare(state: ShareState, detail?: string) {
   shareDetail.textContent =
     detail ??
     (state === "shared"
-      ? "This tab is shared with the current Clovy task."
+      ? tx("tabShared")
       : state === "unavailable"
-        ? "This tab already belongs to the current Clovy task."
+        ? tx("tabOwned")
         : state === "pending"
-          ? `Share code: ${activeShareId ?? "Preparing..."}. Paste it into your Clovy chat.`
-          : "Only the tab you choose becomes available to the current Clovy task.");
+          ? tx("shareCode", { code: activeShareId ?? tx("preparing") })
+          : tx("shareIntro"));
   share.hidden = state === "shared" || state === "unavailable";
-  share.textContent = state === "pending" ? "Copy share code" : "Share this tab";
+  share.textContent = state === "pending" ? tx("copyShareCode") : tx("shareButton");
   revoke.hidden = state === "available" || state === "unavailable";
-  revoke.textContent = state === "pending" ? "Cancel share" : "Stop sharing";
+  revoke.textContent = state === "pending" ? tx("cancelShare") : tx("stopSharing");
 }
 
 async function refreshShare() {
@@ -104,7 +107,7 @@ async function refreshShare() {
   }
   const tabId = await activeTabId();
   if (tabId === undefined) {
-    renderShare("available", "Open a browser tab before sharing.");
+    renderShare("available", tx("openTabFirst"));
     return;
   }
   const response = (await chrome.runtime.sendMessage({
@@ -112,7 +115,7 @@ async function refreshShare() {
     tabId,
   })) as ShareResponse | undefined;
   if (!response?.success || !response.state) {
-    renderShare("available", response?.message ?? "This tab cannot be shared.");
+    renderShare("available", response?.message ?? tx("tabCannotBeShared"));
     return;
   }
   activeShareId = response.shareId;
@@ -146,7 +149,7 @@ document.getElementById("retry")?.addEventListener("click", () => {
 document.getElementById("share")?.addEventListener("click", async () => {
   const tabId = await activeTabId();
   if (tabId === undefined) {
-    renderShare("available", "Open a browser tab before sharing.");
+    renderShare("available", tx("openTabFirst"));
     return;
   }
   let shareId = activeShareId;
@@ -155,19 +158,14 @@ document.getElementById("share")?.addEventListener("click", async () => {
       | ShareResponse
       | undefined;
     if (!response?.success || !response.shareId) {
-      renderShare("available", response?.message ?? "This tab could not be shared.");
+      renderShare("available", response?.message ?? tx("tabCouldNotBeShared"));
       return;
     }
     shareId = response.shareId;
     activeShareId = shareId;
   }
   const copied = await copyShareCode(shareId);
-  renderShare(
-    "pending",
-    copied
-      ? "Share code copied. Paste it into your Clovy chat."
-      : `Share code: ${shareId}. Paste it into your Clovy chat.`,
-  );
+  renderShare("pending", copied ? tx("shareCodeCopied") : tx("shareCode", { code: shareId }));
 });
 
 document.getElementById("revoke-share")?.addEventListener("click", async () => {
@@ -178,4 +176,5 @@ document.getElementById("revoke-share")?.addEventListener("click", async () => {
   await refreshShare();
 });
 
+localizeStaticCopy();
 void refresh();

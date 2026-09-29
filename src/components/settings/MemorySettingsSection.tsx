@@ -7,6 +7,7 @@ import { IconProjects } from "central-icons/IconProjects";
 import { IconTrashCanSimple } from "central-icons/IconTrashCanSimple";
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
+import { formatDate, useT } from "../../i18n";
 import { useProjectMemoryDemo } from "../../lib/project-memory-demo";
 import {
   createMemory,
@@ -26,8 +27,6 @@ import { Switch } from "../ui/Switch";
 import { SettingsPageHeader } from "./AppSettings";
 
 const MEMORY_MAX_CHARS = 4_000;
-const MEMORY_TOGGLE_ERROR =
-  "Your memory setting was saved, but Clovy could not finish applying it. Quit and reopen Clovy before starting another agent run.";
 // Filter sentinel for memories that aren't tied to any project.
 const SCOPE_ALL = "__all__";
 const SCOPE_GENERAL = "__general__";
@@ -43,6 +42,7 @@ export function MemorySettingsSection({
   /** Drill from a memory's project tag into that project. */
   onOpenProject?: (folderId: string) => void;
 }) {
+  const t = useT();
   const [memories, setMemories] = useState<MemoryDto[]>([]);
   const [enabled, setEnabled] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -108,7 +108,7 @@ export function MemorySettingsSection({
         // the original enforcement error remains the actionable message.
       }
       console.warn("Failed to finish applying the Memory setting", caught);
-      setError(MEMORY_TOGGLE_ERROR);
+      setError(t("settingsPanels.memory.toggleError"));
     } finally {
       setSavingEnabled(false);
     }
@@ -155,10 +155,14 @@ export function MemorySettingsSection({
 
   const scopeOptions = useMemo(
     () => [
-      { value: SCOPE_ALL, label: "All projects", count: allMemories.length },
+      {
+        value: SCOPE_ALL,
+        label: t("settingsPanels.memory.allProjects"),
+        count: allMemories.length,
+      },
       {
         value: SCOPE_GENERAL,
-        label: "General",
+        label: t("settingsPanels.memory.general"),
         count: allMemories.filter((memory) => !memory.folderId).length,
       },
       ...[...folders]
@@ -169,7 +173,7 @@ export function MemorySettingsSection({
           count: allMemories.filter((memory) => memory.folderId === folder.id).length,
         })),
     ],
-    [folders, allMemories],
+    [folders, allMemories, t],
   );
 
   const addDefaultFolderId = scope !== SCOPE_ALL && scope !== SCOPE_GENERAL ? scope : undefined;
@@ -181,7 +185,7 @@ export function MemorySettingsSection({
       onClick={() => setAddOpen(true)}
     >
       <IconPlusMedium size={14} />
-      Add memory
+      {t("settingsPanels.memory.addMemory")}
     </button>
   );
 
@@ -189,23 +193,23 @@ export function MemorySettingsSection({
     <section className="settings-group memory-settings" aria-labelledby="memory-heading">
       <SettingsPageHeader
         id="memory-heading"
-        title="Memory"
-        blurb="Everything Clovy remembers, across every project. Memories stay on this Mac."
+        title={t("settingsPanels.memory.title")}
+        blurb={t("settingsPanels.memory.blurb")}
       />
 
       <div className="settings-card">
         <div className="settings-row">
           <div className="settings-row-info">
-            <h3 className="settings-row-title">Let Clovy remember things</h3>
+            <h3 className="settings-row-title">{t("settingsPanels.memory.enableTitle")}</h3>
             <p className="settings-row-description">
-              Clovy can save useful details across sessions and use them when they are relevant.
+              {t("settingsPanels.memory.enableDescription")}
             </p>
           </div>
           <div className="settings-row-control">
             <Switch
               checked={enabled}
               disabled={!loaded || savingEnabled}
-              aria-label="Let Clovy remember things"
+              aria-label={t("settingsPanels.memory.enableTitle")}
               onCheckedChange={(next) => void toggleEnabled(next)}
             />
           </div>
@@ -213,31 +217,28 @@ export function MemorySettingsSection({
       </div>
 
       {!enabled && loaded ? (
-        <p className="memory-settings-hint">
-          Memory is off. Saved memories remain visible, but Clovy cannot add or update them.
-        </p>
+        <p className="memory-settings-hint">{t("settingsPanels.memory.offHint")}</p>
       ) : null}
 
       {loaded && allMemories.length === 0 ? (
         <EmptyState
           className="memory-empty-state"
-          label="Saved memories"
+          label={t("settingsPanels.memory.savedMemories")}
           icon={<IconBrain size={28} />}
-          title="Nothing remembered yet"
-          description="Clovy saves useful details as you work together and brings them back when they're relevant. What it remembers shows up here."
+          title={t("settingsPanels.memory.emptyTitle")}
+          description={t("settingsPanels.memory.emptyDescription")}
           action={addMemoryButton}
         />
       ) : (
         <>
           <h2 className="settings-group-heading memory-manager-heading">
-            Saved memories
+            {t("settingsPanels.memory.savedMemories")}
             {loaded ? (
               <span className="status-pill memory-manager-heading-count">{allMemories.length}</span>
             ) : null}
           </h2>
           <p className="settings-group-description">
-            Everything Clovy has remembered, across every project. Search, filter by project, edit,
-            or delete.
+            {t("settingsPanels.memory.managerDescription")}
           </p>
           <div className="settings-card memory-manager-card">
             <div className="memory-manager-toolbar">
@@ -249,8 +250,8 @@ export function MemorySettingsSection({
                 />
                 <input
                   type="search"
-                  aria-label="Search memories"
-                  placeholder="Search memories"
+                  aria-label={t("settingsPanels.memory.search")}
+                  placeholder={t("settingsPanels.memory.search")}
                   value={query}
                   onChange={(event) => setQuery(event.currentTarget.value)}
                 />
@@ -259,8 +260,8 @@ export function MemorySettingsSection({
                 className="memory-scope-select"
                 value={scope}
                 options={scopeOptions}
-                placeholder="All projects"
-                ariaLabel="Filter memories by project"
+                placeholder={t("settingsPanels.memory.allProjects")}
+                ariaLabel={t("settingsPanels.memory.filterByProject")}
                 onChange={setScope}
                 popoverWidth="trigger"
               />
@@ -276,7 +277,7 @@ export function MemorySettingsSection({
                 onOpenProject={onOpenProject}
               />
             ) : (
-              <p className="memory-manager-noresults">No memories match your search.</p>
+              <p className="memory-manager-noresults">{t("settingsPanels.memory.noResults")}</p>
             )}
           </div>
         </>
@@ -289,8 +290,8 @@ export function MemorySettingsSection({
 
       <MemoryDialog
         open={addOpen}
-        title="Add memory"
-        submitLabel="Add memory"
+        title={t("settingsPanels.memory.addMemory")}
+        submitLabel={t("settingsPanels.memory.addMemory")}
         folders={folders}
         defaultFolderId={addDefaultFolderId}
         onClose={() => setAddOpen(false)}
@@ -320,6 +321,7 @@ export function MemoryRows({
   /** Drill from a memory's project into that project. */
   onOpenProject?: (folderId: string) => void;
 }) {
+  const t = useT();
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [editing, setEditing] = useState<MemoryDto>();
   const [deleting, setDeleting] = useState<MemoryDto>();
@@ -356,7 +358,11 @@ export function MemoryRows({
                   {memory.content}
                 </button>
                 <p className="memory-meta">
-                  <span>{memory.source === "agent" ? "Added by Clovy" : "Added by you"}</span>
+                  <span>
+                    {memory.source === "agent"
+                      ? t("settingsPanels.memory.addedByClovy")
+                      : t("settingsPanels.memory.addedByYou")}
+                  </span>
                   <span className="metadata-dot" aria-hidden />
                   <span>{formatMemoryDate(memory.createdAt)}</span>
                   {project && memory.folderId ? (
@@ -366,7 +372,7 @@ export function MemoryRows({
                         <button
                           type="button"
                           className="memory-project"
-                          aria-label={`Open project ${project}`}
+                          aria-label={t("settingsPanels.memory.openProject", { name: project })}
                           onClick={() => onOpenProject(memory.folderId as string)}
                         >
                           <IconProjects size={11} />
@@ -387,7 +393,7 @@ export function MemoryRows({
                 <button
                   type="button"
                   className="icon-button"
-                  aria-label="Edit memory"
+                  aria-label={t("settingsPanels.memory.editMemory")}
                   disabled={!editable}
                   onClick={() => setEditing(memory)}
                 >
@@ -396,7 +402,7 @@ export function MemoryRows({
                 <button
                   type="button"
                   className="icon-button icon-button-destructive"
-                  aria-label="Delete memory"
+                  aria-label={t("settingsPanels.memory.deleteMemory")}
                   onClick={() => setDeleting(memory)}
                 >
                   <IconTrashCanSimple size={14} />
@@ -414,8 +420,8 @@ export function MemoryRows({
 
       <MemoryDialog
         open={editing !== undefined}
-        title="Edit memory"
-        submitLabel="Save changes"
+        title={t("settingsPanels.memory.editMemory")}
+        submitLabel={t("settingsPanels.memory.saveChanges")}
         initialContent={editing?.content}
         onClose={() => {
           setEditing(undefined);
@@ -435,9 +441,9 @@ export function MemoryRows({
       />
       <ConfirmDialog
         open={deleting !== undefined}
-        title="Delete memory?"
-        description="This permanently removes this memory from Clovy."
-        confirmLabel="Delete"
+        title={t("settingsPanels.memory.deleteTitle")}
+        description={t("settingsPanels.memory.deleteDescription")}
+        confirmLabel={t("common.delete")}
         destructive
         onClose={() => setDeleting(undefined)}
         onConfirm={async () => {
@@ -468,6 +474,7 @@ function MemoryDialog({
   onClose: () => void;
   onSubmit: (content: string, folderId?: string) => Promise<void>;
 }) {
+  const t = useT();
   const [content, setContent] = useState(initialContent);
   // null = no project (a general memory) — the optional default.
   const [scope, setScope] = useState<string | null>(defaultFolderId ?? null);
@@ -509,7 +516,7 @@ function MemoryDialog({
       footer={
         <>
           <button type="button" className="primary-action" disabled={saving} onClick={handleClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="submit"
@@ -523,7 +530,7 @@ function MemoryDialog({
       }
     >
       <form id="memory-entry-form" className="dialog-body" onSubmit={handleSubmit}>
-        <DialogField label="Memory" htmlFor="memory-content">
+        <DialogField label={t("settingsPanels.memory.memoryLabel")} htmlFor="memory-content">
           <textarea
             id="memory-content"
             name="memory-content"
@@ -537,15 +544,18 @@ function MemoryDialog({
           />
         </DialogField>
         {folders ? (
-          <DialogField label="Project" hint="Optional. Choose General to apply everywhere.">
+          <DialogField
+            label={t("settingsPanels.memory.projectLabel")}
+            hint={t("settingsPanels.memory.projectHint")}
+          >
             <Select
               value={scope ?? SCOPE_GENERAL}
               options={[
-                { value: SCOPE_GENERAL, label: "General" },
+                { value: SCOPE_GENERAL, label: t("settingsPanels.memory.general") },
                 ...folders.map((folder) => ({ value: folder.id, label: folder.name })),
               ]}
-              placeholder="Select a project"
-              ariaLabel="Memory project"
+              placeholder={t("settingsPanels.memory.selectProject")}
+              ariaLabel={t("settingsPanels.memory.memoryProject")}
               onChange={(value) => setScope(value === SCOPE_GENERAL ? null : value)}
               popoverWidth="trigger"
             />
@@ -574,7 +584,7 @@ function formatMemoryDate(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   const now = new Date();
-  return date.toLocaleDateString(undefined, {
+  return formatDate(date, {
     month: "short",
     day: "numeric",
     year: date.getFullYear() === now.getFullYear() ? undefined : "numeric",

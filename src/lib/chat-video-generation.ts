@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 /**
  * Orchestration for generating a video from chat.
  *
@@ -77,7 +78,7 @@ export async function generateChatVideo(
 ): Promise<GenerateChatVideoResult> {
   const trimmed = prompt.trim();
   if (!trimmed) {
-    return { status: "error", message: "Enter a prompt to generate a video." };
+    return { status: "error", message: t("lib.errors.videoPromptRequired") };
   }
 
   let job: VideoJobDto;
@@ -135,7 +136,7 @@ export async function pollChatVideo(
 
   return {
     status: "error",
-    message: "Video generation is still running. Try again later.",
+    message: t("lib.errors.videoStillRunning"),
     jobId,
     stillRunning: true,
   };

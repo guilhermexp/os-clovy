@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { parseDictationHelperEvent } from "../../lib/dictation-events";
+import { t } from "../../i18n";
 import { isWindowsPlatform } from "../../lib/platform";
 import { dictationHelperCommand, setDictationShortcut } from "../../lib/tauri";
 import type {
@@ -80,7 +81,7 @@ export function useShortcutCapture({
       const helperEvent = parseDictationHelperEvent(event.payload);
       if (!helperEvent) return;
       if (helperEvent.type === "shortcut_capture_error") {
-        setError(helperEvent.payload?.message ?? "Shortcut could not be captured.");
+        setError(helperEvent.payload?.message ?? t("shell.shortcut.captureFailed"));
         setCapturing(false);
         return;
       }
@@ -92,7 +93,7 @@ export function useShortcutCapture({
       if (helperEvent.type !== "shortcut_captured") return;
       const captured = shortcutFromCapturePayload(helperEvent.payload?.shortcut, 1);
       if (!captured) {
-        setError("Shortcut capture returned invalid data.");
+        setError(t("shell.shortcut.captureInvalid"));
         setCapturing(false);
         return;
       }
@@ -202,8 +203,8 @@ export const MODIFIER_REQUIRED_MESSAGE = "Shortcut must include Cmd, Ctrl, Opt, 
 
 export function modifierRequiredMessage() {
   return isWindowsPlatform()
-    ? "Shortcut must include Ctrl, Alt, Shift, or Win."
-    : MODIFIER_REQUIRED_MESSAGE;
+    ? t("shell.shortcut.modifierRequiredWindows")
+    : t("shell.shortcut.modifierRequired");
 }
 
 export function chordFromKeyEvent(event: KeyboardEvent): CaptureKeyResult {

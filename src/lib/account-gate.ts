@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import { AUTO_MODEL_ID } from "./agent-model-selection";
 import { modelAvailableForMode } from "./model-privacy";
 import type { AccountStatus, VeniceModelDto } from "./tauri";
@@ -36,14 +37,14 @@ export function depletedBalanceAction(account: AccountStatus): DepletedBalanceAc
   return isOnMaxPlan(account) ? "top_up" : "upgrade_to_max";
 }
 
-export function depletedBalanceActionLabel(account: AccountStatus) {
+export function depletedBalanceActionLabel(account: AccountStatus): string {
   switch (depletedBalanceAction(account)) {
     case "top_up":
-      return "Top up credits";
+      return t("lib.accountGate.topUp");
     case "upgrade_to_max":
-      return "Upgrade to Max";
+      return t("lib.accountGate.upgradeToMax");
     default:
-      return "Upgrade";
+      return t("lib.accountGate.upgrade");
   }
 }
 

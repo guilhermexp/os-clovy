@@ -1,3 +1,4 @@
+import { formatNumber, intlLocale, t } from "../i18n/translate";
 import type { VeniceModelDto } from "./tauri";
 
 export function pricingLabel(model: VeniceModelDto) {
@@ -8,26 +9,34 @@ export function pricingLabel(model: VeniceModelDto) {
     const input = priceForPath(pricing, ["input", "usd"]);
     const output = priceForPath(pricing, ["output", "usd"]);
     if (input !== undefined && output !== undefined) {
-      return `$${formatUsd(input)} in / $${formatUsd(output)} out`;
+      return t("lib.modelPricing.inOut", {
+        input: usd(formatUsd(input)),
+        output: usd(formatUsd(output)),
+      });
     }
     const usdValues = collectUsdValues(pricing);
-    if (usdValues.length === 1) return `$${formatUsd(usdValues[0])}`;
+    if (usdValues.length === 1) return usd(formatUsd(usdValues[0]));
     if (usdValues.length > 1) {
       const min = Math.min(...usdValues);
       const max = Math.max(...usdValues);
-      return min === max ? `$${formatUsd(min)}` : `$${formatUsd(min)}-$${formatUsd(max)}`;
+      return min === max ? usd(formatUsd(min)) : `${usd(formatUsd(min))}-${usd(formatUsd(max))}`;
     }
   }
   if (model.priceDescription?.trim()) return model.priceDescription.trim();
   if (model.priceUnit === "seconds" && typeof model.creditsPerMillionSeconds === "number") {
-    return `${formatCreditsAsUsdPerUnit(model.creditsPerMillionSeconds, 1_000_000)} per second audio`;
+    return t("lib.modelPricing.perSecondAudio", {
+      price: formatCreditsAsUsdPerUnit(model.creditsPerMillionSeconds, 1_000_000),
+    });
   }
   if (
     model.priceUnit === "tokens" &&
     typeof model.inputCreditsPerMillionTokens === "number" &&
     typeof model.outputCreditsPerMillionTokens === "number"
   ) {
-    return `${formatCreditsAsUsd(model.inputCreditsPerMillionTokens)} input / ${formatCreditsAsUsd(model.outputCreditsPerMillionTokens)} output per 1M tokens`;
+    return t("lib.modelPricing.perMillionTokens", {
+      input: formatCreditsAsUsd(model.inputCreditsPerMillionTokens),
+      output: formatCreditsAsUsd(model.outputCreditsPerMillionTokens),
+    });
   }
   return undefined;
 }
@@ -57,15 +66,30 @@ function formatUsd(value: number) {
 
 export function formatCreditsAsUsd(credits: number) {
   const cents = Math.round(credits / 10);
-  return `$${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+  return usd(`${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`);
+}
+
+/** A USD amount given as its English decimal text ("1.75", "0.000150").
+ * English keeps the historical `$1.75` shape exactly; other languages format
+ * the same amount and precision as US dollars in their own convention
+ * ("US$ 1,75"), so the currency never changes, only its notation. */
+function usd(amount: string): string {
+  if (intlLocale() === undefined) return `$${amount}`;
+  const digits = amount.split(".")[1]?.length ?? 0;
+  return formatNumber(Number(amount), {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
 }
 
 function formatCreditsAsUsdPerUnit(credits: number, units: number) {
-  if (units <= 0) return "$0.00";
+  if (units <= 0) return usd("0.00");
   const microUsd = Math.round((credits * 1_000) / units);
   if (microUsd >= 1_000_000) {
     const cents = Math.round(microUsd / 10_000);
-    return `$${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+    return usd(`${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`);
   }
-  return `$0.${String(microUsd).padStart(6, "0").replace(/0+$/, "")}`;
+  return usd(`0.${String(microUsd).padStart(6, "0").replace(/0+$/, "")}`);
 }

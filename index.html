@@ -56,6 +56,12 @@
             "--font-scale",
             String(scales[scale] || 1),
           );
+          // Pre-paint interface language for assistive tech. Keep the key in
+          // sync with src/i18n/locale.ts, which owns the full resolution.
+          var locale = localStorage.getItem("os-clovy:interface-locale");
+          if (locale === "pt-BR" || locale === "en") {
+            document.documentElement.lang = locale;
+          }
         } catch (e) {}
       })();
     </script>

@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 /**
  * Orchestration for generating an image from chat and handing it to Clovy's
  * EXISTING inline image display path.
@@ -110,7 +111,7 @@ export async function generateChatImage(
 ): Promise<GenerateChatImageResult> {
   const trimmed = prompt.trim();
   if (!trimmed) {
-    return { status: "error", message: "Enter a prompt to generate an image." };
+    return { status: "error", message: t("lib.errors.imagePromptRequired") };
   }
 
   let image: GeneratedImageDto;
@@ -126,7 +127,7 @@ export async function generateChatImage(
   if (!parseImageDataUrl(dataUrl)) {
     return {
       status: "error",
-      message: "Clovy returned an image it can't display.",
+      message: t("lib.errors.imageUndisplayable"),
     };
   }
 
@@ -164,7 +165,7 @@ export async function editChatImage(
 ): Promise<EditChatImageResult> {
   const trimmed = instruction.trim();
   if (!trimmed) {
-    return { status: "error", message: "Enter an edit instruction." };
+    return { status: "error", message: t("lib.errors.imageEditInstructionRequired") };
   }
 
   let sourceData: string | null;
@@ -177,7 +178,7 @@ export async function editChatImage(
   if (!parsedSource) {
     return {
       status: "error",
-      message: "Clovy couldn't read the source image.",
+      message: t("lib.errors.imageSourceUnreadable"),
     };
   }
 
@@ -192,7 +193,7 @@ export async function editChatImage(
   if (!parseImageDataUrl(dataUrl)) {
     return {
       status: "error",
-      message: "Clovy returned an image it can't display.",
+      message: t("lib.errors.imageUndisplayable"),
     };
   }
 

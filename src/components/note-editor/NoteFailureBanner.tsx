@@ -1,5 +1,6 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { useState } from "react";
+import { t as translate, useT } from "../../i18n";
 import { isInsufficientCreditsMessage } from "../../lib/errors";
 import { TierMiniCard } from "../account/FundingNotice";
 import type { FundingTier } from "../account/FundingNotice";
@@ -44,17 +45,30 @@ function friendlyFailureSegment(message: string) {
   const normalized = body.toLowerCase();
   let friendly = body;
   if (normalized.includes("no_speech") || normalized.includes("no speech")) {
-    friendly = "No speech detected. Try speaking louder or moving closer to the microphone.";
+    friendly = translate("notes.failure.noSpeech");
   } else if (isInvalidClovyResponseMessage(body)) {
-    friendly = "The processing service returned an invalid response.";
+    friendly = translate("notes.failure.invalidResponse");
   } else if (normalized.includes("metering_provider_failed")) {
-    friendly = "Billing is temporarily unavailable. Please try again in a moment.";
+    friendly = translate("notes.failure.billingUnavailable");
   } else if (normalized.includes("upstream_provider_failed")) {
-    friendly = "The transcription provider could not process this audio.";
+    friendly = translate("notes.failure.providerFailed");
   } else if (normalized.includes("authorization_denied")) {
-    friendly = "The service is busy right now. Wait a minute, then retry.";
+    friendly = translate("notes.failure.serviceBusy");
   }
-  return source ? `${source}: ${friendly}` : friendly;
+  return source
+    ? translate("notes.failure.sourcePrefixed", {
+        source: failureSourceLabel(source),
+        message: friendly,
+      })
+    : friendly;
+}
+
+/** The transcript source a backend failure names ("Microphone: ..."), shown in
+ * the interface language; any other casing passes through untouched. */
+function failureSourceLabel(source: string) {
+  if (source === "Microphone") return translate("notes.editor.source.microphone");
+  if (source === "System") return translate("notes.editor.source.system");
+  return source;
 }
 
 export function isInvalidClovyResponseMessage(message: string) {
@@ -71,10 +85,12 @@ export function NoteFailureBanner({
   audioPreserved,
   onRetry,
   onTopUp,
-  topUpLabel = "Upgrade",
+  topUpLabel: topUpLabelProp,
   retryBlockedReason,
   tier,
 }: Props) {
+  const t = useT();
+  const topUpLabel = topUpLabelProp ?? t("notes.editor.upgrade");
   const kind = classifyFailure(errorMessage);
   const isBalanceIssue = kind === "balance_low";
   const displayMessage = userFacingFailureMessage(errorMessage);
@@ -107,12 +123,10 @@ export function NoteFailureBanner({
       <p className="note-failure-message">
         {isBalanceIssue
           ? audioPreserved
-            ? `Your balance ran out. Your recording is saved locally, so ${topUpAction} and retry.`
-            : `Your balance is too low. ${topUpLabel} to continue.`
-          : (displayMessage ?? "Clovy couldn't finish processing this note.")}
-        {!isBalanceIssue && audioPreserved
-          ? " Your recording is saved locally, so you can retry."
-          : null}
+            ? t("notes.failure.balanceRanOut", { action: topUpAction })
+            : t("notes.failure.balanceTooLow", { action: topUpLabel })
+          : (displayMessage ?? t("notes.failure.generic"))}
+        {!isBalanceIssue && audioPreserved ? ` ${t("notes.failure.savedCanRetry")}` : null}
         {retryBlockedReason ? ` ${retryBlockedReason}` : null}
       </p>
       <div className="note-failure-actions">
@@ -133,7 +147,7 @@ export function NoteFailureBanner({
             className="balance-refresh-icon"
             style={{ transform: `rotate(${spins * 360}deg)` }}
           />
-          Retry
+          {t("common.retry")}
         </button>
       </div>
     </aside>

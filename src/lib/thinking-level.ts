@@ -18,6 +18,8 @@
  * state, readable synchronously on render).
  */
 
+import { type MessageKey, t } from "../i18n/translate";
+
 export type ThinkingLevel = "instant" | "medium" | "hard";
 
 export type ThinkingLevelOption = {
@@ -32,25 +34,28 @@ export type ThinkingLevelOption = {
 
 /** Slider stops in track order (left to right: fastest to deepest). */
 export const THINKING_LEVELS: readonly ThinkingLevelOption[] = Object.freeze([
-  {
-    id: "instant",
-    label: "Low",
-    blurb: "Faster responses with lower usage.",
-    effort: "minimal",
-  },
-  {
-    id: "medium",
-    label: "Medium",
-    blurb: "Balances speed and depth for most tasks.",
-    effort: "medium",
-  },
-  {
-    id: "hard",
-    label: "High",
-    blurb: "Deeper reasoning with higher usage.",
-    effort: "high",
-  },
+  thinkingOption("instant", "lib.thinking.low.label", "lib.thinking.low.blurb", "minimal"),
+  thinkingOption("medium", "lib.thinking.medium.label", "lib.thinking.medium.blurb", "medium"),
+  thinkingOption("hard", "lib.thinking.high.label", "lib.thinking.high.blurb", "high"),
 ]);
+
+function thinkingOption(
+  id: ThinkingLevel,
+  labelKey: MessageKey,
+  blurbKey: MessageKey,
+  effort: string,
+): ThinkingLevelOption {
+  return {
+    id,
+    get label() {
+      return t(labelKey);
+    },
+    get blurb() {
+      return t(blurbKey);
+    },
+    effort,
+  };
+}
 
 /** The control lands here when the user has never picked a level. */
 export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";

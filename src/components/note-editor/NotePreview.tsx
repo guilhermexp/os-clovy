@@ -5,6 +5,7 @@ import { IconBold } from "central-icons/IconBold";
 import { IconBulletList } from "central-icons/IconBulletList";
 import { IconH1 } from "central-icons/IconH1";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { t as translate, useLocale, useT } from "../../i18n";
 
 type NotePreviewProps = {
   noteId: string;
@@ -34,6 +35,13 @@ export function NotePreview({
   onBlur,
   emptyPlaceholder,
 }: NotePreviewProps) {
+  const t = useT();
+  const locale = useLocale();
+  // The editor is built once per note, so its placeholder and aria-label read
+  // through a ref / the bare translator at render time rather than capturing
+  // the strings of the render that created it.
+  const emptyPlaceholderRef = useRef(emptyPlaceholder);
+  emptyPlaceholderRef.current = emptyPlaceholder;
   const wrapRef = useRef<HTMLDivElement>(null);
   const [toolbar, setToolbar] = useState<{ x: number; y: number } | null>(null);
   const initialHtml = useMemo(() => markdownToHtml(markdown), [noteId]);
@@ -65,19 +73,18 @@ export function NotePreview({
           },
         }),
         Placeholder.configure({
-          placeholder:
-            emptyPlaceholder ??
-            "Hit record to capture a conversation, or just start typing your thoughts here",
+          placeholder: () =>
+            emptyPlaceholderRef.current ?? translate("notes.editor.emptyPlaceholder"),
         }),
       ],
       content: initialHtml,
       editorProps: {
-        attributes: {
+        attributes: () => ({
           class: "note-preview",
           role: "textbox",
-          "aria-label": "Generated note",
+          "aria-label": translate("notes.preview.label"),
           "aria-multiline": "true",
-        },
+        }),
       },
       onUpdate: ({ editor, transaction }) => {
         if (!transaction.docChanged) return;
@@ -136,6 +143,21 @@ export function NotePreview({
     };
   }, [editor]);
 
+  // Re-render the editor's own DOM (aria-label, placeholder) when the
+  // interface language changes: an empty transaction recomputes both without
+  // touching the document.
+  const renderedLocaleRef = useRef(locale);
+  useEffect(() => {
+    if (renderedLocaleRef.current === locale) return;
+    renderedLocaleRef.current = locale;
+    if (!editor || editor.isDestroyed) return;
+    try {
+      editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false));
+    } catch {
+      // Mid-teardown; the next editor is built with the current language.
+    }
+  }, [editor, locale]);
+
   // Backend writes (transcribe → generate) arrive after the editor has
   // already mounted, so we have to pull new markdown in by hand. Skip
   // if the user is actively editing — clobbering focused content would
@@ -185,7 +207,7 @@ export function NotePreview({
         <div
           className="selection-toolbar"
           role="toolbar"
-          aria-label="Format selection"
+          aria-label={t("notes.preview.formatSelection")}
           style={{ left: toolbar.x, top: toolbar.y }}
           onMouseDown={(event) => event.preventDefault()}
         >
@@ -194,8 +216,8 @@ export function NotePreview({
             data-active={editor?.isActive("heading", { level: 1 }) || undefined}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => applyFormat("h1")}
-            title="Heading"
-            aria-label="Heading"
+            title={t("notes.preview.heading")}
+            aria-label={t("notes.preview.heading")}
           >
             <IconH1 size={16} />
           </button>
@@ -204,8 +226,8 @@ export function NotePreview({
             data-active={editor?.isActive("bulletList") || undefined}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => applyFormat("bullet")}
-            title="Bullet list"
-            aria-label="Bullet list"
+            title={t("notes.preview.bulletList")}
+            aria-label={t("notes.preview.bulletList")}
           >
             <IconBulletList size={16} />
           </button>
@@ -215,8 +237,8 @@ export function NotePreview({
             data-active={editor?.isActive("bold") || undefined}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => applyFormat("bold")}
-            title="Bold"
-            aria-label="Bold"
+            title={t("notes.preview.bold")}
+            aria-label={t("notes.preview.bold")}
           >
             <IconBold size={16} />
           </button>

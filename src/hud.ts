@@ -23,12 +23,15 @@ import { isOnboardingComplete, subscribeToOnboardingComplete } from "./lib/onboa
 import { installNativeContextMenuGuard } from "./lib/native-context-menu";
 import { subscribeBrand } from "./lib/brand";
 import { createHudLifecycle } from "./lib/hud-lifecycle";
+import { subscribeInterfaceLocale, subscribeInterfaceLocaleAcrossWindows, t } from "./i18n";
 import "./styles/hud.css";
 
 const lifecycle = createHudLifecycle();
 
 // Recolor this HUD window to the selected accent and keep it live-synced.
 lifecycle.trackUnlisten(subscribeBrand());
+// Follow the interface language chosen in the main window (sets <html lang>).
+lifecycle.addCleanup(subscribeInterfaceLocaleAcrossWindows());
 
 type DictationHudEvent = {
   type: string;
@@ -66,6 +69,30 @@ const meetingAppLabel = document.querySelector<HTMLElement>("#hud-meeting-app");
 const meetingDismissButton = document.querySelector<HTMLButtonElement>("#hud-meeting-dismiss");
 const statusText = document.querySelector<HTMLElement>("#hud-status");
 const escTip = document.querySelector<HTMLElement>("#hud-esc-tip");
+const meetingLabel = document.querySelector<HTMLElement>("#hud-meeting-label");
+
+// Replace a control's own text while keeping its child elements (the record
+// button carries its microphone icon next to the label).
+function setOwnText(element: HTMLElement | null, text: string) {
+  if (!element) return;
+  const node = Array.from(element.childNodes).find(
+    (child) => child.nodeType === Node.TEXT_NODE && child.textContent?.trim(),
+  );
+  if (node) node.textContent = text;
+  else element.append(document.createTextNode(text));
+}
+
+// The static page chrome from hud.html, in the current language.
+function applyStaticLabels() {
+  document.title = t("hud.dictation.windowTitle");
+  cancelButton?.setAttribute("aria-label", t("hud.dictation.cancel"));
+  stopButton?.setAttribute("aria-label", t("hud.dictation.stop"));
+  meetingDismissButton?.setAttribute("aria-label", t("hud.meeting.dismiss"));
+  if (meetingLabel) meetingLabel.textContent = t("hud.meeting.detected");
+  setOwnText(meetingStartButton, t("hud.meeting.record"));
+}
+
+applyStaticLabels();
 
 // House iconography (central-icons), injected like the agent HUD does.
 // The cancel X is the cross-medium cut at 16px: its drawn span (~8.3px)
@@ -266,9 +293,24 @@ type HudTransition = {
 
 let hudTransitionId = 0;
 
-function setHud(state: string, status: string): HudTransition {
+// A status line is either a translatable label (resolved again when the
+// interface language changes) or verbatim text such as a native error message.
+type StatusText = string | (() => string);
+
+const idleStatus = () => t("hud.status.idle");
+const listeningStatus = () => t("hud.status.listening");
+const transcribingStatus = () => t("hud.status.transcribing");
+let currentStatus: StatusText = idleStatus;
+
+function resolveStatus(status: StatusText) {
+  return typeof status === "function" ? status() : status;
+}
+
+function setHud(state: string, statusSource: StatusText): HudTransition {
   const id = ++hudTransitionId;
   if (!hud || !statusText) return { changed: false, id };
+  currentStatus = statusSource;
+  const status = resolveStatus(statusSource);
   const previous = hud.dataset.state;
   const entersProcessing =
     (state === "transcribing" || state === "pasting") &&
@@ -823,7 +865,7 @@ function startLongDictationNotice() {
     longDictationNoticeTimer = undefined;
     if (lifecycle.signal.aborted) return;
     if (hud?.dataset.state !== "transcribing") return;
-    const transition = setHud("transcribing", "Still transcribing");
+    const transition = setHud("transcribing", () => t("hud.status.stillTranscribing"));
     void showHud(showOptionsForTransition(transition));
   }, LONG_DICTATION_NOTICE_MS);
 }
@@ -850,7 +892,7 @@ async function hideHud() {
     if (exitState) {
       hud.dataset.exitState = exitState;
     }
-    setHud("exiting", statusText?.textContent || "Idle");
+    setHud("exiting", currentStatus);
     if (meetingExit) {
       // The meeting card leaves the way it came in: a native slide-up +
       // fade that also hides the window (the invoke resolves once it's
@@ -884,7 +926,7 @@ async function hideHud() {
   if (hud?.dataset.state === "exiting" && requestId === hideRequestId) {
     hud.classList.remove("hud-error-exit");
     delete hud.dataset.exitState;
-    setHud("idle", "Idle");
+    setHud("idle", idleStatus);
   }
 }
 
@@ -1054,7 +1096,7 @@ async function handleDictationEventPayload(payload: unknown) {
     escapeCancelAvailable =
       !HAS_TAURI_BRIDGE || dictationEvent.payload?.escapeCancelAvailable === true;
     resetBars();
-    const transition = setHud("listening", "Listening");
+    const transition = setHud("listening", listeningStatus);
     await showHud(showOptionsForTransition(transition));
     return;
   }
@@ -1082,7 +1124,7 @@ async function handleDictationEventPayload(payload: unknown) {
     }
     const level = Number(dictationEvent.payload?.level || 0);
     queueAudioLevel(level);
-    setHud("listening", "Listening");
+    setHud("listening", listeningStatus);
     return;
   }
 
@@ -1093,9 +1135,9 @@ async function handleDictationEventPayload(payload: unknown) {
     if (hud?.dataset.state === "listening") {
       // Push-to-talk release (or any stop that skipped the button): same
       // collapse the stop button plays.
-      await collapseToSpinner("Transcribing");
+      await collapseToSpinner(transcribingStatus);
     } else {
-      const transition = setHud("transcribing", "Transcribing");
+      const transition = setHud("transcribing", transcribingStatus);
       await showHud(showOptionsForTransition(transition));
     }
     if (lifecycle.signal.aborted) return;
@@ -1104,15 +1146,15 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "final_transcript") {
-    const transition = setHud("pasting", "Pasting");
+    const transition = setHud("pasting", () => t("hud.status.pasting"));
     await showHud(showOptionsForTransition(transition));
     return;
   }
 
   if (dictationEvent.type === "paste_target") {
-    const transition = setHud(
-      "pasting",
-      `Pasting into ${dictationEvent.payload?.app || "previous app"}`,
+    const app = dictationEvent.payload?.app;
+    const transition = setHud("pasting", () =>
+      t("hud.status.pastingInto", { app: app || t("hud.status.previousApp") }),
     );
     await showHud(showOptionsForTransition(transition));
     return;
@@ -1174,8 +1216,9 @@ async function handleDictationEventPayload(payload: unknown) {
       triggerShake();
       return;
     }
-    const message = String(dictationEvent.payload?.message ?? "Dictation failed.").trim();
-    const transition = setHud("error", message || "Dictation failed.");
+    // Native error messages arrive already worded; only the fallback is ours.
+    const message = String(dictationEvent.payload?.message ?? "").trim();
+    const transition = setHud("error", message || (() => t("hud.status.dictationFailed")));
     // Latch the error state before awaiting native placement. A key-up event
     // can arrive during that IPC call, and its secondary not_listening error
     // must not dismiss the actionable start failure.
@@ -1248,14 +1291,17 @@ async function showMeetingPrompt(meetingEvent: DictationHudEvent) {
   }
   // Set the app line before the pill is measured so the window is sized
   // for it. Heartbeats refresh it (the mic can move between apps).
+  meetingAppLabels = meetingEvent.payload?.appLabels;
   if (meetingAppLabel) {
-    meetingAppLabel.textContent = meetingAppLine(meetingEvent.payload?.appLabels);
+    meetingAppLabel.textContent = meetingAppLine(meetingAppLabels);
   }
-  const transition = setHud("meeting", "Meeting detected");
+  const transition = setHud("meeting", () => t("hud.meeting.detected"));
   await showHud(showOptionsForTransition(transition));
   if (lifecycle.signal.aborted) return;
   startMeetingPromptTimer();
 }
+
+let meetingAppLabels: unknown;
 
 function hideBlankWindowIfNeeded() {
   if (pillIsBlank(hud?.dataset.state)) {
@@ -1277,7 +1323,7 @@ function meetingAppLine(labels: unknown) {
   const names = Array.isArray(labels)
     ? labels.filter((label): label is string => typeof label === "string" && label.trim() !== "")
     : [];
-  return names.length > 0 ? names.join(", ") : "Microphone in use";
+  return names.length > 0 ? names.join(", ") : t("hud.meeting.micInUse");
 }
 
 function pillIsBlank(state: string | undefined) {
@@ -1349,7 +1395,7 @@ lifecycle.addCleanup(interruptCollapse);
 // (CSS, see .hud.hud-collapse) while the waveform ghost fades in place. The
 // native frame holds the old, larger size — it is transparent, so only the
 // pill's motion is visible — and snaps to the square once the tween settles.
-async function collapseToSpinner(status: string) {
+async function collapseToSpinner(status: StatusText) {
   if (!hud || lifecycle.signal.aborted) return;
   const fromWidth = hud.getBoundingClientRect().width;
   const collapsedPillSize = cssPixelToken("--control-lg") || hud.getBoundingClientRect().height;
@@ -1416,7 +1462,7 @@ stopButton?.addEventListener("click", async (event) => {
   event.preventDefault();
   setStopHover(false);
   if (hud?.dataset.state === "listening") {
-    void collapseToSpinner("Transcribing");
+    void collapseToSpinner(transcribingStatus);
   }
   try {
     await invoke("dictation_helper_command", {
@@ -1426,7 +1472,7 @@ stopButton?.addEventListener("click", async (event) => {
     if (lifecycle.signal.aborted) return;
     if (hud?.dataset.state === "transcribing") {
       interruptCollapse();
-      const transition = setHud("listening", "Listening");
+      const transition = setHud("listening", listeningStatus);
       await showHud(showOptionsForTransition(transition));
       triggerShake();
     }
@@ -1588,6 +1634,24 @@ if (import.meta.env.DEV) {
 }
 
 lifecycle.addCleanup(subscribeToOnboardingComplete(showPendingMeetingPromptAfterOnboarding));
+
+// Language change from the main window: re-render the visible state in place
+// and re-fit the native frame to the new label widths.
+function rerenderForLocale() {
+  applyStaticLabels();
+  const state = hud?.dataset.state;
+  const status = resolveStatus(currentStatus);
+  if (statusText) statusText.textContent = status;
+  if (errorText && state === "error") errorText.textContent = status;
+  if (meetingAppLabel && state === "meeting") {
+    meetingAppLabel.textContent = meetingAppLine(meetingAppLabels);
+  }
+  if (state && state !== "idle" && state !== "exiting") {
+    void syncWindowToPill({ animate: false });
+  }
+}
+
+lifecycle.addCleanup(subscribeInterfaceLocale(rerenderForLocale));
 
 // Console drivers for this page when served standalone in a browser:
 // __dictationHud("listening") drives the dictation pill, __meetingHud(

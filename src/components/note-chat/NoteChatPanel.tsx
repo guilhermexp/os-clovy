@@ -12,6 +12,7 @@ import { IconStop } from "central-icons/IconStop";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
+import { t as translate, useT } from "../../i18n";
 import {
   displayedComposerUserMessageText,
   type AgentChatPart,
@@ -43,32 +44,42 @@ import type { NoteChat, NoteChatAttachment } from "./useNoteChat";
  * + label). Like those, a click prefills the composer rather than sending —
  * the prompt lands in the box so the person sees exactly what will run before
  * spending credits. The note reference is prepended by useNoteChat on the
- * first message, so these are just the questions. */
+ * first message, so these are just the questions. The prompt is sent to the
+ * model, so it stays in English; only the chip label follows the interface
+ * language (a getter, so it reads the locale at render time). */
 type NotePreset = { key: string; icon: ReactNode; label: string; prompt: string };
 
 const NOTE_PRESETS: NotePreset[] = [
   {
     key: "summary",
     icon: <IconFileSparkle size={16} />,
-    label: "Summarize",
+    get label() {
+      return translate("notes.chat.preset.summary");
+    },
     prompt: "Summarize this note.",
   },
   {
     key: "actions",
     icon: <IconChecklist size={16} />,
-    label: "Action items",
+    get label() {
+      return translate("notes.chat.preset.actions");
+    },
     prompt: "List the action items from this note and who owns each.",
   },
   {
     key: "decisions",
     icon: <IconFlag1 size={16} />,
-    label: "Key decisions",
+    get label() {
+      return translate("notes.chat.preset.decisions");
+    },
     prompt: "What decisions were made in this note?",
   },
   {
     key: "followup",
     icon: <IconEmail1Sparkle size={16} />,
-    label: "Draft follow-up",
+    get label() {
+      return translate("notes.chat.preset.followup");
+    },
     prompt: "Draft a follow-up email summarizing this note and its action items.",
   },
 ];
@@ -158,6 +169,7 @@ export function NoteChatPanel({
   onClose: () => void;
   onOpenInAgent: (sessionId: string | undefined) => void;
 }) {
+  const t = useT();
   const {
     turns,
     working,
@@ -188,7 +200,7 @@ export function NoteChatPanel({
   // session workspace before the run begins.
   async function pickAttachments() {
     try {
-      const selected = await openFileDialog({ multiple: true, title: "Attach files" });
+      const selected = await openFileDialog({ multiple: true, title: t("notes.chat.attachFiles") });
       if (!selected) return;
       const paths = (Array.isArray(selected) ? selected : [selected])
         .map((path) => path.trim())
@@ -406,25 +418,25 @@ export function NoteChatPanel({
         className="note-chat-resize-handle"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize Ask Clovy panel"
+        aria-label={t("notes.chat.resize")}
         onPointerDown={startResize}
       />
       <aside
         ref={panelRef}
         className="note-chat-panel"
-        aria-label="Ask Clovy about this note"
+        aria-label={t("notes.chat.panelLabel")}
         data-entered={entered || undefined}
         onAnimationEnd={(event) => {
           if (event.animationName === "note-chat-panel-in") setEntered(true);
         }}
       >
         <header className="note-chat-bar">
-          <h2 className="note-chat-bar-title">Ask Clovy</h2>
+          <h2 className="note-chat-bar-title">{t("notes.header.ask")}</h2>
           <button
             type="button"
             className="icon-button"
-            aria-label="Open in agent view"
-            title={escalationPending ? "Finishing up…" : "Open in agent view"}
+            aria-label={t("notes.chat.openInAgent")}
+            title={escalationPending ? t("notes.chat.finishingUp") : t("notes.chat.openInAgent")}
             disabled={escalationPending}
             onClick={() => onOpenInAgent(storedSessionId)}
           >
@@ -433,8 +445,8 @@ export function NoteChatPanel({
           <button
             type="button"
             className="icon-button"
-            aria-label="Close Ask Clovy"
-            title="Close"
+            aria-label={t("notes.chat.close")}
+            title={t("common.close")}
             onClick={onClose}
           >
             <IconCrossMedium size={15} />
@@ -443,9 +455,7 @@ export function NoteChatPanel({
         <div ref={scrollerRef} className="note-chat-scroll scroll-fade-mask" {...fade.props}>
           {turns.length === 0 && !loading ? (
             <div className="note-chat-empty">
-              <p className="note-chat-empty-lead">
-                Ask about this note: what was said, what it means, or how to reshape it.
-              </p>
+              <p className="note-chat-empty-lead">{t("notes.chat.emptyLead")}</p>
               <div className="note-chat-suggestions">
                 {NOTE_PRESETS.map((preset) => (
                   <button
@@ -486,7 +496,9 @@ export function NoteChatPanel({
               )}
               {working && !streamingVisibly ? (
                 <div className="note-chat-working">
-                  {runningTool && "name" in runningTool ? runningTool.name : "Thinking…"}
+                  {runningTool && "name" in runningTool
+                    ? runningTool.name
+                    : t("notes.chat.thinking")}
                 </div>
               ) : null}
             </div>
@@ -532,7 +544,7 @@ export function NoteChatPanel({
             ) : null}
             <ComposerEditor
               ref={composerRef}
-              placeholder="Ask about this note"
+              placeholder={t("notes.chat.placeholder")}
               onChange={(text) => {
                 draftRef.current = text;
                 setDraftEmpty(!text.trim());
@@ -544,8 +556,8 @@ export function NoteChatPanel({
               <button
                 type="button"
                 className="agent-composer-attach"
-                aria-label="Attach files"
-                title="Attach files"
+                aria-label={t("notes.chat.attachFiles")}
+                title={t("notes.chat.attachFiles")}
                 onClick={() => void pickAttachments()}
               >
                 <IconPlusMedium size={18} />
@@ -564,12 +576,12 @@ export function NoteChatPanel({
                 <button
                   type="button"
                   className="agent-composer-mic"
-                  aria-label="Dictate"
+                  aria-label={t("notes.chat.dictate")}
                   title={
                     creditActionsDisabledReason ??
                     (recordingActive
-                      ? "Dictate a question (kept out of the recording)"
-                      : "Start dictation")
+                      ? t("notes.chat.dictateDuringRecording")
+                      : t("notes.chat.startDictation"))
                   }
                   disabled={Boolean(creditActionsDisabledReason)}
                   onClick={() => void startDictation()}
@@ -580,8 +592,8 @@ export function NoteChatPanel({
                   <button
                     type="button"
                     className="agent-composer-stop"
-                    aria-label="Stop Clovy"
-                    title="Stop Clovy"
+                    aria-label={t("notes.chat.stop")}
+                    title={t("notes.chat.stop")}
                     onClick={stop}
                   >
                     <IconStop size={16} />
@@ -590,7 +602,7 @@ export function NoteChatPanel({
                   <button
                     type="button"
                     className="agent-composer-send"
-                    aria-label="Send message"
+                    aria-label={t("notes.chat.send")}
                     disabled={
                       Boolean(textActionsDisabledReason) || (draftEmpty && !attachments.length)
                     }

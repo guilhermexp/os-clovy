@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
+import { useT } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import {
   browserApprovalRespond,
@@ -13,6 +14,7 @@ const BROWSER_APPROVALS_CHANGED_EVENT = "clovy://browser-approvals-changed";
 /** Shell-owned approval surface because a browser action can park while the
  * user navigates away from the originating session. */
 export function BrowserApprovalsTray() {
+  const t = useT();
   const [pending, setPending] = useState<PendingBrowserApproval[]>([]);
   const [submitting, setSubmitting] = useState<string>();
   const [error, setError] = useState<string>();
@@ -41,7 +43,7 @@ export function BrowserApprovalsTray() {
 
   if (pending.length === 0) return null;
   return (
-    <aside className="connector-approvals" aria-label="Browser approvals">
+    <aside className="connector-approvals" aria-label={t("agent.browserApprovals.label")}>
       <div className="connector-approvals-list">
         {pending.map((approval) => (
           <BrowserApprovalCard

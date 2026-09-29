@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
+import { t } from "../i18n/translate";
 import { withTimeout } from "./async-timeout";
 import { osAccountsLogout, osAccountsStatus, osAccountsStatusLocal } from "./tauri";
 import type { AccountStatus } from "./tauri";
 
 export const LOCAL_ACCOUNT_STATUS_TIMEOUT_MS = 2_000;
 export const ACCOUNT_STATUS_TIMEOUT_MS = 8_000;
-const ACCOUNT_STATUS_TIMEOUT_MESSAGE = "Account status took too long. Please try again.";
+const accountStatusTimeoutMessage = () => t("lib.errors.accountStatusTimeout");
 
 const EMPTY_STATUS: AccountStatus = { signedIn: false, configured: false };
 const DEMO_ACCOUNT: AccountStatus = {
@@ -48,7 +49,7 @@ export function useAccountStatus(options: UseAccountStatusOptions = {}): UseAcco
       const next = await withTimeout(
         osAccountsStatus(),
         ACCOUNT_STATUS_TIMEOUT_MS,
-        ACCOUNT_STATUS_TIMEOUT_MESSAGE,
+        accountStatusTimeoutMessage(),
       );
       setAccount(next);
       setError(undefined);
@@ -74,7 +75,7 @@ export function useAccountStatus(options: UseAccountStatusOptions = {}): UseAcco
           const localStatus = await withTimeout(
             osAccountsStatusLocal(),
             LOCAL_ACCOUNT_STATUS_TIMEOUT_MS,
-            ACCOUNT_STATUS_TIMEOUT_MESSAGE,
+            accountStatusTimeoutMessage(),
           );
           if (!cancelled) {
             setAccount(localStatus);
