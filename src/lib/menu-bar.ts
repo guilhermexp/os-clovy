@@ -124,8 +124,10 @@ function statusForSession(
   return "idle";
 }
 
+// An untitled session goes out empty: the native menu supplies "Untitled
+// session" in the interface language, and re-renders it when that changes.
 function titleForSession(session: AgentSessionDto) {
-  return normalizeText(session.title, TITLE_LIMIT) ?? "Untitled session";
+  return normalizeText(session.title, TITLE_LIMIT) ?? "";
 }
 
 function sessionTimestamp(session: AgentSessionDto) {

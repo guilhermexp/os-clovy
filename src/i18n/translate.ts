@@ -80,6 +80,15 @@ function selectPlural(message: PluralMessage, count: number, locale: InterfaceLo
   return message[category as keyof PluralMessage] ?? message.other;
 }
 
+/**
+ * A number placed inside translated copy. English keeps the raw digits the
+ * copy always used (`${count}`: "1234 notes", never regrouped by the system
+ * locale); other languages format with their own separators ("1.234 notas").
+ */
+export function formatParamNumber(value: number, locale: InterfaceLocale) {
+  return intlLocale(locale) ? formatNumber(value, undefined, locale) : String(value);
+}
+
 const PLACEHOLDER = /\{(\w+)\}/g;
 
 export function interpolate(
@@ -91,7 +100,7 @@ export function interpolate(
   return template.replace(PLACEHOLDER, (match, name: string) => {
     const value = params[name];
     if (value === undefined || value === null) return match;
-    return typeof value === "number" ? formatNumber(value, undefined, locale) : value;
+    return typeof value === "number" ? formatParamNumber(value, locale) : value;
   });
 }
 
@@ -113,8 +122,9 @@ export function resolveTemplate(
  * the key itself (visible in review, never a crash); a key missing from a
  * non-English catalog falls back to English.
  *
- * Numeric params are formatted with the locale's digits and separators; pass
- * a string (`String(year)`) for numbers that must stay raw.
+ * Numeric params stay raw in English and are formatted with the locale's
+ * digits and separators elsewhere; pass a string (`String(year)`) for numbers
+ * that must stay raw in every language.
  */
 export function t(
   key: MessageKey,

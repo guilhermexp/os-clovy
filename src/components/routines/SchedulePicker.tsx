@@ -1,9 +1,10 @@
 import {
+  dayName,
   humanizeSchedule,
   scheduleFromDraft,
   type ScheduleDraft,
 } from "../../lib/routine-schedule";
-import { formatDate, type TFunction, useT } from "../../i18n";
+import { type TFunction, useT } from "../../i18n";
 import { Select } from "../ui/Select";
 
 function kindOptions(t: TFunction) {
@@ -18,11 +19,11 @@ function kindOptions(t: TFunction) {
 
 type ScheduleKind = ScheduleDraft["kind"];
 
-/** Weekday names in the interface language, Sunday first (cron day 0).
- * 2026-01-04 is a Sunday, so day N is that date plus N days. */
+/** Weekday names in the interface language, Sunday first (cron day 0). English
+ * keeps its fixed names regardless of the system's regional format. */
 function dayOptions() {
   return Array.from({ length: 7 }, (_, day) => {
-    const name = formatDate(new Date(2026, 0, 4 + day), { weekday: "long" });
+    const name = dayName(day);
     return { value: String(day), label: name.charAt(0).toUpperCase() + name.slice(1) };
   });
 }

@@ -78,6 +78,16 @@ describe("interface locale preference", () => {
     expect(window.localStorage.getItem(INTERFACE_LOCALE_STORAGE_KEY)).toBe("en");
   });
 
+  it("falls back to English for an invalid stored value even on a fresh Portuguese system", () => {
+    setNavigatorLanguages(["pt-BR"]);
+    window.localStorage.removeItem("clovy.onboarding.completedVersion");
+    window.localStorage.removeItem("june.onboarding.completedVersion");
+    window.localStorage.setItem(INTERFACE_LOCALE_STORAGE_KEY, "fr");
+    initInterfaceLocale();
+    expect(getInterfaceLocale()).toBe("en");
+    expect(window.localStorage.getItem(INTERFACE_LOCALE_STORAGE_KEY)).toBe("en");
+  });
+
   it("keeps existing installs in English even on a Portuguese system", () => {
     setNavigatorLanguages(["pt-BR", "en-US"]);
     markOnboardingComplete();
@@ -142,6 +152,8 @@ describe("translation", () => {
     expect(t("common.items", { count: 0 }, "pt-BR")).toBe("0 itens");
     // Numbers use the locale's grouping.
     expect(t("common.items", { count: 1234 }, "pt-BR")).toBe("1.234 itens");
+    // English keeps the raw digits its copy always used.
+    expect(t("common.items", { count: 1234 }, "en")).toBe("1234 items");
   });
 
   it("returns the key itself for an unknown key instead of crashing", () => {
@@ -181,6 +193,15 @@ describe("translation", () => {
     applyInterfaceLocale("pt-BR");
     render(<Probe />);
     expect(screen.getByText("2 itens")).toBeInTheDocument();
+  });
+
+  it("keeps raw digits in English rich messages", () => {
+    function Probe() {
+      const tr = useTRich();
+      return <p>{tr("common.items", { count: 1234 })}</p>;
+    }
+    render(<Probe />);
+    expect(screen.getByText("1234 items")).toBeInTheDocument();
   });
 });
 

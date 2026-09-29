@@ -8,7 +8,7 @@ import {
   modelPrivacyBadge,
   modelPrivacyFlags,
 } from "../../lib/model-privacy";
-import { formatNumber, t as translate, useT } from "../../i18n";
+import { formatNumber, intlLocale, t as translate, useT } from "../../i18n";
 import { formatCreditsAsUsd, pricingLabel } from "../../lib/model-pricing";
 import { suggestedModelsForMode } from "../../lib/suggested-models";
 import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
@@ -287,15 +287,16 @@ export function contextLabel(model: VeniceModelDto) {
   return translate("settingsPanels.models.contextTokens", { value: String(model.contextTokens) });
 }
 
-/** One decimal at most ("1.5M"), in the interface locale's digits ("1,5M"). */
+/** One decimal at most: "1.5M" in English (as before, whatever the system's
+ * regional format), the interface locale's digits elsewhere ("1,5M"). */
 function trimNumber(value: number) {
-  return Number.isInteger(value)
-    ? String(value)
-    : formatNumber(value, {
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1,
-        useGrouping: false,
-      });
+  if (Number.isInteger(value)) return String(value);
+  if (!intlLocale()) return value.toFixed(1);
+  return formatNumber(value, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    useGrouping: false,
+  });
 }
 
 // The hover card's spec list: the pricing/context facts split into label/value

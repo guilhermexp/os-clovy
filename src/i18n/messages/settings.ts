@@ -7,7 +7,7 @@ export default defineMessages({
       "Choose the language, theme, accent color, text size, and date format Clovy uses.",
     "settings.interfaceLanguage.title": "Interface language",
     "settings.interfaceLanguage.description":
-      "The language of Clovy's menus, buttons, and messages. Dictation and transcription keep their own language setting.",
+      "The language of Clovy's menus, buttons, and messages. Dictation and note transcription keep their own language setting.",
     "settings.interfaceLanguage.aria": "Interface language: {language}",
     "settings.theme.title": "Theme",
     "settings.theme.description": "Match the system or force light or dark mode.",
@@ -389,7 +389,7 @@ export default defineMessages({
       "Escolha o idioma, o tema, a cor de destaque, o tamanho do texto e o formato de data do Clovy.",
     "settings.interfaceLanguage.title": "Idioma da interface",
     "settings.interfaceLanguage.description":
-      "O idioma dos menus, botões e mensagens do Clovy. Ditado e transcrição mantêm a própria configuração de idioma.",
+      "O idioma dos menus, botões e mensagens do Clovy. Ditado e transcrição de notas mantêm a própria configuração de idioma.",
     "settings.interfaceLanguage.aria": "Idioma da interface: {language}",
     "settings.theme.title": "Tema",
     "settings.theme.description": "Siga o sistema ou force o modo claro ou escuro.",

@@ -48,11 +48,11 @@ export function normalizeLocale(value: unknown): InterfaceLocale | undefined {
   return undefined;
 }
 
-function readStoredLocale(): InterfaceLocale | undefined {
+function readRawStoredLocale(): string | null {
   try {
-    return normalizeLocale(window.localStorage.getItem(INTERFACE_LOCALE_STORAGE_KEY));
+    return window.localStorage.getItem(INTERFACE_LOCALE_STORAGE_KEY);
   } catch {
-    return undefined;
+    return null;
   }
 }
 
@@ -76,9 +76,19 @@ export function initialLocale(): InterfaceLocale {
   return hasCompletedAnyOnboardingVersion() ? DEFAULT_LOCALE : systemLocale();
 }
 
+/**
+ * The locale a window starts in. The first-run default applies only when
+ * nothing is stored; a stored value that is not a supported language ("fr",
+ * garbage) falls back to English rather than to the system language.
+ */
+function resolveStartupLocale(raw: string | null = readRawStoredLocale()): InterfaceLocale {
+  if (raw === null) return initialLocale();
+  return normalizeLocale(raw) ?? DEFAULT_LOCALE;
+}
+
 export function getInterfaceLocale(): InterfaceLocale {
   if (currentLocale) return currentLocale;
-  currentLocale = readStoredLocale() ?? initialLocale();
+  currentLocale = resolveStartupLocale();
   return currentLocale;
 }
 
@@ -132,14 +142,8 @@ export function setInterfaceLocale(value: InterfaceLocale) {
  * onboarding completion, and tells the native menus which language to use.
  */
 export function initInterfaceLocale() {
-  const stored = readStoredLocale();
-  const locale = stored ?? initialLocale();
-  let raw: string | null = null;
-  try {
-    raw = window.localStorage.getItem(INTERFACE_LOCALE_STORAGE_KEY);
-  } catch {
-    raw = null;
-  }
+  const raw = readRawStoredLocale();
+  const locale = resolveStartupLocale(raw);
   // Also rewrites an invalid or non-canonical stored value ("pt_BR", "fr").
   if (raw !== locale) persist(locale);
   applyInterfaceLocale(locale);
@@ -151,7 +155,7 @@ export function initInterfaceLocale() {
  * the main window. Returns an unsubscribe function.
  */
 export function subscribeInterfaceLocaleAcrossWindows(): () => void {
-  applyInterfaceLocale(readStoredLocale() ?? initialLocale());
+  applyInterfaceLocale(resolveStartupLocale());
   const onStorage = (event: StorageEvent) => {
     if (event.key === INTERFACE_LOCALE_STORAGE_KEY) applyInterfaceLocale(event.newValue);
   };

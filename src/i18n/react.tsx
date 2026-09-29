@@ -6,7 +6,7 @@ import {
   subscribeInterfaceLocale,
 } from "./locale";
 import {
-  formatNumber,
+  formatParamNumber,
   interpolate,
   type MessageKey,
   resolveTemplate,
@@ -78,7 +78,7 @@ export function translateRich(
     } else if (name) {
       const value = params[name];
       let node: ReactNode = whole;
-      if (typeof value === "number") node = formatNumber(value, undefined, locale);
+      if (typeof value === "number") node = formatParamNumber(value, locale);
       else if (value !== undefined && value !== null && typeof value !== "function") node = value;
       nodes.push(createElement(Fragment, { key: index }, node));
     }

@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { IconRecord } from "central-icons/IconRecord";
 import { InlineNotice } from "../ui/InlineNotice";
-import { formatNumber, useT } from "../../i18n";
+import { formatNumber, intlLocale, useT } from "../../i18n";
 import type { RecoverableRecordingDto } from "../../lib/tauri";
 
 type NoteRecoveryPromptProps = {
@@ -111,16 +111,20 @@ function hasOneRenderedLine(element: HTMLElement): boolean {
   return lineTops.length === 1;
 }
 
-// One decimal, no grouping: the same digits as the old toFixed(1), with the
-// decimal separator following the interface language (1,5 MB in pt-BR).
+// One decimal, no grouping. English keeps the old toFixed(1) exactly; other
+// languages take their own decimal separator (1,5 MB in pt-BR).
 const ONE_DECIMAL: Intl.NumberFormatOptions = {
   minimumFractionDigits: 1,
   maximumFractionDigits: 1,
   useGrouping: false,
 };
 
+function oneDecimal(value: number): string {
+  return intlLocale() ? formatNumber(value, ONE_DECIMAL) : value.toFixed(1);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${formatNumber(bytes / 1024, ONE_DECIMAL)} KB`;
-  return `${formatNumber(bytes / (1024 * 1024), ONE_DECIMAL)} MB`;
+  if (bytes < 1024 * 1024) return `${oneDecimal(bytes / 1024)} KB`;
+  return `${oneDecimal(bytes / (1024 * 1024))} MB`;
 }

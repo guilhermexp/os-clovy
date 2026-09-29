@@ -192,7 +192,7 @@ function monthDayText(monthIndex: number, day: number): string {
 
 /** Weekday name for a cron day (0 = Sunday). English keeps its fixed names;
  * other languages take the name from Intl ("segunda-feira"). */
-function dayName(day: number): string {
+export function dayName(day: number): string {
   if (isEnglish()) return DAY_NAMES[day];
   // 2023-01-01 was a Sunday, so day N of that week is weekday N.
   return formatDate(new Date(2023, 0, 1 + day), { weekday: "long" });
