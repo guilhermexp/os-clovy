@@ -55,3 +55,6 @@ CLAUDE.local.md
 # Local agent working files: task briefs and review/report scratch
 .briefs
 .reviews
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
