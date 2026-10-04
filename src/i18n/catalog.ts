@@ -6,6 +6,7 @@
 import type { Message } from "./define";
 import type { InterfaceLocale } from "./locale";
 import account from "./messages/account";
+import activity from "./messages/activity";
 import agent from "./messages/agent";
 import app from "./messages/app";
 import chat from "./messages/chat";
@@ -22,6 +23,7 @@ import shell from "./messages/shell";
 
 export const namespaces = {
   account,
+  activity,
   agent,
   app,
   chat,
