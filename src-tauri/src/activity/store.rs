@@ -967,42 +967,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypted_file_is_unreadable_without_key() {
-        let (_dir, path) = temp_db();
-        let keys = MemoryKeyStore::default();
-        let store = ActivityStore::open(&path, &keys).await.expect("open");
-        store
-            .insert_frame(&frame(at(1, 10), "secret meeting notes"))
-            .await
-            .expect("insert");
-        store.close().await;
-
-        // A plain SQLite client (no PRAGMA key) must not recognize the file.
-        let plain = sqlx_sqlite::SqliteConnectOptions::new().filename(&path);
-        let error = match sqlx_sqlite::SqlitePool::connect_with(plain).await {
-            Ok(pool) => match sqlx::query::query("SELECT count(*) FROM frames")
-                .fetch_one(&pool)
-                .await
-            {
-                Ok(_) => panic!("plain sqlite must not read the encrypted file"),
-                Err(error) => error,
-            },
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("file is not a database"),
-            "unexpected error: {error}"
-        );
-        let raw = std::fs::read(&path).expect("read file");
-        assert!(!raw.starts_with(b"SQLite format 3"));
-        assert!(!raw.windows(6).any(|window| window == b"secret"));
-
-        // The same key reopens it.
-        let reopened = ActivityStore::open(&path, &keys).await.expect("reopen");
-        assert_eq!(reopened.frames_after(0, 10).await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
     async fn missing_key_with_existing_file_refuses_to_open_and_keeps_the_file() {
         let (_dir, path) = temp_db();
         let keys = MemoryKeyStore::default();

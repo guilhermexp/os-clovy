@@ -13,6 +13,9 @@ pub mod key;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod platform;
+#[cfg(test)]
+#[path = "red_tests.rs"]
+mod red_tests;
 pub mod redact;
 pub mod schedule;
 pub mod settings;
