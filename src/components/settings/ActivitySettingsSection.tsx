@@ -80,9 +80,11 @@ export function ActivitySettingsSection() {
     void saveSettings({ ...settings, enabled });
   }
 
+  // Only the user's own pause can be resumed here. Automatic pauses (work
+  // hours, low disk, protected video) keep the button as "Pause capture", which
+  // adds a manual pause on top, matching the menu bar.
   function handleTogglePaused() {
-    const isPaused = status?.manualPause || state.kind === "paused";
-    void activitySetPaused(!isPaused).then(setStatus);
+    void activitySetPaused(!status?.manualPause).then(setStatus);
   }
 
   function handleRequestPermission(
@@ -162,7 +164,7 @@ export function ActivitySettingsSection() {
       .finally(() => setDebugExporting(false));
   }
 
-  const isPaused = status.manualPause || state.kind === "paused";
+  const isPaused = status.manualPause;
   const needsPermissions = state.kind === "needsPermissions";
   const missingRequiredList = needsPermissions ? state.missing : [];
 

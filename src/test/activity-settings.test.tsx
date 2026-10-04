@@ -229,6 +229,30 @@ describe("ActivitySettingsSection", () => {
     });
   });
 
+  it("offers a manual pause, not a no-op resume, while paused automatically", async () => {
+    currentStatus = {
+      ...currentStatus,
+      settings: { ...defaultSettings, enabled: true },
+      state: { kind: "paused", reason: "workHours" },
+      manualPause: false,
+    };
+
+    render(<ActivitySettingsSection />);
+
+    const pauseButton = await screen.findByRole("button", { name: "Pause capture" });
+    expect(screen.queryByRole("button", { name: "Resume capture" })).toBeNull();
+    fireEvent.click(pauseButton);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("activity_set_paused", {
+        request: { paused: true },
+      });
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("activity_set_paused", {
+      request: { paused: false },
+    });
+  });
+
   it("requires confirmation before activity_recreate_database in key-missing flow", async () => {
     currentStatus = {
       ...currentStatus,
