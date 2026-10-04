@@ -327,11 +327,15 @@ that proves rendering, not the native flow.
 ```json
 {
   "command": {
-    "argv": ["pnpm", "tauri:build", "--", "--bundles", "app"],
+    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" pnpm tauri:build -- --bundles app"],
     "cwd": "."
   }
 }
 ```
+
+The agent sidecar is packaged as a Node SEA, which needs an official Node 24
+binary carrying `NODE_SEA_FUSE_*`; Homebrew's node lacks it ("Could not find
+the sentinel"). This machine keeps one at `~/.local/share/node-official/node24`.
 
 <!-- repowise:start -->
 ## Repowise — diagnóstico de código
