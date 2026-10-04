@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 
-use super::filter::{is_protected_video, skip_reason, within_work_hours};
+use super::filter::{is_browser, is_protected_video, skip_reason, within_work_hours};
 use super::input::{clipboard_event, normalize_input, FocusTracker};
 use super::key::ActivityKeyStore;
 use super::platform::{
@@ -214,6 +214,9 @@ pub struct CaptureEngine<P: ActivityPlatform> {
     open_pause: Option<(i64, PauseReason)>,
     low_disk: bool,
     input_capture_on: bool,
+    /// The window whose interval the buffered input belongs to; see
+    /// `capture_focused`.
+    epoch: Option<WindowEpoch>,
 }
 
 impl<P: ActivityPlatform> CaptureEngine<P> {
@@ -237,6 +240,7 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
             open_pause: None,
             low_disk: false,
             input_capture_on: false,
+            epoch: None,
         }
     }
 
@@ -310,12 +314,18 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
                     frames += self
                         .capture_focused(store, &settings, window, now, &raw_input, clipboard)
                         .await;
+                } else {
+                    self.focus.reset();
+                    self.epoch = None;
                 }
                 if plan.secondary {
                     frames += self.capture_secondary(store, &settings, now).await;
                 }
             }
-            _ => self.focus.reset(),
+            _ => {
+                self.focus.reset();
+                self.epoch = None;
+            }
         }
 
         if plan.retention {
@@ -427,9 +437,24 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
             // Excluded: no text read, no frame, and the tick's input and
             // clipboard are discarded with it.
             self.focus.reset();
+            self.epoch = None;
             return 0;
         }
+        let key = WindowEpoch::of(&window);
+        // Clicks, keys, and clipboard changes are buffered between ticks
+        // without their source window. They are kept only when the same
+        // capturable window (and page) was focused at both ends of the
+        // interval; any switch in between could hide an excluded source.
+        let same_epoch = self.epoch.as_ref() == Some(&key);
         let (text_source, text) = self.window_text(&window);
+        if needs_revalidation(&window) {
+            let after = self.platform.focused_window();
+            if !unchanged_after_read(&window, after.as_ref(), settings, self.own_pid) {
+                self.focus.reset();
+                self.epoch = None;
+                return 0;
+            }
+        }
         let frame = NewFrame {
             captured_at: now,
             app_name: window.app_name.clone(),
@@ -449,15 +474,18 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
                 0
             }
         };
+        self.epoch = Some(key);
 
         let app = Some(window.app_name.as_str());
         let mut events: Vec<NewInputEvent> = Vec::new();
         events.extend(self.focus.observe(&window, now));
-        if settings.input_events {
-            events.extend(normalize_input(raw_input, app));
-        }
-        if let Some(text) = clipboard {
-            events.extend(clipboard_event(&text, app, now));
+        if same_epoch {
+            if settings.input_events {
+                events.extend(normalize_input(raw_input, app));
+            }
+            if let Some(text) = clipboard {
+                events.extend(clipboard_event(&text, app, now));
+            }
         }
         if let Err(error) = store.insert_input_events(&events).await {
             tracing::warn!(%error, "activity: could not store input events");
@@ -480,6 +508,16 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
                 continue;
             }
             let (text_source, text) = self.window_text(&window);
+            if needs_revalidation(&window) {
+                let after = self
+                    .platform
+                    .secondary_windows()
+                    .into_iter()
+                    .find(|candidate| candidate.window_id == window.window_id);
+                if !unchanged_after_read(&window, after.as_ref(), settings, self.own_pid) {
+                    continue;
+                }
+            }
             let frame = NewSecondaryFrame {
                 captured_at: now,
                 display_id: window.display_id,
@@ -497,6 +535,46 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
         }
         stored
     }
+}
+
+/// Identity of the focused window (and page) for one capture interval.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WindowEpoch {
+    pid: i32,
+    window_id: Option<u32>,
+    browser_url: Option<String>,
+}
+
+impl WindowEpoch {
+    fn of(window: &WindowDescriptor) -> Self {
+        Self {
+            pid: window.pid,
+            window_id: window.window_id,
+            browser_url: window.browser_url.clone(),
+        }
+    }
+}
+
+/// Browser windows can navigate or switch tabs while their text is read.
+fn needs_revalidation(window: &WindowDescriptor) -> bool {
+    window.browser_url.is_some() || is_browser(&window.app_name, window.bundle_id.as_deref())
+}
+
+/// The descriptor re-read after text extraction still names the same window
+/// and page, and that page is still capturable. Unknown counts as changed.
+fn unchanged_after_read(
+    before: &WindowDescriptor,
+    after: Option<&WindowDescriptor>,
+    settings: &ActivitySettings,
+    own_pid: i32,
+) -> bool {
+    after.is_some_and(|after| {
+        after.pid == before.pid
+            && after.window_id == before.window_id
+            && after.browser_url == before.browser_url
+            && !after.private_window
+            && skip_reason(after, settings, own_pid).is_none()
+    })
 }
 
 fn meaningful_chars(text: &str) -> usize {
@@ -547,6 +625,10 @@ mod tests {
         free_disk: Option<u64>,
         calls: Arc<Mutex<Calls>>,
         input_capture: Arc<AtomicBool>,
+        /// Scripted `focused_window` results, consumed before `focused`.
+        focused_reads: VecDeque<Option<WindowDescriptor>>,
+        /// Scripted `secondary_windows` results, consumed before `secondary`.
+        secondary_reads: VecDeque<Vec<WindowDescriptor>>,
     }
 
     impl FakePlatform {
@@ -566,6 +648,8 @@ mod tests {
                 free_disk: Some(100 << 30),
                 calls: Arc::default(),
                 input_capture: Arc::default(),
+                focused_reads: VecDeque::new(),
+                secondary_reads: VecDeque::new(),
             }
         }
     }
@@ -576,10 +660,14 @@ mod tests {
         }
         fn request_permission(&self, _permission: ActivityPermission) {}
         fn focused_window(&mut self) -> Option<WindowDescriptor> {
-            self.focused.clone()
+            self.focused_reads
+                .pop_front()
+                .unwrap_or_else(|| self.focused.clone())
         }
         fn secondary_windows(&mut self) -> Vec<WindowDescriptor> {
-            self.secondary.clone()
+            self.secondary_reads
+                .pop_front()
+                .unwrap_or_else(|| self.secondary.clone())
         }
         fn accessibility_text(&mut self, window: &WindowDescriptor) -> Option<String> {
             lock(&self.calls)
@@ -879,25 +967,29 @@ mod tests {
 
     #[tokio::test]
     async fn input_events_are_stored_without_content_and_clipboard_redacted() {
-        let mut platform = FakePlatform::granted();
+        let platform = FakePlatform::granted();
+        let input_capture = Arc::clone(&platform.input_capture);
+        let mut harness = Harness::new(platform, enabled_settings());
+        // First tick opens the interval in Zed.
+        harness.engine.tick().await;
+        assert!(
+            input_capture.load(Ordering::SeqCst),
+            "tap started while active"
+        );
         let now = Utc::now();
-        platform.input = vec![
+        harness.engine.platform.input = vec![
             RawInputEvent::Key {
                 at: now,
                 characters: Some("hunter2".into()),
             },
             RawInputEvent::Click { at: now },
         ];
-        platform
+        harness
+            .engine
+            .platform
             .clipboard
             .push_back("token ghp_1234567890abcdefghijABCDEFGHIJ123456".into());
-        let input_capture = Arc::clone(&platform.input_capture);
-        let mut harness = Harness::new(platform, enabled_settings());
         harness.engine.tick().await;
-        assert!(
-            input_capture.load(Ordering::SeqCst),
-            "tap started while active"
-        );
         let events = harness.events().await;
         let kinds: Vec<InputEventKind> = events.iter().map(|event| event.kind).collect();
         assert!(kinds.contains(&InputEventKind::AppSwitch));
@@ -923,6 +1015,122 @@ mod tests {
             !input_capture.load(Ordering::SeqCst),
             "tap stopped while paused"
         );
+    }
+
+    #[tokio::test]
+    async fn input_from_an_excluded_window_is_not_attributed_to_the_next_one() {
+        let mut platform = FakePlatform::granted();
+        platform.focused = Some(chrome("https://www.youtube.com/watch?v=1"));
+        let mut harness = Harness::new(platform, enabled_settings());
+        harness.engine.tick().await;
+
+        // Typed and copied on the ignored site, then switched to Zed before
+        // the next tick drained the buffer.
+        let now = Utc::now();
+        harness.engine.platform.input = vec![
+            RawInputEvent::Key {
+                at: now,
+                characters: None,
+            },
+            RawInputEvent::Click { at: now },
+        ];
+        harness
+            .engine
+            .platform
+            .clipboard
+            .push_back("copied on the ignored site".into());
+        harness.engine.platform.focused = Some(zed());
+        harness.engine.tick().await;
+        let kinds: Vec<InputEventKind> = harness
+            .events()
+            .await
+            .iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![InputEventKind::AppSwitch],
+            "only the switch itself"
+        );
+        assert_eq!(
+            harness.frames().await.len(),
+            1,
+            "the Zed frame is still captured"
+        );
+
+        // Input made while Zed stays focused is kept.
+        harness.engine.platform.input = vec![RawInputEvent::Click { at: now }];
+        harness.engine.tick().await;
+        assert!(harness
+            .events()
+            .await
+            .iter()
+            .any(|event| event.kind == InputEventKind::Click));
+    }
+
+    #[tokio::test]
+    async fn browser_navigating_to_an_ignored_domain_while_read_is_discarded() {
+        let mut platform = FakePlatform::granted();
+        let allowed = chrome("https://example.com/");
+        platform.focused = Some(allowed.clone());
+        platform.focused_reads = VecDeque::from([
+            Some(allowed.clone()),
+            Some(chrome("https://www.youtube.com/watch?v=1")),
+        ]);
+        let mut harness = Harness::new(platform, enabled_settings());
+        harness.engine.tick().await;
+        assert!(
+            harness.frames().await.is_empty(),
+            "text read during navigation must not be stored under the old URL"
+        );
+
+        // A tab that became private, or a different window, is discarded too.
+        let mut private = allowed.clone();
+        private.private_window = true;
+        harness.engine.platform.focused_reads =
+            VecDeque::from([Some(allowed.clone()), Some(private)]);
+        harness.engine.tick().await;
+        let mut other_window = allowed.clone();
+        other_window.window_id = Some(99);
+        harness.engine.platform.focused_reads =
+            VecDeque::from([Some(allowed.clone()), Some(other_window)]);
+        harness.engine.tick().await;
+        harness.engine.platform.focused_reads = VecDeque::from([Some(allowed.clone()), None]);
+        harness.engine.tick().await;
+        assert!(harness.frames().await.is_empty());
+
+        // Unchanged page: stored.
+        harness.engine.tick().await;
+        let frames = harness.frames().await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].browser_url.as_deref(),
+            Some("https://example.com/")
+        );
+    }
+
+    #[tokio::test]
+    async fn secondary_browser_window_is_revalidated_before_storing() {
+        let mut platform = FakePlatform::granted();
+        let mut allowed = chrome("https://example.com/");
+        allowed.display_id = Some(2);
+        let mut navigated = allowed.clone();
+        navigated.browser_url = Some("https://music.youtube.com/".into());
+        platform.secondary_reads = VecDeque::from([vec![allowed.clone()], vec![navigated]]);
+        let settings = ActivitySettings {
+            secondary_monitors: true,
+            ..enabled_settings()
+        };
+        let mut harness = Harness::new(platform, settings);
+        harness.engine.tick().await;
+        let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap();
+        assert!(harness
+            .store()
+            .secondary_frames_between(from, to)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
