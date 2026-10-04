@@ -2,12 +2,12 @@
 
 ## 1. S1a — Provedores de LLM (núcleo)
 
-- [ ] 1.1 Núcleo `llm` em `src-tauri` com geração pontual (texto/JSON com schema), marcador de autoria, tempo limite sem processo órfão e semáforo de atividade; verificado por testes unitários e de integração com CLIs falsos.
-- [ ] 1.2 Detecção dos seis CLIs via PATH do shell de login, preservando o ambiente do perfil, com caminho e versão; verificado por teste com executáveis falsos em diretório temporário.
-- [ ] 1.3 Registro de endpoints OpenAI-compatíveis nomeados com segredo no Keychain e migração do `localGeneration` existente; verificado por testes de carga de settings legado e de DTO sem segredo.
-- [ ] 1.4 Teste de conexão e probe do nível de saída estruturada por provedor; verificado por integração com CLI falso e servidor HTTP falso.
+- [x] 1.1 Núcleo `llm` em `src-tauri` com geração pontual (texto/JSON com schema), marcador de autoria, tempo limite sem processo órfão e semáforo de atividade; verificado por testes unitários e de integração com CLIs falsos.
+- [x] 1.2 Detecção dos seis CLIs via PATH do shell de login, preservando o ambiente do perfil, com caminho e versão; verificado por teste com executáveis falsos em diretório temporário.
+- [x] 1.3 Registro de endpoints OpenAI-compatíveis nomeados com segredo no Keychain e migração do `localGeneration` existente; verificado por testes de carga de settings legado e de DTO sem segredo.
+- [x] 1.4 Teste de conexão e probe do nível de saída estruturada por provedor; verificado por integração com CLI falso e servidor HTTP falso.
 - [ ] 1.5 Seleção por uso (chat, notas, limpeza de ditado, atividade; atividade padrão "nenhum") ligada às rotas existentes de notas, ditado e agente; verificado por testes de roteamento e nota gerada por CLI falso.
-- [ ] 1.6 UI de provedores na aba Modelos (lista, instalado/não instalado, cadastro de endpoint, testar, escolha por uso) en/pt-BR conforme `spec/`; verificado por testes de componente e captura no app de desenvolvimento.
+- [x] 1.6 UI de provedores na aba Modelos (lista, instalado/não instalado, cadastro de endpoint, testar, escolha por uso) en/pt-BR conforme `spec/`; verificado por testes de componente e captura no app de desenvolvimento.
 
 ## 2. S2 — Captura de atividade e banco cifrado
 
