@@ -1558,9 +1558,14 @@ export async function videoStatus(jobId: string) {
   });
 }
 
-/** GETs {baseUrl}/models with an optional bearer token (~10s timeout) and
- * returns the advertised model ids, for the settings "Test connection" flow. */
-export async function probeLocalGenerationEndpoint(input: { baseUrl: string; apiKey: string }) {
+/** GETs {baseUrl}/models (~10s timeout) and returns the advertised model ids.
+ * The bearer token is the typed `apiKey`, or, when blank, the Keychain key
+ * saved for `endpointId`; the key never comes back to the webview. */
+export async function probeLocalGenerationEndpoint(input: {
+  baseUrl: string;
+  apiKey: string;
+  endpointId?: string;
+}) {
   return invoke<{ models: string[] }>("probe_local_generation_endpoint", {
     request: input,
   });

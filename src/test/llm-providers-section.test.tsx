@@ -1,9 +1,10 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LlmProvidersSection } from "../components/settings/LlmProvidersSection";
 import { applyInterfaceLocale } from "../i18n/locale";
 import type { LlmCliStatusDto, LlmProvidersDto } from "../lib/llm-providers";
+import { dispatchProviderModelSettingsChanged } from "../lib/model-privacy";
 
 const mocks = vi.hoisted(() => ({
   llmProviders: vi.fn(),
@@ -257,6 +258,46 @@ describe("LlmProvidersSection", () => {
         "Chat with agent CLIs arrives in a later update. Chat keeps using Clovy until then.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("re-reads the registry when the text model changes elsewhere", async () => {
+    mocks.llmProviders.mockResolvedValueOnce({
+      ...sampleProviders,
+      usage: { ...sampleProviders.usage, chat: { kind: "endpoint", id: "ep-1" } },
+    });
+    render(<LlmProvidersSection />);
+    const chatSelect = (await screen.findByRole("combobox", {
+      name: "Chat",
+    })) as HTMLSelectElement;
+    await waitFor(() => expect(chatSelect.value).toBe("endpoint:ep-1"));
+
+    // Picking a Clovy model in the text-model picker moved chat back to Clovy.
+    dispatchProviderModelSettingsChanged({ mode: "generation", modelId: "zai-org-glm-5-2" });
+
+    await waitFor(() => expect(chatSelect.value).toBe("clovy"));
+  });
+
+  it("loads models of a saved endpoint with its stored key when no key is typed", async () => {
+    const user = userEvent.setup();
+    mocks.probeLocalGenerationEndpoint.mockResolvedValue({ models: ["llama3.2:3b"] });
+    render(<LlmProvidersSection />);
+
+    await user.click(await screen.findByRole("button", { name: "Configure Local Ollama" }));
+    await user.click(screen.getByRole("button", { name: "Load models" }));
+
+    expect(mocks.probeLocalGenerationEndpoint).toHaveBeenCalledWith({
+      baseUrl: "http://localhost:11434/v1",
+      apiKey: "",
+      endpointId: "ep-1",
+    });
+
+    await user.type(screen.getByLabelText("API key"), "sk-new-key");
+    await user.click(screen.getByRole("button", { name: "Load models" }));
+    expect(mocks.probeLocalGenerationEndpoint).toHaveBeenLastCalledWith({
+      baseUrl: "http://localhost:11434/v1",
+      apiKey: "sk-new-key",
+      endpointId: "ep-1",
+    });
   });
 
   it("renders properly in pt-BR", async () => {

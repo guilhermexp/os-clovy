@@ -21,6 +21,7 @@ import {
   providerRefKey,
 } from "../../lib/llm-providers";
 import { isLoopbackUrl } from "../../lib/local-generation";
+import { PROVIDER_MODEL_SETTINGS_CHANGED_EVENT } from "../../lib/model-privacy";
 import { probeLocalGenerationEndpoint } from "../../lib/tauri";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
@@ -111,6 +112,19 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  // A model change elsewhere in Settings (for example picking a Clovy model
+  // in the text-model picker) can move chat back to Clovy on the backend;
+  // re-read the registry so the selects never show a stale provider.
+  useEffect(() => {
+    const refresh = () => {
+      void llmProviders()
+        .then(setData)
+        .catch(() => undefined);
+    };
+    window.addEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, refresh);
+    return () => window.removeEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, refresh);
+  }, []);
 
   const handleRefreshClis = async () => {
     setClisDetecting(true);
@@ -229,6 +243,9 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
       const result = await probeLocalGenerationEndpoint({
         baseUrl: draft.baseUrl.trim(),
         apiKey: draft.apiKey.trim(),
+        // Without a typed key, the backend uses the key saved for the
+        // endpoint being edited (unless the user is removing it).
+        endpointId: editingEndpoint && !draft.clearApiKey ? editingEndpoint.id : undefined,
       });
       setProbedModels(result.models);
     } catch (err) {
@@ -686,32 +703,31 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
           ) : null}
 
           <div className="dialog-field">
-            <label>
-              <span>{t("settingsPanels.llm.endpointModelId")}</span>
-              <div style={{ display: "flex", gap: "var(--sp-2)", marginTop: "var(--sp-1)" }}>
-                <input
-                  className="dialog-input"
-                  style={{ flex: 1 }}
-                  value={draft.modelId}
-                  list="llm-endpoint-models-datalist"
-                  placeholder="llama3.1:8b"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, modelId: e.target.value }))}
-                />
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  disabled={probingModels || !draft.baseUrl.trim()}
-                  onClick={() => void handleProbeModels()}
-                >
-                  {probingModels
-                    ? t("settingsPanels.llm.loadingModels")
-                    : t("settingsPanels.llm.loadModels")}
-                </button>
-              </div>
-            </label>
+            <label htmlFor="llm-endpoint-model-id">{t("settingsPanels.llm.endpointModelId")}</label>
+            <div style={{ display: "flex", gap: "var(--sp-2)", marginTop: "var(--sp-1)" }}>
+              <input
+                id="llm-endpoint-model-id"
+                className="dialog-input"
+                style={{ flex: 1 }}
+                value={draft.modelId}
+                list="llm-endpoint-models-datalist"
+                placeholder="llama3.1:8b"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                onChange={(e) => setDraft((prev) => ({ ...prev, modelId: e.target.value }))}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={probingModels || !draft.baseUrl.trim()}
+                onClick={() => void handleProbeModels()}
+              >
+                {probingModels
+                  ? t("settingsPanels.llm.loadingModels")
+                  : t("settingsPanels.llm.loadModels")}
+              </button>
+            </div>
             <datalist id="llm-endpoint-models-datalist">
               {probedModels.map((id) => (
                 <option key={id} value={id} />

@@ -33,7 +33,8 @@ let out = llm::generate(&provider, GenerateRequest {
     timeout: None,                  // CLI default 180 s, endpoint default 120 s
 }).await?;
 out.text;      // raw answer
-out.json;      // Some(parsed object) when a schema was given
+out.json;      // Some(object) when a schema was given; answers that do not
+               // validate against the schema fail with LlmError::InvalidOutput
 out.provider;  // "endpoint:<id>" or "cli:<id>"
 
 // Background activity work (reports, day summary, agent-session summaries).
@@ -57,11 +58,16 @@ dictation cleanup, or activity.
 `none < prompt < json_object < json_schema < strict`. Endpoints are measured by
 the connection test: a plain prompt for latency, then the ladder strict
 (`response_format.json_schema.strict = true`), json_schema (`strict = false`),
-json_object, prompt; the first rung whose answer parses wins. CLIs have a
-catalog level (codex `strict` via `--output-schema`; claude and agy
-`json_schema` via `--json-schema`; pi, cursor-agent, copilot `prompt`) that the
-test confirms with a schema-constrained call (`none` when the answer does not
-parse). Features that need JSON must refuse levels below `json_schema`.
+json_object, prompt; the first rung whose answer validates against the probe
+schema (only `{"answer": "schema"}` is valid) wins. The strict and json_schema
+rungs ask the prompt for a different object (`"color": "blue"`), so an
+endpoint that ignores `response_format` follows the prompt, fails validation,
+and is not credited with schema support. CLIs have a catalog level (codex
+`strict` via `--output-schema`; claude and agy `json_schema` via
+`--json-schema`; pi, cursor-agent, copilot `prompt`) that the test confirms
+with the same discriminating probe (`none` when the answer does not validate).
+A level is stored only if the endpoint still has the URL and model that were
+tested. Features that need JSON must refuse levels below `json_schema`.
 
 ## CLI isolation contract
 
@@ -79,10 +85,16 @@ Every one-shot CLI call:
   `--no-session-persistence --tools "" --setting-sources "" --strict-mcp-config
   --disable-slash-commands`; codex `exec -s read-only --ephemeral`; pi
   `--no-session --no-tools --no-context-files --no-skills --no-prompt-templates
-  --no-approve`; cursor-agent `--mode ask` in the scratch workspace);
+  --no-approve`; cursor-agent `--mode ask` in the scratch workspace; copilot
+  `--no-custom-instructions --no-ask-user --disable-builtin-mcps`, every
+  built-in tool in `--excluded-tools`, and `--deny-tool=shell,write,read,url,memory`,
+  which wins over permissions the user saved for interactive use);
 - strips `ANTHROPIC_API_KEY` for claude and `CURSOR_API_KEY` for cursor-agent so
   a stray key never switches the user to metered billing;
-- is killed with its whole process group on timeout (`LlmError::TimedOut`).
+- is killed with its whole process group on timeout (`LlmError::TimedOut`), and
+  the group is swept right after the CLI exits, before output is collected, so
+  a lingering helper cannot hold stdout open; stdout, stderr, and codex's answer
+  file are each capped at 8 MiB.
 
 ## Settings and routing
 
@@ -96,7 +108,9 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   ("Local model") with the same URL, model, and key (key moved to the
   Keychain). If the legacy local model was enabled, chat and notes select it.
   If the Keychain refuses the key, the legacy key stays in the file, keeps
-  working, and the move is retried on the next launch.
+  working, and the move is retried on the next launch. Saving a new key for
+  `local` ends a pending migration and drops the legacy key, so the retry can
+  never overwrite the new key.
 - **Chat.** Chat on an endpoint is mirrored into the legacy
   `generationProvider = "local"` / `generationModel` fields, so the existing
   agent route, model picker, and capability lookups work unchanged. Agent
@@ -124,8 +138,9 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
 | `llm_set_usage` | `usage`, `provider` | registry DTO, or `llm_structured_output_insufficient`, `llm_provider_not_allowed`, `llm_cli_not_installed`, `llm_endpoint_not_found` |
 | `llm_test_provider` | `provider` | `{ latencyMs, structuredOutput }` (level persisted) |
 
-`probe_local_generation_endpoint` still lists an endpoint's `/models` for the
-endpoint form.
+`probe_local_generation_endpoint` lists an endpoint's `/models` for the
+endpoint form; with no typed key and an `endpointId`, the backend uses the
+Keychain key saved for that endpoint (the key never reaches the webview).
 
 ## Verification
 
