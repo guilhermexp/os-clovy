@@ -29544,3 +29544,68 @@ button.connector-approvals-info {
   font-size: var(--fs-md);
   color: var(--muted-foreground);
 }
+
+/* Coding-agent lane of the "Today" view (CodingAgentSessionsStrip): one row
+ * per block with agent, project, time, and summary. Tokens only. */
+.coding-agent-strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.coding-agent-strip-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.coding-agent-strip-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.coding-agent-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-4);
+  border: var(--border-width) solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+
+.coding-agent-block-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--muted-foreground);
+}
+
+.coding-agent-block-agent {
+  font-weight: var(--fw-medium);
+  color: var(--foreground);
+}
+
+.coding-agent-block-summary,
+.coding-agent-block-status,
+.coding-agent-block-prompt {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
+.coding-agent-block-status,
+.coding-agent-block-prompt {
+  color: var(--muted-foreground);
+}
+
+.coding-agent-block-prompt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
