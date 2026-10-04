@@ -833,6 +833,44 @@ Per-consumer high-water mark (`frames.id`) of activity the timeline has
 processed. Retention deletes only rows at or before it.
 _Avoid_: checkpoint, offset.
 
+**Activity session**:
+A run of consecutive useful frames of one app and **session context**, ended
+by an app switch, a context switch, or a **gap**. At most one is *active* (still
+growing); a closed one has a **category**. Its duration never includes a gap
+(see [docs/activity-timeline.md](docs/activity-timeline.md)).
+_Avoid_: session unqualified (that is the agent's chat session), visit, block
+(a block is only its drawing in the view).
+
+**Session context**:
+The browser's domain or the editor's workspace of an activity session; a new
+one in the same app starts a new session.
+_Avoid_: project (that is the agent's project), tab.
+
+**Useful frame / idle frame**:
+A frame is useful when the app, window, URL, or text changed since the
+previous frame, or the user gave input around it; otherwise it is idle. Idle
+frames extend nothing.
+_Avoid_: active frame (active describes the open session).
+
+**Gap**:
+More than 5 minutes without a useful frame, classified as `idle` (idle frames
+cover most of it), `sleep` (no frames: the Mac slept or capture was off), or
+`paused` (a **pause record** covers most of it, with its reason). Gaps are
+never session time.
+_Avoid_: pause (that is the capture's own record), break.
+
+**Category**:
+One of ten deterministic classes a session gets from scored evidence (coding,
+code review, meeting, communication, design, documentation, planning,
+deployment/devops, research, idle/personal); below 0.35 confidence it is
+idle/personal. No model is called.
+_Avoid_: tag, label, classification by AI.
+
+**Today view**:
+The first-level sidebar view showing one day's activity timeline (sessions,
+gaps, stats, search). "Today" is its name even when another day is selected.
+_Avoid_: dashboard, journal.
+
 ## Flagged ambiguities
 
 - **"proxy"** usually means **Clovy API** (the thing in front of OpenAI /

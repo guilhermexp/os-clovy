@@ -203,6 +203,9 @@ pub async fn dispatch_tool(
             Ok(json!({ "deleted": true, "routineId": routine_id }))
         }
         "request_clarification" => consume_clarification_answer(context).await,
+        name if crate::activity::timeline::agent_tools::is_activity_tool(name) => {
+            crate::activity::timeline::dispatch_agent_tool(&context.app, name, &arguments).await
+        }
         "request_secret" => consume_secret_reference(context).await,
         "computer_use" => Ok(crate::computer_use::handle_proxy_action_for_call(
             &context.app,

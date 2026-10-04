@@ -4,7 +4,8 @@
 //!
 //! Layout: `engine` (2 s tick and privacy decisions), `platform` (OS seam,
 //! `macos` implements it), `store` + `key` (SQLCipher database and its
-//! Keychain key), `settings`, `filter`, `schedule`, `input`, `redact`.
+//! Keychain key), `settings`, `filter`, `schedule`, `input`, `redact`, and
+//! `timeline` (sessions, gaps, categories, search; `docs/activity-timeline.md`).
 
 pub mod engine;
 pub mod filter;
@@ -20,6 +21,7 @@ pub mod redact;
 pub mod schedule;
 pub mod settings;
 pub mod store;
+pub mod timeline;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -231,11 +233,15 @@ pub async fn activity_debug_export(
             "The activity database is not open. Turn capture on first.",
         )
     })?;
+    let extra = timeline::db::debug_sections(&store, DEBUG_EXPORT_LIMIT)
+        .await
+        .map_err(|error| AppError::new("activity_debug_export_failed", error.to_string()))?;
     let export = store
         .debug_export(
             &runtime.data_dir.join("activity-debug-exports"),
             chrono::Utc::now(),
             DEBUG_EXPORT_LIMIT,
+            extra,
         )
         .await
         .map_err(|error| AppError::new("activity_debug_export_failed", error.to_string()))?;
@@ -278,6 +284,7 @@ fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
     let thread_keys = Arc::clone(&keys);
     let thread_db = db_path.clone();
     let handle = app.clone();
+    timeline::start(app.clone(), Arc::clone(&shared));
     std::thread::Builder::new()
         .name("clovy-activity-capture".into())
         .spawn(move || {
