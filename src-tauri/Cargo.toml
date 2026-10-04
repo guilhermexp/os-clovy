@@ -142,10 +142,18 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSData",
     "NSGeometry",
     "objc2-core-foundation",
+    "NSDictionary",
 ] }
 window-vibrancy = "0.6"
 platform-macos = { git = "https://github.com/trycua/cua", rev = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1" }
 security-framework = "3.7"
+# SQLCipher for the encrypted activity database (activity.sqlite3). Cargo
+# unifies features into the single libsqlite3-sys that sqlx-sqlite links, so
+# this swaps the SQLite library for the whole macOS binary: the main
+# notes.sqlite3 keeps opening without `PRAGMA key` (SQLCipher without a key
+# behaves like plain SQLite). macOS only: activity capture is a macOS feature
+# and vendored OpenSSL would add perl/nasm to the Windows build lane.
+libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

@@ -1167,7 +1167,7 @@ export async function checkRecordingSourceReadiness(sourceMode: RecordingSourceM
 }
 
 export async function openPrivacySettings(
-  pane: "microphone" | "accessibility" | "screenRecording" | "systemAudio",
+  pane: "microphone" | "accessibility" | "screenRecording" | "systemAudio" | "inputMonitoring",
 ) {
   return invoke<void>("open_privacy_settings", { request: { pane } });
 }

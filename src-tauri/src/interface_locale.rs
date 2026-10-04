@@ -221,6 +221,43 @@ impl MenuStrings {
             _ => self.pick("Updated", "Atualizada"),
         }
     }
+
+    // Activity capture (menu bar).
+    pub fn activity_status(&self, state: &crate::activity::schedule::CaptureState) -> String {
+        use crate::activity::schedule::CaptureState;
+        use crate::activity::store::PauseReason;
+        let detail = match state {
+            CaptureState::Off => self.pick("off", "desligada"),
+            CaptureState::Active => self.pick("on", "ativa"),
+            CaptureState::Paused { reason } => match reason {
+                PauseReason::Manual => self.pick("paused", "pausada"),
+                PauseReason::WorkHours => {
+                    self.pick("paused, outside work hours", "pausada, fora do horário")
+                }
+                PauseReason::LowDisk => {
+                    self.pick("paused, low disk space", "pausada, pouco espaço em disco")
+                }
+                PauseReason::ProtectedVideo => {
+                    self.pick("paused, protected video", "pausada, vídeo protegido")
+                }
+            },
+            CaptureState::NeedsPermissions { .. } => {
+                self.pick("needs permissions", "precisa de permissões")
+            }
+            CaptureState::KeyMissing => self.pick("database key missing", "chave do banco ausente"),
+            CaptureState::Error { .. } => self.pick("unavailable", "indisponível"),
+        };
+        match self.locale {
+            UiLocale::En => format!("Activity capture: {detail}"),
+            UiLocale::PtBr => format!("Captura de atividade: {detail}"),
+        }
+    }
+    pub fn pause_capture(&self) -> &'static str {
+        self.pick("Pause capture", "Pausar captura")
+    }
+    pub fn resume_capture(&self) -> &'static str {
+        self.pick("Resume capture", "Retomar captura")
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -31,6 +31,7 @@ import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconShortcut } from "central-icons/IconShortcut";
 import { IconTrashCan } from "central-icons/IconTrashCan";
 import { IconUnpin } from "central-icons/IconUnpin";
+import { IconLiveActivity } from "central-icons/IconLiveActivity";
 import { IconZap } from "central-icons/IconZap";
 import {
   type DragEvent,
@@ -91,6 +92,7 @@ import {
   type SessionPartitionMap,
 } from "../../lib/session-partition-filter";
 import { OPEN_REFERRAL_DIALOG_EVENT } from "../referral/ReferralNudge";
+import { isMacLikePlatform } from "../../lib/platform";
 import { settingsTabsForCompanionPairing, type SettingsTab } from "../settings/settings-config";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyLinkField } from "../ui/CopyLinkField";
@@ -273,6 +275,11 @@ const SETTINGS_SIDEBAR_GROUPS: {
         id: "shortcuts",
         label: "shell.settingsNav.shortcuts",
         icon: <IconShortcut size={16} />,
+      },
+      {
+        id: "activity",
+        label: "activity.tab.label",
+        icon: <IconLiveActivity size={16} />,
       },
     ],
   },
@@ -694,7 +701,9 @@ export function Sidebar({
         ? settingsTabsForCompanionPairing(companionPairingEnabled)
             .filter(
               (tab) =>
-                !HIDDEN_SETTINGS_TABS.has(tab.id) && !(account.localDev && tab.id === "billing"),
+                !HIDDEN_SETTINGS_TABS.has(tab.id) &&
+                !(account.localDev && tab.id === "billing") &&
+                (isMacLikePlatform() || tab.id !== "activity"),
             )
             .map(
               (tab): CommandPromptItem => ({
@@ -706,7 +715,9 @@ export function Sidebar({
                     ? `settings general account permissions privacy ${tab.label}`
                     : tab.id === "appearance"
                       ? `settings appearance theme accent text size dark light mode ${tab.label}`
-                      : `settings ${tab.label}`,
+                      : tab.id === "activity"
+                        ? `settings activity capture permissions ${tab.label}`
+                        : `settings ${tab.label}`,
                 ),
                 action: () => {
                   onSettingsTabChange?.(tab.id);
@@ -1723,13 +1734,15 @@ function SettingsSidebarNav({
   // Hide the admin-surfaces-PR tabs until stabilized, keeping the pre-PR billing
   // rule (billing is hidden in local dev). Empty groups drop out so their
   // headers don't render.
+  const isMac = isMacLikePlatform();
   const groups = SETTINGS_SIDEBAR_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter(
       (item) =>
         !HIDDEN_SETTINGS_TABS.has(item.id) &&
         !(localDev && item.id === "billing") &&
-        (companionPairingEnabled || item.id !== "linked-devices"),
+        (companionPairingEnabled || item.id !== "linked-devices") &&
+        (isMac || item.id !== "activity"),
     ),
   })).filter((group) => group.items.length > 0);
 

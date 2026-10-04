@@ -92,6 +92,7 @@ import {
 } from "../../lib/updater";
 import {
   fallbackDictationCapabilities,
+  isMacLikePlatform,
   isSystemAudioSupportedPlatform,
   useDictationCapabilities,
 } from "../../lib/platform";
@@ -136,6 +137,7 @@ import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
 import { PrivacySettingsSection } from "./PrivacySettingsSection";
+import { ActivitySettingsSection } from "./ActivitySettingsSection";
 import { SETTINGS_TABS, type SettingsTab } from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
 import {
@@ -332,7 +334,11 @@ export type { SettingsTab };
 export { SETTINGS_TABS };
 
 export function appSettingsTabsForCompanionPairing(companionPairingEnabled: boolean) {
-  return SETTINGS_TABS.filter((tab) => companionPairingEnabled || tab.id !== "linked-devices");
+  const mac = isMacLikePlatform();
+  return SETTINGS_TABS.filter(
+    (tab) =>
+      (companionPairingEnabled || tab.id !== "linked-devices") && (mac || tab.id !== "activity"),
+  );
 }
 
 /**
@@ -1780,7 +1786,7 @@ export function AppSettings({
             </div>
           </section>
         ) : null}
-
+        {activeTab === "activity" ? <ActivitySettingsSection /> : null}
         {activeTab === "dictation" ? (
           <>
             <section className="settings-group" aria-labelledby="dictation-heading">

@@ -28,6 +28,18 @@ static MEETING_RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// status and the dictation indicator) without an agent payload of its own.
 static LAST_AGENT_STATE: Mutex<Option<AgentMenuBarState>> = Mutex::new(None);
 
+/// Last activity-capture state published by `crate::activity::publish`, with
+/// whether the pause is the user's own (so the menu offers "Resume"). `None`
+/// until the activity runtime starts (and always where it is unsupported), in
+/// which case the menu shows no activity items.
+static ACTIVITY_MENU_STATE: Mutex<Option<ActivityMenuState>> = Mutex::new(None);
+
+#[derive(Clone, Debug)]
+struct ActivityMenuState {
+    state: crate::activity::schedule::CaptureState,
+    manual_pause: bool,
+}
+
 /// The Clovy logo mark as a macOS template image (black glyph on transparent).
 /// The menu bar must show the same mark as the app icon, but the app icon itself
 /// can't be used
@@ -53,6 +65,9 @@ const AGENT_MENU_BAR_NEW_SESSION_EVENT: &str = "clovy:menu-bar:new-agent-session
 const AGENT_MENU_BAR_OPEN_SESSION_EVENT: &str = "clovy:menu-bar:open-agent-session";
 const AGENT_MENU_BAR_SET_AGENT_HUD_EVENT: &str = "clovy:menu-bar:set-agent-hud";
 const AGENT_MENU_BAR_OPEN_SETTINGS_EVENT: &str = "clovy://open-settings";
+/// Bare trigger: the activity state itself is stored in
+/// `ACTIVITY_MENU_STATE`; the listener only rebuilds the menu.
+const ACTIVITY_MENU_BAR_STATE_EVENT: &str = "clovy:menu-bar:activity-state";
 
 const MENU_SHOW_ID: &str = "agent_menu_bar_show";
 const MENU_SETTINGS_ID: &str = "agent_menu_bar_settings";
@@ -62,6 +77,8 @@ const MENU_HIDE_AGENT_HUD_ID: &str = "agent_menu_bar_hide_agent_hud";
 const MENU_QUIT_ID: &str = "agent_menu_bar_quit";
 const MENU_STATUS_ID: &str = "agent_menu_bar_status";
 const MENU_LAST_STATUS_ID: &str = "agent_menu_bar_last_status";
+const MENU_ACTIVITY_STATUS_ID: &str = "agent_menu_bar_activity_status";
+const MENU_ACTIVITY_TOGGLE_PAUSE_ID: &str = "agent_menu_bar_activity_toggle_pause";
 const MENU_SESSION_ID_PREFIX: &str = "agent_menu_bar_session:";
 
 #[derive(Clone, Debug, Deserialize)]
@@ -178,6 +195,11 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
         refresh_tray(&handle);
     });
 
+    let handle = app.handle().clone();
+    app.listen_any(ACTIVITY_MENU_BAR_STATE_EVENT, move |_| {
+        relocalize(&handle);
+    });
+
     Ok(())
 }
 
@@ -227,6 +249,22 @@ pub fn set_meeting_recording_active(app: &AppHandle, active: bool) {
     let _ = app.emit(MEETING_RECORDING_MENU_BAR_STATE_EVENT, active);
 }
 
+/// Records the activity-capture state for the tray and asks the tray to
+/// rebuild its menu. Called from `crate::activity::publish`, on any thread.
+pub fn set_activity_state(
+    app: &AppHandle,
+    state: &crate::activity::schedule::CaptureState,
+    manual_pause: bool,
+) {
+    if let Ok(mut current) = ACTIVITY_MENU_STATE.lock() {
+        *current = Some(ActivityMenuState {
+            state: state.clone(),
+            manual_pause,
+        });
+    }
+    let _ = app.emit(ACTIVITY_MENU_BAR_STATE_EVENT, ());
+}
+
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref();
     if id == MENU_SHOW_ID {
@@ -249,6 +287,15 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
     if id == MENU_HIDE_AGENT_HUD_ID {
         let _ = app.emit(AGENT_MENU_BAR_SET_AGENT_HUD_EVENT, false);
+        return;
+    }
+    if id == MENU_ACTIVITY_TOGGLE_PAUSE_ID {
+        let manual_pause = ACTIVITY_MENU_STATE
+            .lock()
+            .ok()
+            .and_then(|current| current.as_ref().map(|activity| activity.manual_pause))
+            .unwrap_or(false);
+        crate::activity::set_manual_pause(app, !manual_pause);
         return;
     }
     if id == MENU_QUIT_ID {
@@ -334,6 +381,47 @@ where
             None::<&str>,
         )?;
         menu.append(&session_item)?;
+    }
+
+    let activity = ACTIVITY_MENU_STATE
+        .lock()
+        .ok()
+        .and_then(|current| current.clone());
+    if let Some(activity) = activity {
+        use crate::activity::schedule::CaptureState;
+        menu.append(&PredefinedMenuItem::separator(manager)?)?;
+        // The user's own pause is known before the capture thread's next tick
+        // re-evaluates the state; show it right away so the menu never says
+        // "on" next to "Resume capture".
+        let shown = match &activity.state {
+            CaptureState::Active | CaptureState::Paused { .. } if activity.manual_pause => {
+                CaptureState::Paused {
+                    reason: crate::activity::store::PauseReason::Manual,
+                }
+            }
+            state => state.clone(),
+        };
+        menu.append(&MenuItem::with_id(
+            manager,
+            MENU_ACTIVITY_STATUS_ID,
+            escape_menu_text(text.activity_status(&shown)),
+            false,
+            None::<&str>,
+        )?)?;
+        let capturing = !matches!(activity.state, CaptureState::Off);
+        if capturing {
+            menu.append(&MenuItem::with_id(
+                manager,
+                MENU_ACTIVITY_TOGGLE_PAUSE_ID,
+                if activity.manual_pause {
+                    text.resume_capture()
+                } else {
+                    text.pause_capture()
+                },
+                true,
+                None::<&str>,
+            )?)?;
+        }
     }
 
     menu.append(&PredefinedMenuItem::separator(manager)?)?;

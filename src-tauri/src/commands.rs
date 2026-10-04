@@ -1161,6 +1161,9 @@ pub async fn open_privacy_settings(request: OpenPrivacySettingsRequest) -> Resul
             "screenRecording" | "systemAudio" => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             }
+            "inputMonitoring" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+            }
             _ => "x-apple.systempreferences:com.apple.preference.security",
         };
         let status = std::process::Command::new("/usr/bin/open")

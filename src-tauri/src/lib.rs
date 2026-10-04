@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod activity;
 pub mod agent_hud;
 pub mod agent_mcp;
 pub mod agent_recorder;
@@ -443,6 +444,12 @@ pub fn run() {
             updates::fetch_update,
             updates::install_update,
             updates::relaunch_for_update,
+            activity::activity_status,
+            activity::activity_save_settings,
+            activity::activity_set_paused,
+            activity::activity_request_permission,
+            activity::activity_recreate_database,
+            activity::activity_debug_export,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
@@ -461,6 +468,9 @@ pub fn run() {
             agent_runtime::tools::seed_bundled_skills(app.handle());
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
+            // After the tray exists: the capture thread publishes its state
+            // to the menu bar from its first tick.
+            activity::setup(app);
             setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
             providers::setup(app);
