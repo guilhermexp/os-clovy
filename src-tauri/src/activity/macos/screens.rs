@@ -214,10 +214,9 @@ pub fn secondary_windows(chromium_settled_pids: &mut HashSet<i32>) -> Vec<Window
             }
 
             let ax_windows = unsafe { copy_ax_windows(app_elem) };
-            let matching_win = ax_windows
-                .into_iter()
-                .map(AutoAxElement)
-                .find(|aw| unsafe { ax_get_window_id(aw.0) } == Some(win.window_id));
+            let matching_win = crate::activity::macos::ax::take_window(ax_windows, |aw| {
+                (unsafe { ax_get_window_id(aw.0) }) == Some(win.window_id)
+            });
 
             let pw = if let Some(target_ax_win) = matching_win {
                 if title.is_none() {

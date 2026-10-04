@@ -10,7 +10,10 @@ use super::settings::{parse_clock, ActivitySettings, WorkHours};
 /// Bundle id prefixes of Clovy itself (release, dev, and June-era builds).
 const CLOVY_BUNDLE_PREFIXES: &[&str] = &["co.opensoftware.june", "co.opensoftware.clovy"];
 
-/// Bundle id prefixes of browsers whose tab URL the platform reads.
+/// Bundle id prefixes of browsers. Together with `BROWSER_NAME_WORDS` this is
+/// the one browser predicate (`is_browser`) used both for private-window
+/// detection (`macos::ax`) and for the unknown-URL rule below, so the two
+/// sets can never drift apart.
 const BROWSER_BUNDLE_PREFIXES: &[&str] = &[
     "com.google.chrome",
     "com.apple.safari",
@@ -21,8 +24,20 @@ const BROWSER_BUNDLE_PREFIXES: &[&str] = &[
     "com.operasoftware.opera",
     "com.vivaldi.vivaldi",
     "org.chromium.chromium",
+    // Firefox, Developer Edition (`org.mozilla.firefoxdeveloperedition`),
+    // and Nightly; not Thunderbird.
     "org.mozilla.firefox",
+    "org.mozilla.nightly",
     "net.imput.helium",
+    "com.kagi.kagimacos",
+    "app.zen-browser.zen",
+];
+
+/// Whole words of browser app names, for apps whose bundle id is unknown.
+/// Word match, not substring: "Knowledge" must not read as "edge".
+const BROWSER_NAME_WORDS: &[&str] = &[
+    "chrome", "chromium", "safari", "brave", "edge", "arc", "opera", "vivaldi", "firefox",
+    "helium", "orion", "zen",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,20 +79,27 @@ pub fn skip_reason(
     }
     if window.browser_url.is_none()
         && !settings.ignored_domains.is_empty()
-        && is_browser(window.bundle_id.as_deref())
+        && is_browser(&window.app_name, window.bundle_id.as_deref())
     {
         return Some(SkipReason::UnknownBrowserUrl);
     }
     None
 }
 
-pub fn is_browser(bundle_id: Option<&str>) -> bool {
-    bundle_id.is_some_and(|bundle| {
+/// The canonical browser predicate: a known browser bundle id, or an app name
+/// containing a browser's name as a whole word.
+pub fn is_browser(app_name: &str, bundle_id: Option<&str>) -> bool {
+    let by_bundle = bundle_id.is_some_and(|bundle| {
         let bundle = bundle.to_ascii_lowercase();
         BROWSER_BUNDLE_PREFIXES
             .iter()
             .any(|prefix| bundle.starts_with(prefix))
-    })
+    });
+    by_bundle
+        || app_name
+            .to_lowercase()
+            .split(|ch: char| !ch.is_alphanumeric())
+            .any(|word| BROWSER_NAME_WORDS.contains(&word))
 }
 
 pub fn is_clovy_window(window: &WindowDescriptor, own_pid: i32) -> bool {
@@ -277,6 +299,34 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn browser_predicate_covers_known_bundles_and_whole_name_words() {
+        for (name, bundle) in [
+            ("Firefox", Some("org.mozilla.firefox")),
+            (
+                "Firefox Developer Edition",
+                Some("org.mozilla.firefoxdeveloperedition"),
+            ),
+            ("Helium", Some("net.imput.helium")),
+            ("Vivaldi", Some("com.vivaldi.Vivaldi")),
+            ("Chromium", Some("org.chromium.Chromium")),
+            ("Arc", Some("company.thebrowser.Browser")),
+            ("Some Browser", Some("com.google.Chrome.canary")),
+            ("Microsoft Edge", None),
+            ("Brave Browser", None),
+        ] {
+            assert!(is_browser(name, bundle), "{name} should be a browser");
+        }
+        for (name, bundle) in [
+            ("Knowledge", None),
+            ("Search", None),
+            ("Thunderbird", Some("org.mozilla.thunderbird")),
+            ("Zed", Some("dev.zed.Zed")),
+        ] {
+            assert!(!is_browser(name, bundle), "{name} is not a browser");
+        }
     }
 
     #[test]

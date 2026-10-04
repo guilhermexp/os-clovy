@@ -61,6 +61,17 @@ impl Drop for AutoAxElement {
     }
 }
 
+/// Picks one window out of a `copy_ax_windows` result. Every retained element
+/// is wrapped before the search, so the ones not selected (and the rest after
+/// a match) are released instead of leaking once per tick.
+pub(crate) fn take_window(
+    retained: Vec<AXUIElementRef>,
+    mut wanted: impl FnMut(&AutoAxElement) -> bool,
+) -> Option<AutoAxElement> {
+    let owned: Vec<AutoAxElement> = retained.into_iter().map(AutoAxElement).collect();
+    owned.into_iter().find(|window| wanted(window))
+}
+
 /// Normalizes browser URL strings from AXURL attributes or address fields.
 pub fn normalize_browser_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -108,6 +119,10 @@ pub fn has_private_window_marker(title: &str) -> bool {
         "[private]",
         "navegação privada",
         "navegacao privada",
+        // Firefox pt-BR: "… — Navegação privativa do Mozilla Firefox".
+        "navegação privativa",
+        "navegacao privativa",
+        "janela privativa",
         "janela privada",
         "aba privada",
         "guia privada",
@@ -149,23 +164,9 @@ pub fn is_private_window(
     window_title: Option<&str>,
     win_elem: Option<AXUIElementRef>,
 ) -> bool {
-    let is_browser = {
-        let lower_app = app_name.to_lowercase();
-        let b_id = bundle_id.unwrap_or_default().to_lowercase();
-        lower_app.contains("chrome")
-            || lower_app.contains("safari")
-            || lower_app.contains("brave")
-            || lower_app.contains("edge")
-            || lower_app.contains("arc")
-            || lower_app.contains("opera")
-            || b_id.contains("chrome")
-            || b_id.contains("safari")
-            || b_id.contains("brave")
-            || b_id.contains("edge")
-            || b_id.contains("arc")
-    };
-
-    if !is_browser {
+    // Same predicate as the capture filter, so every browser the filter knows
+    // gets the private-window check (Firefox, Vivaldi, Chromium, Helium...).
+    if !crate::activity::filter::is_browser(app_name, bundle_id) {
         return false;
     }
 
@@ -427,7 +428,7 @@ pub fn focused_window(chromium_settled_pids: &mut HashSet<i32>) -> Option<Window
     } else {
         // Fallback to first window in AXWindows
         let windows = unsafe { copy_ax_windows(app_elem) };
-        windows.into_iter().next().map(AutoAxElement)
+        take_window(windows, |_| true)
     };
 
     let Some(win) = target_win else {
@@ -507,13 +508,12 @@ pub fn accessibility_text(window: &WindowDescriptor) -> Option<String> {
 
     // Find the AX window matching window.window_id
     let ax_windows = unsafe { copy_ax_windows(app_elem) };
-    let matching_win = if let Some(target_wid) = window.window_id {
-        ax_windows
-            .into_iter()
-            .map(AutoAxElement)
-            .find(|w| unsafe { ax_get_window_id(w.0) } == Some(target_wid))
-    } else {
-        ax_windows.into_iter().next().map(AutoAxElement)
+    let matching_win = match window.window_id {
+        Some(target_wid) => take_window(
+            ax_windows,
+            |w| unsafe { ax_get_window_id(w.0) } == Some(target_wid),
+        ),
+        None => take_window(ax_windows, |_| true),
     };
 
     let Some(win) = matching_win else {
@@ -681,6 +681,83 @@ mod tests {
         assert!(!has_private_window_marker("Google Chrome"));
         assert!(!has_private_window_marker("Inbox (3) - Mail"));
         assert!(!has_private_window_marker("Settings - Clovy"));
+    }
+
+    #[test]
+    fn take_window_releases_every_window_it_does_not_return() {
+        use core_foundation::base::{CFGetRetainCount, CFRetain};
+        use core_foundation::data::CFData;
+
+        // Stand-ins for AX elements: real CF objects, retained once more the
+        // way `copy_ax_windows` hands them over.
+        let objects: Vec<CFData> = (0..4u8)
+            .map(|seed| CFData::from_buffer(&[seed; 64]))
+            .collect();
+        let baseline: Vec<isize> = objects
+            .iter()
+            .map(|object| unsafe { CFGetRetainCount(object.as_CFTypeRef()) })
+            .collect();
+        let retained: Vec<AXUIElementRef> = objects
+            .iter()
+            .map(|object| unsafe { CFRetain(object.as_CFTypeRef()) as AXUIElementRef })
+            .collect();
+        let wanted = retained[1];
+
+        let selected = take_window(retained, |window| window.0 == wanted).expect("selected");
+        let counts: Vec<isize> = objects
+            .iter()
+            .map(|object| unsafe { CFGetRetainCount(object.as_CFTypeRef()) })
+            .collect();
+        assert_eq!(counts[0], baseline[0], "skipped window released");
+        assert_eq!(counts[1], baseline[1] + 1, "selected window still owned");
+        assert_eq!(counts[2], baseline[2], "windows after the match released");
+        assert_eq!(counts[3], baseline[3], "windows after the match released");
+
+        drop(selected);
+        assert_eq!(
+            unsafe { CFGetRetainCount(objects[1].as_CFTypeRef()) },
+            baseline[1]
+        );
+    }
+
+    #[test]
+    fn private_windows_are_detected_for_every_browser_the_filter_knows() {
+        let private = |app: &str, bundle: Option<&str>, title: &str| {
+            is_private_window(app, bundle, Some(title), None)
+        };
+        assert!(private(
+            "Firefox",
+            Some("org.mozilla.firefox"),
+            "Example — Mozilla Firefox Private Browsing"
+        ));
+        assert!(private(
+            "Firefox",
+            Some("org.mozilla.firefox"),
+            "Example — Navegação privativa do Mozilla Firefox"
+        ));
+        assert!(private(
+            "Firefox Nightly",
+            Some("org.mozilla.nightly"),
+            "Private Browsing"
+        ));
+        assert!(private(
+            "Helium",
+            Some("net.imput.helium"),
+            "New Tab (Incognito)"
+        ));
+        assert!(private(
+            "Vivaldi",
+            Some("com.vivaldi.Vivaldi"),
+            "Start Page (Private)"
+        ));
+        assert!(private("Chromium", None, "New Tab (Incognito)"));
+        // Not browsers: a document titled "Incognito" stays capturable.
+        assert!(!private(
+            "Notes",
+            Some("com.apple.Notes"),
+            "Incognito ideas"
+        ));
+        assert!(!private("Knowledge", None, "Incognito ideas"));
     }
 
     #[test]
