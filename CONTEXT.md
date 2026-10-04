@@ -63,6 +63,36 @@ zero-retention. Venice BYOK requests remain direct and do not use this routing
 policy.
 _Avoid_: gateway, router (unqualified).
 
+**Own provider**:
+A text-generation provider the user brings, used instead of Clovy API: an
+**agent CLI** installed on the Mac (`claude`, `codex`, `pi`, `agy`,
+`cursor-agent`, `copilot`), run through the user's own login and
+subscription, or a named **OpenAI-compatible endpoint** (name, base URL, model,
+optional key kept in the Keychain). The legacy single "local model" is the
+endpoint `local`. Own providers never transcribe audio. See
+[docs/llm-providers.md](docs/llm-providers.md).
+_Avoid_: upstream provider (that is Clovy API's side), BYOK (reserved for the
+Venice key), local model (unless the endpoint is on this machine).
+
+**Provider use (usage selection)**:
+Which provider serves each use: **chat**, **notes**, **dictation cleanup**, or
+**activity**. Clovy API is the default for the first three; activity defaults
+to **none**, never falls back to Clovy API, and requires a provider with
+`json_schema` structured output.
+_Avoid_: default model, active provider (unqualified).
+
+**One-shot generation**:
+A single isolated prompt-to-answer call on an own provider (text, or JSON
+constrained by a schema), through `crate::llm`. CLI one-shot calls carry the
+**authorship marker** `[clovy-internal-ai-call]` so session ingestion skips
+Clovy's own calls. Distinct from an **agent run**.
+_Avoid_: completion (unqualified), query.
+
+**Structured-output level**:
+How strongly a provider can be held to a JSON schema: `none`, `prompt`,
+`json_object`, `json_schema`, `strict`. Measured by the provider's connection
+test (endpoints) or given by the CLI catalog and confirmed by the test.
+
 ### Notes
 
 **Note**:
