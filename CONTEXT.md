@@ -833,6 +833,21 @@ Per-consumer high-water mark (`frames.id`) of activity the timeline has
 processed. Retention deletes only rows at or before it.
 _Avoid_: checkpoint, offset.
 
+**Coding agent**:
+A third-party AI coding tool the user runs on the Mac (Claude Code, Codex,
+Copilot CLI, Copilot in VS Code, Cursor, Cursor CLI, Antigravity) whose local
+transcripts Clovy reads, read-only, when its source is on (see
+[docs/coding-agent-sessions.md](docs/coding-agent-sessions.md)).
+_Avoid_: agent unqualified (that is Clovy's own agent), assistant.
+
+**Coding-agent block**:
+A slice of one coding-agent session stored in the **activity database**: it
+ends at an idle gap over 1 hour, or is cut at the first user prompt once it is
+1 hour long. It moves `live` → `sealed` → `summarized`; sealed blocks never
+change.
+_Avoid_: session (one session can span many blocks), segment (the
+implementation term), chunk.
+
 ## Flagged ambiguities
 
 - **"proxy"** usually means **Clovy API** (the thing in front of OpenAI /

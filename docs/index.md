@@ -134,6 +134,7 @@ Per-repo config the engineering skills read before acting (see the
   - [Azure Boards](plugins/azure-boards-prd.md) - [implementation plan](plugins/azure-boards-implementation-plan.md)
   - [Canva](plugins/canva-prd.md) - [implementation plan](plugins/canva-implementation-plan.md)
 - [activity-capture.md](activity-capture.md) - activity capture: capture loop and privacy rules, the encrypted `activity.sqlite3` schema, processing cursor, retention, and the store API later slices use
+- [coding-agent-sessions.md](coding-agent-sessions.md) - coding-agent session ingestion: read-only readers for seven local agents, block cutting and lifecycle, summaries by the agent's own CLI or the activity provider, the `coding_agent_blocks` schema and its query API, the "Today" lane component
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [llm-providers.md](llm-providers.md) - own providers: agent CLIs and named OpenAI-compatible endpoints, per-use selection, one-shot generation API, structured-output levels, CLI isolation contract

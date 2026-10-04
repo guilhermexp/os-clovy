@@ -10,7 +10,7 @@ Models). Transcription always stays on Clovy API (CLIs do not transcribe).
 
 | Module | Role |
 |---|---|
-| `llm/mod.rs` | Public API: `generate`, `generate_for_activity`, `provider_for`, `test_provider`, `run_cli`, `parse_json_value`, `StructuredOutputLevel`, `LlmError`, `CLOVY_AUTHORSHIP_MARKER` |
+| `llm/mod.rs` | Public API: `generate`, `generate_for_activity`, `generate_on_cli_for_activity`, `provider_for`, `test_provider`, `run_cli`, `parse_json_value`, `StructuredOutputLevel`, `LlmError`, `CLOVY_AUTHORSHIP_MARKER` |
 | `llm/cli.rs` | Catalog of the six CLIs (`claude`, `codex`, `pi`, `agy`, `cursor-agent`, `copilot`), one-shot argv/stdin/env per CLI, output parsing, schema strictifier |
 | `llm/shell_env.rs` | Login-shell environment (`$SHELL -l -c 'env -0'`, captured once, merged over the app environment, plus fallback bin dirs) |
 | `llm/detect.rs` | Installed / path / `--version` per CLI |
@@ -49,6 +49,12 @@ llm::generate_for_activity(request).await?;
 - a provider whose measured level is below `json_schema` (or never tested)
   returns `LlmError::StructuredOutputInsufficient`;
 - calls are serialized by a process-wide semaphore (one at a time).
+
+`generate_on_cli_for_activity(kind, request)` is the one exception: a
+background call on a named CLI regardless of the activity selection, used to
+summarize a coding-agent block with that agent's own CLI
+([coding-agent-sessions.md](coding-agent-sessions.md)). It takes the same
+semaphore and follows the CLI isolation contract below.
 
 `llm::provider_for(LlmUsage::X)` returns the selection for chat, notes,
 dictation cleanup, or activity.
