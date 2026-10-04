@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { MessageKey } from "../../i18n";
 
 export type TimelineLaneProps = {
+  /** The selected day's range, RFC 3339 (local midnight to next local midnight). */
   from: string;
   to: string;
   dayStartMs: number;
@@ -11,16 +12,16 @@ export type TimelineLaneProps = {
 };
 
 /**
- * Extension point for custom timeline lanes rendered on the same 24-hour scale.
- * The primary sessions lane renders first, followed by each registered extra lane.
+ * Extension point for extra lanes drawn under the sessions lane on the same
+ * 24-hour scale (for example the coding-agent lane). A lane fetches its own
+ * data for `from`..`to` and positions items with `xForTime`.
  */
 export type TimelineLane = {
   id: string;
-  label: MessageKey | string;
+  /** Catalog key of the lane's name (en and pt-BR). */
+  label: MessageKey;
   render: (props: TimelineLaneProps) => ReactNode;
 };
 
-/**
- * Registry for additional timeline lanes (e.g. coding-agent lane).
- */
+/** Registered extra lanes, rendered in order. */
 export const EXTRA_TIMELINE_LANES: TimelineLane[] = [];

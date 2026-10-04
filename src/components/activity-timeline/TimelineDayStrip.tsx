@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { type MessageKey, useLocale, useT } from "../../i18n";
+import { useLocale, useT } from "../../i18n";
 import type { TimelineGapDto, TimelineSessionDto } from "../../lib/activity-timeline";
 import { EXTRA_TIMELINE_LANES } from "./lanes";
 import {
@@ -151,23 +151,16 @@ export function TimelineDayStrip({
         </div>
 
         {/* Extra Lanes from Extension Point */}
-        {EXTRA_TIMELINE_LANES.map((lane) => {
-          const laneLabel =
-            typeof lane.label === "string" && lane.label.includes(".")
-              ? t(lane.label as MessageKey)
-              : lane.label;
-
-          return (
-            <div key={lane.id} className="timeline-extra-lane">
-              <div className="timeline-strip-header">
-                <div className="timeline-lane-name">{laneLabel}</div>
-              </div>
-              <div className="timeline-track timeline-extra-track">
-                {lane.render({ from, to, dayStartMs, dayEndMs, xForTime })}
-              </div>
+        {EXTRA_TIMELINE_LANES.map((lane) => (
+          <div key={lane.id} className="timeline-extra-lane">
+            <div className="timeline-strip-header">
+              <div className="timeline-lane-name">{t(lane.label)}</div>
             </div>
-          );
-        })}
+            <div className="timeline-track timeline-extra-track">
+              {lane.render({ from, to, dayStartMs, dayEndMs, xForTime })}
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );

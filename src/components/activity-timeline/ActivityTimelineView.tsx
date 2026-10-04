@@ -61,6 +61,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
     const load = async () => {
       try {
         const res = await activityTimeline(currentRange);
+        if (!active) return;
         setTimeline(res);
         setError(null);
       } catch (err: unknown) {
@@ -68,7 +69,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
         const msg =
           err && typeof err === "object" && "message" in err && typeof err.message === "string"
             ? err.message
-            : "Failed to load activity timeline";
+            : t("activity.state.unknownError");
         setError(msg);
       } finally {
         if (active) setLoading(false);
@@ -98,7 +99,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
       unlisten?.();
       clearInterval(intervalTimer);
     };
-  }, [selectedDate, isToday]);
+  }, [selectedDate, isToday, t]);
 
   const handlePrevDay = () => {
     setSelectedDate((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() - 1));
@@ -213,7 +214,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
               <IconCircleInfo size={16} aria-hidden="true" />
               <span className="timeline-notice-text">
                 {t("activity.state.errorNotice", {
-                  message: timeline?.message || error || "Unknown error",
+                  message: timeline?.message || error || t("activity.state.unknownError"),
                 })}
               </span>
               {onNavigateToSettings ? (

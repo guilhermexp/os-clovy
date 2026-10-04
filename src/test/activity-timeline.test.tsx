@@ -320,8 +320,8 @@ describe("ActivityTimelineView", () => {
 
     // Metrics in pt-BR
     expect(screen.getByText("Focado")).toBeInTheDocument();
-    const inativoElements = screen.getAllByText("Inativo");
-    expect(inativoElements.length).toBeGreaterThan(0);
+    const idleElements = screen.getAllByText("Ocioso");
+    expect(idleElements.length).toBeGreaterThan(0);
     expect(screen.getByText("Ausente")).toBeInTheDocument();
     expect(screen.getByText("Principais apps")).toBeInTheDocument();
     expect(screen.getByText("Categorias")).toBeInTheDocument();

@@ -87,7 +87,7 @@ is `idle_personal`.
 | `design` | `design` | Design |
 | `documentation` | `documentation` | Documentation / Documentação |
 | `planning` | `planning` | Planning / Planejamento |
-| `deployment_devops` | `deploymentDevops` | Deploy and devops |
+| `deployment_devops` | `deploymentDevops` | Deploy and DevOps / Deploy e DevOps |
 | `research` | `research` | Research / Pesquisa |
 | `idle_personal` | `idlePersonal` | Idle or personal / Ocioso ou pessoal |
 
@@ -160,7 +160,27 @@ search with a period filter whose results open the day at that session.
 
 ### Lane extension point
 
-LANE_EXTENSION_PLACEHOLDER
+`src/components/activity-timeline/lanes.ts` is the hook for extra lanes (the
+coding-agent lane of the next slice). Register a lane by appending to
+`EXTRA_TIMELINE_LANES`:
+
+```ts
+type TimelineLane = {
+  id: string;
+  label: MessageKey; // catalog key, en and pt-BR
+  render: (props: TimelineLaneProps) => ReactNode;
+};
+type TimelineLaneProps = {
+  from: string; to: string;         // selected local day, RFC 3339
+  dayStartMs: number; dayEndMs: number;
+  xForTime(ms: number): number;     // 0..1 fraction of the day
+};
+```
+
+`TimelineDayStrip` renders the sessions lane, then each registered lane in
+order, each in its own row on the same 24 h scale. A lane fetches its own data
+for `from`..`to` (and may listen to `clovy://activity-timeline` or its own
+event); positions are `xForTime(ms) * 100%` of the track width.
 
 ## Debug data
 
