@@ -390,10 +390,21 @@ where
     if let Some(activity) = activity {
         use crate::activity::schedule::CaptureState;
         menu.append(&PredefinedMenuItem::separator(manager)?)?;
+        // The user's own pause is known before the capture thread's next tick
+        // re-evaluates the state; show it right away so the menu never says
+        // "on" next to "Resume capture".
+        let shown = match &activity.state {
+            CaptureState::Active | CaptureState::Paused { .. } if activity.manual_pause => {
+                CaptureState::Paused {
+                    reason: crate::activity::store::PauseReason::Manual,
+                }
+            }
+            state => state.clone(),
+        };
         menu.append(&MenuItem::with_id(
             manager,
             MENU_ACTIVITY_STATUS_ID,
-            escape_menu_text(text.activity_status(&activity.state)),
+            escape_menu_text(text.activity_status(&shown)),
             false,
             None::<&str>,
         )?)?;

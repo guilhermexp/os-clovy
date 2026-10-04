@@ -41,6 +41,12 @@ pub(crate) fn bound_messaging(element: AXUIElementRef) {
     }
 }
 
+/// Wall-clock budgets for the per-tick descriptor walks. A Chromium window
+/// still building its tree can answer every AX call at the messaging timeout,
+/// so node budgets alone could stall a tick for minutes.
+const PRIVATE_BADGE_BUDGET: Duration = Duration::from_millis(150);
+const BROWSER_URL_BUDGET: Duration = Duration::from_millis(250);
+
 /// RAII wrapper for `AXUIElementRef` ensuring `CFRelease` is called on drop.
 #[derive(Debug)]
 pub struct AutoAxElement(pub AXUIElementRef);
@@ -177,34 +183,30 @@ pub fn is_private_window(
     let mut queue = VecDeque::new();
     queue.push_back((win, 0usize));
     let mut visited = 0usize;
+    let deadline = Instant::now() + PRIVATE_BADGE_BUDGET;
+    let mut found = false;
 
     while let Some((elem, depth)) = queue.pop_front() {
         bound_messaging(elem);
         visited += 1;
-        if visited > 120 {
+        if visited > 120 || Instant::now() >= deadline {
+            if elem != win {
+                unsafe { CFRelease(elem as CFTypeRef) };
+            }
             break;
         }
 
         let role = unsafe { copy_string_attr(elem, "AXRole") }.unwrap_or_default();
-        if role == "AXSecureTextField" {
-            continue;
-        }
+        let marked = role != "AXSecureTextField"
+            && ["AXTitle", "AXDescription"].iter().any(|name| {
+                unsafe { copy_string_attr(elem, name) }
+                    .is_some_and(|text| has_private_window_marker(&text))
+            });
 
-        if let Some(t) = unsafe { copy_string_attr(elem, "AXTitle") } {
-            if has_private_window_marker(&t) {
-                return true;
-            }
-        }
-        if let Some(d) = unsafe { copy_string_attr(elem, "AXDescription") } {
-            if has_private_window_marker(&d) {
-                return true;
-            }
-        }
-
-        if depth < 5 {
+        if !marked && role != "AXSecureTextField" && depth < 5 {
             let children = unsafe { copy_children(elem) };
             for child in children {
-                // Ensure child will be released when popped or discarded
+                // Released when popped, or in the drain below.
                 queue.push_back((child, depth + 1));
             }
         }
@@ -213,6 +215,10 @@ pub fn is_private_window(
             unsafe {
                 CFRelease(elem as CFTypeRef);
             }
+        }
+        if marked {
+            found = true;
+            break;
         }
     }
 
@@ -225,7 +231,7 @@ pub fn is_private_window(
         }
     }
 
-    false
+    found
 }
 
 /// Finds the browser URL by searching for `AXWebArea` under `win_elem`, then
@@ -239,11 +245,15 @@ pub fn resolve_browser_url(win_elem: AXUIElementRef) -> Option<String> {
     queue.push_back((win_elem, 0usize));
     let mut visited = 0usize;
     let mut fallback_url = None;
+    let deadline = Instant::now() + BROWSER_URL_BUDGET;
 
     while let Some((elem, depth)) = queue.pop_front() {
         bound_messaging(elem);
         visited += 1;
-        if visited > 200 {
+        if visited > 200 || Instant::now() >= deadline {
+            if elem != win_elem {
+                unsafe { CFRelease(elem as CFTypeRef) };
+            }
             break;
         }
 
@@ -449,13 +459,19 @@ pub fn focused_window(chromium_settled_pids: &mut HashSet<i32>) -> Option<Window
             .or_else(|| Some(main_display_id()))
     };
 
-    let browser_url = resolve_browser_url(win.0);
+    // Private first: a private window's URL is never read, and a fresh
+    // Chromium window answering slowly costs only the badge budget.
     let private_window = is_private_window(
         &app_name,
         bundle_id.as_deref(),
         window_title.as_deref(),
         Some(win.0),
     );
+    let browser_url = if private_window {
+        None
+    } else {
+        resolve_browser_url(win.0)
+    };
 
     drop(win);
     drop(auto_app);
@@ -544,9 +560,25 @@ pub fn accessibility_text(window: &WindowDescriptor) -> Option<String> {
             continue;
         }
 
-        // Skip non-text structural controls
-        let is_pure_noise = role == "AXScrollBar" || role == "AXSplitter" || role == "AXRuler";
-        if !is_pure_noise {
+        // Window chrome (toolbars, menus, buttons, scroll bars) is labels, not
+        // content. Counting it would let a toolbar's button titles pass the
+        // engine's "has text" threshold and hide the OCR fallback, e.g. for an
+        // image in Preview.
+        let is_chrome = matches!(
+            role.as_str(),
+            "AXToolbar" | "AXMenuBar" | "AXMenu" | "AXScrollBar" | "AXSplitter" | "AXRuler"
+        );
+        let is_control_label = matches!(
+            role.as_str(),
+            "AXButton"
+                | "AXMenuButton"
+                | "AXPopUpButton"
+                | "AXCheckBox"
+                | "AXRadioButton"
+                | "AXDisclosureTriangle"
+                | "AXImage"
+        );
+        if !is_chrome && !is_control_label {
             // Extract text from AXValue, AXTitle, AXDescription
             let val = unsafe { copy_string_attr(elem, "AXValue") };
             let title = unsafe { copy_string_attr(elem, "AXTitle") };
@@ -561,7 +593,7 @@ pub fn accessibility_text(window: &WindowDescriptor) -> Option<String> {
             }
         }
 
-        if depth < MAX_DEPTH {
+        if depth < MAX_DEPTH && !is_chrome {
             let children = unsafe { copy_children(elem) };
             for child in children {
                 queue.push_back((child, depth + 1));

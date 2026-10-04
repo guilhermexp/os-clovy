@@ -223,13 +223,16 @@ pub fn secondary_windows(chromium_settled_pids: &mut HashSet<i32>) -> Vec<Window
                 if title.is_none() {
                     title = unsafe { copy_string_attr(target_ax_win.0, "AXTitle") };
                 }
-                browser_url = resolve_browser_url(target_ax_win.0);
-                is_private_window(
+                let private = is_private_window(
                     &win.app_name,
                     bundle_id.as_deref(),
                     title.as_deref(),
                     Some(target_ax_win.0),
-                )
+                );
+                if !private {
+                    browser_url = resolve_browser_url(target_ax_win.0);
+                }
+                private
             } else {
                 is_private_window(&win.app_name, bundle_id.as_deref(), title.as_deref(), None)
             };

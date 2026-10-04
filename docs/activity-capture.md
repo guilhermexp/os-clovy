@@ -51,9 +51,16 @@ below) and mirrored to the menu bar.
 
 - **Text only.** Accessibility text first (Chromium/Electron apps get
   `AXManualAccessibility`/`AXEnhancedUserInterface` set once per process);
-  when it has fewer than 20 non-whitespace characters, OCR with Apple Vision on
-  an in-memory ScreenCaptureKit image of exactly that window. No image is
-  written to disk.
+  window chrome (toolbars, menus, buttons, images, scroll bars) is not counted
+  as text, so when the content has fewer than 20 non-whitespace characters
+  Clovy falls back to OCR with Apple Vision on an in-memory ScreenCaptureKit
+  image of exactly that window (`ocr.rs` calls ScreenCaptureKit and Vision
+  through objc2). No image is encoded or written anywhere.
+- **Bounded ticks.** Every AX element gets a 0.25 s messaging timeout (the
+  system default is 6 s); the private-badge walk is capped at 150 ms, the URL
+  walk at 250 ms, the text walk at 300 ms / 3000 nodes / 20k characters, and
+  each ScreenCaptureKit completion at 2 s. A window that is still building its
+  tree (a fresh Chrome window) cannot stall capture.
 - **Exclusions** (`filter::skip_reason`): Clovy's own windows (own pid or a
   `co.opensoftware.june*`/`co.opensoftware.clovy*` bundle id), ignored apps
   (exact, case-insensitive name or bundle id), private/incognito windows (no
