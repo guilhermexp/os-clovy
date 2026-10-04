@@ -134,6 +134,7 @@ Per-repo config the engineering skills read before acting (see the
   - [Canva](plugins/canva-prd.md) - [implementation plan](plugins/canva-implementation-plan.md)
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
+- [llm-providers.md](llm-providers.md) - own providers: agent CLIs and named OpenAI-compatible endpoints, per-use selection, one-shot generation API, structured-output levels, CLI isolation contract
 - [clovy-api-prd.md](clovy-api-prd.md) — Clovy API: upstream AI calls + OS Accounts authorize/charge (the canonical service spec)
 - [telemetry.md](telemetry.md) — public overview of Clovy telemetry, current behavior, and policies
 - [telemetry-p3a-prd.md](telemetry-p3a-prd.md) — Clovy P3A: opt-in, privacy-preserving product telemetry

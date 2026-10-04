@@ -31,9 +31,6 @@ import {
   clovyOpenCommunityPage,
   clovyOpenVerifyPage,
   clearVeniceApiKey,
-  saveLocalGenerationSettings,
-  setLocalGenerationEnabled,
-  probeLocalGenerationEndpoint,
   setDictationLanguage,
   setDictationMicrophone,
   setDictationShortcut,
@@ -57,7 +54,6 @@ import type {
   DictationShortcutModifiers,
   DictationShortcutSetting,
   FolderDto,
-  LocalGenerationSettingsDto,
   ProviderModelMode,
   ProviderModelSettingsDto,
   RecordingSourceMode,
@@ -105,11 +101,8 @@ import {
   dispatchProviderModelSettingsChanged,
   modelAvailableForMode,
 } from "../../lib/model-privacy";
-import {
-  isLoopbackUrl,
-  localGenerationOptionId,
-  withLocalGenerationOption,
-} from "../../lib/local-generation";
+import { localGenerationOptionId, withLocalGenerationOption } from "../../lib/local-generation";
+import { LlmProvidersSection } from "./LlmProvidersSection";
 import { ProviderLogo } from "./ProviderLogo";
 import { AUTO_MODEL_ID, modelOptions, selectedModel } from "./ModelPickerDialog";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
@@ -305,7 +298,6 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   localGeneration: {
     baseUrl: "",
     modelId: "",
-    apiKey: "",
   },
   // On by default, matching the Rust providers default.
   imageSafeMode: true,
@@ -452,20 +444,9 @@ export function AppSettings({
   const [effectiveProviderSettings, setEffectiveProviderSettings] =
     useState<ProviderModelSettingsDto>(DEFAULT_PROVIDER_MODELS);
   const providerSettingsProfileRef = useRef<string | null>(null);
-  const [localGenerationDraft, setLocalGenerationDraft] = useState<LocalGenerationSettingsDto>(
-    DEFAULT_PROVIDER_MODELS.localGeneration,
-  );
   const currentDataPartitionLabel = useCurrentDataPartitionName();
   const showingPartitionModels = currentDataPartitionLabel !== DEFAULT_DATA_PARTITION;
   const [partitionGenerationModel, setPartitionGenerationModel] = useState<string>();
-  // Model ids returned by the last successful "Test connection" probe, used to
-  // populate the Model ID field's datalist (free text is still allowed).
-  const [localProbeModels, setLocalProbeModels] = useState<string[]>([]);
-  // A non-loopback endpoint requires an explicit confirm before enabling, so
-  // the switch doesn't silently start sending prompts off the device. Set when
-  // the switch is flipped for a remote endpoint; the confirm affordance
-  // proceeds.
-  const [localEnableConfirm, setLocalEnableConfirm] = useState(false);
   const [veniceModels, setVeniceModels] = useState<Record<ProviderModelMode, VeniceModelDto[]>>({
     transcription: [],
     generation: [],
@@ -530,8 +511,6 @@ export function AppSettings({
   const [showMoreVoiceOptions, setShowMoreVoiceOptions] = useState(false);
   const [showMoreTextOptions, setShowMoreTextOptions] = useState(false);
   const [showMoreImageOptions, setShowMoreImageOptions] = useState(false);
-  const [localModelSetupVisible, setLocalModelSetupVisible] = useState(false);
-  const [localModelStatus, setLocalModelStatus] = useState<string>();
   const [internalTab, setInternalTab] = useState<SettingsTab>("general");
   const [micPopoverPlacement, setMicPopoverPlacement] =
     useState<SelectPopoverPlacement>("align-selected");
@@ -679,14 +658,6 @@ export function AppSettings({
     setReconcileVersion(undefined);
     onReconcileToStable?.();
   }
-
-  useEffect(() => {
-    setLocalGenerationDraft(providerSettings.localGeneration);
-  }, [
-    providerSettings.localGeneration.baseUrl,
-    providerSettings.localGeneration.modelId,
-    providerSettings.localGeneration.apiKey,
-  ]);
 
   useEffect(() => {
     setMicOpen(false);
@@ -1199,129 +1170,14 @@ export function AppSettings({
     if (mode === "generation" && costQuality !== undefined) {
       applyCostQuality(costQuality);
     }
-    if (mode === "generation" && picked?.provider === "local") {
-      enableLocalGenerationFromPicker();
-    } else {
+    // The local option is the endpoint already serving chat; the provider is
+    // switched in the Providers section, so picking it changes nothing.
+    if (!(mode === "generation" && picked?.provider === "local")) {
       void selectVeniceModel(mode, modelId);
     }
     // The Auto toggle switches models mid-flow, so it asks to keep the picker
     // open; a row pick is a final choice and closes it.
     if (!options?.keepOpen) closeModelPicker();
-  }
-
-  // True when the draft matches what's persisted, so enabling can skip a
-  // redundant save. The catalog is derived from providerSettings, never a
-  // re-fetch, so there's no awaited network call to overwrite the status.
-  function draftMatchesSavedLocal() {
-    const saved = providerSettings.localGeneration;
-    return (
-      localGenerationDraft.baseUrl.trim() === saved.baseUrl.trim() &&
-      localGenerationDraft.modelId.trim() === saved.modelId.trim() &&
-      localGenerationDraft.apiKey === saved.apiKey
-    );
-  }
-
-  // Persists the draft fields without changing the active provider. Returns
-  // the updated settings on success (draft re-syncs from providerSettings via
-  // effect); surfaces validation errors next to the local controls.
-  async function commitLocalGenerationSettings() {
-    try {
-      const next = await saveLocalGenerationSettings({
-        baseUrl: localGenerationDraft.baseUrl,
-        modelId: localGenerationDraft.modelId,
-        apiKey: localGenerationDraft.apiKey,
-      });
-      setProviderSettings(next);
-      dispatchProviderModelSettingsChanged({
-        mode: "generation",
-        modelId: next.generationModel,
-      });
-      return next;
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
-      return undefined;
-    }
-  }
-
-  async function handleSaveLocalModel() {
-    const saved = await commitLocalGenerationSettings();
-    if (saved) setLocalModelStatus(translate("settings.localModel.saved"));
-  }
-
-  // Flips the provider to the saved local endpoint. The backend enables from
-  // stored settings, so callers save any dirty draft first.
-  async function commitLocalGenerationEnabled() {
-    try {
-      const next = await setLocalGenerationEnabled(true);
-      setProviderSettings(next);
-      dispatchProviderModelSettingsChanged({
-        mode: "generation",
-        modelId: next.generationModel,
-      });
-      setLocalEnableConfirm(false);
-      setLocalModelSetupVisible(true);
-      setLocalModelStatus(translate("settings.localModel.enabled"));
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
-    }
-  }
-
-  // The model picker's local option enables from the SAVED settings (never
-  // the draft), but it must honor the same off-device invariant as the
-  // toggle: a non-loopback endpoint is never enabled silently. Instead of
-  // enabling, it reveals the confirm affordance in More options
-  // and says so; a loopback endpoint enables in one step.
-  function enableLocalGenerationFromPicker() {
-    const baseUrl = providerSettings.localGeneration.baseUrl.trim();
-    if (!isLoopbackUrl(baseUrl)) {
-      setLocalEnableConfirm(true);
-      setLocalModelSetupVisible(true);
-      // The confirm affordance lives behind More options; reveal it so the
-      // status message's instruction is reachable.
-      setShowMoreTextOptions(true);
-      setLocalModelStatus(translate("settings.localModel.remoteConfirmInMore"));
-      return;
-    }
-    void commitLocalGenerationEnabled();
-  }
-
-  async function enableLocalGeneration() {
-    const baseUrl = localGenerationDraft.baseUrl.trim();
-    const modelId = localGenerationDraft.modelId.trim();
-    if (!baseUrl || !modelId) {
-      setLocalModelSetupVisible(true);
-      setLocalModelStatus(translate("settings.localModel.enterFirst"));
-      return;
-    }
-    // A remote endpoint takes a deliberate second step: the first flip reveals
-    // the confirm affordance instead of enabling.
-    if (!isLoopbackUrl(baseUrl) && !localEnableConfirm) {
-      setLocalEnableConfirm(true);
-      setLocalModelSetupVisible(true);
-      return;
-    }
-    if (!draftMatchesSavedLocal()) {
-      const saved = await commitLocalGenerationSettings();
-      if (!saved) return;
-    }
-    await commitLocalGenerationEnabled();
-  }
-
-  async function disableLocalGeneration() {
-    // Toggle-off never saves the draft: it only flips the provider back and
-    // leaves the stored local fields untouched.
-    setLocalEnableConfirm(false);
-    try {
-      const next = await setLocalGenerationEnabled(false);
-      setProviderSettings(next);
-      dispatchProviderModelSettingsChanged({
-        mode: "generation",
-        modelId: next.generationModel,
-      });
-      setLocalModelStatus(translate("settings.localModel.disabled"));
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
-    }
   }
 
   async function saveVeniceApiKey() {
@@ -1343,30 +1199,6 @@ export function AppSettings({
       }
     } catch (error) {
       setStatus(messageFromError(error));
-    }
-  }
-
-  function handleLocalToggle(enabled: boolean) {
-    setLocalModelSetupVisible(true);
-    if (enabled) {
-      void enableLocalGeneration();
-    } else {
-      void disableLocalGeneration();
-    }
-  }
-
-  async function testLocalConnection() {
-    try {
-      const result = await probeLocalGenerationEndpoint({
-        baseUrl: localGenerationDraft.baseUrl,
-        apiKey: localGenerationDraft.apiKey,
-      });
-      setLocalProbeModels(result.models);
-      setLocalModelStatus(
-        translate("settings.localModel.connected", { count: result.models.length }),
-      );
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
     }
   }
 
@@ -1481,29 +1313,6 @@ export function AppSettings({
   const videoOptions = VIDEO_GENERATION_ENABLED
     ? modelOptions(VIDEO_MODELS, displayProviderSettings.videoModel)
     : [];
-  const localDraftBaseUrl = localGenerationDraft.baseUrl.trim();
-  const localNonLoopback = localDraftBaseUrl.length > 0 && !isLoopbackUrl(localDraftBaseUrl);
-  const localModelHasDraft =
-    localDraftBaseUrl.length > 0 ||
-    localGenerationDraft.modelId.trim().length > 0 ||
-    localGenerationDraft.apiKey.length > 0;
-  const localModelHasSavedConfig =
-    providerSettings.localGeneration.baseUrl.trim().length > 0 ||
-    providerSettings.localGeneration.modelId.trim().length > 0;
-  const showLocalModelFields =
-    localModelEnabled || localModelSetupVisible || localModelHasDraft || localModelHasSavedConfig;
-
-  // Advanced model settings (the Venice key and the local model) sit behind a
-  // collapsed "More options" disclosure. Auto-expand it when a local model is
-  // already enabled so the active toggle and endpoint config are never hidden
-  // behind the disclosure. It only ever expands: a manual collapse, or a later
-  // disable, is left as the user set it.
-  useEffect(() => {
-    if (localModelEnabled) {
-      setShowMoreTextOptions(true);
-      setLocalModelSetupVisible(true);
-    }
-  }, [localModelEnabled]);
 
   useEffect(() => {
     if (showingPartitionModels) closeModelPicker();
@@ -2360,143 +2169,28 @@ export function AppSettings({
                         onSave={() => void saveVeniceApiKey()}
                         onRemove={() => void removeVeniceApiKey()}
                       />
-                      <div className="settings-row settings-local-model-toggle-row">
-                        <div className="settings-row-info">
-                          <h3 className="settings-row-title">{t("settings.localModel.title")}</h3>
-                          <p className="settings-row-description">
-                            {t("settings.localModel.description")}
-                          </p>
-                        </div>
-                        <div className="settings-row-control">
-                          <Switch
-                            checked={localModelEnabled}
-                            aria-label={t("settings.localModel.aria")}
-                            onCheckedChange={handleLocalToggle}
-                          />
-                        </div>
-                      </div>
-
-                      {showLocalModelFields ? (
-                        <div className="settings-row settings-row-stack settings-local-model-fields-row">
-                          <div className="settings-row-info">
-                            <h3 className="settings-row-title">
-                              {t("settings.localModel.endpoint")}
-                            </h3>
-                            <p className="settings-row-description">
-                              {t("settings.localModel.endpointDescription")}
-                            </p>
-                          </div>
-                          <div className="settings-row-control settings-local-model-fields">
-                            <label className="settings-field">
-                              <span>{t("settings.localModel.baseUrl")}</span>
-                              <input
-                                value={localGenerationDraft.baseUrl}
-                                onChange={(event) => {
-                                  const baseUrl = event.currentTarget.value;
-                                  setLocalGenerationDraft((draft) => ({
-                                    ...draft,
-                                    baseUrl,
-                                  }));
-                                  setLocalEnableConfirm(false);
-                                  setLocalModelStatus(undefined);
-                                }}
-                                placeholder="http://localhost:11434/v1"
-                                autoCapitalize="none"
-                                autoCorrect="off"
-                                spellCheck={false}
-                              />
-                            </label>
-                            <label className="settings-field">
-                              <span>{t("settings.localModel.modelId")}</span>
-                              <input
-                                value={localGenerationDraft.modelId}
-                                onChange={(event) => {
-                                  const modelId = event.currentTarget.value;
-                                  setLocalGenerationDraft((draft) => ({
-                                    ...draft,
-                                    modelId,
-                                  }));
-                                  setLocalModelStatus(undefined);
-                                }}
-                                placeholder="llama3.1:8b"
-                                list="local-generation-models"
-                                autoCapitalize="none"
-                                autoCorrect="off"
-                                spellCheck={false}
-                              />
-                              <datalist id="local-generation-models">
-                                {localProbeModels.map((id) => (
-                                  <option key={id} value={id} />
-                                ))}
-                              </datalist>
-                            </label>
-                            <label className="settings-field">
-                              <span>{t("settings.localModel.apiKey")}</span>
-                              <input
-                                type="password"
-                                value={localGenerationDraft.apiKey}
-                                onChange={(event) => {
-                                  const apiKey = event.currentTarget.value;
-                                  setLocalGenerationDraft((draft) => ({
-                                    ...draft,
-                                    apiKey,
-                                  }));
-                                  setLocalModelStatus(undefined);
-                                }}
-                                placeholder={t("settings.localModel.optional")}
-                                autoCapitalize="none"
-                                autoCorrect="off"
-                                spellCheck={false}
-                              />
-                            </label>
-                            {localNonLoopback ? (
-                              <p className="settings-local-model-warning" role="note">
-                                {t("settings.localModel.remoteWarning")}
-                              </p>
-                            ) : null}
-                            <div className="settings-local-model-actions">
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                onClick={() => void testLocalConnection()}
-                              >
-                                {t("settings.localModel.test")}
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                onClick={() => void handleSaveLocalModel()}
-                              >
-                                {t("settings.localModel.save")}
-                              </button>
-                            </div>
-                            {localModelStatus ? (
-                              <p className="settings-local-model-status" role="status">
-                                {localModelStatus}
-                              </p>
-                            ) : null}
-                            {localEnableConfirm ? (
-                              <div className="settings-local-model-confirm" role="alert">
-                                <p className="settings-row-error">
-                                  {t("settings.localModel.remoteWarning")}
-                                </p>
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  onClick={() => void enableLocalGeneration()}
-                                >
-                                  {t("settings.localModel.enableAnyway")}
-                                </button>
-                              </div>
-                            ) : null}
-                          </div>
-                        </div>
-                      ) : null}
                     </div>
                   ) : null}
                 </div>
               </div>
             </section>
+
+            <LlmProvidersSection
+              onChatProviderChanged={async () => {
+                try {
+                  const modelResponse = await providerModelSettings();
+                  const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
+                  setProviderSettings(modelSnapshot.settings);
+                  setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
+                  dispatchProviderModelSettingsChanged({
+                    mode: "generation",
+                    modelId: modelSnapshot.settings.generationModel,
+                  });
+                } catch {
+                  // Provider settings refresh failed
+                }
+              }}
+            />
 
             <ConfirmDialog
               open={veniceKeyAutoBillingChoiceOpen}

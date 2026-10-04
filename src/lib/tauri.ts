@@ -431,7 +431,6 @@ export type ProfileModelOverridesDto = {
 export type LocalGenerationSettingsDto = {
   baseUrl: string;
   modelId: string;
-  apiKey: string;
 };
 
 export type GeneratedImageDto = {
@@ -1559,31 +1558,14 @@ export async function videoStatus(jobId: string) {
   });
 }
 
-/** Persists the local endpoint, model id, and optional API key. Strictly
- * validated backend-side (any http/https URL with a host is accepted) and it
- * never changes the active provider — enabling is a separate step. */
-export async function saveLocalGenerationSettings(input: {
+/** GETs {baseUrl}/models (~10s timeout) and returns the advertised model ids.
+ * The bearer token is the typed `apiKey`, or, when blank, the Keychain key
+ * saved for `endpointId`; the key never comes back to the webview. */
+export async function probeLocalGenerationEndpoint(input: {
   baseUrl: string;
-  modelId: string;
   apiKey: string;
+  endpointId?: string;
 }) {
-  return invoke<ProviderModelSettingsDto>("save_local_generation_settings", {
-    request: input,
-  });
-}
-
-/** Flips generation between the saved local endpoint and the remote model.
- * Enabling requires saved settings (the backend errors otherwise); disabling
- * restores the remote provider without touching the stored local fields. */
-export async function setLocalGenerationEnabled(enabled: boolean) {
-  return invoke<ProviderModelSettingsDto>("set_local_generation_enabled", {
-    request: { enabled },
-  });
-}
-
-/** GETs {baseUrl}/models with an optional bearer token (~10s timeout) and
- * returns the advertised model ids, for the settings "Test connection" flow. */
-export async function probeLocalGenerationEndpoint(input: { baseUrl: string; apiKey: string }) {
   return invoke<{ models: string[] }>("probe_local_generation_endpoint", {
     request: input,
   });
