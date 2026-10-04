@@ -3,7 +3,7 @@
 
 use super::{
     cli::{schema_instruction, strictify},
-    parse_json_value, GenerateRequest, LlmError, StructuredOutputLevel,
+    matches_schema, parse_json_value, GenerateRequest, LlmError, StructuredOutputLevel,
 };
 use serde_json::{json, Value};
 use std::{
@@ -112,10 +112,12 @@ pub async fn complete(
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
         .ok_or_else(|| LlmError::InvalidOutput("The endpoint returned no text.".to_string()))?;
-    if request.schema.is_some() && parse_json_value(&text).is_none() {
-        return Err(LlmError::InvalidOutput(
-            "The endpoint did not return valid JSON.".to_string(),
-        ));
+    if let Some(schema) = &request.schema {
+        if !parse_json_value(&text).is_some_and(|value| matches_schema(&value, schema)) {
+            return Err(LlmError::InvalidOutput(
+                "The endpoint did not return JSON matching the schema.".to_string(),
+            ));
+        }
     }
     Ok(text)
 }
@@ -185,7 +187,13 @@ fn completion_text(value: &Value) -> Option<String> {
 
 /// Measures latency with a minimal prompt, then walks the structured-output
 /// ladder (strict, json_schema, json_object, prompt) and returns the first
-/// level whose answer parses. All rungs failing yields `none`.
+/// level whose answer validates against the probe schema. All rungs failing
+/// yields `none`.
+///
+/// The schema-enforcing rungs use a prompt that asks for a different object
+/// than the schema allows ([`probe_prompt`]), so an endpoint that silently
+/// ignores `response_format` follows the prompt, fails validation, and is not
+/// credited with schema support.
 pub async fn probe(
     connection: &EndpointConnection,
     timeout: Duration,
@@ -203,19 +211,19 @@ pub async fn probe(
     )
     .await?;
     let latency = started.elapsed();
-    let probe_request = GenerateRequest {
-        system: None,
-        prompt: "Answer with a JSON object whose \"ok\" field is true.".to_string(),
-        schema: Some(probe_schema()),
-        timeout: Some(timeout),
-    };
     for level in [
         StructuredOutputLevel::Strict,
         StructuredOutputLevel::JsonSchema,
         StructuredOutputLevel::JsonObject,
         StructuredOutputLevel::Prompt,
     ] {
-        if let Ok(text) = complete(connection, &probe_request, level).await {
+        let request = GenerateRequest {
+            system: None,
+            prompt: probe_prompt(level).to_string(),
+            schema: Some(probe_schema()),
+            timeout: Some(timeout),
+        };
+        if let Ok(text) = complete(connection, &request, level).await {
             if probe_answer_ok(&text) {
                 return Ok((latency, level));
             }
@@ -224,17 +232,30 @@ pub async fn probe(
     Ok((latency, StructuredOutputLevel::None))
 }
 
+/// Only `{"answer": "schema"}` satisfies this schema.
 pub fn probe_schema() -> Value {
     json!({
         "type": "object",
-        "properties": { "ok": { "type": "boolean" } },
-        "required": ["ok"],
+        "properties": { "answer": { "type": "string", "const": "schema" } },
+        "required": ["answer"],
         "additionalProperties": false
     })
 }
 
+/// Prompt for one probe rung. Where the level claims to enforce the schema,
+/// the prompt deliberately asks for an object the schema forbids; only real
+/// enforcement yields a valid answer. Prompt-level rungs carry the schema in
+/// the prompt, so they are asked to follow it.
+pub fn probe_prompt(level: StructuredOutputLevel) -> &'static str {
+    if level.supports_json_schema() {
+        "Reply with a JSON object whose \"color\" field is \"blue\"."
+    } else {
+        "Reply with the JSON object the schema describes."
+    }
+}
+
 pub fn probe_answer_ok(text: &str) -> bool {
-    parse_json_value(text).is_some_and(|value| value.get("ok").is_some_and(Value::is_boolean))
+    parse_json_value(text).is_some_and(|value| matches_schema(&value, &probe_schema()))
 }
 
 async fn wait_for_slot(endpoint_id: &str, rpm: u32) {
@@ -262,7 +283,8 @@ async fn wait_for_slot(endpoint_id: &str, rpm: u32) {
 #[cfg(test)]
 pub(crate) mod test_server {
     //! A tiny OpenAI-compatible server for tests: answers each request with
-    //! the handler's (status, body) and records the parsed request bodies.
+    //! the handler's (status, body) and records the parsed request bodies and
+    //! `Authorization` headers.
 
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -276,6 +298,7 @@ pub(crate) mod test_server {
     pub struct FakeServer {
         pub base_url: String,
         pub requests: Arc<Mutex<Vec<Value>>>,
+        pub authorizations: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     pub async fn start(handler: Handler) -> FakeServer {
@@ -283,6 +306,8 @@ pub(crate) mod test_server {
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
+        let recorded_auth = authorizations.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -290,10 +315,11 @@ pub(crate) mod test_server {
                 };
                 let handler = handler.clone();
                 let recorded = recorded.clone();
+                let recorded_auth = recorded_auth.clone();
                 tokio::spawn(async move {
                     let mut buffer = Vec::new();
                     let mut chunk = [0_u8; 8192];
-                    let body = loop {
+                    let (head, body) = loop {
                         let read = socket.read(&mut chunk).await.unwrap_or(0);
                         if read == 0 {
                             return;
@@ -310,10 +336,19 @@ pub(crate) mod test_server {
                                 })
                                 .unwrap_or(0);
                             if buffer.len() >= split + 4 + length {
-                                break buffer[split + 4..split + 4 + length].to_vec();
+                                break (
+                                    text[..split].to_string(),
+                                    buffer[split + 4..split + 4 + length].to_vec(),
+                                );
                             }
                         }
                     };
+                    let authorization = head.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_string())
+                    });
+                    recorded_auth.lock().unwrap().push(authorization);
                     let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                     let (status, response) = handler(&request);
                     recorded.lock().unwrap().push(request);
@@ -329,6 +364,7 @@ pub(crate) mod test_server {
         FakeServer {
             base_url: format!("http://{address}/v1"),
             requests,
+            authorizations,
         }
     }
 
@@ -354,9 +390,11 @@ mod tests {
 
     #[tokio::test]
     async fn llm_endpoint_probe_reports_latency_and_strict_level() {
+        // A server that enforces the schema: whatever the prompt asks, the
+        // answer satisfies `response_format`.
         let server = start(Arc::new(|request: &Value| {
             if request.get("response_format").is_some() {
-                (200, chat_reply(r#"{"ok": true}"#))
+                (200, chat_reply(r#"{"answer": "schema"}"#))
             } else {
                 (200, chat_reply("ok"))
             }
@@ -375,6 +413,55 @@ mod tests {
         );
     }
 
+    /// Answers like a model that ignores `response_format` and only follows
+    /// the prompt text.
+    fn prompt_follower(request: &Value) -> (u16, Value) {
+        let prompt = request["messages"]
+            .as_array()
+            .and_then(|messages| messages.last())
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        if prompt.contains("\"color\"") {
+            (200, chat_reply(r#"{"color": "blue"}"#))
+        } else if prompt.contains("JSON schema") {
+            (200, chat_reply(r#"{"answer": "schema"}"#))
+        } else {
+            (200, chat_reply("ok"))
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_endpoint_ignoring_response_format_is_not_credited_with_schema_support() {
+        let server = start(Arc::new(prompt_follower)).await;
+        let (_, level) = probe(&connection(&server.base_url), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(
+            !level.supports_json_schema(),
+            "a prompt-following endpoint was credited with {level:?}"
+        );
+        assert_eq!(level, StructuredOutputLevel::JsonObject);
+    }
+
+    #[tokio::test]
+    async fn llm_endpoint_answer_outside_the_schema_is_rejected() {
+        let server = start(Arc::new(prompt_follower)).await;
+        let error = complete(
+            &connection(&server.base_url),
+            &GenerateRequest {
+                system: None,
+                prompt: probe_prompt(StructuredOutputLevel::Strict).to_string(),
+                schema: Some(probe_schema()),
+                timeout: Some(Duration::from_secs(5)),
+            },
+            StructuredOutputLevel::Strict,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, LlmError::InvalidOutput(_)), "{error:?}");
+    }
+
     #[tokio::test]
     async fn llm_endpoint_probe_falls_back_to_prompt_level() {
         // A server that rejects every response_format but follows the prompt.
@@ -385,7 +472,7 @@ mod tests {
                     serde_json::json!({ "error": { "message": "response_format unsupported" } }),
                 )
             } else {
-                (200, chat_reply("```json\n{\"ok\": true}\n```"))
+                (200, chat_reply("```json\n{\"answer\": \"schema\"}\n```"))
             }
         }))
         .await;

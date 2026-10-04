@@ -6065,6 +6065,7 @@ mod live_local_tests {
         let probe = probe_local_generation_endpoint(ProbeLocalGenerationEndpointRequest {
             base_url: base_url.clone(),
             api_key: String::new(),
+            endpoint_id: None,
         })
         .await
         .expect("probe against the live endpoint should succeed");
@@ -6247,6 +6248,7 @@ mod llm_note_tests {
 
     #[tokio::test]
     async fn llm_note_generated_by_fake_cli_is_persisted_like_a_clovy_note() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let _restore = Restore;
         let bin = tempfile::tempdir().unwrap();
         let stdin_log = bin.path().join("stdin.txt");
@@ -6356,6 +6358,7 @@ mod llm_note_tests {
     #[tokio::test]
     #[ignore = "requires an installed, signed-in claude CLI"]
     async fn live_claude_cli_generates_a_note() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let _restore = Restore;
         set_login_env_for_tests(None);
         let mut settings = crate::providers::default_settings_for_tests();

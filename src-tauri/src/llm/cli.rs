@@ -19,6 +19,36 @@ use std::path::{Path, PathBuf};
 /// are passed on argv (agy and copilot read the prompt from argv only).
 const ARGV_PROMPT_CAP_CHARS: usize = 180_000;
 const ERROR_DETAIL_CHARS: usize = 300;
+/// Copilot CLI's built-in tool names (`--excluded-tools`), per GitHub's CLI
+/// command reference.
+const COPILOT_TOOLS: &[&str] = &[
+    "bash",
+    "powershell",
+    "list_bash",
+    "list_powershell",
+    "read_bash",
+    "read_powershell",
+    "stop_bash",
+    "stop_powershell",
+    "write_bash",
+    "write_powershell",
+    "apply_patch",
+    "create",
+    "edit",
+    "view",
+    "list_agents",
+    "read_agent",
+    "task",
+    "write_agent",
+    "ask_user",
+    "glob",
+    "grep",
+    "rg",
+    "skill",
+    "web_fetch",
+];
+/// Copilot CLI permission kinds (`--deny-tool`); denies win over allows.
+const COPILOT_PERMISSION_KINDS: &[&str] = &["shell", "write", "read", "url", "memory"];
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CliKind {
@@ -237,8 +267,8 @@ pub fn build_invocation(
             args.push(workdir.to_string_lossy().into_owned());
             (args, Some(prompt))
         }
-        CliKind::Copilot => (
-            vec![
+        CliKind::Copilot => {
+            let mut args = vec![
                 "-p".to_string(),
                 cap_middle(&prompt, ARGV_PROMPT_CAP_CHARS),
                 "-s".to_string(),
@@ -246,9 +276,19 @@ pub fn build_invocation(
                 "--log-level".to_string(),
                 "none".to_string(),
                 "--no-custom-instructions".to_string(),
-            ],
-            None,
-        ),
+                "--no-ask-user".to_string(),
+                "--disable-builtin-mcps".to_string(),
+            ];
+            // Hide every built-in tool from the model, and deny every
+            // permission kind: deny rules win over any permission the user
+            // persisted for interactive use (even `--allow-all`).
+            args.push(format!("--excluded-tools={}", COPILOT_TOOLS.join(",")));
+            args.push(format!(
+                "--deny-tool={}",
+                COPILOT_PERMISSION_KINDS.join(",")
+            ));
+            (args, None)
+        }
     };
     Ok(CliInvocation {
         args,
@@ -571,7 +611,28 @@ mod tests {
             assert!(pi.contains(&flag.to_string()), "pi lacks {flag}");
         }
         assert!(args(CliKind::CursorAgent).contains(&"ask".to_string()));
-        assert!(args(CliKind::Copilot).contains(&"--no-custom-instructions".to_string()));
+        let copilot = args(CliKind::Copilot);
+        assert!(copilot.contains(&"--no-custom-instructions".to_string()));
+        let excluded = copilot
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--excluded-tools="))
+            .unwrap();
+        for tool in ["bash", "edit", "create", "view", "web_fetch", "task"] {
+            assert!(
+                excluded.split(',').any(|t| t == tool),
+                "copilot keeps {tool}"
+            );
+        }
+        let denied = copilot
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--deny-tool="))
+            .unwrap();
+        for kind in ["shell", "write", "read", "url", "memory"] {
+            assert!(
+                denied.split(',').any(|k| k == kind),
+                "copilot allows {kind}"
+            );
+        }
     }
 
     #[test]

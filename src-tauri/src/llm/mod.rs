@@ -174,10 +174,19 @@ async fn generate_with_registry(
         }
         ProviderRef::Clovy | ProviderRef::None => return Err(LlmError::NotLocal),
     };
-    let json = request
-        .schema
-        .as_ref()
-        .and_then(|_| parse_json_value(&text));
+    let json = match &request.schema {
+        Some(schema) => {
+            let value = parse_json_value(&text)
+                .filter(|value| matches_schema(value, schema))
+                .ok_or_else(|| {
+                    LlmError::InvalidOutput(
+                        "The provider did not return JSON matching the schema.".to_string(),
+                    )
+                })?;
+            Some(value)
+        }
+        None => None,
+    };
     Ok(GenerateOutput {
         text,
         json,
@@ -262,10 +271,10 @@ pub async fn run_cli(
             LlmError::CliFailed { cli: kind, detail }
         }
     })?;
-    let output_file = invocation
-        .output_file
-        .as_ref()
-        .and_then(|path| std::fs::read_to_string(path).ok());
+    let output_file = match &invocation.output_file {
+        Some(path) => read_output_file(kind, path)?,
+        None => None,
+    };
     cli::parse_output(
         kind,
         &output,
@@ -274,21 +283,67 @@ pub async fn run_cli(
     )
 }
 
+/// Reads a CLI's answer file under the same cap as captured stdout, without
+/// ever allocating more than the cap. A missing file is "no answer".
+fn read_output_file(kind: CliKind, path: &std::path::Path) -> Result<Option<String>, LlmError> {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
+    let limit = process::MAX_CAPTURE_BYTES as u64;
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| LlmError::CliFailed {
+            cli: kind,
+            detail: format!("could not read the answer: {error}"),
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(LlmError::InvalidOutput(format!(
+            "{} returned an answer larger than {} MiB.",
+            kind.display_name(),
+            process::MAX_CAPTURE_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// Result of a connection test.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderTest {
+    pub latency: Duration,
+    pub level: StructuredOutputLevel,
+    /// For an endpoint, the URL and model that were actually tested.
+    pub tested_endpoint: Option<registry::TestedEndpoint>,
+}
+
 /// Connection test: latency of a minimal call plus the structured-output
-/// level. For a CLI the level is its catalog level when a schema-constrained
-/// answer parses, and `none` when it does not.
-pub async fn test_provider(
-    provider: &ProviderRef,
-) -> Result<(Duration, StructuredOutputLevel), LlmError> {
+/// level. For a CLI the level is its catalog level when the answer to the
+/// discriminating probe ([`endpoint::probe_prompt`]) validates against the
+/// probe schema, and `none` when it does not.
+pub async fn test_provider(provider: &ProviderRef) -> Result<ProviderTest, LlmError> {
     const TEST_TIMEOUT: Duration = Duration::from_secs(90);
     match provider {
         ProviderRef::Endpoint { id } => {
             let connection = registry().connection(id, secrets::store())?;
-            endpoint::probe(&connection, TEST_TIMEOUT).await
+            let (latency, level) = endpoint::probe(&connection, TEST_TIMEOUT).await?;
+            Ok(ProviderTest {
+                latency,
+                level,
+                tested_endpoint: Some(registry::TestedEndpoint {
+                    base_url: connection.base_url,
+                    model_id: connection.model_id,
+                }),
+            })
         }
         ProviderRef::Cli { id } => {
             let env = shell_env::login_env().await;
-            test_cli(*id, env.as_ref(), TEST_TIMEOUT).await
+            let (latency, level) = test_cli(*id, env.as_ref(), TEST_TIMEOUT).await?;
+            Ok(ProviderTest {
+                latency,
+                level,
+                tested_endpoint: None,
+            })
         }
         ProviderRef::Clovy | ProviderRef::None => Err(LlmError::NotLocal),
     }
@@ -304,7 +359,7 @@ async fn test_cli(
         kind,
         &GenerateRequest {
             system: None,
-            prompt: "Answer with a JSON object whose \"ok\" field is true.".to_string(),
+            prompt: endpoint::probe_prompt(kind.structured_output()).to_string(),
             schema: Some(endpoint::probe_schema()),
             timeout: Some(timeout),
         },
@@ -346,6 +401,69 @@ pub fn parse_json_value(text: &str) -> Option<Value> {
     (end > start)
         .then(|| parse_object(&trimmed[start..=end]))
         .flatten()
+}
+
+/// Validates `value` against the JSON Schema subset Clovy's schemas use:
+/// `type`, `const`, `enum`, `properties`, `required`,
+/// `additionalProperties: false`, and `items`.
+pub fn matches_schema(value: &Value, schema: &Value) -> bool {
+    let Some(schema) = schema.as_object() else {
+        return true;
+    };
+    if let Some(expected) = schema.get("const") {
+        if value != expected {
+            return false;
+        }
+    }
+    if let Some(options) = schema.get("enum").and_then(Value::as_array) {
+        if !options.contains(value) {
+            return false;
+        }
+    }
+    let type_ok = |name: &str| match name {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "boolean" => value.is_boolean(),
+        "number" => value.is_number(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "null" => value.is_null(),
+        _ => true,
+    };
+    match schema.get("type") {
+        Some(Value::String(name)) if !type_ok(name) => return false,
+        Some(Value::Array(names)) if !names.iter().filter_map(Value::as_str).any(type_ok) => {
+            return false
+        }
+        _ => {}
+    }
+    if let Some(object) = value.as_object() {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            if required
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|key| !object.contains_key(key))
+            {
+                return false;
+            }
+        }
+        for (key, field) in object {
+            match properties.and_then(|properties| properties.get(key)) {
+                Some(field_schema) if !matches_schema(field, field_schema) => return false,
+                None if schema.get("additionalProperties") == Some(&Value::Bool(false)) => {
+                    return false
+                }
+                _ => {}
+            }
+        }
+    }
+    if let (Some(items), Some(schema_items)) = (value.as_array(), schema.get("items")) {
+        if !items.iter().all(|item| matches_schema(item, schema_items)) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -467,7 +585,7 @@ mod tests {
         fake_cli(
             dir.path(),
             "claude",
-            "cat > /dev/null\necho '{\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"structured_output\":{\"ok\":true}}'",
+            "cat > /dev/null\necho '{\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"structured_output\":{\"answer\":\"schema\"}}'",
         );
         let (latency, level) = test_cli(
             CliKind::Claude,
@@ -488,6 +606,63 @@ mod tests {
             test_cli(CliKind::Pi, &env_with(dir.path()), Duration::from_secs(10)).await,
             Err(LlmError::CliFailed { .. })
         ));
+    }
+
+    /// The real `claude` CLI through the real login shell must pass the
+    /// discriminating probe (its `--json-schema` is enforced).
+    #[tokio::test]
+    #[ignore = "requires an installed, signed-in claude CLI"]
+    async fn live_claude_cli_passes_the_discriminating_probe() {
+        let env = shell_env::login_env().await;
+        let (_, level) = test_cli(CliKind::Claude, env.as_ref(), Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(level, StructuredOutputLevel::JsonSchema);
+    }
+
+    #[tokio::test]
+    async fn llm_cli_ignoring_its_schema_flag_is_not_credited_with_schema_support() {
+        let dir = tempfile::tempdir().unwrap();
+        // Answers what the prompt asks for, never what --json-schema demands.
+        fake_cli(
+            dir.path(),
+            "claude",
+            "cat > /dev/null\necho '{\"subtype\":\"success\",\"is_error\":false,\"result\":\"{\\\"color\\\": \\\"blue\\\"}\"}'",
+        );
+        let (_, level) = test_cli(
+            CliKind::Claude,
+            &env_with(dir.path()),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(level, StructuredOutputLevel::None);
+    }
+
+    #[tokio::test]
+    async fn llm_oversized_codex_answer_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // Writes 9 MiB to the `-o` answer file, above the 8 MiB capture cap.
+        fake_cli(
+            dir.path(),
+            "codex",
+            "cat > /dev/null\nout=''\nwhile [ $# -gt 0 ]; do if [ \"$1\" = '-o' ]; then out=\"$2\"; fi; shift; done\nhead -c 9437184 /dev/zero | tr '\\000' a > \"$out\"",
+        );
+        let error = run_cli(
+            CliKind::Codex,
+            &GenerateRequest {
+                prompt: "hi".to_string(),
+                timeout: Some(Duration::from_secs(20)),
+                ..GenerateRequest::default()
+            },
+            &env_with(dir.path()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidOutput(message) if message.contains("larger than 8 MiB")),
+            "{error:?}"
+        );
     }
 
     fn registry_with_activity(
@@ -583,7 +758,10 @@ mod tests {
     #[tokio::test]
     async fn llm_endpoint_generation_returns_parsed_json() {
         let server = endpoint::test_server::start(Arc::new(|_: &Value| {
-            (200, endpoint::test_server::chat_reply(r#"{"ok": true}"#))
+            (
+                200,
+                endpoint::test_server::chat_reply(r#"{"answer": "schema"}"#),
+            )
         }))
         .await;
         let mut registry =
@@ -602,10 +780,29 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.json.unwrap()["ok"], true);
+        assert_eq!(output.json.unwrap()["answer"], "schema");
         assert_eq!(output.provider, "endpoint:ep");
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests[0]["response_format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn llm_schema_validation_checks_const_required_and_extra_fields() {
+        let schema = endpoint::probe_schema();
+        assert!(matches_schema(
+            &serde_json::json!({"answer": "schema"}),
+            &schema
+        ));
+        assert!(!matches_schema(
+            &serde_json::json!({"answer": "prompt"}),
+            &schema
+        ));
+        assert!(!matches_schema(&serde_json::json!({}), &schema));
+        assert!(!matches_schema(
+            &serde_json::json!({"answer": "schema", "color": "blue"}),
+            &schema
+        ));
+        assert!(!matches_schema(&serde_json::json!({"answer": 1}), &schema));
     }
 
     #[test]

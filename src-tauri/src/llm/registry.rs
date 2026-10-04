@@ -500,6 +500,12 @@ pub fn save_endpoint(
         .unwrap_or_else(|| format!("ep-{}", uuid::Uuid::new_v4().simple()));
     let has_api_key = if let Some(key) = api_key {
         store.set(&id, key).map_err(|_| keychain_error())?;
+        if id == LEGACY_LOCAL_ENDPOINT_ID {
+            // The new key is in the Keychain; a legacy key still waiting
+            // for migration must not be moved over it on the next launch.
+            settings.local_generation = LocalGenerationSettings::default();
+            settings.llm_registry_migrated = true;
+        }
         true
     } else if request.clear_api_key {
         store.delete(&id).map_err(|_| keychain_error())?;
@@ -555,16 +561,32 @@ pub fn delete_endpoint(
     Ok(())
 }
 
-/// Stores a measured level for an endpoint or CLI.
+/// The endpoint configuration a connection test ran against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestedEndpoint {
+    pub base_url: String,
+    pub model_id: String,
+}
+
+/// Stores a measured level for an endpoint or CLI. An endpoint level is
+/// stored only while the endpoint still has the URL and model that were
+/// tested, so editing it during a test never attaches a stale level to the
+/// new configuration.
 pub fn record_level(
     settings: &mut ProviderModelSettings,
     provider: &ProviderRef,
     level: StructuredOutputLevel,
+    tested: Option<&TestedEndpoint>,
 ) {
     match provider {
         ProviderRef::Endpoint { id } => {
+            let Some(tested) = tested else {
+                return;
+            };
             if let Some(endpoint) = settings.llm_endpoints.iter_mut().find(|e| &e.id == id) {
-                endpoint.structured_output = Some(level);
+                if endpoint.base_url == tested.base_url && endpoint.model_id == tested.model_id {
+                    endpoint.structured_output = Some(level);
+                }
             }
         }
         ProviderRef::Cli { id } => {
@@ -572,6 +594,21 @@ pub fn record_level(
         }
         ProviderRef::Clovy | ProviderRef::None => {}
     }
+}
+
+/// The key to send when listing an endpoint's models: the key typed in the
+/// form, else the key saved for the endpoint being edited.
+pub fn listing_key(
+    registry: &LlmRegistry,
+    endpoint_id: Option<&str>,
+    typed: &str,
+    store: &dyn SecretStore,
+) -> Option<String> {
+    let typed = typed.trim();
+    if !typed.is_empty() {
+        return Some(typed.to_string());
+    }
+    registry.connection(endpoint_id?, store).ok()?.api_key
 }
 
 fn keychain_error() -> AppError {
@@ -664,6 +701,96 @@ mod tests {
         // A second load does not duplicate the endpoint.
         let again = migrate_legacy_local_generation(settings, &store);
         assert_eq!(again.llm_endpoints.len(), 1);
+    }
+
+    #[test]
+    fn llm_new_local_key_is_not_overwritten_by_a_pending_legacy_migration() {
+        // Launch 1: the Keychain refuses the legacy key, which stays on disk.
+        let refusing = MemorySecretStore::failing();
+        let mut settings = load(&legacy_settings_json("local"), &refusing);
+        assert!(!settings.llm_registry_migrated);
+        // Later the Keychain works and the user saves a new key for `local`.
+        let store = MemorySecretStore::default();
+        save_endpoint(
+            &mut settings,
+            SaveEndpointRequest {
+                id: Some(LEGACY_LOCAL_ENDPOINT_ID.to_string()),
+                name: "Local model".to_string(),
+                base_url: "http://localhost:11434/v1".to_string(),
+                model_id: "llama3.1:8b".to_string(),
+                api_key: Some("sk-new".to_string()),
+                clear_api_key: false,
+            },
+            &store,
+        )
+        .unwrap();
+        assert!(settings.llm_registry_migrated);
+        assert!(!serde_json::to_string(&settings)
+            .unwrap()
+            .contains("sk-legacy"));
+        // Launch 2: migration runs again on the saved file.
+        let saved = serde_json::to_string(&settings).unwrap();
+        let reloaded = load(&saved, &store);
+        assert_eq!(store.get("local").unwrap().as_deref(), Some("sk-new"));
+        assert_eq!(
+            LlmRegistry::from(&reloaded)
+                .connection("local", &store)
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("sk-new")
+        );
+    }
+
+    #[test]
+    fn llm_test_level_is_not_recorded_on_an_endpoint_edited_during_the_test() {
+        let mut settings = settings_with_endpoint(None);
+        let endpoint = ProviderRef::Endpoint {
+            id: "ep".to_string(),
+        };
+        let tested = TestedEndpoint {
+            base_url: "http://localhost:1/v1".to_string(),
+            model_id: "m".to_string(),
+        };
+        // The user switched the model while the test ran.
+        settings.llm_endpoints[0].model_id = "other-model".to_string();
+        record_level(
+            &mut settings,
+            &endpoint,
+            StructuredOutputLevel::Strict,
+            Some(&tested),
+        );
+        assert_eq!(settings.endpoint("ep").unwrap().structured_output, None);
+        // Unchanged configuration: the level is stored.
+        settings.llm_endpoints[0].model_id = "m".to_string();
+        record_level(
+            &mut settings,
+            &endpoint,
+            StructuredOutputLevel::Strict,
+            Some(&tested),
+        );
+        assert_eq!(
+            settings.endpoint("ep").unwrap().structured_output,
+            Some(StructuredOutputLevel::Strict)
+        );
+    }
+
+    #[test]
+    fn llm_model_listing_uses_the_saved_key_unless_one_is_typed() {
+        let store = MemorySecretStore::default();
+        let mut settings = settings_with_endpoint(None);
+        settings.llm_endpoints[0].has_api_key = true;
+        store.set("ep", "sk-saved").unwrap();
+        let registry = LlmRegistry::from(&settings);
+        assert_eq!(
+            listing_key(&registry, Some("ep"), "  ", &store).as_deref(),
+            Some("sk-saved")
+        );
+        assert_eq!(
+            listing_key(&registry, Some("ep"), "sk-typed", &store).as_deref(),
+            Some("sk-typed")
+        );
+        assert_eq!(listing_key(&registry, None, "", &store), None);
     }
 
     #[test]

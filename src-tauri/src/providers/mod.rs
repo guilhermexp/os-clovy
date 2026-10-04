@@ -294,8 +294,14 @@ pub struct SetCostQualityRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ProbeLocalGenerationEndpointRequest {
     pub base_url: String,
+    /// A key typed in the form; blank falls back to the key saved for
+    /// `endpoint_id`.
     #[serde(default)]
     pub api_key: String,
+    /// The registered endpoint being edited, whose Keychain key is used when
+    /// no key is typed.
+    #[serde(default)]
+    pub endpoint_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1094,7 +1100,13 @@ pub async fn probe_local_generation_endpoint(
     request: ProbeLocalGenerationEndpointRequest,
 ) -> Result<LocalEndpointProbe, AppError> {
     let base_url = normalize_local_base_url(&request.base_url)?;
-    let api_key = request.api_key.trim().to_string();
+    let api_key = crate::llm::registry::listing_key(
+        &llm_registry(),
+        request.endpoint_id.as_deref(),
+        &request.api_key,
+        crate::llm::secrets::store(),
+    )
+    .unwrap_or_default();
     let url = format!("{base_url}/models");
 
     let client = reqwest::Client::builder()
@@ -1247,6 +1259,12 @@ fn replace_current_settings(settings: ProviderModelSettings) {
 pub(crate) fn replace_current_settings_for_tests(settings: ProviderModelSettings) {
     replace_current_settings(settings);
 }
+
+/// Test-only: serializes tests that install process-wide settings, so they
+/// never observe each other's provider selection.
+#[cfg(test)]
+pub(crate) static GLOBAL_SETTINGS_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Test-only companion to [`replace_current_settings_for_tests`]: the default
 /// (remote) settings, for restoring the store after a live test.
@@ -2653,6 +2671,47 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)),
             Some("$0.00006 per second audio".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_listing_models_of_a_saved_endpoint_sends_its_keychain_key() {
+        use crate::llm::endpoint::test_server;
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let server = test_server::start(std::sync::Arc::new(|_: &serde_json::Value| {
+            (
+                200,
+                serde_json::json!({ "data": [{ "id": "private-model" }] }),
+            )
+        }))
+        .await;
+        let id = format!("ep-list-{}", uuid::Uuid::new_v4().simple());
+        crate::llm::secrets::store()
+            .set(&id, "sk-saved-key")
+            .unwrap();
+        let mut settings = default_settings();
+        settings.llm_endpoints.push(LlmEndpointRecord {
+            id: id.clone(),
+            name: "Private".to_string(),
+            base_url: server.base_url.clone(),
+            model_id: "private-model".to_string(),
+            has_api_key: true,
+            structured_output: None,
+            rpm_limit: None,
+        });
+        replace_current_settings_for_tests(settings);
+
+        let probe = probe_local_generation_endpoint(ProbeLocalGenerationEndpointRequest {
+            base_url: server.base_url.clone(),
+            api_key: String::new(),
+            endpoint_id: Some(id.clone()),
+        })
+        .await;
+        replace_current_settings_for_tests(default_settings());
+        assert_eq!(probe.unwrap().models, vec!["private-model"]);
+        assert_eq!(
+            server.authorizations.lock().unwrap().as_slice(),
+            [Some("Bearer sk-saved-key".to_string())]
         );
     }
 }

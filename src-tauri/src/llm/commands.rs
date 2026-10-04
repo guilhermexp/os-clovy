@@ -71,13 +71,18 @@ pub async fn llm_test_provider(
     state: State<'_, ProviderSettingsState>,
     provider: ProviderRef,
 ) -> Result<LlmProviderTestResultDto, AppError> {
-    let (latency, level) = test_provider(&provider).await?;
+    let test = test_provider(&provider).await?;
     crate::providers::update_llm_registry(&state, |settings| {
-        registry::record_level(settings, &provider, level);
+        registry::record_level(
+            settings,
+            &provider,
+            test.level,
+            test.tested_endpoint.as_ref(),
+        );
         Ok(())
     })?;
     Ok(LlmProviderTestResultDto {
-        latency_ms: u64::try_from(latency.as_millis()).unwrap_or(u64::MAX),
-        structured_output: level,
+        latency_ms: u64::try_from(test.latency.as_millis()).unwrap_or(u64::MAX),
+        structured_output: test.level,
     })
 }
