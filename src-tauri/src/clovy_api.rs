@@ -6350,4 +6350,33 @@ mod llm_note_tests {
             Some("## Summary\n- Ship the updater fix")
         );
     }
+
+    /// Generates a note with the real `claude` CLI found through the real
+    /// login shell (no fakes). Needs `claude` installed and signed in.
+    #[tokio::test]
+    #[ignore = "requires an installed, signed-in claude CLI"]
+    async fn live_claude_cli_generates_a_note() {
+        let _restore = Restore;
+        set_login_env_for_tests(None);
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.llm_usage.notes = ProviderRef::Cli {
+            id: CliKind::Claude,
+        };
+        crate::providers::replace_current_settings_for_tests(settings);
+        let generated = generate_note_from_transcript(GenerationRequest {
+            provider: crate::providers::generation_provider(),
+            operation_id: Some("live-claude-note".to_string()),
+            title: "Weekly sync".to_string(),
+            existing_generated_note: None,
+            transcript: "Weekly sync. We agreed to ship the updater fix on Thursday. Ana will review the onboarding metrics next Monday.".to_string(),
+            transcript_source_labels: false,
+            manual_notes: None,
+            language: Some("en".to_string()),
+        })
+        .await
+        .expect("claude should generate the note");
+        assert_eq!(generated.provider, "cli:claude");
+        assert!(generated.content.to_lowercase().contains("updater"));
+        eprintln!("live claude note:\n{}\n", generated.content);
+    }
 }

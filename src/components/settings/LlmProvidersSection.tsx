@@ -562,15 +562,15 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
               if (endpoint.hasApiKey) {
                 badges.push(t("settingsPanels.llm.apiKeySaved"));
               }
-              if (endpoint.structuredOutput) {
+              // A fresh test result already states the measured level.
+              if (testResult) {
+                badges.push(testResult);
+              } else if (endpoint.structuredOutput) {
                 badges.push(
                   t("settingsPanels.llm.structuredOutputPrefix", {
                     level: formatLevel(endpoint.structuredOutput, t),
                   }),
                 );
-              }
-              if (testResult) {
-                badges.push(testResult);
               }
 
               return (
