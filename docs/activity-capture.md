@@ -71,9 +71,17 @@ below) and mirrored to the menu bar.
   but no window text is extracted, no frame is stored, and the tick's input
   and clipboard are discarded.
 - **Private windows** are recognized by title markers (Chrome "Incognito" /
-  pt-BR "Modo anônimo", Safari "Private Browsing", Edge "InPrivate", and
-  es/fr/de variants) or by an incognito/private badge in the first levels of
-  the window's accessibility tree. False positives only drop frames.
+  pt-BR "Modo anônimo", Firefox "Private Browsing" / pt-BR "Navegação
+  privativa", Safari "Private Browsing", Edge "InPrivate", and es/fr/de
+  variants) or by an incognito/private badge in the first levels of the
+  window's accessibility tree. The check runs for every app the one browser
+  predicate (`filter::is_browser`: known bundle ids or a browser name as a
+  whole word) accepts. False positives only drop frames.
+- **Revalidation.** For browser windows the descriptor is read again after the
+  text is extracted; the sample is dropped unless the same window still shows
+  the same URL and is still capturable (a navigation to an ignored domain, a
+  tab turning private, or an unknown re-read all discard it). Secondary frames
+  follow the same rule.
 - **Protected video** (setting, on by default): a known DRM streaming app or
   site focused pauses capture with reason `protected_video`; such windows on
   secondary displays are skipped.
@@ -84,10 +92,17 @@ below) and mirrored to the menu bar.
   2 GiB.
 - **Input** carries no content: the event tap reads only the event type; the
   normalizer drops any characters a platform reports. Clipboard text is
-  redacted (`redact.rs`: private keys, `password=`-style assignments, bearer
-  values, provider token prefixes, JWTs, card numbers, high-entropy strings)
-  and truncated to 1000 characters. Pasteboards marked concealed or transient
-  (password managers) are skipped.
+  redacted (`redact.rs`: private keys, `password=` / `password = value` /
+  `"token": value` assignments, bearer values, provider token prefixes, JWTs,
+  card numbers, high-entropy strings) and truncated to 1000 characters.
+  Pasteboards marked concealed or transient (password managers) are skipped.
+  Clicks, keys, and clipboard changes are buffered between ticks without their
+  source window, so they are stored only when the same capturable window and
+  URL were focused at both ends of the 2 s interval; any switch in between
+  discards that interval's input (the app switch itself is still recorded).
+- **Pause control.** "Pause capture" / "Resume capture" (settings and menu
+  bar) act on the manual pause only; an automatic pause (work hours, low disk,
+  protected video) shows "Pause capture" and resumes on its own.
 
 ## Database
 
