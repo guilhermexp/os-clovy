@@ -28,6 +28,7 @@ pub mod feature_flags;
 mod filesystem;
 pub mod image_safety;
 pub mod interface_locale;
+pub mod llm;
 pub mod macos_menu_icons;
 pub mod meeting_calendar_context;
 pub mod meeting_detection;
@@ -380,9 +381,13 @@ pub fn run() {
             providers::video_generate,
             providers::video_status,
             providers::generated_video_dir,
-            providers::save_local_generation_settings,
-            providers::set_local_generation_enabled,
             providers::probe_local_generation_endpoint,
+            llm::commands::llm_providers,
+            llm::commands::llm_detect_clis,
+            llm::commands::llm_save_endpoint,
+            llm::commands::llm_delete_endpoint,
+            llm::commands::llm_set_usage,
+            llm::commands::llm_test_provider,
             p3a::p3a_settings,
             p3a::p3a_question_catalog,
             p3a::set_p3a_enabled,

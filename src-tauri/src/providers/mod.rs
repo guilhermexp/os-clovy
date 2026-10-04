@@ -1,11 +1,17 @@
 //! Model-picker state. The Tauri side persists which transcription /
 //! generation models the user selected. Remote provider keys and URLs live in
-//! Clovy API; the opt-in "bring your own inference" local model stores an
-//! OpenAI-compatible endpoint (any http/https host) here. Advanced users may
-//! also store their own Venice API key locally; responses only expose whether
-//! one is present, never the key itself.
+//! Clovy API. The user's own providers (named OpenAI-compatible endpoints,
+//! agent CLIs, and the provider chosen per use) are the `llm` registry, also
+//! persisted here; endpoint keys live in the Keychain (`crate::llm::secrets`).
+//! Advanced users may also store their own Venice API key locally; responses
+//! only expose whether one is present, never the key itself.
 
 use crate::domain::types::AppError;
+use crate::llm::{
+    cli::CliKind,
+    registry::{LlmEndpointRecord, LlmRegistry, LlmUsageSelection, ProviderRef},
+    StructuredOutputLevel,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     collections::BTreeMap,
@@ -82,8 +88,21 @@ pub struct ProviderModelSettings {
     pub video_model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venice_api_key: Option<String>,
-    #[serde(default)]
+    /// The pre-registry single endpoint. Only read to migrate it into
+    /// `llm_endpoints`; kept on disk solely while the Keychain refuses its key.
+    #[serde(default, skip_serializing_if = "LocalGenerationSettings::is_empty")]
     pub local_generation: LocalGenerationSettings,
+    /// Named OpenAI-compatible endpoints (keys live in the Keychain).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm_endpoints: Vec<LlmEndpointRecord>,
+    /// The provider chosen for each use.
+    #[serde(default)]
+    pub llm_usage: LlmUsageSelection,
+    /// Structured-output level measured by the last CLI connection test.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub llm_cli_levels: BTreeMap<CliKind, StructuredOutputLevel>,
+    #[serde(default)]
+    pub llm_registry_migrated: bool,
     /// When true, Venice `safe_mode` blurs adult content on generated/edited
     /// images. Clovy defaults it ON; the user opts out via Settings or the
     /// generation-time consent dialog. Defaulted so settings files predating
@@ -122,6 +141,29 @@ pub struct LocalGenerationSettings {
     pub api_key: String,
 }
 
+impl LocalGenerationSettings {
+    pub fn is_empty(&self) -> bool {
+        self.base_url.trim().is_empty()
+            && self.model_id.trim().is_empty()
+            && self.api_key.trim().is_empty()
+    }
+}
+
+impl ProviderModelSettings {
+    pub fn endpoint(&self, id: &str) -> Option<&LlmEndpointRecord> {
+        self.llm_endpoints.iter().find(|endpoint| endpoint.id == id)
+    }
+}
+
+/// The endpoint serving chat, as the settings UI sees it. Never carries the
+/// API key.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatEndpointDto {
+    pub base_url: String,
+    pub model_id: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileModelOverrides {
@@ -135,9 +177,8 @@ pub struct ProfileModelOverrides {
     pub video_model: Option<String>,
 }
 
-/// The client-facing view of provider settings. The Venice API key is never
-/// serialized back — only whether one is configured. The local endpoint's
-/// api key is round-tripped so the settings UI can pre-fill and edit it.
+/// The client-facing view of provider settings. API keys are never
+/// serialized back, only whether a Venice key is configured.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelSettingsDto {
@@ -150,7 +191,7 @@ pub struct ProviderModelSettingsDto {
     pub image_model: String,
     pub video_model: String,
     pub venice_api_key_configured: bool,
-    pub local_generation: LocalGenerationSettings,
+    pub local_generation: ChatEndpointDto,
     pub image_safe_mode: bool,
     pub image_safe_mode_prompt_dismissed: bool,
     pub live_transcription: bool,
@@ -171,11 +212,24 @@ impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
                 .venice_api_key
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty()),
-            local_generation: settings.local_generation.clone(),
+            local_generation: chat_endpoint_dto(settings),
             image_safe_mode: settings.image_safe_mode,
             image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
             live_transcription: settings.live_transcription,
         }
+    }
+}
+
+fn chat_endpoint_dto(settings: &ProviderModelSettings) -> ChatEndpointDto {
+    match &settings.llm_usage.chat {
+        ProviderRef::Endpoint { id } => settings
+            .endpoint(id)
+            .map(|endpoint| ChatEndpointDto {
+                base_url: endpoint.base_url.clone(),
+                model_id: endpoint.model_id.clone(),
+            })
+            .unwrap_or_default(),
+        _ => ChatEndpointDto::default(),
     }
 }
 
@@ -234,21 +288,6 @@ pub struct SetVeniceModelRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SetCostQualityRequest {
     pub value: u8,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveLocalGenerationSettingsRequest {
-    pub base_url: String,
-    pub model_id: String,
-    #[serde(default)]
-    pub api_key: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SetLocalGenerationEnabledRequest {
-    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -386,8 +425,32 @@ pub fn generation_provider() -> String {
     current_settings().generation_provider
 }
 
+/// The endpoint serving chat (the agent route), key included; empty when
+/// chat is not on an endpoint.
 pub fn local_generation_settings() -> LocalGenerationSettings {
-    current_settings().local_generation
+    let registry = llm_registry();
+    let connection = match &registry.usage.chat {
+        ProviderRef::Endpoint { id } => registry.connection(id, crate::llm::secrets::store()).ok(),
+        _ => None,
+    };
+    crate::llm::registry::legacy_settings(connection)
+}
+
+/// The endpoint an agent request for `model_id` should use: the chat
+/// endpoint when it serves that model, else any registered endpoint that does.
+pub fn local_generation_settings_for_model(model_id: &str) -> LocalGenerationSettings {
+    let registry = llm_registry();
+    let connection = registry.endpoint_for_model(model_id).and_then(|endpoint| {
+        registry
+            .connection(&endpoint.id, crate::llm::secrets::store())
+            .ok()
+    });
+    crate::llm::registry::legacy_settings(connection)
+}
+
+/// Snapshot of the provider registry for routing one generation call.
+pub fn llm_registry() -> LlmRegistry {
+    LlmRegistry::from(&current_settings())
 }
 
 pub fn image_model() -> String {
@@ -654,9 +717,13 @@ pub fn set_venice_model(
             settings.transcription_model = model_id.to_string();
         }
         ModelMode::Generation => {
+            // Picking a Clovy model in the text-model picker moves chat back
+            // to Clovy API; `normalize` mirrors it into the legacy fields.
+            settings.llm_usage.chat = ProviderRef::Clovy;
             settings.generation_provider = PROVIDER_VENICE.to_string();
             settings.generation_model = model_id.to_string();
             settings.remote_generation_model = model_id.to_string();
+            crate::llm::registry::normalize(settings);
         }
         ModelMode::Image => settings.image_model = model_id.to_string(),
         ModelMode::Video => settings.video_model = model_id.to_string(),
@@ -1019,93 +1086,6 @@ pub fn clear_venice_api_key(
     })
 }
 
-/// Persists the "bring your own inference" endpoint without switching the
-/// active provider. Enabling and disabling the local model is a separate
-/// command so that saving a draft never silently activates it, and toggling
-/// off never rewrites the stored endpoint.
-#[tauri::command]
-pub fn save_local_generation_settings(
-    state: State<'_, ProviderSettingsState>,
-    request: SaveLocalGenerationSettingsRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    save_local_generation_settings_impl(&state, request)
-}
-
-fn save_local_generation_settings_impl(
-    state: &ProviderSettingsState,
-    request: SaveLocalGenerationSettingsRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    let raw_base_url = request.base_url.trim();
-    let model_id = request.model_id.trim().to_string();
-    let api_key = request.api_key.trim().to_string();
-    let clearing = raw_base_url.is_empty() && model_id.is_empty() && api_key.is_empty();
-
-    // Validate the URL up front so a bad request never mutates stored state.
-    let base_url = if clearing {
-        String::new()
-    } else {
-        normalize_local_base_url(raw_base_url)?
-    };
-
-    let candidate = LocalGenerationSettings {
-        base_url,
-        model_id,
-        api_key,
-    };
-    let configured = local_generation_settings_configured(&candidate);
-
-    update_settings_result(state, |settings| {
-        let provider_is_local = settings.generation_provider == PROVIDER_LOCAL;
-        if provider_is_local && !configured {
-            return Err(AppError::new(
-                "local_model_in_use",
-                "Disable the local model first.",
-            ));
-        }
-        settings.local_generation = candidate.clone();
-        if provider_is_local {
-            settings.generation_model = candidate.model_id.clone();
-        }
-        Ok(())
-    })
-}
-
-/// Switches the active generation provider between the saved local endpoint
-/// and the remote Venice default. Never edits the stored local endpoint, so
-/// disabling and re-enabling round-trips the same configuration.
-#[tauri::command]
-pub fn set_local_generation_enabled(
-    state: State<'_, ProviderSettingsState>,
-    request: SetLocalGenerationEnabledRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    set_local_generation_enabled_impl(&state, request)
-}
-
-fn set_local_generation_enabled_impl(
-    state: &ProviderSettingsState,
-    request: SetLocalGenerationEnabledRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings_result(state, |settings| {
-        if request.enabled {
-            if !local_generation_settings_configured(&settings.local_generation) {
-                return Err(AppError::new(
-                    "local_model_not_configured",
-                    "Configure a local model endpoint and model ID first.",
-                ));
-            }
-            settings.generation_provider = PROVIDER_LOCAL.to_string();
-            settings.generation_model = settings.local_generation.model_id.trim().to_string();
-        } else {
-            settings.generation_provider = PROVIDER_VENICE.to_string();
-            settings.generation_model = non_empty_or(
-                settings.remote_generation_model.clone(),
-                DEFAULT_GENERATION_MODEL,
-            );
-        }
-        Ok(())
-    })
-}
-
 /// Lists the models an OpenAI-compatible endpoint advertises, so the settings
 /// UI can confirm the endpoint is reachable and offer real model ids. Uses a
 /// short timeout because this runs interactively while the user types.
@@ -1218,12 +1198,19 @@ pub async fn list_venice_models(
 pub fn setup(app: &mut tauri::App) {
     let path = provider_settings_path(app.handle())
         .unwrap_or_else(|| PathBuf::from("provider-settings.json"));
-    let settings = load_settings_from_disk(app.handle());
+    let (settings, migrated_now) = load_settings_from_disk(app.handle());
     replace_current_settings(settings.clone());
-    app.manage(ProviderSettingsState {
+    let state = ProviderSettingsState {
         path,
-        settings: Mutex::new(settings),
-    });
+        settings: Mutex::new(settings.clone()),
+    };
+    if migrated_now {
+        // Rewrite the file so the migrated endpoint key no longer sits in it.
+        if let Err(error) = save_settings(&state, &settings) {
+            tracing::warn!(code = %error.code, "could not persist the migrated provider registry");
+        }
+    }
+    app.manage(state);
 }
 
 pub fn load_local_env() {
@@ -1268,6 +1255,15 @@ pub(crate) fn default_settings_for_tests() -> ProviderModelSettings {
     default_settings()
 }
 
+/// Test-only: parse, migrate (with `store`), and sanitize a settings file.
+#[cfg(test)]
+pub(crate) fn settings_from_json_for_tests(
+    raw: &str,
+    store: &dyn crate::llm::secrets::SecretStore,
+) -> Option<ProviderModelSettings> {
+    settings_from_json(raw, store).map(|(settings, _)| settings)
+}
+
 fn default_settings() -> ProviderModelSettings {
     ProviderModelSettings {
         transcription_provider: PROVIDER_VENICE.to_string(),
@@ -1280,6 +1276,10 @@ fn default_settings() -> ProviderModelSettings {
         video_model: DEFAULT_VIDEO_MODEL.to_string(),
         venice_api_key: None,
         local_generation: LocalGenerationSettings::default(),
+        llm_endpoints: Vec::new(),
+        llm_usage: LlmUsageSelection::default(),
+        llm_cli_levels: BTreeMap::new(),
+        llm_registry_migrated: true,
         image_safe_mode: true,
         image_safe_mode_prompt_dismissed: false,
         image_safe_mode_set_by_user: false,
@@ -1345,17 +1345,27 @@ fn provider_settings_path_from_config_dir(directory: PathBuf) -> PathBuf {
     directory.join("provider-settings.json")
 }
 
-fn load_settings_from_disk(app: &AppHandle) -> ProviderModelSettings {
-    let defaults = default_settings();
-    let Some(path) = provider_settings_path(app) else {
-        return defaults;
-    };
+/// Loads the saved settings; the flag is true when the legacy endpoint was
+/// migrated during this load and the file should be rewritten.
+fn load_settings_from_disk(app: &AppHandle) -> (ProviderModelSettings, bool) {
+    provider_settings_path(app)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|raw| settings_from_json(&raw, crate::llm::secrets::store()))
+        .unwrap_or_else(|| (default_settings(), false))
+}
 
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|settings| serde_json::from_str::<ProviderModelSettings>(&settings).ok())
-        .map(|settings| sanitize_settings(settings, &defaults))
-        .unwrap_or(defaults)
+fn settings_from_json(
+    raw: &str,
+    store: &dyn crate::llm::secrets::SecretStore,
+) -> Option<(ProviderModelSettings, bool)> {
+    let parsed = serde_json::from_str::<ProviderModelSettings>(raw).ok()?;
+    let was_migrated = parsed.llm_registry_migrated;
+    let migrated = crate::llm::registry::migrate_legacy_local_generation(parsed, store);
+    let migrated_now = migrated.llm_registry_migrated != was_migrated;
+    Some((
+        sanitize_settings(migrated, &default_settings()),
+        migrated_now,
+    ))
 }
 
 fn sanitize_settings(
@@ -1369,16 +1379,10 @@ fn sanitize_settings(
         &defaults.remote_generation_model,
     );
     let local_generation = sanitize_local_generation(settings.local_generation);
-    let persisted_provider_local = settings.generation_provider == PROVIDER_LOCAL;
-    let local_active =
-        persisted_provider_local && local_generation_settings_configured(&local_generation);
-
-    let generation_model = if local_active {
-        local_generation.model_id.clone()
-    } else if persisted_provider_local {
-        // Local was selected but is no longer valid. Fall back to the remote
-        // model. The persisted `generation_model` holds the stale LOCAL model
-        // id, so it must not leak into the remote fallback.
+    // Chat on an endpoint is restored from `llm_usage` by `normalize` below;
+    // here a persisted local provider only must not leak its stale local
+    // model id into the remote model.
+    let generation_model = if settings.generation_provider == PROVIDER_LOCAL {
         remote_generation_model.clone()
     } else {
         // Venice, legacy, or missing provider: honor the saved generation model
@@ -1387,6 +1391,15 @@ fn sanitize_settings(
         remote_generation_model = configured.clone();
         configured
     };
+    let llm_endpoints = settings
+        .llm_endpoints
+        .into_iter()
+        .filter_map(|mut endpoint| {
+            endpoint.base_url = normalize_local_base_url(&endpoint.base_url).ok()?;
+            endpoint.model_id = endpoint.model_id.trim().to_string();
+            (!endpoint.id.trim().is_empty() && !endpoint.model_id.is_empty()).then_some(endpoint)
+        })
+        .collect();
 
     let image_safe_mode = if settings.image_safe_mode_set_by_user {
         settings.image_safe_mode
@@ -1394,13 +1407,9 @@ fn sanitize_settings(
         true
     };
 
-    ProviderModelSettings {
+    let mut sanitized = ProviderModelSettings {
         transcription_provider: transcription_provider_for_model(&transcription_model).to_string(),
-        generation_provider: if local_active {
-            PROVIDER_LOCAL.to_string()
-        } else {
-            PROVIDER_VENICE.to_string()
-        },
+        generation_provider: PROVIDER_VENICE.to_string(),
         transcription_model,
         generation_model,
         cost_quality: settings.cost_quality.min(100),
@@ -1409,12 +1418,18 @@ fn sanitize_settings(
         video_model: sanitize_video_model(settings.video_model, &defaults.video_model),
         venice_api_key: normalize_api_key_option(settings.venice_api_key),
         local_generation,
+        llm_endpoints,
+        llm_usage: settings.llm_usage,
+        llm_cli_levels: settings.llm_cli_levels,
+        llm_registry_migrated: settings.llm_registry_migrated,
         image_safe_mode,
         image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
         image_safe_mode_set_by_user: settings.image_safe_mode_set_by_user,
         live_transcription: settings.live_transcription,
         profile_overrides: sanitize_profile_overrides(settings.profile_overrides),
-    }
+    };
+    crate::llm::registry::normalize(&mut sanitized);
+    sanitized
 }
 
 fn sanitize_profile_overrides(
@@ -1633,6 +1648,34 @@ fn update_settings_result(
     Ok(ProviderModelSettingsDto::from(&*settings))
 }
 
+/// Applies a registry change atomically: the closure works on a copy, and
+/// only a successful change is saved and published.
+pub(crate) fn update_llm_registry(
+    state: &ProviderSettingsState,
+    update: impl FnOnce(&mut ProviderModelSettings) -> Result<(), AppError>,
+) -> Result<ProviderModelSettings, AppError> {
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
+    let mut candidate = settings.clone();
+    update(&mut candidate)?;
+    save_settings(state, &candidate)?;
+    *settings = candidate.clone();
+    replace_current_settings(candidate.clone());
+    Ok(candidate)
+}
+
+pub(crate) fn settings_snapshot(
+    state: &ProviderSettingsState,
+) -> Result<ProviderModelSettings, AppError> {
+    state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))
+}
+
 fn save_settings(
     state: &ProviderSettingsState,
     settings: &ProviderModelSettings,
@@ -1659,15 +1702,11 @@ fn sanitize_local_generation(settings: LocalGenerationSettings) -> LocalGenerati
     }
 }
 
-fn local_generation_settings_configured(settings: &LocalGenerationSettings) -> bool {
-    !settings.base_url.trim().is_empty() && !settings.model_id.trim().is_empty()
-}
-
-/// Validates a local model base URL. Accepts any http/https URL that has a
-/// host (trailing slashes trimmed). The loopback-only restriction was removed
-/// so LAN endpoints work; the frontend surfaces the "requests leave your
-/// device" warning.
-fn normalize_local_base_url(value: &str) -> Result<String, AppError> {
+/// Validates an OpenAI-compatible endpoint base URL. Accepts any http/https
+/// URL that has a host (trailing slashes trimmed). The loopback-only
+/// restriction was removed so LAN endpoints work; the frontend surfaces the
+/// "requests leave your device" warning.
+pub(crate) fn normalize_local_base_url(value: &str) -> Result<String, AppError> {
     let trimmed = value.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err(AppError::new(
@@ -2222,51 +2261,49 @@ mod tests {
     }
 
     #[test]
-    fn invalid_saved_local_settings_do_not_activate() {
-        // A genuinely unparseable base_url cannot activate local generation, and
-        // the stale local model id must not leak into the remote fallback.
-        let settings = ProviderModelSettings {
-            generation_provider: PROVIDER_LOCAL.to_string(),
-            generation_model: "llama3.1:8b".to_string(),
-            remote_generation_model: "remote-model".to_string(),
-            local_generation: LocalGenerationSettings {
-                base_url: "not a url".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-
+    fn llm_invalid_legacy_local_endpoint_does_not_activate() {
+        // An unparseable legacy base_url cannot activate an endpoint, and the
+        // stale local model id must not leak into the remote fallback.
+        let raw = r#"{
+            "generationProvider": "local",
+            "generationModel": "llama3.1:8b",
+            "remoteGenerationModel": "remote-model",
+            "localGeneration": { "baseUrl": "not a url", "modelId": "llama3.1:8b" }
+        }"#;
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let sanitized = settings_from_json_for_tests(raw, &store).unwrap();
         assert_eq!(sanitized.generation_provider, PROVIDER_VENICE);
-        assert_eq!(sanitized.local_generation.base_url, "");
+        assert!(sanitized.llm_endpoints.is_empty());
         assert_eq!(sanitized.generation_model, "remote-model");
         assert_eq!(sanitized.remote_generation_model, "remote-model");
     }
 
     #[test]
-    fn lan_local_settings_activate() {
-        let settings = ProviderModelSettings {
-            generation_provider: PROVIDER_LOCAL.to_string(),
-            generation_model: "llama3.1:8b".to_string(),
-            remote_generation_model: "remote-model".to_string(),
-            local_generation: LocalGenerationSettings {
-                base_url: "http://192.168.1.5:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: "secret".to_string(),
-            },
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-
+    fn llm_lan_endpoint_selected_for_chat_activates_the_local_route() {
+        let raw = r#"{
+            "generationProvider": "venice",
+            "generationModel": "remote-model",
+            "remoteGenerationModel": "remote-model",
+            "llmRegistryMigrated": true,
+            "llmEndpoints": [{
+                "id": "lan", "name": "LAN", "baseUrl": "http://192.168.1.5:11434/v1/",
+                "modelId": "llama3.1:8b", "hasApiKey": false
+            }],
+            "llmUsage": { "chat": { "kind": "endpoint", "id": "lan" } }
+        }"#;
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let sanitized = settings_from_json_for_tests(raw, &store).unwrap();
         assert_eq!(sanitized.generation_provider, PROVIDER_LOCAL);
         assert_eq!(sanitized.generation_model, "llama3.1:8b");
         assert_eq!(sanitized.remote_generation_model, "remote-model");
         assert_eq!(
-            sanitized.local_generation.base_url,
+            sanitized.llm_endpoints[0].base_url,
             "http://192.168.1.5:11434/v1"
         );
-        assert_eq!(sanitized.local_generation.api_key, "secret");
+        assert_eq!(sanitized.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(sanitized.llm_usage.activity, ProviderRef::None);
+        let dto = ProviderModelSettingsDto::from(&sanitized);
+        assert_eq!(dto.local_generation.model_id, "llama3.1:8b");
     }
 
     #[test]
@@ -2539,141 +2576,55 @@ mod tests {
     }
 
     #[test]
-    fn save_local_generation_settings_persists_without_activating() {
+    fn llm_registry_update_persists_and_rejected_change_leaves_state_untouched() {
         let state = test_state();
-        let updated = save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://192.168.1.5:11434/v1/".to_string(),
-                model_id: "  llama3.1:8b  ".to_string(),
-                api_key: "  secret  ".to_string(),
-            },
-        )
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let saved = update_llm_registry(&state, |settings| {
+            crate::llm::registry::save_endpoint(
+                settings,
+                crate::llm::registry::SaveEndpointRequest {
+                    id: None,
+                    name: "Ollama".to_string(),
+                    base_url: "http://localhost:11434/v1/".to_string(),
+                    model_id: "llama3.1:8b".to_string(),
+                    api_key: None,
+                    clear_api_key: false,
+                },
+                &store,
+            )
+            .map(|_| ())
+        })
         .unwrap();
-
-        // Provider is untouched; endpoint is stored trimmed and normalized.
-        assert_eq!(updated.generation_provider, PROVIDER_VENICE);
+        let id = saved.llm_endpoints[0].id.clone();
+        let on_disk: ProviderModelSettings =
+            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
         assert_eq!(
-            updated.local_generation.base_url,
-            "http://192.168.1.5:11434/v1"
+            on_disk.llm_endpoints[0].base_url,
+            "http://localhost:11434/v1"
         );
-        assert_eq!(updated.local_generation.model_id, "llama3.1:8b");
-        assert_eq!(updated.local_generation.api_key, "secret");
-    }
 
-    #[test]
-    fn save_local_generation_settings_rejects_invalid_url_without_wiping() {
-        let state = test_state();
-        // Seed a valid saved endpoint.
-        save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://localhost:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-        )
-        .unwrap();
-
-        let error = save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "not a url".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-        )
+        let error = update_llm_registry(&state, |settings| {
+            crate::llm::registry::save_endpoint(
+                settings,
+                crate::llm::registry::SaveEndpointRequest {
+                    id: Some(id.clone()),
+                    name: "Ollama".to_string(),
+                    base_url: "not a url".to_string(),
+                    model_id: "llama3.1:8b".to_string(),
+                    api_key: None,
+                    clear_api_key: false,
+                },
+                &store,
+            )
+            .map(|_| ())
+        })
         .unwrap_err();
         assert_eq!(error.code, "local_model_base_url_invalid");
-
-        // The previously saved endpoint is intact, not wiped to "".
         let settings = state.settings.lock().unwrap();
         assert_eq!(
-            settings.local_generation.base_url,
+            settings.llm_endpoints[0].base_url,
             "http://localhost:11434/v1"
         );
-    }
-
-    #[test]
-    fn save_local_generation_settings_blocks_clearing_while_active() {
-        let state = test_state();
-        save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://localhost:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-        )
-        .unwrap();
-        set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: true },
-        )
-        .unwrap();
-
-        let error = save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: String::new(),
-                model_id: String::new(),
-                api_key: String::new(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "local_model_in_use");
-
-        // Endpoint remains configured after the rejected clear.
-        let settings = state.settings.lock().unwrap();
-        assert_eq!(settings.local_generation.model_id, "llama3.1:8b");
-    }
-
-    #[test]
-    fn enable_disable_local_generation_round_trips_without_touching_endpoint() {
-        let state = test_state();
-        save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://localhost:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: "secret".to_string(),
-            },
-        )
-        .unwrap();
-
-        let enabled = set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: true },
-        )
-        .unwrap();
-        assert_eq!(enabled.generation_provider, PROVIDER_LOCAL);
-        assert_eq!(enabled.generation_model, "llama3.1:8b");
-
-        let disabled = set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: false },
-        )
-        .unwrap();
-        assert_eq!(disabled.generation_provider, PROVIDER_VENICE);
-        assert_eq!(disabled.generation_model, DEFAULT_GENERATION_MODEL);
-        // Disabling must NOT touch the stored endpoint.
-        assert_eq!(
-            disabled.local_generation.base_url,
-            "http://localhost:11434/v1"
-        );
-        assert_eq!(disabled.local_generation.model_id, "llama3.1:8b");
-        assert_eq!(disabled.local_generation.api_key, "secret");
-    }
-
-    #[test]
-    fn enable_local_generation_requires_configuration() {
-        let state = test_state();
-        let error = set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: true },
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "local_model_not_configured");
     }
 
     #[test]
