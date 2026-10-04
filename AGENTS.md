@@ -327,7 +327,7 @@ that proves rendering, not the native flow.
 ```json
 {
   "command": {
-    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none pnpm tauri:build -- --bundles app"],
+    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none pnpm tauri:build -- --bundles app --config src-tauri/tauri.macos.conf.json --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'"],
     "cwd": "."
   }
 }
@@ -340,7 +340,9 @@ With Xcode 27, release builds under `MACOSX_DEPLOYMENT_TARGET=14.0` corrupt
 proc-macro dylibs when Cargo strips build dependencies ("mis-aligned LINKEDIT
 string pool", then `can't find crate for zerofrom_derive`);
 `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` avoids it without touching the
-shipped binary.
+shipped binary. The fork has no updater signing key, so the recipe turns off
+updater artifacts (passing the macOS config explicitly, since any `--config`
+disables the script's default one).
 
 <!-- repowise:start -->
 ## Repowise — diagnóstico de código
