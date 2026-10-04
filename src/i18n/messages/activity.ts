@@ -108,7 +108,7 @@ export default defineMessages({
       "Sample text from additional connected displays approximately every 10 seconds.",
     "activity.options.pauseOnProtectedVideo": "Pause on protected video",
     "activity.options.pauseOnProtectedVideoDescription":
-      "Automatically pause capture when FairPlay or protected media is playing.",
+      "Pause capture while a streaming app or site with protected video, like Netflix, is in front.",
     "activity.options.inputEvents": "Input events",
     "activity.options.inputEventsDescription":
       "Record click and keystroke counts using Input monitoring.",
@@ -227,7 +227,7 @@ export default defineMessages({
       "Amostra texto de monitores adicionais conectados a cada 10 segundos aproximadamente.",
     "activity.options.pauseOnProtectedVideo": "Pausar em vídeo protegido",
     "activity.options.pauseOnProtectedVideoDescription":
-      "Pausar a captura automaticamente quando mídia FairPlay ou protegida estiver em reprodução.",
+      "Pausar a captura enquanto um app ou site de streaming com vídeo protegido, como a Netflix, estiver em primeiro plano.",
     "activity.options.inputEvents": "Eventos de entrada",
     "activity.options.inputEventsDescription":
       "Registrar contagens de cliques e teclas usando monitoramento de entrada.",
