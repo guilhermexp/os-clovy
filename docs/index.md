@@ -66,6 +66,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0054](adr/0054-clovy-presentation-retains-june-era-technical-identities.md) - Clovy is the product name while shipped June-era bundle, storage, API, update, and tool identities remain stable
 - [adr/0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md) - supersedes ADR-0054: Clovy becomes canonical through idempotent migration and rollback-safe aliases while immutable OS identities preserve existing installs
 - [adr/0056](adr/0056-interface-language-uses-an-in-repo-typed-catalog.md) - interface language (English, Português (Brasil)) uses an in-repo typed catalog, a localStorage preference independent of the transcription language, and a Tauri event mirrored into the native menus
+- [adr/0057](adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md) - the activity database is a separate SQLCipher file with a Keychain key; SQLCipher is linked app-wide on macOS and the unkeyed main database is unaffected
 
 ## Enforceable rules (spec/)
 
@@ -132,6 +133,7 @@ Per-repo config the engineering skills read before acting (see the
   - [Pipedrive](plugins/pipedrive-prd.md) - [implementation plan](plugins/pipedrive-implementation-plan.md)
   - [Azure Boards](plugins/azure-boards-prd.md) - [implementation plan](plugins/azure-boards-implementation-plan.md)
   - [Canva](plugins/canva-prd.md) - [implementation plan](plugins/canva-implementation-plan.md)
+- [activity-capture.md](activity-capture.md) - activity capture: capture loop and privacy rules, the encrypted `activity.sqlite3` schema, processing cursor, retention, and the store API later slices use
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [clovy-api-prd.md](clovy-api-prd.md) — Clovy API: upstream AI calls + OS Accounts authorize/charge (the canonical service spec)

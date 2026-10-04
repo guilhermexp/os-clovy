@@ -764,6 +764,45 @@ macOS Accessibility.
 _Avoid_: entitlement (that is the code-signing sense), treating one bundle's
 mic grant as covering the other.
 
+### Activity capture
+
+**Activity capture**:
+Opt-in, macOS-only, text-only recording of what the user sees and does,
+stored in the **activity database** (see
+[docs/activity-capture.md](docs/activity-capture.md)). Off by default; never
+stores pixels.
+_Avoid_: screen recording (that is the TCC permission and the meeting feature),
+tracking, monitoring.
+
+**Activity database** (`activity.sqlite3`):
+The SQLCipher-encrypted SQLite file holding activity data, separate from
+`notes.sqlite3`; its key lives only in the Keychain (see
+[ADR-0057](docs/adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md)).
+_Avoid_: "the database" unqualified (that means `notes.sqlite3`).
+
+**Frame**:
+One 2-second sample of the focused window: time, app, window title, browser
+URL, text, and its **text source** (`accessibility` or `ocr`). A **secondary
+frame** is a ~10-second sample of another display's top window; it never
+splits the focused session.
+_Avoid_: screenshot, snapshot (no image is kept).
+
+**Input event**:
+A click, key, app switch, window focus, or clipboard change recorded with only
+time, app, and a count. Clipboard text is the only content kept, truncated and
+redacted.
+_Avoid_: keystroke log, keylogging.
+
+**Pause record**:
+A row stating when capture paused and why (`manual`, `work_hours`, `low_disk`,
+`protected_video`), so the timeline can tell a pause from inactivity.
+_Avoid_: gap (a gap is the timeline's inferred absence of frames).
+
+**Processing cursor**:
+Per-consumer high-water mark (`frames.id`) of activity the timeline has
+processed. Retention deletes only rows at or before it.
+_Avoid_: checkpoint, offset.
+
 ## Flagged ambiguities
 
 - **"proxy"** usually means **Clovy API** (the thing in front of OpenAI /
