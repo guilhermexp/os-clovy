@@ -199,33 +199,6 @@ export default defineMessages({
     "settings.safeMode.on": "Safe mode on: adult content is blurred.",
     "settings.safeMode.off": "Safe mode off: images are not filtered.",
 
-    "settings.localModel.title": "Use local model",
-    "settings.localModel.description":
-      "Route generated notes and agent responses through your own OpenAI-compatible endpoint.",
-    "settings.localModel.aria": "Use local text model",
-    "settings.localModel.endpoint": "Endpoint",
-    "settings.localModel.endpointDescription":
-      "Add the base URL, model ID, and optional API key for your local text model.",
-    "settings.localModel.baseUrl": "Base URL",
-    "settings.localModel.modelId": "Model ID",
-    "settings.localModel.apiKey": "Local API key",
-    "settings.localModel.optional": "Optional",
-    "settings.localModel.remoteWarning":
-      "This endpoint is not on this machine. Requests will leave your device.",
-    "settings.localModel.remoteConfirmInMore":
-      "This endpoint is not on this machine. Requests will leave your device. Confirm in More options to enable it.",
-    "settings.localModel.test": "Test connection",
-    "settings.localModel.save": "Save local model",
-    "settings.localModel.enableAnyway": "Enable anyway",
-    "settings.localModel.saved": "Local model saved.",
-    "settings.localModel.enabled": "Local model enabled.",
-    "settings.localModel.disabled": "Local model disabled.",
-    "settings.localModel.enterFirst": "Enter a local endpoint and model ID first.",
-    "settings.localModel.connected": {
-      one: "Connected. {count} model available.",
-      other: "Connected. {count} models available.",
-    },
-
     "settings.venice.title": "Venice API key",
     "settings.venice.description":
       "Use your own key for Venice models so Clovy credits are not used. Stored locally and sent only for Venice requests. For least privilege, use an inference-only key.",
@@ -585,33 +558,6 @@ export default defineMessages({
     "settings.safeMode.aria": "Desfocar conteúdo adulto em imagens",
     "settings.safeMode.on": "Modo seguro ativado: conteúdo adulto fica desfocado.",
     "settings.safeMode.off": "Modo seguro desativado: as imagens não são filtradas.",
-
-    "settings.localModel.title": "Usar modelo local",
-    "settings.localModel.description":
-      "Encaminhe notas geradas e respostas do agente pelo seu próprio endpoint compatível com OpenAI.",
-    "settings.localModel.aria": "Usar modelo de texto local",
-    "settings.localModel.endpoint": "Endpoint",
-    "settings.localModel.endpointDescription":
-      "Adicione a URL base, o ID do modelo e a chave de API opcional do seu modelo de texto local.",
-    "settings.localModel.baseUrl": "URL base",
-    "settings.localModel.modelId": "ID do modelo",
-    "settings.localModel.apiKey": "Chave de API local",
-    "settings.localModel.optional": "Opcional",
-    "settings.localModel.remoteWarning":
-      "Este endpoint não está nesta máquina. As solicitações vão sair do seu dispositivo.",
-    "settings.localModel.remoteConfirmInMore":
-      "Este endpoint não está nesta máquina. As solicitações vão sair do seu dispositivo. Confirme em Mais opções para ativá-lo.",
-    "settings.localModel.test": "Testar conexão",
-    "settings.localModel.save": "Salvar modelo local",
-    "settings.localModel.enableAnyway": "Ativar mesmo assim",
-    "settings.localModel.saved": "Modelo local salvo.",
-    "settings.localModel.enabled": "Modelo local ativado.",
-    "settings.localModel.disabled": "Modelo local desativado.",
-    "settings.localModel.enterFirst": "Informe primeiro um endpoint local e o ID do modelo.",
-    "settings.localModel.connected": {
-      one: "Conectado. {count} modelo disponível.",
-      other: "Conectado. {count} modelos disponíveis.",
-    },
 
     "settings.venice.title": "Chave de API da Venice",
     "settings.venice.description":

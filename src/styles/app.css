@@ -14143,16 +14143,6 @@ button.agent-user-attachment:hover {
   }
 }
 
-.settings-row-stack {
-  align-items: start;
-}
-
-.settings-local-model-fields {
-  display: grid;
-  width: min(420px, 46vw);
-  gap: var(--sp-3);
-}
-
 .settings-field {
   display: grid;
   gap: var(--sp-1);
@@ -14196,36 +14186,6 @@ button.agent-user-attachment:hover {
   color: color-mix(in oklch, var(--warm-strong) 82%, var(--foreground));
   font-size: var(--fs-sm);
   line-height: 1.4;
-}
-
-.settings-local-model-status {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.4;
-}
-
-.settings-local-model-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-}
-
-.settings-local-model-confirm {
-  display: grid;
-  gap: var(--sp-2);
-  padding: var(--sp-3);
-  border: 1px solid color-mix(in oklch, var(--warm-strong) 40%, var(--border-subtle));
-  border-radius: var(--r-md);
-  background: color-mix(in oklch, var(--warm-strong) 10%, transparent);
-}
-
-.settings-local-model-confirm .settings-row-error {
-  color: color-mix(in oklch, var(--warm-strong) 82%, var(--foreground));
-}
-
-.settings-local-model-confirm .btn {
-  justify-self: start;
 }
 
 .settings-row-mic-test {
@@ -14510,9 +14470,7 @@ button.agent-user-attachment:hover {
 }
 
 .settings-model-row .settings-row-description,
-.settings-row-venice-key .settings-row-description,
-.settings-local-model-toggle-row .settings-row-description,
-.settings-local-model-fields-row .settings-row-description {
+.settings-row-venice-key .settings-row-description {
   display: block;
   overflow: visible;
   white-space: normal;

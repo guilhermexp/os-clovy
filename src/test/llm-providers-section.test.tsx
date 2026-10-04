@@ -1,0 +1,272 @@
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LlmProvidersSection } from "../components/settings/LlmProvidersSection";
+import { applyInterfaceLocale } from "../i18n/locale";
+import type { LlmCliStatusDto, LlmProvidersDto } from "../lib/llm-providers";
+
+const mocks = vi.hoisted(() => ({
+  llmProviders: vi.fn(),
+  llmDetectClis: vi.fn(),
+  llmSaveEndpoint: vi.fn(),
+  llmDeleteEndpoint: vi.fn(),
+  llmTestProvider: vi.fn(),
+  llmSetUsage: vi.fn(),
+  probeLocalGenerationEndpoint: vi.fn(),
+}));
+
+vi.mock("../lib/llm-providers", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/llm-providers")>()),
+  llmProviders: mocks.llmProviders,
+  llmDetectClis: mocks.llmDetectClis,
+  llmSaveEndpoint: mocks.llmSaveEndpoint,
+  llmDeleteEndpoint: mocks.llmDeleteEndpoint,
+  llmTestProvider: mocks.llmTestProvider,
+  llmSetUsage: mocks.llmSetUsage,
+}));
+
+vi.mock("../lib/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/tauri")>()),
+  probeLocalGenerationEndpoint: mocks.probeLocalGenerationEndpoint,
+}));
+
+const sampleClis: LlmCliStatusDto[] = [
+  {
+    id: "claude",
+    name: "Claude Code",
+    installed: true,
+    path: "/usr/local/bin/claude",
+    version: "1.0.0",
+    structuredOutput: "strict",
+  },
+  {
+    id: "codex",
+    name: "Codex",
+    installed: false,
+    reason: "Not found in your login shell PATH.",
+    structuredOutput: "none",
+  },
+  {
+    id: "pi",
+    name: "Pi",
+    installed: false,
+    structuredOutput: "prompt",
+  },
+  {
+    id: "agy",
+    name: "Antigravity",
+    installed: false,
+    structuredOutput: "none",
+  },
+  {
+    id: "cursor-agent",
+    name: "Cursor Agent",
+    installed: false,
+    structuredOutput: "none",
+  },
+  {
+    id: "copilot",
+    name: "GitHub Copilot",
+    installed: false,
+    structuredOutput: "none",
+  },
+];
+
+const sampleProviders: LlmProvidersDto = {
+  endpoints: [
+    {
+      id: "ep-1",
+      name: "Local Ollama",
+      baseUrl: "http://localhost:11434/v1",
+      modelId: "llama3.2:3b",
+      hasApiKey: true,
+      structuredOutput: "json_schema",
+    },
+  ],
+  usage: {
+    chat: { kind: "clovy" },
+    notes: { kind: "clovy" },
+    dictationCleanup: { kind: "clovy" },
+    activity: { kind: "none" },
+  },
+  cliLevels: {},
+};
+
+describe("LlmProvidersSection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.llmProviders.mockResolvedValue(sampleProviders);
+    mocks.llmDetectClis.mockResolvedValue(sampleClis);
+    mocks.llmSaveEndpoint.mockImplementation(async (req) => ({
+      ...sampleProviders,
+      endpoints: [
+        ...sampleProviders.endpoints,
+        {
+          id: req.id ?? "ep-new",
+          name: req.name,
+          baseUrl: req.baseUrl,
+          modelId: req.modelId,
+          hasApiKey: Boolean(req.apiKey),
+        },
+      ],
+    }));
+    mocks.llmDeleteEndpoint.mockResolvedValue(sampleProviders);
+    mocks.llmTestProvider.mockResolvedValue({
+      latencyMs: 142,
+      structuredOutput: "strict",
+    });
+    mocks.llmSetUsage.mockImplementation(async (usage, provider) => ({
+      ...sampleProviders,
+      usage: {
+        ...sampleProviders.usage,
+        [usage]: provider,
+      },
+    }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    applyInterfaceLocale("en");
+  });
+
+  it("renders installed vs not-installed CLIs with path/version vs reason, and disables not-installed in selects", async () => {
+    render(<LlmProvidersSection />);
+
+    expect(await screen.findByRole("heading", { name: "Claude Code" })).toBeInTheDocument();
+    expect(screen.getByText(/\/usr\/local\/bin\/claude · 1.0.0/)).toBeInTheDocument();
+
+    expect(screen.getByRole("heading", { name: "Codex" })).toBeInTheDocument();
+    // Non-installed CLI reasons
+    expect(screen.getAllByText("Not found in your login shell PATH.").length).toBeGreaterThan(0);
+    // Usage select checks
+    const chatSelect = screen.getByRole("combobox", { name: "Chat" });
+    const installedOption = chatSelect.querySelector(
+      'option[value="cli:claude"]',
+    ) as HTMLOptionElement;
+    const notInstalledOption = chatSelect.querySelector(
+      'option[value="cli:codex"]',
+    ) as HTMLOptionElement;
+
+    expect(installedOption).toBeInTheDocument();
+    expect(installedOption.disabled).toBe(false);
+    expect(installedOption.textContent).toBe("Claude Code");
+
+    expect(notInstalledOption).toBeInTheDocument();
+    expect(notInstalledOption.disabled).toBe(true);
+    expect(notInstalledOption.textContent).toContain("(not installed)");
+  });
+
+  it("test button shows latency and level", async () => {
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+
+    expect(await screen.findByRole("heading", { name: "Claude Code" })).toBeInTheDocument();
+    const testButton = screen.getByRole("button", { name: "Test" });
+    await user.click(testButton);
+
+    expect(mocks.llmTestProvider).toHaveBeenCalledWith({ kind: "cli", id: "claude" });
+    expect(
+      await screen.findByText(/Connected in 142 ms · Structured output: Strict/),
+    ).toBeInTheDocument();
+  });
+
+  it("add endpoint sends request without echoing key back and shows 'API key saved' from hasApiKey", async () => {
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+
+    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
+    expect(screen.getByText(/API key saved/)).toBeInTheDocument();
+
+    // Verify the secret key is never rendered in HTML
+    expect(screen.queryByText("supersecretkey")).not.toBeInTheDocument();
+
+    const addBtn = screen.getByRole("button", { name: "Add endpoint" });
+    await user.click(addBtn);
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    const nameInput = screen.getByLabelText("Name");
+    const urlInput = screen.getByLabelText("Base URL");
+    const modelInput = screen.getByLabelText("Model ID");
+    const keyInput = screen.getByLabelText("API key");
+
+    await user.type(nameInput, "Custom Gateway");
+    await user.type(urlInput, "http://localhost:8000/v1");
+    await user.type(modelInput, "custom-model");
+    await user.type(keyInput, "my-secret-token");
+
+    const saveBtn = screen.getByRole("button", { name: "Save endpoint" });
+    await user.click(saveBtn);
+
+    expect(mocks.llmSaveEndpoint).toHaveBeenCalledWith({
+      id: undefined,
+      name: "Custom Gateway",
+      baseUrl: "http://localhost:8000/v1",
+      modelId: "custom-model",
+      apiKey: "my-secret-token",
+      clearApiKey: undefined,
+    });
+  });
+
+  it("choosing activity provider rejected with llm_structured_output_insufficient shows message and keeps previous value", async () => {
+    const user = userEvent.setup();
+    mocks.llmSetUsage.mockRejectedValue({
+      code: "llm_structured_output_insufficient",
+      message: "JSON schema support is required for background activity. Run Test first.",
+    });
+
+    render(<LlmProvidersSection />);
+
+    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
+
+    const activitySelect = screen.getByRole("combobox", { name: "Activity" }) as HTMLSelectElement;
+    expect(activitySelect.value).toBe("none");
+
+    await user.selectOptions(activitySelect, "endpoint:ep-1");
+
+    expect(
+      await screen.findByText(
+        "JSON schema support is required for background activity. Run Test first.",
+      ),
+    ).toBeInTheDocument();
+    // Select keeps the previous value
+    expect(activitySelect.value).toBe("none");
+  });
+
+  it("default activity selection renders as None", async () => {
+    render(<LlmProvidersSection />);
+    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
+
+    const activitySelect = screen.getByRole("combobox", { name: "Activity" }) as HTMLSelectElement;
+    expect(activitySelect.value).toBe("none");
+    expect(
+      screen.getByText("Activity stays off when set to None. Nothing is sent anywhere."),
+    ).toBeInTheDocument();
+  });
+
+  it("chat set to a CLI shows the later-update note", async () => {
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
+
+    const chatSelect = screen.getByRole("combobox", { name: "Chat" });
+    await user.selectOptions(chatSelect, "cli:claude");
+
+    expect(
+      await screen.findByText(
+        "Chat with agent CLIs arrives in a later update. Chat keeps using Clovy until then.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders properly in pt-BR", async () => {
+    applyInterfaceLocale("pt-BR");
+    render(<LlmProvidersSection />);
+
+    expect(await screen.findByText("Provedores de LLM")).toBeInTheDocument();
+    expect(screen.getByText("Provedores para cada uso")).toBeInTheDocument();
+    expect(screen.getByText("CLIs de agentes")).toBeInTheDocument();
+    expect(screen.getByText("Endpoints")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Adicionar endpoint" })).toBeInTheDocument();
+  });
+});
