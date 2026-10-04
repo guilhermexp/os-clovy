@@ -53,6 +53,9 @@ export function gapLabelKey(
  */
 export function formatDuration(durationMs: number, locale: InterfaceLocale = "en"): string {
   const isPt = locale === "pt-BR";
+  if (durationMs <= 0) {
+    return isPt ? "0 min" : "0m";
+  }
   if (durationMs < 60_000) {
     return isPt ? "< 1 min" : "< 1m";
   }

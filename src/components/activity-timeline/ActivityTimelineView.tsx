@@ -101,16 +101,20 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
     };
   }, [selectedDate, isToday, t]);
 
+  // A session belongs to one day: changing the day by hand closes its detail.
   const handlePrevDay = () => {
+    setSelectedSessionId(null);
     setSelectedDate((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() - 1));
   };
 
   const handleNextDay = () => {
     if (isToday) return;
+    setSelectedSessionId(null);
     setSelectedDate((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() + 1));
   };
 
   const handleJumpToday = () => {
+    setSelectedSessionId(null);
     setSelectedDate(new Date());
   };
 

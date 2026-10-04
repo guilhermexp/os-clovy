@@ -309,6 +309,8 @@ describe("ActivityTimelineView", () => {
     });
 
     expect(await screen.findByText("Text excerpt")).toBeInTheDocument();
+    // The results popover gets out of the way of the opened detail.
+    expect(screen.queryByText("export function ActivityTimelineView…")).not.toBeInTheDocument();
   });
 
   it("renders pt-BR labels when Portuguese is selected", async () => {

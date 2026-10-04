@@ -161,6 +161,8 @@ export default defineMessages({
     "activity.search.noResults": 'No results found for "{query}"',
     "activity.search.searching": "Searching\u2026",
     "activity.search.count": { one: "{count} result", other: "{count} results" },
+    "activity.search.failed": "Search failed",
+    "activity.search.clear": "Clear search",
 
     "activity.detail.windows": "Windows",
     "activity.detail.excerpt": "Text excerpt",
@@ -341,6 +343,8 @@ export default defineMessages({
     "activity.search.noResults": 'Nenhum resultado encontrado para "{query}"',
     "activity.search.searching": "Buscando\u2026",
     "activity.search.count": { one: "{count} resultado", other: "{count} resultados" },
+    "activity.search.failed": "A busca falhou",
+    "activity.search.clear": "Limpar busca",
 
     "activity.detail.windows": "Janelas",
     "activity.detail.excerpt": "Trecho de texto",

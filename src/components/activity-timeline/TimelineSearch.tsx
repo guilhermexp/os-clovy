@@ -27,6 +27,8 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The results popover closes once a result is opened and reopens on input.
+  const [open, setOpen] = useState(true);
 
   const resultsRef = useRef<HTMLDivElement>(null);
   const scrollFade = useScrollFade(resultsRef);
@@ -79,7 +81,7 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
           const msg =
             err && typeof err === "object" && "message" in err && typeof err.message === "string"
               ? err.message
-              : "Search failed";
+              : t("activity.search.failed");
           setError(msg);
           setLoading(false);
           setHasSearched(true);
@@ -90,7 +92,7 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
       active = false;
       clearTimeout(timer);
     };
-  }, [query, period]);
+  }, [query, period, t]);
 
   return (
     <div className="timeline-search-bar">
@@ -100,7 +102,11 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
           type="search"
           className="timeline-search-input"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
           placeholder={t("activity.search.placeholder")}
           aria-label={t("activity.search.placeholder")}
         />
@@ -109,7 +115,7 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
             type="button"
             className="timeline-search-clear-btn"
             onClick={() => setQuery("")}
-            aria-label="Clear search"
+            aria-label={t("activity.search.clear")}
           >
             <IconCrossSmall size={14} />
           </button>
@@ -156,7 +162,7 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
       </div>
 
       {/* Floating or embedded Search Results Dropdown when query is non-empty */}
-      {query.trim().length > 0 ? (
+      {open && query.trim().length > 0 ? (
         <div
           ref={resultsRef}
           className="timeline-search-results-popover scroll-fade-mask"
@@ -192,7 +198,10 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
                   key={`search-res-${res.sessionId}-${res.seenAt}`}
                   type="button"
                   className="timeline-search-result-item"
-                  onClick={() => onSelectResult(res)}
+                  onClick={() => {
+                    setOpen(false);
+                    onSelectResult(res);
+                  }}
                 >
                   <div className="timeline-search-result-header">
                     <span className="timeline-search-result-app">{res.appName}</span>
