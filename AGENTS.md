@@ -327,7 +327,7 @@ that proves rendering, not the native flow.
 ```json
 {
   "command": {
-    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" pnpm tauri:build -- --bundles app"],
+    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none pnpm tauri:build -- --bundles app"],
     "cwd": "."
   }
 }
@@ -336,6 +336,11 @@ that proves rendering, not the native flow.
 The agent sidecar is packaged as a Node SEA, which needs an official Node 24
 binary carrying `NODE_SEA_FUSE_*`; Homebrew's node lacks it ("Could not find
 the sentinel"). This machine keeps one at `~/.local/share/node-official/node24`.
+With Xcode 27, release builds under `MACOSX_DEPLOYMENT_TARGET=14.0` corrupt
+proc-macro dylibs when Cargo strips build dependencies ("mis-aligned LINKEDIT
+string pool", then `can't find crate for zerofrom_derive`);
+`CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` avoids it without touching the
+shipped binary.
 
 <!-- repowise:start -->
 ## Repowise — diagnóstico de código
