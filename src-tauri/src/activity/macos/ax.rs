@@ -106,6 +106,10 @@ pub fn has_private_window_marker(title: &str) -> bool {
         "aba privada",
         "guia privada",
         "anônima",
+        // Chrome pt-BR incognito window titles end in "(Modo anônimo)"
+        // (observed live on Chrome with a pt-BR UI).
+        "anônimo",
+        "anonimo",
         "anonima",
         "janela anônima",
         "janela anonima",
@@ -628,6 +632,9 @@ mod tests {
         // Portuguese (pt-BR)
         assert!(has_private_window_marker(
             "Nova guia - Google Chrome (Anônima)"
+        ));
+        assert!(has_private_window_marker(
+            "Wikipedia - Google Chrome (Modo anônimo)"
         ));
         assert!(has_private_window_marker("Nova janela anônima"));
         assert!(has_private_window_marker("Safari — Navegação Privada"));

@@ -10,12 +10,30 @@ use super::settings::{parse_clock, ActivitySettings, WorkHours};
 /// Bundle id prefixes of Clovy itself (release, dev, and June-era builds).
 const CLOVY_BUNDLE_PREFIXES: &[&str] = &["co.opensoftware.june", "co.opensoftware.clovy"];
 
+/// Bundle id prefixes of browsers whose tab URL the platform reads.
+const BROWSER_BUNDLE_PREFIXES: &[&str] = &[
+    "com.google.chrome",
+    "com.apple.safari",
+    "com.apple.safaritechnologypreview",
+    "com.brave.browser",
+    "com.microsoft.edgemac",
+    "company.thebrowser.browser",
+    "com.operasoftware.opera",
+    "com.vivaldi.vivaldi",
+    "org.chromium.chromium",
+    "org.mozilla.firefox",
+    "net.imput.helium",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkipReason {
     ClovyWindow,
     IgnoredApp,
     IgnoredDomain,
     PrivateWindow,
+    /// A browser window whose tab URL is not known yet (accessibility still
+    /// starting up): with ignored domains configured, it cannot be cleared.
+    UnknownBrowserUrl,
 }
 
 /// Why `window` must not be captured, or `None` when it may be.
@@ -44,7 +62,22 @@ pub fn skip_reason(
     {
         return Some(SkipReason::IgnoredDomain);
     }
+    if window.browser_url.is_none()
+        && !settings.ignored_domains.is_empty()
+        && is_browser(window.bundle_id.as_deref())
+    {
+        return Some(SkipReason::UnknownBrowserUrl);
+    }
     None
+}
+
+pub fn is_browser(bundle_id: Option<&str>) -> bool {
+    bundle_id.is_some_and(|bundle| {
+        let bundle = bundle.to_ascii_lowercase();
+        BROWSER_BUNDLE_PREFIXES
+            .iter()
+            .any(|prefix| bundle.starts_with(prefix))
+    })
 }
 
 pub fn is_clovy_window(window: &WindowDescriptor, own_pid: i32) -> bool {
@@ -237,9 +270,31 @@ mod tests {
             Some(SkipReason::IgnoredApp)
         );
         assert_eq!(
-            skip_reason(&window("Slack Helper", None), &settings, 1),
+            skip_reason(
+                &window("Slack Helper", Some("https://example.com")),
+                &settings,
+                1
+            ),
             None
         );
+    }
+
+    #[test]
+    fn browser_without_a_known_url_is_skipped_only_when_domains_are_ignored() {
+        let chrome_without_url = window("Google Chrome", None);
+        assert_eq!(
+            skip_reason(&chrome_without_url, &settings(), 1),
+            Some(SkipReason::UnknownBrowserUrl)
+        );
+        assert_eq!(
+            skip_reason(&chrome_without_url, &ActivitySettings::default(), 1),
+            None
+        );
+        let editor = WindowDescriptor {
+            bundle_id: Some("dev.zed.Zed".into()),
+            ..window("Zed", None)
+        };
+        assert_eq!(skip_reason(&editor, &settings(), 1), None);
     }
 
     #[test]

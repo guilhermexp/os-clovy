@@ -57,9 +57,16 @@ below) and mirrored to the menu bar.
 - **Exclusions** (`filter::skip_reason`): Clovy's own windows (own pid or a
   `co.opensoftware.june*`/`co.opensoftware.clovy*` bundle id), ignored apps
   (exact, case-insensitive name or bundle id), private/incognito windows (no
-  OCR fallback either), and URLs whose host is an ignored domain or one of its
-  subdomains. An excluded window yields no text read, no frame, and the tick's
-  input and clipboard are discarded.
+  OCR fallback either), URLs whose host is an ignored domain or one of its
+  subdomains, and, while any domain is ignored, browser windows whose tab URL
+  is not known yet (Chromium builds its accessibility tree a moment after
+  Clovy first asks). An excluded window has its title and URL read to decide,
+  but no window text is extracted, no frame is stored, and the tick's input
+  and clipboard are discarded.
+- **Private windows** are recognized by title markers (Chrome "Incognito" /
+  pt-BR "Modo anônimo", Safari "Private Browsing", Edge "InPrivate", and
+  es/fr/de variants) or by an incognito/private badge in the first levels of
+  the window's accessibility tree. False positives only drop frames.
 - **Protected video** (setting, on by default): a known DRM streaming app or
   site focused pauses capture with reason `protected_video`; such windows on
   secondary displays are skipped.
