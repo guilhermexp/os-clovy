@@ -95,7 +95,7 @@ impl ActivityShared {
     }
 
     pub fn set_settings(&self, settings: ActivitySettings) {
-        let enabling = settings.enabled && !lock(&self.settings).enabled;
+        let enabling = settings.needs_store() && !lock(&self.settings).needs_store();
         *lock(&self.settings) = settings;
         if enabling {
             lock(&self.slot).needs_open = true;
@@ -257,7 +257,7 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
         let permissions = self.platform.permissions();
         let permissions_changed = self.shared.set_permissions(permissions);
 
-        let store_status = if settings.enabled {
+        let store_status = if settings.needs_store() {
             self.ensure_store(now, tick).await
         } else {
             StoreStatus::Ready

@@ -257,6 +257,7 @@ pub struct DebugExport {
     pub secondary_frames: usize,
     pub input_events: usize,
     pub pauses: usize,
+    pub coding_agent_blocks: usize,
 }
 
 struct ActivityMigration {
@@ -267,7 +268,8 @@ struct ActivityMigration {
 
 /// Append-only, like the main catalog: never edit or reorder an entry; add a
 /// new version instead.
-const MIGRATIONS: &[ActivityMigration] = &[ActivityMigration {
+const MIGRATIONS: &[ActivityMigration] = &[
+    ActivityMigration {
     version: 1,
     name: "activity_capture",
     statements: &[
@@ -333,8 +335,47 @@ const MIGRATIONS: &[ActivityMigration] = &[ActivityMigration {
             last_frame_at TEXT,
             updated_at TEXT NOT NULL
         )",
-    ],
-}];
+        ],
+    },
+    // Coding-agent blocks (`crate::coding_agents`): one row per block of a
+    // session read from a local agent's transcript, keyed by its start.
+    ActivityMigration {
+        version: 2,
+        name: "coding_agent_blocks",
+        statements: &[
+            "CREATE TABLE coding_agent_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL CHECK (source IN ('claude_code', 'codex', 'copilot_cli', 'copilot_vscode', 'cursor', 'cursor_cli', 'antigravity')),
+                session_id TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                cwd TEXT,
+                project TEXT,
+                title TEXT,
+                first_prompt TEXT,
+                prompt_count INTEGER NOT NULL DEFAULT 0,
+                reply_count INTEGER NOT NULL DEFAULT 0,
+                active_seconds INTEGER NOT NULL DEFAULT 0,
+                transcript TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('live', 'sealed', 'summarized')),
+                sealed_at TEXT,
+                summary TEXT,
+                summary_source TEXT,
+                summarized_at TEXT,
+                summary_attempts INTEGER NOT NULL DEFAULT 0,
+                summary_error TEXT,
+                next_attempt_at TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE (source, session_id, started_at),
+                CHECK (state = 'live' OR sealed_at IS NOT NULL),
+                CHECK (state <> 'summarized' OR summary IS NOT NULL)
+            )",
+            "CREATE INDEX idx_coding_agent_blocks_started_at ON coding_agent_blocks(started_at)",
+            "CREATE INDEX idx_coding_agent_blocks_ended_at ON coding_agent_blocks(ended_at)",
+            "CREATE INDEX idx_coding_agent_blocks_state ON coding_agent_blocks(state)",
+        ],
+    },
+];
 
 pub fn timestamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Micros, true)
@@ -459,6 +500,12 @@ impl ActivityStore {
 
     pub async fn close(&self) {
         self.pool.close().await;
+    }
+
+    /// For the slices that keep their own tables in this database
+    /// (`crate::coding_agents::store`).
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub async fn insert_frame(&self, frame: &NewFrame) -> Result<i64, StoreError> {
@@ -776,6 +823,7 @@ impl ActivityStore {
         let secondary_frames = self.secondary_frames_between(epoch, far).await?;
         let input_events = self.input_events_between(epoch, far).await?;
         let pauses = self.pauses_between(epoch, far).await?;
+        let coding_agent_blocks = self.coding_agent_blocks_between(epoch, far).await?;
         let cursor = self.processing_cursor(TIMELINE_CONSUMER).await?;
         let schema_version: i64 = query("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
             .fetch_one(&self.pool)
@@ -791,6 +839,7 @@ impl ActivityStore {
             "secondaryFrames": secondary_frames,
             "inputEvents": input_events,
             "pauses": pauses,
+            "codingAgentBlocks": coding_agent_blocks,
         });
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!(
@@ -811,6 +860,7 @@ impl ActivityStore {
             secondary_frames: secondary_frames.len(),
             input_events: input_events.len(),
             pauses: pauses.len(),
+            coding_agent_blocks: coding_agent_blocks.len(),
         })
     }
 

@@ -9,6 +9,8 @@
 //! - [`generate_for_activity`]: background activity calls; refuses when the
 //!   activity provider is "none" (nothing leaves the machine), requires
 //!   `json_schema` support, and runs one call at a time.
+//! - [`generate_on_cli_for_activity`]: background call on a named CLI
+//!   (coding-agent summaries), under the same one-at-a-time semaphore.
 //! - [`provider_for`]: the provider selected for a use.
 //!
 //! See `docs/llm-providers.md` for the full contract.
@@ -205,6 +207,20 @@ pub async fn generate_for_activity(request: GenerateRequest) -> Result<GenerateO
         async move { generate_with_registry(&registry, &provider, request).await }
     })
     .await
+}
+
+/// Background generation on a specific CLI regardless of the activity
+/// selection (a coding-agent block summarized by the agent's own CLI). Shares
+/// the activity semaphore, so it never runs alongside another activity call.
+pub async fn generate_on_cli_for_activity(
+    kind: CliKind,
+    request: GenerateRequest,
+) -> Result<GenerateOutput, LlmError> {
+    let _permit = ACTIVITY_PERMIT
+        .acquire()
+        .await
+        .map_err(|_| LlmError::ActivityProviderMissing)?;
+    generate_with_registry(&registry(), &ProviderRef::Cli { id: kind }, request).await
 }
 
 async fn run_activity<F, Fut>(

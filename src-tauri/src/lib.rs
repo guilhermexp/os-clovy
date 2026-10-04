@@ -11,6 +11,7 @@ pub mod browser;
 mod browser_broker;
 pub mod claude_projects;
 pub mod clovy_api;
+pub mod coding_agents;
 pub mod commands;
 pub mod companion;
 pub mod computer_use;
@@ -450,6 +451,8 @@ pub fn run() {
             activity::activity_request_permission,
             activity::activity_recreate_database,
             activity::activity_debug_export,
+            coding_agents::coding_agents_status,
+            coding_agents::coding_agents_blocks,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
@@ -471,6 +474,8 @@ pub fn run() {
             // After the tray exists: the capture thread publishes its state
             // to the menu bar from its first tick.
             activity::setup(app);
+            // Shares the activity database and settings.
+            coding_agents::setup(app);
             setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
             providers::setup(app);
