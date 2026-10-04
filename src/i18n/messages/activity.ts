@@ -119,6 +119,65 @@ export default defineMessages({
     "activity.debug.exportButton": "Export diagnostic data",
     "activity.debug.exportResult":
       "Exported to {path} ({frames} frames, {secondaryFrames} secondary frames, {inputEvents} input events, {pauses} pauses)",
+
+    // Activity timeline & today view
+    "activity.category.coding": "Coding",
+    "activity.category.codeReview": "Code review",
+    "activity.category.meeting": "Meeting",
+    "activity.category.communication": "Communication",
+    "activity.category.design": "Design",
+    "activity.category.documentation": "Documentation",
+    "activity.category.planning": "Planning",
+    "activity.category.deploymentDevops": "DevOps",
+    "activity.category.research": "Research",
+    "activity.category.idlePersonal": "Personal",
+
+    "activity.gap.idle": "Idle",
+    "activity.gap.sleep": "System sleep",
+    "activity.gap.pausedManual": "Paused (manual)",
+    "activity.gap.pausedWorkHours": "Paused (outside work hours)",
+    "activity.gap.pausedLowDisk": "Paused (low disk space)",
+    "activity.gap.pausedProtectedVideo": "Paused (protected video)",
+
+    "activity.timeline.title": "Today",
+    "activity.timeline.prevDay": "Previous day",
+    "activity.timeline.nextDay": "Next day",
+    "activity.timeline.jumpToday": "Today",
+    "activity.timeline.live": "Live",
+    "activity.timeline.emptyDay": "No activity recorded for this day.",
+    "activity.timeline.capturePausedHint": "Activity capture is currently off.",
+
+    "activity.stats.focused": "Focused",
+    "activity.stats.idle": "Idle",
+    "activity.stats.away": "Away",
+    "activity.stats.topApps": "Top apps",
+    "activity.stats.categories": "Categories",
+
+    "activity.search.placeholder": "Search activity, apps, and window titles",
+    "activity.search.today": "Today",
+    "activity.search.last7Days": "Last 7 days",
+    "activity.search.last30Days": "Last 30 days",
+    "activity.search.all": "All",
+    "activity.search.noResults": 'No results found for "{query}"',
+    "activity.search.searching": "Searching...",
+    "activity.search.count": "{count} results",
+
+    "activity.detail.windows": "Windows",
+    "activity.detail.excerpt": "Text excerpt",
+    "activity.detail.close": "Close details",
+    "activity.detail.openInTimeline": "Open in timeline",
+    "activity.detail.frameCount": "{count} frames",
+    "activity.detail.timeRange": "{start} - {end}",
+
+    "activity.emptyState.title": "Activity timeline",
+    "activity.emptyState.description":
+      "Text-only activity capture records window titles and visible text into an encrypted database stored only on this Mac. Nothing leaves this Mac, and no screenshots are saved.",
+    "activity.emptyState.turnOn": "Turn on in Settings",
+    "activity.state.keyMissingNotice":
+      "Encryption key is missing from Keychain. Recreate the database in Settings to resume capture.",
+    "activity.state.errorNotice": "Could not load timeline: {message}",
+    "activity.state.openSettings": "Open Settings",
+    "activity.lanes.sessions": "Activity",
   },
   "pt-BR": {
     "activity.tab.label": "Atividade",
@@ -239,5 +298,64 @@ export default defineMessages({
     "activity.debug.exportButton": "Exportar dados de diagnóstico",
     "activity.debug.exportResult":
       "Exportado para {path} ({frames} quadros, {secondaryFrames} quadros secundários, {inputEvents} eventos de entrada, {pauses} pausas)",
+
+    // Activity timeline & today view
+    "activity.category.coding": "Programação",
+    "activity.category.codeReview": "Revisão de código",
+    "activity.category.meeting": "Reunião",
+    "activity.category.communication": "Comunicação",
+    "activity.category.design": "Design",
+    "activity.category.documentation": "Documentação",
+    "activity.category.planning": "Planejamento",
+    "activity.category.deploymentDevops": "DevOps",
+    "activity.category.research": "Pesquisa",
+    "activity.category.idlePersonal": "Pessoal",
+
+    "activity.gap.idle": "Inativo",
+    "activity.gap.sleep": "Repouso do sistema",
+    "activity.gap.pausedManual": "Pausado (manual)",
+    "activity.gap.pausedWorkHours": "Pausado (fora do expediente)",
+    "activity.gap.pausedLowDisk": "Pausado (pouco espaço em disco)",
+    "activity.gap.pausedProtectedVideo": "Pausado (vídeo protegido)",
+
+    "activity.timeline.title": "Hoje",
+    "activity.timeline.prevDay": "Dia anterior",
+    "activity.timeline.nextDay": "Próximo dia",
+    "activity.timeline.jumpToday": "Hoje",
+    "activity.timeline.live": "Ao vivo",
+    "activity.timeline.emptyDay": "Nenhuma atividade registrada para este dia.",
+    "activity.timeline.capturePausedHint": "A captura de atividade está desativada no momento.",
+
+    "activity.stats.focused": "Focado",
+    "activity.stats.idle": "Inativo",
+    "activity.stats.away": "Ausente",
+    "activity.stats.topApps": "Principais apps",
+    "activity.stats.categories": "Categorias",
+
+    "activity.search.placeholder": "Buscar atividade, apps e títulos de janela",
+    "activity.search.today": "Hoje",
+    "activity.search.last7Days": "Últimos 7 dias",
+    "activity.search.last30Days": "Últimos 30 dias",
+    "activity.search.all": "Tudo",
+    "activity.search.noResults": 'Nenhum resultado encontrado para "{query}"',
+    "activity.search.searching": "Buscando...",
+    "activity.search.count": "{count} resultados",
+
+    "activity.detail.windows": "Janelas",
+    "activity.detail.excerpt": "Trecho de texto",
+    "activity.detail.close": "Fechar detalhes",
+    "activity.detail.openInTimeline": "Abrir na linha do tempo",
+    "activity.detail.frameCount": "{count} quadros",
+    "activity.detail.timeRange": "{start} - {end}",
+
+    "activity.emptyState.title": "Linha do tempo de atividade",
+    "activity.emptyState.description":
+      "A captura apenas de texto grava títulos de janelas e texto visível em um banco de dados criptografado armazenado apenas neste Mac. Nada sai deste Mac e nenhuma captura de tela é salva.",
+    "activity.emptyState.turnOn": "Ativar nas Configurações",
+    "activity.state.keyMissingNotice":
+      "A chave de criptografia está ausente do Keychain. Recrie o banco nas Configurações para retomar a captura.",
+    "activity.state.errorNotice": "Não foi possível carregar a linha do tempo: {message}",
+    "activity.state.openSettings": "Abrir Configurações",
+    "activity.lanes.sessions": "Atividade",
   },
 });
