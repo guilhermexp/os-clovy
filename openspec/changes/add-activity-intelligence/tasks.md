@@ -6,18 +6,18 @@
 - [x] 1.2 Detecção dos seis CLIs via PATH do shell de login, preservando o ambiente do perfil, com caminho e versão; verificado por teste com executáveis falsos em diretório temporário.
 - [x] 1.3 Registro de endpoints OpenAI-compatíveis nomeados com segredo no Keychain e migração do `localGeneration` existente; verificado por testes de carga de settings legado e de DTO sem segredo.
 - [x] 1.4 Teste de conexão e probe do nível de saída estruturada por provedor; verificado por integração com CLI falso e servidor HTTP falso.
-- [ ] 1.5 Seleção por uso (chat, notas, limpeza de ditado, atividade; atividade padrão "nenhum") ligada às rotas existentes de notas, ditado e agente; verificado por testes de roteamento e nota gerada por CLI falso.
+- [x] 1.5 Seleção por uso (chat, notas, limpeza de ditado, atividade; atividade padrão "nenhum") ligada às rotas existentes de notas, ditado e agente; verificado por testes de roteamento e nota gerada por CLI falso.
 - [x] 1.6 UI de provedores na aba Modelos (lista, instalado/não instalado, cadastro de endpoint, testar, escolha por uso) en/pt-BR conforme `spec/`; verificado por testes de componente e captura no app de desenvolvimento.
 
 ## 2. S2 — Captura de atividade e banco cifrado
 
-- [ ] 2.1 Banco `activity.sqlite3` com SQLCipher, chave no Keychain (`-dev` em debug), migrações próprias, tratamento de chave ausente; verificado por teste de arquivo ilegível sem chave e pela suíte completa do banco principal.
-- [ ] 2.2 Extração AX com habilitação Chromium/Electron e fallback OCR Vision em memória; verificado por integração e por captura real no app de desenvolvimento.
-- [ ] 2.3 Agendador de 2 s, monitores secundários (~10 s, opcional) e eventos de entrada sem conteúdo com clipboard redigido; verificado por testes do agendador, normalizador e redator.
-- [ ] 2.4 Exclusões (apps, domínios, janelas privadas sem OCR, janelas do Clovy, vídeo protegido, horário de trabalho), pausa manual, pausa por pouco disco e registros de pausa; verificado por testes de filtro e relógio simulado.
-- [ ] 2.5 Retenção (30 dias padrão, só processados) com vácuo incremental; verificado por teste com cursor de processamento.
-- [ ] 2.6 Aba "Atividade" nas configurações (ligar, permissões com deep links, exclusões, horário, retenção, monitores, vídeo protegido) e estado/pausa no menu da barra, en/pt-BR; verificado por testes de componente e captura no app de desenvolvimento.
-- [ ] 2.7 Export de depuração do banco de atividade (somente debug, sem expor chave); verificado por teste de integração.
+- [x] 2.1 Banco `activity.sqlite3` com SQLCipher, chave no Keychain (`-dev` em debug), migrações próprias, tratamento de chave ausente; verificado por teste de arquivo ilegível sem chave e pela suíte completa do banco principal.
+- [x] 2.2 Extração AX com habilitação Chromium/Electron e fallback OCR Vision em memória; verificado por integração e por captura real no app de desenvolvimento.
+- [x] 2.3 Agendador de 2 s, monitores secundários (~10 s, opcional) e eventos de entrada sem conteúdo com clipboard redigido; verificado por testes do agendador, normalizador e redator.
+- [x] 2.4 Exclusões (apps, domínios, janelas privadas sem OCR, janelas do Clovy, vídeo protegido, horário de trabalho), pausa manual, pausa por pouco disco e registros de pausa; verificado por testes de filtro e relógio simulado.
+- [x] 2.5 Retenção (30 dias padrão, só processados) com vácuo incremental; verificado por teste com cursor de processamento.
+- [x] 2.6 Aba "Atividade" nas configurações (ligar, permissões com deep links, exclusões, horário, retenção, monitores, vídeo protegido) e estado/pausa no menu da barra, en/pt-BR; verificado por testes de componente e captura no app de desenvolvimento.
+- [x] 2.7 Export de depuração do banco de atividade (somente debug, sem expor chave); verificado por teste de integração.
 
 ## 3. S3 — Linha do tempo
 

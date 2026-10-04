@@ -79,6 +79,7 @@ os-clovy/
 │   ├── src/os_accounts.rs   # OS Accounts login (PKCE), keychain token store
 │   ├── src/providers/       # model-settings persistence
 │   ├── src/llm/             # own providers: agent CLIs, OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
+│   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057; tests: `cargo test activity`)
 │   ├── src/commands.rs      # the Tauri command surface
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper
 ├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)
@@ -306,12 +307,16 @@ Gates (run from the repo root, judge by failure count per the notes above):
 
 Functional proof (Reality) for desktop features:
 
-1. Isolation: debug build only (`pnpm tauri:dev`), so data/config land in the
-   `-dev` dirs; record their paths before launch. Stop only processes started
-   by this run.
+1. Isolation: debug builds only, so data/config land in the `-dev` dirs; record
+   their paths before launch. For UI automation build a debug bundle
+   (`pnpm tauri build --debug --bundles app`, with the Node 24 PATH below) and
+   open it **by path**, launched from Terminal.app so it inherits Terminal's
+   Accessibility/Screen Recording grants. Never open or look up the app by
+   bundle id `co.opensoftware.june`: that starts the installed production
+   `/Applications/June.app` on real data. Stop only processes started by this run.
 2. Readiness: wait for the main window; macOS permissions the feature needs
-   (Accessibility, Screen Recording, Notifications) must already be granted to
-   the dev binary, otherwise the proof is blocked, not faked.
+   (Accessibility, Screen Recording, Microphone, Notifications) must already be
+   granted, otherwise the proof is blocked, not faked.
 3. Action: drive the real UI as the user would (computer use / clicks), or the
    Tauri command the UI calls when the UI path is the thing under test.
 4. Observable: screenshot of the window showing the result, plus persisted
