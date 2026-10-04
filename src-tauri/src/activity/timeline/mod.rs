@@ -13,12 +13,14 @@ pub mod builder;
 pub mod categorize;
 pub mod context;
 pub mod db;
+pub mod debug_import;
 pub mod etl;
 #[cfg(test)]
 #[path = "red_tests.rs"]
 mod red_tests;
 pub mod stats;
 
+use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration as StdDuration;
 
@@ -306,11 +308,23 @@ pub async fn run_pass(
 }
 
 /// Background loop: a pass every 30 s while the store is open, so the
-/// cursor (and with it retention) keeps moving without the view open.
-pub fn start(app: AppHandle, shared: Arc<ActivityShared>) {
+/// cursor (and with it retention) keeps moving without the view open. In
+/// development builds, a fixture named by `CLOVY_ACTIVITY_DEBUG_IMPORT` is
+/// imported once the store is first open (`debug_import`).
+pub fn start(app: AppHandle, shared: Arc<ActivityShared>, data_dir: PathBuf) {
     tauri::async_runtime::spawn(async move {
+        let mut fixture = cfg!(debug_assertions)
+            .then(|| std::env::var_os(debug_import::DEBUG_IMPORT_ENV))
+            .flatten()
+            .map(PathBuf::from);
         loop {
             if let Some(store) = shared.store() {
+                if let Some(path) = fixture.take() {
+                    match debug_import::import_file(&store, &path, &data_dir).await {
+                        Ok(frames) => tracing::info!(frames, "activity debug fixture imported"),
+                        Err(error) => tracing::warn!(%error, "activity debug fixture failed"),
+                    }
+                }
                 if let Err(error) = run_pass(&app, &store).await {
                     tracing::warn!(%error, "activity timeline pass failed");
                 }

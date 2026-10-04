@@ -60,6 +60,10 @@ pub struct BuilderState {
     pub last_useful_at: Option<DateTime<Utc>>,
     /// Idle frames since the last useful one.
     pub idle_frames: u32,
+    /// After frames went back in time, the newest time seen before that:
+    /// crossing it again restarts too, so no gap spans already-built time.
+    #[serde(default)]
+    pub rewound_from: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,9 +232,10 @@ fn context_splits(current: Option<&SessionContext>, next: Option<&SessionContext
     matches!((current, next), (Some(current), Some(next)) if current != next)
 }
 
-/// Feeds one frame. Frames must come in id order; a frame older than the
+/// Feeds one frame. Frames must come in id order. A frame older than the
 /// previous one (clock change, imported data) closes the open session and
-/// restarts the state without inventing a gap.
+/// restarts without inventing a gap; so does the first frame past the time
+/// reached before that rewind.
 pub fn push_frame(
     state: &mut BuilderState,
     frame: &StoredFrame,
@@ -240,7 +245,14 @@ pub fn push_frame(
     let Some(at) = parse_time(&frame.captured_at) else {
         return;
     };
-    if state.last_frame.as_ref().is_some_and(|last| at < last.at) {
+    if let Some(last) = state.last_frame.as_ref().filter(|last| at < last.at) {
+        let rewound_from = state.rewound_from.map_or(last.at, |mark| mark.max(last.at));
+        close_open(state, out);
+        *state = BuilderState {
+            rewound_from: Some(rewound_from),
+            ..BuilderState::default()
+        };
+    } else if state.rewound_from.is_some_and(|mark| at > mark) {
         close_open(state, out);
         *state = BuilderState::default();
     }
@@ -639,13 +651,23 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_frame_older_than_the_last_restarts_without_a_gap() {
+    fn frames_going_back_in_time_restart_without_gaps_over_built_time() {
         let mut id = 0;
         let mut frames = run(&mut id, at(10, 0, 0), 5, "Code", "a \u{2014} p", None);
+        // Imported (or clock-shifted) older frames, then live frames again.
         frames.extend(run(&mut id, at(8, 0, 0), 5, "Slack", "general", None));
+        frames.extend(run(&mut id, at(8, 30, 0), 5, "Slack", "general", None));
+        frames.extend(run(&mut id, at(10, 20, 0), 5, "Code", "a \u{2014} p", None));
         let (state, events) = feed(&frames, &BatchSignals::default());
-        assert!(gaps(&events).is_empty());
-        assert_eq!(closed(&events).len(), 1);
-        assert_eq!(state.open.unwrap().app_name, "Slack");
+        let gaps = gaps(&events);
+        assert_eq!(gaps.len(), 1, "only the gap inside the older block");
+        assert_eq!(gaps[0].started_at, at(8, 0, 10));
+        assert_eq!(gaps[0].ended_at, at(8, 30, 0));
+        let apps: Vec<&str> = closed(&events)
+            .iter()
+            .map(|session| session.app_name.as_str())
+            .collect();
+        assert_eq!(apps, vec!["Code", "Slack", "Slack"]);
+        assert_eq!(state.open.unwrap().started_at, at(10, 20, 0));
     }
 }

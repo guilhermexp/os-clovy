@@ -284,7 +284,7 @@ fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
     let thread_keys = Arc::clone(&keys);
     let thread_db = db_path.clone();
     let handle = app.clone();
-    timeline::start(app.clone(), Arc::clone(&shared));
+    timeline::start(app.clone(), Arc::clone(&shared), data_dir.clone());
     std::thread::Builder::new()
         .name("clovy-activity-capture".into())
         .spawn(move || {

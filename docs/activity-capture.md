@@ -136,6 +136,9 @@ refuses to open (`NewerSchema`). Add a version; never edit one.
 | `pauses` | `id`, `started_at`, `ended_at` (NULL while open), `reason` (`manual`/`work_hours`/`low_disk`/`protected_video`) | Pauses left open by a crash are closed at the next start |
 | `processing_cursor` | `consumer` (PK), `last_frame_id`, `last_frame_at`, `updated_at` | Per-consumer high-water mark; `timeline` is the one retention honors |
 
+Migration 2 (`activity_timeline`) adds the timeline's tables; see
+[activity-timeline.md](activity-timeline.md#schema-migration-2-activity_timeline).
+
 ### Rust API (`crate::activity::store::ActivityStore`)
 
 Get the open store from the managed `ActivityState` runtime
@@ -164,7 +167,8 @@ both the period and the cursor frame's `last_frame_at`. Unreferenced
 `frame_texts` go with them. Each sweep that deleted anything then runs
 `PRAGMA incremental_vacuum(500)`, so space returns gradually without a full
 `VACUUM` blocking capture. Until the timeline advances the cursor, nothing is
-deleted.
+deleted. The same sweep removes timeline sessions, gaps, and search documents
+older than the period.
 
 ## Settings (`activity-settings.json`, app config dir)
 
