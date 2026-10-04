@@ -276,3 +276,72 @@ build scripts in `pnpm-workspace.yaml` — live in
 - **Identity and credits are OS Accounts'.** Clovy is an on-device client of OS
   Accounts and never owns user or wallet state. The dependency arrow points
   Clovy → OS Accounts, never the reverse.
+
+## Fork guilhermexp (harness ~/orchestrator)
+
+This checkout is Guilherme's personal fork (`origin` = guilhermexp/os-clovy,
+`upstream` = open-software-network/os-clovy). OS Platform is not configured
+here: say "platform sync skipped" and work offline; issues/branches use the
+harness tickets, not `JUN-*`.
+
+- **OpenSpec** (`openspec/`, pt-BR) holds what to build for fork features;
+  `specs/` stays the upstream Spec Kit history. Scenarios carry `Test:` stamps.
+- **Data safety:** never run against the real install data
+  (`~/Library/Application Support/co.opensoftware.june`). Debug builds already
+  use the isolated `co.opensoftware.june-dev` dirs; never set
+  `OS_CLOVY_USE_PROD_DATA_DIR` in tests or verification. Keychain items created
+  by dev builds must use a `-dev` service suffix.
+
+## Verification
+
+Gates (run from the repo root, judge by failure count per the notes above):
+
+- Frontend: `pnpm check`, `pnpm typecheck`, `NODE_OPTIONS=--no-experimental-webstorage pnpm test`.
+- Desktop Rust: `cargo fmt --manifest-path src-tauri/Cargo.toml --all --check`,
+  `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings`,
+  `pnpm test:rust`.
+- Agent sidecar (when touched): `pnpm agent-runtime:typecheck && pnpm agent-runtime:test`.
+- Full CI parity: `make verify`.
+
+Functional proof (Reality) for desktop features:
+
+1. Isolation: debug build only (`pnpm tauri:dev`), so data/config land in the
+   `-dev` dirs; record their paths before launch. Stop only processes started
+   by this run.
+2. Readiness: wait for the main window; macOS permissions the feature needs
+   (Accessibility, Screen Recording, Notifications) must already be granted to
+   the dev binary, otherwise the proof is blocked, not faked.
+3. Action: drive the real UI as the user would (computer use / clicks), or the
+   Tauri command the UI calls when the UI path is the thing under test.
+4. Observable: screenshot of the window showing the result, plus persisted
+   state read back (SQLite in the `-dev` data dir; encrypted DBs through the
+   app's own debug export command, never by copying keys into the transcript).
+5. Evidence under `.tmp/verify/<ticket>/run-<id>/` with a `report.md`;
+   cleanup leaves the `-dev` data intact unless the run created a throwaway copy.
+
+UI-only checks may use the browser shim from `.agents/skills/browser-test-tauri-fe`;
+that proves rendering, not the native flow.
+
+### Build
+
+```json
+{
+  "command": {
+    "argv": ["pnpm", "tauri:build", "--", "--bundles", "app"],
+    "cwd": "."
+  }
+}
+```
+
+<!-- repowise:start -->
+## Repowise — diagnóstico de código
+
+Navegação (onde fica, quem chama, assinaturas) continua no Graft. O Repowise responde diagnóstico, pelo MCP `repowise` ou pelo adapter do harness com a raiz absoluta do checkout (`<raiz>`):
+
+- Revisar ou aceitar mudança: `get_change_risk` com revspec `base..head` (saúde introduzida, testes sugeridos).
+- Antes de mexer em arquivo crítico: `get_risk` (correções recentes, churn e arquivos que costumam mudar junto; confira se precisam acompanhar).
+- Saúde e refatoração: `get_health`. Código morto: `get_dead_code`; só apague achado de nível seguro e confirmado por busca.
+- Por que o código mudou: `get_why` (commits). Decisões de produto e do harness não moram aqui.
+- DOX desatualizado: `/Users/guilhermevarela/orchestrator/scripts/project-repowise.sh query doc-drift <raiz>`.
+- Índice atrasado (`_meta.index_behind`) ou ausente: `/Users/guilhermevarela/orchestrator/scripts/project-repowise.sh ensure <raiz>`. Worktree não tem índice: `/Users/guilhermevarela/orchestrator/scripts/project-repowise.sh query risk <checkout-principal> <base>..<branch>`. Não rode `repowise` direto; sem o adapter ele registra MCP e hooks globais.
+<!-- repowise:end -->
