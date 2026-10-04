@@ -63,6 +63,9 @@ pub fn redact_clipboard(text: &str) -> String {
     let without_keys = redact_private_key_blocks(text);
     let mut out = String::with_capacity(without_keys.len());
     let mut redact_next = false;
+    // The previous token was a bare secret key (`password`, `API_KEY`), so a
+    // following `=` / `:` (spaced or attached to the value) starts a secret.
+    let mut after_secret_key = false;
     let mut rest = without_keys.as_str();
     while !rest.is_empty() {
         let split = rest.find(char::is_whitespace).unwrap_or(rest.len());
@@ -73,18 +76,43 @@ pub fn redact_clipboard(text: &str) -> String {
             .map_or(tail.len(), |(index, _)| index);
         let (whitespace, tail) = tail.split_at(ws_len);
         if !token.is_empty() {
-            let (redacted, follows_key) = redact_token(token);
-            if redact_next && !follows_key && looks_like_credential_value(token) {
+            let bare = token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | ',' | '{' | '}'));
+            let operator_len = assignment_operator_prefix(bare);
+            if after_secret_key && operator_len > 0 && operator_len == bare.len() {
+                // `password = hunter2`: the value is the next token.
+                out.push_str(token);
+                redact_next = true;
+                after_secret_key = false;
+            } else if after_secret_key && operator_len > 0 {
+                // `password =hunter2`: operator and value in one token.
+                let start = token.find(&bare[..operator_len]).unwrap_or(0) + operator_len;
+                out.push_str(&token[..start]);
                 out.push_str(REDACTED);
+                redact_next = false;
+                after_secret_key = false;
             } else {
-                out.push_str(&redacted);
+                let (redacted, follows_key) = redact_token(token);
+                if redact_next && !follows_key && looks_like_credential_value(token) {
+                    out.push_str(REDACTED);
+                } else {
+                    out.push_str(&redacted);
+                }
+                redact_next = follows_key;
+                after_secret_key = !follows_key && is_secret_key(bare);
             }
-            redact_next = follows_key;
         }
         out.push_str(whitespace);
         rest = tail;
     }
     truncate(out)
+}
+
+/// Length of a leading assignment operator (`=`, `:`, `:=`, `=>`), or 0.
+fn assignment_operator_prefix(token: &str) -> usize {
+    [":=", "=>", "=", ":"]
+        .iter()
+        .find(|operator| token.starts_with(**operator))
+        .map_or(0, |operator| operator.len())
 }
 
 fn truncate(text: String) -> String {
@@ -312,6 +340,34 @@ mod tests {
         assert!(!redacted.contains("abc.def.ghi"));
         assert!(!redacted.contains("q1w2e3"));
         assert!(redacted.contains("user=ana"));
+    }
+
+    #[test]
+    fn spaced_assignments_are_redacted() {
+        for (text, secret) in [
+            ("password = hunter2", "hunter2"),
+            ("API_KEY = abc123", "abc123"),
+            ("token : xyz789", "xyz789"),
+            ("secret =s3cr3t", "s3cr3t"),
+            ("\"password\" : \"hunter2\"", "hunter2"),
+            ("db_password := letmein", "letmein"),
+            (
+                "export AWS_SECRET_ACCESS_KEY = wJalrXUtnFEMI",
+                "wJalrXUtnFEMI",
+            ),
+        ] {
+            let redacted = redact_clipboard(text);
+            assert!(
+                !redacted.contains(secret),
+                "leaked {secret} from {text:?}: {redacted}"
+            );
+            assert!(redacted.contains(REDACTED), "{text:?} -> {redacted}");
+        }
+        // A secret word in prose without an operator is left alone.
+        assert_eq!(
+            redact_clipboard("the password policy changed"),
+            "the password policy changed"
+        );
     }
 
     #[test]
