@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::hour::HourActivity;
+use super::prompts;
 
 const TITLE_CHARS: usize = 80;
 
@@ -193,6 +194,9 @@ pub fn plan_fold(
     plan
 }
 
+/// The fold prompt: the day's workstreams and this hour's numbered
+/// activities, both written earlier from captured text, inside the
+/// untrusted-data fence.
 pub fn prompt(prior: &[WorkstreamDto], hour_label: &str, activities: &[HourActivity]) -> String {
     let anchors: Vec<Value> = prior
         .iter()
@@ -204,25 +208,28 @@ pub fn prompt(prior: &[WorkstreamDto], hour_label: &str, activities: &[HourActiv
             })
         })
         .collect();
-    let mut out = String::from("=== CURRENT WORKSTREAMS (anchors; keep them as they are) ===\n");
-    if anchors.is_empty() {
-        out.push_str("(none yet)\n");
+    let anchors = if anchors.is_empty() {
+        "(none yet)".to_string()
     } else {
-        out.push_str(&serde_json::to_string_pretty(&anchors).unwrap_or_default());
-        out.push('\n');
-    }
-    out.push_str(&format!(
-        "\n=== NEW HOUR {hour_label}: place these activities only ===\n"
-    ));
-    for (index, activity) in activities.iter().enumerate() {
-        out.push_str(&format!(
-            "{}. ({} min) {}\n",
-            index + 1,
-            activity.minutes,
-            activity.description
-        ));
-    }
-    out
+        serde_json::to_string_pretty(&anchors).unwrap_or_default()
+    };
+    let numbered: Vec<String> = activities
+        .iter()
+        .enumerate()
+        .map(|(index, activity)| {
+            format!(
+                "{}. ({} min) {}",
+                index + 1,
+                activity.minutes,
+                activity.description
+            )
+        })
+        .collect();
+    format!(
+        "=== CURRENT WORKSTREAMS (anchors; keep them as they are) ===\n{}\n\n=== NEW HOUR {hour_label}: place these activities only ===\n{}\n",
+        prompts::fence(&anchors),
+        prompts::fence(&numbered.join("\n"))
+    )
 }
 
 #[cfg(test)]

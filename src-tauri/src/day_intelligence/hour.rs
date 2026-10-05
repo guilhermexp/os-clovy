@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::prompts;
 use super::sources::{CodingBlock, MeetingNote};
 
 /// One activity of an hour report, with Clovy's minutes.
@@ -130,11 +131,11 @@ pub struct HourInput<'a> {
     pub distilled: &'a str,
 }
 
+/// The hour's prompt: the hour and its measured active time, then everything
+/// captured (sessions and window titles, coding-agent blocks, meetings, screen
+/// text) inside the untrusted-data fence.
 pub fn prompt(input: &HourInput<'_>) -> String {
-    let mut out = format!(
-        "=== HOUR {} (local time) ===\nMeasured active time: {} min\n\nSessions (measured):\n",
-        input.label, input.active_minutes
-    );
+    let mut data = String::from("Sessions (measured):\n");
     for session in input.sessions {
         let context = session
             .context
@@ -146,7 +147,7 @@ pub fn prompt(input: &HourInput<'_>) -> String {
             .as_deref()
             .map(|window| format!(" · \"{window}\""))
             .unwrap_or_default();
-        out.push_str(&format!(
+        data.push_str(&format!(
             "- {}-{} · {}{} · {} · {} min{}\n",
             session.start,
             session.end,
@@ -158,24 +159,29 @@ pub fn prompt(input: &HourInput<'_>) -> String {
         ));
     }
     if !input.coding_blocks.is_empty() {
-        out.push_str("\nCoding-agent sessions:\n");
+        data.push_str("\nCoding-agent sessions:\n");
         for block in input.coding_blocks {
-            out.push_str(&format!("- {}\n", block.prompt_line()));
+            data.push_str(&format!("- {}\n", block.prompt_line()));
         }
     }
     if !input.meetings.is_empty() {
-        out.push_str("\nMeetings and notes recorded in Clovy:\n");
+        data.push_str("\nMeetings and notes recorded in Clovy:\n");
         for meeting in input.meetings {
-            out.push_str(&format!("- {}\n", meeting.prompt_line()));
+            data.push_str(&format!("- {}\n", meeting.prompt_line()));
         }
     }
-    out.push_str("\nScreen text (distilled):\n");
-    out.push_str(if input.distilled.is_empty() {
+    data.push_str("\nScreen text (distilled):\n");
+    data.push_str(if input.distilled.is_empty() {
         "(none)"
     } else {
         input.distilled
     });
-    out
+    format!(
+        "=== HOUR {} (local time) ===\nMeasured active time: {} min\n\n{}",
+        input.label,
+        input.active_minutes,
+        prompts::fence(&data)
+    )
 }
 
 #[cfg(test)]

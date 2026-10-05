@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::hour::HourActivity;
+use super::prompts;
 use super::sources::{CodingBlock, MeetingNote};
 use super::workstreams::WorkstreamDto;
 use crate::activity::timeline::stats::{AppTime, CategoryTime, TimelineStatsDto};
@@ -236,6 +237,9 @@ pub struct DayInput<'a> {
     pub coding_blocks: &'a [CodingBlock],
 }
 
+/// The summary prompt: the day and its measured totals, then the
+/// workstreams, hour reports, meetings and notes, and coding-agent blocks
+/// inside the untrusted-data fence.
 pub fn prompt(input: &DayInput<'_>) -> String {
     let minutes = |ms: i64| ms / 60_000;
     let mut out = format!(
@@ -260,42 +264,44 @@ pub fn prompt(input: &DayInput<'_>) -> String {
             .collect();
         out.push_str(&format!("Time by category: {}.\n", categories.join(", ")));
     }
-    out.push_str("\n=== WORKSTREAMS (what the day was made of) ===\n");
+    let mut data = String::from("=== WORKSTREAMS (what the day was made of) ===\n");
     if input.workstreams.is_empty() {
-        out.push_str("(none)\n");
+        data.push_str("(none)\n");
     }
     for workstream in input.workstreams {
-        out.push_str(&format!(
+        data.push_str(&format!(
             "\n{} ({} min): {}\n",
             workstream.title, workstream.minutes, workstream.summary
         ));
         for hour in workstream.hours.iter().take(NOTES_PER_WORKSTREAM) {
-            out.push_str(&format!("  - {}\n", hour.note));
+            data.push_str(&format!("  - {}\n", hour.note));
         }
     }
     if !input.hour_reports.is_empty() {
-        out.push_str(
+        data.push_str(
             "\n=== HOUR REPORTS (more detail; grouped by hour only because that is how it was captured) ===\n",
         );
         for report in input.hour_reports {
             let summary: String = report.summary.chars().take(HOUR_SUMMARY_CHARS).collect();
             let hour = report.hour.get(11..13).unwrap_or(&report.hour);
-            out.push_str(&format!("{hour}:00 - {summary}\n"));
+            data.push_str(&format!("{hour}:00 - {summary}\n"));
         }
     }
-    out.push_str("\n=== MEETINGS AND NOTES RECORDED IN CLOVY ===\n");
+    data.push_str("\n=== MEETINGS AND NOTES RECORDED IN CLOVY ===\n");
     if input.meetings.is_empty() {
-        out.push_str("(none)\n");
+        data.push_str("(none)\n");
     }
     for meeting in input.meetings {
-        out.push_str(&format!("- {}\n", meeting.prompt_line()));
+        data.push_str(&format!("- {}\n", meeting.prompt_line()));
     }
     if !input.coding_blocks.is_empty() {
-        out.push_str("\n=== CODING-AGENT SESSIONS ===\n");
+        data.push_str("\n=== CODING-AGENT SESSIONS ===\n");
         for block in input.coding_blocks {
-            out.push_str(&format!("- {}\n", block.prompt_line()));
+            data.push_str(&format!("- {}\n", block.prompt_line()));
         }
     }
+    out.push('\n');
+    out.push_str(&prompts::fence(data.trim_end()));
     out
 }
 
