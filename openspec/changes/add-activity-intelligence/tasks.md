@@ -21,12 +21,12 @@
 
 ## 3. S3 — Linha do tempo
 
-- [ ] 3.1 ETL incremental de quadros para sessões (contexto de domínio/workspace), sessão ativa e cursor; verificado por testes do construtor e de retomada.
-- [ ] 3.2 Lacunas (>5 min) classificadas e excluídas das durações; verificado por testes de classificação.
-- [ ] 3.3 Categorizador determinístico de 10 classes com piso de confiança; verificado por testes com amostras por classe.
-- [ ] 3.4 Estatísticas do dia e busca FTS5 com filtro de período; verificado por testes do agregador e do índice.
-- [ ] 3.5 Vista "Hoje" na barra lateral (dias, blocos, lacunas, sessão ativa, detalhe, estatísticas, busca, estado vazio) en/pt-BR; verificado por testes de componente e captura no app de desenvolvimento com dados de teste.
-- [ ] 3.6 Ferramentas do agente `search_activity` e `get_activity_timeline` registradas no catálogo e no despacho; verificado por teste de despacho.
+- [x] 3.1 ETL incremental de quadros para sessões (contexto de domínio/workspace), sessão ativa e cursor; verificado por testes do construtor e de retomada.
+- [x] 3.2 Lacunas (>5 min) classificadas e excluídas das durações; verificado por testes de classificação.
+- [x] 3.3 Categorizador determinístico de 10 classes com piso de confiança; verificado por testes com amostras por classe.
+- [x] 3.4 Estatísticas do dia e busca FTS5 com filtro de período; verificado por testes do agregador e do índice.
+- [x] 3.5 Vista "Hoje" na barra lateral (dias, blocos, lacunas, sessão ativa, detalhe, estatísticas, busca, estado vazio) en/pt-BR; verificado por testes de componente e captura no app de desenvolvimento com dados de teste.
+- [x] 3.6 Ferramentas do agente `search_activity` e `get_activity_timeline` registradas no catálogo e no despacho; verificado por teste de despacho.
 
 ## 4. S5 — Ingestão de sessões de agentes de código
 

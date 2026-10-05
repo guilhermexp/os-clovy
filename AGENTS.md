@@ -79,7 +79,7 @@ os-clovy/
 │   ├── src/os_accounts.rs   # OS Accounts login (PKCE), keychain token store
 │   ├── src/providers/       # model-settings persistence
 │   ├── src/llm/             # own providers: agent CLIs, OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
-│   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057; tests: `cargo test activity`)
+│   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/commands.rs      # the Tauri command surface
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper
 ├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)
