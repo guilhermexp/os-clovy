@@ -30,10 +30,10 @@
 
 ## 4. S5 — Ingestão de sessões de agentes de código
 
-- [ ] 4.1 Leitores somente leitura das sete fontes com chave por fonte; verificado por testes com fixtures sintéticas e checagem de hash/mtime.
-- [ ] 4.2 Normalização e segmentação (1 h de pausa ou de duração, corte em prompt) com ciclo vivo → selado → resumido; verificado por testes do segmentador.
-- [ ] 4.3 Resumo pelo CLI do agente ou provedor de atividade, filtro por marcador de autoria; verificado por testes do seletor e do filtro.
-- [ ] 4.4 Faixa de sessões de agentes na vista "Hoje" e seção de fontes na aba Atividade; verificado por teste de componente e captura no app de desenvolvimento.
+- [x] 4.1 Leitores somente leitura das sete fontes com chave por fonte; verificado por testes com fixtures sintéticas e checagem de hash/mtime.
+- [x] 4.2 Normalização e segmentação (1 h de pausa ou de duração, corte em prompt) com ciclo vivo → selado → resumido; verificado por testes do segmentador.
+- [x] 4.3 Resumo pelo CLI do agente ou provedor de atividade, filtro por marcador de autoria; verificado por testes do seletor e do filtro.
+- [x] 4.4 Faixa de sessões de agentes na vista "Hoje" e seção de fontes na aba Atividade; verificado por teste de componente e captura no app de desenvolvimento.
 
 ## 5. S4 — Inteligência do dia
 

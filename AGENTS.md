@@ -80,6 +80,7 @@ os-clovy/
 │   ├── src/providers/       # model-settings persistence
 │   ├── src/llm/             # own providers: agent CLIs, OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
 │   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
+│   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/commands.rs      # the Tauri command surface
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper
 ├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)
