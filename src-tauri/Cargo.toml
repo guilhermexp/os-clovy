@@ -65,6 +65,8 @@ clovy-companion-protocol = { path = "../crates/clovy-companion-protocol" }
 rand = "0.8"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+# Day intelligence distiller: segment, junk, and entity patterns.
+regex = "1"
 # Pure-Rust FFT for the echo-rejection similarity gate (GCC-PHAT lag estimation).
 rustfft = "6.2"
 # Matches the version tauri-plugin-updater resolves, so the version_comparator
@@ -154,6 +156,14 @@ security-framework = "3.7"
 # behaves like plain SQLite). macOS only: activity capture is a macOS feature
 # and vendored OpenSSL would add perl/nasm to the Windows build lane.
 libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
+# Day intelligence: on-device sentence embeddings (BGE small, BERT) for the
+# distiller's semantic dedup, in pure Rust with Accelerate for the matmuls.
+# Weights are downloaded once into the app data dir (`day_intelligence::embedder`).
+# macOS only, like activity capture; `fancy-regex` keeps tokenizers free of C (onig).
+candle-core = { version = "0.10", features = ["accelerate"] }
+candle-nn = { version = "0.10", features = ["accelerate"] }
+candle-transformers = { version = "0.10", features = ["accelerate"] }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

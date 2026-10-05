@@ -140,6 +140,8 @@ Migration 2 (`activity_timeline`) adds the timeline's tables; see
 [activity-timeline.md](activity-timeline.md#schema-migration-2-activity_timeline).
 Migration 3 (`coding_agent_blocks`) belongs to coding-agent ingestion; see
 [coding-agent-sessions.md](coding-agent-sessions.md#database-migration-3-coding_agent_blocks).
+Migration 4 (`day_intelligence`) adds hour reports, workstreams, and day
+summaries; see [day-intelligence.md](day-intelligence.md#schema-migration-4-day_intelligence).
 
 ### Rust API (`crate::activity::store::ActivityStore`)
 
@@ -178,7 +180,9 @@ older than the period.
 `pauseOnProtectedVideo` (true), `ignoredApps`, `ignoredDomains` (bare hosts,
 normalized on save), `workHours` `{enabled: false, days: [1..5] (ISO), start:
 "09:00", end: "18:00"}`, `retentionDays` (30), `codingAgents` (every source
-off; see [coding-agent-sessions.md](coding-agent-sessions.md)). Malformed
+off; see [coding-agent-sessions.md](coding-agent-sessions.md)), and for day
+intelligence `daySummary` `{time: "18:00"}` and `notifications` `{enabled:
+true, quietHours: {enabled: false, start: "22:00", end: "08:00"}}`. Malformed
 files load defaults. Manual pause is in memory only: a restart resumes capture.
 
 ## Commands and event (frontend contract)

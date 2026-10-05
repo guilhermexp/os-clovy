@@ -457,6 +457,76 @@ const MIGRATIONS: &[ActivityMigration] = &[
             "CREATE INDEX idx_coding_agent_blocks_state ON coding_agent_blocks(state)",
         ],
     },
+    // Day intelligence (`crate::day_intelligence`, docs/day-intelligence.md):
+    // hour reports, the day's workstreams, day summaries, and the scheduler's
+    // attempt bookkeeping. Days and hours are local ("YYYY-MM-DD",
+    // "YYYY-MM-DDTHH"); `started_at`/`ended_at` are the UTC bounds.
+    ActivityMigration {
+        version: 4,
+        name: "day_intelligence",
+        statements: &[
+            "CREATE TABLE day_hour_reports (
+                hour TEXT PRIMARY KEY,
+                day TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                active_minutes INTEGER NOT NULL CHECK (active_minutes >= 0),
+                summary TEXT NOT NULL,
+                activities_json TEXT NOT NULL,
+                distilled TEXT NOT NULL,
+                distill_json TEXT NOT NULL,
+                locale TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                -- set once the hour is part of the day's workstreams
+                folded_at TEXT
+            )",
+            "CREATE INDEX idx_day_hour_reports_day ON day_hour_reports(day)",
+            // Workstreams only grow: a later hour appends a row to
+            // day_workstream_hours (and may refresh the summary of the one
+            // workstream it joins); titles and other workstreams never change.
+            "CREATE TABLE day_workstreams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                first_hour TEXT NOT NULL,
+                last_hour TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            "CREATE INDEX idx_day_workstreams_day ON day_workstreams(day)",
+            "CREATE TABLE day_workstream_hours (
+                workstream_id INTEGER NOT NULL REFERENCES day_workstreams(id) ON DELETE CASCADE,
+                hour TEXT NOT NULL,
+                minutes INTEGER NOT NULL CHECK (minutes >= 0),
+                note TEXT NOT NULL,
+                PRIMARY KEY (workstream_id, hour)
+            )",
+            "CREATE TABLE day_summaries (
+                day TEXT PRIMARY KEY,
+                headline TEXT NOT NULL,
+                narrative TEXT NOT NULL,
+                insights_json TEXT NOT NULL,
+                standup_json TEXT NOT NULL,
+                hours_covered INTEGER NOT NULL,
+                locale TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+                generated_at TEXT NOT NULL
+            )",
+            // One row per unit of scheduled work ('hour:<hour>', 'fold:<hour>',
+            // 'auto:<day>'): retries back off and stop after a few failures.
+            "CREATE TABLE day_intelligence_runs (
+                key TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL,
+                outcome TEXT NOT NULL CHECK (outcome IN ('ok', 'failed', 'empty')),
+                last_error TEXT,
+                next_attempt_at TEXT,
+                updated_at TEXT NOT NULL
+            )",
+        ],
+    },
 ];
 
 pub fn timestamp(at: DateTime<Utc>) -> String {
@@ -585,7 +655,8 @@ impl ActivityStore {
     }
 
     /// For the slices that keep their own tables in this database: the
-    /// timeline (`timeline::db`) and coding agents (`crate::coding_agents::store`).
+    /// timeline (`timeline::db`), coding agents (`crate::coding_agents::store`),
+    /// and day intelligence (`crate::day_intelligence::db`).
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -1183,14 +1254,17 @@ mod tests {
         // A database written by the timeline build: migrations 1 and 2 only.
         let store = ActivityStore::open(&path, &keys).await.unwrap();
         store.insert_frame(&frame(at(1, 10), "kept")).await.unwrap();
-        query("DROP TABLE coding_agent_blocks")
-            .execute(&store.pool)
-            .await
-            .unwrap();
-        query("DELETE FROM schema_migrations WHERE version = 3")
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        for statement in [
+            "DROP TABLE coding_agent_blocks",
+            "DROP TABLE day_workstream_hours",
+            "DROP TABLE day_workstreams",
+            "DROP TABLE day_hour_reports",
+            "DROP TABLE day_summaries",
+            "DROP TABLE day_intelligence_runs",
+            "DELETE FROM schema_migrations WHERE version >= 3",
+        ] {
+            query(statement).execute(&store.pool).await.unwrap();
+        }
         store.close().await;
 
         let store = ActivityStore::open(&path, &keys).await.expect("upgrade");
@@ -1208,6 +1282,7 @@ mod tests {
                 (1, "activity_capture".to_string()),
                 (2, "activity_timeline".to_string()),
                 (3, "coding_agent_blocks".to_string()),
+                (4, "day_intelligence".to_string()),
             ]
         );
         assert!(store
@@ -1215,6 +1290,43 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        assert_eq!(store.frames_after(0, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn coding_agents_database_upgrades_with_day_intelligence_as_migration_4() {
+        let (_dir, path) = temp_db();
+        let keys = MemoryKeyStore::default();
+        // A database written by the coding-agents build: migrations 1 to 3.
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        store.insert_frame(&frame(at(1, 10), "kept")).await.unwrap();
+        for statement in [
+            "DROP TABLE day_workstream_hours",
+            "DROP TABLE day_workstreams",
+            "DROP TABLE day_hour_reports",
+            "DROP TABLE day_summaries",
+            "DROP TABLE day_intelligence_runs",
+            "DELETE FROM schema_migrations WHERE version = 4",
+        ] {
+            query(statement).execute(&store.pool).await.unwrap();
+        }
+        store.close().await;
+
+        let store = ActivityStore::open(&path, &keys).await.expect("upgrade");
+        let versions: Vec<i64> = query("SELECT version FROM schema_migrations ORDER BY version")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert!(
+            crate::day_intelligence::db::summary_of_day(&store, "2026-10-01")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(store.frames_after(0, 10).await.unwrap().len(), 1);
     }
 

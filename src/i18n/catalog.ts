@@ -12,6 +12,7 @@ import app from "./messages/app";
 import chat from "./messages/chat";
 import codingAgents from "./messages/codingAgents";
 import common from "./messages/common";
+import dayIntelligence from "./messages/dayIntelligence";
 import hud from "./messages/hud";
 import lib from "./messages/lib";
 import notes from "./messages/notes";
@@ -30,6 +31,7 @@ export const namespaces = {
   chat,
   codingAgents,
   common,
+  dayIntelligence,
   hud,
   lib,
   notes,

@@ -39,6 +39,11 @@ const defaultSettings: ActivitySettingsDto = {
     end: "18:00",
   },
   retentionDays: 30,
+  daySummary: { time: "18:00" },
+  notifications: {
+    enabled: true,
+    quietHours: { enabled: false, start: "22:00", end: "08:00" },
+  },
   codingAgents: DEFAULT_CODING_AGENT_SOURCES,
 };
 

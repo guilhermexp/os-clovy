@@ -204,10 +204,10 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     />
   ) : activeView === "today" ? (
     <ActivityTimelineViewRoute
-      onNavigateToSettings={() => {
+      onNavigateToSettings={(tab) => {
         setSettingsReturnView(activeView);
         setActiveView("settings");
-        setSettingsTab("activity");
+        setSettingsTab(tab ?? "activity");
       }}
     />
   ) : activeView === "routines" ? (

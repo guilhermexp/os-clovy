@@ -25,6 +25,8 @@ use tauri::{AppHandle, Manager};
 const MAIN_WINDOW_LABEL: &str = "main";
 #[cfg(target_os = "macos")]
 const AGENT_OPEN_EVENT: &str = "clovy:agent:open";
+/// Opens the "Today" view at a day's summary (activity notifications).
+const TODAY_OPEN_EVENT: &str = "clovy:today:open";
 
 // The center delegate is a static C callback with no captured state, so
 // activations reach the app through this handle (same pattern as the agent
@@ -32,6 +34,21 @@ const AGENT_OPEN_EVENT: &str = "clovy:agent:open";
 static NOTIFICATION_APP: OnceLock<AppHandle> = OnceLock::new();
 
 static AGENT_OPEN_QUEUE: Mutex<AgentOpenQueue> = Mutex::new(AgentOpenQueue::new());
+/// Same handshake for activity notifications; the queued value is the day.
+static TODAY_OPEN_QUEUE: Mutex<AgentOpenQueue> = Mutex::new(AgentOpenQueue::new());
+
+/// An activity notification (day intelligence): clicking it opens the
+/// "Today" view at `day`; the action button snoozes it for an hour.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TodayNotification {
+    pub title: String,
+    pub body: String,
+    /// Local day, "YYYY-MM-DD".
+    pub day: String,
+    /// `day_intelligence::notify::NoticeKind` tag, handed back on snooze.
+    pub kind: String,
+    pub snooze_label: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +119,36 @@ pub fn agent_open_ready() -> Option<String> {
     lock_queue().mark_ready()
 }
 
+/// Marks the webview ready for `clovy:today:open` events and returns the day
+/// of an activity notification clicked before that.
+#[tauri::command]
+pub fn today_open_ready() -> Option<String> {
+    lock_today_queue().mark_ready()
+}
+
+/// Posts an activity notification. On macOS the native path carries the day
+/// (click opens "Today") and a snooze button; elsewhere the plugin posts it
+/// without click-through.
+pub fn send_today_notification(
+    app: &AppHandle,
+    notification: &TodayNotification,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if macos::deliver_today(notification) {
+        return Ok(());
+    }
+    send_via_plugin(
+        app,
+        &AppNotificationRequest {
+            title: notification.title.clone(),
+            body: notification.body.clone(),
+            sound: None,
+            group: Some(format!("clovy-today-{}", notification.kind)),
+            session_id: None,
+        },
+    )
+}
+
 /// Posts a notification. On macOS the native path attaches the session id so
 /// a click deep-links into the chat; elsewhere (and when the native center is
 /// unavailable) the plugin posts it without click-through.
@@ -140,6 +187,33 @@ fn lock_queue() -> std::sync::MutexGuard<'static, AgentOpenQueue> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_today_queue() -> std::sync::MutexGuard<'static, AgentOpenQueue> {
+    TODAY_OPEN_QUEUE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Runs on an activity notification click: the snooze button posts it again
+/// in an hour; anything else focuses the app and opens "Today" at the day.
+fn handle_today_activation(day: String, kind: String, snooze: bool) {
+    let Some(app) = NOTIFICATION_APP.get() else {
+        return;
+    };
+    if snooze {
+        crate::day_intelligence::snooze_notice(app, &kind, &day);
+        return;
+    }
+    show_main_window(app);
+    if let Some(day) = lock_today_queue().on_activation(Some(day)) {
+        use tauri::Emitter;
+        let _ = app.emit_to(
+            MAIN_WINDOW_LABEL,
+            TODAY_OPEN_EVENT,
+            serde_json::json!({ "day": day }),
+        );
+    }
+}
+
 /// Runs on a notification click: focus the app, then route the session id to
 /// the webview (or queue it until the frontend is ready). A notification
 /// without a session id keeps the old behavior of just opening the app.
@@ -173,7 +247,10 @@ fn show_main_window(app: &AppHandle) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{handle_notification_activation, AppNotificationRequest};
+    use super::{
+        handle_notification_activation, handle_today_activation, AppNotificationRequest,
+        TodayNotification,
+    };
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
     use objc2::sel;
@@ -183,6 +260,11 @@ mod macos {
     /// `userInfo` keys carrying the agent session on Clovy's own notifications.
     const SESSION_ID_KEY: &str = "clovyAgentSessionId";
     const LEGACY_SESSION_ID_KEY: &str = "juneAgentSessionId";
+    /// `userInfo` keys of activity notifications (day and notice kind).
+    const TODAY_DAY_KEY: &str = "clovyTodayDay";
+    const TODAY_KIND_KEY: &str = "clovyTodayKind";
+    /// `NSUserNotificationActivationTypeActionButtonClicked`.
+    const ACTION_BUTTON_CLICKED: isize = 2;
 
     /// Set once the permanent delegate is installed; the native posting path
     /// is only trusted after that, so clicks are never silently dropped.
@@ -286,8 +368,53 @@ mod macos {
         true
     }
 
-    /// Reads Clovy's session id out of a clicked notification's `userInfo`.
-    unsafe fn notification_session_id(notification: *mut AnyObject) -> Option<String> {
+    /// Posts an activity notification natively: the day and kind go in
+    /// `userInfo`, and the action button (shown when the user's alert style
+    /// for Clovy is "Alerts") snoozes it.
+    pub(super) fn deliver_today(request: &TodayNotification) -> bool {
+        if !CENTER_DELEGATE_INSTALLED.load(Ordering::Acquire) {
+            return false;
+        }
+        unsafe {
+            let Some(center) = default_center() else {
+                return false;
+            };
+            let (Some(class), Some(dictionary_class)) = (
+                AnyClass::get(c"NSUserNotification"),
+                AnyClass::get(c"NSMutableDictionary"),
+            ) else {
+                return false;
+            };
+            let notification: *mut AnyObject = msg_send![class, new];
+            if notification.is_null() {
+                return false;
+            }
+            let title = NSString::from_str(&request.title);
+            let body = NSString::from_str(&request.body);
+            let action = NSString::from_str(&request.snooze_label);
+            let _: () = msg_send![notification, setTitle: &*title];
+            let _: () = msg_send![notification, setInformativeText: &*body];
+            let _: () = msg_send![notification, setHasActionButton: Bool::YES];
+            let _: () = msg_send![notification, setActionButtonTitle: &*action];
+            let user_info: *mut AnyObject = msg_send![dictionary_class, dictionary];
+            for (key, value) in [
+                (TODAY_DAY_KEY, &request.day),
+                (TODAY_KIND_KEY, &request.kind),
+            ] {
+                let key = NSString::from_str(key);
+                let value = NSString::from_str(value);
+                let _: () = msg_send![user_info, setObject: &*value, forKey: &*key];
+            }
+            let _: () = msg_send![notification, setUserInfo: user_info];
+            let _: () = msg_send![center, deliverNotification: notification];
+            let _: () = msg_send![notification, release];
+        }
+        true
+    }
+
+    /// Reads the first of `keys` present in a clicked notification's
+    /// `userInfo` as a string.
+    unsafe fn user_info_string(notification: *mut AnyObject, keys: &[&str]) -> Option<String> {
         if notification.is_null() {
             return None;
         }
@@ -296,13 +423,11 @@ mod macos {
             if user_info.is_null() {
                 return None;
             }
-            let value = [SESSION_ID_KEY, LEGACY_SESSION_ID_KEY]
-                .into_iter()
-                .find_map(|key| {
-                    let key = NSString::from_str(key);
-                    let value: *mut AnyObject = msg_send![user_info, objectForKey: &*key];
-                    (!value.is_null()).then_some(value)
-                })?;
+            let value = keys.iter().find_map(|key| {
+                let key = NSString::from_str(key);
+                let value: *mut AnyObject = msg_send![user_info, objectForKey: &*key];
+                (!value.is_null()).then_some(value)
+            })?;
             // Clovy only ever stores an NSString under this key; a foreign
             // object that does not respond to UTF8String is ignored.
             let responds: Bool = msg_send![value, respondsToSelector: sel!(UTF8String)];
@@ -338,7 +463,15 @@ mod macos {
         _center: *mut AnyObject,
         notification: *mut AnyObject,
     ) {
-        let session_id = unsafe { notification_session_id(notification) };
+        if let Some(day) = unsafe { user_info_string(notification, &[TODAY_DAY_KEY]) } {
+            let kind =
+                unsafe { user_info_string(notification, &[TODAY_KIND_KEY]) }.unwrap_or_default();
+            let activation: isize = unsafe { msg_send![notification, activationType] };
+            handle_today_activation(day, kind, activation == ACTION_BUTTON_CLICKED);
+            return;
+        }
+        let session_id =
+            unsafe { user_info_string(notification, &[SESSION_ID_KEY, LEGACY_SESSION_ID_KEY]) };
         handle_notification_activation(session_id);
     }
 

@@ -121,7 +121,7 @@ pub struct TimelineSearchRequest {
 /// A session is hidden while the user's current exclusions match its app or
 /// its domain: removing something from capture also removes its history
 /// from the view and the agent.
-fn session_excluded(
+pub(crate) fn session_excluded(
     app_name: &str,
     bundle_id: Option<&str>,
     domain: Option<&str>,
@@ -264,14 +264,14 @@ fn parse_request_time(value: &str, field: &str) -> Result<DateTime<Utc>, AppErro
 }
 
 /// How the timeline can be read right now.
-enum StoreAccess {
+pub(crate) enum StoreAccess {
     Open(ActivityStore),
     /// Capture is on but its database is not open yet: an empty, ready view.
     Empty,
     Unavailable(Availability, Option<String>),
 }
 
-async fn store_access(runtime: &ActivityRuntime) -> StoreAccess {
+pub(crate) async fn store_access(runtime: &ActivityRuntime) -> StoreAccess {
     if let Some(store) = runtime.shared.store() {
         return StoreAccess::Open(store);
     }
