@@ -302,11 +302,12 @@ fn computer_use_signature_matches(app_dir: &std::path::Path, identity: &str) -> 
 }
 
 /// `tauri_build::build()` validates every `bundle.resources` source path at
-/// compile time, but the native messaging shim is a sibling `[[bin]]` of this
-/// crate — it does not exist yet while build.rs runs. This placeholder keeps
-/// the mapping valid for every cargo invocation; `scripts/bundle-nm-shim.sh`
-/// (the macOS `beforeBundleCommand`) replaces it with the real signed binary
-/// after compilation and fails the bundle if it cannot.
+/// compile time, but the native messaging shim and the `clovy-mcp` relay are
+/// sibling `[[bin]]`s of this crate — they do not exist yet while build.rs
+/// runs. These placeholders keep the mappings valid for every cargo
+/// invocation; `scripts/bundle-nm-shim.sh` and `bundle-clovy-mcp.sh` (the
+/// macOS `beforeBundleCommand`) replace them with the real signed binaries
+/// after compilation and fail the bundle if they cannot.
 fn ensure_nm_shim_placeholder() {
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
         return;
@@ -320,7 +321,7 @@ fn ensure_nm_shim_placeholder() {
     else {
         return;
     };
-    for name in ["clovy-nm-shim", "june-nm-shim"] {
+    for name in ["clovy-nm-shim", "june-nm-shim", "clovy-mcp"] {
         let shim = helper_dir.join(name);
         if shim.exists() {
             continue;
@@ -328,7 +329,7 @@ fn ensure_nm_shim_placeholder() {
         if let Err(error) = std::fs::create_dir_all(&helper_dir).and_then(|_| {
             std::fs::write(
                 &shim,
-                b"placeholder: replaced by scripts/bundle-nm-shim.sh\n",
+                b"placeholder: replaced by the macOS beforeBundleCommand\n",
             )
         }) {
             println!("cargo:warning=could not create {name} placeholder: {error}");

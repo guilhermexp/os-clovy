@@ -46,6 +46,9 @@ pub struct ActivitySettings {
     pub ignored_domains: Vec<String>,
     pub work_hours: WorkHours,
     pub retention_days: u32,
+    /// The Clovy MCP server (`crate::mcp_server`); only its own command
+    /// changes it, `activity_save_settings` keeps the stored value.
+    pub mcp_server: bool,
 }
 
 impl Default for ActivitySettings {
@@ -59,6 +62,7 @@ impl Default for ActivitySettings {
             ignored_domains: Vec::new(),
             work_hours: WorkHours::default(),
             retention_days: DEFAULT_RETENTION_DAYS,
+            mcp_server: false,
         }
     }
 }

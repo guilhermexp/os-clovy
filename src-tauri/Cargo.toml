@@ -6,7 +6,7 @@ authors = ["Open Software Network"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.80.0"
-# Two binaries below; `cargo run` (tauri dev via scripts/cargo-clovy-runner.sh)
+# Several binaries below; `cargo run` (tauri dev via scripts/cargo-clovy-runner.sh)
 # must keep launching the app.
 default-run = "os-june"
 
@@ -24,6 +24,13 @@ path = "src/main.rs"
 [[bin]]
 name = "clovy-nm-shim"
 path = "src/bin/clovy_nm_shim.rs"
+required-features = ["helper-binaries"]
+
+# The Clovy MCP server's stdio relay (`mcp_server::stdio`). Bundled like the
+# shim: bundle-clovy-mcp.sh copies and signs it into .tauri-helper/.
+[[bin]]
+name = "clovy-mcp"
+path = "src/bin/clovy_mcp.rs"
 required-features = ["helper-binaries"]
 
 [[bin]]

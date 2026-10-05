@@ -31,6 +31,7 @@ pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
 pub mod macos_menu_icons;
+pub mod mcp_server;
 pub mod meeting_calendar_context;
 pub mod meeting_detection;
 pub mod meeting_hud;
@@ -453,6 +454,8 @@ pub fn run() {
             activity::timeline::activity_timeline,
             activity::timeline::activity_timeline_session,
             activity::timeline::activity_timeline_search,
+            mcp_server::mcp_server_status,
+            mcp_server::mcp_server_set_enabled,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
@@ -474,6 +477,8 @@ pub fn run() {
             // After the tray exists: the capture thread publishes its state
             // to the menu bar from its first tick.
             activity::setup(app);
+            // Reads the switch from the activity settings registered above.
+            mcp_server::setup(app);
             setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
             providers::setup(app);
