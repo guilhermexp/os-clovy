@@ -311,18 +311,27 @@ Gates (run from the repo root, judge by failure count per the notes above):
 
 Functional proof (Reality) for desktop features:
 
-1. Isolation: debug builds only, so data/config land in the `-dev` dirs; record
-   their paths before launch. For UI automation build a debug bundle
-   (`pnpm tauri build --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}'`,
-   with the Node 24 PATH below), copy it into the run folder, set its
-   `CFBundleIdentifier` to `co.opensoftware.june.proof`, re-sign it ad hoc
-   (`codesign --force --deep -s -`) and open that copy with `open -n <path>`.
-   macOS attributes Accessibility and Screen Recording to the app itself, so
-   the owner adds that copy with "+" in Privacy & Security (Terminal grants do
-   not count). Bind Computer Use to `co.opensoftware.june.proof`. Never open or
-   look up the app by bundle id `co.opensoftware.june`: that starts the
-   installed production `/Applications/June.app` on real data. Stop only
+1. Isolation: debug builds only. The owner's `co.opensoftware.june-dev` profile
+   is not a throwaway fixture. For automation compile a separate identifier:
+   `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"co.opensoftware.june.timelineproof","bundle":{"createUpdaterArtifacts":false}}'`
+   (Node 24 PATH below). Choose a run-owned identifier/profile; copy the dev
+   profile without its live MCP socket before launch. This example uses
+   `~/Library/Application Support/co.opensoftware.june.timelineproof-dev`.
+   Copy the bundle into the evidence folder, re-sign ad hoc if needed
+   (`codesign --force --deep -s -`), open by exact path, and verify the process's
+   database paths with `lsof` before changing settings or generating reports.
+   Changing only `Info.plist` does not isolate Tauri's compiled data identity.
+   Keep the normal HOME: a fake HOME hides the default Keychain.
+   Bind Computer Use to that exact bundle path. If the main window is hidden,
+   `open -a <exact-bundle-path>` reopens it. macOS permissions belong to the
+   proof app itself; the owner grants them in Privacy & Security when needed.
+   Never open or look up bundle id `co.opensoftware.june`; never launch an old
+   proof binary against a profile with a newer database schema. Stop only
    processes started by this run.
+   Startup may create the shared `~/Library/LaunchAgents/June.plist` even for
+   a proof bundle. Check its `ProgramArguments`: undo this run's autostart
+   through Settings → General only when it points to this run's exact bundle,
+   and verify the entry is gone. Never remove another app's login entry.
    Never create, unlock, or switch keychains, and never change the default
    keychain or its search list: the app reads its keys from `login` (`-dev`
    services). Only one native proof runs on the machine at a time; parallel
