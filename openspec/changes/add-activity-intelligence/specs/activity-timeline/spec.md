@@ -20,7 +20,7 @@ O sistema SHALL agrupar quadros consecutivos do mesmo app em sessões, distingui
 - Test: integration — processamento interrompido e retomado sobre banco de teste
 
 ### Requirement: Lacunas e tempo real
-Intervalos acima de 5 minutos sem quadros úteis SHALL virar lacunas classificadas como ocioso, suspensão do sistema ou pausa (manual, horário de trabalho, pouco disco). A duração das sessões MUST excluir lacunas, de modo que suspensão ou noite nunca inflem as horas registradas.
+Intervalos acima de 5 minutos sem quadros úteis SHALL virar lacunas classificadas como ocioso, suspensão do sistema ou pausa (manual, horário de trabalho, pouco disco, vídeo protegido). Uma lacuna ainda em andamento MUST aparecer até o momento atual. A duração das sessões MUST excluir lacunas, de modo que suspensão ou noite nunca inflem as horas registradas.
 
 #### Scenario: Mac suspenso
 - **WHEN** não há quadros entre 12:00 e 13:10 porque o Mac dormiu
