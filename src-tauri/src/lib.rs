@@ -19,6 +19,7 @@ mod computer_use_permission_drag;
 pub mod connectors;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod credential_compat;
+pub mod day_intelligence;
 pub mod db;
 pub mod dictation;
 pub mod domain;
@@ -352,6 +353,7 @@ pub fn run() {
             agent_hud::agent_hud_main_focused,
             notifications::send_app_notification,
             notifications::agent_open_ready,
+            notifications::today_open_ready,
             meeting_detection::queue_meeting_start_request,
             meeting_detection::pending_meeting_start_request,
             meeting_detection::acknowledge_meeting_start_request,
@@ -453,6 +455,8 @@ pub fn run() {
             activity::timeline::activity_timeline,
             activity::timeline::activity_timeline_session,
             activity::timeline::activity_timeline_search,
+            day_intelligence::day_intelligence_day,
+            day_intelligence::day_intelligence_generate,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
@@ -474,6 +478,7 @@ pub fn run() {
             // After the tray exists: the capture thread publishes its state
             // to the menu bar from its first tick.
             activity::setup(app);
+            day_intelligence::setup(app);
             setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
             providers::setup(app);

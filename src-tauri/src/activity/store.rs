@@ -417,6 +417,76 @@ const MIGRATIONS: &[ActivityMigration] = &[ActivityMigration {
             )",
         ],
     },
+    // Day intelligence (`crate::day_intelligence`, docs/day-intelligence.md):
+    // hour reports, the day's workstreams, day summaries, and the scheduler's
+    // attempt bookkeeping. Days and hours are local ("YYYY-MM-DD",
+    // "YYYY-MM-DDTHH"); `started_at`/`ended_at` are the UTC bounds.
+    ActivityMigration {
+        version: 3,
+        name: "day_intelligence",
+        statements: &[
+            "CREATE TABLE day_hour_reports (
+                hour TEXT PRIMARY KEY,
+                day TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                active_minutes INTEGER NOT NULL CHECK (active_minutes >= 0),
+                summary TEXT NOT NULL,
+                activities_json TEXT NOT NULL,
+                distilled TEXT NOT NULL,
+                distill_json TEXT NOT NULL,
+                locale TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                -- set once the hour is part of the day's workstreams
+                folded_at TEXT
+            )",
+            "CREATE INDEX idx_day_hour_reports_day ON day_hour_reports(day)",
+            // Workstreams only grow: a later hour appends a row to
+            // day_workstream_hours (and may refresh the summary of the one
+            // workstream it joins); titles and other workstreams never change.
+            "CREATE TABLE day_workstreams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                first_hour TEXT NOT NULL,
+                last_hour TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            "CREATE INDEX idx_day_workstreams_day ON day_workstreams(day)",
+            "CREATE TABLE day_workstream_hours (
+                workstream_id INTEGER NOT NULL REFERENCES day_workstreams(id) ON DELETE CASCADE,
+                hour TEXT NOT NULL,
+                minutes INTEGER NOT NULL CHECK (minutes >= 0),
+                note TEXT NOT NULL,
+                PRIMARY KEY (workstream_id, hour)
+            )",
+            "CREATE TABLE day_summaries (
+                day TEXT PRIMARY KEY,
+                headline TEXT NOT NULL,
+                narrative TEXT NOT NULL,
+                insights_json TEXT NOT NULL,
+                standup_json TEXT NOT NULL,
+                hours_covered INTEGER NOT NULL,
+                locale TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+                generated_at TEXT NOT NULL
+            )",
+            // One row per unit of scheduled work ('hour:<hour>', 'fold:<hour>',
+            // 'auto:<day>'): retries back off and stop after a few failures.
+            "CREATE TABLE day_intelligence_runs (
+                key TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL,
+                outcome TEXT NOT NULL CHECK (outcome IN ('ok', 'failed', 'empty')),
+                last_error TEXT,
+                next_attempt_at TEXT,
+                updated_at TEXT NOT NULL
+            )",
+        ],
+    },
 ];
 
 pub fn timestamp(at: DateTime<Utc>) -> String {
@@ -544,8 +614,9 @@ impl ActivityStore {
         self.pool.close().await;
     }
 
-    /// The pool, for the timeline module's own tables (`timeline::db`).
-    pub(in crate::activity) fn pool(&self) -> &SqlitePool {
+    /// The pool, for the slices that keep their own tables in this database
+    /// (`timeline::db`, `crate::day_intelligence::db`).
+    pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 

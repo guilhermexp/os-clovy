@@ -54,6 +54,23 @@ pub struct ActivityRuntime {
 #[derive(Default)]
 pub struct ActivityState(Option<ActivityRuntime>);
 
+impl ActivityState {
+    /// For the slices that build on capture (`crate::day_intelligence`).
+    pub fn runtime(&self) -> Option<&ActivityRuntime> {
+        self.0.as_ref()
+    }
+}
+
+impl ActivityRuntime {
+    pub fn shared(&self) -> &Arc<ActivityShared> {
+        &self.shared
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityStatusDto {
@@ -126,11 +143,13 @@ fn runtime<'a>(state: &'a State<'_, ActivityState>) -> Result<&'a ActivityRuntim
     })
 }
 
-/// Pushes the current status to the frontend and the menu bar.
+/// Pushes the current status to the frontend and the menu bar, and tells day
+/// intelligence about capture failures (it notifies the user).
 pub fn publish(app: &AppHandle) {
     let state = app.state::<ActivityState>();
     let status = status_of(state.0.as_ref());
     crate::menu_bar::set_activity_state(app, &status.state, status.manual_pause);
+    crate::day_intelligence::on_capture_state(app, &status.state);
     let _ = app.emit(ACTIVITY_STATE_EVENT, status);
 }
 
@@ -233,9 +252,14 @@ pub async fn activity_debug_export(
             "The activity database is not open. Turn capture on first.",
         )
     })?;
-    let extra = timeline::db::debug_sections(&store, DEBUG_EXPORT_LIMIT)
+    let mut extra = timeline::db::debug_sections(&store, DEBUG_EXPORT_LIMIT)
         .await
         .map_err(|error| AppError::new("activity_debug_export_failed", error.to_string()))?;
+    extra.extend(
+        crate::day_intelligence::db::debug_sections(&store)
+            .await
+            .map_err(|error| AppError::new("activity_debug_export_failed", error.to_string()))?,
+    );
     let export = store
         .debug_export(
             &runtime.data_dir.join("activity-debug-exports"),

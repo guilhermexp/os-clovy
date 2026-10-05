@@ -35,6 +35,61 @@ impl Default for WorkHours {
     }
 }
 
+/// When the day summary is generated on its own (the day intelligence
+/// scheduler; `docs/day-intelligence.md`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DaySummarySettings {
+    /// "HH:MM", local time.
+    pub time: String,
+}
+
+impl Default for DaySummarySettings {
+    fn default() -> Self {
+        Self {
+            time: "18:00".into(),
+        }
+    }
+}
+
+/// Hours during which activity notifications wait instead of showing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QuietHours {
+    pub enabled: bool,
+    /// "HH:MM"; an end at or before the start spans midnight.
+    pub start: String,
+    pub end: String,
+}
+
+impl Default for QuietHours {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start: "22:00".into(),
+            end: "08:00".into(),
+        }
+    }
+}
+
+/// Activity notifications (day summary ready, activity failures).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ActivityNotificationSettings {
+    /// The switch for every activity notification.
+    pub enabled: bool,
+    pub quiet_hours: QuietHours,
+}
+
+impl Default for ActivityNotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            quiet_hours: QuietHours::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ActivitySettings {
@@ -46,6 +101,8 @@ pub struct ActivitySettings {
     pub ignored_domains: Vec<String>,
     pub work_hours: WorkHours,
     pub retention_days: u32,
+    pub day_summary: DaySummarySettings,
+    pub notifications: ActivityNotificationSettings,
 }
 
 impl Default for ActivitySettings {
@@ -59,6 +116,8 @@ impl Default for ActivitySettings {
             ignored_domains: Vec::new(),
             work_hours: WorkHours::default(),
             retention_days: DEFAULT_RETENTION_DAYS,
+            day_summary: DaySummarySettings::default(),
+            notifications: ActivityNotificationSettings::default(),
         }
     }
 }
@@ -93,6 +152,16 @@ impl ActivitySettings {
         }
         if parse_clock(&self.work_hours.end).is_none() {
             self.work_hours.end = defaults.end;
+        }
+        if parse_clock(&self.day_summary.time).is_none() {
+            self.day_summary.time = DaySummarySettings::default().time;
+        }
+        let quiet = QuietHours::default();
+        if parse_clock(&self.notifications.quiet_hours.start).is_none() {
+            self.notifications.quiet_hours.start = quiet.start;
+        }
+        if parse_clock(&self.notifications.quiet_hours.end).is_none() {
+            self.notifications.quiet_hours.end = quiet.end;
         }
         self
     }
