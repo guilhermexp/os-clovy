@@ -37,13 +37,13 @@
 
 ## 5. S4 — Inteligência do dia
 
-- [ ] 5.1 Destilação local com deduplicação semântica por embeddings locais e resgate de entidades; verificado por testes do pipeline.
-- [ ] 5.2 Relatório por hora com minutos normalizados pelo tempo ativo medido; verificado por teste de normalização e integração com provedor falso.
-- [ ] 5.3 Frentes de trabalho por dobra incremental ancorada; verificado por teste com resposta simulada.
-- [ ] 5.4 Resumo do dia (narrativa, insights, standup, painéis ligados aos dados, reuniões/notas do Clovy, blocos de agentes), idioma da interface e chaves JSON em inglês; verificado por integração com provedor falso.
-- [ ] 5.5 Agendamento diário com recuperação após suspensão e geração sob demanda, inativo sem provedor; verificado por teste com relógio simulado.
-- [ ] 5.6 Notificações (resumo pronto, falha), horário silencioso, abrir vista, adiar quando suportado; verificado por testes da política e prova real no app de desenvolvimento.
-- [ ] 5.7 Resumo, frentes e relatórios na vista "Hoje" com copiar standup e estado desligado; verificado por testes de componente e captura no app de desenvolvimento.
+- [x] 5.1 Destilação local com deduplicação semântica por embeddings locais e resgate de entidades; verificado por testes do pipeline.
+- [x] 5.2 Relatório por hora com minutos normalizados pelo tempo ativo medido; verificado por teste de normalização e integração com provedor falso.
+- [x] 5.3 Frentes de trabalho por dobra incremental ancorada; verificado por teste com resposta simulada.
+- [x] 5.4 Resumo do dia (narrativa, insights, standup, painéis ligados aos dados, reuniões/notas do Clovy, blocos de agentes), idioma da interface e chaves JSON em inglês; verificado por integração com provedor falso.
+- [x] 5.5 Agendamento diário com recuperação após suspensão e geração sob demanda, inativo sem provedor; verificado por teste com relógio simulado.
+- [x] 5.6 Notificações (resumo pronto, falha), horário silencioso, abrir vista, adiar quando suportado; verificado por testes da política e prova real no app de desenvolvimento.
+- [x] 5.7 Resumo, frentes e relatórios na vista "Hoje" com copiar standup e estado desligado; verificado por testes de componente e captura no app de desenvolvimento.
 
 ## 6. S6 — Servidor MCP do Clovy
 
