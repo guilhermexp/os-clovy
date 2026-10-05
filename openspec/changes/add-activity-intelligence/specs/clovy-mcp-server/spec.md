@@ -20,7 +20,7 @@ O Clovy SHALL oferecer um servidor MCP por stdio, desligado por padrão, que só
 - Test: integration — conexão sem segredo
 
 ### Requirement: Ferramentas de dados do Clovy
-O servidor SHALL expor, somente leitura e no perfil ativo, ferramentas com nomes `verb_object`: `search_notes`, `get_note`, `list_dictations`, `list_memories`, e as de atividade `get_activity_timeline`, `search_activity`, `get_activity_stats`, `get_active_session`, `list_app_usage`, `get_session_detail`, `list_coding_agent_sessions`, `get_day_summary`. Ferramentas de atividade MUST existir apenas com a captura ligada.
+O servidor SHALL expor, somente leitura, ferramentas com nomes `verb_object`: `search_notes`, `get_note`, `list_dictations`, `list_memories`, e as de atividade `get_activity_timeline`, `search_activity`, `get_activity_stats`, `get_active_session`, `list_app_usage`, `get_session_detail`, `list_coding_agent_sessions`, `get_day_summary`. Notas, ditados e memórias MUST vir do perfil ativo. A atividade (captura, linha do tempo, blocos de agentes, resumos) é da instalação, sem partição por perfil, como na vista "Hoje" e no agente do app. Ferramentas de atividade MUST existir apenas com a captura ligada e respeitar exclusões, retenção e limites de saída.
 
 #### Scenario: Busca de notas pelo Claude Code
 - **WHEN** o Claude Code, configurado com o servidor do Clovy, chama `search_notes` com um termo de uma nota existente
