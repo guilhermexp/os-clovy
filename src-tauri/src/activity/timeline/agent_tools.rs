@@ -16,6 +16,7 @@ use crate::domain::types::AppError;
 pub const SEARCH_ACTIVITY: &str = "search_activity";
 pub const GET_ACTIVITY_TIMELINE: &str = "get_activity_timeline";
 const MAX_SESSIONS: usize = 300;
+const MAX_GAPS: usize = 300;
 const DEFAULT_RESULTS: u32 = 20;
 const MAX_RESULTS: u32 = 50;
 
@@ -31,7 +32,7 @@ pub fn descriptors(capture_enabled: bool) -> Vec<Value> {
     vec![
         json!({
             "name": GET_ACTIVITY_TIMELINE,
-            "description": "Read the user's activity timeline (app sessions with browser domain or editor workspace, category, and gaps for idle, sleep, or paused capture) and its totals for a period. Use it for questions like \"what did I do this morning?\". Times are RFC 3339; omit both bounds for today so far.",
+            "description": "Read the user's activity timeline (app sessions with browser domain or editor workspace, category, and gaps for idle, sleep, or paused capture) and its totals for a period. Use it for questions like \"what did I do this morning?\". Times are RFC 3339; omit both bounds for today so far. Long periods are truncated (see `truncated`, `totalSessions`, `totalGaps`); ask for a shorter period to see everything.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -114,6 +115,7 @@ fn gap_json(gap: &TimelineGapDto) -> Value {
         "startedAt": local(&gap.started_at),
         "endedAt": local(&gap.ended_at),
         "minutes": minutes(gap.duration_ms),
+        "ongoing": gap.ongoing,
     })
 }
 
@@ -147,12 +149,14 @@ async fn get_timeline(
     let view = timeline_view(store, settings, from, to, now)
         .await
         .map_err(|error| AppError::new("activity_timeline_failed", error.to_string()))?;
-    let truncated = view.sessions.len() > MAX_SESSIONS;
+    let truncated = view.sessions.len() > MAX_SESSIONS || view.gaps.len() > MAX_GAPS;
     Ok(json!({
         "from": from.with_timezone(&Local).to_rfc3339(),
         "to": to.with_timezone(&Local).to_rfc3339(),
         "sessions": view.sessions.iter().take(MAX_SESSIONS).map(session_json).collect::<Vec<_>>(),
-        "gaps": view.gaps.iter().map(gap_json).collect::<Vec<_>>(),
+        "gaps": view.gaps.iter().take(MAX_GAPS).map(gap_json).collect::<Vec<_>>(),
+        "totalSessions": view.sessions.len(),
+        "totalGaps": view.gaps.len(),
         "stats": {
             "focusedMinutes": minutes(view.stats.focused_ms),
             "idleMinutes": minutes(view.stats.idle_ms),
@@ -337,6 +341,49 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(found["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_activity_timeline_bounds_gaps_and_flags_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ActivityStore::open(
+            &dir.path().join(ACTIVITY_DB_FILE),
+            &MemoryKeyStore::default(),
+        )
+        .await
+        .unwrap();
+        // One frame every 6 minutes: every interval is a gap.
+        let start = at(0, 0);
+        for index in 0..310 {
+            store
+                .insert_frame(&NewFrame {
+                    captured_at: start + Duration::minutes(index * 6),
+                    app_name: "Zed".into(),
+                    bundle_id: None,
+                    window_title: Some("p \u{2014} a.rs".into()),
+                    browser_url: None,
+                    text_source: TextSource::Accessibility,
+                    text: Some(format!("fn f{index}")),
+                })
+                .await
+                .unwrap();
+        }
+        let now = start + Duration::minutes(309 * 6) + Duration::seconds(30);
+        run_pass(&store, now, &[]).await.unwrap();
+        let settings = ActivitySettings {
+            enabled: true,
+            ..ActivitySettings::default()
+        };
+        let arguments = json!({ "from": "2026-10-01T00:00:00Z", "to": "2026-10-03T00:00:00Z" });
+        let value = dispatch(&store, &settings, GET_ACTIVITY_TIMELINE, &arguments, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value["gaps"].as_array().unwrap().len(), MAX_GAPS);
+        assert_eq!(value["sessions"].as_array().unwrap().len(), MAX_SESSIONS);
+        assert_eq!(value["totalGaps"], json!(309));
+        assert_eq!(value["totalSessions"], json!(310));
+        assert_eq!(value["truncated"], json!(true));
     }
 
     #[tokio::test]

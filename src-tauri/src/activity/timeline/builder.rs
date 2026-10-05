@@ -359,6 +359,24 @@ pub fn expire(state: &mut BuilderState, now: DateTime<Utc>, out: &mut Vec<Timeli
     }
 }
 
+/// The gap still going on at `now`: more than the threshold since the last
+/// useful frame, with no session still open within it. Not persisted (the
+/// next useful frame writes the real one); reads add it so idle or away time
+/// shows while it lasts. `pauses` must cover the gap up to `now`.
+pub fn ongoing_gap(
+    state: &BuilderState,
+    now: DateTime<Utc>,
+    pauses: &[PauseSpan],
+) -> Option<GapRecord> {
+    let from = state.last_useful_at? + FRAME_SPAN;
+    let session_live = state
+        .open
+        .as_ref()
+        .is_some_and(|open| now - open.ended_at <= GAP_THRESHOLD);
+    (!session_live && now - from > GAP_THRESHOLD)
+        .then(|| classify_gap(from, now, state.idle_frames, pauses))
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

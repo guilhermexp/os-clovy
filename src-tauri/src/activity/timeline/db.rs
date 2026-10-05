@@ -82,6 +82,9 @@ pub struct TimelineGapDto {
     pub duration_ms: i64,
     pub kind: GapKind,
     pub pause_reason: Option<PauseReason>,
+    /// Still going on at read time (synthesized up to "now", not stored yet;
+    /// `id` is 0). Stored gaps are always `false`.
+    pub ongoing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -109,6 +112,10 @@ pub struct TimelineSearchResultDto {
     pub app_name: String,
     #[serde(skip)]
     pub bundle_id: Option<String>,
+    /// The session's persisted browser domain, for exclusion filtering: a
+    /// document written before the URL was known has no URL of its own.
+    #[serde(skip)]
+    pub session_domain: Option<String>,
     pub window_title: Option<String>,
     pub browser_url: Option<String>,
     pub seen_at: String,
@@ -490,6 +497,7 @@ fn gap_dto(row: &SqliteRow) -> TimelineGapDto {
         duration_ms: row.get(3),
         kind: GapKind::from_db(row.get::<&str, _>(4)),
         pause_reason: pause_reason_from_db(row.get::<Option<&str>, _>(5)),
+        ongoing: false,
     }
 }
 
@@ -606,13 +614,15 @@ pub fn fts_query(input: &str) -> Option<String> {
     )
 }
 
-/// Best matches first among documents seen in `[from, to)`.
+/// Best matches first among documents seen in `[from, to)`; `offset` pages
+/// through the ranked results.
 pub async fn search(
     store: &ActivityStore,
     input: &str,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<TimelineSearchResultDto>, StoreError> {
     let Some(expression) = fts_query(input) else {
         return Ok(Vec::new());
@@ -621,17 +631,19 @@ pub async fn search(
         "SELECT timeline_search.session_id, timeline_search.seen_at,
                 timeline_search.window_title, timeline_search.browser_url,
                 snippet(timeline_search, -1, '', '', '\u{2026}', 16),
-                s.app_name, s.bundle_id
+                s.app_name, s.bundle_id,
+                CASE WHEN s.context_kind = 'domain' THEN s.context END
          FROM timeline_search JOIN timeline_sessions s ON s.id = timeline_search.session_id
          WHERE timeline_search MATCH ?
            AND timeline_search.seen_at >= ? AND timeline_search.seen_at < ?
          ORDER BY bm25(timeline_search), timeline_search.seen_at DESC
-         LIMIT ?",
+         LIMIT ? OFFSET ?",
     )
     .bind(expression)
     .bind(timestamp(from))
     .bind(timestamp(to))
     .bind(i64::from(limit))
+    .bind(i64::from(offset))
     .fetch_all(store.pool())
     .await?;
     Ok(rows
@@ -644,6 +656,7 @@ pub async fn search(
             snippet: row.get(4),
             app_name: row.get(5),
             bundle_id: row.get(6),
+            session_domain: row.get(7),
         })
         .collect())
 }

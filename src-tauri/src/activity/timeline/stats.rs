@@ -137,6 +137,7 @@ mod tests {
             duration_ms: (to - from).num_milliseconds(),
             kind,
             pause_reason: None,
+            ongoing: false,
         }
     }
 
