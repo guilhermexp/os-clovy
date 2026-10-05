@@ -208,11 +208,12 @@ mod unix {
             &self.socket
         }
 
-        /// Stops accepting, closes every open connection, and removes the
-        /// socket file.
+        /// Removes the socket file, then stops accepting and closes every open
+        /// connection. Removing first means a relay whose connection drops can
+        /// already tell that the server is off.
         pub fn stop(self) {
-            let _ = self.shutdown.send(true);
             let _ = std::fs::remove_file(&self.socket);
+            let _ = self.shutdown.send(true);
         }
     }
 

@@ -189,6 +189,15 @@ mod unix {
         let _ = output.flush();
     }
 
+    /// Why requests lost their connection: a server that no longer listens was
+    /// turned off (or Clovy quit); otherwise Clovy dropped the connection.
+    fn dropped_reason(dir: &Path) -> &'static str {
+        match channel::connect(dir) {
+            Err(ClientError::NotListening) => OFF_MESSAGE,
+            _ => DROPPED_MESSAGE,
+        }
+    }
+
     /// An authenticated connection and the requests still waiting on it.
     struct Connection {
         stream: UnixStream,
@@ -204,6 +213,7 @@ mod unix {
             let pending: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
             let (thread_alive, thread_pending, thread_output) =
                 (Arc::clone(&alive), Arc::clone(&pending), Arc::clone(output));
+            let probe_dir = dir.to_path_buf();
             std::thread::spawn(move || {
                 for line in BufReader::new(reader).lines() {
                     let Ok(line) = line else { break };
@@ -225,9 +235,12 @@ mod unix {
                     .drain()
                     .map(|(_, message)| message)
                     .collect();
-                for message in orphans {
-                    if let Some(response) = fallback(&message, DROPPED_MESSAGE) {
-                        emit(&thread_output, &response);
+                if !orphans.is_empty() {
+                    let reason = dropped_reason(&probe_dir);
+                    for message in orphans {
+                        if let Some(response) = fallback(&message, reason) {
+                            emit(&thread_output, &response);
+                        }
                     }
                 }
             });
