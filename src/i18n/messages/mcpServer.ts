@@ -4,7 +4,7 @@ export default defineMessages({
   en: {
     "mcpServer.heading": "Clovy MCP server",
     "mcpServer.description":
-      "Let coding tools on this Mac, like Claude Code and Cursor, read your notes, dictations, memories, and activity. Read-only, local, and limited to the current profile.",
+      "Let coding tools on this Mac, like Claude Code and Cursor, read your notes, dictations, and memories from the current data set, and your activity on this Mac. Read-only and local.",
     "mcpServer.toggleTitle": "Turn on MCP server",
     "mcpServer.toggleDescription":
       "Answers only while Clovy is open. Activity tools appear when activity capture is on.",
@@ -28,7 +28,7 @@ export default defineMessages({
   "pt-BR": {
     "mcpServer.heading": "Servidor MCP do Clovy",
     "mcpServer.description":
-      "Permite que ferramentas de programação neste Mac, como Claude Code e Cursor, leiam suas notas, ditados, memórias e atividade. Somente leitura, local e limitado ao perfil atual.",
+      "Permite que ferramentas de programação neste Mac, como Claude Code e Cursor, leiam suas notas, ditados e memórias do conjunto de dados atual e sua atividade neste Mac. Somente leitura e local.",
     "mcpServer.toggleTitle": "Ligar servidor MCP",
     "mcpServer.toggleDescription":
       "Responde só enquanto o Clovy está aberto. As ferramentas de atividade aparecem quando a captura de atividade está ligada.",

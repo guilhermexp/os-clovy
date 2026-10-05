@@ -68,6 +68,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0056](adr/0056-interface-language-uses-an-in-repo-typed-catalog.md) - interface language (English, Português (Brasil)) uses an in-repo typed catalog, a localStorage preference independent of the transcription language, and a Tauri event mirrored into the native menus
 - [adr/0057](adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md) - the activity database is a separate SQLCipher file with a Keychain key; SQLCipher is linked app-wide on macOS and the unkeyed main database is unaffected
 - [adr/0058](adr/0058-clovy-mcp-server-relays-to-the-running-app.md) - the Clovy MCP server is a stdio relay (`clovy-mcp`) to the running app over a same-user Unix socket with an installation secret; the binary never opens the databases
+- [adr/0059](adr/0059-activity-is-per-installation-not-per-data-partition.md) - activity (timeline and coding-agent blocks) belongs to the installation, not to a data partition; MCP activity tools read it like the "Today" view while notes, dictations, and memories stay in the current partition
 
 ## Enforceable rules (spec/)
 
