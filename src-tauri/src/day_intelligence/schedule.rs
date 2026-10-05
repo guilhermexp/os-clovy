@@ -200,6 +200,26 @@ pub fn auto_summary_due(
     now_local.time() >= at && may_run(record, now, false)
 }
 
+/// The day whose automatic summary runs at this tick, if any. Yesterday's
+/// comes first while its run never finished (the Mac slept through the
+/// configured time and woke after midnight); then today's per
+/// [`auto_summary_due`]. One day per tick; the run records make each happen
+/// once.
+pub fn auto_summary_day(
+    now_local: NaiveDateTime,
+    summary_time: &str,
+    yesterday: Option<&RunRecord>,
+    today: Option<&RunRecord>,
+    now: DateTime<Utc>,
+) -> Option<NaiveDate> {
+    parse_clock(summary_time)?;
+    let day = now_local.date();
+    if may_run(yesterday, now, false) {
+        return day.pred_opt();
+    }
+    auto_summary_due(now_local, summary_time, today, now).then_some(day)
+}
+
 /// The local end of the quiet period `now_local` falls in, if any. An end at
 /// or before the start spans midnight; equal times mean no quiet hours.
 pub fn quiet_until(now_local: NaiveDateTime, quiet: &QuietHours) -> Option<NaiveDateTime> {
@@ -300,5 +320,37 @@ mod tests {
             ..quiet
         };
         assert_eq!(quiet_until(local(4, 23, 0), &off), None);
+    }
+
+    #[test]
+    fn a_summary_missed_overnight_runs_for_its_own_day_after_waking() {
+        let zone = zone();
+        let done = RunRecord {
+            attempts: 1,
+            outcome: RunOutcome::Ok,
+            next_attempt_at: None,
+        };
+        let yesterday = NaiveDate::from_ymd_opt(2026, 10, 4).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+        // Asleep from 17:30 on the 4th to 08:00 on the 5th.
+        let wake = local(5, 8, 0);
+        let at = |time: NaiveDateTime| zone.instant(time).unwrap();
+        assert_eq!(
+            auto_summary_day(wake, "18:00", None, None, at(wake)),
+            Some(yesterday)
+        );
+        assert_eq!(
+            auto_summary_day(wake, "18:00", Some(&done), None, at(wake)),
+            None
+        );
+        let evening = local(5, 18, 0);
+        assert_eq!(
+            auto_summary_day(evening, "18:00", Some(&done), None, at(evening)),
+            Some(today)
+        );
+        assert_eq!(
+            auto_summary_day(evening, "18:00", Some(&done), Some(&done), at(evening)),
+            None
+        );
     }
 }

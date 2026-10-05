@@ -139,7 +139,9 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
 
 /// Groups note rows (one per recording session, or one without a recording)
 /// into notes: a meeting spans its first recording start to its last end; a
-/// note without a recording sits at its creation time.
+/// note without a recording sits at its creation time. A recording counts
+/// only its part inside `[from, to)`, so a meeting across midnight splits its
+/// duration between the two days.
 pub fn meetings_from_rows(
     rows: Vec<NoteRow>,
     from: DateTime<Utc>,
@@ -164,9 +166,14 @@ pub fn meetings_from_rows(
             },
         };
         let overlaps = if recorded {
-            start < to && end >= from
+            start < to && (end > from || start >= from)
         } else {
             start >= from && start < to
+        };
+        let inside_ms = if recorded {
+            (end.min(to) - start.max(from)).num_milliseconds().max(0)
+        } else {
+            0
         };
         if !overlaps {
             continue;
@@ -175,7 +182,7 @@ pub fn meetings_from_rows(
             let existing_start = parse_time(&existing.started_at).unwrap_or(start);
             let existing_end = parse_time(&existing.ended_at).unwrap_or(end);
             if recorded {
-                existing.duration_ms += (end - start).num_milliseconds();
+                existing.duration_ms += inside_ms;
                 existing.recorded = true;
             }
             let start = start.min(existing_start);
@@ -193,11 +200,7 @@ pub fn meetings_from_rows(
             ended_at: end.to_rfc3339(),
             start_local: hhmm(zone, start),
             end_local: hhmm(zone, end),
-            duration_ms: if recorded {
-                (end - start).num_milliseconds()
-            } else {
-                0
-            },
+            duration_ms: inside_ms,
             recorded,
             excerpt: excerpt(&content),
         });
@@ -226,13 +229,14 @@ impl DaySources for AppSources {
             let from_text = from.to_rfc3339();
             let to_text = to.to_rfc3339();
             let rows = query(
-                "SELECT n.id, n.title, COALESCE(n.generated_content, n.edited_content, ''),
+                "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, ''),
                         r.started_at, r.ended_at, n.created_at
                  FROM notes n LEFT JOIN recording_sessions r ON r.note_id = n.id
                  WHERE n.profile = ? AND (
                     (r.started_at IS NOT NULL
                       AND julianday(r.started_at) < julianday(?)
-                      AND (r.ended_at IS NULL OR julianday(r.ended_at) >= julianday(?)))
+                      AND (r.ended_at IS NULL OR julianday(r.ended_at) > julianday(?)
+                        OR julianday(r.started_at) >= julianday(?)))
                     OR (r.id IS NULL
                       AND julianday(n.created_at) >= julianday(?)
                       AND julianday(n.created_at) < julianday(?)))
@@ -240,6 +244,7 @@ impl DaySources for AppSources {
             )
             .bind(profile)
             .bind(&to_text)
+            .bind(&from_text)
             .bind(&from_text)
             .bind(&from_text)
             .bind(&to_text)
@@ -306,7 +311,7 @@ pub(crate) mod tests {
     fn overlaps(start: &str, end: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
         let start = parse_time(start).unwrap();
         let end = parse_time(end).unwrap();
-        start < to && end >= from
+        start < to && (end > from || start >= from)
     }
 
     impl DaySources for FixedSources {
@@ -399,5 +404,45 @@ pub(crate) mod tests {
         assert!(meeting
             .prompt_line()
             .contains("meeting \"Weekly sync\" (30 min)"));
+    }
+
+    #[test]
+    fn a_meeting_across_midnight_splits_its_minutes_between_the_days() {
+        let zone = FixedZone(chrono::FixedOffset::west_opt(3 * 3600).unwrap());
+        let midnight = parse_time("2026-10-05T03:00:00Z").unwrap();
+        let day = chrono::Duration::days(1);
+        let now = parse_time("2026-10-05T12:00:00Z").unwrap();
+        let row = |id: &str, start: &str, end: &str| {
+            (
+                id.to_string(),
+                "Late call".to_string(),
+                String::new(),
+                Some(start.to_string()),
+                Some(end.to_string()),
+                start.to_string(),
+            )
+        };
+        let rows = || {
+            vec![
+                row("n1", "2026-10-05T02:50:00Z", "2026-10-05T03:10:00Z"),
+                row("n2", "2026-10-05T02:30:00Z", "2026-10-05T03:00:00Z"),
+            ]
+        };
+
+        let before = meetings_from_rows(rows(), midnight - day, midnight, &zone, now);
+        let after = meetings_from_rows(rows(), midnight, midnight + day, &zone, now);
+
+        let minutes = |notes: &[MeetingNote]| {
+            notes
+                .iter()
+                .map(|note| (note.note_id.clone(), note.duration_ms / 60_000))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            minutes(&before),
+            vec![("n2".to_string(), 30), ("n1".to_string(), 10)]
+        );
+        // n2 ended exactly at midnight: it is not part of the next day.
+        assert_eq!(minutes(&after), vec![("n1".to_string(), 10)]);
     }
 }

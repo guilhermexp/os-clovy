@@ -47,7 +47,9 @@ embedding model test is ignored by default:
   every file verified by SHA-256). Until it is present, or if it fails, the
   distiller runs its lexical stages only.
 - Notes and meetings of the day (title, time, a 400-character excerpt of the
-  generated note) go to the activity provider with the day summary.
+  note, the user's edited version when there is one) go to the activity
+  provider with the day summary. A recording across midnight counts only its
+  part inside each day.
 
 ## Pipeline
 
@@ -82,7 +84,9 @@ wakes every minute, on a capture failure, and when a notice is due:
 5. **Day summary**: at the configured time (default 18:00), once per day: due
    when the local clock is past the time and no automatic run of the day
    finished, so a Mac asleep at 18:00 generates it at the first tick after
-   waking. On demand ("Generate summary") it reports the day's pending hours
+   waking. A Mac that slept through the time and woke after midnight first
+   generates the previous day's summary (once; one day per tick). On demand
+   ("Generate summary") it reports the day's pending hours
    (retrying failed ones now) and regenerates. Text follows the interface
    language (`interface_locale::current()`); JSON keys stay English. A day with
    no reports, meetings, or blocks has no summary and no call.

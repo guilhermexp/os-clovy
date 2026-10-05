@@ -276,33 +276,38 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
         locale: crate::interface_locale::current(),
         now,
     };
-    let key = day_key(today);
-    for day in [today - Duration::days(1), today] {
+    let yesterday = today - Duration::days(1);
+    for day in [yesterday, today] {
         match pipeline::catch_up_day(&deps, day, false).await {
             Ok(result) if result.reported + result.folded > 0 => emit(app, &day_key(day), false),
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "day intelligence catch-up failed"),
         }
     }
-    let auto_key = format!("auto:{key}");
-    let record = match db::run_record(&store, &auto_key).await {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::warn!(%error, "day summary run record unreadable");
-            return;
+    let mut records = Vec::with_capacity(2);
+    for day in [yesterday, today] {
+        match db::run_record(&store, &format!("auto:{}", day_key(day))).await {
+            Ok(record) => records.push(record),
+            Err(error) => {
+                tracing::warn!(%error, "day summary run record unreadable");
+                return;
+            }
         }
-    };
-    if !schedule::auto_summary_due(
+    }
+    let Some(day) = schedule::auto_summary_day(
         zone.local(now),
         &settings.day_summary.time,
-        record.as_ref(),
+        records[0].as_ref(),
+        records[1].as_ref(),
         now,
-    ) {
+    ) else {
         return;
-    }
+    };
+    let key = day_key(day);
+    let auto_key = format!("auto:{key}");
     state.running.store(true, Ordering::SeqCst);
     emit(app, &key, true);
-    let outcome = pipeline::generate_summary(&deps, today, SummaryTrigger::Scheduled).await;
+    let outcome = pipeline::generate_summary(&deps, day, SummaryTrigger::Scheduled).await;
     state.running.store(false, Ordering::SeqCst);
     let recorded = match outcome {
         Ok(Some(summary)) => {
