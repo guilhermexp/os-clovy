@@ -5,7 +5,7 @@
 //! `clovy-mcp-server` spec of the OpenSpec change `add-activity-intelligence`;
 //! `docs/mcp-server.md` lists them with their arguments and limits.
 
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use serde_json::{json, Value};
 use sqlx::{query::query, row::Row};
 use sqlx_sqlite::SqlitePool;
@@ -33,9 +33,10 @@ pub const GET_ACTIVE_SESSION: &str = "get_active_session";
 pub const LIST_APP_USAGE: &str = "list_app_usage";
 pub const GET_SESSION_DETAIL: &str = "get_session_detail";
 pub const LIST_CODING_AGENT_SESSIONS: &str = "list_coding_agent_sessions";
+pub const GET_DAY_SUMMARY: &str = "get_day_summary";
 
 /// Activity tools, in catalog order.
-pub const ACTIVITY_TOOLS: [&str; 7] = [
+pub const ACTIVITY_TOOLS: [&str; 8] = [
     agent_tools::GET_ACTIVITY_TIMELINE,
     agent_tools::SEARCH_ACTIVITY,
     GET_ACTIVITY_STATS,
@@ -43,6 +44,7 @@ pub const ACTIVITY_TOOLS: [&str; 7] = [
     LIST_APP_USAGE,
     GET_SESSION_DETAIL,
     LIST_CODING_AGENT_SESSIONS,
+    GET_DAY_SUMMARY,
 ];
 const DATA_TOOLS: [&str; 4] = [SEARCH_NOTES, GET_NOTE, LIST_DICTATIONS, LIST_MEMORIES];
 
@@ -55,6 +57,12 @@ const DEFAULT_APP_USAGE: u64 = 20;
 const MAX_APP_USAGE: u64 = 100;
 const DEFAULT_CODING_AGENT_BLOCKS: u64 = 20;
 const MAX_CODING_AGENT_BLOCKS: u64 = 50;
+const MAX_DAY_WORKSTREAMS: usize = 20;
+const MAX_DAY_HOUR_REPORTS: usize = 24;
+const MAX_WORKSTREAM_HOURS: usize = 24;
+const MAX_HOUR_ACTIVITIES: usize = 20;
+const DAY_SUMMARY_TEXT_MAX_CHARS: usize = 4_000;
+const DAY_SUMMARY_NARRATIVE_MAX_CHARS: usize = 20_000;
 /// How far back `get_active_session` looks for the session going on now.
 const ACTIVE_LOOKBACK_HOURS: i64 = 12;
 
@@ -231,6 +239,20 @@ pub fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
                     "from": { "type": "string", "description": "Start, RFC 3339 with offset (default: local midnight today)." },
                     "to": { "type": "string", "description": "End, RFC 3339 with offset (default: now)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_CODING_AGENT_BLOCKS, "default": DEFAULT_CODING_AGENT_BLOCKS }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        read_only(
+            GET_DAY_SUMMARY,
+            "The day's summary: headline, narrative, insights, standup (done, in-progress, blockers), workstreams, and hour reports. Omit `date` for today.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Local date in YYYY-MM-DD format (default: today)."
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -563,6 +585,7 @@ async fn activity_tool(
         LIST_APP_USAGE => app_usage(store, settings, arguments, now).await,
         GET_SESSION_DETAIL => session_detail(store, settings, arguments, now).await,
         LIST_CODING_AGENT_SESSIONS => coding_agent_sessions(store, settings, arguments, now).await,
+        GET_DAY_SUMMARY => day_summary(store, settings, arguments, now).await,
         _ => Err(AppError::new(
             "mcp_tool_unknown",
             format!("Unknown activity tool `{name}`."),
@@ -774,4 +797,179 @@ async fn coding_agent_sessions(
         "totalBlocks": total,
         "truncated": total > limit,
     }))
+}
+
+fn parse_day_argument(arguments: &Value, now: DateTime<Utc>) -> Result<NaiveDate, AppError> {
+    match arguments.get("date") {
+        None | Some(Value::Null) => Ok(now.with_timezone(&Local).date_naive()),
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(now.with_timezone(&Local).date_naive())
+            } else {
+                NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+                    .map_err(|_| invalid("`date` must be a valid date in YYYY-MM-DD format"))
+            }
+        }
+        Some(_) => Err(invalid("`date` must be a string in YYYY-MM-DD format")),
+    }
+}
+
+async fn day_summary(
+    store: &ActivityStore,
+    settings: &ActivitySettings,
+    arguments: &Value,
+    now: DateTime<Utc>,
+) -> Result<Value, AppError> {
+    let target_date = parse_day_argument(arguments, now)?;
+    let day_key = target_date.format("%Y-%m-%d").to_string();
+
+    let floor_date = retention_floor(settings, now)
+        .with_timezone(&Local)
+        .date_naive();
+    if target_date < floor_date {
+        return Ok(json!({
+            "date": day_key,
+            "state": "past_retention",
+            "reason": "The requested date is past the activity retention period.",
+            "summary": Value::Null,
+            "workstreams": [],
+            "hourReports": [],
+            "totalWorkstreams": 0,
+            "totalHourReports": 0,
+            "truncated": false,
+        }));
+    }
+
+    let summary = crate::day_intelligence::db::summary_of_day(store, &day_key)
+        .await
+        .map_err(|error| AppError::new("activity_day_summary_failed", error.to_string()))?;
+    let workstreams = crate::day_intelligence::db::workstreams_of_day(store, &day_key)
+        .await
+        .map_err(|error| AppError::new("activity_day_summary_failed", error.to_string()))?;
+    let hour_reports = crate::day_intelligence::db::hour_reports_of_day(store, &day_key)
+        .await
+        .map_err(|error| AppError::new("activity_day_summary_failed", error.to_string()))?;
+
+    let (summary_value, summary_truncated) = match summary {
+        Some(s) => {
+            let (narrative, narr_trunc) = clip(&s.narrative, DAY_SUMMARY_NARRATIVE_MAX_CHARS);
+            let (headline, head_trunc) = clip(&s.headline, 500);
+            let mut val = serde_json::to_value(&s).unwrap_or_default();
+            if narr_trunc {
+                val["narrative"] = json!(narrative);
+            }
+            if head_trunc {
+                val["headline"] = json!(headline);
+            }
+            let is_trunc = narr_trunc || head_trunc;
+            val["truncated"] = json!(is_trunc);
+            (val, is_trunc)
+        }
+        None => (Value::Null, false),
+    };
+
+    let total_workstreams = workstreams.len();
+    let mut workstreams_truncated = total_workstreams > MAX_DAY_WORKSTREAMS;
+    let workstreams_json: Vec<Value> = workstreams
+        .into_iter()
+        .take(MAX_DAY_WORKSTREAMS)
+        .map(|ws| {
+            let (title, title_trunc) = clip(&ws.title, 500);
+            let (summary, summary_trunc) = clip(&ws.summary, DAY_SUMMARY_TEXT_MAX_CHARS);
+            let total_hours = ws.hours.len();
+            let hours_truncated = total_hours > MAX_WORKSTREAM_HOURS;
+            let mut any_hour_note_trunc = false;
+            let hours_json: Vec<Value> = ws
+                .hours
+                .into_iter()
+                .take(MAX_WORKSTREAM_HOURS)
+                .map(|h| {
+                    let (note, note_trunc) = clip(&h.note, 500);
+                    if note_trunc {
+                        any_hour_note_trunc = true;
+                    }
+                    json!({
+                        "hour": h.hour,
+                        "minutes": h.minutes,
+                        "note": note,
+                        "truncated": note_trunc,
+                    })
+                })
+                .collect();
+            let item_trunc = title_trunc || summary_trunc || hours_truncated || any_hour_note_trunc;
+            if item_trunc {
+                workstreams_truncated = true;
+            }
+            json!({
+                "id": ws.id,
+                "title": title,
+                "summary": summary,
+                "minutes": ws.minutes,
+                "hours": hours_json,
+                "truncated": item_trunc,
+            })
+        })
+        .collect();
+
+    let total_reports = hour_reports.len();
+    let mut reports_truncated = total_reports > MAX_DAY_HOUR_REPORTS;
+    let reports_json: Vec<Value> = hour_reports
+        .into_iter()
+        .take(MAX_DAY_HOUR_REPORTS)
+        .map(|hr| {
+            let (summary, summary_trunc) = clip(&hr.summary, DAY_SUMMARY_TEXT_MAX_CHARS);
+            let total_activities = hr.activities.len();
+            let activities_truncated = total_activities > MAX_HOUR_ACTIVITIES;
+            let mut any_desc_trunc = false;
+            let activities_json: Vec<Value> = hr
+                .activities
+                .into_iter()
+                .take(MAX_HOUR_ACTIVITIES)
+                .map(|a| {
+                    let (desc, desc_trunc) = clip(&a.description, 500);
+                    if desc_trunc {
+                        any_desc_trunc = true;
+                    }
+                    json!({
+                        "description": desc,
+                        "minutes": a.minutes,
+                        "truncated": desc_trunc,
+                    })
+                })
+                .collect();
+            let item_trunc = summary_trunc || activities_truncated || any_desc_trunc;
+            if item_trunc {
+                reports_truncated = true;
+            }
+            json!({
+                "hour": hr.hour,
+                "startedAt": hr.started_at,
+                "endedAt": hr.ended_at,
+                "activeMinutes": hr.active_minutes,
+                "summary": summary,
+                "activities": activities_json,
+                "provider": hr.provider,
+                "generatedAt": hr.generated_at,
+                "truncated": item_trunc,
+            })
+        })
+        .collect();
+
+    let has_summary = !summary_value.is_null();
+    let any_truncated = summary_truncated || workstreams_truncated || reports_truncated;
+    let mut result = json!({
+        "date": day_key,
+        "state": if has_summary { "ready" } else { "not_generated" },
+        "summary": summary_value,
+        "workstreams": workstreams_json,
+        "hourReports": reports_json,
+        "totalWorkstreams": total_workstreams,
+        "totalHourReports": total_reports,
+        "truncated": any_truncated,
+    });
+    if !has_summary {
+        result["reason"] = json!("No summary has been generated for this date yet.");
+    }
+    Ok(result)
 }

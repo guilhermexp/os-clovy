@@ -248,6 +248,7 @@ async fn activity_tools_are_listed_only_while_capture_is_on() {
             "list_app_usage",
             "get_session_detail",
             "list_coding_agent_sessions",
+            "get_day_summary",
         ]
     );
 }
@@ -1060,4 +1061,196 @@ async fn coding_agent_sessions_list_enabled_sources_newest_first_within_retentio
     assert_eq!(limited["blocks"].as_array().unwrap().len(), 1);
     assert_eq!(limited["totalBlocks"], json!(2));
     assert_eq!(limited["truncated"], json!(true));
+}
+
+#[tokio::test]
+async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_state() {
+    use crate::day_intelligence::db as day_db;
+    use crate::day_intelligence::db::NewHourReport;
+    use crate::day_intelligence::hour::HourActivity;
+    use crate::day_intelligence::summary::{DaySummaryDto, Insight, Standup, SummaryTrigger};
+    use crate::day_intelligence::workstreams::{Create, FoldPlan};
+
+    let (_dir, store) = activity_store().await;
+    let pool = notes_pool().await;
+    let day = "2026-10-01";
+
+    // Seed hour report
+    day_db::insert_hour_report(
+        &store,
+        &NewHourReport {
+            hour: "2026-10-01T09".into(),
+            day: day.into(),
+            started_at: at(9, 0),
+            ended_at: at(10, 0),
+            active_minutes: 45,
+            summary: "Worked on Zephyr importer".into(),
+            activities: vec![HourActivity {
+                description: "Coding Zephyr".into(),
+                minutes: 45,
+            }],
+            distilled: "distilled text".into(),
+            distill_stats: json!({}),
+            locale: "en".into(),
+            provider: "test-provider".into(),
+            generated_at: at(10, 0),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Seed workstream
+    day_db::apply_fold(
+        &store,
+        day,
+        "2026-10-01T09",
+        &FoldPlan {
+            creates: vec![Create {
+                title: "Zephyr importer".into(),
+                summary: "Scaffolding importer".into(),
+                minutes: 45,
+                note: "Initial scaffold".into(),
+            }],
+            appends: vec![],
+        },
+        at(10, 0),
+    )
+    .await
+    .unwrap();
+
+    // Seed day summary
+    let summary_dto = DaySummaryDto {
+        day: day.into(),
+        headline: "Shipped Zephyr importer and reviewed PRs".into(),
+        narrative: "Spent the morning developing the importer and the afternoon testing.".into(),
+        insights: vec![Insight {
+            title: "Deep focus".into(),
+            text: "Long uninterrupted blocks in Code.".into(),
+        }],
+        standup: Standup {
+            done: vec!["Zephyr importer".into()],
+            in_progress: vec!["Testing".into()],
+            blockers: vec![],
+        },
+        hours_covered: 1,
+        locale: "en".into(),
+        provider: "test-provider".into(),
+        trigger: SummaryTrigger::Scheduled,
+        generated_at: "2026-10-01T18:00:00Z".into(),
+    };
+    day_db::save_summary(&store, &summary_dto).await.unwrap();
+
+    let open_data = McpData {
+        notes: pool.clone(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: ActivityAccess::Open {
+            store: store.clone(),
+            settings: ActivitySettings {
+                enabled: true,
+                retention_days: 30,
+                ..ActivitySettings::default()
+            },
+        },
+        now: at(19, 0),
+    };
+
+    // 1. REAL tools/call for get_day_summary: asserting the summary fields come back
+    let result = call(&open_data, "get_day_summary", json!({ "date": day }))
+        .await
+        .unwrap();
+    assert_eq!(result["date"], json!(day));
+    assert_eq!(result["state"], json!("ready"));
+    let summary = &result["summary"];
+    assert_eq!(
+        summary["headline"],
+        json!("Shipped Zephyr importer and reviewed PRs")
+    );
+    assert_eq!(
+        summary["narrative"],
+        json!("Spent the morning developing the importer and the afternoon testing.")
+    );
+    assert_eq!(summary["standup"]["done"], json!(["Zephyr importer"]));
+    assert_eq!(summary["standup"]["inProgress"], json!(["Testing"]));
+    assert_eq!(summary["insights"][0]["title"], json!("Deep focus"));
+    assert_eq!(summary["hoursCovered"], json!(1));
+    assert_eq!(summary["locale"], json!("en"));
+    assert_eq!(summary["provider"], json!("test-provider"));
+    assert_eq!(summary["trigger"], json!("scheduled"));
+
+    let workstreams = result["workstreams"].as_array().unwrap();
+    assert_eq!(workstreams.len(), 1);
+    assert_eq!(workstreams[0]["title"], json!("Zephyr importer"));
+    assert_eq!(workstreams[0]["minutes"], json!(45));
+
+    let reports = result["hourReports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["hour"], json!("2026-10-01T09"));
+    assert_eq!(reports[0]["activeMinutes"], json!(45));
+
+    // Never includes raw distilled text
+    assert!(!result.to_string().contains("distilled text"));
+
+    // 2. Default date (omitted date defaults to today)
+    let default_result = call(&open_data, "get_day_summary", json!({}))
+        .await
+        .unwrap();
+    let today_str = open_data
+        .now
+        .with_timezone(&Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    assert_eq!(default_result["date"], json!(today_str));
+
+    // 3. No summary -> clear empty state
+    let empty_result = call(
+        &open_data,
+        "get_day_summary",
+        json!({ "date": "2026-09-30" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(empty_result["date"], json!("2026-09-30"));
+    assert_eq!(empty_result["state"], json!("not_generated"));
+    assert!(empty_result["summary"].is_null());
+    assert!(empty_result["reason"].is_string());
+
+    // 4. Capture off -> activity_capture_off
+    let off_data = McpData {
+        notes: pool.clone(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: ActivityAccess::Off,
+        now: at(19, 0),
+    };
+    let off_err = call(&off_data, "get_day_summary", json!({ "date": day }))
+        .await
+        .unwrap_err();
+    assert!(off_err.contains("activity_capture_off"), "{off_err}");
+
+    // 5. Invalid date -> isError
+    let invalid_err = call(
+        &open_data,
+        "get_day_summary",
+        json!({ "date": "not-a-date" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        invalid_err.contains("mcp_invalid_arguments"),
+        "{invalid_err}"
+    );
+
+    // 6. Respects retention (past retention returns empty state with past_retention)
+    let past_result = call(
+        &open_data,
+        "get_day_summary",
+        json!({ "date": "2026-08-01" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(past_result["state"], json!("past_retention"));
+    assert!(past_result["summary"].is_null());
+    assert!(past_result["workstreams"].as_array().unwrap().is_empty());
+    assert!(past_result["hourReports"].as_array().unwrap().is_empty());
 }

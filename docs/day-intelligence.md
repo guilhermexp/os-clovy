@@ -161,9 +161,10 @@ In `crate::day_intelligence::db`, over an open `ActivityStore`:
 | `hour_reports_of_day(store, day)` | `Vec<HourReportDto>`: hour, bounds, active minutes, summary, activities with minutes |
 
 `pipeline::day_view(&ReadContext, day)` returns those plus `DayPanelsDto`
-(numbers read now from the timeline, workstreams, meetings, and blocks). A
-`get_day_summary` tool should return `summary_of_day` with the panels, not
-numbers from the summary text.
+(numbers read now from the timeline, workstreams, meetings, and blocks). The
+MCP server's `get_day_summary` tool ([mcp-server.md](mcp-server.md#tools-and-resources))
+uses this read API over `ActivityStore` to return the stored day summary,
+workstreams, and hour reports.
 
 ## Commands and event (frontend contract)
 
