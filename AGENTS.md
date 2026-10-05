@@ -314,6 +314,11 @@ Functional proof (Reality) for desktop features:
    Accessibility/Screen Recording grants. Never open or look up the app by
    bundle id `co.opensoftware.june`: that starts the installed production
    `/Applications/June.app` on real data. Stop only processes started by this run.
+   Never create, unlock, or switch keychains, and never change the default
+   keychain or its search list: the app reads its keys from `login` (`-dev`
+   services). Only one native proof runs on the machine at a time; parallel
+   workers do not open the app. A macOS password dialog on the owner's screen
+   is an incident: stop this run's processes and report it.
 2. Readiness: wait for the main window; macOS permissions the feature needs
    (Accessibility, Screen Recording, Microphone, Notifications) must already be
    granted, otherwise the proof is blocked, not faked.
