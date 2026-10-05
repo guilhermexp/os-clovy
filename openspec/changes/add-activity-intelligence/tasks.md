@@ -56,11 +56,11 @@
 - [x] 7.1 Adaptador de sessão por CLI (turno com retomada, tradução do stream para eventos/itens existentes, cancelamento, mensagem seguinte durante execução); verificado por integração com CLIs falsos.
 - [x] 7.2 Ferramentas do Clovy via servidor MCP para CLIs que aceitam MCP e indicação na UI quando não aceitam; verificado por integração com CLI falso lendo a configuração MCP.
 - [x] 7.3 Endpoint cadastrado como modelo do agente com ferramentas e streaming; verificado por integração com servidor falso com tool call.
-- [ ] 7.4 Escolha do motor na sessão de chat (UI) en/pt-BR; verificado por teste de componente e conversa real no app de desenvolvimento com um CLI instalado.
+- [x] 7.4 Escolha do motor na sessão de chat (UI) en/pt-BR; verificado por teste de componente e conversa real no app de desenvolvimento com um CLI instalado.
 - [x] 7.5 Ferramenta MCP `get_day_summary` sobre os resumos do S4; verificado por chamada MCP real contra banco de teste.
 
 ## 8. Integração
 
-- [ ] 8.1 Integrar recortes no `main` local, `make verify` verde e build de produção (`### Build` do DOX) no HEAD integrado.
-- [ ] 8.2 Prova funcional ponta a ponta no app de desenvolvimento: captura ligada, linha do tempo do dia, resumo gerado por provedor escolhido, notificação, cliente MCP real consultando o Clovy, conversa com motor CLI; evidência em `.tmp/verify/`.
-- [ ] 8.3 Atualizar `AGENTS.md`/docs (`docs/index.md`, nova doc de atividade) e `CONTEXT.md` com os termos novos.
+- [x] 8.1 Integrar recortes no `main` local, `make verify` verde e build de produção (`### Build` do DOX) no HEAD integrado.
+- [ ] 8.2 Prova funcional ponta a ponta no app de desenvolvimento: captura ligada, linha do tempo do dia, resumo gerado por provedor escolhido, notificação, cliente MCP real consultando o Clovy, conversa com motor CLI; evidência em `.tmp/verify/`. (Feito em 2026-10-05, exceto o banner da notificação, não observável nesta sessão; ver `run-native/report.md` do ticket de integração.)
+- [x] 8.3 Atualizar `AGENTS.md`/docs (`docs/index.md`, nova doc de atividade) e `CONTEXT.md` com os termos novos.

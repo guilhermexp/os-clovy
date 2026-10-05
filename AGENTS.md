@@ -313,11 +313,16 @@ Functional proof (Reality) for desktop features:
 
 1. Isolation: debug builds only, so data/config land in the `-dev` dirs; record
    their paths before launch. For UI automation build a debug bundle
-   (`pnpm tauri build --debug --bundles app`, with the Node 24 PATH below) and
-   open it **by path**, launched from Terminal.app so it inherits Terminal's
-   Accessibility/Screen Recording grants. Never open or look up the app by
-   bundle id `co.opensoftware.june`: that starts the installed production
-   `/Applications/June.app` on real data. Stop only processes started by this run.
+   (`pnpm tauri build --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}'`,
+   with the Node 24 PATH below), copy it into the run folder, set its
+   `CFBundleIdentifier` to `co.opensoftware.june.proof`, re-sign it ad hoc
+   (`codesign --force --deep -s -`) and open that copy with `open -n <path>`.
+   macOS attributes Accessibility and Screen Recording to the app itself, so
+   the owner adds that copy with "+" in Privacy & Security (Terminal grants do
+   not count). Bind Computer Use to `co.opensoftware.june.proof`. Never open or
+   look up the app by bundle id `co.opensoftware.june`: that starts the
+   installed production `/Applications/June.app` on real data. Stop only
+   processes started by this run.
    Never create, unlock, or switch keychains, and never change the default
    keychain or its search list: the app reads its keys from `login` (`-dev`
    services). Only one native proof runs on the machine at a time; parallel
