@@ -165,7 +165,7 @@ pub async fn execute_turn<S: FrameSink>(
             return;
         }
     }
-    let mut env = super::cli_environment(&context.env);
+    let mut env = crate::llm::shell_env::cli_environment(&context.env);
     for name in &invocation.remove_env {
         env.remove(*name);
     }

@@ -27,7 +27,7 @@ use crate::agent_runtime::AgentRepository;
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -162,30 +162,6 @@ impl ChatEngineHost {
             tracing::warn!("a CLI chat turn did not stop before shutdown");
         }
     }
-}
-
-/// Variables Clovy itself reads (its own configuration and credentials, such
-/// as the local development bearer token loaded from `.env`). The login
-/// environment is merged over Clovy's process environment, so they would
-/// otherwise reach the CLI, its tools, and its MCP servers.
-const CLOVY_OWNED_PREFIXES: [&str; 5] =
-    ["OS_CLOVY_", "OS_JUNE_", "OS_ACCOUNTS_", "CLOVY_", "JUNE_"];
-const CLOVY_OWNED_NAMES: [&str; 2] = ["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"];
-
-/// The CLI's environment: the user's login environment (HOME, PATH,
-/// `PI_CODING_AGENT_DIR`, and every other profile variable unchanged) minus
-/// Clovy's own variables.
-pub fn cli_environment(login: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    login
-        .iter()
-        .filter(|(name, _)| {
-            !CLOVY_OWNED_NAMES.contains(&name.as_str())
-                && !CLOVY_OWNED_PREFIXES
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-        })
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
 }
 
 /// A message to run on a CLI engine.

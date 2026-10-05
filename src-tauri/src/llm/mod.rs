@@ -287,7 +287,7 @@ pub async fn run_cli(
             cli: kind,
             detail: format!("could not create a scratch directory: {error}"),
         })?;
-    let mut child_env = env.vars().clone();
+    let mut child_env = shell_env::cli_environment(env.vars());
     for name in &invocation.remove_env {
         child_env.remove(*name);
     }
@@ -539,6 +539,103 @@ mod tests {
         assert!(env.contains(&format!("HOME={}", dir.path().display())));
         // Runs in an empty scratch directory, not in a project.
         assert!(read("cwd").contains("clovy-llm-"));
+    }
+
+    #[tokio::test]
+    async fn llm_cli_processes_get_the_profile_but_not_clovy_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("record");
+        // One fake claude for the one-shot call and for `--version`
+        // (detection); a fake login shell for the environment capture.
+        fake_cli(
+            dir.path(),
+            "claude",
+            &format!(
+                "if [ \"$1\" = --version ]; then env > '{0}.version.env'; echo '9.9.9 (Claude Code)'; exit 0; fi\ncat > /dev/null\nenv > '{0}.oneshot.env'\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}}'",
+                record.display()
+            ),
+        );
+        fake_cli(
+            dir.path(),
+            "fake-login-shell",
+            &format!(
+                "env > '{}.shell.env'\nprintf '__CLOVY_LOGIN_ENV_START__'; env -0; printf '__CLOVY_LOGIN_ENV_END__'",
+                record.display()
+            ),
+        );
+        let pi_dir = dir.path().join(".pi").join("agent");
+        let mut vars = BTreeMap::from([
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", dir.path().display()),
+            ),
+            (
+                "HOME".to_string(),
+                dir.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "PI_CODING_AGENT_DIR".to_string(),
+                pi_dir.to_string_lossy().into_owned(),
+            ),
+            ("OPENROUTER_API_KEY".to_string(), "user-own-key".to_string()),
+        ]);
+        for (name, value) in [
+            ("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "clovy-dev-token"),
+            ("OS_JUNE_LOCAL_DEV_BEARER_TOKEN", "june-dev-token"),
+            ("OS_ACCOUNTS_CLIENT_ID", "clovy-client"),
+            ("CLOVY_API_URL", "http://127.0.0.1:8787"),
+            ("GOOGLE_OAUTH_CLIENT_SECRET", "clovy-oauth-secret"),
+        ] {
+            vars.insert(name.to_string(), value.to_string());
+        }
+        let env = shell_env::LoginEnv::from_vars(vars.clone());
+
+        run_cli(
+            CliKind::Claude,
+            &GenerateRequest {
+                system: None,
+                prompt: "Hi".to_string(),
+                schema: None,
+                timeout: Some(Duration::from_secs(10)),
+            },
+            &env,
+        )
+        .await
+        .unwrap();
+        let detected = detect::detect(CliKind::Claude, &env).await;
+        assert!(detected.installed);
+        shell_env::resolve_login_env(&dir.path().join("fake-login-shell"), &vars).await;
+
+        for child in ["oneshot", "version", "shell"] {
+            let seen = std::fs::read_to_string(format!("{}.{child}.env", record.display()))
+                .unwrap_or_else(|_| panic!("the {child} process did not run"));
+            for kept in [
+                format!("HOME={}", dir.path().display()),
+                format!("PI_CODING_AGENT_DIR={}", pi_dir.display()),
+                format!("PATH={}:/usr/bin:/bin", dir.path().display()),
+                "OPENROUTER_API_KEY=user-own-key".to_string(),
+            ] {
+                assert!(
+                    seen.lines().any(|line| line == kept),
+                    "{child}: missing {kept}"
+                );
+            }
+            for secret in [
+                "clovy-dev-token",
+                "june-dev-token",
+                "clovy-client",
+                "127.0.0.1:8787",
+                "clovy-oauth-secret",
+            ] {
+                assert!(
+                    !seen.contains(secret),
+                    "{child}: {secret} reached the process"
+                );
+            }
+        }
+        // Clovy's own marker for one-shot calls is set after the filter.
+        let oneshot = std::fs::read_to_string(format!("{}.oneshot.env", record.display())).unwrap();
+        assert!(oneshot.lines().any(|line| line == "CLOVY_ONESHOT=1"));
     }
 
     #[tokio::test]
