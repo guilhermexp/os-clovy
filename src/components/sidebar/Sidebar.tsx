@@ -808,6 +808,7 @@ export function Sidebar({
   }, [
     account.localDev,
     account.signedIn,
+    activitySupported,
     agentSessions,
     commandQuery,
     companionPairingEnabled,
