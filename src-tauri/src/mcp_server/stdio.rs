@@ -189,12 +189,15 @@ mod unix {
         let _ = output.flush();
     }
 
-    /// Why requests lost their connection: a server that no longer listens was
-    /// turned off (or Clovy quit); otherwise Clovy dropped the connection.
+    /// Why requests lost their connection: the listener removes its socket
+    /// before closing connections, so a missing socket means the server was
+    /// turned off; otherwise Clovy dropped the connection (or quit). Checks the
+    /// file only: connecting would take a connection slot from real clients.
     fn dropped_reason(dir: &Path) -> &'static str {
-        match channel::connect(dir) {
-            Err(ClientError::NotListening) => OFF_MESSAGE,
-            _ => DROPPED_MESSAGE,
+        if channel::socket_path(dir).exists() {
+            DROPPED_MESSAGE
+        } else {
+            OFF_MESSAGE
         }
     }
 
