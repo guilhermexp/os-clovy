@@ -460,8 +460,6 @@ export default defineMessages({
     "settingsPanels.llm.usageActivity": "Activity",
     "settingsPanels.llm.usageActivityDescription":
       "Activity stays off when set to None. Nothing is sent anywhere.",
-    "settingsPanels.llm.chatCliNote":
-      "Chat with agent CLIs arrives in a later update. Chat keeps using Clovy until then.",
     "settingsPanels.llm.providerClovy": "Clovy",
     "settingsPanels.llm.providerNone": "None",
     "settingsPanels.llm.notInstalledSuffix": " (not installed)",
@@ -988,8 +986,6 @@ export default defineMessages({
     "settingsPanels.llm.usageActivity": "Atividade",
     "settingsPanels.llm.usageActivityDescription":
       "Os recursos de atividade ficam desativados quando definido como Nenhum. Nada é enviado para lugar algum.",
-    "settingsPanels.llm.chatCliNote":
-      "O chat com CLIs de agentes chega em uma atualização futura. O chat continuará usando o Clovy até lá.",
     "settingsPanels.llm.providerClovy": "Clovy",
     "settingsPanels.llm.providerNone": "Nenhum",
     "settingsPanels.llm.notInstalledSuffix": " (não instalado)",

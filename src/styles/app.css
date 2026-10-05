@@ -6904,6 +6904,17 @@ button.agent-user-attachment:hover {
   color: var(--foreground);
 }
 
+.agent-composer-model-row:disabled,
+.agent-composer-model-row[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.agent-engine-popover {
+  width: 260px;
+}
+
 .agent-composer-model-row-copy {
   display: grid;
   min-width: 0;

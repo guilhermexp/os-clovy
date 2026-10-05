@@ -274,7 +274,7 @@ describe("LlmProvidersSection", () => {
     ).toBeInTheDocument();
   });
 
-  it("chat set to a CLI shows the later-update note", async () => {
+  it("chat set to a CLI updates the selection without the later-update note", async () => {
     const user = userEvent.setup();
     render(<LlmProvidersSection />);
     expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
@@ -283,10 +283,10 @@ describe("LlmProvidersSection", () => {
     await user.selectOptions(chatSelect, "cli:claude");
 
     expect(
-      await screen.findByText(
+      screen.queryByText(
         "Chat with agent CLIs arrives in a later update. Chat keeps using Clovy until then.",
       ),
-    ).toBeInTheDocument();
+    ).not.toBeInTheDocument();
   });
 
   it("re-reads the registry when the text model changes elsewhere", async () => {
