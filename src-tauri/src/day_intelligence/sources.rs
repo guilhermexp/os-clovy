@@ -11,6 +11,7 @@ use tauri::AppHandle;
 use super::schedule::LocalZone;
 use crate::activity::store::ActivityStore;
 use crate::coding_agents::store::CodingAgentBlock;
+use crate::coding_agents::CodingAgentsStatusDto;
 
 const EXCERPT_CHARS: usize = 400;
 
@@ -121,6 +122,27 @@ pub trait DaySources: Send + Sync {
         to: DateTime<Utc>,
         zone: &'a dyn LocalZone,
     ) -> BoxFuture<'a, Vec<CodingBlock>>;
+
+    /// Whether coding-agent ingestion has read every enabled agent's
+    /// transcripts up to `until` (true with every source off).
+    fn coding_agents_read_until(&self, until: DateTime<Utc>) -> bool;
+}
+
+/// From the ingestion status: read past `until` when no source is on, when
+/// the last scan finished at or after it, or when scanning fails (its error
+/// shows in Settings; a broken source must not hold the summary forever).
+pub fn ingestion_read_until(status: &CodingAgentsStatusDto, until: DateTime<Utc>) -> bool {
+    if !status.supported || !status.sources.iter().any(|source| source.enabled) {
+        return true;
+    }
+    if status.last_error.is_some() {
+        return true;
+    }
+    status
+        .last_scan_at
+        .as_deref()
+        .and_then(parse_time)
+        .is_some_and(|at| at >= until)
 }
 
 pub fn excerpt(text: &str) -> Option<String> {
@@ -281,6 +303,15 @@ impl DaySources for AppSources {
     ) -> BoxFuture<'a, Vec<CodingBlock>> {
         Box::pin(coding_blocks_between(store, from, to, zone))
     }
+
+    fn coding_agents_read_until(&self, until: DateTime<Utc>) -> bool {
+        use tauri::Manager;
+        self.app
+            .try_state::<crate::coding_agents::CodingAgentsState>()
+            .is_none_or(|state| {
+                ingestion_read_until(&crate::coding_agents::coding_agents_status(state), until)
+            })
+    }
 }
 
 /// Coding-agent blocks from the activity database
@@ -348,10 +379,12 @@ pub(crate) mod tests {
     use super::*;
 
     /// Fixed meetings and blocks, filtered by overlap like the real sources.
+    /// `ingestion_scanned_at`: the last coding-agent scan (`None`: up to date).
     #[derive(Default)]
     pub(crate) struct FixedSources {
         pub meetings: Vec<MeetingNote>,
         pub blocks: Vec<CodingBlock>,
+        pub ingestion_scanned_at: std::sync::Mutex<Option<DateTime<Utc>>>,
     }
 
     fn overlaps(start: &str, end: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
@@ -390,6 +423,11 @@ pub(crate) mod tests {
                 .cloned()
                 .collect();
             Box::pin(async move { found })
+        }
+
+        fn coding_agents_read_until(&self, until: DateTime<Utc>) -> bool {
+            crate::day_intelligence::lock(&self.ingestion_scanned_at)
+                .is_none_or(|scanned| scanned >= until)
         }
     }
 
@@ -490,5 +528,42 @@ pub(crate) mod tests {
         );
         // n2 ended exactly at midnight: it is not part of the next day.
         assert_eq!(minutes(&after), vec![("n1".to_string(), 10)]);
+    }
+
+    #[test]
+    fn ingestion_holds_the_summary_until_a_scan_passes_the_last_hour() {
+        use crate::coding_agents::{SourceId, SourceStatusDto};
+        let until = parse_time("2026-10-04T21:00:00Z").unwrap();
+        let status =
+            |enabled: bool, scanned: Option<&str>, error: Option<&str>| CodingAgentsStatusDto {
+                supported: true,
+                sources: vec![SourceStatusDto {
+                    id: SourceId::Codex,
+                    name: "Codex",
+                    enabled,
+                    present: true,
+                }],
+                database_ready: true,
+                last_scan_at: scanned.map(str::to_string),
+                last_error: error.map(str::to_string),
+            };
+        assert!(ingestion_read_until(&status(false, None, None), until));
+        assert!(!ingestion_read_until(&status(true, None, None), until));
+        assert!(!ingestion_read_until(
+            &status(true, Some("2026-10-04T20:59:00.000000Z"), None),
+            until
+        ));
+        assert!(ingestion_read_until(
+            &status(true, Some("2026-10-04T21:00:30.000000Z"), None),
+            until
+        ));
+        assert!(ingestion_read_until(
+            &status(
+                true,
+                Some("2026-10-04T20:00:00.000000Z"),
+                Some("permission denied")
+            ),
+            until
+        ));
     }
 }

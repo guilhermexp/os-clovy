@@ -366,6 +366,172 @@ pub async fn catch_up_day(
     Ok(result)
 }
 
+/// What a summary of the day would still leave out right now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Incomplete {
+    /// The timeline has not built every hour that ended yet.
+    TimelineBehind,
+    /// Hours that ended without a report and may still get one (never tried,
+    /// or failed with retries left).
+    Hours(Vec<String>),
+    /// Hour reports not yet part of the day's workstreams.
+    Folds(usize),
+    /// Coding-agent ingestion has not read past the day's last ended hour.
+    CodingAgents,
+    /// Hour reports or folds that failed in an on-demand run.
+    Failed(usize),
+}
+
+impl std::fmt::Display for Incomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Incomplete::TimelineBehind => write!(f, "the timeline is still being built"),
+            Incomplete::Hours(hours) => write!(f, "hours without a report: {}", hours.join(", ")),
+            Incomplete::Folds(count) => write!(f, "{count} hour reports not in workstreams yet"),
+            Incomplete::CodingAgents => write!(f, "coding-agent sessions are still being read"),
+            Incomplete::Failed(count) => write!(f, "{count} hour reports or folds failed"),
+        }
+    }
+}
+
+/// Whether every input of `day`'s summary is settled: the timeline built
+/// through the last hour that ended, each ended hour reported (or empty, or
+/// given up after its last attempt), every report folded, and coding-agent
+/// ingestion past that hour.
+pub async fn incomplete(deps: &Deps<'_>, day: NaiveDate) -> Result<Option<Incomplete>, StoreError> {
+    let Some(last_end) = schedule::hours_of_day(deps.zone, day)
+        .into_iter()
+        .filter(|window| window.end <= deps.now)
+        .map(|window| window.end)
+        .last()
+    else {
+        return Ok(None);
+    };
+    if built_until(deps.store, deps.now).await? < last_end {
+        return Ok(Some(Incomplete::TimelineBehind));
+    }
+    let mut pending = Vec::new();
+    for window in schedule::completed_hours(deps.zone, day, deps.now, last_end) {
+        if db::hour_report_exists(deps.store, &window.hour).await? {
+            continue;
+        }
+        let record = db::run_record(deps.store, &format!("hour:{}", window.hour)).await?;
+        let settled = record.is_some_and(|record| match record.outcome {
+            RunOutcome::Ok | RunOutcome::Empty => true,
+            RunOutcome::Failed => record.next_attempt_at.is_none(),
+        });
+        if !settled {
+            pending.push(window.hour);
+        }
+    }
+    if !pending.is_empty() {
+        return Ok(Some(Incomplete::Hours(pending)));
+    }
+    let unfolded = db::unfolded_reports(deps.store, &day_key(day)).await?.len();
+    if unfolded > 0 {
+        return Ok(Some(Incomplete::Folds(unfolded)));
+    }
+    if !deps.sources.coding_agents_read_until(last_end) {
+        return Ok(Some(Incomplete::CodingAgents));
+    }
+    Ok(None)
+}
+
+/// A summary run over a day whose inputs may not be settled yet.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SummaryRun {
+    /// Nothing was generated or saved: the summary would leave this out.
+    Incomplete(Incomplete),
+    /// Nothing to summarize (no reports, meetings, or blocks).
+    Empty,
+    Generated(DaySummaryDto),
+}
+
+/// Generates the summary of `day` only once its inputs are settled
+/// ([`incomplete`]), so a stored summary is never written from partial rows.
+/// `started` runs right before the provider call.
+pub async fn summarize_settled_day(
+    deps: &Deps<'_>,
+    day: NaiveDate,
+    trigger: SummaryTrigger,
+    started: &(dyn Fn() + Send + Sync),
+) -> Result<SummaryRun, PipelineError> {
+    if let Some(reason) = incomplete(deps, day).await? {
+        return Ok(SummaryRun::Incomplete(reason));
+    }
+    started();
+    Ok(match generate_summary(deps, day, trigger).await? {
+        Some(summary) => SummaryRun::Generated(summary),
+        None => SummaryRun::Empty,
+    })
+}
+
+/// "Generate summary": reports and folds the day's pending hours now (failed
+/// ones retried), then writes the summary. An hour or fold that still fails,
+/// or an input still behind, comes back as [`SummaryRun::Incomplete`] instead
+/// of a summary written from partial rows.
+pub async fn summarize_on_demand(
+    deps: &Deps<'_>,
+    day: NaiveDate,
+) -> Result<SummaryRun, PipelineError> {
+    let caught_up = catch_up_day(deps, day, true).await?;
+    if caught_up.failed > 0 {
+        return Ok(SummaryRun::Incomplete(Incomplete::Failed(caught_up.failed)));
+    }
+    summarize_settled_day(deps, day, SummaryTrigger::Manual, &|| {}).await
+}
+
+/// The outcome of the daily automatic summary of one day.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScheduledRun {
+    /// Inputs not settled yet: nothing generated or recorded; the next tick
+    /// tries again.
+    Waiting(Incomplete),
+    Generated(DaySummaryDto),
+    Empty,
+    /// `first`: the first failure of the day's run (worth a notification).
+    Failed {
+        message: String,
+        first: bool,
+    },
+}
+
+/// The automatic summary of `day`, recorded under `auto:<day>` (so it runs
+/// once) only when it was generated, had nothing to say, or failed.
+pub async fn run_scheduled_summary(
+    deps: &Deps<'_>,
+    day: NaiveDate,
+    started: &(dyn Fn() + Send + Sync),
+) -> Result<ScheduledRun, StoreError> {
+    let key = format!("auto:{}", day_key(day));
+    match summarize_settled_day(deps, day, SummaryTrigger::Scheduled, started).await {
+        Ok(SummaryRun::Incomplete(reason)) => Ok(ScheduledRun::Waiting(reason)),
+        Ok(SummaryRun::Generated(summary)) => {
+            db::record_run(deps.store, &key, RunOutcome::Ok, None, deps.now).await?;
+            Ok(ScheduledRun::Generated(summary))
+        }
+        Ok(SummaryRun::Empty) => {
+            db::record_run(deps.store, &key, RunOutcome::Empty, None, deps.now).await?;
+            Ok(ScheduledRun::Empty)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let record = db::record_run(
+                deps.store,
+                &key,
+                RunOutcome::Failed,
+                Some(&message),
+                deps.now,
+            )
+            .await?;
+            Ok(ScheduledRun::Failed {
+                message,
+                first: record.attempts == 1,
+            })
+        }
+    }
+}
+
 /// The day's measured statistics and per-hour focus from the timeline.
 async fn day_measures(
     deps_store: &ActivityStore,

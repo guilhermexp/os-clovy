@@ -213,6 +213,22 @@ describe("Day summary", () => {
     );
   });
 
+  it("says in the interface language that the day is not ready when the backend refuses", async () => {
+    applyInterfaceLocale("pt-BR");
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "day_intelligence_day") return { ...readyDay, summary: null };
+      throw {
+        code: "day_summary_incomplete",
+        message: "The summary was not written because part of the day is not ready.",
+      };
+    });
+    render(<DaySummaryPanel day={DAY} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Gerar resumo" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Parte deste dia ainda está sendo processada, então o resumo não foi escrito.",
+    );
+  });
+
   it("shows a failed first read with a retry instead of loading forever", async () => {
     let fail = true;
     invokeMock.mockImplementation(async (command: string) => {

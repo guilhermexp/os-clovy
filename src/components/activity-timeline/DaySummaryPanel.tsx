@@ -3,7 +3,7 @@ import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconSparkle } from "central-icons/IconSparkle";
-import { useLocale, useT } from "../../i18n";
+import { type MessageKey, useLocale, useT } from "../../i18n";
 import {
   type DayIntelligenceDto,
   type DayPanelsDto,
@@ -40,6 +40,19 @@ function errorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+/** Refusals that keep a summary from being written read in the interface language. */
+const GENERATE_ERROR_KEYS: Record<string, MessageKey> = {
+  day_summary_incomplete: "dayIntelligence.errors.incomplete",
+  day_summary_no_activity: "dayIntelligence.errors.noActivity",
+};
+
+function errorCode(error: unknown): string | undefined {
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+  return undefined;
 }
 
 /** "cli:claude" → "claude", "endpoint:local" → "local". */
@@ -121,7 +134,12 @@ export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelPr
       const generated = await generateDaySummary(day);
       if (settled()) setData(generated);
     } catch (generateError) {
-      if (current.day === day) setError(errorMessage(generateError));
+      if (current.day === day) {
+        const key = GENERATE_ERROR_KEYS[errorCode(generateError) ?? ""];
+        setError(
+          key ? t(key) : t("dayIntelligence.error", { message: errorMessage(generateError) }),
+        );
+      }
     } finally {
       setGenerating(false);
     }
@@ -251,7 +269,7 @@ export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelPr
 
         {error ? (
           <p className="day-summary-error" role="alert">
-            {t("dayIntelligence.error", { message: error })}
+            {error}
           </p>
         ) : null}
 

@@ -190,6 +190,7 @@ pub fn sources() -> FixedSources {
     FixedSources {
         meetings: vec![meeting()],
         blocks: vec![coding_block()],
+        ..FixedSources::default()
     }
 }
 

@@ -17,6 +17,9 @@ export default defineMessages({
       "No summary for this day yet. It is generated at {time}, or you can generate it now.",
     "dayIntelligence.error": "Could not generate the summary: {message}",
     "dayIntelligence.loadError": "Could not load the day summary: {message}",
+    "dayIntelligence.errors.incomplete":
+      "Part of this day is still being processed, so the summary was not written. Try again in a few minutes.",
+    "dayIntelligence.errors.noActivity": "There is no activity to summarize for this day yet.",
     "dayIntelligence.embedderDownloading":
       "Downloading the local text model (once, about 130 MB). Summaries work meanwhile.",
 
@@ -86,6 +89,9 @@ export default defineMessages({
       "Ainda não há resumo deste dia. Ele é gerado às {time}, ou você pode gerar agora.",
     "dayIntelligence.error": "Não foi possível gerar o resumo: {message}",
     "dayIntelligence.loadError": "Não foi possível carregar o resumo do dia: {message}",
+    "dayIntelligence.errors.incomplete":
+      "Parte deste dia ainda está sendo processada, então o resumo não foi escrito. Tente de novo em alguns minutos.",
+    "dayIntelligence.errors.noActivity": "Ainda não há atividade para resumir neste dia.",
     "dayIntelligence.embedderDownloading":
       "Baixando o modelo de texto local (uma vez, cerca de 130 MB). Os resumos funcionam enquanto isso.",
 

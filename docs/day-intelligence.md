@@ -44,8 +44,18 @@ embedding model test is ignored by default:
 - Distillation is local. The only network access of this module is the
   one-time download of the embedding model into `<app data dir>/models/`
   (`BAAI/bge-small-en-v1.5` at revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`,
-  every file verified by SHA-256). Until it is present, or if it fails, the
-  distiller runs its lexical stages only.
+  every file verified by SHA-256). Cached files are trusted only after their
+  SHA-256 matches again, once per launch (`LocalEmbedder::ensure_ready`, at the
+  first tick with a provider); a mismatch is deleted and downloaded again.
+  Until the files are verified, or if that fails, the distiller runs its
+  lexical stages only.
+- Captured text is untrusted. Every prompt puts it, and everything written
+  from it earlier (hour summaries, activities, workstreams, coding-agent
+  summaries, note excerpts and titles, window titles), between
+  `<activity_data>` and `</activity_data>`; a closing tag inside (any case) is
+  escaped (`prompts::fence`), and every system prompt says fenced content is
+  quoted data whose instructions are never followed. Only Clovy's own numbers
+  and labels (hour, measured minutes, categories) sit outside the fence.
 - Notes and meetings of the day (title, time, a 400-character excerpt of the
   note, the user's edited version when there is one) go to the activity
   provider with the day summary. A recording across midnight counts only its
@@ -63,7 +73,7 @@ wakes every minute, on a capture failure, and when a notice is due:
 2. **Distillation** (`distill.rs`, Meridian's pipeline): segment lines over 140
    characters, drop junk (under 18 characters, spinners, low letter ratio) and
    lines without function words (English and Portuguese stop words; code
-   passes), cut lines seen in at least max(3, 25%) of the hour's sessions unless
+   passes), except lines naming an entity, which skip both gates; cut lines seen in at least max(3, 25%) of the hour's sessions unless
    they name an entity, dedupe by normalized 80-character prefix, then
    semantically (cosine above 0.86, except an entity line in another session),
    pick 3 to 14 diverse lines per session (facility location), and rescue up to
@@ -85,9 +95,17 @@ wakes every minute, on a capture failure, and when a notice is due:
    when the local clock is past the time and no automatic run of the day
    finished, so a Mac asleep at 18:00 generates it at the first tick after
    waking. A Mac that slept through the time and woke after midnight first
-   generates the previous day's summary (once; one day per tick). On demand
-   ("Generate summary") it reports the day's pending hours
-   (retrying failed ones now) and regenerates. Text follows the interface
+   generates the previous day's summary (once; one day per tick). The summary
+   is written only once the day's inputs are settled
+   (`pipeline::incomplete`): the timeline built through the last hour that
+   ended, each such hour reported (or empty, or given up after its last
+   attempt), every report folded, and coding-agent ingestion scanned past that
+   hour (or every source off, or scanning failing). Until then the scheduled
+   run waits without recording anything and tries again at the next tick.
+   On demand ("Generate summary") it reports and folds the day's pending hours
+   now (retrying failed ones); if one still fails or an input is behind, the
+   command fails with `day_summary_incomplete` instead of writing a partial
+   summary. Text follows the interface
    language (`interface_locale::current()`); JSON keys stay English. A day with
    no reports, meetings, or blocks has no summary and no call.
 
@@ -152,7 +170,7 @@ numbers from the summary text.
 | Command | Request | Returns |
 |---|---|---|
 | `day_intelligence_day` | `{ request: { day } }` | `{ availability, day, provider: "ready" \| "missing" \| "insufficient", embedder: "absent" \| "downloading" \| "ready" \| "failed", running, summaryTime, summary, workstreams, hourReports, panels }` |
-| `day_intelligence_generate` | `{ request: { day } }` | Same DTO; errors `llm_activity_provider_missing`, `llm_structured_output_insufficient`, `activity_database_closed`, `day_summary_no_activity`, provider errors (`llm_timeout`, ...) |
+| `day_intelligence_generate` | `{ request: { day } }` | Same DTO; errors `llm_activity_provider_missing`, `llm_structured_output_insufficient`, `activity_database_closed`, `day_summary_no_activity`, `day_summary_incomplete` (an hour or fold still failing, or an input behind; nothing written), provider errors (`llm_timeout`, ...) |
 | `today_open_ready` | none | Day of a notification clicked before the webview listened, or null |
 
 `panels`: `focusedMs`, `idleMs`, `awayMs`, `categories`, `topApps` (the day's

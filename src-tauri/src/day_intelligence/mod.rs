@@ -48,10 +48,13 @@ use crate::llm::registry::ProviderRef;
 use crate::llm::LlmError;
 use embedder::{EmbedderStatus, LocalEmbedder};
 use notify::{NoticeKind, NoticeQueue};
-use pipeline::{ActivityProvider, DayIntelligenceDto, Deps, ProviderState, ReadContext};
-use schedule::{day_key, local_day, parse_day, LocalZone, RunOutcome, SystemZone};
+use pipeline::{
+    ActivityProvider, DayIntelligenceDto, Deps, ProviderState, ReadContext, ScheduledRun,
+    SummaryRun,
+};
+use schedule::{day_key, local_day, parse_day, LocalZone, SystemZone};
 use sources::AppSources;
-use summary::{DayPanelsDto, SummaryTrigger};
+use summary::DayPanelsDto;
 
 /// Emitted when a day's reports, workstreams, or summary changed, or a run
 /// started or ended. Payload `{ day, running }`.
@@ -259,7 +262,7 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
     }
     if state.embedder.status() == EmbedderStatus::Absent {
         let embedder = Arc::clone(&state.embedder);
-        tauri::async_runtime::spawn(async move { embedder.ensure_downloaded().await });
+        tauri::async_runtime::spawn(async move { embedder.ensure_ready().await });
     }
     let Ok(_guard) = state.run.try_lock() else {
         return;
@@ -304,37 +307,36 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
         return;
     };
     let key = day_key(day);
-    let auto_key = format!("auto:{key}");
-    state.running.store(true, Ordering::SeqCst);
-    emit(app, &key, true);
-    let outcome = pipeline::generate_summary(&deps, day, SummaryTrigger::Scheduled).await;
-    state.running.store(false, Ordering::SeqCst);
-    let recorded = match outcome {
-        Ok(Some(summary)) => {
+    let started = || {
+        state.running.store(true, Ordering::SeqCst);
+        emit(app, &key, true);
+    };
+    let outcome = pipeline::run_scheduled_summary(&deps, day, &started).await;
+    let generated = state.running.swap(false, Ordering::SeqCst);
+    match outcome {
+        Ok(ScheduledRun::Waiting(reason)) => {
+            tracing::debug!(day = %key, %reason, "day summary waits for its inputs");
+        }
+        Ok(ScheduledRun::Generated(summary)) => {
             raise(
                 app,
                 NoticeKind::SummaryReady,
                 key.clone(),
                 Some(summary.headline),
             );
-            db::record_run(&store, &auto_key, RunOutcome::Ok, None, now).await
         }
-        Ok(None) => db::record_run(&store, &auto_key, RunOutcome::Empty, None, now).await,
-        Err(error) => {
-            let message = error.to_string();
+        Ok(ScheduledRun::Empty) => {}
+        Ok(ScheduledRun::Failed { message, first }) => {
             tracing::warn!(%message, "scheduled day summary failed");
-            let result =
-                db::record_run(&store, &auto_key, RunOutcome::Failed, Some(&message), now).await;
-            if result.as_ref().is_ok_and(|record| record.attempts == 1) {
+            if first {
                 raise(app, NoticeKind::SummaryFailed, key.clone(), Some(message));
             }
-            result
         }
-    };
-    if let Err(error) = recorded {
-        tracing::warn!(%error, "day summary run not recorded");
+        Err(error) => tracing::warn!(%error, "day summary run not recorded"),
     }
-    emit(app, &key, false);
+    if generated {
+        emit(app, &key, false);
+    }
 }
 
 fn parse_request_day(day: &str) -> Result<NaiveDate, AppError> {
@@ -465,7 +467,7 @@ pub async fn day_intelligence_generate(
     };
     if state.embedder.status() == EmbedderStatus::Absent {
         let embedder = Arc::clone(&state.embedder);
-        tauri::async_runtime::spawn(async move { embedder.ensure_downloaded().await });
+        tauri::async_runtime::spawn(async move { embedder.ensure_ready().await });
     }
     let _guard = state.run.lock().await;
     state.running.store(true, Ordering::SeqCst);
@@ -483,21 +485,19 @@ pub async fn day_intelligence_generate(
         locale: crate::interface_locale::current(),
         now: Utc::now(),
     };
-    let result = async {
-        pipeline::catch_up_day(&deps, day, true)
-            .await
-            .map_err(|error| AppError::new("day_intelligence_failed", error.to_string()))?;
-        match pipeline::generate_summary(&deps, day, SummaryTrigger::Manual).await {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => Err(AppError::new(
-                "day_summary_no_activity",
-                "There is no activity to summarize for this day yet.",
-            )),
-            Err(pipeline::PipelineError::Llm(error)) => Err(error.0.into()),
-            Err(error) => Err(AppError::new("day_intelligence_failed", error.to_string())),
-        }
-    }
-    .await;
+    let result = match pipeline::summarize_on_demand(&deps, day).await {
+        Ok(SummaryRun::Generated(_)) => Ok(()),
+        Ok(SummaryRun::Empty) => Err(AppError::new(
+            "day_summary_no_activity",
+            "There is no activity to summarize for this day yet.",
+        )),
+        Ok(SummaryRun::Incomplete(reason)) => Err(AppError::new(
+            "day_summary_incomplete",
+            format!("The summary was not written because part of the day is not ready ({reason}). Try again in a few minutes."),
+        )),
+        Err(pipeline::PipelineError::Llm(error)) => Err(error.0.into()),
+        Err(error) => Err(AppError::new("day_intelligence_failed", error.to_string())),
+    };
     state.running.store(false, Ordering::SeqCst);
     emit(&app, &request.day, false);
     result?;

@@ -4,11 +4,12 @@
 //!
 //! The weights are downloaded once, from a pinned revision with pinned
 //! SHA-256 digests, into `<app data dir>/models/bge-small-en-v1.5/`; this is
-//! the only network access of the distillation. Until the files are present
-//! (or when loading fails), [`Embedder::embed`] answers `None` and the
-//! distiller degrades to lexical stages. The model is loaded for one batch
-//! and dropped right after, so ~130 MB of weights do not stay resident
-//! between hours.
+//! the only network access of the distillation. Cached files are trusted only
+//! after their digests match again ([`LocalEmbedder::ensure_ready`], once per
+//! launch); a mismatch is deleted and downloaded again. Until then (or when
+//! loading fails), [`Embedder::embed`] answers `None` and the distiller
+//! degrades to lexical stages. The model is loaded for one batch and dropped
+//! right after, so ~130 MB of weights do not stay resident between hours.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -36,13 +37,13 @@ pub const MODEL_REPO: &str = "BAAI/bge-small-en-v1.5";
 pub const MODEL_REVISION: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
 pub const MODEL_DIR_NAME: &str = "bge-small-en-v1.5";
 
-struct ModelFile {
+struct ModelFile<'d> {
     name: &'static str,
     size: u64,
-    sha256: &'static str,
+    sha256: &'d str,
 }
 
-const MODEL_FILES: [ModelFile; 3] = [
+const MODEL_FILES: [ModelFile<'static>; 3] = [
     ModelFile {
         name: "config.json",
         size: 743,
@@ -63,8 +64,10 @@ const MODEL_FILES: [ModelFile; 3] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EmbedderStatus {
-    /// Not downloaded yet (nothing asked for it: no activity provider).
+    /// Not verified or downloaded yet (nothing asked for it: no activity
+    /// provider).
     Absent,
+    /// Verifying the cached files or downloading the missing ones.
     Downloading,
     Ready,
     /// The download or the model failed; lexical distillation continues.
@@ -86,17 +89,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl LocalEmbedder {
-    /// `models_dir` is `<app data dir>/models`.
+    /// `models_dir` is `<app data dir>/models`. Nothing is trusted yet: the
+    /// first [`Self::ensure_ready`] verifies what is on disk.
     pub fn new(models_dir: &Path) -> Self {
-        let dir = models_dir.join(MODEL_DIR_NAME);
-        let status = if files_present(&dir) {
-            EmbedderStatus::Ready
-        } else {
-            EmbedderStatus::Absent
-        };
         Self {
-            dir,
-            status: Mutex::new(status),
+            dir: models_dir.join(MODEL_DIR_NAME),
+            status: Mutex::new(EmbedderStatus::Absent),
             run: Arc::new(Mutex::new(())),
         }
     }
@@ -105,9 +103,11 @@ impl LocalEmbedder {
         *lock(&self.status)
     }
 
-    /// Downloads the missing files once (pinned revision, verified digests).
-    /// A failed download is not retried until the next launch.
-    pub async fn ensure_downloaded(&self) {
+    /// Verifies the cached files against their pinned digests, deletes the
+    /// ones that do not match, and downloads what is missing (pinned
+    /// revision, verified digests). A failure is not retried until the next
+    /// launch.
+    pub async fn ensure_ready(&self) {
         {
             let mut status = lock(&self.status);
             if *status != EmbedderStatus::Absent {
@@ -115,7 +115,7 @@ impl LocalEmbedder {
             }
             *status = EmbedderStatus::Downloading;
         }
-        let result = download(&self.dir).await;
+        let result = prepare(&self.dir).await;
         let mut status = lock(&self.status);
         *status = match result {
             Ok(()) => EmbedderStatus::Ready,
@@ -155,28 +155,83 @@ impl Embedder for LocalEmbedder {
     }
 }
 
-fn files_present(dir: &Path) -> bool {
-    MODEL_FILES.iter().all(|file| {
-        std::fs::metadata(dir.join(file.name)).is_ok_and(|meta| meta.len() == file.size)
-    })
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-async fn download(dir: &Path) -> Result<(), String> {
+/// Whether `path` holds exactly `file`: its size, then its SHA-256.
+fn verified(path: &Path, file: &ModelFile<'_>) -> bool {
+    use std::io::Read;
+
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.len() == file.size) {
+        return false;
+    }
+    let Ok(mut reader) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return false,
+        }
+    }
+    hex(&hasher.finalize()) == file.sha256
+}
+
+/// The files of `files` that `dir` does not hold verified; cached files whose
+/// digest does not match are deleted so they are downloaded again.
+fn unverified<'a, 'd>(dir: &Path, files: &'a [ModelFile<'d>]) -> Vec<&'a ModelFile<'d>> {
+    files
+        .iter()
+        .filter(|file| {
+            let path = dir.join(file.name);
+            if verified(&path, file) {
+                return false;
+            }
+            if path.exists() {
+                tracing::warn!(
+                    file = file.name,
+                    "embedding model file does not match its digest"
+                );
+                let _ = std::fs::remove_file(&path);
+            }
+            true
+        })
+        .collect()
+}
+
+/// Verifies the cache, then downloads the files that are missing.
+async fn prepare(dir: &Path) -> Result<(), String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
 
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|error| error.to_string())?;
+    let cache = dir.to_path_buf();
+    let missing = tokio::task::spawn_blocking(move || {
+        unverified(&cache, &MODEL_FILES)
+            .into_iter()
+            .map(|file| file.name)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if missing.is_empty() {
+        return Ok(());
+    }
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|error| error.to_string())?;
-    for file in &MODEL_FILES {
+    for file in MODEL_FILES
+        .iter()
+        .filter(|file| missing.contains(&file.name))
+    {
         let dest = dir.join(file.name);
-        if std::fs::metadata(&dest).is_ok_and(|meta| meta.len() == file.size) {
-            continue;
-        }
         let url = format!(
             "https://huggingface.co/{MODEL_REPO}/resolve/{MODEL_REVISION}/{}",
             file.name
@@ -202,11 +257,7 @@ async fn download(dir: &Path) -> Result<(), String> {
         }
         out.flush().await.map_err(|error| error.to_string())?;
         drop(out);
-        let digest: String = hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let digest = hex(&hasher.finalize());
         if digest != file.sha256 {
             let _ = tokio::fs::remove_file(&part).await;
             return Err(format!("{}: digest mismatch", file.name));
@@ -314,20 +365,61 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn missing_or_partial_files_are_not_ready() {
+    #[tokio::test]
+    async fn a_cache_with_the_pinned_sizes_is_not_trusted_before_its_digests_match() {
         let dir = tempfile::tempdir().unwrap();
-        let embedder = LocalEmbedder::new(dir.path());
-        assert_eq!(embedder.status(), EmbedderStatus::Absent);
         let model_dir = dir.path().join(MODEL_DIR_NAME);
         std::fs::create_dir_all(&model_dir).unwrap();
         for file in &MODEL_FILES {
-            std::fs::write(model_dir.join(file.name), b"truncated").unwrap();
+            // Right size, wrong bytes (sparse, so the test stays cheap).
+            std::fs::File::create(model_dir.join(file.name))
+                .unwrap()
+                .set_len(file.size)
+                .unwrap();
         }
-        assert_eq!(
-            LocalEmbedder::new(dir.path()).status(),
-            EmbedderStatus::Absent
-        );
+        let embedder = LocalEmbedder::new(dir.path());
+        assert_eq!(embedder.status(), EmbedderStatus::Absent);
+        assert!(embedder.embed(vec!["text".into()]).await.is_none());
+    }
+
+    #[test]
+    fn cached_files_whose_digest_does_not_match_are_deleted_for_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = br#"{"hidden_size": 384}"#;
+        let digest = |bytes: &[u8]| hex(&Sha256::digest(bytes));
+        let (good_digest, expected_digest, none_digest) =
+            (digest(good), digest(b"expected"), digest(b"none"));
+        let files = [
+            ModelFile {
+                name: "config.json",
+                size: good.len() as u64,
+                sha256: &good_digest,
+            },
+            // Same size as the pinned bytes, different content.
+            ModelFile {
+                name: "tokenizer.json",
+                size: 8,
+                sha256: &expected_digest,
+            },
+            ModelFile {
+                name: "model.safetensors",
+                size: 4,
+                sha256: &none_digest,
+            },
+        ];
+        std::fs::write(dir.path().join("config.json"), good).unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), b"replaced").unwrap();
+
+        let names: Vec<&str> = unverified(dir.path(), &files)
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+
+        assert_eq!(names, vec!["tokenizer.json", "model.safetensors"]);
+        assert!(dir.path().join("config.json").exists());
+        assert!(!dir.path().join("tokenizer.json").exists());
+        std::fs::write(dir.path().join("tokenizer.json"), b"expected").unwrap();
+        assert!(verified(&dir.path().join("tokenizer.json"), &files[1]));
     }
 
     /// The real model: near-duplicates score above the dedup threshold and
@@ -339,6 +431,7 @@ pub(crate) mod tests {
     async fn real_model_separates_near_duplicates_from_unrelated_text() {
         let models = std::env::var("CLOVY_TEST_EMBEDDER_MODELS").expect("models dir");
         let embedder = LocalEmbedder::new(Path::new(&models));
+        embedder.ensure_ready().await;
         assert_eq!(embedder.status(), EmbedderStatus::Ready);
         let vectors = embedder
             .embed(vec![
