@@ -1504,13 +1504,15 @@
 }
 
 .day-grid-card {
+  /* Line boxes of the card's text: a short card shows whole lines only. */
+  --day-grid-title-line: calc(var(--fs-md) * 1.25);
+  --day-grid-meta-line: calc(var(--fs-2xs) * 1.5);
+  --day-grid-note-line: calc(var(--fs-xs) * 1.45);
   position: absolute;
   display: flex;
-  /* Content starts at the top; a short card clips its notes, never its title. */
-  align-items: flex-start;
   gap: var(--sp-3);
   box-sizing: border-box;
-  padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-2);
+  padding: var(--sp-2) var(--sp-4) var(--sp-2) var(--sp-2);
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
   background: color-mix(in oklch, var(--brand) 7%, var(--card));
@@ -1552,7 +1554,7 @@
   width: var(--sp-1);
   flex-shrink: 0;
   align-self: stretch;
-  margin: calc(var(--sp-3) * -1) 0;
+  margin: calc(var(--sp-2) * -1) 0;
 }
 
 .day-grid-sitting {
@@ -1571,27 +1573,39 @@
   );
 }
 
+/* Title, then one meta line, then as many whole note lines as fit. */
 .day-grid-card-body {
   display: flex;
+  flex: 1;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: var(--sp-px);
+  overflow: hidden;
 }
 
 .day-grid-card-title {
+  flex-shrink: 0;
   font-size: var(--fs-md);
+  line-height: var(--day-grid-title-line);
   font-weight: var(--fw-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* One line: items that do not fit beside the active time wrap out of view
+   whole (the card's label and the details keep them). */
 .day-grid-card-meta {
   display: flex;
+  flex-shrink: 0;
   flex-wrap: wrap;
   align-items: center;
   column-gap: var(--sp-3);
+  height: var(--day-grid-meta-line);
+  overflow: hidden;
   font-size: var(--fs-2xs);
+  line-height: var(--day-grid-meta-line);
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
@@ -1603,25 +1617,33 @@
 
 .day-grid-card-badge {
   padding: 0 var(--sp-1);
-  border: 1px solid var(--border-subtle);
+  /* An inset ring, not a border, so the badge stays inside its line box. */
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
   border-radius: var(--r-xs);
   font-size: var(--fs-2xs);
   color: var(--muted-foreground);
 }
 
 .day-grid-card-notes {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: var(--sp-px);
+  flex: 1 1 0;
+  min-height: 0;
   margin-top: var(--sp-1);
 }
 
+.day-grid-card-note-lines {
+  display: block;
+  height: round(down, 100%, var(--day-grid-note-line));
+  overflow: hidden;
+}
+
 .day-grid-card-note {
+  display: block;
+  height: var(--day-grid-note-line);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--fs-xs);
+  line-height: var(--day-grid-note-line);
   color: var(--muted-foreground);
 }
 

@@ -100,7 +100,14 @@ export function WorkstreamGrid({ layout, nowMs, selectedId, onSelect }: Workstre
                   type="button"
                   className="day-grid-card"
                   aria-pressed={selected}
-                  aria-label={`${workstream.title}, ${t("activity.grid.active", { duration: active })}, ${range}`}
+                  aria-label={[
+                    workstream.title,
+                    t("activity.grid.active", { duration: active }),
+                    range,
+                    card.approximate ? t("activity.grid.byHour") : null,
+                  ]
+                    .filter(Boolean)
+                    .join(", ")}
                   onClick={() => onSelect(workstream.id)}
                   style={{
                     top: card.top,
@@ -128,24 +135,29 @@ export function WorkstreamGrid({ layout, nowMs, selectedId, onSelect }: Workstre
                   </span>
                   <span className="day-grid-card-body">
                     <span className="day-grid-card-title">{workstream.title}</span>
+                    {/* Most important first: on a narrow card the later items
+                        wrap out of view whole, the precision badge stays. */}
                     <span className="day-grid-card-meta">
                       <span className="day-grid-card-active">{active}</span>
-                      <span>{range}</span>
                       {card.approximate ? (
                         <span className="day-grid-card-badge" title={t("activity.grid.byHourHint")}>
                           {t("activity.grid.byHour")}
                         </span>
-                      ) : card.sittings > 1 ? (
+                      ) : null}
+                      <span>{range}</span>
+                      {!card.approximate && card.sittings > 1 ? (
                         <span>{t("activity.grid.sittings", { count: card.sittings })}</span>
                       ) : null}
                     </span>
                     {notes.length > 0 ? (
                       <span className="day-grid-card-notes">
-                        {notes.map((hour) => (
-                          <span key={hour.hour} className="day-grid-card-note">
-                            {hour.note}
-                          </span>
-                        ))}
+                        <span className="day-grid-card-note-lines">
+                          {notes.map((hour) => (
+                            <span key={hour.hour} className="day-grid-card-note">
+                              {hour.note}
+                            </span>
+                          ))}
+                        </span>
                       </span>
                     ) : null}
                   </span>
