@@ -104,3 +104,39 @@ export function isSameDay(d1: Date, d2: Date): boolean {
     d1.getDate() === d2.getDate()
   );
 }
+
+const TICK_EVERY_HOURS = 3;
+/** Small enough to land on every local hour, including +x:30/+x:45 zones. */
+const TICK_SCAN_STEP_MS = 15 * 60_000;
+
+/**
+ * Ruler ticks at real local clock hours (every 3 h) of the day
+ * `[dayStartMs, dayEndMs)`, positioned by timestamp. On DST days the day is
+ * 23 or 25 hours long: a skipped hour has no tick and a repeated one gets a
+ * single tick. `timeZone` defaults to the system zone (tests pin one).
+ */
+export function hourTicks(
+  dayStartMs: number,
+  dayEndMs: number,
+  timeZone?: string,
+): { ms: number; label: string }[] {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const ticks: { ms: number; label: string }[] = [];
+  for (let ms = dayStartMs; ms < dayEndMs; ms += TICK_SCAN_STEP_MS) {
+    const fields = parts.formatToParts(new Date(ms));
+    const hour = Number(fields.find((part) => part.type === "hour")?.value);
+    const minute = Number(fields.find((part) => part.type === "minute")?.value);
+    const label = `${hour.toString().padStart(2, "0")}:00`;
+    if (minute !== 0 || hour % TICK_EVERY_HOURS !== 0 || ticks.some((t) => t.label === label)) {
+      continue;
+    }
+    ticks.push({ ms, label });
+  }
+  ticks.push({ ms: dayEndMs, label: "24:00" });
+  return ticks;
+}

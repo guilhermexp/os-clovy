@@ -47,6 +47,8 @@ export type TimelineGapDto = {
   durationMs: number;
   kind: TimelineGapKind;
   pauseReason: TimelinePauseReason | null;
+  /** Still going on: runs to the time of the read (`id` is 0). */
+  ongoing: boolean;
 };
 
 export type TimelineStatsDto = {

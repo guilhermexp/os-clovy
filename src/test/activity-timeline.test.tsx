@@ -75,6 +75,16 @@ const mockReadyTimeline: ActivityTimelineDto = {
       durationMs: 3600_000, // 1h
       kind: "idle",
       pauseReason: null,
+      ongoing: false,
+    },
+    {
+      id: 0,
+      startedAt: oneHourAgoIso,
+      endedAt: todayIso,
+      durationMs: 3600_000,
+      kind: "paused",
+      pauseReason: "protectedVideo",
+      ongoing: true,
     },
   ],
   stats: {
@@ -199,6 +209,7 @@ describe("ActivityTimelineView", () => {
     expect(screen.getByText("os-clovy")).toBeInTheDocument();
     expect(screen.getByText("github.com")).toBeInTheDocument();
     expect(screen.getAllByText("Idle").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Paused (protected video)").length).toBeGreaterThan(0);
 
     // Active session live badge
     const liveBadges = screen.getAllByText("Live");

@@ -8,6 +8,7 @@ import {
   formatDuration,
   formatTime,
   gapLabelKey,
+  hourTicks,
 } from "./timeline-utils";
 
 type TimelineDayStripProps = {
@@ -22,8 +23,6 @@ type TimelineDayStripProps = {
   nowMs: number;
   isToday: boolean;
 };
-
-const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21, 24];
 
 export function TimelineDayStrip({
   sessions,
@@ -57,19 +56,16 @@ export function TimelineDayStrip({
       <div className="timeline-strip-container">
         {/* Hour markers along the 24-hour scale */}
         <div className="timeline-time-ruler" aria-hidden="true">
-          {HOUR_TICKS.map((hour) => {
-            const fraction = hour / 24;
-            const hourLabel = `${hour.toString().padStart(2, "0")}:00`;
-            return (
-              <div
-                key={hour}
-                className="timeline-ruler-tick"
-                style={{ left: `${fraction * 100}%` }}
-              >
-                <span className="timeline-ruler-label">{hourLabel}</span>
-              </div>
-            );
-          })}
+          {hourTicks(dayStartMs, dayEndMs).map((tick) => (
+            <div
+              key={tick.ms}
+              className="timeline-ruler-tick"
+              data-testid="timeline-ruler-tick"
+              style={{ left: `${xForTime(tick.ms) * 100}%` }}
+            >
+              <span className="timeline-ruler-label">{tick.label}</span>
+            </div>
+          ))}
         </div>
 
         {/* Primary Sessions & Gaps Track */}
