@@ -870,8 +870,54 @@ _Avoid_: tag, label, classification by AI.
 
 **Today view**:
 The first-level sidebar view showing one day's activity timeline (sessions,
-gaps, stats, search). "Today" is its name even when another day is selected.
+gaps, stats, search) and, in its "Day summary" section, the day's
+intelligence. "Today" is its name even when another day is selected.
 _Avoid_: dashboard, journal.
+
+### Day intelligence
+
+**Activity provider**:
+The provider (CLI or endpoint) chosen for the activity usage in Settings,
+Models. Activity text goes only to it; with none chosen, day intelligence is
+inactive and nothing leaves the Mac (see
+[docs/day-intelligence.md](docs/day-intelligence.md)).
+_Avoid_: AI, the model.
+
+**Distillation**:
+The local reduction of an hour's captured text before any model call (junk and
+prose gates, frequency cut, lexical and semantic dedup with on-device
+embeddings, diverse pick, entity rescue). No network except the one-time
+embedding model download.
+_Avoid_: summarization (that is the model's job), compression.
+
+**Hour report**:
+One completed local hour with activity, described by the activity provider in
+one call: a short summary and its activities. The minutes shown are Clovy's:
+the hour's measured active minutes split by the model's estimates as weights.
+_Avoid_: worklog, timesheet.
+
+**Workstream** (pt-BR "frente de trabalho"):
+A thread of work in one day, grown hour by hour by an anchored fold: an hour
+joins an existing workstream or opens one; titles and other workstreams are
+never rewritten. Its minutes are the sum of its hours' measured minutes.
+_Avoid_: task, ticket, project.
+
+**Day summary**:
+The day's headline, narrative, insights, and **standup** written by the
+activity provider in the interface language, generated once a day at the
+configured time (or right after waking) and on demand. Its panels' numbers are
+read from the data each time it is shown, never from the model.
+_Avoid_: daily report, journal.
+
+**Standup**:
+The day summary's three lists (done, in progress, blockers), copied as bullet
+lists in one click.
+_Avoid_: status update.
+
+**Quiet hours**:
+The local period in which activity notifications wait instead of showing; an
+end at or before the start spans midnight.
+_Avoid_: do not disturb (that is the macOS Focus feature).
 
 ## Flagged ambiguities
 

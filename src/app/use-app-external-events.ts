@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { agentOpenReady } from "../lib/tauri";
 import { AGENT_OPEN_EVENT } from "../lib/agent-events";
+import { requestTodayOpen, TODAY_OPEN_EVENT, todayOpenReady } from "../lib/day-intelligence";
 import { listAgentSessions } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { UseAppExternalEventsDependencies } from "./use-app-external-events-types";
@@ -130,4 +131,32 @@ export function useAppExternalEvents(dependencies: UseAppExternalEventsDependenc
       window.removeEventListener(AGENT_OPEN_EVENT, handleOpenEvent);
     };
   }, []);
+
+  // Activity notifications (day summary ready, failures) open the "Today"
+  // view at that day's summary. A click that launched the app is drained
+  // from the backend queue once the listener exists.
+  useEffect(() => {
+    let aborted = false;
+    let unlisten: (() => void) | undefined;
+    const openToday = (day: string | null | undefined) => {
+      if (aborted || !day) return;
+      setActiveView("today");
+      requestTodayOpen(day);
+    };
+    void listen<{ day?: string }>(TODAY_OPEN_EVENT, (event) => {
+      openToday(event.payload?.day);
+      // The backend keeps the click queued until drained (webview reloads).
+      void todayOpenReady().catch(() => null);
+    }).then((cleanup) => {
+      if (aborted) cleanup();
+      else unlisten = cleanup;
+      void todayOpenReady()
+        .then(openToday)
+        .catch(() => {});
+    });
+    return () => {
+      aborted = true;
+      unlisten?.();
+    };
+  }, [setActiveView]);
 }

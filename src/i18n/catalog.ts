@@ -11,6 +11,7 @@ import agent from "./messages/agent";
 import app from "./messages/app";
 import chat from "./messages/chat";
 import common from "./messages/common";
+import dayIntelligence from "./messages/dayIntelligence";
 import hud from "./messages/hud";
 import lib from "./messages/lib";
 import notes from "./messages/notes";
@@ -28,6 +29,7 @@ export const namespaces = {
   app,
   chat,
   common,
+  dayIntelligence,
   hud,
   lib,
   notes,

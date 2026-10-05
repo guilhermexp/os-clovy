@@ -177,6 +177,8 @@ chronological list, session detail (windows, URLs, excerpt), statistics, and
 search with a period filter whose results open the day at that session. Hour
 ticks sit at the real local times of the selected day (`hourTicks`), so on
 23- and 25-hour DST days they line up with the blocks.
+The header switches between this timeline and the "Day summary" section
+([day-intelligence.md](day-intelligence.md)); the day strip stays above both.
 
 ### Lane extension point
 

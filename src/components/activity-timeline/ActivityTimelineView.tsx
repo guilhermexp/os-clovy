@@ -12,6 +12,13 @@ import {
   type ActivityTimelineDto,
   type TimelineSearchResultDto,
 } from "../../lib/activity-timeline";
+import {
+  dateOfDayKey,
+  dayKey,
+  onTodayOpenRequest,
+  takePendingTodayOpen,
+} from "../../lib/day-intelligence";
+import { DaySummaryPanel } from "./DaySummaryPanel";
 import { TimelineDayStrip } from "./TimelineDayStrip";
 import { TimelineSearch } from "./TimelineSearch";
 import { TimelineSessionDetail } from "./TimelineSessionDetail";
@@ -20,19 +27,39 @@ import { TimelineStats } from "./TimelineStats";
 import { formatDayHeader } from "./timeline-utils";
 
 export type ActivityTimelineViewProps = {
-  onNavigateToSettings?: () => void;
+  onNavigateToSettings?: (tab?: "activity" | "models") => void;
 };
+
+type TodaySection = "timeline" | "summary";
 
 export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineViewProps) {
   const t = useT();
   const locale = useLocale();
 
-  const [selectedDate, setSelectedDate] = useState<Date>(() => new Date());
+  // A notification click may have asked for a day's summary before this
+  // view mounted (it is lazy-loaded); later clicks arrive as requests.
+  const [initialOpen] = useState(() => takePendingTodayOpen());
+  const [selectedDate, setSelectedDate] = useState<Date>(
+    () => (initialOpen && dateOfDayKey(initialOpen)) || new Date(),
+  );
+  const [section, setSection] = useState<TodaySection>(initialOpen ? "summary" : "timeline");
   const [timeline, setTimeline] = useState<ActivityTimelineDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(
+    () =>
+      onTodayOpenRequest((day) => {
+        const date = dateOfDayKey(day);
+        if (!date) return;
+        setSelectedSessionId(null);
+        setSelectedDate(date);
+        setSection("summary");
+      }),
+    [],
+  );
 
   const today = new Date();
   const isToday =
@@ -165,7 +192,33 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
         </div>
 
         <div className="timeline-header-actions">
-          <TimelineSearch onSelectResult={handleSelectSearchResult} />
+          <div
+            className="timeline-section-tabs"
+            role="tablist"
+            aria-label={t("dayIntelligence.tabs.label")}
+          >
+            {(["timeline", "summary"] as const).map((id) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                className="timeline-section-tab"
+                aria-selected={section === id}
+                data-active={section === id || undefined}
+                onClick={() => setSection(id)}
+              >
+                {id === "timeline"
+                  ? t("dayIntelligence.tab.timeline")
+                  : t("dayIntelligence.tab.summary")}
+              </button>
+            ))}
+          </div>
+          <TimelineSearch
+            onSelectResult={(result) => {
+              setSection("timeline");
+              handleSelectSearchResult(result);
+            }}
+          />
         </div>
       </header>
 
@@ -188,7 +241,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
               <button
                 type="button"
                 className="primary-action primary-solid timeline-empty-action-btn"
-                onClick={onNavigateToSettings}
+                onClick={() => onNavigateToSettings("activity")}
               >
                 {t("activity.emptyState.turnOn")}
               </button>
@@ -206,7 +259,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
                 <button
                   type="button"
                   className="timeline-notice-action-btn"
-                  onClick={onNavigateToSettings}
+                  onClick={() => onNavigateToSettings("activity")}
                 >
                   <IconSettingsGear4 size={14} aria-hidden="true" />
                   {t("activity.state.openSettings")}
@@ -225,7 +278,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
                 <button
                   type="button"
                   className="timeline-notice-action-btn"
-                  onClick={onNavigateToSettings}
+                  onClick={() => onNavigateToSettings("activity")}
                 >
                   <IconSettingsGear4 size={14} aria-hidden="true" />
                   {t("activity.state.openSettings")}
@@ -251,38 +304,48 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
               from={range.from}
               to={range.to}
               selectedSessionId={selectedSessionId}
-              onSelectSession={(id) => setSelectedSessionId(id)}
+              onSelectSession={(id) => {
+                setSection("timeline");
+                setSelectedSessionId(id);
+              }}
               nowMs={nowMs}
               isToday={isToday}
             />
           ) : null}
 
-          {/* Bottom Area: Chronological Sessions List + Stats Panel + Detail Panel */}
-          <div className="timeline-lower-grid">
-            <div className="timeline-list-column">
-              {timeline ? (
-                <TimelineSessionList
-                  sessions={timeline.sessions}
-                  gaps={timeline.gaps}
-                  selectedSessionId={selectedSessionId}
-                  onSelectSession={(id) => setSelectedSessionId(id)}
-                />
+          {section === "summary" ? (
+            <DaySummaryPanel
+              day={dayKey(selectedDate)}
+              onNavigateToSettings={onNavigateToSettings}
+            />
+          ) : (
+            /* Bottom Area: Chronological Sessions List + Stats Panel + Detail Panel */
+            <div className="timeline-lower-grid">
+              <div className="timeline-list-column">
+                {timeline ? (
+                  <TimelineSessionList
+                    sessions={timeline.sessions}
+                    gaps={timeline.gaps}
+                    selectedSessionId={selectedSessionId}
+                    onSelectSession={(id) => setSelectedSessionId(id)}
+                  />
+                ) : null}
+              </div>
+
+              {selectedSessionId !== null ? (
+                <div className="timeline-detail-column">
+                  <TimelineSessionDetail
+                    sessionId={selectedSessionId}
+                    onClose={() => setSelectedSessionId(null)}
+                  />
+                </div>
+              ) : timeline?.stats ? (
+                <div className="timeline-stats-column">
+                  <TimelineStats stats={timeline.stats} />
+                </div>
               ) : null}
             </div>
-
-            {selectedSessionId !== null ? (
-              <div className="timeline-detail-column">
-                <TimelineSessionDetail
-                  sessionId={selectedSessionId}
-                  onClose={() => setSelectedSessionId(null)}
-                />
-              </div>
-            ) : timeline?.stats ? (
-              <div className="timeline-stats-column">
-                <TimelineStats stats={timeline.stats} />
-              </div>
-            ) : null}
-          </div>
+          )}
         </div>
       )}
     </main>

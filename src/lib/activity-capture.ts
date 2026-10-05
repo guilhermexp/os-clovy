@@ -10,6 +10,12 @@ export type ActivityWorkHoursDto = {
   end: string; // "HH:MM"
 };
 
+/** Activity notifications: the switch and quiet hours ("HH:MM", local). */
+export type ActivityNotificationSettingsDto = {
+  enabled: boolean;
+  quietHours: { enabled: boolean; start: string; end: string };
+};
+
 export type ActivitySettingsDto = {
   enabled: boolean;
   secondaryMonitors: boolean;
@@ -19,6 +25,9 @@ export type ActivitySettingsDto = {
   ignoredDomains: string[];
   workHours: ActivityWorkHoursDto;
   retentionDays: number;
+  /** When the day summary is generated on its own ("HH:MM", local). */
+  daySummary: { time: string };
+  notifications: ActivityNotificationSettingsDto;
 };
 
 export type ActivityPauseReason = "manual" | "workHours" | "lowDisk" | "protectedVideo";
@@ -73,6 +82,11 @@ export const DEFAULT_ACTIVITY_SETTINGS: ActivitySettingsDto = {
     end: "18:00",
   },
   retentionDays: 30,
+  daySummary: { time: "18:00" },
+  notifications: {
+    enabled: true,
+    quietHours: { enabled: false, start: "22:00", end: "08:00" },
+  },
 };
 
 export async function activityStatus(): Promise<ActivityStatusDto> {

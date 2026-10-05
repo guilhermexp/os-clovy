@@ -135,6 +135,7 @@ Per-repo config the engineering skills read before acting (see the
   - [Canva](plugins/canva-prd.md) - [implementation plan](plugins/canva-implementation-plan.md)
 - [activity-capture.md](activity-capture.md) - activity capture: capture loop and privacy rules, the encrypted `activity.sqlite3` schema, processing cursor, retention, and the store API later slices use
 - [activity-timeline.md](activity-timeline.md) - activity timeline: incremental ETL from frames to sessions and gaps, categorizer, day stats, FTS5 search, the "Today" view and its lane extension point, the `search_activity` / `get_activity_timeline` agent tools, and the query API for later slices
+- [day-intelligence.md](day-intelligence.md) - day intelligence: local distillation with on-device embeddings, hour reports with measured minutes, workstream fold, day summary and standup, daily schedule with wake recovery, notifications and quiet hours, schema and the read API for the MCP server
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [llm-providers.md](llm-providers.md) - own providers: agent CLIs and named OpenAI-compatible endpoints, per-use selection, one-shot generation API, structured-output levels, CLI isolation contract

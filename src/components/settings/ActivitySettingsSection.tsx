@@ -22,6 +22,7 @@ import { openPrivacySettings } from "../../lib/tauri";
 import { type MessageKey, useT } from "../../i18n";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Switch } from "../ui/Switch";
+import { DaySummarySettingsSection } from "./DaySummarySettingsSection";
 import { SettingsPageHeader } from "./AppSettings";
 
 const ISO_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const;
@@ -576,6 +577,12 @@ export function ActivitySettingsSection() {
           </div>
         </div>
       </section>
+
+      <DaySummarySettingsSection
+        settings={settings}
+        saving={saving}
+        onSave={(next) => void saveSettings(next)}
+      />
 
       <section className="settings-group" aria-labelledby="activity-retention-heading">
         <h2 id="activity-retention-heading" className="settings-group-heading">

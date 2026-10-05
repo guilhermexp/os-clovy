@@ -138,6 +138,8 @@ refuses to open (`NewerSchema`). Add a version; never edit one.
 
 Migration 2 (`activity_timeline`) adds the timeline's tables; see
 [activity-timeline.md](activity-timeline.md#schema-migration-2-activity_timeline).
+Migration 3 (`day_intelligence`) adds hour reports, workstreams, and day
+summaries; see [day-intelligence.md](day-intelligence.md#schema-migration-3-day_intelligence).
 
 ### Rust API (`crate::activity::store::ActivityStore`)
 
@@ -175,7 +177,10 @@ older than the period.
 `enabled` (false), `secondaryMonitors` (false), `inputEvents` (true),
 `pauseOnProtectedVideo` (true), `ignoredApps`, `ignoredDomains` (bare hosts,
 normalized on save), `workHours` `{enabled: false, days: [1..5] (ISO), start:
-"09:00", end: "18:00"}`, `retentionDays` (30). Malformed files load defaults.
+"09:00", end: "18:00"}`, `retentionDays` (30), and for day intelligence
+`daySummary` `{time: "18:00"}` and `notifications` `{enabled: true,
+quietHours: {enabled: false, start: "22:00", end: "08:00"}}`. Malformed files
+load defaults.
 Manual pause is in memory only: a restart resumes capture.
 
 ## Commands and event (frontend contract)
