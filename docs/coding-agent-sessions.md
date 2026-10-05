@@ -225,7 +225,8 @@ Event: `clovy://coding-agents-updated` (no payload).
   discovered or opened (and a symlinked root resolved once), oversized JSONL
   lines skipped, bounded block transcripts, the segmenter (blocks only at
   prompts, delayed output joins the open block), store lifecycle (including a
-  block crossing the window start), summarizer choice (only tool-free CLIs)
+  block crossing the window start, and a database at the timeline's migration
+  2 gaining `coding_agent_blocks` as 3), summarizer choice (only tool-free CLIs)
   and drain with a fake backend, the fenced prompt, the first-line marker
   rule, and the spec scenarios over a temporary home (a disabled source is
   never read, transcripts keep hash and mtime and nothing is created next to
