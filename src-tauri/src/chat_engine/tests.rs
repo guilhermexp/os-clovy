@@ -1266,7 +1266,9 @@ echo '{"type":"agent_end","messages":[]}'"#,
 async fn chat_engine_cancel_during_launch_preparation_spawns_nothing() {
     let kind = CliKind::Claude;
     let harness = Harness::new(kind).await;
-    let program = harness.fake_cli(kind, FAKE_CLAUDE);
+    // Any attempt to start this program fails, which would end the run as
+    // `failed` ("Could not start …") instead of `cancelled`.
+    let program = harness.bin.path().join("claude-must-not-start");
     let host = ChatEngineHost::default();
 
     // The cancel arrives after the run is registered but before the turn
@@ -1289,16 +1291,13 @@ async fn chat_engine_cancel_during_launch_preparation_spawns_nothing() {
         cancel,
     )
     .await;
+    let emitted = sink.emitted.into_inner().unwrap();
     assert!(
-        !harness.log.path().join("count").exists(),
-        "the CLI was started after the cancel"
+        !emitted.iter().any(|(method, _)| method == "run.failed"),
+        "the turn tried to start the CLI after the cancel: {emitted:?}"
     );
     assert_eq!(
-        sink.emitted
-            .into_inner()
-            .unwrap()
-            .last()
-            .map(|(method, _)| method.clone()),
+        emitted.last().map(|(method, _)| method.clone()),
         Some("run.cancelled".to_string())
     );
     assert_eq!(
@@ -1324,7 +1323,7 @@ async fn chat_engine_cancel_during_launch_preparation_spawns_nothing() {
         receiver,
     )
     .await;
-    assert!(!harness.log.path().join("count").exists());
+    // Nothing was attempted: the settled run keeps its status.
     assert_eq!(
         harness.repository.get_run(&settled).await.unwrap().status,
         "cancelled"
