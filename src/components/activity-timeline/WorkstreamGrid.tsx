@@ -135,8 +135,9 @@ export function WorkstreamGrid({ layout, nowMs, selectedId, onSelect }: Workstre
                   </span>
                   <span className="day-grid-card-body">
                     <span className="day-grid-card-title">{workstream.title}</span>
-                    {/* Most important first: on a narrow card the later items
-                        wrap out of view whole, the precision badge stays. */}
+                    {/* In priority order (active time, by-hour badge, range): on a
+                        narrow card the items that do not fit wrap out of view
+                        whole, and the label and the details still carry them. */}
                     <span className="day-grid-card-meta">
                       <span className="day-grid-card-active">{active}</span>
                       {card.approximate ? (

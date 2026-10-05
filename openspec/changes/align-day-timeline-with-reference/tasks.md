@@ -17,6 +17,6 @@
 
 ## 4. Comprovação
 
-- [ ] 4.1 Executar gate, GREEN correspondente ao RED, build de produção e revisão independente; registrar evidências sem alterar o ticket pelo worker.
+- [x] 4.1 Executar gate, GREEN correspondente ao RED, build de produção e revisão independente; registrar evidências sem alterar o ticket pelo worker.
 - [x] 4.2 Provar em dev a grade e seleção, retomadas/sobreposição, navegação/busca e dois ícones reais; declarar alcance de fixtures e de dados reais.
 - [x] 4.3 Reconciliar documentação de atividade e matriz de verificação, mantendo pendências não observadas explícitas. O Main atualiza esta checklist.

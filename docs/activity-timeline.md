@@ -20,11 +20,12 @@ Terms are in [CONTEXT.md](../CONTEXT.md#activity-capture).
 | `src-tauri/src/activity/timeline/mod.rs` | Tauri commands, background loop, exclusion/retention filtering, agent tool wiring |
 | `src-tauri/src/activity/timeline/agent_tools.rs` | `search_activity`, `get_activity_timeline` |
 | `src-tauri/src/activity/timeline/debug_import.rs` | Development-only fixture import (`CLOVY_ACTIVITY_DEBUG_IMPORT`) |
-| `src/components/activity-timeline/`, `src/lib/activity-timeline.ts` | The "Today" view and its typed bindings |
+| `src-tauri/src/activity/app_icon.rs` | `activity_app_icon`: an installed app's icon by bundle id (Launch Services, 64x64 PNG, per-id cache) |
+| `src/components/activity-timeline/`, `src/lib/activity-timeline.ts` | The "Today" view and its typed bindings; the workstream grid is `WorkstreamGrid.tsx` / `WorkstreamDetail.tsx` with its pure layout in `day-grid-layout.ts` |
 
 Tests: `cargo test --manifest-path src-tauri/Cargo.toml activity` (timeline
 tests are under `activity::timeline::`) and
-`pnpm exec vitest run --configLoader=runner src/test/activity-timeline`.
+`pnpm exec vitest run --configLoader=runner src/test/activity-timeline src/test/day-timeline-grid src/test/day-grid-layout`.
 
 ## ETL
 
