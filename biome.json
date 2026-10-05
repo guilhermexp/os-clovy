@@ -9,7 +9,8 @@
       "*.ts",
       "*.mjs",
       "!**/*.min.js",
-      "!**/dist"
+      "!**/dist",
+      "!!**/.tmp"
     ],
     "ignoreUnknown": true
   },
