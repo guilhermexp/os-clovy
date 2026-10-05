@@ -48,12 +48,24 @@ fn copy_database(source: &Path) -> Result<(tempfile::TempDir, PathBuf), String> 
         .tempdir()
         .map_err(|error| error.to_string())?;
     let copy = dir.path().join("store.db");
-    std::fs::copy(source, &copy).map_err(|error| error.to_string())?;
+    copy_regular(source, &copy)?;
     let wal = PathBuf::from(format!("{}-wal", source.display()));
-    if wal.is_file() {
-        std::fs::copy(&wal, dir.path().join("store.db-wal")).map_err(|error| error.to_string())?;
+    match std::fs::symlink_metadata(&wal) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(metadata) if metadata.file_type().is_file() => {
+            copy_regular(&wal, &dir.path().join("store.db-wal"))?;
+        }
+        _ => return Err(format!("{} is not a regular file", wal.display())),
     }
     Ok((dir, copy))
+}
+
+/// Copies a file opened with `O_NOFOLLOW`, so a symlink is never followed.
+fn copy_regular(from: &Path, to: &Path) -> Result<(), String> {
+    let mut source = super::open_regular(from).map_err(|error| error.to_string())?;
+    let mut target = std::fs::File::create(to).map_err(|error| error.to_string())?;
+    std::io::copy(&mut source, &mut target).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// A TEXT or BLOB column as text.

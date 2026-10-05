@@ -18,42 +18,56 @@ use sqlx::query::query;
 use sqlx::row::Row;
 
 use super::sqlite::{text_column, value_for_key, Snapshot};
-use super::{list_dir, str_at, SourceRoots};
-use crate::coding_agents::record::{from_epoch_millis, inner_tag, Record, RecordKind, Session};
-use crate::coding_agents::SourceId;
+use super::{is_regular_file, list_subdirs, source_root, str_at, under, SourceRoots};
+use crate::coding_agents::record::{from_epoch_millis, inner_tag, Record, RecordKind, SessionInfo};
+use crate::coding_agents::segment::BlockBuilder;
 
 pub fn root(roots: &SourceRoots) -> PathBuf {
     roots.home.join(".cursor").join("chats")
 }
 
-pub fn discover(roots: &SourceRoots) -> Vec<PathBuf> {
-    list_dir(&root(roots))
+pub fn discover(roots: &SourceRoots) -> Vec<(PathBuf, PathBuf)> {
+    let Some(root) = source_root(&root(roots)) else {
+        return Vec::new();
+    };
+    let stores = list_subdirs(&root)
         .into_iter()
-        .filter(|workspace| workspace.is_dir())
-        .flat_map(|workspace| list_dir(&workspace))
+        .flat_map(|workspace| list_subdirs(&workspace))
         .map(|chat| chat.join("store.db"))
-        .filter(|store| store.is_file())
-        .collect()
+        .filter(|store| is_regular_file(store))
+        .collect();
+    under(&root, stores)
 }
 
-pub async fn load(path: &Path, modified: SystemTime) -> Result<Option<Session>, String> {
+pub async fn load(
+    path: &Path,
+    modified: SystemTime,
+    new_builder: impl Fn() -> BlockBuilder,
+) -> Result<Vec<(SessionInfo, BlockBuilder)>, String> {
     let Some(id) = path
         .parent()
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
     else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let snapshot = Snapshot::open(path).await?;
-    let messages = read(&snapshot).await;
+    let mut builder = new_builder();
+    let read = read(&snapshot, modified.into(), &mut builder).await;
     snapshot.close().await;
-    let Some((meta, messages)) = messages? else {
-        return Ok(None);
-    };
-    Ok(Some(normalize(id, &meta, &messages, modified.into())))
+    Ok(read?
+        .map(|title| (SessionInfo { id, title }, builder))
+        .into_iter()
+        .collect())
 }
 
-async fn read(snapshot: &Snapshot) -> Result<Option<(Value, Vec<Value>)>, String> {
+/// Streams the chat's turns into `builder`; returns the chat's title, or
+/// `None` when the store holds no chat.
+async fn read(
+    snapshot: &Snapshot,
+    modified: DateTime<Utc>,
+    builder: &mut BlockBuilder,
+) -> Result<Option<Option<String>>, String> {
     let pool = snapshot.pool();
     let Some(raw_meta) = value_for_key(pool, "SELECT value FROM meta WHERE key = ?", "0").await
     else {
@@ -74,21 +88,41 @@ async fn read(snapshot: &Snapshot) -> Result<Option<(Value, Vec<Value>)>, String
     let Some(root) = root else {
         return Ok(None);
     };
-    let mut messages = Vec::new();
+    let created = meta
+        .get("createdAt")
+        .and_then(Value::as_f64)
+        .and_then(from_epoch_millis);
+    // Every turn is stamped `created` except the last, so each turn is held
+    // back until the next one shows it was not the last.
+    let mut pending: Option<(RecordKind, String)> = None;
     for id in message_ids(&root) {
         let blob = query("SELECT data FROM blobs WHERE id = ?")
             .bind(&id)
             .fetch_optional(pool)
             .await
             .map_err(|error| error.to_string())?;
-        if let Some(message) = blob
+        let Some(turn) = blob
             .and_then(|row| text_column(&row, 0))
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        {
-            messages.push(message);
+            .and_then(|message| turn(&message))
+        else {
+            continue;
+        };
+        if let Some((kind, body)) = pending.replace(turn) {
+            if !builder.push(Record::new(created, kind, &body)) {
+                return Ok(Some(None));
+            }
         }
     }
-    Ok(Some((meta, messages)))
+    if let Some((kind, body)) = pending {
+        builder.push(Record::new(Some(modified), kind, &body));
+    }
+    Ok(Some(
+        str_at(&meta, &["name"])
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && *name != "New Agent")
+            .map(str::to_string),
+    ))
 }
 
 /// Hex-encoded JSON, or plain JSON.
@@ -165,51 +199,20 @@ fn message_text(message: &Value) -> String {
     }
 }
 
-pub fn normalize(id: String, meta: &Value, messages: &[Value], modified: DateTime<Utc>) -> Session {
-    let created = meta
-        .get("createdAt")
-        .and_then(Value::as_f64)
-        .and_then(from_epoch_millis);
-    let mut turns: Vec<(RecordKind, String)> = Vec::new();
-    for message in messages {
-        let text = message_text(message);
-        match str_at(message, &["role"]) {
-            Some("user") => {
-                let prompt = match inner_tag(&text, "user_query") {
-                    Some(query) => query.to_string(),
-                    None if text.contains("<user_info>") => continue,
-                    None => text,
-                };
-                if !prompt.is_empty() {
-                    turns.push((RecordKind::Prompt, prompt));
-                }
-            }
-            Some("assistant") if !text.is_empty() => turns.push((RecordKind::Reply, text)),
-            _ => {}
-        }
-    }
-    let last = turns.len().saturating_sub(1);
-    let records = turns
-        .into_iter()
-        .enumerate()
-        .map(|(index, (kind, body))| {
-            let at = if index == last {
-                Some(modified)
-            } else {
-                created
+/// A user or assistant message as a turn; scaffolding yields `None`.
+fn turn(message: &Value) -> Option<(RecordKind, String)> {
+    let text = message_text(message);
+    match str_at(message, &["role"]) {
+        Some("user") => {
+            let prompt = match inner_tag(&text, "user_query") {
+                Some(query) => query.to_string(),
+                None if text.contains("<user_info>") => return None,
+                None => text,
             };
-            Record::new(at, kind, body)
-        })
-        .collect();
-    Session {
-        source: SourceId::CursorCli,
-        id,
-        title: str_at(meta, &["name"])
-            .map(str::trim)
-            .filter(|name| !name.is_empty() && *name != "New Agent")
-            .map(str::to_string),
-        cwd: None,
-        records,
+            (!prompt.is_empty()).then_some((RecordKind::Prompt, prompt))
+        }
+        Some("assistant") if !text.is_empty() => Some((RecordKind::Reply, text)),
+        _ => None,
     }
 }
 
@@ -291,21 +294,32 @@ mod tests {
         pool.close().await;
 
         let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_791_101_000);
-        let session = load(&path, modified).await.unwrap().unwrap();
-        assert_eq!(session.id, "chat-1");
-        assert_eq!(session.title.as_deref(), Some("Inspect bug"));
-        let turns: Vec<(RecordKind, &str)> = session
-            .records
-            .iter()
-            .map(|r| (r.kind, r.body.as_str()))
-            .collect();
+        let created = from_epoch_millis(1_791_100_800_000.0).unwrap();
+        let sessions = load(&path, modified, || {
+            BlockBuilder::new(
+                crate::coding_agents::SourceId::CursorCli,
+                DateTime::<Utc>::from(modified),
+                created - chrono::Duration::days(1),
+            )
+        })
+        .await
+        .unwrap();
+        let (info, builder) = sessions.into_iter().next().unwrap();
+        assert_eq!(info.id, "chat-1");
+        assert_eq!(info.title.as_deref(), Some("Inspect bug"));
+        let blocks = builder.finish(&info);
+        assert_eq!(blocks.len(), 1);
         assert_eq!(
-            turns,
-            vec![
-                (RecordKind::Prompt, "what is a WAL file?"),
-                (RecordKind::Reply, "A write-ahead log.")
-            ]
+            blocks[0].first_prompt.as_deref(),
+            Some("what is a WAL file?")
         );
-        assert_eq!(session.records[1].at, Some(DateTime::<Utc>::from(modified)));
+        assert_eq!(blocks[0].prompt_count, 1);
+        assert_eq!(blocks[0].reply_count, 1);
+        assert!(
+            !blocks[0].transcript.contains("darwin"),
+            "scaffolding is dropped"
+        );
+        assert_eq!(blocks[0].started_at, created);
+        assert_eq!(blocks[0].ended_at, DateTime::<Utc>::from(modified));
     }
 }

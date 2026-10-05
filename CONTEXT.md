@@ -841,9 +841,10 @@ transcripts Clovy reads, read-only, when its source is on (see
 _Avoid_: agent unqualified (that is Clovy's own agent), assistant.
 
 **Coding-agent block**:
-A slice of one coding-agent session stored in the **activity database**: it
-ends at an idle gap over 1 hour, or is cut at the first user prompt once it is
-1 hour long. It moves `live` → `sealed` → `summarized`; sealed blocks never
+A slice of one coding-agent session stored in the **activity database**. It
+always starts at a user prompt: a prompt opens a new block after more than
+1 hour of silence or once the open block is 1 hour long; anything else joins
+the open block. It moves `live` → `sealed` → `summarized`; sealed blocks never
 change.
 _Avoid_: session (one session can span many blocks), segment (the
 implementation term), chunk.

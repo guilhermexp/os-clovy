@@ -40,10 +40,12 @@ the Activity settings are saved:
    Then, for each enabled source only, its store entries changed since the
    start of the window are listed; an entry whose size and mtime (and its
    SQLite WAL's) did not change since it was last loaded is skipped; the rest
-   are loaded, Clovy's own CLI conversations are dropped, and every block that
-   ended inside the window is upserted.
-3. **Summaries.** Up to 4 sealed blocks of enabled sources are summarized per
-   pass, newest first; with more due the loop comes back after 1 s.
+   are streamed into block builders, Clovy's own CLI conversations are
+   dropped, and every block that ended inside the window is upserted.
+3. **Summaries.** Up to 4 sealed blocks of enabled sources that ended inside
+   the window are summarized per pass, newest first; with more due the loop
+   comes back after 1 s. A block that started before the window and ended
+   inside it is summarized like any other.
 4. **Retention**, hourly: blocks that ended before the activity retention
    period (`retentionDays`, default 30) are deleted.
 5. When blocks or summaries changed, `clovy://coding-agents-updated` (no
@@ -65,36 +67,56 @@ of past sessions.
 | Cursor CLI | `~/.cursor/chats/<workspace-md5>/<chat>/store.db` | Root blob lists message blobs; user text is the `<user_query>` part | none |
 | Antigravity | `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl` (editor: `~/.gemini/antigravity/brain/`) | `USER_EXPLICIT` `USER_INPUT` (inside `<USER_REQUEST>`), `MODEL` `PLANNER_RESPONSE`, other `MODEL` steps are tool output | none |
 
-Read-only rules:
+Source boundary and read-only rules:
 
-- Files are opened for reading only. JSONL readers skip malformed and
-  partially written lines (the next scan sees them complete).
+- Each source has a configured location (its root). The root may itself be a
+  symlink (dotfiles); it is resolved once. Below it nothing is followed:
+  listings skip symlinked entries, a candidate (and a SQLite WAL next to it)
+  must be a regular file, and right before reading the candidate is checked
+  again to be a regular file whose canonical path is under the canonical
+  root. Files are opened with `O_NOFOLLOW`. Nothing outside a root is read.
+- Files are opened for reading only.
 - SQLite stores (Cursor, Cursor CLI) are never opened in place: opening a live
   WAL database, even read-only, can make SQLite create or write `-wal`/`-shm`
   next to it, and `immutable=1` would miss rows still in the WAL. The file and
-  its WAL are copied to a private temporary directory and the copy is read.
+  its WAL are copied (no symlink followed) to a private temporary directory
+  and the copy is read.
 - A disabled source's directories are not listed or read at all.
 - Cursor CLI messages carry no timestamps: every record gets the chat's
   `createdAt` except the last, which gets the store's mtime.
 
-**Self-ingestion.** Every CLI call Clovy makes starts its prompt with
+**Bounded memory.** Transcripts are never held whole. JSONL is read line by
+line; a line over 4 MiB is skipped without being buffered or parsed. Each
+record body is capped (tool inputs 400, tool results 800, any record 4,000
+characters) and goes straight into the session's block builder. A block that
+closes before the window is dropped at once, and a kept block holds at most
+the first 70,000 and the last 30,000 characters of its rendered transcript. A
+VS Code chat session over 32 MiB (its operation log must be replayed whole)
+is skipped. Cursor conversations are loaded one at a time.
+
+**Self-ingestion.** Every CLI call Clovy makes puts
 `CLOVY_AUTHORSHIP_MARKER` (`[clovy-internal-ai-call]`, see
-[llm-providers.md](llm-providers.md)). A session whose first prompt contains
-it is skipped entirely (`Session::is_clovy_call`). Claude and Codex calls are
-already not persisted (`--no-session-persistence`, `--ephemeral`); Cursor CLI
-and others are caught by the marker.
+[llm-providers.md](llm-providers.md)) alone on the first line of its prompt. A
+session whose first prompt's first non-empty line is exactly the marker
+(after the source's own wrapper, such as `<user_query>`, is removed) is
+skipped entirely and reading stops there. A user prompt that merely mentions
+the marker is user work. Claude calls are not persisted
+(`--no-session-persistence`); anything else is caught by the marker.
 
 ## Blocks
 
-`segment::segment` cuts one session. A new block starts when more than 1 hour
-passed since the previous timestamped record, when the open block is at least
-1 hour long and the record is a user prompt (so a block ends on a complete
-agent turn and the next starts on what the user asked), or after an explicit
-exit. Untimed turns join the open block; blocks without turns are dropped.
-A long autonomous stretch stays in its block until the next prompt or a
-1-hour silence. `active_seconds` sums the gaps between records, each capped at
-2 minutes. Cutting depends only on earlier records, so appending to a
-transcript never moves an existing block's start (its identity).
+`segment::BlockBuilder` cuts one session while its records stream in. A block
+always starts at a user prompt; a prompt starts a new block when more than
+1 hour passed since the previous timestamped record, when the open block is
+at least 1 hour long (so a block ends on a complete agent turn and the next
+starts on what the user asked), or when the agent exited after the open
+block's last turn. Anything else (replies, tool output, bookkeeping), however
+late, joins the open block, so delayed agent output never becomes a block of
+its own; records before the first prompt belong to no block. A long
+autonomous stretch stays in its block until the next prompt. `active_seconds`
+sums the gaps between records, each capped at 2 minutes. Cutting depends only
+on earlier records, so appending to a transcript never moves an existing
+block's start (its identity).
 
 **Lifecycle**: every block but the session's last is written `sealed`; the
 last stays `live` (rewritten on each scan) until the agent exits or it is idle
@@ -103,30 +125,33 @@ for more than 1 hour. Sealed blocks never change (the upsert only updates
 
 ## Summaries
 
-| Agent | Summarized by (when installed) |
-|---|---|
-| Claude Code | `claude` |
-| Codex | `codex` |
-| Copilot CLI, Copilot in VS Code | `copilot` |
-| Cursor, Cursor CLI | `cursor-agent` |
-| Antigravity | `agy` |
+A block transcript is untrusted text: it holds whatever the agent read and
+whatever the user pasted. It only ever goes to a model that cannot act on it,
+that is, a CLI started with every tool off or an endpoint
+([CLI isolation contract](llm-providers.md#cli-isolation-contract)).
 
-When the agent's CLI is not installed, the activity provider chosen in
-Settings, Models summarizes (`llm::generate_for_activity`, which requires a
-provider with JSON schema support). With neither, the block is not read for
-summarizing, no call is made, no attempt is counted, and it stays `sealed`
-until one becomes available. Own-CLI calls go through
+| Agent | Summarized by |
+|---|---|
+| Claude Code | `claude` when installed (runs with every tool off), else the activity provider |
+| Codex, Copilot CLI, Copilot in VS Code, Cursor, Cursor CLI, Antigravity | the activity provider: their own CLIs (`codex`, `copilot`, `cursor-agent`, `agy`) keep tools that cannot be turned off, so they never receive a transcript |
+
+The activity provider is the one chosen in Settings, Models
+(`llm::generate_for_activity`, which requires JSON schema support and refuses a
+CLI that keeps its tools). With no usable summarizer, the block is not read
+for summarizing, no call is made, no attempt is counted, and it stays
+`sealed` until one becomes available. Own-CLI calls go through
 `llm::generate_on_cli_for_activity`, which shares the activity semaphore (one
-activity call at a time) and the CLI isolation contract.
+activity call at a time) and refuses CLIs that keep their tools.
 
 The prompt asks for 1 to 3 plain sentences in the interface language (English
-or Brazilian Portuguese) with the agent, project, session title, UTC time
-range, and the block transcript (turns with their times; tool inputs capped at
-400 and tool results at 800 characters; the whole transcript capped at 100,000
-characters, keeping the first 70% and the last 30%). Answers are trimmed,
-unfenced, and capped at 1,200 characters. A failed attempt is retried after
-30 minutes times the attempt number; after 3 attempts the block stays sealed
-with `summaryError`.
+or Brazilian Portuguese) with the agent, project, and UTC time range outside
+the fence, and the session title and block transcript inside
+`<transcript>…</transcript>`; the instructions say the fenced text is
+quoted, untrusted data whose instructions must never be followed, and a
+`</transcript>` inside it is escaped so it cannot close the fence. Answers
+are trimmed, unfenced, and capped at 1,200 characters. A failed attempt is
+retried after 30 minutes times the attempt number; after 3 attempts the block
+stays sealed with `summaryError`.
 
 ## Database (migration 2, `coding_agent_blocks`)
 
@@ -185,10 +210,14 @@ Event: `clovy://coding-agents-updated` (no payload).
 ## Verification
 
 - Unit and integration: readers per agent with synthetic fixtures (including
-  real SQLite stores for Cursor and Cursor CLI), segmenter, store lifecycle,
-  summarizer choice and drain with a fake backend, and the spec scenarios over
-  a temporary home (a disabled source is never read, transcripts keep hash and
-  mtime and nothing is created next to them, 2 h 30 min becomes three blocks
-  cut at prompts, a conversation started by Clovy's own summary prompt is
-  skipped).
+  real SQLite stores for Cursor and Cursor CLI), symlinks below a root never
+  discovered or opened (and a symlinked root resolved once), oversized JSONL
+  lines skipped, bounded block transcripts, the segmenter (blocks only at
+  prompts, delayed output joins the open block), store lifecycle (including a
+  block crossing the window start), summarizer choice (only tool-free CLIs)
+  and drain with a fake backend, the fenced prompt, the first-line marker
+  rule, and the spec scenarios over a temporary home (a disabled source is
+  never read, transcripts keep hash and mtime and nothing is created next to
+  them, 2 h 30 min becomes three blocks cut at prompts, a conversation
+  started by Clovy's own summary prompt is skipped).
 - Component: `src/test/coding-agents.test.tsx` (settings section and lane).

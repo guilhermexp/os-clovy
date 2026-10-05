@@ -6,15 +6,18 @@
 //! text is wrapped in `<USER_REQUEST>`, followed by `<ADDITIONAL_METADATA>`.
 //! The transcript keeps no working directory.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{list_dir, read_json_lines, str_at, SourceRoots};
-use crate::coding_agents::record::{
-    cap, inner_tag, parse_time, Record, RecordKind, Session, TOOL_TEXT_CAP,
+use super::{
+    for_each_json_line, is_real_dir, is_regular_file, list_subdirs, source_root, str_at,
+    SourceRoots,
 };
-use crate::coding_agents::SourceId;
+use crate::coding_agents::record::{
+    cap, inner_tag, parse_time, Record, RecordKind, RecordSink, SessionInfo, TOOL_TEXT_CAP,
+};
 
 pub fn cli_root(roots: &SourceRoots) -> PathBuf {
     roots.home.join(".gemini").join("antigravity-cli")
@@ -24,38 +27,43 @@ pub fn ide_root(roots: &SourceRoots) -> PathBuf {
     roots.home.join(".gemini").join("antigravity")
 }
 
-pub fn discover(roots: &SourceRoots) -> Vec<PathBuf> {
-    [cli_root(roots), ide_root(roots)]
-        .iter()
-        .flat_map(|root| list_dir(&root.join("brain")))
-        .map(|conversation| {
-            conversation
-                .join(".system_generated")
-                .join("logs")
-                .join("transcript.jsonl")
-        })
-        .filter(|file| file.is_file())
-        .collect()
-}
-
-pub fn load(path: &Path) -> Option<Session> {
-    let id = path
-        .ancestors()
-        .nth(3)?
-        .file_name()?
-        .to_string_lossy()
-        .into_owned();
-    Some(normalize(id, &read_json_lines(path)))
-}
-
-pub fn normalize(id: String, values: &[Value]) -> Session {
-    Session {
-        source: SourceId::Antigravity,
-        id,
-        title: None,
-        cwd: None,
-        records: values.iter().map(record).collect(),
+/// Each install location is its own root.
+pub fn discover(roots: &SourceRoots) -> Vec<(PathBuf, PathBuf)> {
+    let mut found = Vec::new();
+    for location in [cli_root(roots), ide_root(roots)] {
+        let Some(root) = source_root(&location) else {
+            continue;
+        };
+        let brain = root.join("brain");
+        if !is_real_dir(&brain) {
+            continue;
+        }
+        for conversation in list_subdirs(&brain) {
+            let generated = conversation.join(".system_generated");
+            let logs = generated.join("logs");
+            if !is_real_dir(&generated) || !is_real_dir(&logs) {
+                continue;
+            }
+            let file = logs.join("transcript.jsonl");
+            if is_regular_file(&file) {
+                found.push((root.clone(), file));
+            }
+        }
     }
+    found
+}
+
+pub fn read(path: &Path, sink: &mut RecordSink<'_>) -> io::Result<SessionInfo> {
+    for_each_json_line(path, |value| sink(record(value)))?;
+    Ok(SessionInfo {
+        id: path
+            .ancestors()
+            .nth(3)
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        title: None,
+    })
 }
 
 fn record(value: &Value) -> Record {
@@ -85,13 +93,13 @@ fn record(value: &Value) -> Record {
             if parts.is_empty() {
                 Record::event(at)
             } else {
-                Record::new(at, RecordKind::Reply, parts.join("\n"))
+                Record::new(at, RecordKind::Reply, &parts.join("\n"))
             }
         }
         (Some("MODEL"), Some(step)) if !content.is_empty() => Record::new(
             at,
             RecordKind::Tool,
-            format!("[{step}: {}]", cap(content, TOOL_TEXT_CAP)),
+            &format!("[{step}: {}]", cap(content, TOOL_TEXT_CAP)),
         ),
         _ => Record::event(at),
     }
@@ -99,13 +107,16 @@ fn record(value: &Value) -> Record {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{collect, write_lines};
     use super::*;
     use serde_json::json;
 
     #[test]
     fn unwraps_user_requests_and_classifies_steps() {
-        let session = normalize(
-            "conv".into(),
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lines(
+            dir.path(),
+            "brain/conv/.system_generated/logs/transcript.jsonl",
             &[
                 json!({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
                        "created_at": "2026-10-04T12:27:18Z",
@@ -119,11 +130,10 @@ mod tests {
                        "created_at": "2026-10-04T12:27:30Z", "content": "Added /health."}),
             ],
         );
-        let turns: Vec<(RecordKind, &str)> = session
-            .records
-            .iter()
-            .map(|r| (r.kind, r.body.as_str()))
-            .collect();
+        let (info, records) = collect(|sink| read(&path, sink));
+        assert_eq!(info.id, "conv");
+        let turns: Vec<(RecordKind, &str)> =
+            records.iter().map(|r| (r.kind, r.body.as_str())).collect();
         assert_eq!(
             turns,
             vec![

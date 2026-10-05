@@ -9,7 +9,7 @@ export default defineMessages({
     "codingAgents.settings.notFound": "Not found on this Mac",
     "codingAgents.settings.toggleAria": "Read {name} sessions",
     "codingAgents.settings.summaries":
-      "Each block is summarized by the agent's own CLI when it is installed, otherwise by the activity provider chosen in Settings, Models. With neither, blocks stay without a summary and nothing leaves this Mac.",
+      "Each block is summarized by the agent's own CLI when it is installed and can run with its tools turned off (Claude Code), otherwise by the activity provider chosen in Settings, Models. With neither, blocks stay without a summary and nothing leaves this Mac.",
     "codingAgents.settings.lastScan": "Last read at {time}",
     "codingAgents.settings.databaseUnavailable":
       "The activity database is not available, so sessions cannot be stored. Check the status above.",
@@ -35,7 +35,7 @@ export default defineMessages({
     "codingAgents.settings.notFound": "Não encontrado neste Mac",
     "codingAgents.settings.toggleAria": "Ler sessões do {name}",
     "codingAgents.settings.summaries":
-      "Cada bloco é resumido pelo CLI do próprio agente quando ele está instalado e, caso contrário, pelo provedor de atividade escolhido em Configurações, Modelos. Sem nenhum dos dois, os blocos ficam sem resumo e nada sai deste Mac.",
+      "Cada bloco é resumido pelo CLI do próprio agente quando ele está instalado e pode rodar com as ferramentas desligadas (Claude Code) e, caso contrário, pelo provedor de atividade escolhido em Configurações, Modelos. Sem nenhum dos dois, os blocos ficam sem resumo e nada sai deste Mac.",
     "codingAgents.settings.lastScan": "Última leitura às {time}",
     "codingAgents.settings.databaseUnavailable":
       "O banco de atividade não está disponível, então as sessões não podem ser guardadas. Confira o status acima.",

@@ -1,15 +1,18 @@
 //! The agent-blind shape every source normalizes its transcripts into. Only
-//! a `Prompt` (a real human message) can open a time-boxed block; tool
-//! results the agent logs as user messages are `Tool`.
+//! a `Prompt` (a real human message) can open a block; tool results the
+//! agent logs as user messages are `Tool`.
+//!
+//! Readers stream records one at a time into a sink (the block builder), so
+//! no reader ever holds a whole transcript; every record body is capped here.
 
 use chrono::{DateTime, TimeZone, Utc};
-
-use super::SourceId;
 
 /// Tool results and tool inputs are capped so one file dump cannot dominate
 /// a block's transcript.
 pub const TOOL_TEXT_CAP: usize = 800;
 pub const TOOL_INPUT_CAP: usize = 400;
+/// Any record body (a pasted file in a prompt, a long answer) is capped.
+pub const TURN_TEXT_CAP: usize = 4_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordKind {
@@ -34,17 +37,18 @@ pub struct Record {
 }
 
 impl Record {
-    pub fn new(at: Option<DateTime<Utc>>, kind: RecordKind, body: impl Into<String>) -> Self {
+    /// A record whose body is trimmed and capped at [`TURN_TEXT_CAP`].
+    pub fn new(at: Option<DateTime<Utc>>, kind: RecordKind, body: &str) -> Self {
         Self {
             at,
             cwd: None,
             kind,
-            body: body.into(),
+            body: cap(body, TURN_TEXT_CAP),
         }
     }
 
     pub fn event(at: Option<DateTime<Utc>>) -> Self {
-        Self::new(at, RecordKind::Event, String::new())
+        Self::new(at, RecordKind::Event, "")
     }
 
     pub fn with_cwd(mut self, cwd: Option<String>) -> Self {
@@ -60,26 +64,25 @@ impl Record {
     }
 }
 
-/// One conversation of one agent, normalized.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Session {
-    pub source: SourceId,
+/// Receives the records of one session in transcript order. Returns `false`
+/// to stop reading (the session is one of Clovy's own calls).
+pub type RecordSink<'a> = dyn FnMut(Record) -> bool + 'a;
+
+/// What a reader learns about a session besides its records.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionInfo {
     pub id: String,
     pub title: Option<String>,
-    /// Working directory known for the whole session (records may refine it).
-    pub cwd: Option<String>,
-    pub records: Vec<Record>,
 }
 
-impl Session {
-    /// True when the first human prompt carries Clovy's authorship marker:
-    /// the conversation is one of Clovy's own CLI calls, never user work.
-    pub fn is_clovy_call(&self) -> bool {
-        self.records
-            .iter()
-            .find(|record| record.kind == RecordKind::Prompt)
-            .is_some_and(|prompt| prompt.body.contains(crate::llm::CLOVY_AUTHORSHIP_MARKER))
-    }
+/// True when a first prompt is one of Clovy's own CLI calls: the producer
+/// (`llm::cli::compose_prompt`) puts the authorship marker alone on the first
+/// line. A user prompt that merely mentions the marker is user work.
+pub fn is_clovy_prompt(body: &str) -> bool {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line == crate::llm::CLOVY_AUTHORSHIP_MARKER)
 }
 
 pub fn parse_time(value: &str) -> Option<DateTime<Utc>> {
@@ -118,11 +121,22 @@ pub fn inner_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::CLOVY_AUTHORSHIP_MARKER;
 
     #[test]
     fn cap_marks_truncation_on_char_boundaries() {
         assert_eq!(cap("ação", 10), "ação");
         assert_eq!(cap("ação ok", 3), "açã…[truncated]");
+    }
+
+    #[test]
+    fn record_bodies_are_capped() {
+        let body = "x".repeat(TURN_TEXT_CAP * 3);
+        let record = Record::new(None, RecordKind::Prompt, &body);
+        assert_eq!(
+            record.body.chars().count(),
+            TURN_TEXT_CAP + "…[truncated]".chars().count()
+        );
     }
 
     #[test]
@@ -132,5 +146,24 @@ mod tests {
             Some("fix it")
         );
         assert_eq!(inner_tag("plain", "USER_REQUEST"), None);
+    }
+
+    #[test]
+    fn only_a_marker_alone_on_the_first_line_is_a_clovy_call() {
+        assert!(is_clovy_prompt(&format!(
+            "{CLOVY_AUTHORSHIP_MARKER}\nSummarize this."
+        )));
+        assert!(is_clovy_prompt(&format!(
+            "\n  {CLOVY_AUTHORSHIP_MARKER}  \nSummarize this."
+        )));
+        assert!(!is_clovy_prompt(&format!(
+            "why does ingestion skip prompts with {CLOVY_AUTHORSHIP_MARKER}?"
+        )));
+        assert!(!is_clovy_prompt(&format!(
+            "grep the repo\n{CLOVY_AUTHORSHIP_MARKER}"
+        )));
+        assert!(!is_clovy_prompt(&format!(
+            "{CLOVY_AUTHORSHIP_MARKER} is the marker, explain it"
+        )));
     }
 }

@@ -3,15 +3,18 @@
 //! content has only `tool_result` blocks; they are not prompts. Sidechain
 //! (subagent) and meta records carry only their timestamp.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{file_stem, list_dir, read_json_lines, str_at, SourceRoots};
-use crate::coding_agents::record::{
-    cap, parse_time, Record, RecordKind, Session, TOOL_INPUT_CAP, TOOL_TEXT_CAP,
+use super::{
+    file_stem, for_each_json_line, is_regular_file, list_subdirs, source_root, str_at, under,
+    SourceRoots,
 };
-use crate::coding_agents::SourceId;
+use crate::coding_agents::record::{
+    cap, parse_time, Record, RecordKind, RecordSink, SessionInfo, TOOL_INPUT_CAP, TOOL_TEXT_CAP,
+};
 
 pub fn root(roots: &SourceRoots) -> PathBuf {
     roots.home.join(".claude").join("projects")
@@ -19,46 +22,47 @@ pub fn root(roots: &SourceRoots) -> PathBuf {
 
 /// Top-level session files of every project (subagent files live one level
 /// deeper and are part of their parent session's work).
-pub fn discover(roots: &SourceRoots) -> Vec<PathBuf> {
-    list_dir(&root(roots))
-        .into_iter()
-        .filter(|project| project.is_dir())
-        .flat_map(|project| list_dir(&project))
-        .filter(|file| file.extension().is_some_and(|ext| ext == "jsonl"))
-        .collect()
-}
-
-pub fn load(path: &Path) -> Option<Session> {
-    let values = read_json_lines(path);
-    Some(normalize(file_stem(path)?, &values))
-}
-
-pub fn normalize(id: String, values: &[Value]) -> Session {
-    let records = values.iter().map(record).collect();
-    Session {
-        source: SourceId::ClaudeCode,
-        id,
-        title: title(values),
-        cwd: None,
-        records,
-    }
-}
-
-/// The last AI title, else the last custom title, else the last summary.
-fn title(values: &[Value]) -> Option<String> {
-    let pick = |kind: &str, field: &str| {
-        values
-            .iter()
-            .rev()
-            .find(|value| str_at(value, &["type"]) == Some(kind))
-            .and_then(|value| str_at(value, &[field]))
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string)
+pub fn discover(roots: &SourceRoots) -> Vec<(PathBuf, PathBuf)> {
+    let Some(root) = source_root(&root(roots)) else {
+        return Vec::new();
     };
-    pick("ai-title", "aiTitle")
-        .or_else(|| pick("custom-title", "customTitle"))
-        .or_else(|| pick("summary", "summary"))
+    let files = list_subdirs(&root)
+        .into_iter()
+        .flat_map(|project| super::list_dir(&project))
+        .filter(|file| file.extension().is_some_and(|ext| ext == "jsonl") && is_regular_file(file))
+        .collect();
+    under(&root, files)
+}
+
+/// Titles seen so far; the last of each kind wins.
+#[derive(Default)]
+struct Titles {
+    ai: Option<String>,
+    custom: Option<String>,
+    summary: Option<String>,
+}
+
+pub fn read(path: &Path, sink: &mut RecordSink<'_>) -> io::Result<SessionInfo> {
+    let mut titles = Titles::default();
+    for_each_json_line(path, |value| {
+        let text = |field| {
+            str_at(value, &[field])
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        match str_at(value, &["type"]) {
+            Some("ai-title") => titles.ai = text("aiTitle").or(titles.ai.take()),
+            Some("custom-title") => titles.custom = text("customTitle").or(titles.custom.take()),
+            Some("summary") => titles.summary = text("summary").or(titles.summary.take()),
+            _ => {}
+        }
+        sink(record(value))
+    })?;
+    Ok(SessionInfo {
+        id: file_stem(path),
+        title: titles.ai.or(titles.custom).or(titles.summary),
+    })
 }
 
 fn record(value: &Value) -> Record {
@@ -82,7 +86,7 @@ fn record(value: &Value) -> Record {
     if body.trim().is_empty() {
         return Record::event(at).with_cwd(cwd);
     }
-    Record::new(at, kind, body).with_cwd(cwd)
+    Record::new(at, kind, &body).with_cwd(cwd)
 }
 
 fn has_prompt_text(content: &Value) -> bool {
@@ -124,15 +128,18 @@ fn render_block(block: &Value) -> Option<String> {
         }
         "tool_result" => {
             let text = match block.get("content") {
-                Some(Value::String(text)) => text.clone(),
-                Some(Value::Array(parts)) => parts
-                    .iter()
-                    .filter_map(|part| str_at(part, &["text"]))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                Some(Value::String(text)) => cap(text, TOOL_TEXT_CAP),
+                Some(Value::Array(parts)) => cap(
+                    &parts
+                        .iter()
+                        .filter_map(|part| str_at(part, &["text"]))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    TOOL_TEXT_CAP,
+                ),
                 _ => String::new(),
             };
-            Some(format!("[tool_result: {}]", cap(&text, TOOL_TEXT_CAP)))
+            Some(format!("[tool_result: {text}]"))
         }
         // Thinking and images are not part of the work log.
         _ => None,
@@ -141,13 +148,16 @@ fn render_block(block: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{collect, write_lines};
     use super::*;
     use serde_json::json;
 
     #[test]
     fn tool_results_logged_as_user_are_not_prompts() {
-        let session = normalize(
-            "s1".into(),
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lines(
+            dir.path(),
+            "p/s1.jsonl",
             &[
                 json!({"type": "user", "timestamp": "2026-10-04T10:00:00Z", "cwd": "/repo",
                        "message": {"role": "user", "content": "fix the login bug"}}),
@@ -161,10 +171,12 @@ mod tests {
                            {"type": "tool_result", "content": "fn main() {}"}]}}),
                 json!({"type": "user", "isSidechain": true, "timestamp": "2026-10-04T10:00:07Z",
                        "message": {"role": "user", "content": "subagent prompt"}}),
+                json!({"type": "custom-title", "customTitle": "Renamed"}),
                 json!({"type": "ai-title", "aiTitle": "Fix login"}),
             ],
         );
-        let kinds: Vec<RecordKind> = session.records.iter().map(|r| r.kind).collect();
+        let (info, records) = collect(|sink| read(&path, sink));
+        let kinds: Vec<RecordKind> = records.iter().map(|r| r.kind).collect();
         assert_eq!(
             kinds,
             vec![
@@ -172,15 +184,17 @@ mod tests {
                 RecordKind::Reply,
                 RecordKind::Tool,
                 RecordKind::Event,
+                RecordKind::Event,
                 RecordKind::Event
             ]
         );
         assert_eq!(
-            session.records[1].body,
+            records[1].body,
             "Reading the file.\n[tool_use: Read {\"path\":\"a.rs\"}]"
         );
-        assert_eq!(session.records[2].body, "[tool_result: fn main() {}]");
-        assert_eq!(session.records[0].cwd.as_deref(), Some("/repo"));
-        assert_eq!(session.title.as_deref(), Some("Fix login"));
+        assert_eq!(records[2].body, "[tool_result: fn main() {}]");
+        assert_eq!(records[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(info.id, "s1");
+        assert_eq!(info.title.as_deref(), Some("Fix login"));
     }
 }

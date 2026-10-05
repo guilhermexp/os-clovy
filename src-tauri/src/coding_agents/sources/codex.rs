@@ -7,73 +7,73 @@
 //! - earlier: `event_msg` `user_message` / `agent_message`.
 //!
 //! `response_item` messages are skipped: they include the injected
-//! instructions and environment context, not what the user typed. When a file
-//! has current-format turns, earlier-format turns are ignored so a transitional
-//! file never counts a prompt twice.
+//! instructions and environment context, not what the user typed. A first
+//! cheap pass (raw bytes, no JSON parsing) tells whether the file has
+//! current-format turns; if it does, earlier-format turns are ignored so a
+//! transitional file never counts a prompt twice.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{file_stem, list_dir, read_json_lines, str_at, SourceRoots};
-use crate::coding_agents::record::{cap, parse_time, Record, RecordKind, Session, TOOL_INPUT_CAP};
-use crate::coding_agents::SourceId;
+use super::{
+    file_stem, for_each_json_line, for_each_line, is_regular_file, list_dir, list_subdirs,
+    source_root, str_at, under, SourceRoots,
+};
+use crate::coding_agents::record::{
+    cap, parse_time, Record, RecordKind, RecordSink, SessionInfo, TOOL_INPUT_CAP,
+};
 
 pub fn root(roots: &SourceRoots) -> PathBuf {
     roots.home.join(".codex").join("sessions")
 }
 
-pub fn discover(roots: &SourceRoots) -> Vec<PathBuf> {
+pub fn discover(roots: &SourceRoots) -> Vec<(PathBuf, PathBuf)> {
+    let Some(root) = source_root(&root(roots)) else {
+        return Vec::new();
+    };
     let mut files = Vec::new();
-    for year in list_dir(&root(roots)).into_iter().filter(|p| p.is_dir()) {
-        for month in list_dir(&year).into_iter().filter(|p| p.is_dir()) {
-            for day in list_dir(&month).into_iter().filter(|p| p.is_dir()) {
-                files.extend(
-                    list_dir(&day)
-                        .into_iter()
-                        .filter(|file| file.extension().is_some_and(|ext| ext == "jsonl")),
-                );
+    for year in list_subdirs(&root) {
+        for month in list_subdirs(&year) {
+            for day in list_subdirs(&month) {
+                files.extend(list_dir(&day).into_iter().filter(|file| {
+                    file.extension().is_some_and(|ext| ext == "jsonl") && is_regular_file(file)
+                }));
             }
         }
     }
-    files
+    under(&root, files)
 }
 
-pub fn load(path: &Path) -> Option<Session> {
-    let values = read_json_lines(path);
-    Some(normalize(file_stem(path)?, &values))
+fn has_current_format(path: &Path) -> io::Result<bool> {
+    let contains = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    };
+    let mut found = false;
+    for_each_line(path, |line| {
+        found = contains(line, b"\"item_completed\"")
+            && (contains(line, b"\"UserMessage\"") || contains(line, b"\"AgentMessage\""));
+        !found
+    })?;
+    Ok(found)
 }
 
-pub fn normalize(fallback_id: String, values: &[Value]) -> Session {
-    let current_format = values.iter().any(|value| {
-        item_type(value).is_some_and(|kind| kind == "UserMessage" || kind == "AgentMessage")
-    });
-    let id = values
-        .iter()
-        .find(|value| str_at(value, &["type"]) == Some("session_meta"))
-        .and_then(|value| str_at(value, &["payload", "id"]))
-        .map(str::to_string)
-        .unwrap_or(fallback_id);
-    let records = values
-        .iter()
-        .map(|value| record(value, current_format))
-        .collect();
-    Session {
-        source: SourceId::Codex,
-        id,
+pub fn read(path: &Path, sink: &mut RecordSink<'_>) -> io::Result<SessionInfo> {
+    let current_format = has_current_format(path)?;
+    let mut id = None;
+    for_each_json_line(path, |value| {
+        if id.is_none() && str_at(value, &["type"]) == Some("session_meta") {
+            id = str_at(value, &["payload", "id"]).map(str::to_string);
+        }
+        sink(record(value, current_format))
+    })?;
+    Ok(SessionInfo {
+        id: id.unwrap_or_else(|| file_stem(path)),
         title: None,
-        cwd: None,
-        records,
-    }
-}
-
-fn item_type(value: &Value) -> Option<&str> {
-    if str_at(value, &["type"]) != Some("event_msg")
-        || str_at(value, &["payload", "type"]) != Some("item_completed")
-    {
-        return None;
-    }
-    str_at(value, &["payload", "item", "type"])
+    })
 }
 
 fn record(value: &Value, current_format: bool) -> Record {
@@ -105,7 +105,7 @@ fn record(value: &Value, current_format: bool) -> Record {
     if body.trim().is_empty() {
         return event();
     }
-    Record::new(at, kind, body).with_cwd(cwd)
+    Record::new(at, kind, &body).with_cwd(cwd)
 }
 
 fn item(item: &Value) -> Option<(RecordKind, String)> {
@@ -166,19 +166,24 @@ fn message_text(message: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{collect, write_lines};
     use super::*;
     use serde_json::json;
 
     #[test]
     fn current_format_turns_and_cwd() {
-        let session = normalize(
-            "rollout-x".into(),
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lines(
+            dir.path(),
+            "rollout-x.jsonl",
             &[
                 json!({"timestamp": "2026-10-04T10:00:00Z", "type": "session_meta",
                        "payload": {"id": "abc", "cwd": "/repo"}}),
                 json!({"timestamp": "2026-10-04T10:00:01Z", "type": "response_item",
                        "payload": {"type": "message", "role": "user",
                                    "content": [{"type": "input_text", "text": "<environment_context>"}]}}),
+                json!({"timestamp": "2026-10-04T10:00:01Z", "type": "event_msg",
+                       "payload": {"type": "user_message", "message": "duplicate"}}),
                 json!({"timestamp": "2026-10-04T10:00:02Z", "type": "event_msg",
                        "payload": {"type": "item_completed",
                                    "item": {"type": "UserMessage", "content": [{"type": "text", "text": "add tests"}]}}}),
@@ -188,13 +193,11 @@ mod tests {
                 json!({"timestamp": "2026-10-04T10:00:04Z", "type": "event_msg",
                        "payload": {"type": "item_completed",
                                    "item": {"type": "AgentMessage", "content": [{"type": "Text", "text": "Done."}]}}}),
-                json!({"timestamp": "2026-10-04T10:00:05Z", "type": "event_msg",
-                       "payload": {"type": "user_message", "message": "duplicate"}}),
             ],
         );
-        assert_eq!(session.id, "abc");
-        let turns: Vec<(RecordKind, &str)> = session
-            .records
+        let (info, records) = collect(|sink| read(&path, sink));
+        assert_eq!(info.id, "abc");
+        let turns: Vec<(RecordKind, &str)> = records
             .iter()
             .filter(|r| r.is_turn())
             .map(|r| (r.kind, r.body.as_str()))
@@ -205,15 +208,18 @@ mod tests {
                 (RecordKind::Prompt, "add tests"),
                 (RecordKind::Tool, "[tool: CommandExecution cargo test]"),
                 (RecordKind::Reply, "Done."),
-            ]
+            ],
+            "the earlier-format duplicate before the first item is ignored too"
         );
-        assert_eq!(session.records[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(records[0].cwd.as_deref(), Some("/repo"));
     }
 
     #[test]
     fn earlier_format_turns() {
-        let session = normalize(
-            "rollout-y".into(),
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lines(
+            dir.path(),
+            "rollout-y.jsonl",
             &[
                 json!({"timestamp": "2026-10-04T10:00:00Z", "type": "turn_context",
                        "payload": {"cwd": "/repo"}}),
@@ -223,8 +229,9 @@ mod tests {
                        "payload": {"type": "agent_message", "message": "It works."}}),
             ],
         );
-        assert_eq!(session.id, "rollout-y");
-        let kinds: Vec<RecordKind> = session.records.iter().map(|r| r.kind).collect();
+        let (info, records) = collect(|sink| read(&path, sink));
+        assert_eq!(info.id, "rollout-y");
+        let kinds: Vec<RecordKind> = records.iter().map(|r| r.kind).collect();
         assert_eq!(
             kinds,
             vec![RecordKind::Event, RecordKind::Prompt, RecordKind::Reply]

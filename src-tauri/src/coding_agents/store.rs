@@ -208,8 +208,9 @@ impl ActivityStore {
         Ok(rows.iter().filter_map(block_row).collect())
     }
 
-    /// Sealed blocks of `sources` that started at or after `since` and are
-    /// due for a summary attempt, newest first.
+    /// Sealed blocks of `sources` that ended at or after `since` (the same
+    /// boundary ingestion keeps blocks by, so a block crossing it is still
+    /// summarized) and are due for a summary attempt, newest first.
     pub async fn coding_agent_blocks_to_summarize(
         &self,
         sources: &[SourceId],
@@ -229,7 +230,7 @@ impl ActivityStore {
             .join(", ");
         let rows = query(&format!(
             "SELECT {BLOCK_COLUMNS}, transcript FROM coding_agent_blocks
-             WHERE state = 'sealed' AND source IN ({source_list}) AND started_at >= ?
+             WHERE state = 'sealed' AND source IN ({source_list}) AND ended_at >= ?
                AND summary_attempts < ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
              ORDER BY ended_at DESC LIMIT ?"
         ))
@@ -423,5 +424,40 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_block_crossing_the_window_start_is_still_summarized() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = MemoryKeyStore::default();
+        let store = ActivityStore::open(&dir.path().join(ACTIVITY_DB_FILE), &keys)
+            .await
+            .unwrap();
+        // Starts at 10:00, ends 10:40; the window starts at 10:30.
+        store
+            .upsert_coding_agent_block(&block(40, true, 1), at(41))
+            .await
+            .unwrap();
+        let before = NewBlock {
+            session_id: "s2".into(),
+            ..block(20, true, 1)
+        };
+        store
+            .upsert_coding_agent_block(&before, at(41))
+            .await
+            .unwrap();
+        let pending = store
+            .coding_agent_blocks_to_summarize(&SourceId::ALL, at(30), at(50), 3, 10)
+            .await
+            .unwrap();
+        let sessions: Vec<&str> = pending
+            .iter()
+            .map(|item| item.block.session_id.as_str())
+            .collect();
+        assert_eq!(
+            sessions,
+            vec!["s1"],
+            "only the block that ended inside the window"
+        );
     }
 }
