@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { MessageKey } from "../../i18n";
+import { CODING_AGENT_LANE } from "../coding-agents/CodingAgentLane";
 
 export type TimelineLaneProps = {
   /** The selected day's range, RFC 3339 (local midnight to next local midnight). */
@@ -24,4 +25,4 @@ export type TimelineLane = {
 };
 
 /** Registered extra lanes, rendered in order. */
-export const EXTRA_TIMELINE_LANES: TimelineLane[] = [];
+export const EXTRA_TIMELINE_LANES: TimelineLane[] = [CODING_AGENT_LANE];

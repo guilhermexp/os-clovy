@@ -10,8 +10,8 @@ Models). Transcription always stays on Clovy API (CLIs do not transcribe).
 
 | Module | Role |
 |---|---|
-| `llm/mod.rs` | Public API: `generate`, `generate_for_activity`, `provider_for`, `test_provider`, `run_cli`, `parse_json_value`, `StructuredOutputLevel`, `LlmError`, `CLOVY_AUTHORSHIP_MARKER` |
-| `llm/cli.rs` | Catalog of the six CLIs (`claude`, `codex`, `pi`, `agy`, `cursor-agent`, `copilot`), one-shot argv/stdin/env per CLI, output parsing, schema strictifier |
+| `llm/mod.rs` | Public API: `generate`, `generate_for_activity`, `generate_on_cli_for_activity`, `provider_for`, `test_provider`, `run_cli`, `parse_json_value`, `StructuredOutputLevel`, `LlmError`, `CLOVY_AUTHORSHIP_MARKER` |
+| `llm/cli.rs` | Catalog of the six CLIs (`claude`, `codex`, `pi`, `agy`, `cursor-agent`, `copilot`), which of them can run with every tool off, one-shot argv/stdin/env for those, output parsing, schema strictifier |
 | `llm/shell_env.rs` | Login-shell environment (`$SHELL -l -c 'env -0'`, captured once, merged over the app environment, plus fallback bin dirs) |
 | `llm/detect.rs` | Installed / path / `--version` per CLI |
 | `llm/process.rs` | Child runner: own process group, timeout kills the whole group, group swept after exit, 8 MiB output cap |
@@ -50,6 +50,12 @@ llm::generate_for_activity(request).await?;
   returns `LlmError::StructuredOutputInsufficient`;
 - calls are serialized by a process-wide semaphore (one at a time).
 
+`generate_on_cli_for_activity(kind, request)` is the one exception: a
+background call on a named CLI regardless of the activity selection, used to
+summarize a coding-agent block with that agent's own CLI
+([coding-agent-sessions.md](coding-agent-sessions.md)). It takes the same
+semaphore and follows the CLI isolation contract below.
+
 `llm::provider_for(LlmUsage::X)` returns the selection for chat, notes,
 dictation cleanup, or activity.
 
@@ -64,37 +70,57 @@ rungs ask the prompt for a different object (`"color": "blue"`), so an
 endpoint that ignores `response_format` follows the prompt, fails validation,
 and is not credited with schema support. CLIs have a catalog level (codex
 `strict` via `--output-schema`; claude and agy `json_schema` via
-`--json-schema`; pi, cursor-agent, copilot `prompt`) that the test confirms
-with the same discriminating probe (`none` when the answer does not validate).
+`--json-schema`; pi, cursor-agent, copilot `prompt`); for the CLIs Clovy may
+call (below) the test confirms it with the same discriminating probe (`none`
+when the answer does not validate).
 A level is stored only if the endpoint still has the URL and model that were
 tested. Features that need JSON must refuse levels below `json_schema`.
 
 ## CLI isolation contract
 
-Every one-shot CLI call:
+A one-shot prompt carries untrusted text (meeting transcripts, notes,
+dictation, coding-agent transcripts). Text in a prompt must never be able to
+make the CLI read files, run commands, or reach the network, so **a one-shot
+call only runs on a CLI that can be started with every tool off**
+(`CliKind::tools_disabled`):
+
+| CLI | One-shot calls | Why |
+|---|---|---|
+| claude | Yes | `--tools ""` turns off every built-in tool; `--strict-mcp-config` without `--mcp-config` and `--setting-sources ""` load no MCP server, plugin, or hook |
+| pi | Yes | `--no-tools` (built-in and extension tools) and `--no-extensions` |
+| codex | Refused | `exec` always offers shell, patch, MCP, and app tools (new versions keep adding more); `-s read-only` still lets it run commands and read files |
+| agy | Refused | no flag turns its tools off |
+| cursor-agent | Refused | print mode "has access to all tools"; `--mode ask` still reads |
+| copilot | Refused | MCP servers from the user's configuration and plugins cannot all be excluded |
+
+A refused CLI fails with `LlmError::CliToolsNotDisabled` (`llm_cli_tools_not_disabled`)
+before anything is spawned, in `generate`, `generate_for_activity`,
+`generate_on_cli_for_activity`, and the connection test. `llm_set_usage`
+refuses it for notes, dictation cleanup, and activity (chat goes through the
+future CLI chat engine and keeps every CLI), and the Models tab disables it in
+those menus and hides its test button. A selection saved before this rule
+fails at use time with the same error; nothing is rerouted silently.
+
+Every allowed one-shot call also:
 
 - resolves the executable on the login-shell PATH (a GUI app does not inherit
   the shell PATH) and runs with the login-shell environment, so `HOME`,
   `PI_CODING_AGENT_DIR`, and other profile variables reach the CLI unchanged;
   Clovy never logs in or edits CLI configuration;
-- starts with `CLOVY_AUTHORSHIP_MARKER` (`[clovy-internal-ai-call]`) on the
-  first prompt line and sets `CLOVY_ONESHOT=1`; session ingestion must skip any
-  CLI session whose first user prompt contains the marker;
-- runs in an empty scratch directory with sessions, tools, context files,
-  skills, and slash commands disabled where the CLI allows it (claude
-  `--no-session-persistence --tools "" --setting-sources "" --strict-mcp-config
-  --disable-slash-commands`; codex `exec -s read-only --ephemeral`; pi
-  `--no-session --no-tools --no-context-files --no-skills --no-prompt-templates
-  --no-approve`; cursor-agent `--mode ask` in the scratch workspace; copilot
-  `--no-custom-instructions --no-ask-user --disable-builtin-mcps`, every
-  built-in tool in `--excluded-tools`, and `--deny-tool=shell,write,read,url,memory`,
-  which wins over permissions the user saved for interactive use);
-- strips `ANTHROPIC_API_KEY` for claude and `CURSOR_API_KEY` for cursor-agent so
-  a stray key never switches the user to metered billing;
+- starts with `CLOVY_AUTHORSHIP_MARKER` (`[clovy-internal-ai-call]`) alone on
+  the first prompt line and sets `CLOVY_ONESHOT=1`; session ingestion skips
+  any CLI session whose first prompt's first line is exactly the marker;
+- runs in an empty scratch directory with sessions, context files, skills,
+  and slash commands off (claude `--no-session-persistence --tools ""
+  --setting-sources "" --strict-mcp-config --disable-slash-commands`; pi
+  `--no-session --no-tools --no-extensions --no-context-files --no-skills
+  --no-prompt-templates --no-approve`);
+- strips `ANTHROPIC_API_KEY` for claude so a stray key never switches the user
+  to metered billing;
 - is killed with its whole process group on timeout (`LlmError::TimedOut`), and
   the group is swept right after the CLI exits, before output is collected, so
-  a lingering helper cannot hold stdout open; stdout, stderr, and codex's answer
-  file are each capped at 8 MiB.
+  a lingering helper cannot hold stdout open; stdout and stderr are each
+  capped at 8 MiB.
 
 ## Settings and routing
 
@@ -132,10 +158,10 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
 | Command | Args | Returns |
 |---|---|---|
 | `llm_providers` | none | `{ endpoints, usage, cliLevels }` |
-| `llm_detect_clis` | none | six `{ id, name, installed, path?, version?, reason?, structuredOutput }` |
+| `llm_detect_clis` | none | six `{ id, name, installed, path?, version?, reason?, structuredOutput, toolsDisabled }` |
 | `llm_save_endpoint` | `request: { id?, name, baseUrl, modelId, apiKey?, clearApiKey? }` | registry DTO |
 | `llm_delete_endpoint` | `id` | registry DTO (usages pointing at it reset) |
-| `llm_set_usage` | `usage`, `provider` | registry DTO, or `llm_structured_output_insufficient`, `llm_provider_not_allowed`, `llm_cli_not_installed`, `llm_endpoint_not_found` |
+| `llm_set_usage` | `usage`, `provider` | registry DTO, or `llm_structured_output_insufficient`, `llm_provider_not_allowed`, `llm_cli_not_installed`, `llm_cli_tools_not_disabled`, `llm_endpoint_not_found` |
 | `llm_test_provider` | `provider` | `{ latencyMs, structuredOutput }` (level persisted) |
 
 `probe_local_generation_endpoint` lists an endpoint's `/models` for the

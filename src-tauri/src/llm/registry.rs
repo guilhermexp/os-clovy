@@ -409,6 +409,11 @@ pub fn set_usage(
         ProviderRef::Cli { id } if !installed(*id) => {
             return Err(LlmError::CliNotInstalled(*id).into());
         }
+        // One-shot uses send content (transcripts, notes) to the CLI; chat
+        // goes through the CLI chat engine, which has its own contract.
+        ProviderRef::Cli { id } if usage != LlmUsage::Chat && !id.tools_disabled() => {
+            return Err(LlmError::CliToolsNotDisabled(*id).into());
+        }
         _ => {}
     }
     if usage == LlmUsage::Activity && provider != ProviderRef::None {
@@ -914,6 +919,27 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "llm_cli_not_installed");
         assert_eq!(settings.llm_usage.notes, ProviderRef::Clovy);
+    }
+
+    #[test]
+    fn llm_cli_that_keeps_tools_cannot_take_content_uses() {
+        let mut settings = crate::providers::default_settings_for_tests();
+        for usage in [
+            LlmUsage::Notes,
+            LlmUsage::DictationCleanup,
+            LlmUsage::Activity,
+        ] {
+            let error = set_usage(
+                &mut settings,
+                usage,
+                ProviderRef::Cli { id: CliKind::Codex },
+                |_| true,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "llm_cli_tools_not_disabled", "{usage:?}");
+        }
+        assert_eq!(settings.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(settings.llm_usage.activity, ProviderRef::None);
     }
 
     #[test]

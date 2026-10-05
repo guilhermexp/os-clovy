@@ -873,6 +873,22 @@ The first-level sidebar view showing one day's activity timeline (sessions,
 gaps, stats, search). "Today" is its name even when another day is selected.
 _Avoid_: dashboard, journal.
 
+**Coding agent**:
+A third-party AI coding tool the user runs on the Mac (Claude Code, Codex,
+Copilot CLI, Copilot in VS Code, Cursor, Cursor CLI, Antigravity) whose local
+transcripts Clovy reads, read-only, when its source is on (see
+[docs/coding-agent-sessions.md](docs/coding-agent-sessions.md)).
+_Avoid_: agent unqualified (that is Clovy's own agent), assistant.
+
+**Coding-agent block**:
+A slice of one coding-agent session stored in the **activity database**. It
+always starts at a user prompt: a prompt opens a new block after more than
+1 hour of silence or once the open block is 1 hour long; replies and tool
+output join the open block. It moves `live` → `sealed` → `summarized`; sealed blocks never
+change.
+_Avoid_: session (one session can span many blocks), segment (the
+implementation term), chunk.
+
 ## Flagged ambiguities
 
 - **"proxy"** usually means **Clovy API** (the thing in front of OpenAI /
