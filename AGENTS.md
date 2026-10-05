@@ -82,6 +82,7 @@ os-clovy/
 │   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/day_intelligence/ # distillation + local embeddings, hourly reports, workstreams, day summary/standup, schedule, notifications (docs/day-intelligence.md; tests: `cargo test day_intelligence`)
+│   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated local socket, read-only tools/resources (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
 │   ├── src/commands.rs      # the Tauri command surface
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper
 ├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)

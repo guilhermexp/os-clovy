@@ -47,9 +47,9 @@
 
 ## 6. S6 — Servidor MCP do Clovy
 
-- [ ] 6.1 Canal local autenticado no app (socket Unix 0600 + segredo) e binário stdio `clovy-mcp` empacotado; verificado por integração com conexão sem segredo recusada.
-- [ ] 6.2 Ferramentas `search_notes`, `get_note`, `list_dictations`, `list_memories` e de atividade (exceto `get_day_summary`, que depende do S4 e entra em 7.5), recursos `clovy://context` e `clovy://guide`; verificado por chamadas MCP reais contra banco de teste.
-- [ ] 6.3 Seção na aba Agente (ligar, copiar configuração para Claude Code e Cursor); verificado por teste do gerador e captura no app de desenvolvimento.
+- [x] 6.1 Canal local autenticado no app (socket Unix 0600 + segredo) e binário stdio `clovy-mcp` empacotado; verificado por integração com conexão sem segredo recusada.
+- [x] 6.2 Ferramentas `search_notes`, `get_note`, `list_dictations`, `list_memories` e de atividade (exceto `get_day_summary`, que depende do S4 e entra em 7.5), recursos `clovy://context` e `clovy://guide`; verificado por chamadas MCP reais contra banco de teste.
+- [x] 6.3 Seção na aba Agente (ligar, copiar configuração para Claude Code e Cursor); verificado por teste do gerador e captura no app de desenvolvimento.
 
 ## 7. S1b — CLIs e endpoints como motor do chat
 
