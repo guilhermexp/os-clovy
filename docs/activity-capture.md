@@ -175,7 +175,10 @@ older than the period.
 `enabled` (false), `secondaryMonitors` (false), `inputEvents` (true),
 `pauseOnProtectedVideo` (true), `ignoredApps`, `ignoredDomains` (bare hosts,
 normalized on save), `workHours` `{enabled: false, days: [1..5] (ISO), start:
-"09:00", end: "18:00"}`, `retentionDays` (30). Malformed files load defaults.
+"09:00", end: "18:00"}`, `retentionDays` (30), `mcpServer` (false; the Clovy
+MCP server switch, changed only by `mcp_server_set_enabled` from Settings,
+Agent; `activity_save_settings` keeps the stored value, see
+[mcp-server.md](mcp-server.md)). Malformed files load defaults.
 Manual pause is in memory only: a restart resumes capture.
 
 ## Commands and event (frontend contract)

@@ -67,6 +67,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md) - supersedes ADR-0054: Clovy becomes canonical through idempotent migration and rollback-safe aliases while immutable OS identities preserve existing installs
 - [adr/0056](adr/0056-interface-language-uses-an-in-repo-typed-catalog.md) - interface language (English, Português (Brasil)) uses an in-repo typed catalog, a localStorage preference independent of the transcription language, and a Tauri event mirrored into the native menus
 - [adr/0057](adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md) - the activity database is a separate SQLCipher file with a Keychain key; SQLCipher is linked app-wide on macOS and the unkeyed main database is unaffected
+- [adr/0058](adr/0058-clovy-mcp-server-relays-to-the-running-app.md) - the Clovy MCP server is a stdio relay (`clovy-mcp`) to the running app over a same-user Unix socket with an installation secret; the binary never opens the databases
 
 ## Enforceable rules (spec/)
 
@@ -135,6 +136,7 @@ Per-repo config the engineering skills read before acting (see the
   - [Canva](plugins/canva-prd.md) - [implementation plan](plugins/canva-implementation-plan.md)
 - [activity-capture.md](activity-capture.md) - activity capture: capture loop and privacy rules, the encrypted `activity.sqlite3` schema, processing cursor, retention, and the store API later slices use
 - [activity-timeline.md](activity-timeline.md) - activity timeline: incremental ETL from frames to sessions and gaps, categorizer, day stats, FTS5 search, the "Today" view and its lane extension point, the `search_activity` / `get_activity_timeline` agent tools, and the query API for later slices
+- [mcp-server.md](mcp-server.md) - Clovy MCP server: the `clovy-mcp` relay, socket and secret handshake, MCP tools and `clovy://` resources with their limits, client configuration snippets, and the launch API for CLI chat engines
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [llm-providers.md](llm-providers.md) - own providers: agent CLIs and named OpenAI-compatible endpoints, per-use selection, one-shot generation API, structured-output levels, CLI isolation contract
