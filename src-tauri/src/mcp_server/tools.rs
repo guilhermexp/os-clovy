@@ -1,8 +1,9 @@
-//! The Clovy MCP server's tools: read-only views of the active profile's
-//! notes, dictations, and memories, and (only while capture is on) of the
-//! activity timeline. Names are fixed in the `clovy-mcp-server` spec of the
-//! OpenSpec change `add-activity-intelligence`; `docs/mcp-server.md` lists
-//! them with their arguments and limits.
+//! The Clovy MCP server's tools: read-only views of the current data
+//! partition's notes, dictations, and memories, and (only while capture is
+//! on) of the installation's activity timeline and coding-agent blocks
+//! (activity has no partition, ADR-0059). Names are fixed in the
+//! `clovy-mcp-server` spec of the OpenSpec change `add-activity-intelligence`;
+//! `docs/mcp-server.md` lists them with their arguments and limits.
 
 use chrono::{DateTime, Duration, Local, Utc};
 use serde_json::{json, Value};
@@ -31,16 +32,17 @@ pub const GET_ACTIVITY_STATS: &str = "get_activity_stats";
 pub const GET_ACTIVE_SESSION: &str = "get_active_session";
 pub const LIST_APP_USAGE: &str = "list_app_usage";
 pub const GET_SESSION_DETAIL: &str = "get_session_detail";
+pub const LIST_CODING_AGENT_SESSIONS: &str = "list_coding_agent_sessions";
 
-/// Activity tools, in catalog order. `list_coding_agent_sessions` joins this
-/// list once the coding-agent slice is on `main`.
-pub const ACTIVITY_TOOLS: [&str; 6] = [
+/// Activity tools, in catalog order.
+pub const ACTIVITY_TOOLS: [&str; 7] = [
     agent_tools::GET_ACTIVITY_TIMELINE,
     agent_tools::SEARCH_ACTIVITY,
     GET_ACTIVITY_STATS,
     GET_ACTIVE_SESSION,
     LIST_APP_USAGE,
     GET_SESSION_DETAIL,
+    LIST_CODING_AGENT_SESSIONS,
 ];
 const DATA_TOOLS: [&str; 4] = [SEARCH_NOTES, GET_NOTE, LIST_DICTATIONS, LIST_MEMORIES];
 
@@ -51,6 +53,8 @@ const DICTATION_MAX_CHARS: usize = 4_000;
 const MEMORY_MAX_CHARS: usize = 4_000;
 const DEFAULT_APP_USAGE: u64 = 20;
 const MAX_APP_USAGE: u64 = 100;
+const DEFAULT_CODING_AGENT_BLOCKS: u64 = 20;
+const MAX_CODING_AGENT_BLOCKS: u64 = 50;
 /// How far back `get_active_session` looks for the session going on now.
 const ACTIVE_LOOKBACK_HOURS: i64 = 12;
 
@@ -59,7 +63,8 @@ const ACTIVE_LOOKBACK_HOURS: i64 = 12;
 pub struct McpData {
     /// The main database (`notes.sqlite3`).
     pub notes: SqlitePool,
-    /// Every query is limited to this profile.
+    /// The current data partition: notes, dictations, and memories queries
+    /// are limited to it (activity is not partitioned).
     pub profile: String,
     /// Settings, Memory: `list_memories` refuses while memory is off.
     pub memory_enabled: bool,
@@ -214,6 +219,19 @@ pub fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
                 "type": "object",
                 "properties": { "id": { "type": "integer" } },
                 "required": ["id"],
+                "additionalProperties": false
+            }),
+        ),
+        read_only(
+            LIST_CODING_AGENT_SESSIONS,
+            "Work the user did with coding agents (Claude Code, Codex, Copilot, Cursor, Antigravity) in a period, newest first. Each entry is one block of a session (a session splits into blocks after an hour of silence or every hour of work): agent, project, title, times, prompt and reply counts, active minutes, and Clovy's short summary when it has one (else the first prompt). Only agents the user reads in Clovy Settings, Activity. Omit both bounds for today so far.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "Start, RFC 3339 with offset (default: local midnight today)." },
+                    "to": { "type": "string", "description": "End, RFC 3339 with offset (default: now)." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_CODING_AGENT_BLOCKS, "default": DEFAULT_CODING_AGENT_BLOCKS }
+                },
                 "additionalProperties": false
             }),
         ),
@@ -398,7 +416,7 @@ async fn get_note(data: &McpData, arguments: &Value) -> Result<Value, AppError> 
     .ok_or_else(|| {
         AppError::new(
             "note_not_found",
-            "No note with this id in the active profile.",
+            "No note with this id in the data set open in Clovy.",
         )
     })?;
     let (content, content_truncated) = clip(&row.get::<String, _>("note"), NOTE_CONTENT_MAX_CHARS);
@@ -544,6 +562,7 @@ async fn activity_tool(
         GET_ACTIVE_SESSION => active_session(store, settings, now).await,
         LIST_APP_USAGE => app_usage(store, settings, arguments, now).await,
         GET_SESSION_DETAIL => session_detail(store, settings, arguments, now).await,
+        LIST_CODING_AGENT_SESSIONS => coding_agent_sessions(store, settings, arguments, now).await,
         _ => Err(AppError::new(
             "mcp_tool_unknown",
             format!("Unknown activity tool `{name}`."),
@@ -706,5 +725,53 @@ async fn session_detail(
         "session": session_json(session),
         "windows": windows,
         "textExcerpt": text_excerpt,
+    }))
+}
+
+/// Coding-agent blocks overlapping the period, newest first, from the
+/// sources still turned on and within the retention period.
+async fn coding_agent_sessions(
+    store: &ActivityStore,
+    settings: &ActivitySettings,
+    arguments: &Value,
+    now: DateTime<Utc>,
+) -> Result<Value, AppError> {
+    let (from, to) = range(arguments, now)?;
+    let limit = bounded(
+        arguments,
+        "limit",
+        DEFAULT_CODING_AGENT_BLOCKS,
+        1,
+        MAX_CODING_AGENT_BLOCKS,
+    ) as usize;
+    let floor = retention_floor(settings, now);
+    let mut blocks = store
+        .coding_agent_blocks_between(from.max(floor), to)
+        .await
+        .map_err(|error| AppError::new("coding_agents_read_failed", error.to_string()))?;
+    blocks.retain(|block| settings.coding_agents.is_enabled(block.source));
+    blocks.reverse();
+    let total = blocks.len();
+    Ok(json!({
+        "from": local_at(from),
+        "to": local_at(to),
+        "blocks": blocks.iter().take(limit).map(|block| json!({
+            "id": block.id,
+            "agent": block.source.display_name(),
+            "source": block.source.as_str(),
+            "sessionId": block.session_id,
+            "project": block.project,
+            "title": block.title,
+            "startedAt": local(&block.started_at),
+            "endedAt": local(&block.ended_at),
+            "activeMinutes": minutes(block.active_seconds * 1000),
+            "prompts": block.prompt_count,
+            "replies": block.reply_count,
+            "state": block.state.as_str(),
+            "summary": block.summary,
+            "firstPrompt": if block.summary.is_none() { block.first_prompt.as_deref() } else { None },
+        })).collect::<Vec<_>>(),
+        "totalBlocks": total,
+        "truncated": total > limit,
     }))
 }

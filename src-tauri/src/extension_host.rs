@@ -125,6 +125,12 @@ fn bundle_data_dir(home: &std::path::Path) -> PathBuf {
     app_support_dir(home).join(APP_BUNDLE_IDENTIFIER)
 }
 
+/// The installed (release) app's data directory, from `HOME`; what debug
+/// helpers such as `clovy-mcp` must stay away from.
+pub(crate) fn production_app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| bundle_data_dir(std::path::Path::new(&home)))
+}
+
 fn descriptor_pointer_path(home: &std::path::Path) -> PathBuf {
     bundle_data_dir(home).join(DESCRIPTOR_POINTER_FILE_NAME)
 }

@@ -247,6 +247,7 @@ async fn activity_tools_are_listed_only_while_capture_is_on() {
             "get_active_session",
             "list_app_usage",
             "get_session_detail",
+            "list_coding_agent_sessions",
         ]
     );
 }
@@ -664,4 +665,399 @@ async fn the_relay_reports_a_server_that_is_off_or_never_enabled() {
         by_id(&off, 3)["error"]["message"],
         json!(stdio::OFF_MESSAGE)
     );
+}
+
+/// `channel::connect`, retried while the app frees slots.
+async fn connect_eventually(dir: &Path) -> std::os::unix::net::UnixStream {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..60 {
+            if let Ok(stream) = channel::connect(&dir) {
+                return stream;
+            }
+            std::thread::sleep(StdDuration::from_millis(50));
+        }
+        panic!("no authenticated connection within 3 s");
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peers_that_never_authenticate_are_capped_and_closed_at_once() {
+    use tokio::io::AsyncReadExt;
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let listener = channel::Listener::start(
+        &dir,
+        handler_for(data(notes_pool().await, ActivityAccess::Off)),
+    )
+    .await
+    .unwrap();
+    let socket = channel::socket_path(&dir);
+    let mut idle = Vec::new();
+    for _ in 0..channel::MAX_PENDING_HANDSHAKES {
+        idle.push(tokio::net::UnixStream::connect(&socket).await.unwrap());
+    }
+    // Over the cap: closed right away, not held for the 5 s handshake.
+    let mut extra = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(StdDuration::from_secs(2), extra.read(&mut byte))
+        .await
+        .expect("the extra peer is closed before the handshake timeout");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+
+    // Once the silent peers go away, a real client gets in.
+    drop(idle);
+    drop(connect_eventually(&dir).await);
+    listener.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_connections_beyond_the_cap_are_turned_away_as_busy() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let listener = channel::Listener::start(
+        &dir,
+        handler_for(data(notes_pool().await, ActivityAccess::Off)),
+    )
+    .await
+    .unwrap();
+    let held_dir = dir.clone();
+    let held = tokio::task::spawn_blocking(move || {
+        (0..channel::MAX_CONNECTIONS)
+            .map(|_| channel::connect(&held_dir).expect("within the cap"))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap();
+    let extra_dir = dir.clone();
+    let extra = tokio::task::spawn_blocking(move || channel::connect(&extra_dir))
+        .await
+        .unwrap();
+    assert!(
+        matches!(extra, Err(channel::ClientError::Busy)),
+        "{extra:?}"
+    );
+    drop(held);
+    drop(connect_eventually(&dir).await);
+    listener.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_gets_only_a_few_requests_answered_at_once() {
+    use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let handler: channel::Handler = {
+        let (gate, started) = (Arc::clone(&gate), Arc::clone(&started));
+        Arc::new(move |message: Value| {
+            let (gate, started) = (Arc::clone(&gate), Arc::clone(&started));
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                gate.acquire().await.unwrap().forget();
+                Some(protocol::result_response(message["id"].clone(), json!({})))
+            })
+        })
+    };
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let listener = channel::Listener::start(&dir, handler).await.unwrap();
+    let stream = connect_eventually(&dir).await;
+    let requests = 40;
+    let mut writer = stream.try_clone().unwrap();
+    tokio::task::spawn_blocking(move || {
+        for id in 0..requests {
+            writeln!(
+                writer,
+                "{}",
+                json!({ "jsonrpc": "2.0", "id": id, "method": "ping" })
+            )
+            .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(StdDuration::from_millis(300)).await;
+    // The app stopped reading at the cap instead of spawning 40 handlers.
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        channel::MAX_IN_FLIGHT_PER_CONNECTION
+    );
+
+    gate.add_permits(requests);
+    let answered = tokio::task::spawn_blocking(move || {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(5)))
+            .unwrap();
+        let mut ids: Vec<i64> = std::io::BufReader::new(stream)
+            .lines()
+            .take(requests)
+            .map(|line| {
+                serde_json::from_str::<Value>(&line.unwrap()).unwrap()["id"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
+    })
+    .await
+    .unwrap();
+    assert_eq!(answered, (0..requests as i64).collect::<Vec<_>>());
+    listener.stop();
+}
+
+#[test]
+fn context_uses_the_local_calendar_across_daylight_saving_changes() {
+    use chrono_tz::America::{New_York, Santiago};
+    // New York springs forward on 2026-03-08 at 02:00: that day has 23 hours.
+    let after = New_York.with_ymd_and_hms(2026, 3, 9, 0, 30, 0).unwrap();
+    let context = protocol::context_json(after, Some("America/New_York".into()));
+    assert_eq!(context["date"], json!("2026-03-09"));
+    assert_eq!(context["yesterday"], json!("2026-03-08"));
+    assert_eq!(context["startOfToday"], json!("2026-03-09T00:00:00-04:00"));
+
+    let during = New_York.with_ymd_and_hms(2026, 3, 8, 12, 0, 0).unwrap();
+    let context = protocol::context_json(during, None);
+    assert_eq!(context["utcOffset"], json!("-04:00"));
+    assert_eq!(context["startOfToday"], json!("2026-03-08T00:00:00-05:00"));
+
+    // Santiago skips midnight on 2026-09-06: the day starts at 01:00.
+    let skipped = Santiago.with_ymd_and_hms(2026, 9, 6, 12, 0, 0).unwrap();
+    let context = protocol::context_json(skipped, None);
+    assert_eq!(context["startOfToday"], json!("2026-09-06T01:00:00-03:00"));
+}
+
+#[tokio::test]
+async fn malformed_json_rpc_objects_get_invalid_request_errors() {
+    let data = data(notes_pool().await, ActivityAccess::Off);
+    for (message, id) in [
+        (json!({ "jsonrpc": "2.0", "id": 1 }), json!(1)),
+        (json!({ "jsonrpc": "2.0", "id": 2, "method": 7 }), json!(2)),
+        (json!({ "id": 3, "method": "ping" }), json!(3)),
+        (
+            json!({ "jsonrpc": "2.0", "id": { "nested": 1 }, "method": "ping" }),
+            Value::Null,
+        ),
+        (
+            json!([{ "jsonrpc": "2.0", "id": 4, "method": "ping" }]),
+            Value::Null,
+        ),
+    ] {
+        let response = protocol::handle(&data, &message)
+            .await
+            .unwrap_or_else(|| panic!("no answer to {message}"));
+        assert_eq!(
+            response["error"]["code"],
+            json!(protocol::INVALID_REQUEST),
+            "{message}"
+        );
+        assert_eq!(response["id"], id, "{message}");
+    }
+    let notification = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    assert!(protocol::handle(&data, &notification).await.is_none());
+    let client_response = json!({ "jsonrpc": "2.0", "id": 5, "result": {} });
+    assert!(protocol::handle(&data, &client_response).await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_relay_skips_an_oversized_line_and_keeps_answering() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let oversized = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"pad\":\"{}\"}}",
+        "a".repeat(channel::MAX_LINE_BYTES)
+    );
+    let input = format!(
+        "{oversized}\n{}\n{}\n",
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
+        json!({ "jsonrpc": "2.0", "id": 3 }),
+    );
+    let output = Captured::default();
+    let (relay_dir, sink) = (dir.clone(), output.clone());
+    tokio::task::spawn_blocking(move || {
+        stdio::relay(&relay_dir, std::io::Cursor::new(input), Box::new(sink));
+    })
+    .await
+    .unwrap();
+    let messages = output.messages(3);
+    assert_eq!(messages[0]["id"], Value::Null);
+    assert_eq!(
+        messages[0]["error"]["code"],
+        json!(protocol::INVALID_REQUEST)
+    );
+    assert_eq!(
+        messages[0]["error"]["message"],
+        json!(stdio::TOO_LONG_MESSAGE)
+    );
+    assert_eq!(by_id(&messages, 2)["result"], json!({}));
+    assert_eq!(
+        by_id(&messages, 3)["error"]["code"],
+        json!(protocol::INVALID_REQUEST)
+    );
+}
+
+#[test]
+fn mcp_switch_and_activity_saves_never_undo_each_other() {
+    use crate::activity::engine::ActivityShared;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("activity-settings.json");
+    let shared = Arc::new(ActivityShared::new(ActivitySettings::default()));
+    let toggles = {
+        let (shared, path) = (Arc::clone(&shared), path.clone());
+        std::thread::spawn(move || {
+            for index in 0..200 {
+                shared
+                    .update_settings(&path, |settings| settings.mcp_server = index % 2 == 1)
+                    .unwrap();
+            }
+        })
+    };
+    let saves = {
+        let (shared, path) = (Arc::clone(&shared), path.clone());
+        std::thread::spawn(move || {
+            for index in 0..200u32 {
+                // What `activity_save_settings` does with a stale request.
+                shared
+                    .update_settings(&path, |current| {
+                        *current = ActivitySettings {
+                            mcp_server: current.mcp_server,
+                            retention_days: index % 30 + 1,
+                            ..ActivitySettings::default()
+                        };
+                    })
+                    .unwrap();
+            }
+        })
+    };
+    toggles.join().unwrap();
+    saves.join().unwrap();
+    let stored = crate::activity::settings::load(&path);
+    assert!(shared.settings().mcp_server && stored.mcp_server);
+    assert_eq!(shared.settings().retention_days, 20);
+    assert_eq!(stored.retention_days, 20);
+}
+
+#[tokio::test]
+async fn activity_belongs_to_the_installation_while_notes_follow_the_partition() {
+    let (_dir, store) = activity_store().await;
+    let pool = notes_pool().await;
+    let range = json!({ "from": "2026-10-01T08:00:00Z", "to": "2026-10-01T12:00:00Z" });
+    let open = || ActivityAccess::Open {
+        store: store.clone(),
+        settings: capture_on(),
+    };
+    let default = data(pool.clone(), open());
+    let mut work = data(pool, open());
+    work.profile = "work".into();
+    assert_eq!(
+        call(&default, "get_activity_timeline", range.clone()).await,
+        call(&work, "get_activity_timeline", range).await
+    );
+    let notes = call(&work, "search_notes", json!({ "query": "zephyr" }))
+        .await
+        .unwrap();
+    assert_eq!(notes["notes"][0]["title"], json!("Zephyr budget"));
+    assert_eq!(notes["count"], json!(1));
+}
+
+#[tokio::test]
+async fn coding_agent_sessions_list_enabled_sources_newest_first_within_retention() {
+    use crate::coding_agents::settings::CodingAgentSources;
+    use crate::coding_agents::store::NewBlock;
+    use crate::coding_agents::SourceId;
+    let (_dir, store) = activity_store().await;
+    let block = |source, session: &str, start: DateTime<Utc>, minutes_long: i64, sealed| NewBlock {
+        source,
+        session_id: session.into(),
+        started_at: start,
+        ended_at: start + Duration::minutes(minutes_long),
+        cwd: Some("/Users/me/os-clovy".into()),
+        project: Some("os-clovy".into()),
+        title: Some(format!("{session} title")),
+        first_prompt: Some(format!("{session} first prompt")),
+        prompt_count: 3,
+        reply_count: 4,
+        active_seconds: 600,
+        transcript: "SECRET TRANSCRIPT".into(),
+        sealed,
+    };
+    for new in [
+        block(SourceId::ClaudeCode, "claude-1", at(7, 0), 40, true),
+        block(SourceId::Codex, "codex-1", at(8, 30), 30, false),
+        block(SourceId::Cursor, "cursor-1", at(8, 0), 20, true),
+        block(
+            SourceId::ClaudeCode,
+            "claude-old",
+            at(7, 0) - Duration::days(40),
+            30,
+            true,
+        ),
+    ] {
+        store
+            .upsert_coding_agent_block(&new, at(9, 0))
+            .await
+            .unwrap();
+    }
+    let claude = store
+        .coding_agent_blocks_between(at(6, 0), at(8, 0))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|block| block.session_id == "claude-1")
+        .unwrap();
+    store
+        .record_coding_agent_summary(claude.id, "Fixed the relay.", "cli:claude", at(9, 0))
+        .await
+        .unwrap();
+    let settings = ActivitySettings {
+        coding_agents: CodingAgentSources {
+            claude_code: true,
+            codex: true,
+            ..CodingAgentSources::default()
+        },
+        ..capture_on()
+    };
+    let data = data(
+        notes_pool().await,
+        ActivityAccess::Open {
+            store: store.clone(),
+            settings,
+        },
+    );
+
+    let listed = call(
+        &data,
+        "list_coding_agent_sessions",
+        json!({ "from": "2026-08-01T00:00:00Z", "to": "2026-10-01T12:00:00Z" }),
+    )
+    .await
+    .unwrap();
+    let sessions: Vec<&str> = listed["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block["sessionId"].as_str().unwrap())
+        .collect();
+    // Cursor is turned off and the 40-day-old block is past retention.
+    assert_eq!(sessions, vec!["codex-1", "claude-1"], "{listed}");
+    assert_eq!(listed["blocks"][0]["agent"], json!("Codex"));
+    assert_eq!(listed["blocks"][0]["state"], json!("live"));
+    assert_eq!(
+        listed["blocks"][0]["firstPrompt"],
+        json!("codex-1 first prompt")
+    );
+    assert_eq!(listed["blocks"][1]["summary"], json!("Fixed the relay."));
+    assert_eq!(listed["blocks"][1]["firstPrompt"], Value::Null);
+    assert_eq!(listed["blocks"][1]["activeMinutes"], json!(10.0));
+    assert!(!listed.to_string().contains("SECRET TRANSCRIPT"));
+
+    let limited = call(&data, "list_coding_agent_sessions", json!({ "limit": 1 }))
+        .await
+        .unwrap();
+    assert_eq!(limited["blocks"].as_array().unwrap().len(), 1);
+    assert_eq!(limited["totalBlocks"], json!(2));
+    assert_eq!(limited["truncated"], json!(true));
 }

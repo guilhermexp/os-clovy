@@ -9,8 +9,9 @@
 //! Usage: `clovy-mcp --dir "<app data dir>/mcp"` (the configuration snippets
 //! in Settings, Agent carry the right directory).
 
+use std::io::BufRead;
 #[cfg(not(unix))]
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -20,8 +21,11 @@ use super::protocol;
 pub const OFF_MESSAGE: &str = "The Clovy MCP server is off or Clovy is not open. Open Clovy and turn on the MCP server in Settings, Agent.";
 pub const NEVER_ENABLED_MESSAGE: &str = "The Clovy MCP server has not been turned on yet. Open Clovy and turn it on in Settings, Agent.";
 pub const REFUSED_MESSAGE: &str = "Clovy refused the connection because the installation secret did not match. Copy the configuration again from Clovy Settings, Agent.";
+pub const BUSY_MESSAGE: &str = "Clovy is already serving as many MCP connections as it allows. Close another MCP client, then try again.";
 pub const DROPPED_MESSAGE: &str =
     "Clovy closed the connection before answering (the MCP server was turned off or Clovy quit).";
+pub const PRODUCTION_DATA_MESSAGE: &str = "This development build of clovy-mcp does not connect to the installed Clovy's data. Copy the configuration from the development app, or set OS_CLOVY_USE_PROD_DATA_DIR=1 to allow it.";
+pub const TOO_LONG_MESSAGE: &str = "The message is longer than 4 MiB.";
 
 /// The `--dir` argument.
 pub fn parse_dir(args: &[String]) -> Result<PathBuf, String> {
@@ -42,7 +46,17 @@ pub fn parse_dir(args: &[String]) -> Result<PathBuf, String> {
 
 /// The local answer to `message` while the app is unreachable for `reason`.
 pub fn fallback(message: &Value, reason: &str) -> Option<Value> {
-    let id = protocol::request_id(message)?;
+    let id = match protocol::classify(message) {
+        protocol::Incoming::Request { id, .. } => id,
+        protocol::Incoming::Invalid { id, reason } => {
+            return Some(protocol::error_response(
+                id,
+                protocol::INVALID_REQUEST,
+                reason,
+            ))
+        }
+        protocol::Incoming::Notification | protocol::Incoming::Response => return None,
+    };
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     Some(match protocol::method(message).unwrap_or_default() {
         "initialize" => protocol::result_response(
@@ -53,6 +67,72 @@ pub fn fallback(message: &Value, reason: &str) -> Option<Value> {
         "tools/call" => protocol::result_response(id, protocol::tool_error(reason)),
         _ => protocol::error_response(id, protocol::SERVER_UNAVAILABLE, reason),
     })
+}
+
+/// Debug builds keep away from the installed app's data, like the debug app
+/// itself (`crate::app_paths`): a channel directory under the production
+/// data directory is refused unless `OS_CLOVY_USE_PROD_DATA_DIR` is set.
+pub fn production_data_refusal(dir: &std::path::Path) -> Option<&'static str> {
+    if !cfg!(debug_assertions) || crate::app_paths::use_prod_data_dir() {
+        return None;
+    }
+    let production = crate::extension_host::production_app_data_dir()?;
+    let resolve =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolve(dir)
+        .starts_with(resolve(&production))
+        .then_some(PRODUCTION_DATA_MESSAGE)
+}
+
+/// One input line.
+pub enum InputLine {
+    Line(Vec<u8>),
+    /// Longer than the limit: skipped to its end without being kept.
+    TooLong,
+}
+
+/// Reads one line of at most `max` bytes (newline excluded). A longer line
+/// is consumed to its newline while keeping nothing, so a client cannot make
+/// the relay buffer an unbounded line.
+pub fn read_bounded_line(
+    input: &mut impl BufRead,
+    max: usize,
+) -> std::io::Result<Option<InputLine>> {
+    let mut line = Vec::new();
+    let mut too_long = false;
+    let mut read_any = false;
+    loop {
+        let available = match input.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            break;
+        }
+        read_any = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let content = newline.unwrap_or(available.len());
+        if !too_long {
+            if line.len() + content > max {
+                too_long = true;
+                line = Vec::new();
+            } else {
+                line.extend_from_slice(&available[..content]);
+            }
+        }
+        input.consume(newline.map_or(content, |index| index + 1));
+        if newline.is_some() {
+            break;
+        }
+    }
+    Ok(read_any.then(|| {
+        if too_long {
+            InputLine::TooLong
+        } else {
+            InputLine::Line(line)
+        }
+    }))
 }
 
 /// Entry point for the `clovy-mcp` binary.
@@ -190,34 +270,69 @@ mod unix {
             ClientError::NeverEnabled => NEVER_ENABLED_MESSAGE.to_string(),
             ClientError::NotListening => OFF_MESSAGE.to_string(),
             ClientError::Refused => REFUSED_MESSAGE.to_string(),
+            ClientError::Busy => BUSY_MESSAGE.to_string(),
             ClientError::Other(error) => format!("Could not reach Clovy: {error}"),
         }
     }
 
     /// Relays `input` lines until end of input.
-    pub fn relay(dir: &Path, input: impl BufRead, output: Box<dyn Write + Send>) {
+    pub fn relay(dir: &Path, mut input: impl BufRead, output: Box<dyn Write + Send>) {
         let output: Output = Arc::new(Mutex::new(output));
+        let refused = production_data_refusal(dir);
         let mut connection: Option<Connection> = None;
-        for line in input.lines() {
-            let Ok(line) = line else { break };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let message = match serde_json::from_str::<Value>(line) {
-                Ok(message) => message,
-                Err(error) => {
+        loop {
+            let bytes = match read_bounded_line(&mut input, channel::MAX_LINE_BYTES) {
+                Ok(Some(InputLine::Line(bytes))) => bytes,
+                Ok(Some(InputLine::TooLong)) => {
                     emit(
                         &output,
                         &protocol::error_response(
                             Value::Null,
-                            protocol::PARSE_ERROR,
-                            error.to_string(),
+                            protocol::INVALID_REQUEST,
+                            TOO_LONG_MESSAGE,
                         ),
                     );
                     continue;
                 }
+                Ok(None) | Err(_) => break,
             };
+            let parsed = String::from_utf8(bytes)
+                .map_err(|error| error.to_string())
+                .and_then(|text| {
+                    let line = text.trim().to_string();
+                    if line.is_empty() {
+                        return Ok(None);
+                    }
+                    serde_json::from_str::<Value>(&line)
+                        .map(|message| Some((line, message)))
+                        .map_err(|error| error.to_string())
+                });
+            let (line, message) = match parsed {
+                Ok(Some(parsed)) => parsed,
+                Ok(None) => continue,
+                Err(error) => {
+                    emit(
+                        &output,
+                        &protocol::error_response(Value::Null, protocol::PARSE_ERROR, error),
+                    );
+                    continue;
+                }
+            };
+            // Invalid requests are answered here; they never reach the app.
+            if let protocol::Incoming::Invalid { id, reason } = protocol::classify(&message) {
+                emit(
+                    &output,
+                    &protocol::error_response(id, protocol::INVALID_REQUEST, reason),
+                );
+                continue;
+            }
+            if let Some(reason) = refused {
+                if let Some(response) = fallback(&message, reason) {
+                    emit(&output, &response);
+                }
+                continue;
+            }
+            let line = line.as_str();
             if connection
                 .as_ref()
                 .is_some_and(|connection| !connection.alive.load(Ordering::SeqCst))

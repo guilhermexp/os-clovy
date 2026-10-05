@@ -163,16 +163,22 @@ pub fn activity_save_settings(
     request: SaveActivitySettingsRequest,
 ) -> Result<ActivityStatusDto, AppError> {
     let runtime = runtime(&state)?;
-    let mut settings = request.settings.normalized();
+    let requested = request.settings.normalized();
     // The MCP server switch lives in Settings, Agent; a stale copy from the
-    // Activity tab must not flip it.
-    settings.mcp_server = runtime.shared.settings().mcp_server;
-    settings::save(&runtime.settings_path, &settings)
+    // Activity tab must not flip it. The update reads the latest value under
+    // the same lock `set_mcp_server_enabled` takes.
+    let settings = runtime
+        .shared
+        .update_settings(&runtime.settings_path, |current| {
+            *current = ActivitySettings {
+                mcp_server: current.mcp_server,
+                ..requested
+            };
+        })
         .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?;
     if !settings.enabled {
         runtime.shared.set_manual_pause(false);
     }
-    runtime.shared.set_settings(settings);
     crate::coding_agents::wake(&app);
     publish(&app);
     Ok(status_of(Some(runtime)))
@@ -197,11 +203,12 @@ pub(crate) fn mcp_server_enabled(app: &AppHandle) -> bool {
 pub(crate) fn set_mcp_server_enabled(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     let state = app.state::<ActivityState>();
     let runtime = runtime(&state)?;
-    let mut settings = runtime.shared.settings();
-    settings.mcp_server = enabled;
-    settings::save(&runtime.settings_path, &settings)
+    runtime
+        .shared
+        .update_settings(&runtime.settings_path, |settings| {
+            settings.mcp_server = enabled;
+        })
         .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?;
-    runtime.shared.set_settings(settings);
     publish(app);
     Ok(())
 }

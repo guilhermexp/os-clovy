@@ -6,9 +6,16 @@
 //!
 //! Wire format: newline-delimited JSON. The client's first line is the
 //! handshake `{"clovyMcp": 1, "secret": "<hex>"}`; the app answers
-//! `{"clovyMcp": 1, "ok": true}` or `{"clovyMcp": 1, "ok": false, "error":
-//! "unauthorized"}` and closes. After `ok`, each line is one MCP JSON-RPC
-//! message in either direction; responses may arrive out of order.
+//! `{"clovyMcp": 1, "ok": true}`, or `{"clovyMcp": 1, "ok": false, "error":
+//! "unauthorized"}` (or `"busy"` when every connection slot is taken) and
+//! closes. After `ok`, each line is one MCP JSON-RPC message in either
+//! direction; responses may arrive out of order.
+//!
+//! Limits (every process of the same user can reach the socket): at most
+//! `MAX_PENDING_HANDSHAKES` connections waiting for their handshake (more are
+//! closed as soon as they are accepted), `MAX_CONNECTIONS` authenticated
+//! connections, and `MAX_IN_FLIGHT_PER_CONNECTION` requests being answered
+//! per connection (the app stops reading that connection until one finishes).
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +27,12 @@ pub const SECRET_FILE: &str = "secret";
 pub const HANDSHAKE_VERSION: u64 = 1;
 /// Longest accepted line, in bytes (a JSON-RPC message).
 pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+/// Accepted connections still in the handshake at once.
+pub const MAX_PENDING_HANDSHAKES: usize = 4;
+/// Authenticated connections at once (each MCP client holds one).
+pub const MAX_CONNECTIONS: usize = 8;
+/// Requests of one connection being answered at once.
+pub const MAX_IN_FLIGHT_PER_CONNECTION: usize = 4;
 const SECRET_BYTES: usize = 32;
 
 /// `<app data dir>/mcp`, the directory the configuration snippets name.
@@ -85,11 +98,12 @@ mod unix {
     use serde_json::{json, Value};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
     use tokio::net::{UnixListener, UnixStream};
-    use tokio::sync::{mpsc, watch};
+    use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 
     use super::*;
 
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+    const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
     /// Answers one MCP message (`None` for notifications).
     pub type Handler =
@@ -153,13 +167,31 @@ mod unix {
             std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
             let (shutdown, mut stopped) = watch::channel(false);
             let connections = shutdown.subscribe();
+            let handshakes = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
+            let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         accepted = listener.accept() => {
-                            let Ok((stream, _)) = accepted else { continue };
+                            let stream = match accepted {
+                                Ok((stream, _)) => stream,
+                                Err(error) => {
+                                    // Out of descriptors (EMFILE) and the like
+                                    // persist: do not spin on them.
+                                    tracing::warn!(%error, "mcp server: accept failed");
+                                    tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                                    continue;
+                                }
+                            };
+                            // Too many peers that have not authenticated yet:
+                            // close this one now instead of holding it open.
+                            let Ok(handshake) = Arc::clone(&handshakes).try_acquire_owned() else {
+                                continue;
+                            };
                             tokio::spawn(serve(
                                 stream,
+                                handshake,
+                                Arc::clone(&slots),
                                 Arc::clone(&secret),
                                 Arc::clone(&handler),
                                 connections.clone(),
@@ -213,6 +245,8 @@ mod unix {
 
     async fn serve(
         stream: UnixStream,
+        handshake: OwnedSemaphorePermit,
+        slots: Arc<Semaphore>,
         secret: Arc<str>,
         handler: Handler,
         mut shutdown: watch::Receiver<bool>,
@@ -233,22 +267,27 @@ mod unix {
                         .and_then(Value::as_str)
                         .is_some_and(|offered| secrets_match(&secret, offered))
             });
-        let reply = if accepted {
-            json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": true })
-        } else {
-            json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": false, "error": "unauthorized" })
+        // Held until this connection ends.
+        let slot = accepted.then(|| slots.try_acquire_owned().ok()).flatten();
+        drop(handshake);
+        let reply = match (accepted, &slot) {
+            (true, Some(_)) => json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": true }),
+            (true, None) => json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": false, "error": "busy" }),
+            (false, _) => {
+                json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": false, "error": "unauthorized" })
+            }
         };
         if write
             .write_all(format!("{reply}\n").as_bytes())
             .await
             .is_err()
-            || !accepted
+            || slot.is_none()
         {
             let _ = write.shutdown().await;
             return;
         }
 
-        let (responses, mut outbox) = mpsc::channel::<Value>(64);
+        let (responses, mut outbox) = mpsc::channel::<Value>(MAX_IN_FLIGHT_PER_CONNECTION);
         let writer = tokio::spawn(async move {
             while let Some(response) = outbox.recv().await {
                 if write
@@ -261,7 +300,17 @@ mod unix {
             }
             let _ = write.shutdown().await;
         });
+        let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT_PER_CONNECTION));
         loop {
+            // Backpressure: the next line is read only once a request slot
+            // is free, so a fast client waits in its own socket buffer.
+            let permit = tokio::select! {
+                permit = Arc::clone(&in_flight).acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                },
+                _ = shutdown.changed() => break,
+            };
             tokio::select! {
                 line = read_line(&mut reader) => {
                     let Ok(Some(line)) = line else { break };
@@ -279,9 +328,11 @@ mod unix {
                                 error.to_string(),
                             )),
                         };
+                        drop(line);
                         if let Some(response) = response {
                             let _ = responses.send(response).await;
                         }
+                        drop(permit);
                     });
                 }
                 _ = shutdown.changed() => break,
@@ -294,6 +345,7 @@ mod unix {
             drop(responses);
             let _ = writer.await;
         }
+        drop(slot);
     }
 
     /// Why the relay could not get an authenticated connection.
@@ -305,6 +357,8 @@ mod unix {
         NotListening,
         /// The app refused the secret.
         Refused,
+        /// Every connection slot is taken.
+        Busy,
         Other(std::io::Error),
     }
 
@@ -328,19 +382,29 @@ mod unix {
         stream
             .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(ClientError::Other)?;
+        // The app closes a peer it has no handshake slot for.
+        let closed = |error: std::io::Error| match error.kind() {
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset => {
+                ClientError::Busy
+            }
+            _ => ClientError::Other(error),
+        };
         (&stream)
             .write_all(format!("{}\n", handshake(&secret)).as_bytes())
-            .map_err(ClientError::Other)?;
+            .map_err(closed)?;
         let mut reply = String::new();
         BufReader::new(&stream)
             .read_line(&mut reply)
-            .map_err(ClientError::Other)?;
-        let accepted = serde_json::from_str::<Value>(&reply)
-            .ok()
-            .and_then(|reply| reply.get("ok").and_then(Value::as_bool))
-            == Some(true);
-        if !accepted {
-            return Err(ClientError::Refused);
+            .map_err(closed)?;
+        if reply.is_empty() {
+            return Err(ClientError::Busy);
+        }
+        let reply = serde_json::from_str::<Value>(&reply).unwrap_or(Value::Null);
+        if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(match reply.get("error").and_then(Value::as_str) {
+                Some("busy") => ClientError::Busy,
+                _ => ClientError::Refused,
+            });
         }
         stream.set_read_timeout(None).map_err(ClientError::Other)?;
         Ok(stream)

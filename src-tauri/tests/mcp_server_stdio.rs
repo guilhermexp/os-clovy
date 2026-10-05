@@ -56,8 +56,8 @@ impl ActivityKeyStore for MemoryKey {
     }
 }
 
-/// A note and a dictation in the active profile (`default`) and decoys in
-/// another profile.
+/// A note and a dictation in the current data partition (`default`) and
+/// decoys in another partition.
 async fn notes_pool() -> SqlitePool {
     let pool = sqlx_sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -169,14 +169,23 @@ struct Client {
 
 impl Client {
     async fn spawn(dir: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_clovy-mcp"))
+        Self::spawn_with_env(dir, &[]).await
+    }
+
+    /// Spawns with `env` added; the production-data opt-in is always
+    /// cleared first so the host environment cannot change the outcome.
+    async fn spawn_with_env(dir: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_clovy-mcp"));
+        command
             .arg("--dir")
             .arg(dir)
+            .env_remove("OS_CLOVY_USE_PROD_DATA_DIR")
+            .env_remove("OS_JUNE_USE_PROD_DATA_DIR")
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("clovy-mcp starts");
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("clovy-mcp starts");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
         let mut client = Self {
@@ -285,6 +294,7 @@ async fn mcp_server_binary_answers_a_stdio_client_from_the_active_profile() {
             "get_note",
             "get_session_detail",
             "list_app_usage",
+            "list_coding_agent_sessions",
             "list_dictations",
             "list_memories",
             "search_activity",
@@ -401,5 +411,46 @@ async fn mcp_server_binary_reports_never_enabled_and_a_refused_secret() {
     let listed = refused.request("tools/list", json!({})).await;
     assert_eq!(listed["error"]["message"], json!(stdio::REFUSED_MESSAGE));
     refused.close().await;
+    listener.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_server_debug_binary_refuses_the_installed_app_data() {
+    // A throwaway HOME (short path: Unix socket paths are capped at 104
+    // bytes) whose production data directory has a live channel.
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let production = home
+        .path()
+        .join("Library/Application Support/co.opensoftware.june");
+    let dir = channel::channel_dir(&production);
+    let store = activity_store(home.path()).await;
+    let listener = channel::Listener::start(&dir, handler(notes_pool().await, store))
+        .await
+        .unwrap();
+    let home_env = home.path().as_os_str();
+
+    let mut refused = Client::spawn_with_env(&dir, &[("HOME", home_env)]).await;
+    assert_eq!(
+        refused
+            .call("search_notes", json!({ "query": "zephyr" }))
+            .await,
+        Err(stdio::PRODUCTION_DATA_MESSAGE.to_string())
+    );
+    refused.close().await;
+
+    // The explicit production-data opt-in, as for the debug app.
+    let mut allowed = Client::spawn_with_env(
+        &dir,
+        &[
+            ("HOME", home_env),
+            ("OS_CLOVY_USE_PROD_DATA_DIR", std::ffi::OsStr::new("1")),
+        ],
+    )
+    .await;
+    assert!(allowed
+        .call("search_notes", json!({ "query": "zephyr" }))
+        .await
+        .is_ok());
+    allowed.close().await;
     listener.stop();
 }

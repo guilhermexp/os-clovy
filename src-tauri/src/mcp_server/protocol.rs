@@ -3,7 +3,7 @@
 //! so any authenticated connection can send any request, and the stdio relay
 //! can answer `initialize` itself while the app is unreachable.
 
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::tools::{self, McpData};
@@ -22,7 +22,7 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub const SERVER_UNAVAILABLE: i64 = -32000;
 const RESOURCE_NOT_FOUND: i64 = -32002;
 
-const INSTRUCTIONS: &str = "Read-only access to the user's Clovy notes, dictations, memories, and (when activity capture is on) their activity timeline, always in the active profile. Read clovy://context for the current date, time, and time zone before resolving words like \"today\"; clovy://guide explains which tool answers which question.";
+const INSTRUCTIONS: &str = "Read-only access to the user's Clovy notes, dictations, and memories (from the data set open in Clovy) and, when activity capture is on, their activity timeline and coding-agent work on this Mac. Read clovy://context for the current date, time, and time zone before resolving words like \"today\"; clovy://guide explains which tool answers which question.";
 
 pub fn result_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -32,10 +32,69 @@ pub fn error_response(id: Value, code: i64, message: impl Into<String>) -> Value
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
 }
 
-/// The `id` of a request; `None` for notifications and responses.
+/// What one incoming JSON-RPC message is.
+#[derive(Debug, PartialEq)]
+pub enum Incoming<'a> {
+    Request {
+        id: Value,
+        method: &'a str,
+    },
+    Notification,
+    /// A response the client sent back (Clovy sends it no requests).
+    Response,
+    /// Not a valid JSON-RPC 2.0 message: answered with `INVALID_REQUEST`
+    /// and `id` (`null` when the id itself is unusable).
+    Invalid {
+        id: Value,
+        reason: &'static str,
+    },
+}
+
+pub fn classify(message: &Value) -> Incoming<'_> {
+    let Some(object) = message.as_object() else {
+        return Incoming::Invalid {
+            id: Value::Null,
+            reason: "Expected one JSON-RPC message object.",
+        };
+    };
+    let id = object.get("id");
+    let usable_id = id.filter(|id| id.is_string() || id.is_number()).cloned();
+    let reply_id = usable_id.clone().unwrap_or(Value::Null);
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Incoming::Invalid {
+            id: reply_id,
+            reason: "`jsonrpc` must be \"2.0\".",
+        };
+    }
+    match object.get("method") {
+        Some(Value::String(method)) => match (id, usable_id) {
+            (None, _) => Incoming::Notification,
+            (Some(_), Some(id)) => Incoming::Request { id, method },
+            (Some(_), None) => Incoming::Invalid {
+                id: Value::Null,
+                reason: "`id` must be a string or a number.",
+            },
+        },
+        Some(_) => Incoming::Invalid {
+            id: reply_id,
+            reason: "`method` must be a string.",
+        },
+        None if id.is_some() && (object.contains_key("result") || object.contains_key("error")) => {
+            Incoming::Response
+        }
+        None => Incoming::Invalid {
+            id: reply_id,
+            reason: "A request needs a `method`.",
+        },
+    }
+}
+
+/// The `id` of a valid request; `None` for anything else.
 pub fn request_id(message: &Value) -> Option<Value> {
-    message.get("method")?;
-    message.get("id").cloned()
+    match classify(message) {
+        Incoming::Request { id, .. } => Some(id),
+        _ => None,
+    }
 }
 
 pub fn method(message: &Value) -> Option<&str> {
@@ -87,18 +146,17 @@ pub fn tool_error(message: &str) -> Value {
     })
 }
 
-/// Answers one JSON-RPC message; `None` for notifications.
+/// Answers one JSON-RPC message; `None` for notifications and responses.
 pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
-    if !message.is_object() {
-        return Some(error_response(
-            Value::Null,
-            INVALID_REQUEST,
-            "Expected one JSON-RPC message object.",
-        ));
-    }
-    let id = request_id(message)?;
+    let (id, method) = match classify(message) {
+        Incoming::Request { id, method } => (id, method),
+        Incoming::Notification | Incoming::Response => return None,
+        Incoming::Invalid { id, reason } => {
+            return Some(error_response(id, INVALID_REQUEST, reason))
+        }
+    };
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-    let outcome = match method(message).unwrap_or_default() {
+    let outcome = match method {
         "initialize" => Ok(initialize_result(&params, INSTRUCTIONS)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools::descriptors(&data.activity) })),
@@ -168,18 +226,34 @@ fn read_resource(params: &Value, now: DateTime<Utc>) -> Result<Value, (i64, Stri
     Ok(json!({ "contents": [{ "uri": uri, "mimeType": mime_type, "text": text }] }))
 }
 
-/// `clovy://context`: the moment in the Mac's local time.
-pub fn context_json(now: DateTime<Local>, time_zone: Option<String>) -> Value {
+/// `clovy://context`: the moment in the Mac's local time. Calendar values
+/// come from the local calendar (`yesterday` is the previous date, and
+/// `startOfToday` is local midnight with the offset in force then), so they
+/// stay right across daylight-saving changes.
+pub fn context_json<Tz: TimeZone>(now: DateTime<Tz>, time_zone: Option<String>) -> Value
+where
+    Tz::Offset: std::fmt::Display,
+{
     let offset = now.format("%:z").to_string();
+    let today = now.date_naive();
     json!({
         "now": now.to_rfc3339(),
-        "date": now.format("%Y-%m-%d").to_string(),
+        "date": today.format("%Y-%m-%d").to_string(),
         "time": now.format("%H:%M").to_string(),
         "weekday": now.format("%A").to_string(),
         "timeZone": time_zone.unwrap_or_else(|| format!("UTC{offset}")),
         "utcOffset": offset,
-        "yesterday": (now - Duration::days(1)).format("%Y-%m-%d").to_string(),
-        "startOfToday": now.date_naive().and_hms_opt(0, 0, 0).map(|midnight| format!("{}{offset}", midnight.format("%Y-%m-%dT%H:%M:%S"))),
+        "yesterday": today.pred_opt().map(|day| day.format("%Y-%m-%d").to_string()),
+        "startOfToday": start_of_day(&now.timezone(), today).map(|start| start.to_rfc3339()),
+    })
+}
+
+/// The first local moment of `day`: midnight, or the first valid minute
+/// after it where a daylight-saving jump skips midnight.
+fn start_of_day<Tz: TimeZone>(zone: &Tz, day: NaiveDate) -> Option<DateTime<Tz>> {
+    (0..=24 * 60).find_map(|minute| {
+        let time = NaiveTime::from_num_seconds_from_midnight_opt(minute * 60, 0)?;
+        zone.from_local_datetime(&day.and_time(time)).earliest()
     })
 }
 
@@ -202,7 +276,7 @@ fn local_time_zone_name() -> Option<String> {
 
 const GUIDE: &str = r#"# Clovy MCP guide
 
-Clovy records meetings and dictations on the user's Mac, turns them into notes, keeps memories, and (when the user turned on activity capture) a text-only timeline of the apps and sites they used. Everything here is read-only and limited to the active Clovy profile.
+Clovy records meetings and dictations on the user's Mac, turns them into notes, keeps memories, and (when the user turned on activity capture) a text-only timeline of the apps and sites they used and of their work with coding agents. Everything here is read-only. Notes, dictations, and memories come from the data set open in Clovy; activity belongs to the Mac, whichever data set is open.
 
 ## Which tool
 
@@ -218,6 +292,7 @@ Clovy records meetings and dictations on the user's Mac, turns them into notes, 
 | "What am I doing right now?" | `get_active_session` |
 | "When did I see X on screen?" | `search_activity` with `query` |
 | "Details of that session" | `get_session_detail` with the session id |
+| "What did I build with Claude Code today?" | `list_coding_agent_sessions` |
 
 ## Tips
 

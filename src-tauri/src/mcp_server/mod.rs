@@ -1,6 +1,6 @@
 //! The Clovy MCP server: lets local MCP clients (Claude Code, Cursor, and the
-//! CLI chat engines) read the active profile's notes, dictations, memories,
-//! and activity. Off by default; the switch is `mcpServer` in
+//! CLI chat engines) read the current data partition's notes, dictations, and
+//! memories, and the installation's activity. Off by default; the switch is `mcpServer` in
 //! `activity-settings.json`, changed only from Settings, Agent. Contract and
 //! protocol: `docs/mcp-server.md`.
 //!
@@ -297,7 +297,7 @@ fn app_handler(app: AppHandle) -> channel::Handler {
     })
 }
 
-/// What `message` may read: the active profile's main database, the memory
+/// What `message` may read: the current data partition's main database, the memory
 /// switch, and the activity store when the message calls an activity tool.
 async fn app_data(app: &AppHandle, message: &Value) -> Result<McpData, AppError> {
     let notes = crate::commands::repositories(app).await?.pool;

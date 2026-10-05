@@ -63,6 +63,9 @@ struct StoreSlot {
 /// State shared by the capture thread, Tauri commands, and the tray.
 pub struct ActivityShared {
     settings: Mutex<ActivitySettings>,
+    /// Held across a read-modify-write of the settings file
+    /// (`update_settings`) so two writers never undo each other.
+    settings_update: Mutex<()>,
     manual_pause: AtomicBool,
     state: Mutex<CaptureState>,
     permissions: Mutex<PermissionSnapshot>,
@@ -76,6 +79,7 @@ impl ActivityShared {
     pub fn new(settings: ActivitySettings) -> Self {
         Self {
             settings: Mutex::new(settings),
+            settings_update: Mutex::new(()),
             manual_pause: AtomicBool::new(false),
             state: Mutex::new(CaptureState::Off),
             permissions: Mutex::new(PermissionSnapshot::UNSUPPORTED),
@@ -92,6 +96,21 @@ impl ActivityShared {
 
     pub fn settings(&self) -> ActivitySettings {
         lock(&self.settings).clone()
+    }
+
+    /// Changes the settings from their latest value, persists them to
+    /// `path`, then publishes them; concurrent updates run one at a time.
+    pub fn update_settings(
+        &self,
+        path: &std::path::Path,
+        change: impl FnOnce(&mut ActivitySettings),
+    ) -> std::io::Result<ActivitySettings> {
+        let _serialized = lock(&self.settings_update);
+        let mut settings = self.settings();
+        change(&mut settings);
+        super::settings::save(path, &settings)?;
+        self.set_settings(settings.clone());
+        Ok(settings)
     }
 
     pub fn set_settings(&self, settings: ActivitySettings) {
