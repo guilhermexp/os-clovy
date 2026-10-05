@@ -106,7 +106,11 @@ Every allowed one-shot call also:
 - resolves the executable on the login-shell PATH (a GUI app does not inherit
   the shell PATH) and runs with the login-shell environment, so `HOME`,
   `PI_CODING_AGENT_DIR`, and other profile variables reach the CLI unchanged;
-  Clovy never logs in or edits CLI configuration;
+  Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`, `OS_ACCOUNTS_*`, `CLOVY_*`,
+  `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`, such as the local development bearer token
+  from `.env`) are removed by `llm::shell_env::cli_environment`, the one filter
+  for one-shot calls, `--version` detection, the login-shell capture, and the
+  CLI chat engine; Clovy never logs in or edits CLI configuration;
 - starts with `CLOVY_AUTHORSHIP_MARKER` (`[clovy-internal-ai-call]`) alone on
   the first prompt line and sets `CLOVY_ONESHOT=1`; session ingestion skips
   any CLI session whose first prompt's first line is exactly the marker;
@@ -197,7 +201,8 @@ One message on a CLI engine is one CLI process in the session workspace:
   unchanged), minus Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`,
   `OS_ACCOUNTS_*`, `CLOVY_*`, `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`; for example the
   local development bearer token loaded from `.env`), which would otherwise
-  reach the CLI, its tools, and its MCP servers (`chat_engine::cli_environment`).
+  reach the CLI, its tools, and its MCP servers (`llm::shell_env::cli_environment`,
+  the same filter as one-shot calls).
   `ANTHROPIC_API_KEY` is removed for claude. No authorship marker: these are
   the user's own conversations.
 - **Continuity.** The CLI's conversation id is saved in the run's config
