@@ -405,7 +405,9 @@ pub async fn distill(sessions: &[SessionText], header: &str, embedder: &dyn Embe
             stats.raw_chars += body.chars().count();
             for raw in body.lines() {
                 for line in segment(raw.trim()) {
-                    if is_junk(&line) || fails_prose_gate(&line) {
+                    // Ticket keys, pull requests, paths, and hashes survive
+                    // however short or terse the line is.
+                    if !has_entity(&line) && (is_junk(&line) || fails_prose_gate(&line)) {
                         continue;
                     }
                     spans.push(Span {
@@ -598,6 +600,31 @@ mod tests {
         let out = distill(&[flicker], "h", &NoEmbedder).await;
         assert!(out.body.is_empty());
         assert_eq!(out.stats.sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn terse_entity_lines_pass_the_gates_and_chrome_without_entities_does_not() {
+        let sessions = vec![session(
+            1,
+            "Zed",
+            &[
+                "KAN-123 login regression",
+                "src/auth.rs",
+                "a1b2c3d",
+                "Home Settings Help",
+                "We traced the failure to the session cookie being dropped on redirect",
+            ],
+        )];
+        let out = distill(&sessions, "h", &NoEmbedder).await;
+        assert!(
+            out.body.contains("KAN-123 login regression"),
+            "{}",
+            out.body
+        );
+        assert!(out.body.contains("src/auth.rs"), "{}", out.body);
+        assert!(out.body.contains("a1b2c3d"), "{}", out.body);
+        assert!(out.body.contains("session cookie"), "{}", out.body);
+        assert!(!out.body.contains("Home Settings Help"), "{}", out.body);
     }
 
     #[test]
