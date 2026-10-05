@@ -20,7 +20,7 @@ one described in [activity-capture.md](activity-capture.md).
 | `src-tauri/src/coding_agents/summarize.rs` | Summarizer choice and the summary drain |
 | `src-tauri/src/coding_agents/settings.rs` | `codingAgents` in `activity-settings.json` |
 | `src/components/settings/CodingAgentSourcesSection.tsx` | Settings, Activity, "Coding agents": one switch per source |
-| `src/components/coding-agents/CodingAgentSessionsStrip.tsx` | The coding-agent lane of the "Today" view |
+| `src/components/coding-agents/CodingAgentLane.tsx` | The coding-agent lane of the "Today" view (`CODING_AGENT_LANE`, registered in `EXTRA_TIMELINE_LANES`) |
 | `src/lib/coding-agents.ts` | Typed bindings, DTOs, event |
 
 Tests: `cargo test --manifest-path src-tauri/Cargo.toml --locked coding_agents`
@@ -155,7 +155,10 @@ are trimmed, unfenced, and capped at 1,200 characters. A failed attempt is
 retried after 30 minutes times the attempt number; after 3 attempts the block
 stays sealed with `summaryError`.
 
-## Database (migration 2, `coding_agent_blocks`)
+## Database (migration 3, `coding_agent_blocks`)
+
+Appended after the timeline's migration 2 in the activity catalog
+(`activity/store.rs`, append-only).
 
 | Column | Notes |
 |---|---|
@@ -202,12 +205,18 @@ Event: `clovy://coding-agents-updated` (no payload).
 - **Settings, Activity, "Coding agents"**: one switch per source with "Found on
   this Mac" / "Not found on this Mac", how summaries are made, and the last
   read time (or why the database is unavailable).
-- **"Today" view lane**: `CodingAgentSessionsStrip` takes the local day to
-  show (`<CodingAgentSessionsStrip day={selectedDay} />`), loads that day's
-  blocks itself, and reloads on `clovy://coding-agents-updated`. Each block
-  shows agent, project, time range, prompt count, and the summary (or "In
-  progress" / "Waiting for a summary" with the first prompt). The "Today" view
-  mounts it as its own lane next to the activity blocks.
+- **"Today" view lane**: `CodingAgentLane` is registered in
+  `EXTRA_TIMELINE_LANES` (`src/components/activity-timeline/lanes.ts`, see
+  [activity-timeline.md](activity-timeline.md#lane-extension-point)), so the
+  day strip draws it as the "Coding agents" row under the activity sessions,
+  on the same 24 h scale. It loads the selected day's blocks itself
+  (`from`..`to` of the lane props) and reloads on
+  `clovy://coding-agents-updated`. Each block sits at its start and end time
+  (at least 0.25 % of the day wide); hover or keyboard focus opens a card with
+  agent, project, time range, prompt count, and the summary (or "In progress" /
+  "Waiting for a summary" with the first prompt). Blocks that are not
+  summarized yet are drawn faded; a live one has a solid border. A day without
+  blocks shows "No coding agent sessions on this day" in the row.
 
 ## Verification
 

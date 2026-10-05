@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn(async () => undefined),
 }));
 
-import { CodingAgentSessionsStrip } from "../components/coding-agents/CodingAgentSessionsStrip";
+import { TimelineDayStrip } from "../components/activity-timeline/TimelineDayStrip";
 import { ActivitySettingsSection } from "../components/settings/ActivitySettingsSection";
 import { applyInterfaceLocale } from "../i18n/locale";
 import { type ActivityStatusDto, DEFAULT_ACTIVITY_SETTINGS } from "../lib/activity-capture";
@@ -150,9 +150,34 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
   });
 });
 
-describe("CodingAgentSessionsStrip", () => {
-  it("shows the day's blocks with agent, project, time range, and summary", async () => {
-    const blocks = [
+describe("coding-agent lane in the Today view", () => {
+  const dayStartMs = new Date(2026, 9, 4).getTime();
+  const dayEndMs = new Date(2026, 9, 5).getTime();
+  const from = new Date(dayStartMs).toISOString();
+  const to = new Date(dayEndMs).toISOString();
+
+  function renderDayStrip() {
+    render(
+      <TimelineDayStrip
+        sessions={[]}
+        gaps={[]}
+        dayStartMs={dayStartMs}
+        dayEndMs={dayEndMs}
+        from={from}
+        to={to}
+        selectedSessionId={null}
+        onSelectSession={() => {}}
+        nowMs={dayEndMs}
+        isToday={false}
+      />,
+    );
+  }
+
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+  it("draws each block at its time on the day's scale; hover shows agent, project, time, and summary", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockResolvedValue([
       block({}),
       block({
         id: 2,
@@ -166,52 +191,48 @@ describe("CodingAgentSessionsStrip", () => {
         endedAt: new Date(2026, 9, 4, 11, 30).toISOString(),
       }),
       block({ id: 3, source: "cursor_cli", state: "live", summary: null, firstPrompt: null }),
-    ];
-    invokeMock.mockResolvedValue(blocks);
+    ]);
 
-    render(<CodingAgentSessionsStrip day={new Date(2026, 9, 4, 15, 0)} />);
+    renderDayStrip();
 
-    const list = await screen.findByRole("list", { name: "Coding agent sessions" });
-    const items = within(list).getAllByRole("listitem");
+    expect(screen.getByText("Coding agents")).toBeInTheDocument();
+    const lane = await screen.findByRole("list", { name: "Coding agent sessions" });
+    const items = within(lane).getAllByRole("listitem");
     expect(items).toHaveLength(3);
+    // 10:00 to 10:40 of a 24-hour day.
+    expect(Number.parseFloat(items[0].style.left)).toBeCloseTo((10 / 24) * 100, 3);
+    expect(Number.parseFloat(items[0].style.width)).toBeCloseTo((40 / 1440) * 100, 3);
 
-    const format: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit" };
-    const range = `${new Date(2026, 9, 4, 10, 0).toLocaleTimeString([], format)} to ${new Date(2026, 9, 4, 10, 40).toLocaleTimeString([], format)}`;
-    const first = within(items[0]);
-    expect(first.getByText("Codex")).toBeInTheDocument();
-    expect(first.getByText("api")).toBeInTheDocument();
-    expect(first.getByText(range)).toBeInTheDocument();
-    expect(first.getByText("3 prompts")).toBeInTheDocument();
-    expect(
-      first.getByText("Added a /health endpoint with a database ping and its test."),
-    ).toBeInTheDocument();
+    const codexTime = `${clock.format(new Date(2026, 9, 4, 10, 0))} to ${clock.format(new Date(2026, 9, 4, 10, 40))}`;
+    await user.hover(screen.getByRole("button", { name: `Codex, api, ${codexTime}` }));
+    const tip = await screen.findByRole("tooltip");
+    expect(tip).toHaveTextContent("Codex");
+    expect(tip).toHaveTextContent(codexTime);
+    expect(tip).toHaveTextContent("3 prompts");
+    expect(tip).toHaveTextContent("Added a /health endpoint with a database ping and its test.");
+    await user.unhover(screen.getByRole("button", { name: `Codex, api, ${codexTime}` }));
 
-    const second = within(items[1]);
-    expect(second.getByText("Claude Code")).toBeInTheDocument();
-    expect(second.getByText("No project")).toBeInTheDocument();
-    expect(second.getByText("1 prompt")).toBeInTheDocument();
-    expect(second.getByText("Waiting for a summary")).toBeInTheDocument();
-    expect(second.getByText("fix the login bug")).toBeInTheDocument();
+    const claudeTime = `${clock.format(new Date(2026, 9, 4, 11, 5))} to ${clock.format(new Date(2026, 9, 4, 11, 30))}`;
+    await user.hover(
+      screen.getByRole("button", { name: `Claude Code, No project, ${claudeTime}` }),
+    );
+    expect(await screen.findByText("Waiting for a summary")).toBeInTheDocument();
+    expect(screen.getByText("fix the login bug")).toBeInTheDocument();
+    expect(screen.getByText("1 prompt")).toBeInTheDocument();
 
-    expect(within(items[2]).getByText("In progress")).toBeInTheDocument();
-
-    expect(invokeMock).toHaveBeenCalledWith("coding_agents_blocks", {
-      request: {
-        from: new Date(2026, 9, 4).toISOString(),
-        to: new Date(2026, 9, 5).toISOString(),
-      },
-    });
+    expect(items[2]).toHaveAttribute("data-state", "live");
+    expect(invokeMock).toHaveBeenCalledWith("coding_agents_blocks", { request: { from, to } });
   });
 
   it("reloads when the scanner reports new blocks", async () => {
     invokeMock.mockResolvedValueOnce([]);
-    render(<CodingAgentSessionsStrip day={new Date(2026, 9, 4)} />);
-    expect(await screen.findByText("No coding agent sessions on this day.")).toBeInTheDocument();
+    renderDayStrip();
+    expect(await screen.findByText("No coding agent sessions on this day")).toBeInTheDocument();
 
     invokeMock.mockResolvedValueOnce([block({})]);
     await waitFor(() => expect(listeners.has(CODING_AGENTS_UPDATED_EVENT)).toBe(true));
     listeners.get(CODING_AGENTS_UPDATED_EVENT)?.();
 
-    expect(await screen.findByText("Codex")).toBeInTheDocument();
+    expect(await screen.findByRole("list", { name: "Coding agent sessions" })).toBeInTheDocument();
   });
 });
