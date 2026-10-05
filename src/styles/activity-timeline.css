@@ -777,6 +777,9 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .timeline-category-row {
@@ -835,8 +838,31 @@
 
 .timeline-top-app-row {
   display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.timeline-top-app-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
   flex-direction: column;
   gap: 2px;
+}
+
+/* A real app icon, or the neutral glyph when it is not readable. */
+.app-icon {
+  flex-shrink: 0;
+  border-radius: var(--r-xs);
+}
+
+.app-icon-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--muted-foreground);
 }
 
 .timeline-top-app-header {
@@ -1367,4 +1393,392 @@
 .day-hour-activities {
   list-style: none;
   padding-left: 0;
+}
+
+/* Timeline mode switch (workstreams grid / captured sessions) */
+.timeline-mode-switch {
+  display: flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: var(--sp-px);
+  margin: var(--sp-3) var(--sp-5) var(--sp-1);
+  padding: var(--sp-px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-subtle);
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* Day grid: workstreams on a vertical axis of local hours */
+.day-grid {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.day-grid-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-6) var(--sp-2);
+}
+
+.day-grid-title {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--fs-xl);
+  font-weight: 400;
+  color: var(--foreground);
+}
+
+.day-grid-total {
+  font-size: var(--fs-xs);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.day-grid-scroller {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-3) var(--sp-6) var(--sp-10);
+}
+
+.day-grid-body {
+  position: relative;
+  display: flex;
+}
+
+.day-grid-axis {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.day-grid-tick {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.day-grid-tick-label {
+  position: absolute;
+  top: calc(var(--fs-2xs) * -0.7);
+  left: 0;
+  padding-right: var(--sp-1);
+  background: var(--background);
+  font-size: var(--fs-2xs);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.day-grid-lanes {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  margin-left: var(--sp-12);
+}
+
+.day-grid-now {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  border-top: 1px solid var(--record);
+  pointer-events: none;
+}
+
+.day-grid-now::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--sp-1) * -0.75);
+  left: calc(var(--sp-1) * -0.75);
+  width: var(--sp-2);
+  height: var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--record);
+}
+
+.day-grid-card {
+  position: absolute;
+  display: flex;
+  /* Content starts at the top; a short card clips its notes, never its title. */
+  align-items: flex-start;
+  gap: var(--sp-3);
+  box-sizing: border-box;
+  padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--brand) 7%, var(--card));
+  background-clip: padding-box;
+  color: var(--foreground);
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  outline-offset: 1px;
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.day-grid-card:hover {
+  background: color-mix(in oklch, var(--brand) 12%, var(--card));
+}
+
+.day-grid-card:focus-visible {
+  outline: var(--focus-outline-width) solid var(--ring-focus);
+}
+
+.day-grid-card[aria-pressed="true"] {
+  z-index: 1;
+  background: color-mix(in oklch, var(--brand) 16%, var(--card));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--brand) 60%, transparent),
+    var(--shadow-md);
+}
+
+.day-grid[data-has-selection] .day-grid-card:not([aria-pressed="true"]) {
+  opacity: 0.45;
+}
+
+/* The sittings, marked along the card's left edge at their real times. */
+.day-grid-card-rail {
+  position: relative;
+  width: var(--sp-1);
+  flex-shrink: 0;
+  align-self: stretch;
+  margin: calc(var(--sp-3) * -1) 0;
+}
+
+.day-grid-sitting {
+  position: absolute;
+  left: 0;
+  width: 3px;
+  border-radius: var(--r-pill);
+  background: var(--brand);
+}
+
+.day-grid-sitting[data-approximate] {
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--muted-foreground) 0 var(--sp-1),
+    transparent var(--sp-1) var(--sp-3)
+  );
+}
+
+.day-grid-card-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.day-grid-card-title {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.day-grid-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--sp-3);
+  font-size: var(--fs-2xs);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.day-grid-card-active {
+  color: var(--brand);
+  font-weight: var(--fw-medium);
+}
+
+.day-grid-card-badge {
+  padding: 0 var(--sp-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  font-size: var(--fs-2xs);
+  color: var(--muted-foreground);
+}
+
+.day-grid-card-notes {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--sp-px);
+  margin-top: var(--sp-1);
+}
+
+.day-grid-card-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--muted-foreground);
+}
+
+.day-grid-card-note::before {
+  content: "· ";
+}
+
+/* Selected workstream in the side panel */
+.workstream-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  padding: var(--sp-5) var(--sp-6) var(--sp-10);
+}
+
+.workstream-detail-back {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: var(--sp-1);
+  height: var(--control-sm);
+  padding: 0 var(--sp-2) 0 var(--sp-1);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.workstream-detail-back:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.workstream-detail-heading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.workstream-detail-kicker {
+  font-size: var(--fs-2xs);
+  color: var(--muted-foreground);
+}
+
+.workstream-detail-title {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--fs-xl);
+  font-weight: 400;
+}
+
+.workstream-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.workstream-detail-active {
+  color: var(--brand);
+  font-weight: var(--fw-medium);
+}
+
+.workstream-detail-summary {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.workstream-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.workstream-detail-section-title {
+  margin: 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--muted-foreground);
+}
+
+.workstream-detail-hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--muted-foreground);
+}
+
+.workstream-detail-periods {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-subtle);
+  list-style: none;
+}
+
+.workstream-detail-period {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--brand);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.workstream-detail-period[data-approximate] {
+  border-left-style: dashed;
+  border-left-color: var(--muted-foreground);
+}
+
+.workstream-detail-period-length {
+  font-size: var(--fs-xs);
+  color: var(--muted-foreground);
+}
+
+.workstream-detail-break {
+  padding: var(--sp-px) 0 var(--sp-px) var(--sp-3);
+  font-size: var(--fs-2xs);
+  color: var(--muted-foreground);
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+.workstream-detail-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding-left: var(--sp-6);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+/* Narrow windows: the side panel goes under the grid. */
+@media (max-width: 900px) {
+  .timeline-lower-grid {
+    flex-direction: column;
+  }
+
+  .timeline-list-column {
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .timeline-stats-column,
+  .timeline-detail-column {
+    width: 100%;
+    max-height: 45%;
+  }
 }

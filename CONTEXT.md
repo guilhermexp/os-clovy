@@ -942,6 +942,17 @@ joins an existing workstream or opens one; titles and other workstreams are
 never rewritten. Its minutes are the sum of its hours' measured minutes.
 _Avoid_: task, ticket, project.
 
+**Sitting** (pt-BR "período"):
+Where a workstream's work was located in time: the bounds of the measured
+sessions its activities named, joined. It locates the work, it does not
+measure it: one session can hold several workstreams, so a sitting has no
+duration of its own and the workstream's active minutes never come from it.
+A workstream resumed after other work has several sittings. Work no session
+was named for, and hours recorded before sittings existed, are known only by
+hour ("By hour").
+_Avoid_: segment, block (blocks are coding-agent blocks), session (a session
+is one app's stretch in the timeline), measured duration.
+
 **Day summary**:
 The day's headline, narrative, insights, and **standup** written by the
 activity provider in the interface language, generated once a day at the

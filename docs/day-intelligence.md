@@ -79,18 +79,29 @@ wakes every minute, on a capture failure, and when a notice is due:
    pick 3 to 14 diverse lines per session (facility location), and rescue up to
    4 dropped lines per session whose entities (ticket keys, PR numbers, file
    paths, commit hashes) are not covered. Sessions under 15 s are flicker.
-3. **Hour report**: one call with the measured sessions, coding-agent blocks,
-   meetings, and the distilled text. The answer's minutes are weights: the
-   hour's measured active minutes (focused time from the timeline, rounded)
-   are split by largest remainder, so 42 measured minutes with estimates 30
-   and 30 show 21 and 21.
+3. **Hour report**: one call with the measured sessions (numbered `S1`,
+   `S2`, ...), coding-agent blocks, meetings, and the distilled text. The
+   answer's minutes are weights: the hour's measured active minutes (focused
+   time from the timeline, rounded) are split by largest remainder, so 42
+   measured minutes with estimates 30 and 30 show 21 and 21. Each activity
+   also names the sessions it happened in (`sessions: [3]`, optional in the
+   schema); its `periods` are those sessions' measured bounds clipped to the
+   hour and joined where they overlap or touch. A period locates the activity
+   (where), it does not measure it (how long): a session keeps one app and
+   context while its window or text changes, so two activities can name the
+   same session. Unknown numbers are ignored, and an activity naming none
+   keeps `periods: null` (known by hour only), so no clock time is estimated.
 4. **Workstream fold**: one call with the day's workstreams as anchors (id,
    title, summary) and the hour's numbered activities; the answer places this
    hour only. A placement on an existing id appends the hour and may refresh
    that workstream's summary; id 0 opens one; activities left out open one
    workstream named after the first of them. Titles and untouched workstreams
    never change. Hours fold in order; a fold that failed its 4 attempts lands
-   as one new workstream without a call.
+   as one new workstream without a call. The workstream's hour keeps the union
+   of its activities' `periods` (null when none had any) and `locatedMinutes`,
+   the minutes of the activities that had periods; the rest of its minutes
+   stay known only by hour, never folded into the periods. Its minutes stay
+   the measured split, independent of how long the periods span.
 5. **Day summary**: at the configured time (default 18:00), once per day: due
    when the local clock is past the time and no automatic run of the day
    finished, so a Mac asleep at 18:00 generates it at the first tick after
@@ -140,9 +151,9 @@ Days are local `YYYY-MM-DD`, hours local `YYYY-MM-DDTHH`; `started_at` /
 
 | Table | Columns | Notes |
 |---|---|---|
-| `day_hour_reports` | `hour` (PK), `day`, `started_at`, `ended_at`, `active_minutes`, `summary`, `activities_json` (`[{description, minutes}]`, Clovy's minutes), `distilled`, `distill_json` (stats), `locale`, `provider`, `generated_at`, `folded_at` | One per completed hour with activity |
+| `day_hour_reports` | `hour` (PK), `day`, `started_at`, `ended_at`, `active_minutes`, `summary`, `activities_json` (`[{description, minutes, periods}]`, Clovy's minutes; `periods` absent in reports written before it), `distilled`, `distill_json` (stats), `locale`, `provider`, `generated_at`, `folded_at` | One per completed hour with activity |
 | `day_workstreams` | `id`, `day`, `title`, `summary`, `first_hour`, `last_hour`, `created_at`, `updated_at` | Title never changes |
-| `day_workstream_hours` | `workstream_id` → workstreams (cascade), `hour`, `minutes`, `note` | PK `(workstream_id, hour)`; minutes are the sum |
+| `day_workstream_hours` | `workstream_id` → workstreams (cascade), `hour`, `minutes`, `note`, `periods_json` (migration 5, `day_workstream_periods`: `{periods: [{startedAt, endedAt}], locatedMinutes}` with UTC session bounds; NULL when only the hour is known, which includes every row written before it; an unreadable value reads as NULL) | PK `(workstream_id, hour)`; minutes are the sum |
 | `day_summaries` | `day` (PK), `headline`, `narrative`, `insights_json`, `standup_json` (`{done, in_progress, blockers}`), `hours_covered`, `locale`, `provider`, `trigger` (`scheduled`/`manual`), `generated_at` | Regenerating replaces the row |
 | `day_intelligence_runs` | `key` (PK), `attempts`, `outcome` (`ok`/`failed`/`empty`), `last_error`, `next_attempt_at`, `updated_at` | Scheduler bookkeeping |
 
@@ -157,8 +168,8 @@ In `crate::day_intelligence::db`, over an open `ActivityStore`:
 | Function | Returns |
 |---|---|
 | `summary_of_day(store, "YYYY-MM-DD")` | `Option<DaySummaryDto>`: headline, narrative, insights, standup `{done, inProgress, blockers}`, `hoursCovered`, `locale`, `provider`, `trigger`, `generatedAt` |
-| `workstreams_of_day(store, day)` | `Vec<WorkstreamDto>`: id, title, summary, minutes, hours `[{hour, minutes, note}]` |
-| `hour_reports_of_day(store, day)` | `Vec<HourReportDto>`: hour, bounds, active minutes, summary, activities with minutes |
+| `workstreams_of_day(store, day)` | `Vec<WorkstreamDto>`: id, title, summary, minutes, hours `[{hour, minutes, note, periods, locatedMinutes}]` (`periods`: `[{startedAt, endedAt}]` session bounds or null; `locatedMinutes`: minutes covered by them, 0 when null) |
+| `hour_reports_of_day(store, day)` | `Vec<HourReportDto>`: hour, bounds, active minutes, summary, activities with minutes and `periods` (null for reports written before periods) |
 
 `pipeline::day_view(&ReadContext, day)` returns those plus `DayPanelsDto`
 (numbers read now from the timeline, workstreams, meetings, and blocks). The
@@ -175,7 +186,7 @@ workstreams, and hour reports.
 | `today_open_ready` | none | Day of a notification clicked before the webview listened, or null |
 
 `panels`: `focusedMs`, `idleMs`, `awayMs`, `categories`, `topApps` (the day's
-timeline stats), `hours` (24 local hours with focused ms; they add up to
+timeline stats, `{appName, bundleId, durationMs}`), `hours` (24 local hours with focused ms; they add up to
 `focusedMs`), `workstreams` (`{id, title, minutes}`), `meetingCount`,
 `meetingMs`, `codingAgentBlocks`, `codingAgentActiveSeconds`.
 

@@ -10,21 +10,24 @@ pub const HOUR_REPORT: &str = "\
 You turn one hour of a person's computer activity into a short report.
 
 Input: a distilled excerpt of what was on screen (grouped by app and window, \
-with local times), the hour's sessions with their measured minutes, and, when \
-present, coding-agent sessions and meetings.
+with local times), the hour's sessions numbered S1, S2, ... with their \
+measured minutes, and, when present, coding-agent sessions and meetings.
 
 Answer with one JSON object:
 - \"summary\": two or three sentences on what was done this hour, high level, \
 understandable by anyone; keep concrete names (tickets, pull requests, files, \
 documents, people) that the excerpt shows.
 - \"activities\": the distinct things done this hour, most time first; each has \
-\"description\" (one sentence starting with a past-tense verb, no clock times) \
-and \"minutes\" (your estimate of the time spent on it).
+\"description\" (one sentence starting with a past-tense verb, no clock times), \
+\"minutes\" (your estimate of the time spent on it), and \"sessions\" (the \
+numbers of the measured sessions it happened in: S3 is 3; empty when no \
+session fits).
 
 Rules: describe only what the input shows; never invent work. Group small \
 related steps into one activity. Leisure or personal browsing is an activity \
 too, described plainly. The minutes are only proportions: the app rescales them \
-to the measured active time.";
+to the measured active time, and takes the activity's clock times from the \
+sessions you name.";
 
 pub const WORKSTREAM_FOLD: &str = "\
 You keep the list of workstreams of a person's day: the threads of work the \
@@ -135,7 +138,8 @@ pub fn hour_report_schema() -> Value {
                     "required": ["description", "minutes"],
                     "properties": {
                         "description": { "type": "string" },
-                        "minutes": { "type": "number" }
+                        "minutes": { "type": "number" },
+                        "sessions": { "type": "array", "items": { "type": "integer" } }
                     }
                 }
             }

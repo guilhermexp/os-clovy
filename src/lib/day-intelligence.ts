@@ -10,7 +10,15 @@ export const TODAY_OPEN_EVENT = "clovy:today:open";
 export type DayIntelligenceProviderState = "ready" | "missing" | "insufficient";
 export type EmbedderStatus = "absent" | "downloading" | "ready" | "failed";
 
-export type HourActivityDto = { description: string; minutes: number };
+/** A measured stretch of work (UTC, RFC 3339). */
+export type ActivityPeriodDto = { startedAt: string; endedAt: string };
+
+export type HourActivityDto = {
+  description: string;
+  minutes: number;
+  /** Measured sessions the activity happened in; null when only the hour is known. */
+  periods: ActivityPeriodDto[] | null;
+};
 
 export type HourReportDto = {
   hour: string; // local "YYYY-MM-DDTHH"
@@ -23,12 +31,26 @@ export type HourReportDto = {
   generatedAt: string;
 };
 
+export type WorkstreamHourDto = {
+  hour: string; // local "YYYY-MM-DDTHH"
+  minutes: number;
+  note: string;
+  /**
+   * Bounds of the measured sessions the hour's work was located in: where,
+   * not how long (a session can hold several workstreams). Null for a record
+   * known only by hour.
+   */
+  periods: ActivityPeriodDto[] | null;
+  /** Of `minutes`, those located in `periods`; the rest is known only by hour. */
+  locatedMinutes: number;
+};
+
 export type WorkstreamDto = {
   id: number;
   title: string;
   summary: string;
   minutes: number;
-  hours: { hour: string; minutes: number; note: string }[];
+  hours: WorkstreamHourDto[];
 };
 
 export type StandupDto = { done: string[]; inProgress: string[]; blockers: string[] };
@@ -51,7 +73,7 @@ export type DayPanelsDto = {
   idleMs: number;
   awayMs: number;
   categories: { category: ActivityCategory; durationMs: number }[];
-  topApps: { appName: string; durationMs: number }[];
+  topApps: { appName: string; bundleId: string | null; durationMs: number }[];
   hours: { hour: string; focusedMs: number }[];
   workstreams: { id: number; title: string; minutes: number }[];
   meetingCount: number;

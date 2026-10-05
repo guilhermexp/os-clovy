@@ -130,6 +130,68 @@ async fn completed_hours_get_reports_with_measured_minutes_and_fold_into_workstr
 }
 
 #[tokio::test]
+async fn a_workstream_hour_takes_the_measured_times_of_the_sessions_its_activities_name() {
+    use super::hour::ActivityPeriod;
+    use crate::activity::store::timestamp;
+    use crate::activity::timeline::builder::parse_time;
+
+    let (_dir, store) = day_store().await;
+    let settings = settings();
+    let zone = zone();
+    let sources = sources();
+    let provider = FakeProvider::new(|request| {
+        Ok(match kind(request) {
+            "hour" => json!({
+                "summary": "Fixed the login redirect.",
+                "activities": [
+                    {"description": "Fixed the login redirect", "minutes": 30, "sessions": [1]},
+                    {"description": "Thought it over", "minutes": 5, "sessions": [7]}
+                ]
+            }),
+            "fold" => json!({"placements": [{
+                "workstream_id": 0, "title": "Login fix", "summary": "s", "activities": [1, 2]
+            }]}),
+            _ => summary_answer(),
+        })
+    });
+    let deps = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::En,
+        local(16, 5),
+    );
+    pipeline::catch_up_day(&deps, day(), false).await.unwrap();
+
+    // The prompt numbers the measured sessions the answer refers to.
+    let prompt = &provider.calls_of(prompts::HOUR_REPORT)[1].prompt;
+    assert!(prompt.contains("- S1 · 14:00-"), "{prompt}");
+
+    let measured = timeline_view(&store, &settings, local(14, 0), local(15, 0), local(16, 5))
+        .await
+        .unwrap();
+    let zed = &measured.sessions[0];
+    let expected = ActivityPeriod {
+        started_at: timestamp(parse_time(&zed.started_at).unwrap().max(local(14, 0))),
+        ended_at: timestamp(parse_time(&zed.ended_at).unwrap().min(local(15, 0))),
+    };
+    let workstreams = db::workstreams_of_day(&store, "2026-10-04").await.unwrap();
+    let fourteen = workstreams
+        .iter()
+        .flat_map(|workstream| &workstream.hours)
+        .find(|hour| hour.hour == "2026-10-04T14")
+        .unwrap();
+    // Minutes stay the hour's measured active minutes; the periods are the
+    // Zed session's bounds, and the activity naming no real session adds no
+    // period: its 6 minutes (weights 30:5 of 42) stay unlocated.
+    assert_eq!(fourteen.minutes, 42);
+    assert_eq!(fourteen.periods, Some(vec![expected]));
+    assert_eq!(fourteen.located_minutes, 36);
+}
+
+#[tokio::test]
 async fn a_new_hour_joins_its_workstream_and_leaves_the_others_untouched() {
     let (_dir, store) = day_store().await;
     let settings = settings();

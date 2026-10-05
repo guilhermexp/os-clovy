@@ -55,7 +55,8 @@ export type TimelineStatsDto = {
   focusedMs: number;
   idleMs: number;
   awayMs: number;
-  topApps: { appName: string; durationMs: number }[];
+  /** Apps told apart by bundle id; the name groups only sessions without one. */
+  topApps: { appName: string; bundleId: string | null; durationMs: number }[];
   categories: { category: ActivityCategory; durationMs: number }[];
 };
 
@@ -125,6 +126,22 @@ export async function onActivityTimelineUpdated(callback: () => void): Promise<U
   return listen(ACTIVITY_TIMELINE_EVENT, () => {
     callback();
   });
+}
+
+// One lookup per bundle id per session: icons do not change while Clovy runs.
+const appIcons = new Map<string, Promise<string | null>>();
+
+/**
+ * The installed app's real icon (PNG data URL) resolved on this Mac by bundle
+ * id, or null when the app is gone or its icon cannot be read.
+ */
+export function activityAppIcon(bundleId: string): Promise<string | null> {
+  let icon = appIcons.get(bundleId);
+  if (!icon) {
+    icon = invoke<string | null>("activity_app_icon", { request: { bundleId } }).catch(() => null);
+    appIcons.set(bundleId, icon);
+  }
+  return icon;
 }
 
 /**

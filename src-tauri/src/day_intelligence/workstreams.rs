@@ -6,14 +6,15 @@
 //! workstream's summary), a new one opens a workstream. Titles never change
 //! and workstreams that receive nothing are untouched, so a bad answer can
 //! only fail to place, never rewrite earlier hours. Minutes come from the
-//! hour report's measured minutes, never from the model.
+//! hour report's measured minutes, never from the model, and an hour's
+//! periods are the union of its placed activities' measured periods.
 
 use std::collections::HashSet;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::hour::HourActivity;
+use super::hour::{merge_periods, ActivityPeriod, HourActivity};
 use super::prompts;
 
 const TITLE_CHARS: usize = 80;
@@ -24,6 +25,14 @@ pub struct WorkstreamHourDto {
     pub hour: String,
     pub minutes: i64,
     pub note: String,
+    /// Bounds of the measured sessions the hour's work was located in; `None`
+    /// when only the hour is known (written before periods existed, or no
+    /// activity named a session). Where, not how long: active time is
+    /// `minutes`.
+    pub periods: Option<Vec<ActivityPeriod>>,
+    /// Of `minutes`, those from activities located in `periods`; the rest
+    /// happened somewhere in the hour. 0 when `periods` is `None`.
+    pub located_minutes: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -59,6 +68,8 @@ pub struct Append {
     pub note: String,
     /// The refreshed story; `None` keeps the stored summary.
     pub summary: Option<String>,
+    pub periods: Option<Vec<ActivityPeriod>>,
+    pub located_minutes: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +78,8 @@ pub struct Create {
     pub summary: String,
     pub minutes: i64,
     pub note: String,
+    pub periods: Option<Vec<ActivityPeriod>>,
+    pub located_minutes: i64,
 }
 
 pub fn parse_placements(value: &Value) -> Option<Vec<Placement>> {
@@ -118,6 +131,15 @@ pub fn plan_fold(
 ) -> FoldPlan {
     let mut plan = FoldPlan::default();
     let mut assigned: HashSet<usize> = HashSet::new();
+    // Minutes of the activities that named a session; the others stay
+    // unlocated inside the hour instead of being folded into the periods.
+    let located = |indices: &[usize]| -> i64 {
+        indices
+            .iter()
+            .filter(|&&index| activities[index].periods.is_some())
+            .map(|&index| activities[index].minutes)
+            .sum()
+    };
     for placement in placements {
         let picked: Vec<usize> = placement
             .activities
@@ -131,6 +153,8 @@ pub fn plan_fold(
             continue;
         }
         let minutes: i64 = picked.iter().map(|&index| activities[index].minutes).sum();
+        let periods = merge_periods(picked.iter().map(|&index| &activities[index].periods));
+        let located_minutes = located(&picked);
         let note = picked
             .iter()
             .map(|&index| activities[index].description.as_str())
@@ -153,12 +177,16 @@ pub fn plan_fold(
                     if summary.is_some() {
                         append.summary = summary;
                     }
+                    append.periods = merge_periods([&append.periods, &periods]);
+                    append.located_minutes += located_minutes;
                 }
                 None => plan.appends.push(Append {
                     workstream_id: placement.workstream_id,
                     minutes,
                     note,
                     summary,
+                    periods,
+                    located_minutes,
                 }),
             }
         } else {
@@ -172,6 +200,8 @@ pub fn plan_fold(
                 summary: summary.unwrap_or_else(|| note.clone()),
                 minutes,
                 note,
+                periods,
+                located_minutes,
             });
         }
     }
@@ -189,6 +219,8 @@ pub fn plan_fold(
             summary: note.clone(),
             minutes: left.iter().map(|&index| activities[index].minutes).sum(),
             note,
+            periods: merge_periods(left.iter().map(|&index| &activities[index].periods)),
+            located_minutes: located(&left),
         });
     }
     plan
@@ -240,6 +272,14 @@ mod tests {
         HourActivity {
             description: description.into(),
             minutes,
+            periods: None,
+        }
+    }
+
+    fn period(from: &str, to: &str) -> ActivityPeriod {
+        ActivityPeriod {
+            started_at: format!("2026-10-04T{from}:00.000000Z"),
+            ended_at: format!("2026-10-04T{to}:00.000000Z"),
         }
     }
 
@@ -298,6 +338,8 @@ mod tests {
                 minutes: 20,
                 note: "Fixed the redirect".into(),
                 summary: None,
+                periods: None,
+                located_minutes: 0,
             }]
         );
         assert_eq!(plan.creates.len(), 2);
@@ -322,5 +364,48 @@ mod tests {
         assert_eq!(plan.creates.len(), 1);
         assert_eq!(plan.creates[0].title, "Wrote the spec");
         assert_eq!(plan.creates[0].minutes, 42);
+    }
+
+    #[test]
+    fn a_placement_keeps_the_measured_periods_of_its_activities() {
+        let prior = vec![workstream(1, "Login fix")];
+        let activities = vec![
+            HourActivity {
+                periods: Some(vec![period("14:00", "14:20")]),
+                ..activity("Fixed the redirect", 20)
+            },
+            activity("Thought about tests", 5),
+            HourActivity {
+                periods: Some(vec![period("14:15", "14:30"), period("14:45", "14:50")]),
+                ..activity("Wrote the test", 15)
+            },
+            activity("Lunch", 10),
+        ];
+        let placement = |workstream_id, numbers: Vec<i64>| Placement {
+            workstream_id,
+            title: "Email".into(),
+            summary: String::new(),
+            activities: numbers,
+        };
+        let plan = plan_fold(
+            &prior,
+            &activities,
+            &[placement(1, vec![1, 2]), placement(1, vec![3])],
+        );
+        // Two placements on one workstream: overlapping periods join, the
+        // later stretch stays apart (a resumption). The 5 minutes of the
+        // activity without periods stay unlocated: the union does not claim
+        // the whole hour's work happened inside the periods.
+        assert_eq!(plan.appends.len(), 1);
+        assert_eq!(plan.appends[0].minutes, 40);
+        assert_eq!(plan.appends[0].located_minutes, 35);
+        assert_eq!(
+            plan.appends[0].periods,
+            Some(vec![period("14:00", "14:30"), period("14:45", "14:50")])
+        );
+        // Leftovers without any period stay known by hour only.
+        assert_eq!(plan.creates.len(), 1);
+        assert_eq!(plan.creates[0].periods, None);
+        assert_eq!(plan.creates[0].located_minutes, 0);
     }
 }

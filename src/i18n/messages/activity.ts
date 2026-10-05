@@ -181,6 +181,34 @@ export default defineMessages({
     "activity.state.unknownError": "Unknown error",
     "activity.state.openSettings": "Open Settings",
     "activity.lanes.sessions": "Activity",
+
+    "activity.view.label": "Show by",
+    "activity.view.workstreams": "Workstreams",
+    "activity.view.sessions": "Sessions",
+    "activity.grid.label": "Workstreams of the day",
+    "activity.grid.count": { one: "{count} workstream", other: "{count} workstreams" },
+    "activity.grid.active": "{duration} active",
+    "activity.grid.sittings": { one: "{count} sitting", other: "{count} sittings" },
+    "activity.grid.byHour": "By hour",
+    "activity.grid.byHourHint":
+      "Part of this work is known only by its hour: no session was tied to it, so there is no exact time.",
+    "activity.grid.now": "Now",
+    "activity.grid.noProvider":
+      "Workstreams need an activity provider. The captured sessions are below.",
+    "activity.grid.chooseProvider": "Choose a provider",
+    "activity.grid.pending":
+      "Workstreams appear after each hour ends and is summarized. The captured sessions are below.",
+    "activity.grid.loadError": "Could not load workstreams: {message}",
+    "activity.workstream.details": "Workstream details",
+    "activity.workstream.kicker": "Workstream",
+    "activity.workstream.back": "Back to the day overview",
+    "activity.workstream.when": "When",
+    "activity.workstream.break": "Break · {duration}",
+    "activity.workstream.hourActive": "{duration} active in this hour",
+    "activity.workstream.hourUnlocated": "{duration} in this hour without an exact time",
+    "activity.workstream.whenHint":
+      "Times of the sessions this work was found in. A session can hold more than one workstream, so these are not its duration; the active time above is.",
+    "activity.workstream.done": "What was done",
   },
   "pt-BR": {
     "activity.tab.label": "Atividade",
@@ -363,5 +391,36 @@ export default defineMessages({
     "activity.state.unknownError": "Erro desconhecido",
     "activity.state.openSettings": "Abrir Configurações",
     "activity.lanes.sessions": "Atividade",
+
+    "activity.view.label": "Mostrar por",
+    "activity.view.workstreams": "Frentes",
+    "activity.view.sessions": "Sessões",
+    "activity.grid.label": "Frentes de trabalho do dia",
+    "activity.grid.count": {
+      one: "{count} frente de trabalho",
+      other: "{count} frentes de trabalho",
+    },
+    "activity.grid.active": "{duration} ativos",
+    "activity.grid.sittings": { one: "{count} período", other: "{count} períodos" },
+    "activity.grid.byHour": "Por hora",
+    "activity.grid.byHourHint":
+      "Parte deste trabalho é conhecida só pela hora: nenhuma sessão foi associada a ela, então não há horário exato.",
+    "activity.grid.now": "Agora",
+    "activity.grid.noProvider":
+      "As frentes de trabalho precisam de um provedor de atividade. As sessões capturadas estão abaixo.",
+    "activity.grid.chooseProvider": "Escolher provedor",
+    "activity.grid.pending":
+      "As frentes de trabalho aparecem depois que cada hora termina e é resumida. As sessões capturadas estão abaixo.",
+    "activity.grid.loadError": "Não foi possível carregar as frentes de trabalho: {message}",
+    "activity.workstream.details": "Detalhes da frente de trabalho",
+    "activity.workstream.kicker": "Frente de trabalho",
+    "activity.workstream.back": "Voltar ao panorama do dia",
+    "activity.workstream.when": "Quando",
+    "activity.workstream.break": "Pausa · {duration}",
+    "activity.workstream.hourActive": "{duration} ativos nesta hora",
+    "activity.workstream.hourUnlocated": "{duration} nesta hora sem horário exato",
+    "activity.workstream.whenHint":
+      "Horários das sessões em que este trabalho aparece. Uma sessão pode ter mais de uma frente, então não são a duração dela; o tempo ativo acima é.",
+    "activity.workstream.done": "O que foi feito",
   },
 });

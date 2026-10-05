@@ -5,12 +5,13 @@
 //! `workstreams_of_day`, `hour_reports_of_day`.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sqlx::query::query;
 use sqlx::row::Row;
 use sqlx_sqlite::SqliteRow;
 
-use super::hour::HourActivity;
+use super::hour::{ActivityPeriod, HourActivity};
 use super::schedule::{next_attempt, RunOutcome, RunRecord};
 use super::summary::{DaySummaryDto, HourReportDto, Insight, Standup, SummaryTrigger};
 use super::workstreams::{FoldPlan, WorkstreamDto, WorkstreamHourDto};
@@ -117,8 +118,27 @@ pub async fn unfolded_reports(
     .collect())
 }
 
+/// `day_workstream_hours.periods_json`: where an hour's work was located and
+/// how many of its minutes that covers. NULL: only the hour is known.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredLocation {
+    periods: Vec<ActivityPeriod>,
+    located_minutes: i64,
+}
+
+fn location_json(periods: &Option<Vec<ActivityPeriod>>, located_minutes: i64) -> Option<String> {
+    let periods = periods.clone()?;
+    serde_json::to_string(&StoredLocation {
+        periods,
+        located_minutes,
+    })
+    .ok()
+}
+
 /// The day's workstreams (oldest first) with their hours; minutes are the
-/// sum of the hours' measured minutes.
+/// sum of the hours' measured minutes. An hour stored without periods (or
+/// with an unreadable location) reads as `periods: None`, known by hour only.
 pub async fn workstreams_of_day(
     store: &ActivityStore,
     day: &str,
@@ -131,16 +151,24 @@ pub async fn workstreams_of_day(
     for row in &rows {
         let id: i64 = row.get(0);
         let hours: Vec<WorkstreamHourDto> = query(
-            "SELECT hour, minutes, note FROM day_workstream_hours WHERE workstream_id = ? ORDER BY hour",
+            "SELECT hour, minutes, note, periods_json FROM day_workstream_hours
+             WHERE workstream_id = ? ORDER BY hour",
         )
         .bind(id)
         .fetch_all(store.pool())
         .await?
         .iter()
-        .map(|hour| WorkstreamHourDto {
-            hour: hour.get(0),
-            minutes: hour.get(1),
-            note: hour.get(2),
+        .map(|hour| {
+            let location: Option<StoredLocation> = hour
+                .get::<Option<&str>, _>(3)
+                .and_then(|json| serde_json::from_str(json).ok());
+            WorkstreamHourDto {
+                hour: hour.get(0),
+                minutes: hour.get(1),
+                note: hour.get(2),
+                located_minutes: location.as_ref().map_or(0, |found| found.located_minutes),
+                periods: location.map(|found| found.periods),
+            }
         })
         .collect();
         workstreams.push(WorkstreamDto {
@@ -178,13 +206,14 @@ pub async fn apply_fold(
     }
     for append in &plan.appends {
         let inserted = query(
-            "INSERT INTO day_workstream_hours (workstream_id, hour, minutes, note)
-             SELECT id, ?, ?, ? FROM day_workstreams WHERE id = ? AND day = ?
+            "INSERT INTO day_workstream_hours (workstream_id, hour, minutes, note, periods_json)
+             SELECT id, ?, ?, ?, ? FROM day_workstreams WHERE id = ? AND day = ?
              ON CONFLICT(workstream_id, hour) DO NOTHING",
         )
         .bind(hour)
         .bind(append.minutes)
         .bind(&append.note)
+        .bind(location_json(&append.periods, append.located_minutes))
         .bind(append.workstream_id)
         .bind(day)
         .execute(&mut *tx)
@@ -220,13 +249,17 @@ pub async fn apply_fold(
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();
-        query("INSERT INTO day_workstream_hours (workstream_id, hour, minutes, note) VALUES (?, ?, ?, ?)")
-            .bind(id)
-            .bind(hour)
-            .bind(create.minutes)
-            .bind(&create.note)
-            .execute(&mut *tx)
-            .await?;
+        query(
+            "INSERT INTO day_workstream_hours (workstream_id, hour, minutes, note, periods_json)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(hour)
+        .bind(create.minutes)
+        .bind(&create.note)
+        .bind(location_json(&create.periods, create.located_minutes))
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(true)

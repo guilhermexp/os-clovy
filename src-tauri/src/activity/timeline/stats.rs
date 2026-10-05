@@ -11,10 +11,13 @@ use super::db::{TimelineGapDto, TimelineSessionDto};
 
 const TOP_APPS: usize = 5;
 
+/// Time in one app. Apps are told apart by bundle id, so two apps with the
+/// same name stay two rows; the name groups only sessions without an id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppTime {
     pub app_name: String,
+    pub bundle_id: Option<String>,
     pub duration_ms: i64,
 }
 
@@ -56,7 +59,7 @@ pub fn day_stats(
     to: DateTime<Utc>,
 ) -> TimelineStatsDto {
     let mut stats = TimelineStatsDto::default();
-    let mut apps: Vec<(String, i64)> = Vec::new();
+    let mut apps: Vec<AppTime> = Vec::new();
     let mut categories: Vec<(Category, i64)> = Vec::new();
     for session in sessions {
         let ms = clipped_ms(&session.started_at, &session.ended_at, from, to);
@@ -64,7 +67,19 @@ pub fn day_stats(
             continue;
         }
         stats.focused_ms += ms;
-        add_to(&mut apps, session.app_name.clone(), ms);
+        let same_app = |app: &&mut AppTime| match (&app.bundle_id, &session.bundle_id) {
+            (Some(known), Some(bundle)) => known == bundle,
+            (None, None) => app.app_name == session.app_name,
+            _ => false,
+        };
+        match apps.iter_mut().find(same_app) {
+            Some(app) => app.duration_ms += ms,
+            None => apps.push(AppTime {
+                app_name: session.app_name.clone(),
+                bundle_id: session.bundle_id.clone(),
+                duration_ms: ms,
+            }),
+        }
         add_to(&mut categories, session.category, ms);
     }
     for gap in gaps {
@@ -74,15 +89,14 @@ pub fn day_stats(
             GapKind::Sleep | GapKind::Paused => stats.away_ms += ms,
         }
     }
-    apps.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    stats.top_apps = apps
-        .into_iter()
-        .take(TOP_APPS)
-        .map(|(app_name, duration_ms)| AppTime {
-            app_name,
-            duration_ms,
-        })
-        .collect();
+    apps.sort_by(|a, b| {
+        b.duration_ms
+            .cmp(&a.duration_ms)
+            .then_with(|| a.app_name.cmp(&b.app_name))
+            .then_with(|| a.bundle_id.cmp(&b.bundle_id))
+    });
+    apps.truncate(TOP_APPS);
+    stats.top_apps = apps;
     categories.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     stats.categories = categories
         .into_iter()
@@ -172,5 +186,49 @@ mod tests {
         let day_end = at(0) + Duration::days(1);
         let stats = day_stats(&sessions, &[], at(0), day_end);
         assert_eq!(stats.focused_ms, Duration::hours(1).num_milliseconds());
+    }
+
+    #[test]
+    fn top_apps_tell_apps_apart_by_bundle_id_not_by_name() {
+        let with_bundle = |id, name: &str, bundle: Option<&str>, from| TimelineSessionDto {
+            bundle_id: bundle.map(str::to_string),
+            ..session(id, name, Category::Coding, from, 1)
+        };
+        let sessions = [
+            // Two different apps that happen to share a name.
+            with_bundle(1, "Notes", Some("com.apple.Notes"), at(8)),
+            with_bundle(2, "Notes", Some("com.example.notes"), at(9)),
+            // One app renamed by an update keeps its single row.
+            with_bundle(3, "Code", Some("com.microsoft.VSCode"), at(10)),
+            with_bundle(
+                4,
+                "Visual Studio Code",
+                Some("com.microsoft.VSCode"),
+                at(11),
+            ),
+            // Without an id, the name is all there is.
+            with_bundle(5, "Legacy", None, at(12)),
+        ];
+        let stats = day_stats(&sessions, &[], at(0), at(0) + Duration::days(1));
+        let rows: Vec<(&str, Option<&str>, i64)> = stats
+            .top_apps
+            .iter()
+            .map(|app| {
+                (
+                    app.app_name.as_str(),
+                    app.bundle_id.as_deref(),
+                    app.duration_ms / 3_600_000,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Code", Some("com.microsoft.VSCode"), 2),
+                ("Legacy", None, 1),
+                ("Notes", Some("com.apple.Notes"), 1),
+                ("Notes", Some("com.example.notes"), 1),
+            ]
+        );
     }
 }

@@ -54,8 +54,22 @@ const readyDay: DayIntelligenceDto = {
       summary: "Planned and fixed the login redirect.",
       minutes: 72,
       hours: [
-        { hour: "2026-10-04T13", minutes: 30, note: "Planned the fix" },
-        { hour: "2026-10-04T14", minutes: 42, note: "Fixed the redirect" },
+        {
+          hour: "2026-10-04T13",
+          minutes: 30,
+          note: "Planned the fix",
+          periods: null,
+          locatedMinutes: 0,
+        },
+        {
+          hour: "2026-10-04T14",
+          minutes: 42,
+          note: "Fixed the redirect",
+          periods: [
+            { startedAt: "2026-10-04T17:00:00.000000Z", endedAt: "2026-10-04T17:42:00.000000Z" },
+          ],
+          locatedMinutes: 42,
+        },
       ],
     },
   ],
@@ -67,8 +81,8 @@ const readyDay: DayIntelligenceDto = {
       activeMinutes: 42,
       summary: "Fixed the login redirect and reviewed a pull request.",
       activities: [
-        { description: "Fixed the login redirect for KAN-123", minutes: 21 },
-        { description: "Reviewed the pagination pull request", minutes: 21 },
+        { description: "Fixed the login redirect for KAN-123", minutes: 21, periods: null },
+        { description: "Reviewed the pagination pull request", minutes: 21, periods: null },
       ],
       provider: "cli:claude",
       generatedAt: "2026-10-04T18:01:00.000000Z",
@@ -79,7 +93,7 @@ const readyDay: DayIntelligenceDto = {
     idleMs: 0,
     awayMs: 4 * 3600_000,
     categories: [{ category: "coding", durationMs: 72 * 60_000 }],
-    topApps: [{ appName: "Zed", durationMs: 42 * 60_000 }],
+    topApps: [{ appName: "Zed", bundleId: "dev.zed.Zed", durationMs: 42 * 60_000 }],
     hours: Array.from({ length: 24 }, (_, hour) => ({
       hour: `${DAY}T${String(hour).padStart(2, "0")}`,
       focusedMs: hour === 13 ? 30 * 60_000 : hour === 14 ? 42 * 60_000 : 0,

@@ -1,13 +1,29 @@
 //! The hour report: one call per completed hour with activity, answering a
 //! short summary and the hour's activities with estimated minutes. The
 //! minutes shown are Clovy's: the hour's measured active minutes split by the
-//! model's estimates used only as weights.
+//! model's estimates used only as weights. Each activity names the measured
+//! sessions it happened in; their bounds, clipped to the hour, become the
+//! activity's periods. A period says where the activity was located (a
+//! measured session), not how long the activity itself took: one session can
+//! hold several activities, so no clock time is estimated and no duration is
+//! read from a period.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::prompts;
 use super::sources::{CodingBlock, MeetingNote};
+use crate::activity::store::timestamp;
+use crate::activity::timeline::builder::parse_time;
+
+/// The bounds of a measured session an activity happened in (UTC, RFC 3339).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityPeriod {
+    pub started_at: String,
+    pub ended_at: String,
+}
 
 /// One activity of an hour report, with Clovy's minutes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,13 +31,74 @@ use super::sources::{CodingBlock, MeetingNote};
 pub struct HourActivity {
     pub description: String,
     pub minutes: i64,
+    /// Bounds of the measured sessions the activity happened in, clipped to
+    /// the hour and coalesced. `None` when only the hour is known: a report
+    /// written before periods existed, or an activity tied to no listed
+    /// session.
+    #[serde(default)]
+    pub periods: Option<Vec<ActivityPeriod>>,
+}
+
+/// One activity as the model answered it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnswerActivity {
+    pub description: String,
+    /// The model's estimate, used only as a weight.
+    pub minutes: f64,
+    /// 1-based numbers of the prompt's measured sessions.
+    pub sessions: Vec<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HourAnswer {
     pub summary: String,
-    /// Descriptions with the model's minutes (weights).
-    pub activities: Vec<(String, f64)>,
+    pub activities: Vec<AnswerActivity>,
+}
+
+/// Sorts `periods` and joins the ones that overlap or touch. Unreadable
+/// timestamps and empty periods are dropped.
+pub fn coalesce(periods: impl IntoIterator<Item = ActivityPeriod>) -> Vec<ActivityPeriod> {
+    let mut ranges: Vec<(DateTime<Utc>, DateTime<Utc>)> = periods
+        .into_iter()
+        .filter_map(|period| {
+            Some((
+                parse_time(&period.started_at)?,
+                parse_time(&period.ended_at)?,
+            ))
+        })
+        .filter(|(start, end)| end > start)
+        .collect();
+    ranges.sort();
+    let mut joined: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match joined.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => joined.push((start, end)),
+        }
+    }
+    joined
+        .into_iter()
+        .map(|(start, end)| ActivityPeriod {
+            started_at: timestamp(start),
+            ended_at: timestamp(end),
+        })
+        .collect()
+}
+
+/// Joins the periods of the activities that have them; `None` when none has
+/// (only the hour is known). Callers keep how many minutes were located
+/// (`located_minutes`), since activities without periods add none here.
+pub fn merge_periods<'a>(
+    lists: impl IntoIterator<Item = &'a Option<Vec<ActivityPeriod>>>,
+) -> Option<Vec<ActivityPeriod>> {
+    let mut any = false;
+    let mut all = Vec::new();
+    for list in lists.into_iter().flatten() {
+        any = true;
+        all.extend(list.iter().cloned());
+    }
+    any.then(|| coalesce(all))
+        .filter(|periods| !periods.is_empty())
 }
 
 /// Splits `active_minutes` across activities in proportion to `weights`
@@ -71,7 +148,7 @@ pub fn normalize_minutes(active_minutes: i64, weights: &[f64]) -> Vec<i64> {
 /// The model's answer, or `None` when it has no usable activity.
 pub fn parse_answer(value: &Value) -> Option<HourAnswer> {
     let summary = value.get("summary")?.as_str()?.trim().to_string();
-    let activities: Vec<(String, f64)> = value
+    let activities: Vec<AnswerActivity> = value
         .get("activities")?
         .as_array()?
         .iter()
@@ -81,7 +158,16 @@ pub fn parse_answer(value: &Value) -> Option<HourAnswer> {
                 .get("minutes")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
-            (!description.is_empty()).then(|| (description.to_string(), minutes))
+            let sessions = activity
+                .get("sessions")
+                .and_then(Value::as_array)
+                .map(|numbers| numbers.iter().filter_map(Value::as_i64).collect())
+                .unwrap_or_default();
+            (!description.is_empty()).then(|| AnswerActivity {
+                description: description.to_string(),
+                minutes,
+                sessions,
+            })
         })
         .collect();
     (!activities.is_empty()).then_some(HourAnswer {
@@ -90,30 +176,53 @@ pub fn parse_answer(value: &Value) -> Option<HourAnswer> {
     })
 }
 
-/// The answer's activities with Clovy's minutes, in the model's order.
-pub fn assemble(answer: &HourAnswer, active_minutes: i64) -> Vec<HourActivity> {
+/// The answer's activities with Clovy's minutes, in the model's order. An
+/// activity's periods are the measured bounds of the sessions it names
+/// (unknown numbers ignored); naming none leaves it known by hour only.
+pub fn assemble(
+    answer: &HourAnswer,
+    active_minutes: i64,
+    sessions: &[SessionLine],
+) -> Vec<HourActivity> {
     let weights: Vec<f64> = answer
         .activities
         .iter()
-        .map(|(_, minutes)| *minutes)
+        .map(|activity| activity.minutes)
         .collect();
     let minutes = normalize_minutes(active_minutes, &weights);
     answer
         .activities
         .iter()
         .zip(minutes)
-        .map(|((description, _), minutes)| HourActivity {
-            description: description.clone(),
-            minutes,
+        .map(|(activity, minutes)| {
+            let periods = coalesce(
+                activity
+                    .sessions
+                    .iter()
+                    .filter_map(|&number| usize::try_from(number).ok()?.checked_sub(1))
+                    .filter_map(|index| sessions.get(index))
+                    .map(|session| ActivityPeriod {
+                        started_at: timestamp(session.started_at),
+                        ended_at: timestamp(session.ended_at),
+                    }),
+            );
+            HourActivity {
+                description: activity.description.clone(),
+                minutes,
+                periods: (!periods.is_empty()).then_some(periods),
+            }
         })
         .collect()
 }
 
-/// A session of the hour as the prompt lists it.
+/// A session of the hour as the prompt lists it (numbered from 1).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionLine {
     pub start: String,
     pub end: String,
+    /// Measured bounds, clipped to the hour.
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
     pub app: String,
     pub context: Option<String>,
     pub category: String,
@@ -136,7 +245,7 @@ pub struct HourInput<'a> {
 /// text) inside the untrusted-data fence.
 pub fn prompt(input: &HourInput<'_>) -> String {
     let mut data = String::from("Sessions (measured):\n");
-    for session in input.sessions {
+    for (index, session) in input.sessions.iter().enumerate() {
         let context = session
             .context
             .as_deref()
@@ -148,7 +257,8 @@ pub fn prompt(input: &HourInput<'_>) -> String {
             .map(|window| format!(" · \"{window}\""))
             .unwrap_or_default();
         data.push_str(&format!(
-            "- {}-{} · {}{} · {} · {} min{}\n",
+            "- S{} · {}-{} · {}{} · {} · {} min{}\n",
+            index + 1,
             session.start,
             session.end,
             session.app,
@@ -214,19 +324,86 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(answer.summary, "Fixed the login bug.");
-        let activities = assemble(&answer, 42);
+        let activities = assemble(&answer, 42, &[]);
         assert_eq!(
             activities,
             vec![
                 HourActivity {
                     description: "Fixed the login bug".into(),
-                    minutes: 21
+                    minutes: 21,
+                    periods: None,
                 },
                 HourActivity {
                     description: "Reviewed a PR".into(),
-                    minutes: 21
+                    minutes: 21,
+                    periods: None,
                 },
             ]
         );
+    }
+
+    fn line(start: (u32, u32), end: (u32, u32)) -> SessionLine {
+        use chrono::TimeZone;
+        let at = |(hour, minute): (u32, u32)| {
+            Utc.with_ymd_and_hms(2026, 10, 4, hour, minute, 0).unwrap()
+        };
+        SessionLine {
+            start: String::new(),
+            end: String::new(),
+            started_at: at(start),
+            ended_at: at(end),
+            app: "Zed".into(),
+            context: None,
+            category: "coding".into(),
+            minutes: 0,
+            window: None,
+        }
+    }
+
+    #[test]
+    fn an_activity_takes_the_measured_times_of_the_sessions_it_names() {
+        let sessions = [
+            line((14, 0), (14, 10)),
+            line((14, 10), (14, 25)),
+            line((14, 25), (14, 30)),
+            line((14, 40), (14, 55)),
+        ];
+        let answer = parse_answer(&json!({
+            "summary": "s",
+            "activities": [
+                // Resumed after another session: two periods, touching ones joined.
+                {"description": "Fixed the login bug", "minutes": 30, "sessions": [4, 1, 2, 99, 0, -1]},
+                {"description": "Read the docs", "minutes": 10, "sessions": [3]},
+                {"description": "Thought about it", "minutes": 5, "sessions": [42]}
+            ]
+        }))
+        .unwrap();
+        let activities = assemble(&answer, 45, &sessions);
+        let period = |from: &str, to: &str| ActivityPeriod {
+            started_at: format!("2026-10-04T{from}:00.000000Z"),
+            ended_at: format!("2026-10-04T{to}:00.000000Z"),
+        };
+        assert_eq!(
+            activities[0].periods,
+            Some(vec![period("14:00", "14:25"), period("14:40", "14:55")])
+        );
+        assert_eq!(activities[1].periods, Some(vec![period("14:25", "14:30")]));
+        // Only unknown numbers: the activity is known by hour, never placed by guess.
+        assert_eq!(activities[2].periods, None);
+        // Minutes stay the measured split, whatever the periods span.
+        assert_eq!(
+            activities
+                .iter()
+                .map(|activity| activity.minutes)
+                .sum::<i64>(),
+            45
+        );
+    }
+
+    #[test]
+    fn reports_written_before_periods_read_as_known_by_hour() {
+        let legacy: Vec<HourActivity> =
+            serde_json::from_str(r#"[{"description": "Old", "minutes": 12}]"#).unwrap();
+        assert_eq!(legacy[0].periods, None);
     }
 }

@@ -123,6 +123,8 @@ fn session_line(
     SessionLine {
         start: hhmm(zone, start),
         end: hhmm(zone, end),
+        started_at: start,
+        ended_at: end,
         app: session.app_name.clone(),
         context: session.context.clone(),
         category: session.category.as_db().to_string(),
@@ -212,7 +214,7 @@ pub async fn report_hour(
         .as_ref()
         .and_then(hour::parse_answer)
         .ok_or(PipelineError::Unusable("hour report without activities"))?;
-    let activities = hour::assemble(&answer, active_minutes);
+    let activities = hour::assemble(&answer, active_minutes, &lines);
     db::insert_hour_report(
         deps.store,
         &NewHourReport {

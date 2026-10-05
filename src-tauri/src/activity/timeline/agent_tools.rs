@@ -128,7 +128,7 @@ pub(crate) fn stats_json(stats: &TimelineStatsDto) -> Value {
         "focusedMinutes": minutes(stats.focused_ms),
         "idleMinutes": minutes(stats.idle_ms),
         "awayMinutes": minutes(stats.away_ms),
-        "topApps": stats.top_apps.iter().map(|app| json!({ "app": app.app_name, "minutes": minutes(app.duration_ms) })).collect::<Vec<_>>(),
+        "topApps": stats.top_apps.iter().map(|app| json!({ "app": app.app_name, "bundleId": app.bundle_id, "minutes": minutes(app.duration_ms) })).collect::<Vec<_>>(),
         "categories": stats.categories.iter().map(|entry| json!({ "category": entry.category, "minutes": minutes(entry.duration_ms) })).collect::<Vec<_>>(),
     })
 }

@@ -893,6 +893,12 @@ async fn day_summary(
                         "hour": h.hour,
                         "minutes": h.minutes,
                         "note": note,
+                        // Bounds of the measured sessions the hour's work was
+                        // located in (where, not how long); null when only the
+                        // hour is known. `locatedMinutes` of `minutes` are
+                        // covered by them.
+                        "periods": h.periods,
+                        "locatedMinutes": h.located_minutes,
                         "truncated": note_trunc,
                     })
                 })

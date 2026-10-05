@@ -1067,7 +1067,7 @@ async fn coding_agent_sessions_list_enabled_sources_newest_first_within_retentio
 async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_state() {
     use crate::day_intelligence::db as day_db;
     use crate::day_intelligence::db::NewHourReport;
-    use crate::day_intelligence::hour::HourActivity;
+    use crate::day_intelligence::hour::{ActivityPeriod, HourActivity};
     use crate::day_intelligence::summary::{DaySummaryDto, Insight, Standup, SummaryTrigger};
     use crate::day_intelligence::workstreams::{Create, FoldPlan};
 
@@ -1088,6 +1088,7 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
             activities: vec![HourActivity {
                 description: "Coding Zephyr".into(),
                 minutes: 45,
+                periods: None,
             }],
             distilled: "distilled text".into(),
             distill_stats: json!({}),
@@ -1110,6 +1111,11 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
                 summary: "Scaffolding importer".into(),
                 minutes: 45,
                 note: "Initial scaffold".into(),
+                periods: Some(vec![ActivityPeriod {
+                    started_at: "2026-10-01T09:05:00.000000Z".into(),
+                    ended_at: "2026-10-01T09:50:00.000000Z".into(),
+                }]),
+                located_minutes: 30,
             }],
             appends: vec![],
         },
@@ -1182,6 +1188,11 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
     assert_eq!(workstreams.len(), 1);
     assert_eq!(workstreams[0]["title"], json!("Zephyr importer"));
     assert_eq!(workstreams[0]["minutes"], json!(45));
+    assert_eq!(
+        workstreams[0]["hours"][0]["periods"],
+        json!([{"startedAt": "2026-10-01T09:05:00.000000Z", "endedAt": "2026-10-01T09:50:00.000000Z"}])
+    );
+    assert_eq!(workstreams[0]["hours"][0]["locatedMinutes"], json!(30));
 
     let reports = result["hourReports"].as_array().unwrap();
     assert_eq!(reports.len(), 1);

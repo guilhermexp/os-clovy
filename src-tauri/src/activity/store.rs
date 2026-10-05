@@ -527,6 +527,15 @@ const MIGRATIONS: &[ActivityMigration] = &[
             )",
         ],
     },
+    // Where a workstream's hour was located: `{periods: [{startedAt, endedAt}],
+    // locatedMinutes}` (UTC bounds of the measured sessions its activities
+    // named, and the minutes those activities cover). NULL: only the hour is
+    // known (rows written before this migration, or no activity named one).
+    ActivityMigration {
+        version: 5,
+        name: "day_workstream_periods",
+        statements: &["ALTER TABLE day_workstream_hours ADD COLUMN periods_json TEXT"],
+    },
 ];
 
 pub fn timestamp(at: DateTime<Utc>) -> String {
@@ -1283,6 +1292,7 @@ mod tests {
                 (2, "activity_timeline".to_string()),
                 (3, "coding_agent_blocks".to_string()),
                 (4, "day_intelligence".to_string()),
+                (5, "day_workstream_periods".to_string()),
             ]
         );
         assert!(store
@@ -1306,7 +1316,7 @@ mod tests {
             "DROP TABLE day_hour_reports",
             "DROP TABLE day_summaries",
             "DROP TABLE day_intelligence_runs",
-            "DELETE FROM schema_migrations WHERE version = 4",
+            "DELETE FROM schema_migrations WHERE version >= 4",
         ] {
             query(statement).execute(&store.pool).await.unwrap();
         }
@@ -1320,7 +1330,7 @@ mod tests {
             .iter()
             .map(|row| row.get(0))
             .collect();
-        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
         assert!(
             crate::day_intelligence::db::summary_of_day(&store, "2026-10-01")
                 .await
@@ -1328,6 +1338,35 @@ mod tests {
                 .is_none()
         );
         assert_eq!(store.frames_after(0, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn day_intelligence_database_keeps_its_workstreams_known_by_hour_after_migration_5() {
+        let (_dir, path) = temp_db();
+        let keys = MemoryKeyStore::default();
+        // A database written by the day-intelligence build: migrations 1 to 4,
+        // with a workstream hour that has only its minutes.
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        for statement in [
+            "ALTER TABLE day_workstream_hours DROP COLUMN periods_json",
+            "DELETE FROM schema_migrations WHERE version = 5",
+            "INSERT INTO day_workstreams (id, day, title, summary, first_hour, last_hour, created_at, updated_at)
+             VALUES (1, '2026-10-01', 'Login fix', 's', '2026-10-01T09', '2026-10-01T09', 'x', 'x')",
+            "INSERT INTO day_workstream_hours (workstream_id, hour, minutes, note)
+             VALUES (1, '2026-10-01T09', 35, 'Fixed the redirect')",
+        ] {
+            query(statement).execute(&store.pool).await.unwrap();
+        }
+        store.close().await;
+
+        let store = ActivityStore::open(&path, &keys).await.expect("upgrade");
+        let workstreams = crate::day_intelligence::db::workstreams_of_day(&store, "2026-10-01")
+            .await
+            .unwrap();
+        assert_eq!(workstreams.len(), 1);
+        assert_eq!(workstreams[0].minutes, 35);
+        assert_eq!(workstreams[0].hours[0].periods, None);
+        assert_eq!(workstreams[0].hours[0].located_minutes, 0);
     }
 
     #[tokio::test]

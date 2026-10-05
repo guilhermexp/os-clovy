@@ -97,8 +97,8 @@ const mockReadyTimeline: ActivityTimelineDto = {
     idleMs: 3600_000, // 1h
     awayMs: 0,
     topApps: [
-      { appName: "Visual Studio Code", durationMs: 3600_000 },
-      { appName: "Google Chrome", durationMs: 3600_000 },
+      { appName: "Visual Studio Code", bundleId: "com.microsoft.VSCode", durationMs: 3600_000 },
+      { appName: "Google Chrome", bundleId: "com.google.Chrome", durationMs: 3600_000 },
     ],
     categories: [
       { category: "coding", durationMs: 3600_000 },

@@ -1,5 +1,6 @@
 import { useLocale, useT } from "../../i18n";
 import type { TimelineStatsDto } from "../../lib/activity-timeline";
+import { AppIcon } from "./AppIcon";
 import { CATEGORY_COLOR_VARS, CATEGORY_LABEL_KEYS, formatDuration } from "./timeline-utils";
 
 type TimelineStatsProps = {
@@ -126,26 +127,31 @@ export function TimelineStats({ stats }: TimelineStatsProps) {
       {/* Top Apps */}
       {stats.topApps.length > 0 ? (
         <section className="timeline-stats-section">
-          <h4 className="timeline-stats-heading">{t("activity.stats.topApps")}</h4>
-          <div className="timeline-top-apps-list">
+          <h4 className="timeline-stats-heading" id="timeline-top-apps-heading">
+            {t("activity.stats.topApps")}
+          </h4>
+          <ul className="timeline-top-apps-list" aria-labelledby="timeline-top-apps-heading">
             {stats.topApps.map((app) => {
               const pctOfMax = Math.round((app.durationMs / maxAppMs) * 100);
 
               return (
-                <div key={app.appName} className="timeline-top-app-row">
-                  <div className="timeline-top-app-header">
-                    <span className="timeline-top-app-name">{app.appName}</span>
-                    <span className="timeline-top-app-time">
-                      {formatDuration(app.durationMs, locale)}
-                    </span>
+                <li key={app.bundleId ?? `name:${app.appName}`} className="timeline-top-app-row">
+                  <AppIcon bundleId={app.bundleId} size={20} />
+                  <div className="timeline-top-app-body">
+                    <div className="timeline-top-app-header">
+                      <span className="timeline-top-app-name">{app.appName}</span>
+                      <span className="timeline-top-app-time">
+                        {formatDuration(app.durationMs, locale)}
+                      </span>
+                    </div>
+                    <div className="timeline-top-app-track">
+                      <div className="timeline-top-app-fill" style={{ width: `${pctOfMax}%` }} />
+                    </div>
                   </div>
-                  <div className="timeline-top-app-track">
-                    <div className="timeline-top-app-fill" style={{ width: `${pctOfMax}%` }} />
-                  </div>
-                </div>
+                </li>
               );
             })}
-          </div>
+          </ul>
         </section>
       ) : null}
     </aside>

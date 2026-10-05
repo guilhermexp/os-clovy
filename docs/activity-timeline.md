@@ -147,6 +147,16 @@ allowed rows are found or the matches run out.
 | `activity_timeline` | `{ request: { from, to } }` (RFC 3339) | `{ availability, message, captureEnabled, sessions, gaps, stats }`; a gap with `ongoing: true` (`id` 0) runs to the time of the read |
 | `activity_timeline_session` | `{ request: { id } }` | `{ session, windows, textExcerpt }`; error `activity_session_not_found` |
 | `activity_timeline_search` | `{ request: { query, from, to, limit } }` (`from`/`to`/`limit` nullable; limit 1 to 200, default 50) | `{ availability, results }` |
+| `activity_app_icon` | `{ request: { bundleId } }` | The installed app's icon as a 64x64 PNG data URL (at most 64 KB), or `null` when the app is gone, the id is malformed, or the platform is not macOS |
+
+`stats.topApps` (`{ appName, bundleId, durationMs }`, at most 5) tells apps
+apart by bundle id: two apps sharing a name stay two rows, and an app renamed
+by an update stays one; sessions without a bundle id group by name.
+`activity_app_icon` (`activity/app_icon.rs`) resolves only by bundle id through
+Launch Services (`NSWorkspace`, no scan of `/Applications`, no network), draws
+the icon into a bitmap, and caches every answer (including "no icon") per
+bundle id for the life of the process (256 ids, then the cache starts over);
+the frontend keeps one request per id (`activityAppIcon`).
 
 `availability`: `ready`, `neverEnabled` (no activity database and capture
 off), `unsupported` (not macOS), `keyMissing`, `error`. When capture is off
@@ -173,15 +183,50 @@ these two tools under the same names plus four more over the same query API
 ## "Today" view
 
 First-level sidebar view (hidden where capture is unsupported). Day navigation,
-a 24 h strip with one block per session colored by category and distinct gap
-segments (idle, system sleep, paused: manual, work hours, low disk, protected
-video), the live active session (refetch on the event and every 30 s), a
-chronological list, session detail (windows, URLs, excerpt), statistics, and
-search with a period filter whose results open the day at that session. Hour
-ticks sit at the real local times of the selected day (`hourTicks`), so on
-23- and 25-hour DST days they line up with the blocks.
-The header switches between this timeline and the "Day summary" section
-([day-intelligence.md](day-intelligence.md)); the day strip stays above both.
+search with a period filter whose results open the day at that session, and
+two sections: this timeline and the "Day summary"
+([day-intelligence.md](day-intelligence.md)).
+
+The timeline shows the day's workstreams by default ("Workstreams" /
+"Sessions" switch):
+
+- **Grid** (`WorkstreamGrid.tsx`, layout in `day-grid-layout.ts`): a vertical
+  axis of the day's real local hours with one card per workstream, from its
+  first to its last sitting. Sittings are the bounds of the measured sessions
+  its hours' work was located in (`periods`,
+  [day-intelligence.md](day-intelligence.md#schema-migration-4-day_intelligence)),
+  joined when under a minute apart and marked on the card's edge. They say
+  where the work happened, not how long it took (one session can hold several
+  workstreams), so no sitting is shown with a duration; the card prints the
+  workstream's active minutes, which never come from its height or span. Work
+  known only by hour is drawn as its whole local hour (on a fall-back day the
+  repeated hour's whole two-hour window) and the card is labeled "By hour"
+  with whole-hour times: a legacy hour without periods, or the minutes of an
+  hour that no session was named for (`minutes - locatedMinutes`). Workstreams
+  whose cards overlap share the width in lanes. Hours without work collapse
+  into one short step; inside hours with work the scale is linear in real
+  time, so 23- and 25-hour DST days keep real durations. Today shows a now
+  line.
+- **Side panel**: without a selection, the day overview (focused, idle, away,
+  categories, top apps with their real icons). Selecting a card (click or
+  keyboard) keeps the grid, highlights the card, and shows its active time,
+  its sittings (session times, with a note that they are not its duration),
+  hour-only parts with their minutes, breaks between sittings only when all of
+  its work was located, and what was done per hour; "Back to the day
+  overview", clicking the card again, or Escape returns. A session from search
+  shows the session detail (windows, URLs, excerpt). Changing the day clears
+  any selection.
+- **No workstreams yet** (no activity provider, or no completed hour folded):
+  a notice says why (with a shortcut to the provider settings) and the day's
+  captured sessions stay listed below it.
+- **Sessions**: the 24 h strip (one block per session colored by category,
+  distinct gap segments: idle, system sleep, paused for manual, work hours,
+  low disk, protected video, plus the extra lanes below) and the chronological
+  list with the live active session. Hour ticks sit at the real local times of
+  the selected day (`hourTicks`).
+
+Data refreshes on `clovy://activity-timeline`, every 30 s for today, and on
+`clovy://day-intelligence` for the day shown (`use-day-intelligence.ts`).
 
 ### Lane extension point
 

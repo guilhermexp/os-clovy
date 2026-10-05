@@ -460,6 +460,7 @@ pub fn run() {
             activity::timeline::activity_timeline,
             activity::timeline::activity_timeline_session,
             activity::timeline::activity_timeline_search,
+            activity::app_icon::activity_app_icon,
             day_intelligence::day_intelligence_day,
             day_intelligence::day_intelligence_generate,
             mcp_server::mcp_server_status,

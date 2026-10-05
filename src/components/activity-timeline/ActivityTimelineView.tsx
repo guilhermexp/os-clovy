@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
@@ -19,18 +19,26 @@ import {
   takePendingTodayOpen,
 } from "../../lib/day-intelligence";
 import { DaySummaryPanel } from "./DaySummaryPanel";
+import { layoutDayGrid } from "./day-grid-layout";
 import { TimelineDayStrip } from "./TimelineDayStrip";
 import { TimelineSearch } from "./TimelineSearch";
 import { TimelineSessionDetail } from "./TimelineSessionDetail";
 import { TimelineSessionList } from "./TimelineSessionList";
 import { TimelineStats } from "./TimelineStats";
 import { formatDayHeader } from "./timeline-utils";
+import { useDayIntelligence } from "./use-day-intelligence";
+import { WorkstreamDetail } from "./WorkstreamDetail";
+import { WorkstreamGrid } from "./WorkstreamGrid";
 
 export type ActivityTimelineViewProps = {
   onNavigateToSettings?: (tab?: "activity" | "models") => void;
 };
 
 type TodaySection = "timeline" | "summary";
+/** The timeline as workstreams on the hour grid, or as captured sessions. */
+type TimelineMode = "workstreams" | "sessions";
+/** What the side panel shows instead of the day overview. */
+type Selection = { kind: "session"; id: number } | { kind: "workstream"; id: number } | null;
 
 export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineViewProps) {
   const t = useT();
@@ -46,7 +54,8 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
   const [timeline, setTimeline] = useState<ActivityTimelineDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
+  const [selection, setSelection] = useState<Selection>(null);
+  const [mode, setMode] = useState<TimelineMode>("workstreams");
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(
@@ -54,7 +63,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
       onTodayOpenRequest((day) => {
         const date = dateOfDayKey(day);
         if (!date) return;
-        setSelectedSessionId(null);
+        setSelection(null);
         setSelectedDate(date);
         setSection("summary");
       }),
@@ -128,28 +137,59 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
     };
   }, [selectedDate, isToday, t]);
 
-  // A session belongs to one day: changing the day by hand closes its detail.
+  const day = dayKey(selectedDate);
+  const intelligence = useDayIntelligence(day);
+  const workstreams = intelligence.data?.workstreams;
+  const gridNowMs = isToday ? nowMs : null;
+  const layout = useMemo(
+    () =>
+      layoutDayGrid(workstreams ?? [], {
+        dayStartMs,
+        dayEndMs,
+        nowMs: gridNowMs,
+      }),
+    [workstreams, dayStartMs, dayEndMs, gridNowMs],
+  );
+  const selectedCard =
+    selection?.kind === "workstream"
+      ? layout.cards.find((card) => card.workstream.id === selection.id)
+      : undefined;
+
+  // Escape returns the side panel to the day overview.
+  useEffect(() => {
+    if (selection === null) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelection(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selection]);
+
+  // A selection belongs to one day: changing the day by hand clears it.
   const handlePrevDay = () => {
-    setSelectedSessionId(null);
+    setSelection(null);
     setSelectedDate((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() - 1));
   };
 
   const handleNextDay = () => {
     if (isToday) return;
-    setSelectedSessionId(null);
+    setSelection(null);
     setSelectedDate((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() + 1));
   };
 
   const handleJumpToday = () => {
-    setSelectedSessionId(null);
+    setSelection(null);
     setSelectedDate(new Date());
   };
 
   const handleSelectSearchResult = (result: TimelineSearchResultDto) => {
     const resultDate = new Date(result.seenAt);
     setSelectedDate(resultDate);
-    setSelectedSessionId(result.sessionId);
+    setSelection({ kind: "session", id: result.sessionId });
   };
+
+  const selectSession = (id: number) => setSelection({ kind: "session", id });
+  const selectedSessionId = selection?.kind === "session" ? selection.id : null;
 
   // Header date display string
   const dateHeading = isToday
@@ -294,50 +334,119 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
             </div>
           ) : null}
 
-          {/* 24-hour horizontal Day Strip */}
-          {timeline ? (
-            <TimelineDayStrip
-              sessions={timeline.sessions}
-              gaps={timeline.gaps}
-              dayStartMs={dayStartMs}
-              dayEndMs={dayEndMs}
-              from={range.from}
-              to={range.to}
-              selectedSessionId={selectedSessionId}
-              onSelectSession={(id) => {
-                setSection("timeline");
-                setSelectedSessionId(id);
-              }}
-              nowMs={nowMs}
-              isToday={isToday}
-            />
-          ) : null}
-
           {section === "summary" ? (
-            <DaySummaryPanel
-              day={dayKey(selectedDate)}
-              onNavigateToSettings={onNavigateToSettings}
-            />
+            <DaySummaryPanel day={day} onNavigateToSettings={onNavigateToSettings} />
           ) : (
-            /* Bottom Area: Chronological Sessions List + Stats Panel + Detail Panel */
+            /* Main column (grid of workstreams, or captured sessions) + side panel */
             <div className="timeline-lower-grid">
               <div className="timeline-list-column">
-                {timeline ? (
-                  <TimelineSessionList
-                    sessions={timeline.sessions}
-                    gaps={timeline.gaps}
-                    selectedSessionId={selectedSessionId}
-                    onSelectSession={(id) => setSelectedSessionId(id)}
+                <fieldset className="timeline-mode-switch" aria-label={t("activity.view.label")}>
+                  {(["workstreams", "sessions"] as const).map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className="timeline-section-tab"
+                      aria-pressed={mode === id}
+                      data-active={mode === id || undefined}
+                      onClick={() => setMode(id)}
+                    >
+                      {id === "workstreams"
+                        ? t("activity.view.workstreams")
+                        : t("activity.view.sessions")}
+                    </button>
+                  ))}
+                </fieldset>
+                {mode === "sessions" ? (
+                  timeline ? (
+                    <>
+                      <TimelineDayStrip
+                        sessions={timeline.sessions}
+                        gaps={timeline.gaps}
+                        dayStartMs={dayStartMs}
+                        dayEndMs={dayEndMs}
+                        from={range.from}
+                        to={range.to}
+                        selectedSessionId={selectedSessionId}
+                        onSelectSession={selectSession}
+                        nowMs={nowMs}
+                        isToday={isToday}
+                      />
+                      <TimelineSessionList
+                        sessions={timeline.sessions}
+                        gaps={timeline.gaps}
+                        selectedSessionId={selectedSessionId}
+                        onSelectSession={selectSession}
+                      />
+                    </>
+                  ) : null
+                ) : layout.cards.length > 0 ? (
+                  <WorkstreamGrid
+                    layout={layout}
+                    nowMs={gridNowMs}
+                    selectedId={selectedCard ? selectedCard.workstream.id : null}
+                    onSelect={(id) =>
+                      setSelection((current) =>
+                        current?.kind === "workstream" && current.id === id
+                          ? null
+                          : { kind: "workstream", id },
+                      )
+                    }
                   />
-                ) : null}
+                ) : !intelligence.loaded ? (
+                  <div className="timeline-loading-state">
+                    <span className="dot-spinner" aria-hidden="true" />
+                  </div>
+                ) : (
+                  /* No workstream yet: say why, and keep the captured sessions at hand. */
+                  <>
+                    {timeline && timeline.sessions.length > 0 ? (
+                      <div className="timeline-notice-banner timeline-notice-muted">
+                        <IconCircleInfo size={15} aria-hidden="true" />
+                        <span className="timeline-notice-text">
+                          {intelligence.error
+                            ? t("activity.grid.loadError", { message: intelligence.error })
+                            : intelligence.data?.provider === "missing" ||
+                                intelligence.data?.provider === "insufficient"
+                              ? t("activity.grid.noProvider")
+                              : t("activity.grid.pending")}
+                        </span>
+                        {!intelligence.error &&
+                        intelligence.data?.provider !== "ready" &&
+                        intelligence.data &&
+                        onNavigateToSettings ? (
+                          <button
+                            type="button"
+                            className="timeline-notice-action-btn"
+                            onClick={() => onNavigateToSettings("models")}
+                          >
+                            <IconSettingsGear4 size={14} aria-hidden="true" />
+                            {t("activity.grid.chooseProvider")}
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {timeline ? (
+                      <TimelineSessionList
+                        sessions={timeline.sessions}
+                        gaps={timeline.gaps}
+                        selectedSessionId={selectedSessionId}
+                        onSelectSession={selectSession}
+                      />
+                    ) : null}
+                  </>
+                )}
               </div>
 
               {selectedSessionId !== null ? (
                 <div className="timeline-detail-column">
                   <TimelineSessionDetail
                     sessionId={selectedSessionId}
-                    onClose={() => setSelectedSessionId(null)}
+                    onClose={() => setSelection(null)}
                   />
+                </div>
+              ) : selectedCard ? (
+                <div className="timeline-detail-column">
+                  <WorkstreamDetail card={selectedCard} onBack={() => setSelection(null)} />
                 </div>
               ) : timeline?.stats ? (
                 <div className="timeline-stats-column">

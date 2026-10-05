@@ -4,9 +4,11 @@
 //!
 //! Layout: `engine` (2 s tick and privacy decisions), `platform` (OS seam,
 //! `macos` implements it), `store` + `key` (SQLCipher database and its
-//! Keychain key), `settings`, `filter`, `schedule`, `input`, `redact`, and
-//! `timeline` (sessions, gaps, categories, search; `docs/activity-timeline.md`).
+//! Keychain key), `settings`, `filter`, `schedule`, `input`, `redact`,
+//! `timeline` (sessions, gaps, categories, search; `docs/activity-timeline.md`),
+//! and `app_icon` (local app icons by bundle id for "Top apps").
 
+pub mod app_icon;
 pub mod engine;
 pub mod filter;
 pub mod input;

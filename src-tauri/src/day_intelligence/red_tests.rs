@@ -5,7 +5,7 @@ use chrono::{Duration, NaiveDate, NaiveDateTime};
 
 use super::distill::{distill, SessionText};
 use super::embedder::NoEmbedder;
-use super::hour::{assemble, normalize_minutes, HourAnswer};
+use super::hour::{assemble, normalize_minutes, AnswerActivity, HourAnswer};
 use super::notify::{NoticeKind, NoticeQueue};
 use super::schedule::{auto_summary_due, FixedZone, LocalZone, RunOutcome, RunRecord};
 use super::workstreams::{plan_fold, Append, Placement, WorkstreamDto, WorkstreamHourDto};
@@ -29,12 +29,16 @@ fn reported_minutes_are_the_measured_minutes_split_by_the_model_weights() {
     assert_eq!(normalize_minutes(42, &[30.0, 30.0]), vec![21, 21]);
     let answer = HourAnswer {
         summary: "s".into(),
-        activities: vec![
-            ("Fixed the login bug".into(), 30.0),
-            ("Reviewed a PR".into(), 30.0),
-        ],
+        activities: ["Fixed the login bug", "Reviewed a PR"]
+            .into_iter()
+            .map(|description| AnswerActivity {
+                description: description.into(),
+                minutes: 30.0,
+                sessions: Vec::new(),
+            })
+            .collect(),
     };
-    let minutes: Vec<i64> = assemble(&answer, 42)
+    let minutes: Vec<i64> = assemble(&answer, 42, &[])
         .iter()
         .map(|activity| activity.minutes)
         .collect();
@@ -83,6 +87,8 @@ fn an_hour_continuing_a_workstream_is_appended_to_it_only() {
                 hour: "2026-10-04T13".into(),
                 minutes: 35,
                 note: "Investigou".into(),
+                periods: None,
+                located_minutes: 0,
             }],
         },
         WorkstreamDto {
@@ -96,9 +102,14 @@ fn an_hour_continuing_a_workstream_is_appended_to_it_only() {
     let activities = assemble(
         &HourAnswer {
             summary: "s".into(),
-            activities: vec![("Corrigiu o redirecionamento".into(), 1.0)],
+            activities: vec![AnswerActivity {
+                description: "Corrigiu o redirecionamento".into(),
+                minutes: 1.0,
+                sessions: Vec::new(),
+            }],
         },
         40,
+        &[],
     );
     let plan = plan_fold(
         &prior,
@@ -118,6 +129,8 @@ fn an_hour_continuing_a_workstream_is_appended_to_it_only() {
             minutes: 40,
             note: "Corrigiu o redirecionamento".into(),
             summary: Some("Investigou e corrigiu o redirecionamento.".into()),
+            periods: None,
+            located_minutes: 0,
         }]
     );
 }
