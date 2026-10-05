@@ -23,7 +23,9 @@ Requirements: the `clovy-mcp-server` spec of the OpenSpec change
 | `src/components/settings/McpServerSection.tsx`, `src/lib/mcp-server.ts` | Settings, Agent section and its bindings |
 
 Tests: `cargo test mcp_server` (protocol against test databases, the relay
-through a real socket, refusal without the secret) and
+through a real socket, refusal without the secret, and
+`src-tauri/tests/mcp_server_stdio.rs`: the built `clovy-mcp` binary spawned
+over stdio against the app side served in the test process) and
 `src/test/mcp-server-section.test.tsx`.
 
 ## Shape
