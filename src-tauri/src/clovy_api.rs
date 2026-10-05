@@ -1284,16 +1284,21 @@ async fn proxy_local_agent_chat_completions(
     })
 }
 
-/// The endpoint for an agent request: the registered endpoint serving the
-/// requested model (tagged or raw id), else the chat endpoint.
+/// The endpoint for an agent request: the endpoint named by the session's
+/// tagged option (never another one, even if it serves the same model), else
+/// the registered endpoint serving the requested model (tagged or raw id),
+/// else the chat endpoint.
 fn agent_local_settings(body: &serde_json::Value) -> LocalGenerationSettings {
     let requested = body
         .get("model")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    let model_id = decode_tagged_model(requested, LOCAL_GENERATION_OPTION_ID_PREFIX)
-        .unwrap_or_else(|| requested.to_string());
+    let (model_id, endpoint_id) =
+        decode_local_option(requested).unwrap_or_else(|| (requested.to_string(), None));
+    if let Some(endpoint_id) = endpoint_id {
+        return crate::providers::local_generation_settings_for_endpoint(&endpoint_id);
+    }
     let by_model = crate::providers::local_generation_settings_for_model(&model_id);
     if by_model.base_url.is_empty() {
         crate::providers::local_generation_settings()
@@ -1515,7 +1520,12 @@ fn normalize_agent_chat_request_for_proxy(body: &mut serde_json::Value) {
         LOCAL_GENERATION_OPTION_ID_PREFIX,
     ] {
         if request_model.starts_with(prefix) {
-            if let Some(decoded) = decode_tagged_model(&request_model, prefix) {
+            let decoded = if prefix == LOCAL_GENERATION_OPTION_ID_PREFIX {
+                decode_local_option(&request_model).map(|(model_id, _)| model_id)
+            } else {
+                decode_tagged_model(&request_model, prefix)
+            };
+            if let Some(decoded) = decoded {
                 request_model = decoded;
                 object.insert(
                     "model".to_string(),
@@ -1569,6 +1579,40 @@ fn decode_tagged_model(model: &str, prefix: &str) -> Option<String> {
     (!decoded.is_empty()).then_some(decoded)
 }
 
+/// The tagged model id of a registered endpoint chosen as a session's engine:
+/// `__june_local_generation__:<model>@<endpoint id>`, both URL-encoded (so
+/// neither part can contain `@`). The older form without `@<endpoint id>`
+/// still routes by model id.
+pub(crate) fn endpoint_option_id(model_id: &str, endpoint_id: &str) -> String {
+    format!(
+        "{LOCAL_GENERATION_OPTION_ID_PREFIX}{}@{}",
+        urlencoding::encode(model_id.trim()),
+        urlencoding::encode(endpoint_id.trim())
+    )
+}
+
+/// The model id and, when present, the endpoint id of a tagged local option.
+fn decode_local_option(model: &str) -> Option<(String, Option<String>)> {
+    let encoded = model
+        .trim()
+        .strip_prefix(LOCAL_GENERATION_OPTION_ID_PREFIX)?;
+    let (model_part, endpoint_part) = match encoded.split_once('@') {
+        Some((model_part, endpoint_part)) => (model_part, Some(endpoint_part)),
+        None => (encoded, None),
+    };
+    let model_id = urlencoding::decode(model_part).ok()?.trim().to_string();
+    if model_id.is_empty() {
+        return None;
+    }
+    let endpoint_id = match endpoint_part {
+        Some(part) => {
+            Some(urlencoding::decode(part).ok()?.trim().to_string()).filter(|id| !id.is_empty())
+        }
+        None => None,
+    };
+    Some((model_id, endpoint_id))
+}
+
 pub(crate) fn is_canonical_agent_model(model: &str) -> bool {
     let model = model.trim();
     !model.is_empty()
@@ -1609,15 +1653,14 @@ fn agent_generation_route(
         .unwrap_or_default();
     let local_model_id = settings.model_id.trim();
     if requested_model.starts_with(LOCAL_GENERATION_OPTION_ID_PREFIX) {
-        let selected_local_model =
-            decode_tagged_model(requested_model, LOCAL_GENERATION_OPTION_ID_PREFIX).ok_or_else(
-                || {
-                    AppError::new(
-                "local_model_invalid",
-                "The local model selected for this session is invalid. Choose the model again.",
-            )
-                },
-            )?;
+        let selected_local_model = decode_local_option(requested_model)
+            .map(|(model_id, _)| model_id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "local_model_invalid",
+                    "The local model selected for this session is invalid. Choose the model again.",
+                )
+            })?;
         if settings.base_url.trim().is_empty() || selected_local_model != local_model_id {
             return Err(AppError::new(
                 "local_model_unavailable",

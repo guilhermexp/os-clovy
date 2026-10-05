@@ -22,7 +22,7 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub const SERVER_UNAVAILABLE: i64 = -32000;
 const RESOURCE_NOT_FOUND: i64 = -32002;
 
-const INSTRUCTIONS: &str = "Read-only access to the user's Clovy notes, dictations, and memories (from the data set open in Clovy) and, when activity capture is on, their activity timeline and coding-agent work on this Mac. Read clovy://context for the current date, time, and time zone before resolving words like \"today\"; clovy://guide explains which tool answers which question.";
+const INSTRUCTIONS: &str = "Read-only access to the user's Clovy notes, dictations, and memories (from the data set open in Clovy) and, when activity capture is on, their activity timeline, day summaries, and coding-agent work on this Mac. Read clovy://context for the current date, time, and time zone before resolving words like \"today\"; clovy://guide explains which tool answers which question.";
 
 pub fn result_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -276,7 +276,7 @@ fn local_time_zone_name() -> Option<String> {
 
 const GUIDE: &str = r#"# Clovy MCP guide
 
-Clovy records meetings and dictations on the user's Mac, turns them into notes, keeps memories, and (when the user turned on activity capture) a text-only timeline of the apps and sites they used and of their work with coding agents. Everything here is read-only. Notes, dictations, and memories come from the data set open in Clovy; activity belongs to the Mac, whichever data set is open.
+Clovy records meetings and dictations on the user's Mac, turns them into notes, keeps memories, and (when the user turned on activity capture) a text-only timeline of the apps and sites they used, day summaries, and their work with coding agents. Everything here is read-only. Notes, dictations, and memories come from the data set open in Clovy; activity belongs to the Mac, whichever data set is open.
 
 ## Which tool
 
@@ -293,10 +293,11 @@ Clovy records meetings and dictations on the user's Mac, turns them into notes, 
 | "When did I see X on screen?" | `search_activity` with `query` |
 | "Details of that session" | `get_session_detail` with the session id |
 | "What did I build with Claude Code today?" | `list_coding_agent_sessions` |
+| "Summarize my day" / "What did I do yesterday?" | `get_day_summary` (`date`: YYYY-MM-DD, default today) |
 
 ## Tips
 
-- Read `clovy://context` first: it has today's date, the time, and the time zone. Activity tools take RFC 3339 times with an offset (`2026-10-04T09:00:00-03:00`); omit `from`/`to` for today so far.
+- Read `clovy://context` first: it has today's date, the time, and the time zone. Activity tools take RFC 3339 times with an offset (`2026-10-04T09:00:00-03:00`); omit `from`/`to` for today so far. `get_day_summary` takes a date (`YYYY-MM-DD`), default today.
 - Activity tools exist only while activity capture is on. Apps and sites the user excluded never appear, and nothing older than the retention period is returned.
 - Long results are capped: look at `truncated`, `hasMore`/`nextOffset`, or `nextTranscriptOffset`, and ask for a shorter period or the next page.
 - Clovy must be open with the MCP server turned on (Settings, Agent). Otherwise every tool answers with an error saying so.

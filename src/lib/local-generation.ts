@@ -20,13 +20,28 @@ export function localGenerationOptionId(modelId: string) {
  * in a synthetic option id, or null when the id is not a synthetic local
  * option (or is malformed). The tagged id stays intact in session settings to
  * retain upstream provenance; Clovy's on-device integration uses this inverse
- * only when it needs to display or forward the raw local id. */
+ * only when it needs to display or forward the raw local id. A chat engine
+ * option also names its endpoint (`<model>@<endpoint id>`, both encoded); see
+ * {@link localGenerationEndpointId}. */
 export function rawLocalGenerationModelId(optionId: string): string | null {
   if (!optionId.startsWith(LOCAL_GENERATION_OPTION_ID_PREFIX)) return null;
+  const [encodedModel] = optionId.slice(LOCAL_GENERATION_OPTION_ID_PREFIX.length).split("@");
   try {
-    const decoded = decodeURIComponent(
-      optionId.slice(LOCAL_GENERATION_OPTION_ID_PREFIX.length),
-    ).trim();
+    const decoded = decodeURIComponent(encodedModel ?? "").trim();
+    return decoded || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The registered endpoint a chat engine option names, or null for the older
+ * form that only carries a model id (routed by model). */
+export function localGenerationEndpointId(optionId: string): string | null {
+  if (!optionId.startsWith(LOCAL_GENERATION_OPTION_ID_PREFIX)) return null;
+  const separator = optionId.indexOf("@", LOCAL_GENERATION_OPTION_ID_PREFIX.length);
+  if (separator < 0) return null;
+  try {
+    const decoded = decodeURIComponent(optionId.slice(separator + 1)).trim();
     return decoded || null;
   } catch {
     return null;

@@ -454,6 +454,15 @@ pub fn local_generation_settings_for_model(model_id: &str) -> LocalGenerationSet
     crate::llm::registry::legacy_settings(connection)
 }
 
+/// The registered endpoint `endpoint_id`, key included; empty when it no
+/// longer exists (the agent route then refuses instead of picking another).
+pub fn local_generation_settings_for_endpoint(endpoint_id: &str) -> LocalGenerationSettings {
+    let connection = llm_registry()
+        .connection(endpoint_id, crate::llm::secrets::store())
+        .ok();
+    crate::llm::registry::legacy_settings(connection)
+}
+
 /// Snapshot of the provider registry for routing one generation call.
 pub fn llm_registry() -> LlmRegistry {
     LlmRegistry::from(&current_settings())
@@ -1763,7 +1772,11 @@ fn selected_model_for_mode(
         .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
     Ok(match mode {
         ModelMode::Transcription => settings.transcription_model.clone(),
-        ModelMode::Generation => settings.generation_model.clone(),
+        // A CLI chosen for chat makes new chat sessions start on that engine.
+        ModelMode::Generation => match &settings.llm_usage.chat {
+            ProviderRef::Cli { id } => crate::chat_engine::engine_model_id(*id),
+            _ => settings.generation_model.clone(),
+        },
         ModelMode::Image => settings.image_model.clone(),
         ModelMode::Video => settings.video_model.clone(),
     })

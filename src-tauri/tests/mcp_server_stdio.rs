@@ -291,6 +291,7 @@ async fn mcp_server_binary_answers_a_stdio_client_from_the_active_profile() {
             "get_active_session",
             "get_activity_stats",
             "get_activity_timeline",
+            "get_day_summary",
             "get_note",
             "get_session_detail",
             "list_app_usage",

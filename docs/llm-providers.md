@@ -97,16 +97,20 @@ A refused CLI fails with `LlmError::CliToolsNotDisabled` (`llm_cli_tools_not_dis
 before anything is spawned, in `generate`, `generate_for_activity`,
 `generate_on_cli_for_activity`, and the connection test. `llm_set_usage`
 refuses it for notes, dictation cleanup, and activity (chat goes through the
-future CLI chat engine and keeps every CLI), and the Models tab disables it in
-those menus and hides its test button. A selection saved before this rule
-fails at use time with the same error; nothing is rerouted silently.
+[CLI chat engine](#cli-chat-engine), which keeps every CLI), and the Models tab
+disables it in those menus and hides its test button. A selection saved before
+this rule fails at use time with the same error; nothing is rerouted silently.
 
 Every allowed one-shot call also:
 
 - resolves the executable on the login-shell PATH (a GUI app does not inherit
   the shell PATH) and runs with the login-shell environment, so `HOME`,
   `PI_CODING_AGENT_DIR`, and other profile variables reach the CLI unchanged;
-  Clovy never logs in or edits CLI configuration;
+  Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`, `OS_ACCOUNTS_*`, `CLOVY_*`,
+  `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`, such as the local development bearer token
+  from `.env`) are removed by `llm::shell_env::cli_environment`, the one filter
+  for one-shot calls, `--version` detection, the login-shell capture, and the
+  CLI chat engine; Clovy never logs in or edits CLI configuration;
 - starts with `CLOVY_AUTHORSHIP_MARKER` (`[clovy-internal-ai-call]`) alone on
   the first prompt line and sets `CLOVY_ONESHOT=1`; session ingestion skips
   any CLI session whose first prompt's first line is exactly the marker;
@@ -141,9 +145,10 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   `generationProvider = "local"` / `generationModel` fields, so the existing
   agent route, model picker, and capability lookups work unchanged. Agent
   requests resolve their endpoint by model id (chat endpoint first, then any
-  endpoint serving that model). A CLI chosen for chat is saved, but the agent
-  stays on Clovy API until the CLI chat engine ships; the UI says so. Picking a
-  Clovy model in the text-model picker moves chat back to Clovy.
+  endpoint serving that model). A CLI chosen for chat makes new chat sessions
+  start on that CLI: `list_venice_models("generation").selectedModel` returns
+  its engine id (below). Picking a Clovy model in the text-model picker moves
+  chat back to Clovy.
 - **Notes.** `clovy_api::generate_note_from_transcript` uses the notes
   selection: Clovy API (with the saved remote model), the endpoint, or the CLI
   (same system prompt and source layout as the endpoint route; stored provider
@@ -152,6 +157,91 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   transcript cleanup) uses the dictation-cleanup selection with Clovy API's
   cleanup prompt and message layout.
 - **Activity.** Defaults to none; Clovy API is not allowed.
+
+## CLI chat engine
+
+A chat session's **chat engine** is part of its model id
+(`crate::chat_engine`): `__clovy_cli_engine__:<cli>` runs each message on that
+CLI; a tagged endpoint id runs the Clovy agent on that endpoint (Clovy's tools,
+streaming, and live steering, as on Clovy API); anything else is a Clovy model.
+The engine picker writes `__june_local_generation__:<model>@<endpoint id>`
+(both URL-encoded), so two endpoints serving the same model stay distinct and
+the agent proxy uses exactly the chosen endpoint (a removed endpoint is
+refused with `local_model_unavailable`, never replaced by another); the older
+`__june_local_generation__:<model>` still routes by model id. The composer's
+engine picker (`src/components/agent/composer/`) lists Clovy, the registered
+endpoints, and the six CLIs (`chat_engine_catalog`).
+
+One message on a CLI engine is one CLI process in the session workspace:
+
+| CLI | Turn | Resume id | Clovy's tools |
+|---|---|---|---|
+| claude | `-p --output-format stream-json --verbose --include-partial-messages`, prompt on stdin | `session_id` of `system/init`; `--resume <id>` | `--mcp-config <temporary file>` |
+| codex | `exec [resume] --json --skip-git-repo-check -c sandbox_mode="workspace-write" [<id>] -`, prompt on stdin | `thread_id` of `thread.started` | `-c mcp_servers.clovy.command=… -c mcp_servers.clovy.args=…` |
+| pi | `--print --mode json --session-id <id>`, prompt on stdin | a UUID Clovy chooses on the first turn | none (pi has no MCP) |
+| agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`; `--conversation <id>` | none (only `agy mcp add`, which edits its global configuration) |
+| cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`; `--resume <id>` | none (project MCP servers need approval inside Cursor) |
+| copilot | `--prompt=<prompt> --output-format json --session-id <id>` | a UUID Clovy chooses on the first turn | `--additional-mcp-config=@<temporary file>` |
+
+- **Permissions.** No flag that skips or pre-grants a CLI's approvals is ever
+  passed (`--dangerously-skip-permissions`, `--yolo`, `--force`,
+  `--dangerously-bypass-approvals-and-sandbox`, `--always-approve`,
+  `--allow-all*`, `--approve-mcps`, `--permission-mode`, `--allowedTools`).
+  `--trust` (cursor-agent) and `--skip-git-repo-check` (codex) only accept the
+  session workspace, a directory Clovy created, as a workspace. An action the
+  CLI refuses for lack of approval becomes a failed tool item whose error says
+  so (`needsApproval: true` in the event). Measured: claude answers the tool
+  with "Claude requested permissions to …, but you haven't granted it yet";
+  codex marks the command `declined` or the sandbox blocks it ("operation not
+  permitted"); agy fails the step with "permission check failed … user denied
+  permission"; cursor-agent completes the call as `rejected`; copilot fails
+  the tool with a permission error.
+- **Environment.** The login-shell environment, as for one-shot calls (PATH,
+  `HOME`, `PI_CODING_AGENT_DIR`, and the user's other profile variables
+  unchanged), minus Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`,
+  `OS_ACCOUNTS_*`, `CLOVY_*`, `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`; for example the
+  local development bearer token loaded from `.env`), which would otherwise
+  reach the CLI, its tools, and its MCP servers (`llm::shell_env::cli_environment`,
+  the same filter as one-shot calls).
+  `ANTHROPIC_API_KEY` is removed for claude. No authorship marker: these are
+  the user's own conversations.
+- **Continuity.** The CLI's conversation id is saved in the run's config
+  (`{"engine": "cli", "cli", "conversationId"}`) as soon as it is known, and
+  the next message resumes it while the session's previous turns stayed on the
+  same CLI. A CLI that starts a new conversation in a session with earlier
+  messages (another engine answered before, or a branch) gets them, bounded
+  to 24,000 characters, ahead of the new message.
+- **Stream.** Text, reasoning, and tool activity become the runtime events the
+  sidecar emits (`message.delta`, `reasoning.delta`, `tool.started`,
+  `tool.completed`/`tool.failed`, `message.completed`, `run.completed`/
+  `run.failed`/`run.cancelled`) and are persisted through the same function
+  (`agent_runtime::host::persist_runtime_event`), so the session shows and
+  keeps them like a Clovy run.
+- **Cancel.** The run's cancellation is registered (`ChatEngineHost::register`)
+  before anything is awaited for it, and the turn checks it and the run's
+  status again right before spawning, so a cancel during launch preparation
+  starts nothing. Cancelling sends SIGTERM to the CLI's process group, then
+  SIGKILL after 2 s.
+- **End of the CLI.** The CLI's exit is watched alongside its stdout: when it
+  exits, its process group is swept (MCP servers and helpers it started,
+  including one still holding stdout), and output still in the pipe is read
+  for at most 1 s.
+- **App shutdown.** The shutdown coordinator (`shutdown::run_cleanup`, also
+  used for restart and update) calls `ChatEngineHost::shutdown`: new turns are
+  refused, every turn is cancelled, and it waits up to 5 s for each to stop its
+  process group and publish `run.cancelled`.
+- **Messages during a run.** `steer_agent_run` answers
+  `{ accepted: false, reason: "cli_engine" }`; the composer's follow-up queue
+  sends the message as the next turn when the run ends.
+- **Clovy's tools.** Given to claude, codex, and copilot while the Clovy MCP
+  server is on ([mcp-server.md](mcp-server.md)); `chat_engine_catalog` reports
+  `clovyTools` (`available`, `server_off`, `unsupported`) and the session says
+  when it has none. Compaction is refused (`agent_compaction_unsupported`):
+  the CLI manages its own context.
+
+| Command | Args | Returns |
+|---|---|---|
+| `chat_engine_catalog` | none | `{ clis: [{ id, name, installed, reason?, modelId, clovyTools }], endpoints: [{ id, name, modelId, optionId }] }` |
 
 ## Tauri commands
 
@@ -175,4 +265,12 @@ Keychain key saved for that endpoint (the key never reaches the webview).
   and CLIs, timeouts without orphans, the endpoint probe against a fake HTTP
   server, migration, DTO secrecy, usage validation, activity gating and
   serialization, and a fake-CLI note persisted like a Clovy note.
-- `pnpm exec vitest run src/test/llm-providers` covers the settings section.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine` covers
+  the CLI chat engine with a fake CLI per CLI (two turns with the resume id,
+  stream to events and items, cancel without orphans, a message sent during a
+  run, the MCP configuration each CLI receives, approval refusals, failures)
+  and the endpoint as the agent's model against a fake streaming server with a
+  tool call. `cargo test chat_engine_real -- --ignored --nocapture` runs two
+  turns on the installed claude, codex, and pi.
+- `pnpm exec vitest run src/test/llm-providers src/test/chat-engine` covers the
+  settings section and the engine picker.

@@ -70,7 +70,7 @@ async fn read_version(path: &std::path::Path, env: &LoginEnv) -> Option<String> 
     let output = process::run(ProcessSpec {
         program: path.to_path_buf(),
         args: vec!["--version".to_string()],
-        env: env.vars().clone(),
+        env: super::shell_env::cli_environment(env.vars()),
         cwd: scratch.path().to_path_buf(),
         stdin: None,
         timeout: VERSION_TIMEOUT,

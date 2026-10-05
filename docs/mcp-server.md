@@ -129,11 +129,9 @@ exclusions and the retention period like the agent tools
 | `list_app_usage` | `from`, `to`, `limit` (1-100, default 20) | Minutes and session count per app, most used first, `totalApps`, `truncated` |
 | `get_session_detail` | `id` | Session, its windows and URLs (windows on excluded domains dropped, and the text excerpt with them), text excerpt; sessions excluded or past retention are "not found" |
 | `list_coding_agent_sessions` | `from`, `to`, `limit` (1-50, default 20) | Coding-agent blocks overlapping the period ([coding-agent-sessions.md](coding-agent-sessions.md)), newest first: id, agent, source, session id, project, title, start and end, `activeMinutes`, prompts, replies, state, summary (else `firstPrompt`); only sources turned on in Settings, Activity and blocks within the retention period; never the transcript or the working directory; `totalBlocks`, `truncated` |
+| `get_day_summary` | `date` (optional local `YYYY-MM-DD`, default today) | Day summary (headline, narrative, insights, standup: done, inProgress, blockers, hoursCovered, locale, provider, trigger, generatedAt), workstreams, and hour reports; `summary: null` with `state: "not_generated"` when none exists yet; respects retention |
 
-Activity times are RFC 3339 with offset; omitted bounds mean today so far.
-`get_day_summary` (day summaries) joins the activity list in its own slice:
-add the name to `ACTIVITY_TOOLS`, a descriptor in `descriptors`, and a
-dispatch arm in `activity_tool` (`tools.rs`).
+Activity times are RFC 3339 with offset; omitted bounds mean today so far. `get_day_summary` takes a local date `YYYY-MM-DD` (default today).
 
 Resources: `clovy://context` (JSON: `now`, `date`, `time`, `weekday`,
 `timeZone` (IANA name from `TZ` or `/etc/localtime`), `utcOffset`,

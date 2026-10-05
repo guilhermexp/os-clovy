@@ -386,8 +386,15 @@ async fn run_cleanup(app: &tauri::AppHandle, _deadline: ShutdownDeadline) -> Cle
         tauri::async_runtime::spawn_blocking(move || crate::dictation::stop_helper(&dictation_app));
     let computer_use = crate::computer_use::shutdown(app);
     let agent_runtime = app.state::<crate::agent_runtime::AgentRuntimeHost>();
-    let (dictation_result, (), ()) =
-        tokio::join!(dictation, computer_use, agent_runtime.shutdown());
+    // CLI chat turns run in their own process groups, which application exit
+    // does not reach: stop them and wait before exiting or restarting.
+    let chat_engines = app.state::<crate::chat_engine::ChatEngineHost>();
+    let (dictation_result, (), (), ()) = tokio::join!(
+        dictation,
+        computer_use,
+        agent_runtime.shutdown(),
+        chat_engines.shutdown()
+    );
     if let Err(error) = dictation_result {
         tracing::warn!(%error, "dictation shutdown worker could not be joined");
     }

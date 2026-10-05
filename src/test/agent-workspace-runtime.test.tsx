@@ -2883,7 +2883,7 @@ describe("AgentWorkspace runtime wiring", () => {
       });
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: /Clovy/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^1\s*Clovy/ }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("resolve_agent_interruption", {
         request: {

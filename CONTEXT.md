@@ -88,6 +88,18 @@ constrained by a schema), through `crate::llm`. CLI one-shot calls carry the
 Clovy's own calls. Distinct from an **agent run**.
 _Avoid_: completion (unqualified), query.
 
+**Chat engine**:
+What answers the messages of one chat session: **Clovy** (the agent harness,
+on a Clovy API model or a registered endpoint, with Clovy's own tools) or an
+**agent CLI** (a **CLI chat engine**: one CLI process per message that
+resumes the CLI's own conversation, with the CLI's own tools and, when the CLI
+accepts a per-run MCP configuration and the server is on, Clovy's tools
+through the **Clovy MCP server**). Stored as the session's model id
+(`__clovy_cli_engine__:<cli>` for a CLI). See
+[docs/llm-providers.md](docs/llm-providers.md#cli-chat-engine).
+_Avoid_: backend, runtime (that is the agent harness process), provider
+(unqualified).
+
 **Structured-output level**:
 How strongly a provider can be held to a JSON schema: `none`, `prompt`,
 `json_object`, `json_schema`, `strict`. Measured by the provider's connection

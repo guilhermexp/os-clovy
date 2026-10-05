@@ -143,6 +143,14 @@ import {
   heroPrivacyFootnote,
   useComposerModelPopoverPosition,
 } from "./composer/ModelPicker";
+import { ChatEngineNotice, ChatEnginePicker } from "./composer/ChatEnginePicker";
+import {
+  type ChatEngineCatalog,
+  chatEngineCatalog,
+  classifyChatEngineModel,
+  selectedChatEndpoint,
+} from "../../lib/chat-engine";
+import { type LlmCliId, llmSetUsage } from "../../lib/llm-providers";
 import { modelPrivacyBadge } from "../../lib/model-privacy";
 import { autoPillDesignation } from "../../lib/suggested-models";
 import { getCurrentDataPartitionName } from "../../lib/data-partition";
@@ -438,6 +446,21 @@ export function AgentWorkspace({
   const [model, setModel] = useState(homeMode ? AUTO_MODEL_ID : initialModelSelection.modelId);
   const modelRef = useRef(model);
   modelRef.current = model;
+  const [engineCatalog, setEngineCatalog] = useState<ChatEngineCatalog | null>(null);
+  const engineCatalogRef = useRef(engineCatalog);
+  engineCatalogRef.current = engineCatalog;
+  const refreshEngineCatalog = useCallback(async () => {
+    try {
+      const catalog = await chatEngineCatalog();
+      setEngineCatalog(catalog);
+      return catalog;
+    } catch {
+      return null;
+    }
+  }, []);
+  useEffect(() => {
+    void refreshEngineCatalog();
+  }, [refreshEngineCatalog]);
   const [costQuality, setCostQuality] = useState(initialModelSelection.costQuality ?? 100);
   const costQualityRef = useRef(costQuality);
   costQualityRef.current = costQuality;
@@ -719,11 +742,15 @@ export function AgentWorkspace({
     if (persisted) setPendingInitialTurn(undefined);
   }, [pendingInitialTurn, projection.items]);
   const activeModel = selectedModel(models, model);
-  const textActionsDisabledReason = shouldBlockTextOnFunding(Boolean(creditActionsDisabledReason), {
-    activeModelId: model || undefined,
-    activeModel,
-    veniceApiKeyConfigured,
-  })
+  const activeEngine = classifyChatEngineModel(model, engineCatalog, models);
+  const textActionsDisabledReason = shouldBlockTextOnFunding(
+    activeEngine.kind === "clovy" && Boolean(creditActionsDisabledReason),
+    {
+      activeModelId: model || undefined,
+      activeModel,
+      veniceApiKeyConfigured,
+    },
+  )
     ? creditActionsDisabledReason
     : undefined;
 
@@ -2639,9 +2666,23 @@ export function AgentWorkspace({
         }
         if (pendingSessionCreationRef.current) return;
         if (nextCostQuality !== undefined) applyCostQuality(nextCostQuality);
-        void persistAgentDefaultModel(nextModel).catch((cause) => {
-          if (modelRef.current === nextModel) setError(messageFromError(cause));
-        });
+        const engine = classifyChatEngineModel(nextModel, engineCatalogRef.current, models);
+        if (engine.kind === "cli") {
+          void llmSetUsage("chat", { kind: "cli", id: engine.cli as LlmCliId }).catch((cause) => {
+            if (modelRef.current === nextModel) setError(messageFromError(cause));
+          });
+        } else if (engine.kind === "endpoint") {
+          const endpoint = selectedChatEndpoint(nextModel, engineCatalogRef.current, models);
+          if (endpoint) {
+            void llmSetUsage("chat", { kind: "endpoint", id: endpoint.id }).catch((cause) => {
+              if (modelRef.current === nextModel) setError(messageFromError(cause));
+            });
+          }
+        } else {
+          void persistAgentDefaultModel(nextModel).catch((cause) => {
+            if (modelRef.current === nextModel) setError(messageFromError(cause));
+          });
+        }
       }}
       costQuality={costQuality}
       onCostQualityChange={applyCostQuality}
@@ -2672,6 +2713,8 @@ export function AgentWorkspace({
       notice={!heroMode ? error : undefined}
       hero={heroMode}
       showModelPicker={!homeMode}
+      engineCatalog={engineCatalog}
+      onRefreshEngineCatalog={refreshEngineCatalog}
     />
   );
   return (
@@ -3278,6 +3321,8 @@ function AgentComposer({
   notice,
   hero = false,
   showModelPicker = true,
+  engineCatalog,
+  onRefreshEngineCatalog,
 }: {
   formRef: RefObject<HTMLFormElement>;
   scrollRef: RefObject<HTMLDivElement>;
@@ -3316,7 +3361,10 @@ function AgentComposer({
   notice?: string;
   hero?: boolean;
   showModelPicker?: boolean;
+  engineCatalog?: ChatEngineCatalog | null;
+  onRefreshEngineCatalog?: () => Promise<ChatEngineCatalog | null>;
 }) {
+  const activeEngine = classifyChatEngineModel(model, engineCatalog, models);
   const t = useT();
   const editorRef = useRef<ComposerEditorHandle>(null);
   const [editorDraftOwnerId, setEditorDraftOwnerId] = useState(draftOwnerId);
@@ -3492,6 +3540,7 @@ function AgentComposer({
           {notice}
         </div>
       ) : null}
+      {showModelPicker ? <ChatEngineNotice catalog={engineCatalog} model={model} /> : null}
       <div className="agent-composer-box" data-stacked={attachments.length ? "true" : undefined}>
         {attachments.length ? (
           <div className="agent-composer-attachments">
@@ -3578,23 +3627,39 @@ function AgentComposer({
           ) : null}
           <div className="agent-composer-actions">
             {showModelPicker ? (
-              <ComposerModelPicker
-                open={modelOpen}
-                model={activeModel}
-                detail={model === AUTO_MODEL_ID ? autoPillDesignation(costQuality) : undefined}
-                effort={thinkingLevel}
-                triggerRef={modelTriggerRef}
-                onToggleOpen={() => {
-                  if (modelOpen) {
+              <>
+                <ChatEnginePicker
+                  model={model}
+                  setModel={(nextModel) => {
+                    setModel(nextModel);
                     setModelOpen(false);
-                    return;
-                  }
-                  setModelFlyout(null);
-                  setModelSearch("");
-                  setModelRootSearch("");
-                  setModelOpen(true);
-                }}
-              />
+                  }}
+                  catalog={engineCatalog}
+                  onRefreshCatalog={onRefreshEngineCatalog}
+                  anchorRef={formRef}
+                  clovyModels={models}
+                  showNotice={false}
+                />
+                {activeEngine.kind === "clovy" ? (
+                  <ComposerModelPicker
+                    open={modelOpen}
+                    model={activeModel}
+                    detail={model === AUTO_MODEL_ID ? autoPillDesignation(costQuality) : undefined}
+                    effort={thinkingLevel}
+                    triggerRef={modelTriggerRef}
+                    onToggleOpen={() => {
+                      if (modelOpen) {
+                        setModelOpen(false);
+                        return;
+                      }
+                      setModelFlyout(null);
+                      setModelSearch("");
+                      setModelRootSearch("");
+                      setModelOpen(true);
+                    }}
+                  />
+                ) : null}
+              </>
             ) : null}
             <button
               type="button"
@@ -3739,7 +3804,7 @@ function AgentComposer({
           })}
         </div>
       ) : null}
-      {showModelPicker && modelOpen ? (
+      {showModelPicker && modelOpen && activeEngine.kind === "clovy" ? (
         <ModelPickerPopover
           mode="generation"
           flyout={modelFlyout}

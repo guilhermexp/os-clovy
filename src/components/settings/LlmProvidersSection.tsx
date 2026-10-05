@@ -325,8 +325,6 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
     activity: { kind: "none" },
   };
 
-  const isChatCli = usage.chat.kind === "cli";
-
   // Provider options generator
   const getOptionsForUsage = (forUsage: LlmUsage) => {
     const options: { value: string; label: string; disabled?: boolean }[] = [];
@@ -392,9 +390,6 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
           <div className="settings-row">
             <div className="settings-row-info">
               <h4 className="settings-row-title">{t("settingsPanels.llm.usageChat")}</h4>
-              {isChatCli ? (
-                <p className="settings-row-description">{t("settingsPanels.llm.chatCliNote")}</p>
-              ) : null}
               {usageErrors.chat ? (
                 <p className="settings-row-error" role="alert">
                   {usageErrors.chat}

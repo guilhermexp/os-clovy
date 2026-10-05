@@ -951,8 +951,8 @@ mod tests {
         set_usage(&mut settings, LlmUsage::Chat, endpoint, |_| true).unwrap();
         assert_eq!(settings.generation_provider, PROVIDER_LOCAL);
         assert_eq!(settings.generation_model, "m");
-        // A CLI for chat is saved, but the agent stays on Clovy API until the
-        // CLI chat engine exists.
+        // A CLI for chat leaves the legacy Clovy route fields on Clovy API:
+        // new sessions get the CLI engine id from `selected_model_for_mode`.
         set_usage(
             &mut settings,
             LlmUsage::Chat,

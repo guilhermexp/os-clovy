@@ -64,6 +64,31 @@ impl LoginEnv {
     }
 }
 
+/// Variables Clovy itself reads (its own configuration and credentials, such
+/// as the local development bearer token loaded from `.env`). The login
+/// environment is merged over Clovy's process environment, so without this
+/// filter they would reach every CLI, its tools, and its MCP servers.
+const CLOVY_OWNED_PREFIXES: [&str; 5] =
+    ["OS_CLOVY_", "OS_JUNE_", "OS_ACCOUNTS_", "CLOVY_", "JUNE_"];
+const CLOVY_OWNED_NAMES: [&str; 2] = ["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"];
+
+/// The environment of a process Clovy starts for the user (a CLI, its
+/// `--version`, the login shell): every variable unchanged (HOME, PATH,
+/// `PI_CODING_AGENT_DIR`, the user's own keys) except Clovy's own. The one
+/// filter for `llm` one-shot calls, CLI detection, the login-shell capture,
+/// and the CLI chat engine.
+pub fn cli_environment(vars: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    vars.iter()
+        .filter(|(name, _)| {
+            !CLOVY_OWNED_NAMES.contains(&name.as_str())
+                && !CLOVY_OWNED_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 /// The login environment, captured once per app run.
 pub async fn login_env() -> Arc<LoginEnv> {
     #[cfg(test)]
@@ -127,7 +152,9 @@ async fn capture_login_env(
     let output = process::run(ProcessSpec {
         program: shell.to_path_buf(),
         args: vec!["-l".to_string(), "-c".to_string(), script],
-        env: process_env.clone(),
+        // The user's profile scripts run here too: keep Clovy's own
+        // variables out of them.
+        env: cli_environment(process_env),
         cwd,
         stdin: None,
         timeout: CAPTURE_TIMEOUT,
