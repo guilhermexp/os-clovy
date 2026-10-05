@@ -53,11 +53,11 @@
 
 ## 7. S1b — CLIs e endpoints como motor do chat
 
-- [ ] 7.1 Adaptador de sessão por CLI (turno com retomada, tradução do stream para eventos/itens existentes, cancelamento, mensagem seguinte durante execução); verificado por integração com CLIs falsos.
-- [ ] 7.2 Ferramentas do Clovy via servidor MCP para CLIs que aceitam MCP e indicação na UI quando não aceitam; verificado por integração com CLI falso lendo a configuração MCP.
-- [ ] 7.3 Endpoint cadastrado como modelo do agente com ferramentas e streaming; verificado por integração com servidor falso com tool call.
+- [x] 7.1 Adaptador de sessão por CLI (turno com retomada, tradução do stream para eventos/itens existentes, cancelamento, mensagem seguinte durante execução); verificado por integração com CLIs falsos.
+- [x] 7.2 Ferramentas do Clovy via servidor MCP para CLIs que aceitam MCP e indicação na UI quando não aceitam; verificado por integração com CLI falso lendo a configuração MCP.
+- [x] 7.3 Endpoint cadastrado como modelo do agente com ferramentas e streaming; verificado por integração com servidor falso com tool call.
 - [ ] 7.4 Escolha do motor na sessão de chat (UI) en/pt-BR; verificado por teste de componente e conversa real no app de desenvolvimento com um CLI instalado.
-- [ ] 7.5 Ferramenta MCP `get_day_summary` sobre os resumos do S4; verificado por chamada MCP real contra banco de teste.
+- [x] 7.5 Ferramenta MCP `get_day_summary` sobre os resumos do S4; verificado por chamada MCP real contra banco de teste.
 
 ## 8. Integração
 
