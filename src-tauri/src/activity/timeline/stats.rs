@@ -83,7 +83,7 @@ pub fn day_stats(
             duration_ms,
         })
         .collect();
-    categories.sort_by(|a, b| b.1.cmp(&a.1));
+    categories.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     stats.categories = categories
         .into_iter()
         .map(|(category, duration_ms)| CategoryTime {
