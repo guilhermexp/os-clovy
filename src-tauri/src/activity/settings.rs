@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::coding_agents::settings::CodingAgentSources;
+
 pub const ACTIVITY_SETTINGS_FILE: &str = "activity-settings.json";
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const MAX_RETENTION_DAYS: u32 = 365;
@@ -49,6 +51,8 @@ pub struct ActivitySettings {
     /// The Clovy MCP server (`crate::mcp_server`); only its own command
     /// changes it, `activity_save_settings` keeps the stored value.
     pub mcp_server: bool,
+    /// Coding-agent transcripts to ingest (`crate::coding_agents`).
+    pub coding_agents: CodingAgentSources,
 }
 
 impl Default for ActivitySettings {
@@ -63,11 +67,17 @@ impl Default for ActivitySettings {
             work_hours: WorkHours::default(),
             retention_days: DEFAULT_RETENTION_DAYS,
             mcp_server: false,
+            coding_agents: CodingAgentSources::default(),
         }
     }
 }
 
 impl ActivitySettings {
+    /// The database is needed while capture or any coding-agent source is on.
+    pub fn needs_store(&self) -> bool {
+        self.enabled || self.coding_agents.any_enabled()
+    }
+
     pub fn normalized(mut self) -> Self {
         self.ignored_apps = dedupe_case_insensitive(
             self.ignored_apps

@@ -18,6 +18,8 @@ export type LlmCliStatusDto = {
   version?: string;
   reason?: string;
   structuredOutput: StructuredOutputLevel;
+  /** Runs one-shot calls with every tool off; only these take notes, dictation cleanup, and activity. */
+  toolsDisabled: boolean;
 };
 
 export type LlmEndpointDto = {

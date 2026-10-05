@@ -33,8 +33,8 @@ not capture is on (only permissions are read while it is off) and is woken
 early by any command. Each tick:
 
 1. Reads TCC permissions (Accessibility, Screen Recording, Input Monitoring).
-2. Opens the database on first need (only once capture is enabled; a key is
-   minted only then).
+2. Opens the database on first need (only once capture or a coding-agent
+   source is enabled; a key is minted only then).
 3. Evaluates the capture state (`schedule::evaluate`), in this precedence:
    `off` → `keyMissing` / `error` → `needsPermissions` (Accessibility and
    Screen Recording are required) → `paused` (`manual` → `workHours` →
@@ -138,6 +138,8 @@ refuses to open (`NewerSchema`). Add a version; never edit one.
 
 Migration 2 (`activity_timeline`) adds the timeline's tables; see
 [activity-timeline.md](activity-timeline.md#schema-migration-2-activity_timeline).
+Migration 3 (`coding_agent_blocks`) belongs to coding-agent ingestion; see
+[coding-agent-sessions.md](coding-agent-sessions.md#database-migration-3-coding_agent_blocks).
 
 ### Rust API (`crate::activity::store::ActivityStore`)
 
@@ -175,11 +177,12 @@ older than the period.
 `enabled` (false), `secondaryMonitors` (false), `inputEvents` (true),
 `pauseOnProtectedVideo` (true), `ignoredApps`, `ignoredDomains` (bare hosts,
 normalized on save), `workHours` `{enabled: false, days: [1..5] (ISO), start:
-"09:00", end: "18:00"}`, `retentionDays` (30), `mcpServer` (false; the Clovy
-MCP server switch, changed only by `mcp_server_set_enabled` from Settings,
-Agent; `activity_save_settings` keeps the stored value, see
-[mcp-server.md](mcp-server.md)). Malformed files load defaults.
-Manual pause is in memory only: a restart resumes capture.
+"09:00", end: "18:00"}`, `retentionDays` (30), `codingAgents` (every source
+off; see [coding-agent-sessions.md](coding-agent-sessions.md)), `mcpServer`
+(false; the Clovy MCP server switch, changed only by `mcp_server_set_enabled`
+from Settings, Agent; `activity_save_settings` keeps the stored value, see
+[mcp-server.md](mcp-server.md)). Malformed files load defaults. Manual pause
+is in memory only: a restart resumes capture.
 
 ## Commands and event (frontend contract)
 
@@ -190,7 +193,7 @@ Manual pause is in memory only: a restart resumes capture.
 | `activity_set_paused` | `{ request: { paused } }` | status DTO |
 | `activity_request_permission` | `{ request: { permission: "accessibility" \| "screenRecording" \| "inputMonitoring" } }` | status DTO |
 | `activity_recreate_database` | none | status DTO |
-| `activity_debug_export` | none | `{ path, frames, secondaryFrames, inputEvents, pauses }`; errors in release builds |
+| `activity_debug_export` | none | `{ path, frames, secondaryFrames, inputEvents, pauses, codingAgentBlocks }`; errors in release builds |
 | `open_privacy_settings` | pane `"inputMonitoring"` added (`Privacy_ListenEvent`) | void |
 
 Status DTO: `{ supported, settings, state: { kind: "off" | "active" |
@@ -204,6 +207,7 @@ lastFrameAt, debugExportAvailable }`. Types live in `src/lib/activity-capture.ts
 `activity_debug_export` (development builds only; the Activity tab shows the
 button only when `debugExportAvailable`) writes
 `<data dir>/activity-debug-exports/activity-debug-export-<UTC>.json` (mode 0600)
-with the newest 500 frames, all secondary frames, input events, pauses, the
-cursor, and the schema version. The key is never written; a test asserts it is
+with the newest 500 frames, all secondary frames, input events, pauses,
+coding-agent blocks (without their transcripts), the cursor, and the schema
+version. The key is never written; a test asserts it is
 absent from the output.

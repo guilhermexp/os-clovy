@@ -10,6 +10,7 @@ import activity from "./messages/activity";
 import agent from "./messages/agent";
 import app from "./messages/app";
 import chat from "./messages/chat";
+import codingAgents from "./messages/codingAgents";
 import common from "./messages/common";
 import hud from "./messages/hud";
 import lib from "./messages/lib";
@@ -28,6 +29,7 @@ export const namespaces = {
   agent,
   app,
   chat,
+  codingAgents,
   common,
   hud,
   lib,

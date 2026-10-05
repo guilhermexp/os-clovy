@@ -183,9 +183,10 @@ ticks sit at the real local times of the selected day (`hourTicks`), so on
 
 ### Lane extension point
 
-`src/components/activity-timeline/lanes.ts` is the hook for extra lanes (the
-coding-agent lane of the next slice). Register a lane by appending to
-`EXTRA_TIMELINE_LANES`:
+`src/components/activity-timeline/lanes.ts` is the hook for extra lanes.
+Register a lane by appending to `EXTRA_TIMELINE_LANES`; the coding-agent lane
+(`CODING_AGENT_LANE`, see
+[coding-agent-sessions.md](coding-agent-sessions.md#ui)) is the first one:
 
 ```ts
 type TimelineLane = {

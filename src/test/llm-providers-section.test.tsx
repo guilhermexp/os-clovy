@@ -39,6 +39,7 @@ const sampleClis: LlmCliStatusDto[] = [
     path: "/usr/local/bin/claude",
     version: "1.0.0",
     structuredOutput: "strict",
+    toolsDisabled: true,
   },
   {
     id: "codex",
@@ -46,30 +47,35 @@ const sampleClis: LlmCliStatusDto[] = [
     installed: false,
     reason: "Not found in your login shell PATH.",
     structuredOutput: "none",
+    toolsDisabled: false,
   },
   {
     id: "pi",
     name: "Pi",
     installed: false,
     structuredOutput: "prompt",
+    toolsDisabled: true,
   },
   {
     id: "agy",
     name: "Antigravity",
     installed: false,
     structuredOutput: "none",
+    toolsDisabled: false,
   },
   {
     id: "cursor-agent",
     name: "Cursor Agent",
     installed: false,
     structuredOutput: "none",
+    toolsDisabled: false,
   },
   {
     id: "copilot",
     name: "GitHub Copilot",
     installed: false,
     structuredOutput: "none",
+    toolsDisabled: false,
   },
 ];
 
@@ -155,6 +161,29 @@ describe("LlmProvidersSection", () => {
     expect(notInstalledOption).toBeInTheDocument();
     expect(notInstalledOption.disabled).toBe(true);
     expect(notInstalledOption.textContent).toContain("(not installed)");
+  });
+
+  it("offers a CLI whose tools stay on for chat only, never for content uses, and does not test it", async () => {
+    mocks.llmDetectClis.mockResolvedValue(
+      sampleClis.map((cli) =>
+        cli.id === "codex" ? { ...cli, installed: true, path: "/usr/local/bin/codex" } : cli,
+      ),
+    );
+    render(<LlmProvidersSection />);
+
+    expect(await screen.findByText(/\/usr\/local\/bin\/codex/)).toBeInTheDocument();
+    const option = (name: string) =>
+      screen
+        .getByRole("combobox", { name })
+        .querySelector('option[value="cli:codex"]') as HTMLOptionElement;
+    expect(option("Chat").disabled).toBe(false);
+    for (const name of ["Notes", "Dictation cleanup", "Activity"]) {
+      expect(option(name).disabled, name).toBe(true);
+      expect(option(name).textContent).toBe("Codex (tools can't be turned off)");
+    }
+    expect(screen.getAllByText(/Its tools can't be turned off/).length).toBe(4);
+    // Only Claude Code (installed, tools off) has a test button.
+    expect(screen.getAllByRole("button", { name: "Test" })).toHaveLength(1);
   });
 
   it("test button shows latency and level", async () => {

@@ -465,6 +465,9 @@ export default defineMessages({
     "settingsPanels.llm.providerClovy": "Clovy",
     "settingsPanels.llm.providerNone": "None",
     "settingsPanels.llm.notInstalledSuffix": " (not installed)",
+    "settingsPanels.llm.toolsOnSuffix": " (tools can't be turned off)",
+    "settingsPanels.llm.toolsOnReason":
+      "Its tools can't be turned off, so it is used for chat only, never for notes, dictation cleanup, or activity.",
     "settingsPanels.llm.clisHeading": "Agent CLIs",
     "settingsPanels.llm.clisDescription": "Installed CLI agents detected on your machine.",
     "settingsPanels.llm.refreshClis": "Check again",
@@ -990,6 +993,9 @@ export default defineMessages({
     "settingsPanels.llm.providerClovy": "Clovy",
     "settingsPanels.llm.providerNone": "Nenhum",
     "settingsPanels.llm.notInstalledSuffix": " (não instalado)",
+    "settingsPanels.llm.toolsOnSuffix": " (ferramentas não podem ser desligadas)",
+    "settingsPanels.llm.toolsOnReason":
+      "As ferramentas dele não podem ser desligadas, então ele só é usado no chat, nunca em notas, limpeza de ditado ou atividade.",
     "settingsPanels.llm.clisHeading": "CLIs de agentes",
     "settingsPanels.llm.clisDescription": "Agentes CLI instalados detectados em sua máquina.",
     "settingsPanels.llm.refreshClis": "Verificar novamente",
