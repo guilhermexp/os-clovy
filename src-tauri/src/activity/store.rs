@@ -1177,6 +1177,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timeline_database_upgrades_with_coding_agents_table_as_migration_3() {
+        let (_dir, path) = temp_db();
+        let keys = MemoryKeyStore::default();
+        // A database written by the timeline build: migrations 1 and 2 only.
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        store.insert_frame(&frame(at(1, 10), "kept")).await.unwrap();
+        query("DROP TABLE coding_agent_blocks")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        query("DELETE FROM schema_migrations WHERE version = 3")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.close().await;
+
+        let store = ActivityStore::open(&path, &keys).await.expect("upgrade");
+        let history: Vec<(i64, String)> =
+            query("SELECT version, name FROM schema_migrations ORDER BY version")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect();
+        assert_eq!(
+            history,
+            vec![
+                (1, "activity_capture".to_string()),
+                (2, "activity_timeline".to_string()),
+                (3, "coding_agent_blocks".to_string()),
+            ]
+        );
+        assert!(store
+            .coding_agent_blocks_between(at(1, 0), at(2, 0))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.frames_after(0, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn wrong_key_is_reported_not_overwritten() {
         let (_dir, path) = temp_db();
         let keys = MemoryKeyStore::default();
