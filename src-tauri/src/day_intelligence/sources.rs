@@ -308,7 +308,7 @@ impl DaySources for AppSources {
         use tauri::Manager;
         self.app
             .try_state::<crate::coding_agents::CodingAgentsState>()
-            .is_none_or(|state| {
+            .map_or(true, |state| {
                 ingestion_read_until(&crate::coding_agents::coding_agents_status(state), until)
             })
     }
@@ -427,7 +427,7 @@ pub(crate) mod tests {
 
         fn coding_agents_read_until(&self, until: DateTime<Utc>) -> bool {
             crate::day_intelligence::lock(&self.ingestion_scanned_at)
-                .is_none_or(|scanned| scanned >= until)
+                .map_or(true, |scanned| scanned >= until)
         }
     }
 

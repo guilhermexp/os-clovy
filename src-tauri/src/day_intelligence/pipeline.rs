@@ -400,10 +400,10 @@ impl std::fmt::Display for Incomplete {
 /// ingestion past that hour.
 pub async fn incomplete(deps: &Deps<'_>, day: NaiveDate) -> Result<Option<Incomplete>, StoreError> {
     let Some(last_end) = schedule::hours_of_day(deps.zone, day)
-        .into_iter()
-        .filter(|window| window.end <= deps.now)
+        .iter()
+        .rev()
+        .find(|window| window.end <= deps.now)
         .map(|window| window.end)
-        .last()
     else {
         return Ok(None);
     };
@@ -444,7 +444,7 @@ pub enum SummaryRun {
     Incomplete(Incomplete),
     /// Nothing to summarize (no reports, meetings, or blocks).
     Empty,
-    Generated(DaySummaryDto),
+    Generated(Box<DaySummaryDto>),
 }
 
 /// Generates the summary of `day` only once its inputs are settled
@@ -461,7 +461,7 @@ pub async fn summarize_settled_day(
     }
     started();
     Ok(match generate_summary(deps, day, trigger).await? {
-        Some(summary) => SummaryRun::Generated(summary),
+        Some(summary) => SummaryRun::Generated(Box::new(summary)),
         None => SummaryRun::Empty,
     })
 }
@@ -487,7 +487,7 @@ pub enum ScheduledRun {
     /// Inputs not settled yet: nothing generated or recorded; the next tick
     /// tries again.
     Waiting(Incomplete),
-    Generated(DaySummaryDto),
+    Generated(Box<DaySummaryDto>),
     Empty,
     /// `first`: the first failure of the day's run (worth a notification).
     Failed {
