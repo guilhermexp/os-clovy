@@ -450,6 +450,9 @@ pub fn run() {
             activity::activity_request_permission,
             activity::activity_recreate_database,
             activity::activity_debug_export,
+            activity::timeline::activity_timeline,
+            activity::timeline::activity_timeline_session,
+            activity::timeline::activity_timeline_search,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())

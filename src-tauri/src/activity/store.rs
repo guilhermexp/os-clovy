@@ -33,7 +33,9 @@ pub const TIMELINE_CONSUMER: &str = "timeline";
 /// stalls a capture write for long.
 const INCREMENTAL_VACUUM_PAGES: i64 = 500;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_CONNECTIONS: u32 = 2;
+/// Capture writes, the timeline ETL transaction, and timeline/agent reads can
+/// overlap; SQLite still serializes the writers (WAL, busy timeout).
+const MAX_CONNECTIONS: u32 = 4;
 /// SQLite's primary result code for "file is not a database", which is how
 /// SQLCipher reports a wrong key.
 const SQLITE_NOTADB: &str = "26";
@@ -247,6 +249,9 @@ pub struct PruneReport {
     pub input_events: u64,
     pub pauses: u64,
     pub texts: u64,
+    pub timeline_sessions: u64,
+    pub timeline_gaps: u64,
+    pub search_documents: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -334,7 +339,85 @@ const MIGRATIONS: &[ActivityMigration] = &[ActivityMigration {
             updated_at TEXT NOT NULL
         )",
     ],
-}];
+    },
+    ActivityMigration {
+        version: 2,
+        name: "activity_timeline",
+        statements: &[
+            // Sessions the timeline ETL derives from frames (`activity::timeline`).
+            // At most one row is `active`: the session still being extended.
+            "CREATE TABLE timeline_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_name TEXT NOT NULL,
+                bundle_id TEXT,
+                context_kind TEXT CHECK (context_kind IN ('domain', 'workspace')),
+                context TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+                first_frame_id INTEGER NOT NULL,
+                last_frame_id INTEGER NOT NULL,
+                frame_count INTEGER NOT NULL,
+                idle_frame_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL CHECK (status IN ('active', 'closed')),
+                category TEXT NOT NULL CHECK (category IN ('coding', 'code_review', 'meeting',
+                    'communication', 'design', 'documentation', 'planning', 'deployment_devops',
+                    'research', 'idle_personal')),
+                confidence REAL NOT NULL DEFAULT 0,
+                meeting_audio INTEGER NOT NULL DEFAULT 0,
+                -- rowid range of the session's documents in timeline_search
+                -- (inserted while it is open, so contiguous).
+                search_rowid_first INTEGER,
+                search_rowid_last INTEGER,
+                CHECK ((context_kind IS NULL) = (context IS NULL))
+            )",
+            "CREATE INDEX idx_timeline_sessions_started_at ON timeline_sessions(started_at)",
+            "CREATE INDEX idx_timeline_sessions_ended_at ON timeline_sessions(ended_at)",
+            "CREATE UNIQUE INDEX idx_timeline_sessions_one_active ON timeline_sessions(status)
+                WHERE status = 'active'",
+            // Window titles and URLs seen in a session, for its detail view.
+            "CREATE TABLE timeline_session_windows (
+                session_id INTEGER NOT NULL REFERENCES timeline_sessions(id) ON DELETE CASCADE,
+                window_title TEXT NOT NULL DEFAULT '',
+                browser_url TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                frame_count INTEGER NOT NULL,
+                PRIMARY KEY (session_id, window_title, browser_url)
+            )",
+            // Intervals over 5 minutes without useful frames; never inside a session.
+            "CREATE TABLE timeline_gaps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),
+                kind TEXT NOT NULL CHECK (kind IN ('idle', 'sleep', 'paused')),
+                pause_reason TEXT CHECK (pause_reason IN ('manual', 'work_hours', 'low_disk',
+                    'protected_video')),
+                CHECK ((kind = 'paused') = (pause_reason IS NOT NULL))
+            )",
+            "CREATE INDEX idx_timeline_gaps_started_at ON timeline_gaps(started_at)",
+            "CREATE INDEX idx_timeline_gaps_ended_at ON timeline_gaps(ended_at)",
+            // The ETL's resumable state (open session, last frame, open search
+            // document), written in the same transaction as the cursor.
+            "CREATE TABLE timeline_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            // Full-text search over what was on screen: one document per window
+            // segment (same title and URL, at most 5 minutes) of a session.
+            "CREATE VIRTUAL TABLE timeline_search USING fts5(
+                window_title,
+                browser_url,
+                body,
+                session_id UNINDEXED,
+                seen_at UNINDEXED,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )",
+        ],
+    },
+];
 
 pub fn timestamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Micros, true)
@@ -459,6 +542,11 @@ impl ActivityStore {
 
     pub async fn close(&self) {
         self.pool.close().await;
+    }
+
+    /// The pool, for the timeline module's own tables (`timeline::db`).
+    pub(in crate::activity) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub async fn insert_frame(&self, frame: &NewFrame) -> Result<i64, StoreError> {
@@ -665,21 +753,9 @@ impl ActivityStore {
         last_frame_id: i64,
         last_frame_at: DateTime<Utc>,
     ) -> Result<ProcessingCursor, StoreError> {
-        query(
-            "INSERT INTO processing_cursor (consumer, last_frame_id, last_frame_at, updated_at)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(consumer) DO UPDATE SET
-                last_frame_id = excluded.last_frame_id,
-                last_frame_at = excluded.last_frame_at,
-                updated_at = excluded.updated_at
-             WHERE excluded.last_frame_id > processing_cursor.last_frame_id",
-        )
-        .bind(consumer)
-        .bind(last_frame_id)
-        .bind(timestamp(last_frame_at))
-        .bind(timestamp(Utc::now()))
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self.pool.acquire().await?;
+        advance_cursor_on(&mut conn, consumer, last_frame_id, last_frame_at).await?;
+        drop(conn);
         self.processing_cursor(consumer).await
     }
 
@@ -728,6 +804,23 @@ impl ActivityStore {
         .execute(&mut *tx)
         .await?
         .rows_affected();
+        // Derived timeline rows follow the same period (search included).
+        let timeline_sessions =
+            query("DELETE FROM timeline_sessions WHERE status = 'closed' AND ended_at < ?")
+                .bind(&cutoff)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        let timeline_gaps = query("DELETE FROM timeline_gaps WHERE ended_at < ?")
+            .bind(&cutoff)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let search_documents = query("DELETE FROM timeline_search WHERE seen_at < ?")
+            .bind(&cutoff)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
         tx.commit().await?;
 
         let report = PruneReport {
@@ -736,6 +829,9 @@ impl ActivityStore {
             input_events,
             pauses,
             texts,
+            timeline_sessions,
+            timeline_gaps,
+            search_documents,
         };
         if report != PruneReport::default() {
             query(&format!(
@@ -748,12 +844,14 @@ impl ActivityStore {
     }
 
     /// Debug builds only (the caller enforces it): writes the newest rows to a
-    /// readable JSON file in `dir`. The key is never part of the output.
+    /// readable JSON file in `dir`, plus the `extra` sections (the timeline's
+    /// tables). The key is never part of the output.
     pub async fn debug_export(
         &self,
         dir: &Path,
         now: DateTime<Utc>,
         limit: u32,
+        extra: serde_json::Map<String, serde_json::Value>,
     ) -> Result<DebugExport, StoreError> {
         let frames = {
             let mut rows = query(
@@ -782,7 +880,7 @@ impl ActivityStore {
             .await?
             .get(0);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "exportedAt": timestamp(now),
             "database": ACTIVITY_DB_FILE,
             "schemaVersion": schema_version,
@@ -792,6 +890,9 @@ impl ActivityStore {
             "inputEvents": input_events,
             "pauses": pauses,
         });
+        if let Some(object) = body.as_object_mut() {
+            object.extend(extra);
+        }
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!(
             "activity-debug-export-{}.json",
@@ -842,6 +943,32 @@ async fn upsert_text(
         .await?
         .get(0);
     Ok(Some(id))
+}
+
+/// The cursor upsert, shared with the timeline ETL so it can advance the
+/// cursor inside the transaction that writes the sessions. Never moves back.
+pub(in crate::activity) async fn advance_cursor_on(
+    conn: &mut SqliteConnection,
+    consumer: &str,
+    last_frame_id: i64,
+    last_frame_at: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    query(
+        "INSERT INTO processing_cursor (consumer, last_frame_id, last_frame_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(consumer) DO UPDATE SET
+            last_frame_id = excluded.last_frame_id,
+            last_frame_at = excluded.last_frame_at,
+            updated_at = excluded.updated_at
+         WHERE excluded.last_frame_id > processing_cursor.last_frame_id",
+    )
+    .bind(consumer)
+    .bind(last_frame_id)
+    .bind(timestamp(last_frame_at))
+    .bind(timestamp(Utc::now()))
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
@@ -1128,7 +1255,7 @@ mod tests {
             .await
             .unwrap();
         let export = store
-            .debug_export(dir.path(), at(5, 11), 500)
+            .debug_export(dir.path(), at(5, 11), 500, serde_json::Map::new())
             .await
             .expect("export");
         assert_eq!(export.frames, 1);

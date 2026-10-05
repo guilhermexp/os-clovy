@@ -2,6 +2,7 @@
 @import "./fonts.css";
 @import "./dot-spinner.css";
 @import "./shimmer.css";
+@import "./activity-timeline.css";
 
 :root {
   color: var(--foreground);
