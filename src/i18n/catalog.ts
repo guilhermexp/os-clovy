@@ -13,6 +13,7 @@ import chat from "./messages/chat";
 import common from "./messages/common";
 import hud from "./messages/hud";
 import lib from "./messages/lib";
+import mcpServer from "./messages/mcpServer";
 import notes from "./messages/notes";
 import onboarding from "./messages/onboarding";
 import recorder from "./messages/recorder";
@@ -30,6 +31,7 @@ export const namespaces = {
   common,
   hud,
   lib,
+  mcpServer,
   notes,
   onboarding,
   recorder,
