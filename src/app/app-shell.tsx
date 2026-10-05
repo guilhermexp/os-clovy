@@ -1,4 +1,5 @@
 import { IconBubble3 } from "central-icons/IconBubble3";
+import { IconCalendarClock } from "central-icons/IconCalendarClock";
 import { IconHomeOpen } from "central-icons/IconHomeOpen";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconNoteText } from "central-icons/IconNoteText";
@@ -153,6 +154,11 @@ export function tabMeta(
       return {
         title: t("app.nav.dictation"),
         icon: <IconMicrophone size={TAB_ICON_SIZE} />,
+      };
+    case "today":
+      return {
+        title: t("app.nav.today"),
+        icon: <IconCalendarClock size={TAB_ICON_SIZE} />,
       };
     case "settings":
       return {

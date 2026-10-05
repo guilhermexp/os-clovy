@@ -111,6 +111,9 @@ type RoutinesViewModule = typeof import("../components/routines/RoutinesView");
 type RoutinesViewProps = ComponentProps<RoutinesViewModule["RoutinesView"]>;
 type AppSettingsModule = typeof import("../components/settings/AppSettings");
 type AppSettingsProps = ComponentProps<AppSettingsModule["AppSettings"]>;
+type ActivityTimelineViewModule =
+  typeof import("../components/activity-timeline/ActivityTimelineView");
+type ActivityTimelineViewProps = ComponentProps<ActivityTimelineViewModule["ActivityTimelineView"]>;
 
 const agentWorkspace = createWorkspaceLoader<AgentWorkspaceModule, AgentWorkspaceProps>(
   () => import("../components/agent/AgentWorkspace"),
@@ -132,12 +135,20 @@ const appSettings = createWorkspaceLoader<AppSettingsModule, AppSettingsProps>(
   () => import("../components/settings/AppSettings"),
   (module) => module.AppSettings,
 );
+const activityTimelineView = createWorkspaceLoader<
+  ActivityTimelineViewModule,
+  ActivityTimelineViewProps
+>(
+  () => import("../components/activity-timeline/ActivityTimelineView"),
+  (module) => module.ActivityTimelineView,
+);
 
 export const AgentWorkspaceRoute = agentWorkspace.Component;
 export const FoldersWorkspaceRoute = foldersWorkspace.Component;
 export const NoteEditorRoute = noteEditor.Component;
 export const RoutinesViewRoute = routinesView.Component;
 export const AppSettingsRoute = appSettings.Component;
+export const ActivityTimelineViewRoute = activityTimelineView.Component;
 
 const deferredWorkspacePreloads = [
   // Meeting-start navigation lands here, so queue the note editor first.
@@ -145,6 +156,7 @@ const deferredWorkspacePreloads = [
   routinesView.preload,
   appSettings.preload,
   foldersWorkspace.preload,
+  activityTimelineView.preload,
 ];
 
 type IdleCallbackWindow = Window & {

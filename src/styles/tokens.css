@@ -404,6 +404,18 @@
    * black wash so the backdrop actually dims what's behind it. */
   --scrim: color-mix(in oklch, var(--foreground) 12%, transparent);
 
+  /* Activity timeline category tokens — light theme */
+  --activity-coding: oklch(55% 0.14 240);
+  --activity-code-review: oklch(54% 0.13 195);
+  --activity-meeting: oklch(54% 0.15 300);
+  --activity-communication: oklch(55% 0.15 345);
+  --activity-design: oklch(60% 0.15 65);
+  --activity-documentation: oklch(52% 0.13 150);
+  --activity-planning: oklch(52% 0.15 275);
+  --activity-deployment-devops: oklch(56% 0.15 25);
+  --activity-research: oklch(62% 0.14 95);
+  --activity-idle-personal: oklch(55% 0.04 250);
+
   /* Motion ----------------------------------------------------------- */
   --ease-linear: linear;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -589,6 +601,18 @@
    * where the text color stays put through the highlight. */
   --selection: oklch(0.52 0.015 84.59 / 38%);
   --selection-foreground: var(--foreground);
+
+  /* Activity timeline category tokens — dark theme */
+  --activity-coding: oklch(68% 0.14 240);
+  --activity-code-review: oklch(68% 0.13 195);
+  --activity-meeting: oklch(68% 0.15 300);
+  --activity-communication: oklch(69% 0.15 345);
+  --activity-design: oklch(72% 0.15 65);
+  --activity-documentation: oklch(66% 0.13 150);
+  --activity-planning: oklch(66% 0.15 275);
+  --activity-deployment-devops: oklch(68% 0.15 25);
+  --activity-research: oklch(74% 0.14 95);
+  --activity-idle-personal: oklch(68% 0.04 250);
 
   --shadow-sm: 0 1px 2px oklch(0% 0 none / 24%), 0 2px 4px oklch(0% 0 none / 12%);
   --drop-shadow-sm: drop-shadow(0 1px 2px oklch(0% 0 none / 24%))

@@ -453,6 +453,9 @@ pub fn run() {
             activity::activity_debug_export,
             coding_agents::coding_agents_status,
             coding_agents::coding_agents_blocks,
+            activity::timeline::activity_timeline,
+            activity::timeline::activity_timeline_session,
+            activity::timeline::activity_timeline_search,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())

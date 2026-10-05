@@ -1,4 +1,4 @@
-//! `coding_agent_blocks` in the encrypted activity database (migration 2 in
+//! `coding_agent_blocks` in the encrypted activity database (migration 3 in
 //! `activity::store`). Lifecycle: `live` (re-written on every scan while the
 //! block grows) → `sealed` (immutable; the upsert only touches live rows) →
 //! `summarized` (summary written, terminal).

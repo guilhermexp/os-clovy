@@ -19,6 +19,7 @@ import {
 } from "./app-shell";
 import type { RenderAppWorkspaceDependencies } from "./app-workspace-view-types";
 import {
+  ActivityTimelineViewRoute,
   AgentWorkspaceRoute,
   AppSettingsRoute,
   FoldersWorkspaceRoute,
@@ -199,6 +200,14 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             block: "start",
           });
         }, 80);
+      }}
+    />
+  ) : activeView === "today" ? (
+    <ActivityTimelineViewRoute
+      onNavigateToSettings={() => {
+        setSettingsReturnView(activeView);
+        setActiveView("settings");
+        setSettingsTab("activity");
       }}
     />
   ) : activeView === "routines" ? (

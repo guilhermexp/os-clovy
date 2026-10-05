@@ -28,7 +28,7 @@ O sistema SHALL normalizar cada transcrição (horários, diretório de trabalho
 - Test: unit — segmentador com transcrição sintética
 
 ### Requirement: Resumo de blocos selados
-Blocos selados SHALL ser resumidos pelo CLI do próprio agente quando instalado e, caso contrário, pelo provedor de atividade escolhido. Sem nenhum dos dois, o bloco MUST ficar selado sem resumo e nenhum conteúdo MUST sair da máquina.
+Blocos selados SHALL ser resumidos pelo CLI do próprio agente quando ele estiver instalado e puder rodar com todas as ferramentas desligadas e, caso contrário, pelo provedor de atividade escolhido. A transcrição MUST ir ao modelo como dado citado e não confiável. Sem nenhum dos dois, o bloco MUST ficar selado sem resumo e nenhum conteúdo MUST sair da máquina.
 
 #### Scenario: Sem provedor
 - **WHEN** um bloco do Cursor é selado, o `cursor-agent` não está instalado e não há provedor de atividade

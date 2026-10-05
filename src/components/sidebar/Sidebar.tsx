@@ -33,6 +33,8 @@ import { IconTrashCan } from "central-icons/IconTrashCan";
 import { IconUnpin } from "central-icons/IconUnpin";
 import { IconLiveActivity } from "central-icons/IconLiveActivity";
 import { IconZap } from "central-icons/IconZap";
+import { IconCalendarClock } from "central-icons/IconCalendarClock";
+import { activityStatus } from "../../lib/activity-capture";
 import {
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -139,7 +141,8 @@ export type SidebarView =
   | "dictation"
   | "routines"
   | "agent"
-  | "agent-sessions";
+  | "agent-sessions"
+  | "today";
 
 type SidebarProps = {
   notes: NoteListItemDto[];
@@ -383,6 +386,17 @@ export function Sidebar({
   // Guards against a stale closure double-firing the summary fetch.
   const referralLoadingRef = useRef(false);
   const referralCopyResetTimerRef = useRef<number>();
+  const [activitySupported, setActivitySupported] = useState(() => isMacLikePlatform());
+
+  useEffect(() => {
+    if (!isMacLikePlatform()) {
+      setActivitySupported(false);
+      return;
+    }
+    void activityStatus()
+      .then((status) => setActivitySupported(status.supported))
+      .catch(() => {});
+  }, []);
   const [referralError, setReferralError] = useState<string | null>(null);
   // The deployment can simply not offer referrals (a 404 from /referrals/me).
   // That's not a transient failure, so it gets a calm message with no retry.
@@ -656,6 +670,19 @@ export function Sidebar({
         ),
         action: () => onChangeView("notes"),
       },
+      ...(activitySupported
+        ? [
+            {
+              id: "quick:today",
+              label: t("shell.command.goToday"),
+              icon: <IconCalendarClock size={15} />,
+              searchText: normalizeCommandQuery(
+                `today hoje activity timeline go to ${t("shell.command.goToday")}`,
+              ),
+              action: () => onChangeView("today"),
+            },
+          ]
+        : []),
       {
         id: "quick:projects",
         label: t("shell.command.goProjects"),
@@ -781,6 +808,7 @@ export function Sidebar({
   }, [
     account.localDev,
     account.signedIn,
+    activitySupported,
     agentSessions,
     commandQuery,
     companionPairingEnabled,
@@ -1247,6 +1275,20 @@ export function Sidebar({
               </span>
               <span className="sidebar-nav-label">{t("shell.sidebar.meetingNotes")}</span>
             </button>
+            {activitySupported ? (
+              <button
+                type="button"
+                className="sidebar-nav-item"
+                data-active={activeView === "today"}
+                aria-current={activeView === "today" ? "page" : undefined}
+                onClick={() => onChangeView("today")}
+              >
+                <span className="sidebar-nav-icon">
+                  <IconCalendarClock size={15} />
+                </span>
+                <span className="sidebar-nav-label">{t("shell.sidebar.today")}</span>
+              </button>
+            ) : null}
             <button
               type="button"
               className="sidebar-nav-item"

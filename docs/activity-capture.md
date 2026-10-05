@@ -125,9 +125,7 @@ Timestamps are RFC 3339 UTC with microseconds and `Z`
 
 Migrations are an append-only catalog in `store.rs` (`MIGRATIONS`), recorded in
 `schema_migrations(version, name, applied_at)`; a database from a newer build
-refuses to open (`NewerSchema`). Add a version; never edit one. Migration 2
-(`coding_agent_blocks`) belongs to coding-agent ingestion and is documented in
-[coding-agent-sessions.md](coding-agent-sessions.md).
+refuses to open (`NewerSchema`). Add a version; never edit one.
 
 | Table | Columns | Notes |
 |---|---|---|
@@ -137,6 +135,11 @@ refuses to open (`NewerSchema`). Add a version; never edit one. Migration 2
 | `input_events` | `id`, `occurred_at`, `kind` (`click`/`key`/`app_switch`/`window_focus`/`clipboard`), `app_name`, `count`, `clipboard_text` | Clicks/keys coalesced per tick (`count`); `CHECK (kind = 'clipboard' OR clipboard_text IS NULL)` |
 | `pauses` | `id`, `started_at`, `ended_at` (NULL while open), `reason` (`manual`/`work_hours`/`low_disk`/`protected_video`) | Pauses left open by a crash are closed at the next start |
 | `processing_cursor` | `consumer` (PK), `last_frame_id`, `last_frame_at`, `updated_at` | Per-consumer high-water mark; `timeline` is the one retention honors |
+
+Migration 2 (`activity_timeline`) adds the timeline's tables; see
+[activity-timeline.md](activity-timeline.md#schema-migration-2-activity_timeline).
+Migration 3 (`coding_agent_blocks`) belongs to coding-agent ingestion; see
+[coding-agent-sessions.md](coding-agent-sessions.md#database-migration-3-coding_agent_blocks).
 
 ### Rust API (`crate::activity::store::ActivityStore`)
 
@@ -166,7 +169,8 @@ both the period and the cursor frame's `last_frame_at`. Unreferenced
 `frame_texts` go with them. Each sweep that deleted anything then runs
 `PRAGMA incremental_vacuum(500)`, so space returns gradually without a full
 `VACUUM` blocking capture. Until the timeline advances the cursor, nothing is
-deleted.
+deleted. The same sweep removes timeline sessions, gaps, and search documents
+older than the period.
 
 ## Settings (`activity-settings.json`, app config dir)
 

@@ -2262,6 +2262,10 @@ async fn tool_descriptors(
         ,{ "name": "request_secret", "description": "Securely request a secret from the user. The result is an opaque one-use reference for a safety-controlled tool, never the secret value.", "parameters": { "type": "object", "properties": { "reason": { "type": "string" } }, "required": ["reason"], "additionalProperties": false }, "requiresApproval": true }
         ,{ "name": "computer_use", "description": "Operate the attended computer-use session through Clovy's permission and approval broker.", "parameters": { "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true }, "requiresApproval": true }
     ]);
+    tools
+        .as_array_mut()
+        .expect("tool descriptor catalog is an array")
+        .extend(crate::activity::timeline::agent_tool_descriptors(app));
     let subsystem = crate::agent_mcp::AgentMcpSubsystem::new(
         crate::agent_mcp::AgentMcpRepository::new(repository.pool.clone()),
         crate::agent_mcp::KeychainMcpSecretStore,
