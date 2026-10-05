@@ -492,7 +492,7 @@ async fn persist_turn_pipeline_result(
                 repos,
                 recording_session_id,
                 "failed",
-                failure.preparation.as_ref(),
+                failure.preparation.as_deref(),
                 reused_transcript_count,
                 Some(error_code.as_str()),
             )
@@ -2200,7 +2200,7 @@ struct TurnPipelineResult {
 #[derive(Debug)]
 struct TurnPipelineFailure {
     error: AppError,
-    preparation: Option<TurnPreparationReport>,
+    preparation: Option<Box<TurnPreparationReport>>,
 }
 
 #[derive(Debug, Clone)]
@@ -3185,14 +3185,14 @@ async fn prepare_and_transcribe_turn_jobs_bounded(
         Err(error) => {
             return Err(TurnPipelineFailure {
                 error,
-                preparation: Some(preparation),
+                preparation: Some(Box::new(preparation)),
             });
         }
     };
     if let Some(error) = preparation.error.clone() {
         return Err(TurnPipelineFailure {
             error,
-            preparation: Some(preparation),
+            preparation: Some(Box::new(preparation)),
         });
     }
     if let Err(error) = transcribe_source_fallbacks(
@@ -3211,7 +3211,7 @@ async fn prepare_and_transcribe_turn_jobs_bounded(
     {
         return Err(TurnPipelineFailure {
             error,
-            preparation: Some(preparation),
+            preparation: Some(Box::new(preparation)),
         });
     }
     Ok(TurnPipelineResult {
@@ -4664,13 +4664,13 @@ mod tests {
         };
         let failure = TurnPipelineFailure {
             error: expected_error.clone(),
-            preparation: Some(TurnPreparationReport {
+            preparation: Some(Box::new(TurnPreparationReport {
                 prepared_count: 1,
                 active_preparation_duration_ms: 42,
                 producer_wall_duration_ms: 137,
                 done_to_preparation_complete_ms: Some(211),
                 error: Some(expected_error.clone()),
-            }),
+            })),
         };
 
         let returned_error = persist_turn_pipeline_result(
