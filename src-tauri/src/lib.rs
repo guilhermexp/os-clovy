@@ -9,6 +9,7 @@ pub mod app_paths;
 pub mod audio;
 pub mod browser;
 mod browser_broker;
+pub mod chat_engine;
 pub mod claude_projects;
 pub mod clovy_api;
 pub mod coding_agents;
@@ -463,10 +464,12 @@ pub fn run() {
             day_intelligence::day_intelligence_generate,
             mcp_server::mcp_server_status,
             mcp_server::mcp_server_set_enabled,
+            chat_engine::chat_engine_catalog,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
         .manage(agent_runtime::AgentRuntimeHost::default())
+        .manage(chat_engine::ChatEngineHost::default())
         .manage(agent_recorder::AgentRecorderBroker::default())
         .manage(Arc::new(browser_broker::BrowserBroker::default()))
         .manage(computer_use::ComputerUseState::default())

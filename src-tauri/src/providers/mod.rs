@@ -1763,7 +1763,11 @@ fn selected_model_for_mode(
         .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
     Ok(match mode {
         ModelMode::Transcription => settings.transcription_model.clone(),
-        ModelMode::Generation => settings.generation_model.clone(),
+        // A CLI chosen for chat makes new chat sessions start on that engine.
+        ModelMode::Generation => match &settings.llm_usage.chat {
+            ProviderRef::Cli { id } => crate::chat_engine::engine_model_id(*id),
+            _ => settings.generation_model.clone(),
+        },
         ModelMode::Image => settings.image_model.clone(),
         ModelMode::Video => settings.video_model.clone(),
     })

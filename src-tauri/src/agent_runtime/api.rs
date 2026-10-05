@@ -261,6 +261,12 @@ pub async fn compact_agent_session(
 ) -> Result<Value, AppError> {
     let repository = repository(&app).await?;
     let session = repository.get_session(&session_id).await?;
+    if crate::chat_engine::cli_for_model(&session.model).is_some() {
+        return Err(AppError::new(
+            "agent_compaction_unsupported",
+            "This session runs on an agent CLI, which manages its own context.",
+        ));
+    }
     if matches!(
         session.status.as_str(),
         "queued" | "running" | "waiting_for_user"
@@ -711,6 +717,22 @@ pub async fn start_agent_run(
     let run = repository
         .create_run(&session.id, &model, reasoning_effort)
         .await?;
+    if let Some(kind) = crate::chat_engine::cli_for_model(&model) {
+        return start_cli_run(
+            &app,
+            &repository,
+            CliRunStart {
+                session_id: &session.id,
+                run_id: &run.id,
+                kind,
+                workspace: &workspace,
+                prompt: &request.prompt,
+                attachments: &prepared_attachments,
+                original_paths: Some(&request.attachments),
+            },
+        )
+        .await;
+    }
     let preparation = async {
         repository
             .set_run_enabled_skills(&run.id, &requested_skills)
@@ -796,6 +818,77 @@ pub async fn start_agent_run(
     Ok(run_json(repository.get_run(&run.id).await?))
 }
 
+struct CliRunStart<'a> {
+    session_id: &'a str,
+    run_id: &'a str,
+    kind: crate::llm::cli::CliKind,
+    workspace: &'a str,
+    prompt: &'a str,
+    attachments: &'a [MessageAttachmentPayload],
+    /// The picked paths of a new message (absent on retry).
+    original_paths: Option<&'a [String]>,
+}
+
+/// Persists the user message of a run on a CLI chat engine and starts the
+/// turn (`crate::chat_engine`). Skills, tool descriptors, and the sidecar
+/// are not involved: the CLI brings its own tools.
+async fn start_cli_run(
+    app: &AppHandle,
+    repository: &AgentRepository,
+    start: CliRunStart<'_>,
+) -> Result<Value, AppError> {
+    let dispatched = async {
+        let user_item = repository
+            .append_item(
+                start.session_id,
+                Some(start.run_id),
+                0,
+                &AgentItemPayload::UserMessage(super::MessagePayload {
+                    role: "user".into(),
+                    content: start.prompt.to_string(),
+                    attachments: start.attachments.to_vec(),
+                }),
+                Some(&format!("user:{}", start.run_id)),
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::new(
+                    "agent_message_persist_failed",
+                    "The user message could not be persisted.",
+                )
+            })?;
+        if let Some(original_paths) = start.original_paths {
+            persist_attachments(
+                repository,
+                start.session_id,
+                start.run_id,
+                &user_item.id,
+                start.attachments,
+                original_paths,
+            )
+            .await?;
+        }
+        crate::chat_engine::start_cli_turn(
+            app,
+            repository.clone(),
+            crate::chat_engine::CliTurnRequest {
+                session_id: start.session_id.to_string(),
+                run_id: start.run_id.to_string(),
+                kind: start.kind,
+                workspace: PathBuf::from(start.workspace),
+                input: message_with_attachment_context(start.prompt, start.attachments),
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = dispatched {
+        mark_dispatch_failed(repository, start.run_id, &error).await;
+        return Err(error);
+    }
+    Ok(run_json(repository.get_run(start.run_id).await?))
+}
+
 #[tauri::command]
 pub async fn cancel_agent_run(
     host: State<'_, AgentRuntimeHost>,
@@ -804,6 +897,23 @@ pub async fn cancel_agent_run(
 ) -> Result<(), AppError> {
     let repository = repository(&app).await?;
     let run = repository.get_run(&run_id).await?;
+    if crate::chat_engine::cli_for_model(&run.model).is_some() {
+        if app
+            .state::<crate::chat_engine::ChatEngineHost>()
+            .cancel(&run.id)
+        {
+            return Ok(());
+        }
+        // No turn behind it any more (it ended meanwhile, or never started):
+        // settle a run that still looks active.
+        if matches!(run.status.as_str(), "queued" | "running") {
+            let cancelled_run = repository
+                .update_run_status(&run.id, "cancelled", None, None, None)
+                .await?;
+            super::host::emit_persisted_run_cancelled(&app, &cancelled_run)?;
+        }
+        return Ok(());
+    }
     if run.status == "waiting_for_user" {
         let pending_interruption_ids = repository.pending_interruption_ids(&run.id).await?;
         let mut _resolution_guards = Vec::with_capacity(pending_interruption_ids.len());
@@ -847,6 +957,11 @@ pub async fn steer_agent_run(
     let run = repository.get_run(&run_id).await?;
     if run.status != "running" && run.status != "queued" {
         return Ok(json!({ "accepted": false, "reason": "not_active" }));
+    }
+    if crate::chat_engine::cli_for_model(&run.model).is_some() {
+        // A CLI turn cannot take input mid-run; the composer sends the
+        // message as the next turn instead.
+        return Ok(json!({ "accepted": false, "reason": "cli_engine" }));
     }
     host.request(
         "run.steer",
@@ -893,6 +1008,22 @@ pub async fn retry_agent_run(
     let run = repository
         .create_run(&session.id, &model, previous.reasoning_effort.as_deref())
         .await?;
+    if let Some(kind) = crate::chat_engine::cli_for_model(&model) {
+        return start_cli_run(
+            &app,
+            &repository,
+            CliRunStart {
+                session_id: &session.id,
+                run_id: &run.id,
+                kind,
+                workspace: &workspace,
+                prompt: &prompt,
+                attachments: &attachments,
+                original_paths: None,
+            },
+        )
+        .await;
+    }
     let preparation = async {
         repository
             .set_run_enabled_skills(&run.id, &enabled_skill_ids)
