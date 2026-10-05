@@ -10,6 +10,7 @@ use tauri::AppHandle;
 
 use super::schedule::LocalZone;
 use crate::activity::store::ActivityStore;
+use crate::coding_agents::store::CodingAgentBlock;
 
 const EXCERPT_CHARS: usize = 400;
 
@@ -282,18 +283,63 @@ impl DaySources for AppSources {
     }
 }
 
-/// Coding-agent blocks from the activity database. Integration point for
-/// coding-agent ingestion (`crate::coding_agents`, not merged into this
-/// branch yet): once it is, this maps
-/// `store.coding_agent_blocks_between(from, to)` (summary when summarized,
-/// else the first prompt) into [`CodingBlock`]s. Until then there are none.
-async fn coding_blocks_between(
-    _store: &ActivityStore,
-    _from: DateTime<Utc>,
-    _to: DateTime<Utc>,
-    _zone: &dyn LocalZone,
+/// Coding-agent blocks from the activity database
+/// (`ActivityStore::coding_agent_blocks_between`, docs/coding-agent-sessions.md).
+pub(crate) async fn coding_blocks_between(
+    store: &ActivityStore,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    zone: &dyn LocalZone,
 ) -> Vec<CodingBlock> {
-    Vec::new()
+    match store.coding_agent_blocks_between(from, to).await {
+        Ok(blocks) => blocks_in_window(blocks, from, to, zone),
+        Err(error) => {
+            tracing::warn!(%error, "day intelligence: coding-agent blocks could not be read");
+            Vec::new()
+        }
+    }
+}
+
+/// Stored blocks as the hour report and the day summary use them. A block
+/// counts only inside `[from, to)` (one ending exactly at `from` is not in
+/// it), and its active time is split by the share of the block inside, so a
+/// block across two hours or two days is not counted twice. Text: the block's
+/// summary once summarized, else its first prompt.
+pub fn blocks_in_window(
+    blocks: Vec<CodingAgentBlock>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    zone: &dyn LocalZone,
+) -> Vec<CodingBlock> {
+    blocks
+        .into_iter()
+        .filter_map(|block| {
+            let start = parse_time(&block.started_at)?;
+            let end = parse_time(&block.ended_at)?.max(start);
+            if start >= to || (end <= from && start < from) {
+                return None;
+            }
+            let span_ms = (end - start).num_milliseconds();
+            let inside_ms = (end.min(to) - start.max(from)).num_milliseconds().max(0);
+            let active_seconds = if span_ms > 0 {
+                ((block.active_seconds as i128 * inside_ms as i128 + span_ms as i128 / 2)
+                    / span_ms as i128) as i64
+            } else {
+                block.active_seconds
+            };
+            Some(CodingBlock {
+                source: block.source.display_name().to_string(),
+                project: block.project,
+                title: block.title,
+                start_local: hhmm(zone, start),
+                end_local: hhmm(zone, end),
+                started_at: block.started_at,
+                ended_at: block.ended_at,
+                active_seconds,
+                summary: block.summary.or(block.first_prompt),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -115,7 +115,7 @@ posts it again an hour later; macOS shows it only when Clovy's alert style is
 has no action or click support on macOS, so unbundled dev runs fall back to
 it without click-through.
 
-## Schema (migration 3, `day_intelligence`)
+## Schema (migration 4, `day_intelligence`)
 
 Days are local `YYYY-MM-DD`, hours local `YYYY-MM-DDTHH`; `started_at` /
 `ended_at` are UTC (RFC 3339, microseconds).
@@ -171,7 +171,12 @@ Invalid times load the defaults.
 
 ## Coding-agent blocks
 
-`sources::coding_blocks_between` is the integration point for coding-agent
-ingestion: until that slice is merged it returns none. Hour prompts, the
-summary prompt, and the panels already take blocks (source, project, title,
-local times, active seconds, summary) and are tested with synthetic ones.
+`sources::coding_blocks_between` reads
+`ActivityStore::coding_agent_blocks_between`
+([coding-agent-sessions.md](coding-agent-sessions.md#rust-api-for-later-slices-crateactivitystoreactivitystore))
+for each hour report and for the day summary and its panels. Each block
+carries the agent's name, project, title, local times, active minutes, and
+its summary once ingestion wrote one, else its first prompt (never the
+transcript). A block counts only inside the window (one ending exactly at
+its start is out), and its active time is split by the share of the block
+inside, so a block across two hours or two days is not counted twice.

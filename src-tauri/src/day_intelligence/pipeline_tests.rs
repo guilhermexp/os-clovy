@@ -381,3 +381,178 @@ async fn days_without_anything_have_no_summary_and_no_call() {
     assert!(provider.calls().is_empty());
     assert_eq!(day_key(day()), "2026-10-04");
 }
+
+/// The app's coding-agent path (`sources::coding_blocks_between` over the
+/// store), without meetings.
+struct StoredBlocks;
+
+impl super::sources::DaySources for StoredBlocks {
+    fn meetings<'a>(
+        &'a self,
+        _from: chrono::DateTime<chrono::Utc>,
+        _to: chrono::DateTime<chrono::Utc>,
+        _zone: &'a dyn super::schedule::LocalZone,
+    ) -> futures_util::future::BoxFuture<'a, Vec<super::sources::MeetingNote>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    fn coding_blocks<'a>(
+        &'a self,
+        store: &'a crate::activity::store::ActivityStore,
+        from: chrono::DateTime<chrono::Utc>,
+        to: chrono::DateTime<chrono::Utc>,
+        zone: &'a dyn super::schedule::LocalZone,
+    ) -> futures_util::future::BoxFuture<'a, Vec<super::sources::CodingBlock>> {
+        Box::pin(super::sources::coding_blocks_between(store, from, to, zone))
+    }
+}
+
+async fn store_block(
+    store: &crate::activity::store::ActivityStore,
+    source: crate::coding_agents::SourceId,
+    session: &str,
+    (start, end): (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+    active_seconds: i64,
+    first_prompt: &str,
+) {
+    let block = crate::coding_agents::store::NewBlock {
+        source,
+        session_id: session.into(),
+        started_at: start,
+        ended_at: end,
+        cwd: Some("/Users/dev/os-clovy".into()),
+        project: Some("os-clovy".into()),
+        title: None,
+        first_prompt: Some(first_prompt.into()),
+        prompt_count: 1,
+        reply_count: 1,
+        active_seconds,
+        transcript: format!("user: {first_prompt}"),
+        sealed: true,
+    };
+    store
+        .upsert_coding_agent_block(&block, local(18, 0))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn coding_agent_blocks_written_by_ingestion_reach_hour_reports_summary_and_panels() {
+    use crate::coding_agents::SourceId;
+    use chrono::Duration;
+
+    let (_dir, store) = day_store().await;
+    // Claude Code 14:05-14:35, summarized by ingestion.
+    store_block(
+        &store,
+        SourceId::ClaudeCode,
+        "claude-1",
+        (local(14, 5), local(14, 35)),
+        1500,
+        "fix the login redirect loop",
+    )
+    .await;
+    let claude = store
+        .coding_agent_blocks_between(local(14, 0), local(15, 0))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|block| block.session_id == "claude-1")
+        .unwrap();
+    store
+        .record_coding_agent_summary(
+            claude.id,
+            "Patched the redirect loop and added a test",
+            "cli:claude",
+            local(18, 0),
+        )
+        .await
+        .unwrap();
+    // Codex 13:50-14:10, not summarized yet: half of it in each hour.
+    store_block(
+        &store,
+        SourceId::Codex,
+        "codex-1",
+        (local(13, 50), local(14, 10)),
+        1200,
+        "add a pagination cursor to the notes API",
+    )
+    .await;
+    // Ends exactly when the day starts: not part of it.
+    store_block(
+        &store,
+        SourceId::Cursor,
+        "cursor-1",
+        (local(0, 0) - Duration::minutes(30), local(0, 0)),
+        900,
+        "late night refactor",
+    )
+    .await;
+
+    let settings = settings();
+    let zone = zone();
+    let sources = StoredBlocks;
+    let provider = FakeProvider::new(|request| {
+        Ok(match kind(request) {
+            "hour" => hour_answer(),
+            "fold" => json!({"placements": []}),
+            _ => summary_answer(),
+        })
+    });
+    let now = local(19, 0);
+    let deps = super::pipeline::Deps {
+        store: &store,
+        settings: &settings,
+        generator: &provider,
+        embedder: &NoEmbedder,
+        sources: &sources,
+        zone: &zone,
+        locale: UiLocale::En,
+        now,
+    };
+    pipeline::catch_up_day(&deps, day(), false).await.unwrap();
+    pipeline::generate_summary(&deps, day(), SummaryTrigger::Manual)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let hour_calls = provider.calls_of(prompts::HOUR_REPORT);
+    let (thirteen, fourteen) = (&hour_calls[0].prompt, &hour_calls[1].prompt);
+    assert!(
+        thirteen.contains("13:50-14:10 · Codex · 10 min")
+            && thirteen.contains("add a pagination cursor to the notes API"),
+        "{thirteen}"
+    );
+    assert!(!thirteen.contains("Claude Code"), "{thirteen}");
+    assert!(
+        fourteen.contains("14:05-14:35 · Claude Code · 25 min · project os-clovy")
+            && fourteen.contains("Patched the redirect loop and added a test"),
+        "{fourteen}"
+    );
+    assert!(
+        fourteen.contains("13:50-14:10 · Codex · 10 min"),
+        "{fourteen}"
+    );
+    assert!(!fourteen.contains("fix the login redirect loop"));
+
+    let summary_prompt = &provider.calls_of(prompts::DAY_SUMMARY)[0].prompt;
+    assert!(summary_prompt.contains("Patched the redirect loop and added a test"));
+    assert!(summary_prompt.contains("add a pagination cursor to the notes API"));
+    assert!(!summary_prompt.contains("late night refactor"));
+
+    let context = ReadContext {
+        store: &store,
+        settings: &settings,
+        sources: &sources,
+        zone: &zone,
+        now,
+    };
+    let (_, _, _, panels) = pipeline::day_view(&context, day()).await.unwrap();
+    assert_eq!(
+        (
+            panels.coding_agent_blocks,
+            panels.coding_agent_active_seconds
+        ),
+        (2, 1500 + 1200)
+    );
+}
