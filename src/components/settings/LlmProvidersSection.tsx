@@ -342,13 +342,18 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
     }
 
     for (const cli of clis) {
-      const disabled = !cli.installed;
-      const label = disabled
-        ? `${cli.name}${t("settingsPanels.llm.notInstalledSuffix")}`
-        : cli.name;
+      // Notes, dictation cleanup, and activity send content to the CLI, so
+      // only CLIs that run with every tool off can take them.
+      const toolsOn = forUsage !== "chat" && !cli.toolsDisabled;
+      const disabled = !cli.installed || toolsOn;
+      const suffix = !cli.installed
+        ? t("settingsPanels.llm.notInstalledSuffix")
+        : toolsOn
+          ? t("settingsPanels.llm.toolsOnSuffix")
+          : "";
       options.push({
         value: providerRefKey({ kind: "cli", id: cli.id }),
-        label,
+        label: `${cli.name}${suffix}`,
         disabled,
       });
     }
@@ -534,9 +539,14 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
                     {details}
                     {testResult ? ` · ${testResult}` : ""}
                   </p>
+                  {cli.toolsDisabled ? null : (
+                    <p className="settings-row-description">
+                      {t("settingsPanels.llm.toolsOnReason")}
+                    </p>
+                  )}
                 </div>
                 <div className="settings-row-control">
-                  {isInstalled ? (
+                  {isInstalled && cli.toolsDisabled ? (
                     <button
                       type="button"
                       className="btn btn-secondary"
