@@ -1,13 +1,18 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type * as TauriCore from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.fn();
 
+// The "Today" view mounts the coding-agent lane (EXTRA_TIMELINE_LANES), which
+// reads its own blocks; these tests cover the view, so that lane stays empty.
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
-  invoke: (command: string, args?: unknown) =>
-    args !== undefined ? invokeMock(command, args) : invokeMock(command),
+  ...(await importOriginal<typeof TauriCore>()),
+  invoke: async (command: string, args?: unknown) => {
+    if (command === "coding_agents_blocks") return [];
+    return args !== undefined ? invokeMock(command, args) : invokeMock(command);
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

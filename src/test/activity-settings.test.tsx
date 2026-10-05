@@ -23,6 +23,7 @@ import {
 import { settingsTabsForCompanionPairing } from "../components/settings/settings-config";
 import { applyInterfaceLocale } from "../i18n/locale";
 import type { ActivitySettingsDto, ActivityStatusDto } from "../lib/activity-capture";
+import { DEFAULT_CODING_AGENT_SOURCES } from "../lib/coding-agents";
 
 const defaultSettings: ActivitySettingsDto = {
   enabled: false,
@@ -43,6 +44,7 @@ const defaultSettings: ActivitySettingsDto = {
     enabled: true,
     quietHours: { enabled: false, start: "22:00", end: "08:00" },
   },
+  codingAgents: DEFAULT_CODING_AGENT_SOURCES,
 };
 
 const defaultStatus: ActivityStatusDto = {

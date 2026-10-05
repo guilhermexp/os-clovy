@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { type CodingAgentSourcesDto, DEFAULT_CODING_AGENT_SOURCES } from "./coding-agents";
 
 export const ACTIVITY_STATE_EVENT = "clovy://activity-state";
 
@@ -28,6 +29,7 @@ export type ActivitySettingsDto = {
   /** When the day summary is generated on its own ("HH:MM", local). */
   daySummary: { time: string };
   notifications: ActivityNotificationSettingsDto;
+  codingAgents: CodingAgentSourcesDto;
 };
 
 export type ActivityPauseReason = "manual" | "workHours" | "lowDisk" | "protectedVideo";
@@ -66,6 +68,7 @@ export type ActivityDebugExportDto = {
   secondaryFrames: number;
   inputEvents: number;
   pauses: number;
+  codingAgentBlocks: number;
 };
 
 export const DEFAULT_ACTIVITY_SETTINGS: ActivitySettingsDto = {
@@ -87,6 +90,7 @@ export const DEFAULT_ACTIVITY_SETTINGS: ActivitySettingsDto = {
     enabled: true,
     quietHours: { enabled: false, start: "22:00", end: "08:00" },
   },
+  codingAgents: DEFAULT_CODING_AGENT_SOURCES,
 };
 
 export async function activityStatus(): Promise<ActivityStatusDto> {

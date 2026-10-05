@@ -55,6 +55,12 @@ pub struct ActivityRuntime {
 pub struct ActivityState(Option<ActivityRuntime>);
 
 impl ActivityState {
+    /// The state shared with the capture thread, for slices that use the
+    /// same database (`crate::coding_agents`).
+    pub fn shared(&self) -> Option<Arc<ActivityShared>> {
+        self.0.as_ref().map(|runtime| Arc::clone(&runtime.shared))
+    }
+
     /// For the slices that build on capture (`crate::day_intelligence`).
     pub fn runtime(&self) -> Option<&ActivityRuntime> {
         self.0.as_ref()
@@ -91,6 +97,7 @@ pub struct ActivityDebugExportDto {
     pub secondary_frames: usize,
     pub input_events: usize,
     pub pauses: usize,
+    pub coding_agent_blocks: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +187,7 @@ pub fn activity_save_settings(
         runtime.shared.set_manual_pause(false);
     }
     runtime.shared.set_settings(settings);
+    crate::coding_agents::wake(&app);
     publish(&app);
     Ok(status_of(Some(runtime)))
 }
@@ -275,6 +283,7 @@ pub async fn activity_debug_export(
         secondary_frames: export.secondary_frames,
         input_events: export.input_events,
         pauses: export.pauses,
+        coding_agent_blocks: export.coding_agent_blocks,
     })
 }
 

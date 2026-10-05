@@ -113,6 +113,7 @@ describe("Day summary", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "day_intelligence_day") return readyDay;
       if (command === "activity_timeline") return emptyTimeline;
+      if (command === "coding_agents_blocks") return [];
       return undefined;
     });
   });

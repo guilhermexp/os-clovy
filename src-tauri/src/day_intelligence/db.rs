@@ -1,4 +1,4 @@
-//! Day intelligence tables in the encrypted `activity.sqlite3` (migration 3,
+//! Day intelligence tables in the encrypted `activity.sqlite3` (migration 4,
 //! `day_intelligence`): hour reports, workstreams and their hours, day
 //! summaries, and the scheduler's run records. This is also the read API
 //! other slices use (the MCP `get_day_summary` tool): `summary_of_day`,

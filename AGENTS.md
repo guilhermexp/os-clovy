@@ -79,7 +79,8 @@ os-clovy/
 │   ├── src/os_accounts.rs   # OS Accounts login (PKCE), keychain token store
 │   ├── src/providers/       # model-settings persistence
 │   ├── src/llm/             # own providers: agent CLIs, OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
-│   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057; tests: `cargo test activity`)
+│   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
+│   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/commands.rs      # the Tauri command surface
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper
 ├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)
@@ -314,6 +315,11 @@ Functional proof (Reality) for desktop features:
    Accessibility/Screen Recording grants. Never open or look up the app by
    bundle id `co.opensoftware.june`: that starts the installed production
    `/Applications/June.app` on real data. Stop only processes started by this run.
+   Never create, unlock, or switch keychains, and never change the default
+   keychain or its search list: the app reads its keys from `login` (`-dev`
+   services). Only one native proof runs on the machine at a time; parallel
+   workers do not open the app. A macOS password dialog on the owner's screen
+   is an incident: stop this run's processes and report it.
 2. Readiness: wait for the main window; macOS permissions the feature needs
    (Accessibility, Screen Recording, Microphone, Notifications) must already be
    granted, otherwise the proof is blocked, not faked.

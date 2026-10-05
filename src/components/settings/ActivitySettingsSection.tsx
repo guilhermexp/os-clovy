@@ -24,6 +24,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Switch } from "../ui/Switch";
 import { DaySummarySettingsSection } from "./DaySummarySettingsSection";
 import { SettingsPageHeader } from "./AppSettings";
+import { CodingAgentSourcesSection } from "./CodingAgentSourcesSection";
 
 const ISO_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const;
 
@@ -685,6 +686,12 @@ export function ActivitySettingsSection() {
           </div>
         </div>
       </section>
+
+      <CodingAgentSourcesSection
+        sources={settings.codingAgents}
+        saving={saving}
+        onChange={(codingAgents) => void saveSettings({ ...settings, codingAgents })}
+      />
 
       {status.debugExportAvailable ? (
         <section className="settings-group" aria-labelledby="activity-debug-heading">

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::coding_agents::settings::CodingAgentSources;
+
 pub const ACTIVITY_SETTINGS_FILE: &str = "activity-settings.json";
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const MAX_RETENTION_DAYS: u32 = 365;
@@ -103,6 +105,8 @@ pub struct ActivitySettings {
     pub retention_days: u32,
     pub day_summary: DaySummarySettings,
     pub notifications: ActivityNotificationSettings,
+    /// Coding-agent transcripts to ingest (`crate::coding_agents`).
+    pub coding_agents: CodingAgentSources,
 }
 
 impl Default for ActivitySettings {
@@ -118,11 +122,17 @@ impl Default for ActivitySettings {
             retention_days: DEFAULT_RETENTION_DAYS,
             day_summary: DaySummarySettings::default(),
             notifications: ActivityNotificationSettings::default(),
+            coding_agents: CodingAgentSources::default(),
         }
     }
 }
 
 impl ActivitySettings {
+    /// The database is needed while capture or any coding-agent source is on.
+    pub fn needs_store(&self) -> bool {
+        self.enabled || self.coding_agents.any_enabled()
+    }
+
     pub fn normalized(mut self) -> Self {
         self.ignored_apps = dedupe_case_insensitive(
             self.ignored_apps

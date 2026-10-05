@@ -262,6 +262,7 @@ pub struct DebugExport {
     pub secondary_frames: usize,
     pub input_events: usize,
     pub pauses: usize,
+    pub coding_agent_blocks: usize,
 }
 
 struct ActivityMigration {
@@ -272,7 +273,8 @@ struct ActivityMigration {
 
 /// Append-only, like the main catalog: never edit or reorder an entry; add a
 /// new version instead.
-const MIGRATIONS: &[ActivityMigration] = &[ActivityMigration {
+const MIGRATIONS: &[ActivityMigration] = &[
+    ActivityMigration {
     version: 1,
     name: "activity_capture",
     statements: &[
@@ -417,12 +419,50 @@ const MIGRATIONS: &[ActivityMigration] = &[ActivityMigration {
             )",
         ],
     },
+    // Coding-agent blocks (`crate::coding_agents`): one row per block of a
+    // session read from a local agent's transcript, keyed by its start.
+    ActivityMigration {
+        version: 3,
+        name: "coding_agent_blocks",
+        statements: &[
+            "CREATE TABLE coding_agent_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL CHECK (source IN ('claude_code', 'codex', 'copilot_cli', 'copilot_vscode', 'cursor', 'cursor_cli', 'antigravity')),
+                session_id TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                cwd TEXT,
+                project TEXT,
+                title TEXT,
+                first_prompt TEXT,
+                prompt_count INTEGER NOT NULL DEFAULT 0,
+                reply_count INTEGER NOT NULL DEFAULT 0,
+                active_seconds INTEGER NOT NULL DEFAULT 0,
+                transcript TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('live', 'sealed', 'summarized')),
+                sealed_at TEXT,
+                summary TEXT,
+                summary_source TEXT,
+                summarized_at TEXT,
+                summary_attempts INTEGER NOT NULL DEFAULT 0,
+                summary_error TEXT,
+                next_attempt_at TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE (source, session_id, started_at),
+                CHECK (state = 'live' OR sealed_at IS NOT NULL),
+                CHECK (state <> 'summarized' OR summary IS NOT NULL)
+            )",
+            "CREATE INDEX idx_coding_agent_blocks_started_at ON coding_agent_blocks(started_at)",
+            "CREATE INDEX idx_coding_agent_blocks_ended_at ON coding_agent_blocks(ended_at)",
+            "CREATE INDEX idx_coding_agent_blocks_state ON coding_agent_blocks(state)",
+        ],
+    },
     // Day intelligence (`crate::day_intelligence`, docs/day-intelligence.md):
     // hour reports, the day's workstreams, day summaries, and the scheduler's
     // attempt bookkeeping. Days and hours are local ("YYYY-MM-DD",
     // "YYYY-MM-DDTHH"); `started_at`/`ended_at` are the UTC bounds.
     ActivityMigration {
-        version: 3,
+        version: 4,
         name: "day_intelligence",
         statements: &[
             "CREATE TABLE day_hour_reports (
@@ -614,8 +654,9 @@ impl ActivityStore {
         self.pool.close().await;
     }
 
-    /// The pool, for the slices that keep their own tables in this database
-    /// (`timeline::db`, `crate::day_intelligence::db`).
+    /// For the slices that keep their own tables in this database: the
+    /// timeline (`timeline::db`), coding agents (`crate::coding_agents::store`),
+    /// and day intelligence (`crate::day_intelligence::db`).
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -945,6 +986,7 @@ impl ActivityStore {
         let secondary_frames = self.secondary_frames_between(epoch, far).await?;
         let input_events = self.input_events_between(epoch, far).await?;
         let pauses = self.pauses_between(epoch, far).await?;
+        let coding_agent_blocks = self.coding_agent_blocks_between(epoch, far).await?;
         let cursor = self.processing_cursor(TIMELINE_CONSUMER).await?;
         let schema_version: i64 = query("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
             .fetch_one(&self.pool)
@@ -960,6 +1002,7 @@ impl ActivityStore {
             "secondaryFrames": secondary_frames,
             "inputEvents": input_events,
             "pauses": pauses,
+            "codingAgentBlocks": coding_agent_blocks,
         });
         if let Some(object) = body.as_object_mut() {
             object.extend(extra);
@@ -983,6 +1026,7 @@ impl ActivityStore {
             secondary_frames: secondary_frames.len(),
             input_events: input_events.len(),
             pauses: pauses.len(),
+            coding_agent_blocks: coding_agent_blocks.len(),
         })
     }
 
@@ -1201,6 +1245,89 @@ mod tests {
             .expect("recreate");
         assert!(keys.current().is_some());
         assert!(store.frames_after(0, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn timeline_database_upgrades_with_coding_agents_table_as_migration_3() {
+        let (_dir, path) = temp_db();
+        let keys = MemoryKeyStore::default();
+        // A database written by the timeline build: migrations 1 and 2 only.
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        store.insert_frame(&frame(at(1, 10), "kept")).await.unwrap();
+        for statement in [
+            "DROP TABLE coding_agent_blocks",
+            "DROP TABLE day_workstream_hours",
+            "DROP TABLE day_workstreams",
+            "DROP TABLE day_hour_reports",
+            "DROP TABLE day_summaries",
+            "DROP TABLE day_intelligence_runs",
+            "DELETE FROM schema_migrations WHERE version >= 3",
+        ] {
+            query(statement).execute(&store.pool).await.unwrap();
+        }
+        store.close().await;
+
+        let store = ActivityStore::open(&path, &keys).await.expect("upgrade");
+        let history: Vec<(i64, String)> =
+            query("SELECT version, name FROM schema_migrations ORDER BY version")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect();
+        assert_eq!(
+            history,
+            vec![
+                (1, "activity_capture".to_string()),
+                (2, "activity_timeline".to_string()),
+                (3, "coding_agent_blocks".to_string()),
+                (4, "day_intelligence".to_string()),
+            ]
+        );
+        assert!(store
+            .coding_agent_blocks_between(at(1, 0), at(2, 0))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.frames_after(0, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn coding_agents_database_upgrades_with_day_intelligence_as_migration_4() {
+        let (_dir, path) = temp_db();
+        let keys = MemoryKeyStore::default();
+        // A database written by the coding-agents build: migrations 1 to 3.
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        store.insert_frame(&frame(at(1, 10), "kept")).await.unwrap();
+        for statement in [
+            "DROP TABLE day_workstream_hours",
+            "DROP TABLE day_workstreams",
+            "DROP TABLE day_hour_reports",
+            "DROP TABLE day_summaries",
+            "DROP TABLE day_intelligence_runs",
+            "DELETE FROM schema_migrations WHERE version = 4",
+        ] {
+            query(statement).execute(&store.pool).await.unwrap();
+        }
+        store.close().await;
+
+        let store = ActivityStore::open(&path, &keys).await.expect("upgrade");
+        let versions: Vec<i64> = query("SELECT version FROM schema_migrations ORDER BY version")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert!(
+            crate::day_intelligence::db::summary_of_day(&store, "2026-10-01")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.frames_after(0, 10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
