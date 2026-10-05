@@ -28,17 +28,25 @@ tests are under `activity::timeline::`) and
 
 ## ETL
 
-`timeline::start` (from `activity::setup` on macOS) runs a pass every 30 s while
-the activity store is open; `activity_timeline`, `activity_timeline_search`, and
-the agent tools run one before reading. Passes are serialized by one lock.
+`timeline::start` (from `activity::setup` on macOS) runs the background loop:
+while a backlog remains it runs passes of at most 10,000 frames back to back,
+releasing the pass lock between them; once caught up, one pass every 30 s while
+the activity store is open. `activity_timeline`, `activity_timeline_search`, and
+the agent tools call `refresh_before_read` first: a pass of at most 2,000
+frames, skipped (not awaited) when another pass holds the lock, so a read never
+waits for a historical backfill and answers from what is already built.
 
-A pass reads frames after `processing_cursor('timeline')` in batches of 100
-(`frames_after`), with that batch's input events (`input_events_between`) and
-pause records (`pauses_between`), feeds them to the builder, and writes the
+A pass reads frames after `processing_cursor('timeline')` in batches of up to
+500 (`frames_after`), with that batch's input events (`input_events_between`)
+and pause records (`pauses_between`), feeds them to the builder, and writes the
 resulting rows, the builder state (`timeline_state`), and the cursor
 (`advance_cursor_on`) in **one transaction**. A crash rolls the whole batch
 back, so a restart never processes a frame twice or skips one. Retention (in
-`ActivityStore::prune`) only deletes frames the cursor has passed.
+`ActivityStore::prune`) only deletes frames the cursor has passed. Only a pass
+that caught up closes a session left open past the threshold (with a backlog,
+later frames may still continue it). Meeting evidence (Clovy recordings) is
+loaded from the older of the open session's start and the first unprocessed
+frame, so a first build over weeks of retained frames still sees old meetings.
 
 Rules (`builder.rs`):
 
@@ -55,11 +63,17 @@ Rules (`builder.rs`):
   active; it is categorized provisionally on every pass and finally on close.
 - **Gaps**: more than 5 minutes between the end of a useful frame and the next
   one. Classified as `paused` (a pause record of one reason covers at least
-  half; reason kept), else `idle` (idle frames cover at least half), else
+  half; the reason is kept: `manual`, `work_hours`, `low_disk`, or
+  `protected_video`), else `idle` (idle frames cover at least half), else
   `sleep` (no frames: the Mac slept, capture was off, or an excluded app was in
   front). A gap closes the session before it, so its time is never session
   time. An active session left more than 5 minutes after its last useful frame
-  is closed by the next pass.
+  is closed by the next pass that caught up.
+- **Ongoing gap**: while the gap has not ended yet (an unchanged screen, an open
+  pause, the Mac asleep), it is not stored; reads that are caught up with
+  capture add it from the last useful frame to now (`ongoing: true`, `id` 0),
+  classified the same way, so the view, stats, and agent count idle and away
+  time as it happens. The next useful frame stores the real gap.
 - **Time going backwards** (clock change, imported fixture): the open session
   closes and the builder restarts without a gap; the first frame past the time
   reached before the rewind restarts it again, so no gap spans time already
@@ -117,17 +131,20 @@ All in `crate::activity::timeline` over an open `ActivityStore`:
 | `search_view(store, settings, query, from, to, limit, now)` | FTS5 results (best first) with session id, app, title, URL, `seen_at`, snippet |
 | `db::session_detail(store, id)` | Session, its windows (most seen first, ≤ 20), and a text excerpt (≤ 1500 chars) |
 | `db::sessions_between`, `db::gaps_between` | Raw rows without filtering |
-| `run_pass(app, store)` | Bring the timeline up to date (serialized) |
+| `refresh_before_read(app, store)` | Bounded catch-up before a read (at most 2,000 frames; skipped while another pass runs) |
 
 Exclusions: a session is hidden while the app is in `ignoredApps` or its domain
-(or a result's URL) matches `ignoredDomains`, so excluding something later
-also removes its history from the view and the agent.
+matches `ignoredDomains`, so excluding something later also removes its history
+from the view and the agent. Search applies the same rule with the session's
+persisted domain and the document's own URL (a document written before the tab
+URL was known has none), and pages through ranked FTS results until `limit`
+allowed rows are found or the matches run out.
 
 ## Commands and event (frontend contract)
 
 | Command | Request | Returns |
 |---|---|---|
-| `activity_timeline` | `{ request: { from, to } }` (RFC 3339) | `{ availability, message, captureEnabled, sessions, gaps, stats }` |
+| `activity_timeline` | `{ request: { from, to } }` (RFC 3339) | `{ availability, message, captureEnabled, sessions, gaps, stats }`; a gap with `ongoing: true` (`id` 0) runs to the time of the read |
 | `activity_timeline_session` | `{ request: { id } }` | `{ session, windows, textExcerpt }`; error `activity_session_not_found` |
 | `activity_timeline_search` | `{ request: { query, from, to, limit } }` (`from`/`to`/`limit` nullable; limit 1 to 200, default 50) | `{ availability, results }` |
 
@@ -147,16 +164,19 @@ with `activity_capture_off` otherwise.
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `get_activity_timeline` | `from`, `to` (RFC 3339, optional; default local midnight to now) | Sessions (app, context, category, local start/end, minutes, active, window title; ≤ 300), gaps, stats in minutes |
+| `get_activity_timeline` | `from`, `to` (RFC 3339, optional; default local midnight to now) | Sessions (app, context, category, local start/end, minutes, active, window title; ≤ 300), gaps (kind, pause reason, ongoing; ≤ 300), `totalSessions`, `totalGaps`, `truncated` when either list was cut, stats in minutes |
 | `search_activity` | `query`, optional `from`, `to`, `limit` (1 to 50, default 20) | Results with session id, app, window title, URL, local `seenAt`, snippet |
 
 ## "Today" view
 
 First-level sidebar view (hidden where capture is unsupported). Day navigation,
 a 24 h strip with one block per session colored by category and distinct gap
-segments, the live active session (refetch on the event and every 30 s), a
+segments (idle, system sleep, paused: manual, work hours, low disk, protected
+video), the live active session (refetch on the event and every 30 s), a
 chronological list, session detail (windows, URLs, excerpt), statistics, and
-search with a period filter whose results open the day at that session.
+search with a period filter whose results open the day at that session. Hour
+ticks sit at the real local times of the selected day (`hourTicks`), so on
+23- and 25-hour DST days they line up with the blocks.
 
 ### Lane extension point
 

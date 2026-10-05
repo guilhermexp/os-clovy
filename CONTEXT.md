@@ -855,8 +855,10 @@ _Avoid_: active frame (active describes the open session).
 **Gap**:
 More than 5 minutes without a useful frame, classified as `idle` (idle frames
 cover most of it), `sleep` (no frames: the Mac slept or capture was off), or
-`paused` (a **pause record** covers most of it, with its reason). Gaps are
-never session time.
+`paused` (a **pause record** covers most of it, with its reason: manual, work
+hours, low disk, or protected video). Gaps are never session time. While it is
+still going on it is an *ongoing gap*, shown up to now but stored only when
+activity resumes.
 _Avoid_: pause (that is the capture's own record), break.
 
 **Category**:
