@@ -72,10 +72,19 @@ describe("chat-engine helpers", () => {
     expect(classifyChatEngineModel("__june_local_generation__:llama3")).toEqual({
       kind: "endpoint",
       modelId: "llama3",
+      endpointId: null,
     });
     expect(classifyChatEngineModel("__june_local_generation__:meta%2Fllama-3")).toEqual({
       kind: "endpoint",
       modelId: "meta/llama-3",
+      endpointId: null,
+    });
+    expect(
+      classifyChatEngineModel("__june_local_generation__:meta%2Fllama-3@lab%20server"),
+    ).toEqual({
+      kind: "endpoint",
+      modelId: "meta/llama-3",
+      endpointId: "lab server",
     });
   });
 
@@ -83,6 +92,7 @@ describe("chat-engine helpers", () => {
     expect(classifyChatEngineModel("llama3", sampleCatalog, [])).toEqual({
       kind: "endpoint",
       modelId: "llama3",
+      endpointId: null,
     });
   });
 

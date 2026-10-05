@@ -231,9 +231,9 @@ pub struct StreamTranslator {
     /// Text of the current message arrived as deltas (claude, pi).
     text_streamed: bool,
     reasoning_streamed: bool,
-    /// cursor-agent: text streamed since the last segment boundary.
-    segment: String,
-    segment_deltas: usize,
+    /// cursor-agent: text arrived as deltas since the last tool call, so the
+    /// whole-segment copies that follow are dropped.
+    segment_streamed: bool,
     /// copilot: message and reasoning ids that streamed deltas.
     streamed_ids: HashSet<String>,
     /// pi and codex report failures that a retry may still recover from.
@@ -249,8 +249,7 @@ impl StreamTranslator {
             started_tools: HashSet::new(),
             text_streamed: false,
             reasoning_streamed: false,
-            segment: String::new(),
-            segment_deltas: 0,
+            segment_streamed: false,
             streamed_ids: HashSet::new(),
             pending_failure: None,
             completed: false,
@@ -727,21 +726,17 @@ impl StreamTranslator {
                 if text.is_empty() {
                     return;
                 }
-                let partial = event.get("timestamp_ms").is_some();
-                // With --stream-partial-output each segment arrives as deltas
-                // and then again whole (timestamped before a tool call, plain
-                // at the end); the whole copy is dropped.
-                if !self.segment.is_empty()
-                    && text == self.segment
-                    && (self.segment_deltas > 1 || !partial)
-                {
-                    self.segment.clear();
-                    self.segment_deltas = 0;
-                } else if partial {
-                    self.segment.push_str(&text);
-                    self.segment_deltas += 1;
+                // With --stream-partial-output text arrives as deltas
+                // (`timestamp_ms`) and each segment again whole: before a tool
+                // call as a record that also carries `model_call_id`, at the
+                // end without `timestamp_ms`. A whole copy is shown only when
+                // nothing was streamed since the last tool call.
+                let aggregate =
+                    event.get("model_call_id").is_some() || event.get("timestamp_ms").is_none();
+                if !aggregate {
+                    self.segment_streamed = true;
                     out.push(EngineEvent::TextDelta(text));
-                } else {
+                } else if !self.segment_streamed {
                     out.push(EngineEvent::Text(text));
                 }
             }
@@ -764,8 +759,7 @@ impl StreamTranslator {
                 let name = cursor_tool_name(key, call);
                 match str_at(event, "subtype") {
                     Some("started") => {
-                        self.segment.clear();
-                        self.segment_deltas = 0;
+                        self.segment_streamed = false;
                         self.start_tool(call_id, &name, call["args"].clone(), out);
                     }
                     Some("completed") => {

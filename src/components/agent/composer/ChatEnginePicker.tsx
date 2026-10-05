@@ -10,8 +10,8 @@ import {
   type ChatEngineEndpoint,
   chatEngineCatalog,
   classifyChatEngineModel,
+  selectedChatEndpoint,
 } from "../../../lib/chat-engine";
-import { rawLocalGenerationModelId } from "../../../lib/local-generation";
 import { useComposerModelPopoverPosition } from "./ModelPicker";
 
 const DEFAULT_CLIS: ChatEngineCliStatus[] = [
@@ -224,19 +224,13 @@ export function ChatEnginePicker({
   const activeCatalog = propCatalog ?? internalCatalog;
   const clis = activeCatalog?.clis.length ? activeCatalog.clis : DEFAULT_CLIS;
   const endpoints = activeCatalog?.endpoints ?? [];
+  const activeEndpoint = selectedChatEndpoint(model, activeCatalog, clovyModels);
 
   let activeEngineLabel = t("chat.engine.clovy");
   if (classification.kind === "cli") {
     const activeCli = clis.find((item) => item.id === classification.cli);
     activeEngineLabel = activeCli?.name ?? fallbackCliName(classification.cli);
   } else if (classification.kind === "endpoint") {
-    const rawLocal = rawLocalGenerationModelId(model ?? "");
-    const activeEndpoint = endpoints.find(
-      (ep) =>
-        ep.optionId === model ||
-        ep.modelId === classification.modelId ||
-        (rawLocal !== null && ep.modelId === rawLocal),
-    );
     activeEngineLabel = activeEndpoint?.name ?? classification.modelId;
   }
 
@@ -292,12 +286,7 @@ export function ChatEnginePicker({
           <p className="agent-composer-model-title">{t("chat.engine.sectionEndpoints")}</p>
           <div className="agent-composer-model-menu">
             {endpoints.map((ep) => {
-              const rawLocal = rawLocalGenerationModelId(model ?? "");
-              const isSelected =
-                classification.kind === "endpoint" &&
-                (model === ep.optionId ||
-                  classification.modelId === ep.modelId ||
-                  rawLocal === ep.modelId);
+              const isSelected = activeEndpoint?.id === ep.id;
               return (
                 <button
                   key={ep.id}

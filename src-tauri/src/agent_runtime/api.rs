@@ -837,6 +837,17 @@ async fn start_cli_run(
     repository: &AgentRepository,
     start: CliRunStart<'_>,
 ) -> Result<Value, AppError> {
+    // Take cancellation ownership before the first await, so a cancel that
+    // arrives while the message is saved or the CLI is resolved stops the
+    // turn instead of finding nothing to cancel.
+    let engines = app.state::<crate::chat_engine::ChatEngineHost>();
+    let ticket = match engines.register(start.run_id) {
+        Ok(ticket) => ticket,
+        Err(error) => {
+            mark_dispatch_failed(repository, start.run_id, &error).await;
+            return Err(error);
+        }
+    };
     let dispatched = async {
         let user_item = repository
             .append_item(
@@ -878,11 +889,13 @@ async fn start_cli_run(
                 workspace: PathBuf::from(start.workspace),
                 input: message_with_attachment_context(start.prompt, start.attachments),
             },
+            ticket,
         )
         .await
     }
     .await;
     if let Err(error) = dispatched {
+        engines.release(start.run_id);
         mark_dispatch_failed(repository, start.run_id, &error).await;
         return Err(error);
     }

@@ -27,12 +27,13 @@ use crate::agent_runtime::AgentRepository;
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 /// Model id prefix of a session that runs on a CLI.
 pub const CLI_ENGINE_MODEL_PREFIX: &str = "__clovy_cli_engine__:";
@@ -77,22 +78,54 @@ impl FrameSink for AppSink {
     }
 }
 
-/// The CLI turns in progress, by run id, for cancellation.
+/// How long app shutdown waits for CLI turns to stop their process groups
+/// (SIGTERM, then SIGKILL after [`turn::CANCEL_GRACE`]).
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The CLI turns in progress, by run id: cancellation and completion.
 #[derive(Default)]
 pub struct ChatEngineHost {
-    turns: Mutex<HashMap<String, watch::Sender<bool>>>,
+    turns: Mutex<HashMap<String, ActiveTurn>>,
+    closing: AtomicBool,
+}
+
+struct ActiveTurn {
+    cancel: watch::Sender<bool>,
+    /// Resolves when the turn's task drops its [`TurnTicket`].
+    done: oneshot::Receiver<()>,
+}
+
+/// Owned by the task that runs one turn: its cancellation signal, and a
+/// completion handle that fires when the ticket is dropped.
+pub struct TurnTicket {
+    pub cancel: watch::Receiver<bool>,
+    _done: oneshot::Sender<()>,
 }
 
 impl ChatEngineHost {
-    fn register(&self, run_id: &str) -> watch::Receiver<bool> {
-        let (sender, receiver) = watch::channel(false);
-        if let Ok(mut turns) = self.turns.lock() {
-            turns.insert(run_id.to_string(), sender);
+    /// Takes cancellation ownership of `run_id`. Call it before awaiting
+    /// anything for the run, so a cancel that arrives during launch
+    /// preparation reaches the turn. Refused once the app is shutting down.
+    pub fn register(&self, run_id: &str) -> Result<TurnTicket, AppError> {
+        let (cancel, receiver) = watch::channel(false);
+        let (done_sender, done) = oneshot::channel();
+        let mut turns = self.turns.lock().map_err(|_| {
+            AppError::new("agent_cli_unavailable", "The CLI engine is unavailable.")
+        })?;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(AppError::new(
+                "agent_cli_shutting_down",
+                "Clovy is quitting; the message was not sent.",
+            ));
         }
-        receiver
+        turns.insert(run_id.to_string(), ActiveTurn { cancel, done });
+        Ok(TurnTicket {
+            cancel: receiver,
+            _done: done_sender,
+        })
     }
 
-    fn release(&self, run_id: &str) {
+    pub fn release(&self, run_id: &str) {
         if let Ok(mut turns) = self.turns.lock() {
             turns.remove(run_id);
         }
@@ -104,9 +137,55 @@ impl ChatEngineHost {
         self.turns
             .lock()
             .ok()
-            .and_then(|turns| turns.get(run_id).map(|sender| sender.send(true).is_ok()))
+            .and_then(|turns| turns.get(run_id).map(|turn| turn.cancel.send(true).is_ok()))
             .unwrap_or(false)
     }
+
+    /// App shutdown: refuses new turns, cancels every turn, and waits (up to
+    /// [`SHUTDOWN_WAIT`]) until each has stopped its CLI's process group and
+    /// published its end.
+    pub async fn shutdown(&self) {
+        let turns = match self.turns.lock() {
+            Ok(mut turns) => {
+                self.closing.store(true, Ordering::Release);
+                turns.drain().map(|(_, turn)| turn).collect::<Vec<_>>()
+            }
+            Err(_) => return,
+        };
+        let mut waiting = Vec::with_capacity(turns.len());
+        for turn in turns {
+            let _ = turn.cancel.send(true);
+            waiting.push(turn.done);
+        }
+        let all_done = futures_util::future::join_all(waiting);
+        if tokio::time::timeout(SHUTDOWN_WAIT, all_done).await.is_err() {
+            tracing::warn!("a CLI chat turn did not stop before shutdown");
+        }
+    }
+}
+
+/// Variables Clovy itself reads (its own configuration and credentials, such
+/// as the local development bearer token loaded from `.env`). The login
+/// environment is merged over Clovy's process environment, so they would
+/// otherwise reach the CLI, its tools, and its MCP servers.
+const CLOVY_OWNED_PREFIXES: [&str; 5] =
+    ["OS_CLOVY_", "OS_JUNE_", "OS_ACCOUNTS_", "CLOVY_", "JUNE_"];
+const CLOVY_OWNED_NAMES: [&str; 2] = ["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"];
+
+/// The CLI's environment: the user's login environment (HOME, PATH,
+/// `PI_CODING_AGENT_DIR`, and every other profile variable unchanged) minus
+/// Clovy's own variables.
+pub fn cli_environment(login: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    login
+        .iter()
+        .filter(|(name, _)| {
+            !CLOVY_OWNED_NAMES.contains(&name.as_str())
+                && !CLOVY_OWNED_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 /// A message to run on a CLI engine.
@@ -120,12 +199,14 @@ pub struct CliTurnRequest {
 }
 
 /// Resolves the CLI on the login-shell PATH and runs the turn in the
-/// background. Errors before anything is spawned (CLI not installed) are
-/// returned so the caller marks the dispatch failed.
+/// background under `ticket` (from [`ChatEngineHost::register`], taken before
+/// any await for the run). Errors before anything is spawned (CLI not
+/// installed) are returned so the caller marks the dispatch failed.
 pub async fn start_cli_turn(
     app: &AppHandle,
     repository: AgentRepository,
     request: CliTurnRequest,
+    ticket: TurnTicket,
 ) -> Result<(), AppError> {
     let env = crate::llm::shell_env::login_env().await;
     let program = env
@@ -152,8 +233,6 @@ pub async fn start_cli_turn(
         input: request.input,
         mcp,
     };
-    let host = app.state::<ChatEngineHost>();
-    let cancel = host.register(&context.run_id);
     let sink = AppSink {
         app: app.clone(),
         repository: repository.clone(),
@@ -161,8 +240,13 @@ pub async fn start_cli_turn(
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let run_id = context.run_id.clone();
+        let TurnTicket {
+            cancel,
+            _done: done,
+        } = ticket;
         turn::execute_turn(&repository, &sink, context, cancel).await;
         app.state::<ChatEngineHost>().release(&run_id);
+        drop(done);
     });
     Ok(())
 }
@@ -234,19 +318,25 @@ pub async fn chat_engine_catalog(app: AppHandle) -> Result<ChatEngineCatalogDto,
             clovy_tools: clovy_tools(cli.id, server_on),
         })
         .collect();
-    let endpoints = crate::llm::registry()
+    Ok(ChatEngineCatalogDto {
+        clis,
+        endpoints: endpoint_engines(&crate::llm::registry()),
+    })
+}
+
+/// One entry per registered endpoint. The option id names the endpoint as
+/// well as its model, so two endpoints serving the same model stay distinct
+/// through the picker, the session model, and the agent proxy.
+pub fn endpoint_engines(registry: &crate::llm::registry::LlmRegistry) -> Vec<EndpointEngineDto> {
+    registry
         .endpoints
-        .into_iter()
+        .iter()
         .filter(|endpoint| !endpoint.model_id.trim().is_empty())
         .map(|endpoint| EndpointEngineDto {
-            option_id: format!(
-                "__june_local_generation__:{}",
-                urlencoding::encode(endpoint.model_id.trim())
-            ),
-            id: endpoint.id,
-            name: endpoint.name,
-            model_id: endpoint.model_id,
+            option_id: crate::clovy_api::endpoint_option_id(&endpoint.model_id, &endpoint.id),
+            id: endpoint.id.clone(),
+            name: endpoint.name.clone(),
+            model_id: endpoint.model_id.clone(),
         })
-        .collect();
-    Ok(ChatEngineCatalogDto { clis, endpoints })
+        .collect()
 }

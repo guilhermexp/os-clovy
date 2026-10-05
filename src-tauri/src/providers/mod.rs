@@ -454,6 +454,15 @@ pub fn local_generation_settings_for_model(model_id: &str) -> LocalGenerationSet
     crate::llm::registry::legacy_settings(connection)
 }
 
+/// The registered endpoint `endpoint_id`, key included; empty when it no
+/// longer exists (the agent route then refuses instead of picking another).
+pub fn local_generation_settings_for_endpoint(endpoint_id: &str) -> LocalGenerationSettings {
+    let connection = llm_registry()
+        .connection(endpoint_id, crate::llm::secrets::store())
+        .ok();
+    crate::llm::registry::legacy_settings(connection)
+}
+
 /// Snapshot of the provider registry for routing one generation call.
 pub fn llm_registry() -> LlmRegistry {
     LlmRegistry::from(&current_settings())

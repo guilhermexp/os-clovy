@@ -158,11 +158,15 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
 
 A chat session's **chat engine** is part of its model id
 (`crate::chat_engine`): `__clovy_cli_engine__:<cli>` runs each message on that
-CLI; a tagged endpoint id (`__june_local_generation__:<model>`) runs the Clovy
-agent on that endpoint (Clovy's tools, streaming, and live steering, as on Clovy
-API); anything else is a Clovy model. The composer's engine picker
-(`src/components/agent/composer/`) lists Clovy, the registered endpoints, and the
-six CLIs (`chat_engine_catalog`).
+CLI; a tagged endpoint id runs the Clovy agent on that endpoint (Clovy's tools,
+streaming, and live steering, as on Clovy API); anything else is a Clovy model.
+The engine picker writes `__june_local_generation__:<model>@<endpoint id>`
+(both URL-encoded), so two endpoints serving the same model stay distinct and
+the agent proxy uses exactly the chosen endpoint (a removed endpoint is
+refused with `local_model_unavailable`, never replaced by another); the older
+`__june_local_generation__:<model>` still routes by model id. The composer's
+engine picker (`src/components/agent/composer/`) lists Clovy, the registered
+endpoints, and the six CLIs (`chat_engine_catalog`).
 
 One message on a CLI engine is one CLI process in the session workspace:
 
@@ -189,8 +193,13 @@ One message on a CLI engine is one CLI process in the session workspace:
   permission"; cursor-agent completes the call as `rejected`; copilot fails
   the tool with a permission error.
 - **Environment.** The login-shell environment, as for one-shot calls (PATH,
-  `HOME`, `PI_CODING_AGENT_DIR` unchanged); `ANTHROPIC_API_KEY` is removed for
-  claude. No authorship marker: these are the user's own conversations.
+  `HOME`, `PI_CODING_AGENT_DIR`, and the user's other profile variables
+  unchanged), minus Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`,
+  `OS_ACCOUNTS_*`, `CLOVY_*`, `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`; for example the
+  local development bearer token loaded from `.env`), which would otherwise
+  reach the CLI, its tools, and its MCP servers (`chat_engine::cli_environment`).
+  `ANTHROPIC_API_KEY` is removed for claude. No authorship marker: these are
+  the user's own conversations.
 - **Continuity.** The CLI's conversation id is saved in the run's config
   (`{"engine": "cli", "cli", "conversationId"}`) as soon as it is known, and
   the next message resumes it while the session's previous turns stayed on the
@@ -203,9 +212,19 @@ One message on a CLI engine is one CLI process in the session workspace:
   `run.failed`/`run.cancelled`) and are persisted through the same function
   (`agent_runtime::host::persist_runtime_event`), so the session shows and
   keeps them like a Clovy run.
-- **Cancel.** `cancel_agent_run` sends SIGTERM to the CLI's process group,
-  then SIGKILL after 2 s; the group is also swept when the CLI exits, so MCP
-  servers it started never outlive the turn.
+- **Cancel.** The run's cancellation is registered (`ChatEngineHost::register`)
+  before anything is awaited for it, and the turn checks it and the run's
+  status again right before spawning, so a cancel during launch preparation
+  starts nothing. Cancelling sends SIGTERM to the CLI's process group, then
+  SIGKILL after 2 s.
+- **End of the CLI.** The CLI's exit is watched alongside its stdout: when it
+  exits, its process group is swept (MCP servers and helpers it started,
+  including one still holding stdout), and output still in the pipe is read
+  for at most 1 s.
+- **App shutdown.** The shutdown coordinator (`shutdown::run_cleanup`, also
+  used for restart and update) calls `ChatEngineHost::shutdown`: new turns are
+  refused, every turn is cancelled, and it waits up to 5 s for each to stop its
+  process group and publish `run.cancelled`.
 - **Messages during a run.** `steer_agent_run` answers
   `{ accepted: false, reason: "cli_engine" }`; the composer's follow-up queue
   sends the message as the next turn when the run ends.

@@ -25,7 +25,10 @@ const STDERR_TAIL_BYTES: usize = 16 * 1024;
 /// Earlier conversation handed to a CLI that starts without a resume id.
 const MAX_HISTORY_CHARS: usize = 24_000;
 /// Time a cancelled CLI gets to save its session after SIGTERM.
-const CANCEL_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const CANCEL_GRACE: Duration = Duration::from_secs(2);
+/// Output still buffered after the CLI exited (and its group was swept) is
+/// read for at most this long.
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 /// Everything one turn needs, resolved by the caller.
 #[derive(Clone, Debug)]
@@ -162,9 +165,25 @@ pub async fn execute_turn<S: FrameSink>(
             return;
         }
     }
-    let mut env = context.env.clone();
+    let mut env = super::cli_environment(&context.env);
     for name in &invocation.remove_env {
         env.remove(*name);
+    }
+    // A cancel may have arrived while the turn was being prepared; nothing is
+    // spawned for a cancelled or already settled run.
+    let run_open = match repository.get_run(&context.run_id).await {
+        Ok(run) => matches!(run.status.as_str(), "queued" | "running"),
+        Err(error) => {
+            tracing::warn!(%error, run_id = %context.run_id, "could not read the CLI run before launch");
+            false
+        }
+    };
+    if *cancel.borrow() || !run_open {
+        drop(scratch);
+        if run_open {
+            frames.emit("run.cancelled", json!({})).await;
+        }
+        return;
     }
 
     let mut translator = StreamTranslator::new(context.kind);
@@ -298,12 +317,19 @@ async fn run_process<S: FrameSink>(
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
     let mut oversized = false;
+    // The CLI's exit is watched alongside its stdout: a helper that inherited
+    // stdout can keep the pipe open after the CLI is gone.
+    let mut exited = None;
     loop {
         tokio::select! {
             biased;
             () = cancelled(cancel) => {
                 stop_group(&mut child, group).await;
                 return TurnEnd::Cancelled;
+            }
+            status = child.wait() => {
+                exited = Some(status);
+                break;
             }
             read = read_line_capped(&mut reader, &mut line, &mut oversized) => {
                 match read {
@@ -322,18 +348,38 @@ async fn run_process<S: FrameSink>(
             }
         }
     }
-    let status = tokio::select! {
-        biased;
-        () = cancelled(cancel) => {
-            stop_group(&mut child, group).await;
-            return TurnEnd::Cancelled;
-        }
-        status = child.wait() => status,
+    let status = match exited {
+        Some(status) => status,
+        None => tokio::select! {
+            biased;
+            () = cancelled(cancel) => {
+                stop_group(&mut child, group).await;
+                return TurnEnd::Cancelled;
+            }
+            status = child.wait() => status,
+        },
     };
-    // Sweep helpers the CLI left in its group (MCP servers it spawned).
+    // Sweep helpers the CLI left in its group (MCP servers it spawned), then
+    // read what is still buffered in the pipe, for a bounded time.
     signal_group(group, SweepSignal::Kill);
+    let drain_until = tokio::time::Instant::now() + OUTPUT_DRAIN_GRACE;
+    while let Ok(Ok(true)) = tokio::time::timeout_at(
+        drain_until,
+        read_line_capped(&mut reader, &mut line, &mut oversized),
+    )
+    .await
+    {
+        if !oversized {
+            let text_line = String::from_utf8_lossy(&line).into_owned();
+            for event in translator.translate_line(&text_line) {
+                state.apply(event).await;
+            }
+        }
+        line.clear();
+        oversized = false;
+    }
     if let Some(task) = stderr_task {
-        if let Ok(Ok(tail)) = tokio::time::timeout(Duration::from_millis(500), task).await {
+        if let Ok(Ok(tail)) = tokio::time::timeout(OUTPUT_DRAIN_GRACE, task).await {
             *stderr_tail = tail;
         }
     }

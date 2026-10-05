@@ -1,4 +1,4 @@
-import { rawLocalGenerationModelId } from "./local-generation";
+import { localGenerationEndpointId, rawLocalGenerationModelId } from "./local-generation";
 import { invoke } from "./tauri";
 
 export const CLI_ENGINE_MODEL_PREFIX = "__clovy_cli_engine__:";
@@ -41,7 +41,8 @@ export async function chatEngineCatalog(): Promise<ChatEngineCatalog> {
 export type ChatEngineClassification =
   | { kind: "clovy" }
   | { kind: "cli"; cli: string }
-  | { kind: "endpoint"; modelId: string };
+  /** `endpointId` is null for an older option that only names a model. */
+  | { kind: "endpoint"; modelId: string; endpointId: string | null };
 
 export function classifyChatEngineModel(
   modelId: string | null | undefined,
@@ -56,13 +57,30 @@ export function classifyChatEngineModel(
   }
   const rawLocal = rawLocalGenerationModelId(modelId);
   if (rawLocal !== null) {
-    return { kind: "endpoint", modelId: rawLocal };
+    return { kind: "endpoint", modelId: rawLocal, endpointId: localGenerationEndpointId(modelId) };
   }
   if (catalog?.endpoints?.some((ep) => ep.modelId === modelId)) {
     const isClovyModel = clovyModels?.some((model) => model.id === modelId) ?? false;
     if (!isClovyModel) {
-      return { kind: "endpoint", modelId };
+      return { kind: "endpoint", modelId, endpointId: null };
     }
   }
   return { kind: "clovy" };
+}
+
+/** The catalog endpoint a session model selects: the one it names, else
+ * (older options that only carry a model id) the first serving that model,
+ * which is what the agent route resolves too. */
+export function selectedChatEndpoint(
+  model: string | null | undefined,
+  catalog: Pick<ChatEngineCatalog, "endpoints"> | null | undefined,
+  clovyModels?: ReadonlyArray<{ id: string }> | null,
+): ChatEngineEndpoint | undefined {
+  const engine = classifyChatEngineModel(model, catalog, clovyModels);
+  if (engine.kind !== "endpoint") return undefined;
+  const endpoints = catalog?.endpoints ?? [];
+  if (engine.endpointId !== null) {
+    return endpoints.find((endpoint) => endpoint.id === engine.endpointId);
+  }
+  return endpoints.find((endpoint) => endpoint.modelId === engine.modelId);
 }

@@ -154,6 +154,50 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
     expect(setModel).toHaveBeenCalledWith("__june_local_generation__:llama3");
   });
 
+  it("keeps two endpoints that serve the same model apart", async () => {
+    const user = userEvent.setup();
+    const setModel = vi.fn();
+    const catalog: ChatEngineCatalog = {
+      clis: sampleCatalog.clis,
+      endpoints: [
+        {
+          id: "home",
+          name: "Home server",
+          modelId: "qwen3",
+          optionId: "__june_local_generation__:qwen3@home",
+        },
+        {
+          id: "lab",
+          name: "Lab server",
+          modelId: "qwen3",
+          optionId: "__june_local_generation__:qwen3@lab",
+        },
+      ],
+    };
+
+    render(
+      <ChatEnginePicker
+        model="__june_local_generation__:qwen3@lab"
+        setModel={setModel}
+        catalog={catalog}
+        showNotice={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Chat engine: Lab server/i })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
+    expect(screen.getByRole("menuitemradio", { name: /^Lab server/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByRole("menuitemradio", { name: /^Home server/ })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    await user.click(screen.getByRole("menuitemradio", { name: /^Home server/ }));
+    expect(setModel).toHaveBeenCalledWith("__june_local_generation__:qwen3@home");
+  });
+
   it("shows the no-tools notice for unsupported and server_off, and not for available", () => {
     const { rerender } = render(
       <ChatEngineNotice catalog={sampleCatalog} model="__clovy_cli_engine__:claude" />,

@@ -148,6 +148,7 @@ import {
   type ChatEngineCatalog,
   chatEngineCatalog,
   classifyChatEngineModel,
+  selectedChatEndpoint,
 } from "../../lib/chat-engine";
 import { type LlmCliId, llmSetUsage } from "../../lib/llm-providers";
 import { modelPrivacyBadge } from "../../lib/model-privacy";
@@ -2671,9 +2672,7 @@ export function AgentWorkspace({
             if (modelRef.current === nextModel) setError(messageFromError(cause));
           });
         } else if (engine.kind === "endpoint") {
-          const endpoint = engineCatalogRef.current?.endpoints.find(
-            (ep) => ep.optionId === nextModel || ep.modelId === engine.modelId,
-          );
+          const endpoint = selectedChatEndpoint(nextModel, engineCatalogRef.current, models);
           if (endpoint) {
             void llmSetUsage("chat", { kind: "endpoint", id: endpoint.id }).catch((cause) => {
               if (modelRef.current === nextModel) setError(messageFromError(cause));

@@ -800,21 +800,12 @@ fn chat_engine_turns_never_pass_permission_bypass_flags() {
         .contains(&"sandbox_mode=\"workspace-write\"".to_string()));
 }
 
-#[test]
-fn chat_engine_cursor_drops_the_whole_copy_of_a_streamed_segment() {
+fn cursor_text(lines: &[&str]) -> (String, Vec<EngineEvent>) {
     let mut translator = StreamTranslator::new(CliKind::CursorAgent);
-    let mut events = Vec::new();
-    for line in [
-        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The"}]},"timestamp_ms":1}"#,
-        r#"{"type":"assistant","message":{"content":[{"type":"text","text":" plan."}]},"timestamp_ms":2}"#,
-        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The plan."}]},"timestamp_ms":3}"#,
-        r#"{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"shellToolCall":{"args":{"command":"touch x"}}}}"#,
-        r#"{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"shellToolCall":{"result":{"rejected":{"command":"touch x","reason":""}}}}}"#,
-        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]},"timestamp_ms":4}"#,
-        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}"#,
-    ] {
-        events.extend(translator.translate_line(line));
-    }
+    let events = lines
+        .iter()
+        .flat_map(|line| translator.translate_line(line))
+        .collect::<Vec<_>>();
     let text = events
         .iter()
         .filter_map(|event| match event {
@@ -822,11 +813,46 @@ fn chat_engine_cursor_drops_the_whole_copy_of_a_streamed_segment() {
             _ => None,
         })
         .collect::<String>();
+    (text, events)
+}
+
+#[test]
+fn chat_engine_cursor_drops_the_whole_copy_of_a_streamed_segment() {
+    // Shapes as captured from cursor-agent 2026.09 (`cursor-t2.jsonl`): the
+    // whole copy before a tool call carries `model_call_id`, the one at the
+    // end has no `timestamp_ms`.
+    let (text, events) = cursor_text(&[
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The"}]},"timestamp_ms":1}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":" plan."}]},"timestamp_ms":2}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The plan."}]},"model_call_id":"m-0","timestamp_ms":3}"#,
+        r#"{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"shellToolCall":{"args":{"command":"touch x"}}}}"#,
+        r#"{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"shellToolCall":{"result":{"rejected":{"command":"touch x","reason":""}}}}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]},"timestamp_ms":4}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}"#,
+    ]);
     assert_eq!(text, "The plan.Done");
     assert!(events.iter().any(|event| matches!(
         event,
         EngineEvent::ToolFinished { needs_approval: true, name, .. } if name == "shell"
     )));
+}
+
+#[test]
+fn chat_engine_cursor_one_delta_segment_before_a_tool_call_is_not_doubled() {
+    let (text, _) = cursor_text(&[
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]},"timestamp_ms":1}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]},"model_call_id":"m-0","timestamp_ms":2}"#,
+        r#"{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"a"}}}}"#,
+        r#"{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"readToolCall":{"result":{"success":{"content":"a"}}}}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"."}]},"timestamp_ms":3}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"."}]}}"#,
+    ]);
+    assert_eq!(text, "OK.");
+    // Without streamed deltas the whole copies are the answer.
+    let (text, _) = cursor_text(&[
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Plain answer"}]}}"#,
+    ]);
+    assert_eq!(text, "Plain answer");
 }
 
 /// A minimal OpenAI-compatible server that streams one tool call
@@ -983,6 +1009,325 @@ async fn chat_engine_registered_endpoint_serves_the_agent_with_streamed_tool_cal
     assert_eq!(
         request["tools"][0]["function"]["name"],
         json!("search_june")
+    );
+}
+
+#[tokio::test]
+async fn chat_engine_endpoint_choice_keeps_its_identity_when_endpoints_share_a_model() {
+    use crate::llm::registry::{LlmEndpointRecord, LlmRegistry, ProviderRef};
+    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::providers::replace_current_settings_for_tests(
+                crate::providers::default_settings_for_tests(),
+            );
+        }
+    }
+    let _restore = Restore;
+    let (first_url, first_requests) = streaming_tool_call_server().await;
+    let (second_url, second_requests) = streaming_tool_call_server().await;
+    let endpoint = |id: &str, base_url: &str| LlmEndpointRecord {
+        id: id.into(),
+        name: format!("Server {id}"),
+        base_url: base_url.into(),
+        model_id: "shared-model".into(),
+        has_api_key: false,
+        structured_output: None,
+        rpm_limit: None,
+    };
+    let mut settings = crate::providers::default_settings_for_tests();
+    settings.llm_endpoints = vec![
+        endpoint("first", &first_url),
+        endpoint("second", &second_url),
+    ];
+    // Chat is on the first endpoint, which serves the same model id.
+    settings.llm_usage.chat = ProviderRef::Endpoint { id: "first".into() };
+    crate::llm::registry::normalize(&mut settings);
+    let registry = LlmRegistry::from(&settings);
+    crate::providers::replace_current_settings_for_tests(settings);
+
+    // The picker offers two distinct choices.
+    let engines = endpoint_engines(&registry);
+    assert_eq!(engines.len(), 2);
+    assert_ne!(engines[0].option_id, engines[1].option_id);
+    let second = engines
+        .iter()
+        .find(|engine| engine.id == "second")
+        .unwrap()
+        .option_id
+        .clone();
+
+    // A session on the second endpoint talks to the second server only.
+    let mut response = crate::clovy_api::proxy_agent_chat_completions(json!({
+        "model": second,
+        "messages": [{ "role": "user", "content": "Hi" }],
+        "stream": true,
+    }))
+    .await
+    .expect("the chosen endpoint answers");
+    while response.chunk().await.unwrap().is_some() {}
+    assert_eq!(second_requests.lock().unwrap().len(), 1);
+    assert!(first_requests.lock().unwrap().is_empty());
+    assert_eq!(
+        second_requests.lock().unwrap()[0]["model"],
+        json!("shared-model")
+    );
+
+    // A removed endpoint is refused instead of silently using another one.
+    let removed = crate::clovy_api::endpoint_option_id("shared-model", "gone");
+    let error = crate::clovy_api::proxy_agent_chat_completions(json!({
+        "model": removed,
+        "messages": [{ "role": "user", "content": "Hi" }],
+        "stream": true,
+    }))
+    .await
+    .err()
+    .expect("a missing endpoint is refused");
+    assert_eq!(error.code, "local_model_unavailable");
+    assert!(first_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn chat_engine_app_shutdown_stops_and_awaits_running_cli_turns() {
+    let kind = CliKind::Claude;
+    let harness = Harness::new(kind).await;
+    let program = harness.fake_cli(
+        kind,
+        r#"
+echo '{"type":"system","subtype":"init","session_id":"claude-conv-1"}'
+sleep 300 &
+echo $! > "$LOG/helper.pid"
+echo $$ > "$LOG/cli.pid"
+sleep 300
+"#,
+    );
+    let host = std::sync::Arc::new(ChatEngineHost::default());
+    let run_id = harness.new_run(kind, "Long task").await;
+    let ticket = host.register(&run_id).unwrap();
+    let sink = std::sync::Arc::new(TestSink {
+        repository: harness.repository.clone(),
+        emitted: StdMutex::new(Vec::new()),
+    });
+    let task = {
+        let repository = harness.repository.clone();
+        let sink = sink.clone();
+        let context = harness.context(kind, &program, &run_id, "Long task", None);
+        tokio::spawn(async move {
+            let TurnTicket {
+                cancel,
+                _done: done,
+            } = ticket;
+            execute_turn(&repository, sink.as_ref(), context, cancel).await;
+            drop(done);
+        })
+    };
+    let pid_file = harness.log.path().join("cli.pid");
+    let helper_file = harness.log.path().join("helper.pid");
+    for _ in 0..200 {
+        if pid_file.exists() && helper_file.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    host.shutdown().await;
+
+    // Shutdown returned only after the turn ended and settled the run.
+    assert_eq!(
+        sink.emitted
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(method, _)| method.clone()),
+        Some("run.cancelled".to_string())
+    );
+    assert_eq!(
+        harness.repository.get_run(&run_id).await.unwrap().status,
+        "cancelled"
+    );
+    for path in [&pid_file, &helper_file] {
+        assert_process_gone(read_pid(path)).await;
+    }
+    task.await.unwrap();
+    // No new turn starts while the app quits.
+    assert!(host.register("late-run").is_err());
+}
+
+fn read_pid(path: &Path) -> i32 {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+async fn assert_process_gone(pid: i32) {
+    for _ in 0..100 {
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("process {pid} is still running");
+}
+
+#[tokio::test]
+async fn chat_engine_cli_exit_ends_the_turn_even_if_a_helper_keeps_stdout_open() {
+    let kind = CliKind::Claude;
+    let harness = Harness::new(kind).await;
+    // The helper inherits stdout and outlives the CLI.
+    let program = harness.fake_cli(
+        kind,
+        r#"
+echo '{"type":"system","subtype":"init","session_id":"claude-conv-1"}'
+sleep 300 &
+echo $! > "$LOG/helper.pid"
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"All done"}}}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"All done"}'
+exit 0
+"#,
+    );
+    let started = std::time::Instant::now();
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        harness.turn(kind, &program, "Quick task", None),
+    )
+    .await;
+    let (run_id, emitted) = finished.expect("the turn ends when the CLI exits");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(
+        emitted.last().map(|(method, _)| method.as_str()),
+        Some("run.completed")
+    );
+    assert_eq!(
+        harness.repository.get_run(&run_id).await.unwrap().status,
+        "completed"
+    );
+    assert!(harness
+        .transcript()
+        .await
+        .contains(&("assistant_message".to_string(), "All done".to_string())));
+    assert_process_gone(read_pid(&harness.log.path().join("helper.pid"))).await;
+}
+
+#[tokio::test]
+async fn chat_engine_cli_environment_keeps_the_profile_but_not_clovy_credentials() {
+    let kind = CliKind::Pi;
+    let harness = Harness::new(kind).await;
+    let program = harness.fake_cli(
+        kind,
+        r#"env > "$LOG/env"
+echo '{"type":"agent_end","messages":[]}'"#,
+    );
+    let run_id = harness.new_run(kind, "Hi").await;
+    let sink = TestSink {
+        repository: harness.repository.clone(),
+        emitted: StdMutex::new(Vec::new()),
+    };
+    let mut context = harness.context(kind, &program, &run_id, "Hi", None);
+    for (name, value) in [
+        ("HOME", "/Users/someone"),
+        ("PI_CODING_AGENT_DIR", "/Users/someone/.pi/agent"),
+        ("OPENROUTER_API_KEY", "user-own-key"),
+        ("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "clovy-dev-token"),
+        ("OS_JUNE_LOCAL_DEV_BEARER_TOKEN", "june-dev-token"),
+        ("OS_ACCOUNTS_CLIENT_ID", "clovy-client"),
+        ("CLOVY_API_URL", "http://127.0.0.1:8787"),
+        ("GOOGLE_OAUTH_CLIENT_SECRET", "clovy-oauth-secret"),
+    ] {
+        context.env.insert(name.to_string(), value.to_string());
+    }
+    let (_cancel, receiver) = watch::channel(false);
+    execute_turn(&harness.repository, &sink, context, receiver).await;
+
+    let env = std::fs::read_to_string(harness.log.path().join("env")).unwrap();
+    for kept in [
+        "HOME=/Users/someone",
+        "PI_CODING_AGENT_DIR=/Users/someone/.pi/agent",
+        "PATH=/usr/bin:/bin",
+        "OPENROUTER_API_KEY=user-own-key",
+    ] {
+        assert!(env.lines().any(|line| line == kept), "missing {kept}");
+    }
+    for secret in [
+        "clovy-dev-token",
+        "june-dev-token",
+        "clovy-client",
+        "127.0.0.1:8787",
+        "clovy-oauth-secret",
+    ] {
+        assert!(!env.contains(secret), "{secret} reached the CLI");
+    }
+}
+
+#[tokio::test]
+async fn chat_engine_cancel_during_launch_preparation_spawns_nothing() {
+    let kind = CliKind::Claude;
+    let harness = Harness::new(kind).await;
+    let program = harness.fake_cli(kind, FAKE_CLAUDE);
+    let host = ChatEngineHost::default();
+
+    // The cancel arrives after the run is registered but before the turn
+    // reaches its launch (while the message is saved or the CLI resolved).
+    let run_id = harness.new_run(kind, "Never run").await;
+    let ticket = host.register(&run_id).unwrap();
+    assert!(host.cancel(&run_id), "the registered run is cancellable");
+    let sink = TestSink {
+        repository: harness.repository.clone(),
+        emitted: StdMutex::new(Vec::new()),
+    };
+    let TurnTicket {
+        cancel,
+        _done: _completion,
+    } = ticket;
+    execute_turn(
+        &harness.repository,
+        &sink,
+        harness.context(kind, &program, &run_id, "Never run", None),
+        cancel,
+    )
+    .await;
+    assert!(
+        !harness.log.path().join("count").exists(),
+        "the CLI was started after the cancel"
+    );
+    assert_eq!(
+        sink.emitted
+            .into_inner()
+            .unwrap()
+            .last()
+            .map(|(method, _)| method.clone()),
+        Some("run.cancelled".to_string())
+    );
+    assert_eq!(
+        harness.repository.get_run(&run_id).await.unwrap().status,
+        "cancelled"
+    );
+
+    // A run already settled by someone else is not started either.
+    let settled = harness.new_run(kind, "Settled").await;
+    harness
+        .repository
+        .update_run_status(&settled, "cancelled", None, None, None)
+        .await
+        .unwrap();
+    let (_cancel, receiver) = watch::channel(false);
+    execute_turn(
+        &harness.repository,
+        &TestSink {
+            repository: harness.repository.clone(),
+            emitted: StdMutex::new(Vec::new()),
+        },
+        harness.context(kind, &program, &settled, "Settled", None),
+        receiver,
+    )
+    .await;
+    assert!(!harness.log.path().join("count").exists());
+    assert_eq!(
+        harness.repository.get_run(&settled).await.unwrap().status,
+        "cancelled"
     );
 }
 
