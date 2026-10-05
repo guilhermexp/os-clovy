@@ -59,7 +59,12 @@ O sistema SHALL permitir escolher o provedor separadamente para: chat/agente, ge
 - Test: integration — CLI falso devolvendo nota e verificação da nota persistida
 
 ### Requirement: Execução isolada de CLIs em geração pontual
-Chamadas de geração pontual a CLIs SHALL rodar sem persistir sessão no CLI, sem ferramentas e sem carregar arquivos de contexto/skills quando o CLI oferecer essas opções, com tempo limite, e MUST marcar o prompt com o marcador de autoria do Clovy para que a ingestão de sessões de agentes as ignore. Chamadas em segundo plano dos recursos de atividade MUST ser serializadas (uma por vez).
+Chamadas de geração pontual a CLIs SHALL rodar sem persistir sessão no CLI, sem ferramentas e sem carregar arquivos de contexto/skills, com tempo limite, e MUST marcar o prompt com o marcador de autoria do Clovy para que a ingestão de sessões de agentes as ignore. CLIs que não garantem todas as ferramentas desligadas (hoje `codex`, `agy`, `cursor-agent`, `copilot`) MUST ser recusados para notas, limpeza de ditado e atividade, sem redirecionamento silencioso; continuam disponíveis como motor do chat. Chamadas em segundo plano dos recursos de atividade MUST ser serializadas (uma por vez).
+
+#### Scenario: CLI que mantém ferramentas
+- **WHEN** o usuário tenta escolher `codex` para notas
+- **THEN** a escolha é recusada com a explicação de que as ferramentas desse CLI não podem ser desligadas, e nenhum processo do `codex` é iniciado
+- Test: unit — seleção por uso e invocação recusadas com CLI falso instalado
 
 #### Scenario: Marcador de autoria presente
 - **WHEN** o Clovy executa qualquer chamada de geração pontual por CLI
