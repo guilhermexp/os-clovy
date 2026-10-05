@@ -1,14 +1,15 @@
 //! Cuts one session into blocks while its records stream in. A block always
 //! starts at a user prompt; a prompt starts a new block when:
 //!
-//! - more than [`IDLE_GAP`] passed since the previous timestamped record;
+//! - more than [`IDLE_GAP`] passed since the previous turn;
 //! - the open block is at least [`TIME_BOX`] long;
 //! - the agent exited after the open block's last turn (a resumed session is
 //!   new work).
 //!
-//! Anything else (replies, tool output, bookkeeping), however late, joins the
-//! open block, so delayed agent output never becomes a block of its own.
-//! Records before the first prompt belong to no block. Cutting depends only
+//! Replies and tool output, however late, join the open block, so delayed
+//! agent output never becomes a block of its own. Bookkeeping records and
+//! exit markers never move a block's time. Records before the first prompt
+//! belong to no block. Cutting depends only
 //! on earlier records, so appending to a transcript never moves an existing
 //! block's start, which is the block's identity in the store.
 //!
@@ -179,9 +180,22 @@ impl BlockBuilder {
                 return false;
             }
         }
+        // Bookkeeping (metadata, token counts, an exit marker) never moves a
+        // block's time: a session reopened days later must not stretch the
+        // old block over those days.
+        match record.kind {
+            RecordKind::Event => return true,
+            RecordKind::End => {
+                if let Some(open) = self.open.as_mut() {
+                    open.exited = true;
+                }
+                return true;
+            }
+            _ => {}
+        }
         let label = self.source.display_name();
         let Some(at) = record.at else {
-            if let Some(open) = self.open.as_mut().filter(|_| record.is_turn()) {
+            if let Some(open) = self.open.as_mut() {
                 open.add_turn(&record, label);
             }
             return true;
@@ -216,11 +230,7 @@ impl BlockBuilder {
         };
         open.ended_at = open.ended_at.max(at);
         open.cwd = self.cwd.clone();
-        match record.kind {
-            RecordKind::End => open.exited = true,
-            RecordKind::Event => {}
-            _ => open.add_turn(&record, label),
-        }
+        open.add_turn(&record, label);
         true
     }
 
@@ -360,6 +370,25 @@ mod tests {
         ]);
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0].sealed);
+    }
+
+    #[test]
+    fn bookkeeping_days_later_does_not_stretch_the_block() {
+        let records = vec![
+            prompt(0, "a"),
+            Record::new(at(5), RecordKind::Reply, "b"),
+            Record::event(at(3 * 24 * 60)),
+            Record::new(at(3 * 24 * 60 + 1), RecordKind::End, ""),
+        ];
+        // Seen right after: the block still ends at its last turn, and the
+        // exit marker seals it without moving its end.
+        let blocks = blocks_at(records, 10, -600);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].ended_at, at(5).unwrap());
+        assert!(
+            blocks[0].sealed,
+            "the exit seals it although it is not idle"
+        );
     }
 
     #[test]

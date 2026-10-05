@@ -110,9 +110,11 @@ always starts at a user prompt; a prompt starts a new block when more than
 1 hour passed since the previous timestamped record, when the open block is
 at least 1 hour long (so a block ends on a complete agent turn and the next
 starts on what the user asked), or when the agent exited after the open
-block's last turn. Anything else (replies, tool output, bookkeeping), however
-late, joins the open block, so delayed agent output never becomes a block of
-its own; records before the first prompt belong to no block. A long
+block's last turn. Replies and tool output, however late, join the open
+block, so delayed agent output never becomes a block of its own; bookkeeping
+records (metadata, token counts) and exit markers never move a block's time,
+so a session reopened days later does not stretch its old block; records
+before the first prompt belong to no block. A long
 autonomous stretch stays in its block until the next prompt. `active_seconds`
 sums the gaps between records, each capped at 2 minutes. Cutting depends only
 on earlier records, so appending to a transcript never moves an existing
