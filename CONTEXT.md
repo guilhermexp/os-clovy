@@ -874,6 +874,18 @@ gaps, stats, search) and, in its "Day summary" section, the day's
 intelligence. "Today" is its name even when another day is selected.
 _Avoid_: dashboard, journal.
 
+**Clovy MCP server** (`clovy-mcp`):
+The opt-in stdio MCP server that lets MCP clients outside Clovy (Claude Code,
+Cursor, CLI chat engines) read the current **data partition**'s notes,
+dictations, and memories, and the installation's activity (activity has no
+partition, [ADR-0059](docs/adr/0059-activity-is-per-installation-not-per-data-partition.md)).
+The binary relays to the running app over an authenticated local socket and
+answers only while Clovy is open with the server on (see
+[docs/mcp-server.md](docs/mcp-server.md)). It is outbound only; the in-app
+agent keeps host tools.
+_Avoid_: Clovy-managed MCP server (the retired in-loop `june_*` servers), MCP
+bridge, plugin.
+
 **Coding agent**:
 A third-party AI coding tool the user runs on the Mac (Claude Code, Codex,
 Copilot CLI, Copilot in VS Code, Cursor, Cursor CLI, Antigravity) whose local

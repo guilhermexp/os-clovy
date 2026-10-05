@@ -15,6 +15,7 @@ import common from "./messages/common";
 import dayIntelligence from "./messages/dayIntelligence";
 import hud from "./messages/hud";
 import lib from "./messages/lib";
+import mcpServer from "./messages/mcpServer";
 import notes from "./messages/notes";
 import onboarding from "./messages/onboarding";
 import recorder from "./messages/recorder";
@@ -34,6 +35,7 @@ export const namespaces = {
   dayIntelligence,
   hud,
   lib,
+  mcpServer,
   notes,
   onboarding,
   recorder,

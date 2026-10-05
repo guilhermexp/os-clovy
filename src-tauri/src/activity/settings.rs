@@ -105,6 +105,9 @@ pub struct ActivitySettings {
     pub retention_days: u32,
     pub day_summary: DaySummarySettings,
     pub notifications: ActivityNotificationSettings,
+    /// The Clovy MCP server (`crate::mcp_server`); only its own command
+    /// changes it, `activity_save_settings` keeps the stored value.
+    pub mcp_server: bool,
     /// Coding-agent transcripts to ingest (`crate::coding_agents`).
     pub coding_agents: CodingAgentSources,
 }
@@ -122,6 +125,7 @@ impl Default for ActivitySettings {
             retention_days: DEFAULT_RETENTION_DAYS,
             day_summary: DaySummarySettings::default(),
             notifications: ActivityNotificationSettings::default(),
+            mcp_server: false,
             coding_agents: CodingAgentSources::default(),
         }
     }

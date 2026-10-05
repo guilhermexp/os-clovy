@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::note_audio_export::{NoteAudioExportSelection, NoteAudioExportSource};
 
-const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
+pub(crate) const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
 const NOTE_PREVIEW_CHAR_LIMIT: usize = 140;
 const LIST_NOTES_CURSOR_VERSION: u8 = 1;
 const LIST_NOTES_CURSOR_MAX_ENCODED_LEN: usize = 1_024;
@@ -6463,7 +6463,7 @@ fn dictation_history_item_from_row(row: sqlx_sqlite::SqliteRow) -> DictationHist
     }
 }
 
-fn dictation_history_cutoff_timestamp() -> String {
+pub(crate) fn dictation_history_cutoff_timestamp() -> String {
     (Utc::now() - Duration::days(DICTATION_HISTORY_RETENTION_DAYS))
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }

@@ -33,6 +33,7 @@ pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
 pub mod macos_menu_icons;
+pub mod mcp_server;
 pub mod meeting_calendar_context;
 pub mod meeting_detection;
 pub mod meeting_hud;
@@ -460,6 +461,8 @@ pub fn run() {
             activity::timeline::activity_timeline_search,
             day_intelligence::day_intelligence_day,
             day_intelligence::day_intelligence_generate,
+            mcp_server::mcp_server_status,
+            mcp_server::mcp_server_set_enabled,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
@@ -481,6 +484,8 @@ pub fn run() {
             // After the tray exists: the capture thread publishes its state
             // to the menu bar from its first tick.
             activity::setup(app);
+            // Reads the switch from the activity settings registered above.
+            mcp_server::setup(app);
             // Shares the activity database and settings.
             coding_agents::setup(app);
             day_intelligence::setup(app);

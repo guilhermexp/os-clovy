@@ -135,7 +135,7 @@ pub(crate) fn session_excluded(
         || url.is_some_and(|url| url_matches_domains(url, &settings.ignored_domains))
 }
 
-fn retention_floor(settings: &ActivitySettings, now: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn retention_floor(settings: &ActivitySettings, now: DateTime<Utc>) -> DateTime<Utc> {
     now - Duration::days(i64::from(settings.retention_days))
 }
 
@@ -587,22 +587,25 @@ pub async fn activity_timeline_search(
     })
 }
 
-/// Agent catalog entries: present only while capture is enabled.
-pub fn agent_tool_descriptors(app: &AppHandle) -> Vec<Value> {
-    let enabled = app
-        .state::<ActivityState>()
+/// Whether capture is on: activity tools (agent and MCP server) exist only
+/// then.
+pub(crate) fn capture_enabled(app: &AppHandle) -> bool {
+    app.state::<ActivityState>()
         .0
         .as_ref()
-        .is_some_and(|runtime| runtime.shared.settings().enabled);
-    agent_tools::descriptors(enabled)
+        .is_some_and(|runtime| runtime.shared.settings().enabled)
 }
 
-/// Agent dispatch for `search_activity` / `get_activity_timeline`.
-pub async fn dispatch_agent_tool(
+/// Agent catalog entries: present only while capture is enabled.
+pub fn agent_tool_descriptors(app: &AppHandle) -> Vec<Value> {
+    agent_tools::descriptors(capture_enabled(app))
+}
+
+/// The open store and the current settings for a tool call (agent or MCP
+/// server), after a bounded refresh. Refuses while capture is off.
+pub(crate) async fn store_for_tools(
     app: &AppHandle,
-    name: &str,
-    arguments: &Value,
-) -> Result<Value, AppError> {
+) -> Result<(ActivityStore, ActivitySettings), AppError> {
     let state = app.state::<ActivityState>();
     let runtime = state
         .0
@@ -621,7 +624,16 @@ pub async fn dispatch_agent_tool(
         ));
     };
     refresh_before_read(app, &store).await;
-    let settings = runtime.shared.settings();
+    Ok((store, runtime.shared.settings()))
+}
+
+/// Agent dispatch for `search_activity` / `get_activity_timeline`.
+pub async fn dispatch_agent_tool(
+    app: &AppHandle,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, AppError> {
+    let (store, settings) = store_for_tools(app).await?;
     agent_tools::dispatch(&store, &settings, name, arguments, Utc::now())
         .await
         .unwrap_or_else(|| {

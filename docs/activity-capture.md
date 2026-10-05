@@ -180,10 +180,13 @@ older than the period.
 `pauseOnProtectedVideo` (true), `ignoredApps`, `ignoredDomains` (bare hosts,
 normalized on save), `workHours` `{enabled: false, days: [1..5] (ISO), start:
 "09:00", end: "18:00"}`, `retentionDays` (30), `codingAgents` (every source
-off; see [coding-agent-sessions.md](coding-agent-sessions.md)), and for day
+off; see [coding-agent-sessions.md](coding-agent-sessions.md)), for day
 intelligence `daySummary` `{time: "18:00"}` and `notifications` `{enabled:
-true, quietHours: {enabled: false, start: "22:00", end: "08:00"}}`. Malformed
-files load defaults. Manual pause is in memory only: a restart resumes capture.
+true, quietHours: {enabled: false, start: "22:00", end: "08:00"}}`, and
+`mcpServer` (false; the Clovy MCP server switch, changed only by
+`mcp_server_set_enabled` from Settings, Agent; `activity_save_settings` keeps
+the stored value, see [mcp-server.md](mcp-server.md)). Malformed files load
+defaults. Manual pause is in memory only: a restart resumes capture.
 
 ## Commands and event (frontend contract)
 

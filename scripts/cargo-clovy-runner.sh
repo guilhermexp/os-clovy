@@ -47,9 +47,11 @@ for arg in "$@"; do
 done
 
 # The Computer use helper is prepared and signed separately before Tauri runs.
-# Building only Clovy here prevents Cargo from relinking that helper with the
-# app's lower deployment target or a different active Swift toolchain.
-cargo build --bin os-june "${cargo_args[@]}"
+# Building only Clovy and its MCP relay here prevents Cargo from relinking that
+# helper with the app's lower deployment target or a different active Swift
+# toolchain. The relay must sit beside the app: Settings, Agent points the
+# copied MCP configuration at it (docs/mcp-server.md).
+cargo build --bin os-june --bin clovy-mcp "${cargo_args[@]}"
 
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [[ "$target_dir" != /* ]]; then

@@ -28,6 +28,7 @@ import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { SettingsPageHeader } from "./AppSettings";
 import { ClovyPersonalitySettingsSection } from "./ClovyPersonalitySettingsSection";
+import { McpServerSection } from "./McpServerSection";
 
 /** Settings owned by Clovy's local agent harness. Messaging compatibility,
  * raw runtime diagnostics, and the legacy filesystem browser are
@@ -250,6 +251,7 @@ export function AgentSettingsSection({
           </p>
         ) : null}
       </section>
+      <McpServerSection />
       <Dialog
         open={Boolean(editingSkill)}
         onClose={() => setEditingSkill(undefined)}

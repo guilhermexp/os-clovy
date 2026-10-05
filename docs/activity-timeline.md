@@ -160,7 +160,10 @@ Named in the `activity-timeline` spec of the OpenSpec change
 `add-activity-intelligence`; offered in the catalog
 (`agent_runtime/api.rs::tool_descriptors`) only while capture is enabled and
 dispatched in `agent_runtime/tools.rs` to `dispatch_agent_tool`, which refuses
-with `activity_capture_off` otherwise.
+with `activity_capture_off` otherwise. `store_for_tools` (open store, current
+settings, bounded refresh) is shared with the Clovy MCP server, which serves
+these two tools under the same names plus four more over the same query API
+([mcp-server.md](mcp-server.md)).
 
 | Tool | Arguments | Result |
 |---|---|---|

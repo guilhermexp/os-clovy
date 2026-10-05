@@ -13816,6 +13816,38 @@ button.agent-user-attachment:hover {
   letter-spacing: 0;
 }
 
+.settings-mcp-client {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-mcp-snippet {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.settings-mcp-snippet-code {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--muted);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.settings-mcp-snippet-copy {
+  flex-shrink: 0;
+  gap: var(--sp-1);
+}
+
 .settings-row-description {
   margin: 0;
   color: var(--muted-foreground);

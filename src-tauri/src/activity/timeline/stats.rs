@@ -35,7 +35,7 @@ pub struct TimelineStatsDto {
     pub categories: Vec<CategoryTime>,
 }
 
-fn clipped_ms(start: &str, end: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
+pub(crate) fn clipped_ms(start: &str, end: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
     match (parse_time(start), parse_time(end)) {
         (Some(start), Some(end)) => (end.min(to) - start.max(from)).num_milliseconds().max(0),
         _ => 0,

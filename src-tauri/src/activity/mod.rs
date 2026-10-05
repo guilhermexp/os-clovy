@@ -180,16 +180,54 @@ pub fn activity_save_settings(
     request: SaveActivitySettingsRequest,
 ) -> Result<ActivityStatusDto, AppError> {
     let runtime = runtime(&state)?;
-    let settings = request.settings.normalized();
-    settings::save(&runtime.settings_path, &settings)
+    let requested = request.settings.normalized();
+    // The MCP server switch lives in Settings, Agent; a stale copy from the
+    // Activity tab must not flip it. The update reads the latest value under
+    // the same lock `set_mcp_server_enabled` takes.
+    let settings = runtime
+        .shared
+        .update_settings(&runtime.settings_path, |current| {
+            *current = ActivitySettings {
+                mcp_server: current.mcp_server,
+                ..requested
+            };
+        })
         .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?;
     if !settings.enabled {
         runtime.shared.set_manual_pause(false);
     }
-    runtime.shared.set_settings(settings);
     crate::coding_agents::wake(&app);
     publish(&app);
     Ok(status_of(Some(runtime)))
+}
+
+/// Whether this platform has activity settings (and so the MCP switch).
+pub(crate) fn activity_settings_supported(app: &AppHandle) -> bool {
+    app.state::<ActivityState>().0.is_some()
+}
+
+/// The stored Clovy MCP server switch; `false` where activity settings are
+/// unsupported.
+pub(crate) fn mcp_server_enabled(app: &AppHandle) -> bool {
+    app.state::<ActivityState>()
+        .0
+        .as_ref()
+        .is_some_and(|runtime| runtime.shared.settings().mcp_server)
+}
+
+/// Persists the Clovy MCP server switch (`crate::mcp_server` owns the
+/// listener it controls).
+pub(crate) fn set_mcp_server_enabled(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
+    let state = app.state::<ActivityState>();
+    let runtime = runtime(&state)?;
+    runtime
+        .shared
+        .update_settings(&runtime.settings_path, |settings| {
+            settings.mcp_server = enabled;
+        })
+        .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?;
+    publish(app);
+    Ok(())
 }
 
 #[tauri::command]

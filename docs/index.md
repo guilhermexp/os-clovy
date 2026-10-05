@@ -67,6 +67,8 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md) - supersedes ADR-0054: Clovy becomes canonical through idempotent migration and rollback-safe aliases while immutable OS identities preserve existing installs
 - [adr/0056](adr/0056-interface-language-uses-an-in-repo-typed-catalog.md) - interface language (English, Português (Brasil)) uses an in-repo typed catalog, a localStorage preference independent of the transcription language, and a Tauri event mirrored into the native menus
 - [adr/0057](adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md) - the activity database is a separate SQLCipher file with a Keychain key; SQLCipher is linked app-wide on macOS and the unkeyed main database is unaffected
+- [adr/0058](adr/0058-clovy-mcp-server-relays-to-the-running-app.md) - the Clovy MCP server is a stdio relay (`clovy-mcp`) to the running app over a same-user Unix socket with an installation secret; the binary never opens the databases
+- [adr/0059](adr/0059-activity-is-per-installation-not-per-data-partition.md) - activity (timeline and coding-agent blocks) belongs to the installation, not to a data partition; MCP activity tools read it like the "Today" view while notes, dictations, and memories stay in the current partition
 
 ## Enforceable rules (spec/)
 
@@ -136,6 +138,7 @@ Per-repo config the engineering skills read before acting (see the
 - [activity-capture.md](activity-capture.md) - activity capture: capture loop and privacy rules, the encrypted `activity.sqlite3` schema, processing cursor, retention, and the store API later slices use
 - [activity-timeline.md](activity-timeline.md) - activity timeline: incremental ETL from frames to sessions and gaps, categorizer, day stats, FTS5 search, the "Today" view and its lane extension point, the `search_activity` / `get_activity_timeline` agent tools, and the query API for later slices
 - [day-intelligence.md](day-intelligence.md) - day intelligence: local distillation with on-device embeddings, hour reports with measured minutes, workstream fold, day summary and standup, daily schedule with wake recovery, notifications and quiet hours, schema and the read API for the MCP server
+- [mcp-server.md](mcp-server.md) - Clovy MCP server: the `clovy-mcp` relay, socket and secret handshake, MCP tools and `clovy://` resources with their limits, client configuration snippets, and the launch API for CLI chat engines
 - [coding-agent-sessions.md](coding-agent-sessions.md) - coding-agent session ingestion: read-only readers for seven local agents, block cutting and lifecycle, summaries by the agent's own CLI or the activity provider, the `coding_agent_blocks` schema (activity migration 3) and its query API, the "Today" view lane
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note

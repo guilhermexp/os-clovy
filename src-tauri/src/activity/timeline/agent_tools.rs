@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::db::{TimelineGapDto, TimelineSessionDto};
+use super::stats::TimelineStatsDto;
 use super::{search_view, timeline_view};
 use crate::activity::settings::ActivitySettings;
 use crate::activity::store::ActivityStore;
@@ -65,7 +66,10 @@ fn invalid(message: impl Into<String>) -> AppError {
     AppError::new("activity_tool_invalid_arguments", message.into())
 }
 
-fn time_argument(arguments: &Value, key: &str) -> Result<Option<DateTime<Utc>>, AppError> {
+pub(crate) fn time_argument(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<DateTime<Utc>>, AppError> {
     match arguments.get(key).and_then(Value::as_str) {
         None => Ok(None),
         Some(value) if value.trim().is_empty() => Ok(None),
@@ -75,17 +79,17 @@ fn time_argument(arguments: &Value, key: &str) -> Result<Option<DateTime<Utc>>, 
     }
 }
 
-fn local(value: &str) -> String {
+pub(crate) fn local(value: &str) -> String {
     DateTime::parse_from_rfc3339(value)
         .map(|at| at.with_timezone(&Local).to_rfc3339())
         .unwrap_or_else(|_| value.to_string())
 }
 
-fn minutes(ms: i64) -> f64 {
+pub(crate) fn minutes(ms: i64) -> f64 {
     (ms as f64 / 60_000.0 * 10.0).round() / 10.0
 }
 
-fn local_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn local_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
     let today = now.with_timezone(&Local).date_naive();
     Local
         .from_local_datetime(&today.and_time(NaiveTime::MIN))
@@ -93,7 +97,7 @@ fn local_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
         .map_or(now - Duration::hours(24), |at| at.with_timezone(&Utc))
 }
 
-fn session_json(session: &TimelineSessionDto) -> Value {
+pub(crate) fn session_json(session: &TimelineSessionDto) -> Value {
     json!({
         "id": session.id,
         "app": session.app_name,
@@ -108,7 +112,7 @@ fn session_json(session: &TimelineSessionDto) -> Value {
     })
 }
 
-fn gap_json(gap: &TimelineGapDto) -> Value {
+pub(crate) fn gap_json(gap: &TimelineGapDto) -> Value {
     json!({
         "kind": gap.kind,
         "pauseReason": gap.pause_reason,
@@ -116,6 +120,16 @@ fn gap_json(gap: &TimelineGapDto) -> Value {
         "endedAt": local(&gap.ended_at),
         "minutes": minutes(gap.duration_ms),
         "ongoing": gap.ongoing,
+    })
+}
+
+pub(crate) fn stats_json(stats: &TimelineStatsDto) -> Value {
+    json!({
+        "focusedMinutes": minutes(stats.focused_ms),
+        "idleMinutes": minutes(stats.idle_ms),
+        "awayMinutes": minutes(stats.away_ms),
+        "topApps": stats.top_apps.iter().map(|app| json!({ "app": app.app_name, "minutes": minutes(app.duration_ms) })).collect::<Vec<_>>(),
+        "categories": stats.categories.iter().map(|entry| json!({ "category": entry.category, "minutes": minutes(entry.duration_ms) })).collect::<Vec<_>>(),
     })
 }
 
@@ -157,13 +171,7 @@ async fn get_timeline(
         "gaps": view.gaps.iter().take(MAX_GAPS).map(gap_json).collect::<Vec<_>>(),
         "totalSessions": view.sessions.len(),
         "totalGaps": view.gaps.len(),
-        "stats": {
-            "focusedMinutes": minutes(view.stats.focused_ms),
-            "idleMinutes": minutes(view.stats.idle_ms),
-            "awayMinutes": minutes(view.stats.away_ms),
-            "topApps": view.stats.top_apps.iter().map(|app| json!({ "app": app.app_name, "minutes": minutes(app.duration_ms) })).collect::<Vec<_>>(),
-            "categories": view.stats.categories.iter().map(|entry| json!({ "category": entry.category, "minutes": minutes(entry.duration_ms) })).collect::<Vec<_>>(),
-        },
+        "stats": stats_json(&view.stats),
         "truncated": truncated,
     }))
 }
