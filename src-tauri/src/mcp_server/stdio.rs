@@ -126,13 +126,12 @@ pub fn read_bounded_line(
             break;
         }
     }
-    Ok(read_any.then(|| {
-        if too_long {
-            InputLine::TooLong
-        } else {
-            InputLine::Line(line)
-        }
-    }))
+    let read = if too_long {
+        InputLine::TooLong
+    } else {
+        InputLine::Line(line)
+    };
+    Ok(read_any.then_some(read))
 }
 
 /// Entry point for the `clovy-mcp` binary.
