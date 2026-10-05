@@ -212,6 +212,53 @@ describe("Day summary", () => {
     );
   });
 
+  it("shows a failed first read with a retry instead of loading forever", async () => {
+    let fail = true;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command !== "day_intelligence_day") return undefined;
+      if (fail) throw { code: "activity_database_closed", message: "The database is closed." };
+      return readyDay;
+    });
+    render(<DaySummaryPanel day={DAY} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load the day summary: The database is closed.",
+    );
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("A day focused on the login fix")).toBeInTheDocument();
+  });
+
+  it("keeps the selected day when the previous day's read answers last", async () => {
+    let answerPrevious: (value: DayIntelligenceDto) => void = () => {};
+    invokeMock.mockImplementation(async (command: string, args?: { request: { day: string } }) => {
+      if (command !== "day_intelligence_day") return undefined;
+      if (args?.request.day === "2026-10-03") {
+        return new Promise<DayIntelligenceDto>((resolve) => {
+          answerPrevious = resolve;
+        });
+      }
+      return readyDay;
+    });
+    const { rerender } = render(<DaySummaryPanel day="2026-10-03" />);
+    rerender(<DaySummaryPanel day={DAY} />);
+    expect(await screen.findByText("A day focused on the login fix")).toBeInTheDocument();
+
+    await act(async () =>
+      answerPrevious({
+        ...readyDay,
+        day: "2026-10-03",
+        summary: {
+          ...(readyDay.summary as NonNullable<DayIntelligenceDto["summary"]>),
+          day: "2026-10-03",
+          headline: "The previous day",
+        },
+      }),
+    );
+    expect(screen.queryByText("The previous day")).not.toBeInTheDocument();
+    expect(screen.getByText("A day focused on the login fix")).toBeInTheDocument();
+  });
+
   it("reads in Portuguese and copies the standup with Portuguese headings", async () => {
     applyInterfaceLocale("pt-BR");
     render(<DaySummaryPanel day={DAY} />);

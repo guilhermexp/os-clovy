@@ -53,21 +53,40 @@ export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelPr
   const [data, setData] = useState<DayIntelligenceDto | null>(null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const fade = useScrollFade(scrollerRef);
+  // Reads overlap (events, day changes): a read is shown only if no later
+  // read was shown already. A finished generation is the newest state of its
+  // day, so it supersedes reads in flight. Responses for another day drop.
+  const requests = useRef({ day, next: 0, shown: 0 });
 
   const load = useCallback(async () => {
+    const current = requests.current;
+    const request = ++current.next;
+    const settled = () => {
+      if (current.day !== day || request <= current.shown) return false;
+      current.shown = request;
+      return true;
+    };
     try {
-      setData(await dayIntelligence(day));
-    } catch (loadError) {
-      setError(errorMessage(loadError));
+      const loaded = await dayIntelligence(day);
+      if (settled()) {
+        setData(loaded);
+        setLoadError(null);
+      }
+    } catch (failure) {
+      if (settled()) setLoadError(errorMessage(failure));
     }
   }, [day]);
 
   useEffect(() => {
+    requests.current.day = day;
+    requests.current.shown = requests.current.next;
     setData(null);
     setError(null);
+    setLoadError(null);
     setCopied(false);
     void load();
     const cleanups: (() => void)[] = [];
@@ -90,12 +109,19 @@ export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelPr
   }, [data, fade.update]);
 
   async function handleGenerate() {
+    const current = requests.current;
+    const settled = () => {
+      if (current.day !== day) return false;
+      current.shown = current.next;
+      return true;
+    };
     setGenerating(true);
     setError(null);
     try {
-      setData(await generateDaySummary(day));
+      const generated = await generateDaySummary(day);
+      if (settled()) setData(generated);
     } catch (generateError) {
-      setError(errorMessage(generateError));
+      if (current.day === day) setError(errorMessage(generateError));
     } finally {
       setGenerating(false);
     }
@@ -117,7 +143,23 @@ export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelPr
   if (!data) {
     return (
       <div className="day-summary-panel day-summary-loading">
-        <span className="dot-spinner" aria-hidden="true" />
+        {loadError ? (
+          <>
+            <p className="day-summary-error" role="alert">
+              {t("dayIntelligence.loadError", { message: loadError })}
+            </p>
+            <button
+              type="button"
+              className="btn btn-secondary day-summary-button"
+              onClick={() => void load()}
+            >
+              <IconArrowRotateClockwise size={14} aria-hidden="true" />
+              {t("common.retry")}
+            </button>
+          </>
+        ) : (
+          <span className="dot-spinner" aria-hidden="true" />
+        )}
       </div>
     );
   }
