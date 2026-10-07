@@ -2,10 +2,11 @@
 
 Local MCP clients (Claude Code, Cursor, and the CLI chat engines) read the
 current data partition's notes, dictations, and memories, and the
-installation's activity, through a stdio MCP server, `clovy-mcp`. It is off by
-default, answers only while Clovy is open with the server turned on in
-Settings, Agent, and everything is read-only. Requirements: the
-`clovy-mcp-server` spec of the OpenSpec change `add-activity-intelligence`;
+installation's activity, through a stdio MCP server, `clovy-mcp`. It is on by
+default (the switch in Settings, Agent turns it off, and the choice survives
+restarts), answers only while Clovy is open, and everything is read-only.
+Requirements: the `clovy-mcp-server` specs of the OpenSpec changes
+`add-activity-intelligence` and `default-capture-and-session-mcp`;
 decision records: [ADR-0058](adr/0058-clovy-mcp-server-relays-to-the-running-app.md)
 (the relay) and
 [ADR-0059](adr/0059-activity-is-per-installation-not-per-data-partition.md)
@@ -169,11 +170,23 @@ child gets the relay's "off" errors.
 
 ## Storage of the switch
 
-`mcpServer` in `activity-settings.json` (default `false`). Only
-`mcp_server_set_enabled` changes it; `activity_save_settings` keeps the stored
-value so a stale Activity tab cannot flip it. Both go through
+`mcpServer` in `activity-settings.json` (default `true`; profiles saved before
+it became default-on are turned on once, see the defaults upgrade in
+[activity-capture.md](activity-capture.md#settings-activity-settingsjson-app-config-dir)).
+Only `mcp_server_set_enabled` changes it; `activity_save_settings` keeps the
+stored value so a stale Activity tab cannot flip it. Both go through
 `ActivityShared::update_settings`, which holds one lock across reading the
 latest settings, writing the file, and publishing them, so an Activity save
-and an MCP toggle at the same moment never undo each other. The listener
-starts at app setup when the switch is on. macOS only (`supported: false`
-elsewhere hides the section).
+and an MCP toggle at the same moment never undo each other. A save whose
+write fails returns `activity_settings_save_failed` and changes nothing. App
+setup schedules the listener start when the switch is on
+(`McpServerState::apply_switch`), whether or not capture is on or has its
+permissions; activity tools are offered only while capture is on. Nothing
+waits for the listener: CLI chat engines get the launch whenever the switch is
+on, and tools and resources answer once the listener is ready. A request that
+arrives earlier gets the relay's own answer: `initialize` and `ping` succeed
+locally, `tools/call` returns an error result, and other requests (such as
+`tools/list` and `resources/*`) fail, both with the unreachable reason. The
+relay opens a new connection for a later request when it has none, so
+requests after the listener is ready reach the app. macOS only
+(`supported: false` elsewhere hides the section).

@@ -1,6 +1,7 @@
-//! Activity capture: opt-in, text-only recording of what the user sees and
-//! does on the Mac, stored in the encrypted `activity.sqlite3`. See
-//! `docs/activity-capture.md` for the schema and the API later slices use.
+//! Activity capture: on by default with a persistent opt-out, text-only
+//! recording of what the user sees and does on the Mac, stored in the
+//! encrypted `activity.sqlite3`. See `docs/activity-capture.md` for the
+//! schema, the settings upgrade, and the API later slices use.
 //!
 //! Layout: `engine` (2 s tick and privacy decisions), `platform` (OS seam,
 //! `macos` implements it), `store` + `key` (SQLCipher database and its
@@ -9,6 +10,9 @@
 //! and `app_icon` (local app icons by bundle id for "Top apps").
 
 pub mod app_icon;
+#[cfg(all(test, unix))]
+#[path = "default_services_tests.rs"]
+mod default_services_tests;
 pub mod engine;
 pub mod filter;
 pub mod input;
@@ -182,18 +186,7 @@ pub fn activity_save_settings(
     request: SaveActivitySettingsRequest,
 ) -> Result<ActivityStatusDto, AppError> {
     let runtime = runtime(&state)?;
-    let requested = request.settings.normalized();
-    // The MCP server switch lives in Settings, Agent; a stale copy from the
-    // Activity tab must not flip it. The update reads the latest value under
-    // the same lock `set_mcp_server_enabled` takes.
-    let settings = runtime
-        .shared
-        .update_settings(&runtime.settings_path, |current| {
-            *current = ActivitySettings {
-                mcp_server: current.mcp_server,
-                ..requested
-            };
-        })
+    let settings = save_user_settings(&runtime.shared, &runtime.settings_path, request.settings)
         .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?;
     if !settings.enabled {
         runtime.shared.set_manual_pause(false);
@@ -201,6 +194,34 @@ pub fn activity_save_settings(
     crate::coding_agents::wake(&app);
     publish(&app);
     Ok(status_of(Some(runtime)))
+}
+
+/// Stores what Settings, Activity sent. The MCP server switch lives in
+/// Settings, Agent; a stale copy from the Activity tab must not flip it, and
+/// the request does not carry `defaults_version`. The update reads the latest
+/// values under the same lock [`store_mcp_server_switch`] takes.
+pub(crate) fn save_user_settings(
+    shared: &ActivityShared,
+    path: &std::path::Path,
+    requested: ActivitySettings,
+) -> std::io::Result<ActivitySettings> {
+    let requested = requested.normalized();
+    shared.update_settings(path, |current| {
+        *current = ActivitySettings {
+            mcp_server: current.mcp_server,
+            defaults_version: current.defaults_version,
+            ..requested
+        };
+    })
+}
+
+/// Stores the Clovy MCP server switch, keeping every other setting.
+pub(crate) fn store_mcp_server_switch(
+    shared: &ActivityShared,
+    path: &std::path::Path,
+    enabled: bool,
+) -> std::io::Result<ActivitySettings> {
+    shared.update_settings(path, |settings| settings.mcp_server = enabled)
 }
 
 /// Whether this platform has activity settings (and so the MCP switch).
@@ -222,11 +243,7 @@ pub(crate) fn mcp_server_enabled(app: &AppHandle) -> bool {
 pub(crate) fn set_mcp_server_enabled(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     let state = app.state::<ActivityState>();
     let runtime = runtime(&state)?;
-    runtime
-        .shared
-        .update_settings(&runtime.settings_path, |settings| {
-            settings.mcp_server = enabled;
-        })
+    store_mcp_server_switch(&runtime.shared, &runtime.settings_path, enabled)
         .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?;
     publish(app);
     Ok(())
@@ -350,7 +367,9 @@ fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
     let config_dir = crate::app_paths::app_config_dir(app)?;
     let settings_path = settings::settings_path(&config_dir);
     let db_path = data_dir.join(ACTIVITY_DB_FILE);
-    let shared = Arc::new(ActivityShared::new(settings::load(&settings_path)));
+    let shared = Arc::new(ActivityShared::new(settings::load_at_startup(
+        &settings_path,
+    )));
     let keys: Arc<dyn ActivityKeyStore> = Arc::new(key::KeychainKeyStore::for_current_build());
 
     let thread_shared = Arc::clone(&shared);

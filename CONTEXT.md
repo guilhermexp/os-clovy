@@ -809,10 +809,10 @@ mic grant as covering the other.
 ### Activity capture
 
 **Activity capture**:
-Opt-in, macOS-only, text-only recording of what the user sees and does,
-stored in the **activity database** (see
-[docs/activity-capture.md](docs/activity-capture.md)). Off by default; never
-stores pixels.
+macOS-only, text-only recording of what the user sees and does, stored in the
+**activity database** (see [docs/activity-capture.md](docs/activity-capture.md)).
+On by default; turning it off is the user's lasting choice. Missing macOS
+permissions block recording without turning it off. Never stores pixels.
 _Avoid_: screen recording (that is the TCC permission and the meeting feature),
 tracking, monitoring.
 
@@ -887,13 +887,15 @@ intelligence. "Today" is its name even when another day is selected.
 _Avoid_: dashboard, journal.
 
 **Clovy MCP server** (`clovy-mcp`):
-The opt-in stdio MCP server that lets MCP clients outside Clovy (Claude Code,
+The stdio MCP server that lets MCP clients outside Clovy (Claude Code,
 Cursor, CLI chat engines) read the current **data partition**'s notes,
 dictations, and memories, and the installation's activity (activity has no
 partition, [ADR-0059](docs/adr/0059-activity-is-per-installation-not-per-data-partition.md)).
 The binary relays to the running app over an authenticated local socket and
-answers only while Clovy is open with the server on (see
-[docs/mcp-server.md](docs/mcp-server.md)). It is outbound only; the in-app
+answers only while Clovy is open with the server on, which it is by default
+until the user turns it off (see [docs/mcp-server.md](docs/mcp-server.md)). It
+is independent of **activity capture**: with capture off it still serves notes,
+dictations, and memories, without activity. It is outbound only; the in-app
 agent keeps host tools.
 _Avoid_: Clovy-managed MCP server (the retired in-loop `june_*` servers), MCP
 bridge, plugin.

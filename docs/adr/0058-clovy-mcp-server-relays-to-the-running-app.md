@@ -58,3 +58,16 @@ Contract and protocol: [docs/mcp-server.md](../mcp-server.md).
   configuration again.
 - The socket path must fit the 104-byte Unix socket limit; very deep data
   directories cannot run the server.
+
+## Addendum: on by default (2026-10-07)
+
+The decision above shipped the server off by default. From 2026-10-07 it is on
+by default, together with activity capture (OpenSpec change
+`default-capture-and-session-mcp`), so CLI chat sessions get Clovy's tools
+without a visit to Settings. Turning it off is persistent: no restart or save
+of other settings turns it back on. Profiles saved before this change cannot
+tell an old default `false` from an explicit opt-out, so on the owner's
+decision they are turned on once, recorded by `defaultsVersion` in
+`activity-settings.json` (see [docs/activity-capture.md](../activity-capture.md)).
+The relay, socket, secret, and same-user checks are unchanged; tools still
+answer only once the listener is ready.

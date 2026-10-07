@@ -1,8 +1,10 @@
 # Activity capture
 
-Opt-in, macOS-only, text-only recording of what the user sees and does, kept in
-an encrypted database on the Mac. This doc is the contract for the slices that
-build on it (timeline, coding-agent ingestion, day summaries). Terms are in
+On by default with a persistent opt-out (OpenSpec change
+`default-capture-and-session-mcp`), macOS-only, text-only recording of what the
+user sees and does, kept in an encrypted database on the Mac. This doc is the
+contract for the slices that build on it (timeline, coding-agent ingestion, day
+summaries). Terms are in
 [CONTEXT.md](../CONTEXT.md#activity-capture); the encryption decision is
 [ADR-0057](adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md).
 
@@ -176,17 +178,35 @@ older than the period.
 
 ## Settings (`activity-settings.json`, app config dir)
 
-`enabled` (false), `secondaryMonitors` (false), `inputEvents` (true),
+`enabled` (true), `secondaryMonitors` (false), `inputEvents` (true),
 `pauseOnProtectedVideo` (true), `ignoredApps`, `ignoredDomains` (bare hosts,
 normalized on save), `workHours` `{enabled: false, days: [1..5] (ISO), start:
 "09:00", end: "18:00"}`, `retentionDays` (30), `codingAgents` (every source
 off; see [coding-agent-sessions.md](coding-agent-sessions.md)), for day
 intelligence `daySummary` `{time: "18:00"}` and `notifications` `{enabled:
 true, quietHours: {enabled: false, start: "22:00", end: "08:00"}}`, and
-`mcpServer` (false; the Clovy MCP server switch, changed only by
+`mcpServer` (true; the Clovy MCP server switch, changed only by
 `mcp_server_set_enabled` from Settings, Agent; `activity_save_settings` keeps
-the stored value, see [mcp-server.md](mcp-server.md)). Malformed files load
-defaults. Manual pause is in memory only: a restart resumes capture.
+the stored value, see [mcp-server.md](mcp-server.md)), and `defaultsVersion`
+(internal; `activity_save_settings` keeps the stored value). Fields missing
+from the file load their defaults, so a new profile starts with capture and
+the MCP server on; malformed files load defaults. Manual pause is in memory
+only: a restart resumes capture.
+
+Defaults upgrade: a file without `defaultsVersion` was saved before capture
+and the MCP server became default-on, when `false` could not be told apart
+from an explicit opt-out. `settings::load_at_startup` turns both on once for
+such a file (owner decision, 2026-10-07), keeps every other choice, sets
+`defaultsVersion` to 1, and saves. From then on `false` is the user's choice
+and no start changes it. If that save fails (reported on the process's
+stderr), the app runs with the upgraded settings in memory while the file
+keeps the old content, so the upgrade is repeated at the next start until a
+save succeeds. The first successful save from either switch (Settings,
+Activity or Settings, Agent) writes the marker together with the user's
+choice, so a saved opt-out is never undone by the upgrade. A save that fails
+returns `activity_settings_save_failed` and changes nothing, in memory or on
+disk. Missing macOS permissions block recording (`needsPermissions`), not the
+switch.
 
 ## Commands and event (frontend contract)
 

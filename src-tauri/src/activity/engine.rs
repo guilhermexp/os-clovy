@@ -617,7 +617,7 @@ pub fn run_capture_loop<P: ActivityPlatform>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::activity::key::MemoryKeyStore;
     use crate::activity::platform::PermissionState;
@@ -633,8 +633,8 @@ mod tests {
         ocr: Vec<String>,
     }
 
-    struct FakePlatform {
-        permissions: PermissionSnapshot,
+    pub(crate) struct FakePlatform {
+        pub(crate) permissions: PermissionSnapshot,
         focused: Option<WindowDescriptor>,
         secondary: Vec<WindowDescriptor>,
         ax_text: Option<String>,
@@ -651,7 +651,7 @@ mod tests {
     }
 
     impl FakePlatform {
-        fn granted() -> Self {
+        pub(crate) fn granted() -> Self {
             Self {
                 permissions: PermissionSnapshot {
                     accessibility: PermissionState::Granted,
@@ -754,16 +754,16 @@ mod tests {
         }
     }
 
-    struct Harness {
+    pub(crate) struct Harness {
         _dir: tempfile::TempDir,
-        engine: CaptureEngine<FakePlatform>,
-        shared: Arc<ActivityShared>,
+        pub(crate) engine: CaptureEngine<FakePlatform>,
+        pub(crate) shared: Arc<ActivityShared>,
         keys: Arc<MemoryKeyStore>,
         calls: Arc<Mutex<Calls>>,
     }
 
     impl Harness {
-        fn new(platform: FakePlatform, settings: ActivitySettings) -> Self {
+        pub(crate) fn new(platform: FakePlatform, settings: ActivitySettings) -> Self {
             // Tuesday 2026-09-29 10:00 local.
             let local = NaiveDate::from_ymd_opt(2026, 9, 29)
                 .unwrap()
@@ -801,7 +801,7 @@ mod tests {
             self.shared.store().expect("store open")
         }
 
-        async fn frames(&self) -> Vec<crate::activity::store::StoredFrame> {
+        pub(crate) async fn frames(&self) -> Vec<crate::activity::store::StoredFrame> {
             self.store().frames_after(0, 100).await.unwrap()
         }
 
@@ -813,8 +813,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_is_off_by_default_and_touches_nothing() {
-        let mut harness = Harness::new(FakePlatform::granted(), ActivitySettings::default());
+    async fn capture_turned_off_touches_nothing() {
+        let settings = ActivitySettings {
+            enabled: false,
+            ..ActivitySettings::default()
+        };
+        let mut harness = Harness::new(FakePlatform::granted(), settings);
         harness.engine.tick().await;
         assert_eq!(harness.shared.state(), CaptureState::Off);
         assert!(harness.shared.store().is_none());

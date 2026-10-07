@@ -14,6 +14,10 @@ pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const MAX_RETENTION_DAYS: u32 = 365;
 const MAX_LIST_ENTRIES: usize = 200;
 
+/// Files saved with a lower `defaultsVersion` (or none) predate capture and
+/// the MCP server starting by default; see [`load_at_startup`].
+pub const DEFAULTS_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkHours {
@@ -110,12 +114,17 @@ pub struct ActivitySettings {
     pub mcp_server: bool,
     /// Coding-agent transcripts to ingest (`crate::coding_agents`).
     pub coding_agents: CodingAgentSources,
+    /// The defaults this file has been upgraded to; `0` when the file has
+    /// none (saved before [`DEFAULTS_VERSION`] 1). Only
+    /// [`load_at_startup`] raises it; every save keeps the stored value.
+    #[serde(default)]
+    pub defaults_version: u32,
 }
 
 impl Default for ActivitySettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             secondary_monitors: false,
             input_events: true,
             pause_on_protected_video: true,
@@ -125,8 +134,9 @@ impl Default for ActivitySettings {
             retention_days: DEFAULT_RETENTION_DAYS,
             day_summary: DaySummarySettings::default(),
             notifications: ActivityNotificationSettings::default(),
-            mcp_server: false,
+            mcp_server: true,
             coding_agents: CodingAgentSources::default(),
+            defaults_version: DEFAULTS_VERSION,
         }
     }
 }
@@ -225,13 +235,37 @@ pub fn settings_path(config_dir: &Path) -> PathBuf {
     config_dir.join(ACTIVITY_SETTINGS_FILE)
 }
 
-/// Missing or malformed files load the defaults (capture off).
+/// Missing or malformed files load the defaults (capture and the MCP server
+/// on); missing fields load theirs.
 pub fn load(path: &Path) -> ActivitySettings {
     fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str::<ActivitySettings>(&raw).ok())
         .unwrap_or_default()
         .normalized()
+}
+
+/// The settings the app starts with: [`load`], with a file from before
+/// capture and the MCP server started by default turned on once (owner
+/// decision, 2026-10-07: an old `false` cannot be told apart from an opt-out).
+/// The upgrade is saved before the user can change anything; if the save
+/// fails, it is reported on stderr and the returned settings still carry
+/// the new `defaults_version`, so the next successful save from either
+/// switch stores it and a saved opt-out is never undone by the upgrade.
+pub fn load_at_startup(path: &Path) -> ActivitySettings {
+    let mut settings = load(path);
+    if settings.defaults_version < DEFAULTS_VERSION {
+        settings.enabled = true;
+        settings.mcp_server = true;
+        settings.defaults_version = DEFAULTS_VERSION;
+        if let Err(error) = save(path, &settings) {
+            eprintln!(
+                "activity settings upgrade not saved to {}: {error}; capture and MCP server preferences are enabled in memory, the upgrade marker is not persisted, and the next successful settings save stores it",
+                path.display()
+            );
+        }
+    }
+    settings
 }
 
 pub fn save(path: &Path, settings: &ActivitySettings) -> std::io::Result<()> {
@@ -250,14 +284,6 @@ pub fn save(path: &Path, settings: &ActivitySettings) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn capture_is_off_by_default_with_thirty_day_retention() {
-        let settings = ActivitySettings::default();
-        assert!(!settings.enabled);
-        assert!(!settings.secondary_monitors);
-        assert_eq!(settings.retention_days, 30);
-    }
 
     #[test]
     fn domains_normalize_to_bare_hosts() {

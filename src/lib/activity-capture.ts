@@ -72,7 +72,7 @@ export type ActivityDebugExportDto = {
 };
 
 export const DEFAULT_ACTIVITY_SETTINGS: ActivitySettingsDto = {
-  enabled: false,
+  enabled: true,
   secondaryMonitors: false,
   inputEvents: true,
   pauseOnProtectedVideo: true,

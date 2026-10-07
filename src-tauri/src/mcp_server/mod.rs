@@ -1,8 +1,8 @@
 //! The Clovy MCP server: lets local MCP clients (Claude Code, Cursor, and the
 //! CLI chat engines) read the current data partition's notes, dictations, and
-//! memories, and the installation's activity. Off by default; the switch is `mcpServer` in
-//! `activity-settings.json`, changed only from Settings, Agent. Contract and
-//! protocol: `docs/mcp-server.md`.
+//! memories, and the installation's activity. On by default; the switch is
+//! `mcpServer` in `activity-settings.json`, changed only from Settings, Agent.
+//! Contract and protocol: `docs/mcp-server.md`.
 //!
 //! Layout: `channel` (Unix socket + installation secret), `stdio` (the
 //! `clovy-mcp` relay binary), `protocol` (MCP JSON-RPC and resources),
@@ -17,7 +17,7 @@ pub mod protocol;
 mod red_tests;
 pub mod stdio;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod tools;
 
 use std::path::{Path, PathBuf};
@@ -167,6 +167,55 @@ struct Slot {
     error: Option<String>,
 }
 
+impl McpServerState {
+    /// Starts the listener in the directory `dir` resolves, with `handler`,
+    /// when `enabled` and none runs; stops it when not `enabled`. `dir` and
+    /// `handler` run only when the listener starts.
+    #[cfg(unix)]
+    pub(crate) async fn apply_switch(
+        &self,
+        enabled: bool,
+        dir: impl FnOnce() -> Result<PathBuf, AppError>,
+        handler: impl FnOnce() -> channel::Handler,
+    ) {
+        let mut slot = self.0.lock().await;
+        if enabled && slot.listener.is_none() {
+            let started = match dir() {
+                Ok(dir) => channel::Listener::start(&dir, handler())
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.message),
+            };
+            match started {
+                Ok(listener) => {
+                    tracing::info!(socket = %listener.socket().display(), "Clovy MCP server listening");
+                    slot.listener = Some(listener);
+                    slot.error = None;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Clovy MCP server could not start");
+                    slot.error = Some(error);
+                }
+            }
+        } else if !enabled {
+            if let Some(listener) = slot.listener.take() {
+                listener.stop();
+            }
+            slot.error = None;
+        }
+    }
+
+    /// Whether the listener runs, and the last start error, read together.
+    pub(crate) async fn listener_status(&self) -> (bool, Option<String>) {
+        let slot = self.0.lock().await;
+        #[cfg(unix)]
+        let running = slot.listener.is_some();
+        #[cfg(not(unix))]
+        let running = false;
+        (running, slot.error.clone())
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerStatusDto {
@@ -196,17 +245,13 @@ async fn status(app: &AppHandle) -> Result<McpServerStatusDto, AppError> {
     let (binary, binary_found) = resolve_binary(app);
     let launch = launch(&binary, &channel_dir(app)?);
     let state = app.state::<McpServerState>();
-    let slot = state.0.lock().await;
-    #[cfg(unix)]
-    let running = slot.listener.is_some();
-    #[cfg(not(unix))]
-    let running = false;
+    let (running, error) = state.listener_status().await;
     let pretty = |value: Value| serde_json::to_string_pretty(&value).unwrap_or_default();
     Ok(McpServerStatusDto {
         supported: supported(app),
         enabled: crate::activity::mcp_server_enabled(app),
         running,
-        error: slot.error.clone(),
+        error,
         binary_path: binary.display().to_string(),
         binary_found,
         claude_code_command: claude_code_command(&launch),
@@ -219,38 +264,14 @@ async fn status(app: &AppHandle) -> Result<McpServerStatusDto, AppError> {
 async fn reconcile(app: &AppHandle) {
     let enabled = crate::activity::mcp_server_enabled(app);
     let state = app.state::<McpServerState>();
-    let mut slot = state.0.lock().await;
     #[cfg(unix)]
-    {
-        if enabled && slot.listener.is_none() {
-            let started = match channel_dir(app) {
-                Ok(dir) => channel::Listener::start(&dir, app_handler(app.clone()))
-                    .await
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error.message),
-            };
-            match started {
-                Ok(listener) => {
-                    tracing::info!(socket = %listener.socket().display(), "Clovy MCP server listening");
-                    slot.listener = Some(listener);
-                    slot.error = None;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Clovy MCP server could not start");
-                    slot.error = Some(error);
-                }
-            }
-        } else if !enabled {
-            if let Some(listener) = slot.listener.take() {
-                listener.stop();
-            }
-            slot.error = None;
-        }
-    }
+    state
+        .apply_switch(enabled, || channel_dir(app), || app_handler(app.clone()))
+        .await;
     #[cfg(not(unix))]
     {
         let _ = enabled;
-        slot.error = None;
+        state.0.lock().await.error = None;
     }
 }
 

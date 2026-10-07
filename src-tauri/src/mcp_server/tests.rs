@@ -25,7 +25,7 @@ pub(super) fn at(hour: u32, minute: u32) -> DateTime<Utc> {
 
 /// Notes, dictations, and memories in the default profile, and a decoy of
 /// each in another profile.
-pub(super) async fn notes_pool() -> SqlitePool {
+pub(crate) async fn notes_pool() -> SqlitePool {
     let pool = sqlx_sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -161,7 +161,7 @@ pub(super) async fn activity_store() -> (tempfile::TempDir, ActivityStore) {
     (dir, store)
 }
 
-pub(super) fn data(notes: SqlitePool, activity: ActivityAccess) -> McpData {
+pub(crate) fn data(notes: SqlitePool, activity: ActivityAccess) -> McpData {
     McpData {
         notes,
         profile: "default".into(),
@@ -502,18 +502,6 @@ fn configuration_snippets_point_at_the_bundled_relay() {
     assert!(stdio::parse_dir(&[]).is_err());
 }
 
-#[test]
-fn settings_files_without_the_switch_keep_the_server_off() {
-    let settings: ActivitySettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
-    assert!(!settings.mcp_server);
-    let saved = serde_json::to_value(ActivitySettings {
-        mcp_server: true,
-        ..ActivitySettings::default()
-    })
-    .unwrap();
-    assert_eq!(saved["mcpServer"], json!(true));
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -522,7 +510,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Collects what the relay writes to stdout.
 #[derive(Clone, Default)]
-pub(super) struct Captured(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
 
 impl Write for Captured {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -537,7 +525,7 @@ impl Write for Captured {
 impl Captured {
     /// Waits until `count` messages arrived (the app answers on another
     /// thread) and returns them by id.
-    pub(super) fn messages(&self, count: usize) -> Vec<Value> {
+    pub(crate) fn messages(&self, count: usize) -> Vec<Value> {
         for _ in 0..200 {
             let text = String::from_utf8(lock(&self.0).clone()).unwrap();
             let messages: Vec<Value> = text
@@ -553,14 +541,14 @@ impl Captured {
     }
 }
 
-pub(super) fn by_id(messages: &[Value], id: i64) -> &Value {
+pub(crate) fn by_id(messages: &[Value], id: i64) -> &Value {
     messages
         .iter()
         .find(|message| message["id"] == json!(id))
         .unwrap_or_else(|| panic!("no answer for id {id}: {messages:?}"))
 }
 
-pub(super) fn handler_for(data: McpData) -> channel::Handler {
+pub(crate) fn handler_for(data: McpData) -> channel::Handler {
     let data = Arc::new(data);
     Arc::new(move |message: Value| {
         let data = Arc::clone(&data);
@@ -568,7 +556,7 @@ pub(super) fn handler_for(data: McpData) -> channel::Handler {
     })
 }
 
-pub(super) async fn run_relay(dir: &Path, lines: &[Value]) -> Captured {
+pub(crate) async fn run_relay(dir: &Path, lines: &[Value]) -> Captured {
     let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
     let output = Captured::default();
     let (dir, sink) = (dir.to_path_buf(), output.clone());
