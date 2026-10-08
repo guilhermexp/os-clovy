@@ -1185,9 +1185,11 @@ final class FocusTargetController {
 
     private var lastExternalApp: NSRunningApplication?
     private var pinnedTarget: NSRunningApplication?
-    private let ignoredBundleIdentifiers: Set<String> = [
-        "co.opensoftware.june.dictation-helper",
-    ]
+    // Debug builds carry `<published>.dev.w<worktree>` (src-tauri/build.rs), so
+    // ignore this helper by its own bundle identifier as well as the release one.
+    private let ignoredBundleIdentifiers: Set<String> = Set(
+        ["co.opensoftware.june.dictation-helper", Bundle.main.bundleIdentifier].compactMap { $0 }
+    )
 
     private init() {}
 

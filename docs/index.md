@@ -69,6 +69,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0057](adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md) - the activity database is a separate SQLCipher file with a Keychain key; SQLCipher is linked app-wide on macOS and the unkeyed main database is unaffected
 - [adr/0058](adr/0058-clovy-mcp-server-relays-to-the-running-app.md) - the Clovy MCP server is a stdio relay (`clovy-mcp`) to the running app over a same-user Unix socket with an installation secret; the binary never opens the databases
 - [adr/0059](adr/0059-activity-is-per-installation-not-per-data-partition.md) - activity (timeline and coding-agent blocks) belongs to the installation, not to a data partition; MCP activity tools read it like the "Today" view while notes, dictations, and memories stay in the current partition
+- [adr/0060](adr/0060-development-app-runs-as-a-signed-bundle-that-owns-its-grants.md) - `pnpm tauri:dev` runs a signed `Clovy Dev.app` beside Cargo's output that owns its privacy grants: no TCC resets, one Apple Development identity for the app and its helpers, and a launcher that disclaims the terminal's responsibility
 
 ## Enforceable rules (spec/)
 

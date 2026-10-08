@@ -199,19 +199,107 @@ Clovy asks for permissions only where the feature needs them:
 
 - **Microphone:** required for meeting notes and dictation.
 - **Accessibility:** required for dictation paste into the previously focused
-  app.
+  app and for activity capture.
 - **Screen and system audio recording:** required when using
-  `Microphone + system audio` on macOS.
+  `Microphone + system audio` on macOS, for activity text recognition, and for
+  Computer use captures.
 - **File access:** requested by agent workflows when a task needs a specific
   scope.
 
-The macOS bundle includes `NSMicrophoneUsageDescription` and
-`NSAudioCaptureUsageDescription` in
-[src-tauri/Info.plist](../src-tauri/Info.plist). If local permission state gets
-stuck during development, reset it with:
+The macOS bundle includes `NSMicrophoneUsageDescription`,
+`NSAudioCaptureUsageDescription`, and `NSScreenCaptureUsageDescription` in
+[src-tauri/Info.plist](../src-tauri/Info.plist).
+
+### The macOS development app
+
+`pnpm tauri:dev` (and `make dev`) runs the app from a signed bundle beside
+Cargo's output, so macOS can show it in System Settings and keep its grants
+across restarts and rebuilds
+([ADR-0060](adr/0060-development-app-runs-as-a-signed-bundle-that-owns-its-grants.md)).
+The launcher never resets permissions.
+
+- **Bundle:** `src-tauri/target/debug/Clovy Dev.app`, bundle identifier
+  `<identifier>.dev` (`co.opensoftware.june.dev` on a normal branch). The
+  compiled Tauri identifier, and with it the `<identifier>-dev` data
+  directory, does not change. A branch identity (`codex/jun-278-…`) or
+  `CLOVY_DEV_APP_IDENTIFIER` gets its own bundle, for example
+  `Clovy Dev permproof.app` for `co.opensoftware.june.permproof`. The browser
+  extension's native messaging host follows the compiled identity too: the
+  shim built with it reads only the release app's descriptor or the one in
+  `<identifier>-dev`, never another profile's.
+- **Signing identity:** `CLOVY_DEV_SIGNING_IDENTITY` (a SHA-1 or exact name
+  from `security find-identity -v -p codesigning`), otherwise the single valid
+  Apple Development identity. Several Apple Development identities, or none,
+  stop the launch with the next step to take; nothing falls back silently.
+  `CLOVY_DEV_SIGNING_IDENTITY=-` opts into ad hoc signing, which macOS ties to
+  the exact code hash: every rebuild then asks for each permission again. In
+  these debug builds the selected identity also wins over an
+  `APPLE_SIGNING_IDENTITY` inherited from the shell; release builds keep
+  signing with `APPLE_SIGNING_IDENTITY`.
+- **One certificate everywhere:** the same identity signs `Clovy Dev.app`
+  (with `clovy-mcp` and `clovy-nm-shim` beside `os-june` in
+  `Contents/MacOS`) and the helpers in `.tauri-helper` (Computer use driver,
+  dictation helper, system audio helper). Their designated requirement is
+  `identifier "<bundle id>" and anchor apple generic and certificate
+  leaf[subject.CN] = "<certificate>" and …`, so a rebuild changes the code
+  hash but not the requirement macOS checks a grant against. Changing the
+  certificate or the bundle identifier is a new identity for macOS.
+- **Reuse:** an unchanged Cargo output reuses the signed bundle as is, and
+  unchanged helpers keep their bundles and signatures. A changed binary
+  replaces the bundle at the same path. Switching between a certificate and
+  `CLOVY_DEV_SIGNING_IDENTITY=-` re-signs the app and the helpers in the new
+  mode even when their content is unchanged. Plain `cargo build` and
+  `cargo test`, which select no identity, keep any valid helper signature.
+- **First authorization:** macOS asks once for each permission the dev app
+  uses, or add `Clovy Dev.app` with + in System Settings > Privacy & Security.
+  When the checkout lives in a protected folder (`~/Documents`, `~/Desktop`,
+  `~/Downloads`), macOS may also ask for access to that folder, possibly before
+  the main window appears. Check which request macOS actually shows and the
+  state under Files and Folders; whether to allow it is the owner's decision.
+  Folder access alone does not make the app ready. macOS may also ask once to
+  let the newly signed app read an existing `-dev` Keychain item; that is an
+  authorization to read the item, never an unlock or change of the Keychain,
+  and Always Allow is recorded against the same requirement.
+- **Web storage:** the unbundled app kept its WebKit storage in
+  `~/Library/WebKit/Clovy`; the first bundled launch copies it to
+  `~/Library/WebKit/<bundle id>` and leaves the original in place.
+
+What macOS sees in development:
+
+| Component | Identity | Started by |
+| --- | --- | --- |
+| `Clovy Dev.app` | `<identifier>.dev` | the runner, responsible for its own requests |
+| `.tauri-helper/June Dictation Helper.app` | `co.opensoftware.june.dictation-helper.dev.w<worktree>` | Clovy Dev, as a child process |
+| `.tauri-helper/June.app` (system audio) | `co.opensoftware.june.audio-capture.dev.w<worktree>` | Clovy Dev, through LaunchServices |
+| `.tauri-helper/June Computer Use Driver.app` | `co.opensoftware.june.computer-use-driver.dev.w<worktree>` | Clovy Dev, through LaunchServices |
+
+`w<worktree>` is the first 12 hex digits of the SHA-256 of the checkout path,
+the same key for the three helpers, so helper grants never land on an
+installed release or on another worktree. Release builds keep the published
+identifiers (`co.opensoftware.june.dictation-helper`,
+`co.opensoftware.june.audio-capture`,
+`co.opensoftware.june.computer-use-driver`). Requests Clovy Dev makes itself
+(microphone for notes, Accessibility and Screen Recording for activity
+capture, notifications) are listed as Clovy Dev. Computer use Accessibility
+belongs to the driver and its Screen Recording to the outer responsible app,
+Clovy Dev
+([ADR-0028 addendum](adr/0028-private-stdio-broker-for-computer-use.md)).
+
+macOS attributes a privacy request to the process responsible for it, and a
+process started from a terminal inherits the terminal as responsible. The
+runner therefore starts the bundle through `clovy-dev-launch`
+([src-tauri/native/dev-launcher](../src-tauri/native/dev-launcher/clovy-dev-launch.c)),
+which execs the app in place with the terminal's responsibility disclaimed.
+The process id, arguments, environment, stdio, and exit status stay the ones
+Tauri dev supervises. It uses `responsibility_spawnattrs_setdisclaim`, which
+libSystem exports but Apple does not document; if a macOS release removes it,
+the launch fails with a message instead of inheriting the terminal's grants.
+
+To reset a development grant on purpose, name the dev bundle, never the
+release identifier:
 
 ```sh
-tccutil reset Microphone co.opensoftware.june
+tccutil reset Microphone co.opensoftware.june.dev
 ```
 
 ## Verification commands

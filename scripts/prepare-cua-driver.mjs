@@ -6,6 +6,11 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
+import {
+  AD_HOC_IDENTITY,
+  DEV_SIGNING_IDENTITY_ENV,
+  signatureSatisfies,
+} from "./dev-signing-identity.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pinPath = path.join(rootDir, "src-tauri", "cua-driver-pin.json");
@@ -47,11 +52,25 @@ const resourcesDir = path.join(contentsDir, "Resources");
 const executable = path.join(executableDir, pin.executable);
 const stampPath = path.join(resourcesDir, "clovy-cua-driver-pin.json");
 const iconDestination = path.join(resourcesDir, iconFileName);
+// Debug helpers launched by `pnpm tauri:dev` carry the same certificate as the
+// dev app bundle so their Accessibility grant survives rebuilds
+// (docs/development.md); an explicit `CLOVY_DEV_SIGNING_IDENTITY=-` re-signs
+// even an unchanged helper ad hoc. Without a selection (release, or a manual
+// `pnpm computer-use:prepare`), new bundles are signed ad hoc and an existing
+// valid signature is kept; build.rs re-signs release with APPLE_SIGNING_IDENTITY.
+const selectedIdentity = release
+  ? undefined
+  : process.env[DEV_SIGNING_IDENTITY_ENV]?.trim() || undefined;
 
-if (preparedBundleMatches()) {
-  console.error(
-    `Reusing ${profile} Computer use helper for ${architectures.join("+")} from ${pin.sourceCommit}.`,
-  );
+if (preparedBundleContentMatches()) {
+  if (bundleSignatureMatches()) {
+    console.error(
+      `Reusing ${profile} Computer use helper for ${architectures.join("+")} from ${pin.sourceCommit}.`,
+    );
+  } else {
+    signBundle();
+    console.error(`Re-signed the unchanged ${profile} Computer use helper.`);
+  }
   stageUniversalCargoBin();
   process.exit(0);
 }
@@ -147,15 +166,7 @@ writeFileSync(
 cpSync(sbomSource, path.join(resourcesDir, "clovy-cua-driver.spdx.json"));
 cpSync(licenseSource, path.join(resourcesDir, "cua-driver-LICENSE.md"));
 cpSync(iconSource, iconDestination);
-run("/usr/bin/codesign", [
-  "--force",
-  "--deep",
-  "--sign",
-  "-",
-  "--identifier",
-  bundleIdentifier,
-  bundleDir,
-]);
+signBundle();
 
 const version = helperVersion(executable);
 if (version.version !== pin.version || version.commit !== pin.sourceCommit) {
@@ -212,7 +223,9 @@ function helperSourceSha256() {
   return hash.digest("hex");
 }
 
-function preparedBundleMatches() {
+// The prepared bundle is reusable when its stamp, executable, and icon match
+// this checkout and its existing seal still verifies.
+function preparedBundleContentMatches() {
   if (!existsSync(executable) || !existsSync(stampPath)) return false;
   let stamp;
   try {
@@ -237,7 +250,7 @@ function preparedBundleMatches() {
     version.version === pin.version &&
     version.commit === pin.sourceCommit &&
     bundleIconMatches() &&
-    bundleSignatureMatches()
+    bundleSealMatches()
   );
 }
 
@@ -253,7 +266,7 @@ function bundleIconMatches() {
   return result.status === 0 && result.stdout.trim() === iconFileName;
 }
 
-function bundleSignatureMatches() {
+function bundleSealMatches() {
   const verification = spawnSync(
     "/usr/bin/codesign",
     ["--verify", "--deep", "--strict", bundleDir],
@@ -268,6 +281,23 @@ function bundleSignatureMatches() {
     details.status === 0 &&
     `${details.stdout || ""}\n${details.stderr || ""}`.includes(`Identifier=${bundleIdentifier}`)
   );
+}
+
+function bundleSignatureMatches() {
+  return selectedIdentity === undefined || signatureSatisfies(bundleDir, selectedIdentity);
+}
+
+function signBundle() {
+  run("/usr/bin/codesign", [
+    "--force",
+    "--deep",
+    "--sign",
+    selectedIdentity ?? AD_HOC_IDENTITY,
+    "--timestamp=none",
+    "--identifier",
+    bundleIdentifier,
+    bundleDir,
+  ]);
 }
 
 function architectureForTarget(rustTarget) {

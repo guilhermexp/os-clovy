@@ -19,7 +19,6 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         link_swift_runtime();
     }
-    clean_legacy_helper_bundles();
     build_system_audio_helper();
     build_dictation_helper();
     prepare_computer_use_driver();
@@ -27,7 +26,51 @@ fn main() {
     ensure_agent_runtime_placeholder();
     ensure_bundled_extension_dir();
     ensure_nm_shim_placeholder();
+    export_app_identifier();
     tauri_build::build();
+}
+
+/// Compiles the app identifier into `CLOVY_APP_IDENTIFIER` for code without an
+/// AppHandle (the native messaging shim). Mirrors Tauri's config merge for this
+/// key: the `--config` overlays the Tauri CLI passes in `TAURI_CONFIG` (where
+/// `CLOVY_DEV_APP_IDENTIFIER` lands), then the platform file, then
+/// `tauri.conf.json`.
+fn export_app_identifier() {
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
+    );
+    let identifier_in = |json: &str| {
+        serde_json::from_str::<serde_json::Value>(json)
+            .ok()?
+            .get("identifier")?
+            .as_str()
+            .map(str::to_string)
+    };
+    let platform_config = match std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() {
+        Some("macos") => Some("tauri.macos.conf.json"),
+        Some("windows") => Some("tauri.windows.conf.json"),
+        Some("linux") => Some("tauri.linux.conf.json"),
+        _ => None,
+    };
+    if let Some(name) = platform_config {
+        println!("cargo:rerun-if-changed={name}");
+    }
+    let identifier = std::env::var("TAURI_CONFIG")
+        .ok()
+        .and_then(|overlay| identifier_in(&overlay))
+        .or_else(|| {
+            platform_config
+                .and_then(|name| std::fs::read_to_string(manifest_dir.join(name)).ok())
+                .and_then(|json| identifier_in(&json))
+        })
+        .or_else(|| {
+            std::fs::read_to_string(manifest_dir.join("tauri.conf.json"))
+                .ok()
+                .and_then(|json| identifier_in(&json))
+        })
+        .expect("tauri.conf.json should declare an identifier");
+    println!("cargo:rustc-env=CLOVY_APP_IDENTIFIER={identifier}");
 }
 
 /// Swift-backed dependencies emit their runtime search paths from dependency
@@ -138,7 +181,6 @@ fn prepare_computer_use_driver() {
         .join("Contents")
         .join("Resources")
         .join("clovy-cua-driver-pin.json");
-    println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
     println!("cargo:rerun-if-changed={}", executable.display());
     println!("cargo:rerun-if-changed={}", stamp.display());
     if !executable.exists() {
@@ -240,64 +282,19 @@ fn verify_computer_use_driver_source(
 }
 
 fn sign_computer_use_driver(app_dir: &std::path::Path) {
-    let identity = std::env::var("APPLE_SIGNING_IDENTITY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "-".to_string());
-    if computer_use_signature_matches(app_dir, &identity) {
+    let signing = helper_signing();
+    if signing.is_satisfied_by(app_dir) {
         return;
     }
     let mut command = std::process::Command::new("codesign");
-    command
-        .arg("--force")
-        .arg("--deep")
-        .arg("--sign")
-        .arg(&identity);
-    if identity != "-" {
-        command.arg("--timestamp").arg("--options").arg("runtime");
-    }
+    command.arg("--force").arg("--deep");
+    signing.add_signing_args(&mut command);
     let status = command.arg(app_dir).status();
     if !matches!(status, Ok(status) if status.success()) {
         panic!(
             "computer use driver could not be signed: {}",
             app_dir.display()
         );
-    }
-}
-
-fn computer_use_signature_matches(app_dir: &std::path::Path, identity: &str) -> bool {
-    let verified = std::process::Command::new("/usr/bin/codesign")
-        .arg("--verify")
-        .arg("--deep")
-        .arg("--strict")
-        .arg(app_dir)
-        .status()
-        .is_ok_and(|status| status.success());
-    if !verified {
-        return false;
-    }
-    let Ok(details) = std::process::Command::new("/usr/bin/codesign")
-        .arg("-dv")
-        .arg("--verbose=4")
-        .arg(app_dir)
-        .output()
-    else {
-        return false;
-    };
-    if !details.status.success() {
-        return false;
-    }
-    let details = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&details.stdout),
-        String::from_utf8_lossy(&details.stderr)
-    );
-    if identity == "-" {
-        details.contains("Signature=adhoc")
-    } else {
-        details
-            .lines()
-            .any(|line| line.trim() == format!("Authority={identity}"))
     }
 }
 
@@ -385,27 +382,6 @@ fn ensure_agent_runtime_placeholder() {
     }
 }
 
-/// Remove generated helper bundles from `.tauri-helper` before rebuilding them.
-/// Their June-era paths stay fixed because Tauri resource lookup and signed
-/// upgrade checks depend on them.
-fn clean_legacy_helper_bundles() {
-    if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
-        return;
-    }
-    let manifest_dir = std::path::PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
-    );
-    let Some(helper_dir) = manifest_dir
-        .parent()
-        .map(|repo_dir| repo_dir.join(".tauri-helper"))
-    else {
-        return;
-    };
-    for legacy in ["June.app", "June Dictation Helper.app"] {
-        let _ = std::fs::remove_dir_all(helper_dir.join(legacy));
-    }
-}
-
 fn build_system_audio_helper() {
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
         return;
@@ -458,6 +434,8 @@ fn build_system_audio_helper() {
         should_sign = true;
     }
 
+    let bundle_identifier =
+        helper_bundle_identifier(&manifest_dir, "co.opensoftware.june.audio-capture");
     let plist = contents_dir.join("Info.plist");
     let plist_contents = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -471,7 +449,7 @@ fn build_system_audio_helper() {
   <key>CFBundleExecutable</key>
   <string>june-system-audio-recorder</string>
   <key>CFBundleIdentifier</key>
-  <string>co.opensoftware.june.audio-capture</string>
+  <string>{bundle_identifier}</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -500,8 +478,12 @@ fn build_system_audio_helper() {
         should_sign = true;
     }
 
-    if should_sign || has_signing_identity() {
-        sign_helper_app(&manifest_dir, &app_dir);
+    let signing = helper_signing();
+    if should_sign
+        || matches!(signing, HelperSigning::Release(_))
+        || !signing.is_satisfied_by(&app_dir)
+    {
+        sign_helper_app(&manifest_dir, &app_dir, &signing);
     }
 }
 
@@ -718,6 +700,8 @@ fn build_dictation_helper() {
         should_sign = true;
     }
 
+    let bundle_identifier =
+        helper_bundle_identifier(&manifest_dir, "co.opensoftware.june.dictation-helper");
     let plist = contents_dir.join("Info.plist");
     let plist_contents = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -731,7 +715,7 @@ fn build_dictation_helper() {
   <key>CFBundleExecutable</key>
   <string>june-dictation-helper</string>
   <key>CFBundleIdentifier</key>
-  <string>co.opensoftware.june.dictation-helper</string>
+  <string>{bundle_identifier}</string>
   <key>CFBundleIconFile</key>
   <string>Clovy.icns</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -807,8 +791,12 @@ fn build_dictation_helper() {
         }
     }
 
-    if should_sign || has_signing_identity() {
-        sign_helper_app(&manifest_dir, &app_dir);
+    let signing = helper_signing();
+    if should_sign
+        || matches!(signing, HelperSigning::Release(_))
+        || !signing.is_satisfied_by(&app_dir)
+    {
+        sign_helper_app(&manifest_dir, &app_dir, &signing);
     }
 }
 
@@ -911,31 +899,161 @@ fn build_universal_swift_executable(
     true
 }
 
-fn has_signing_identity() -> bool {
-    std::env::var("APPLE_SIGNING_IDENTITY")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty())
+/// Bundle identifier for a helper built here. Release builds keep the published
+/// identifier. Debug builds use `<published>.dev.w<worktree key>`, the scheme
+/// `scripts/computer-use-dev.mjs` gives the Computer use driver (SHA-256 of
+/// the checkout path, first 12 hex digits), so a development grant or
+/// signature never lands on an installed release or another worktree
+/// (docs/development.md).
+fn helper_bundle_identifier(manifest_dir: &std::path::Path, published: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    if std::env::var("PROFILE").ok().as_deref() != Some("debug") {
+        return published.to_string();
+    }
+    let worktree = manifest_dir
+        .parent()
+        .expect("src-tauri should have a repository parent");
+    let digest = Sha256::digest(worktree.to_string_lossy().as_bytes());
+    let key: String = digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{published}.dev.w{key}")
 }
 
-fn sign_helper_app(manifest_dir: &std::path::Path, app_dir: &std::path::Path) {
-    let identity = std::env::var("APPLE_SIGNING_IDENTITY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "-".to_string());
+/// The identity build.rs signs helper bundles with.
+enum HelperSigning {
+    /// `APPLE_SIGNING_IDENTITY`: release signing with a secure timestamp and
+    /// the hardened runtime.
+    Release(String),
+    /// `CLOVY_DEV_SIGNING_IDENTITY` in debug builds: the certificate SHA-1
+    /// `pnpm tauri:dev` also signs the dev app bundle with, so helper grants
+    /// keep matching their designated requirement after rebuilds
+    /// (docs/development.md).
+    Development(String),
+    /// `CLOVY_DEV_SIGNING_IDENTITY=-`: the developer explicitly chose ad hoc,
+    /// so a helper signed with a certificate is re-signed ad hoc.
+    AdHoc,
+    /// No identity selected (plain `cargo build`/`cargo test`, unsigned
+    /// release): new or changed helpers are signed ad hoc, and an existing
+    /// valid signature is kept, never downgraded.
+    Unselected,
+}
+
+/// Debug builds started by `pnpm tauri:dev` carry `CLOVY_DEV_SIGNING_IDENTITY`,
+/// the identity the runner also signs the app bundle with. It wins over an
+/// `APPLE_SIGNING_IDENTITY` inherited from the shell, so the app and its
+/// helpers keep one certificate (`-` keeps the explicit ad hoc opt-in). Release
+/// builds, and debug builds outside the launcher, keep `APPLE_SIGNING_IDENTITY`.
+fn helper_signing() -> HelperSigning {
+    println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
+    println!("cargo:rerun-if-env-changed=CLOVY_DEV_SIGNING_IDENTITY");
+    let configured = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    if std::env::var("PROFILE").ok().as_deref() == Some("debug") {
+        match configured("CLOVY_DEV_SIGNING_IDENTITY") {
+            Some(identity) if identity == "-" => return HelperSigning::AdHoc,
+            Some(identity) => return HelperSigning::Development(identity),
+            None => {}
+        }
+    }
+    match configured("APPLE_SIGNING_IDENTITY") {
+        Some(identity) => HelperSigning::Release(identity),
+        None => HelperSigning::Unselected,
+    }
+}
+
+impl HelperSigning {
+    fn add_signing_args(&self, command: &mut std::process::Command) {
+        match self {
+            Self::Release(identity) => {
+                command
+                    .arg("--sign")
+                    .arg(identity)
+                    .arg("--timestamp")
+                    .arg("--options")
+                    .arg("runtime");
+            }
+            Self::Development(identity) => {
+                command.arg("--sign").arg(identity).arg("--timestamp=none");
+            }
+            Self::AdHoc | Self::Unselected => {
+                command.arg("--sign").arg("-");
+            }
+        }
+    }
+
+    /// Whether `bundle` already carries a valid signature this selection
+    /// accepts: the selected certificate, the release identity, an ad hoc
+    /// signature for an explicit ad hoc choice, or any valid signature when
+    /// nothing was selected.
+    fn is_satisfied_by(&self, bundle: &std::path::Path) -> bool {
+        let mut verify = std::process::Command::new("/usr/bin/codesign");
+        verify.arg("--verify").arg("--deep").arg("--strict");
+        if let Self::Development(identity) = self {
+            verify.arg(format!("-R=certificate leaf = H\"{identity}\""));
+        }
+        if !verify
+            .arg(bundle)
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return false;
+        }
+        if matches!(self, Self::Development(_) | Self::Unselected) {
+            return true;
+        }
+        let Ok(details) = std::process::Command::new("/usr/bin/codesign")
+            .arg("-dv")
+            .arg("--verbose=4")
+            .arg(bundle)
+            .output()
+        else {
+            return false;
+        };
+        let details = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&details.stdout),
+            String::from_utf8_lossy(&details.stderr)
+        );
+        match self {
+            Self::Release(identity) => details
+                .lines()
+                .any(|line| line.trim() == format!("Authority={identity}")),
+            _ => details.lines().any(|line| line.trim() == "Signature=adhoc"),
+        }
+    }
+}
+
+fn sign_helper_app(
+    manifest_dir: &std::path::Path,
+    app_dir: &std::path::Path,
+    signing: &HelperSigning,
+) {
     let entitlements = manifest_dir.join("Entitlements.plist");
     let mut command = std::process::Command::new("codesign");
     command
         .arg("--force")
         .arg("--deep")
         .arg("--entitlements")
-        .arg(entitlements)
-        .arg("--sign")
-        .arg(&identity);
-    if identity != "-" {
-        command.arg("--timestamp").arg("--options").arg("runtime");
-    }
+        .arg(entitlements);
+    signing.add_signing_args(&mut command);
     let status = command.arg(app_dir).status();
     if !matches!(status, Ok(status) if status.success()) {
+        // A development identity that cannot sign must stop the build: an
+        // ad hoc or stale helper would silently lose its privacy grants.
+        if matches!(signing, HelperSigning::Development(_)) {
+            panic!(
+                "helper app could not be signed with CLOVY_DEV_SIGNING_IDENTITY: {}",
+                app_dir.display()
+            );
+        }
         println!(
             "cargo:warning=helper app could not be signed: {}",
             app_dir.display()

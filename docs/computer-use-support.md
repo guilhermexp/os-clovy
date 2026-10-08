@@ -64,42 +64,36 @@ from System Settings.
 ## Local worktree permission testing
 
 Every macOS `make dev` launch gives the debug Computer use helper a stable
-bundle identifier derived from the current worktree path. The launch registers
-that helper with LaunchServices, clears Accessibility for the helper identifier,
-clears Screen Recording for the outer Clovy development app identifier, and
-removes stale debug staging copies before Tauri copies the signed bundle again.
-This provides a fresh permission walkthrough on every dev restart without
-resetting Screen Recording for the wrong responsible app.
+bundle identifier derived from the current worktree path and signs it with the
+same development certificate as `Clovy Dev.app`
+([development.md](development.md#the-macos-development-app),
+[ADR-0060](adr/0060-development-app-runs-as-a-signed-bundle-that-owns-its-grants.md)).
+The launch reuses an unchanged helper bundle and never resets privacy grants:
+Accessibility granted to the helper and Screen Recording granted to the outer
+`Clovy Dev` app survive restarts and rebuilds. A new worktree, a new signing
+certificate, or `CLOVY_DEV_SIGNING_IDENTITY=-` is a new identity for macOS and
+asks again. To repeat the first-permission walkthrough on purpose, remove the
+entries in System Settings, or run `tccutil reset Accessibility
+co.opensoftware.june.computer-use-driver.dev.w<worktree>` and `tccutil reset
+ScreenCapture co.opensoftware.june.dev` yourself.
 
-The Screen Recording reset is deferred (not treated as a failure) when the app
-bundle identifier is not yet registered with LaunchServices. This is expected on
-a clean worktree where `tauri dev` runs the Cargo binary directly instead of a
-packaged `.app` bundle. In that state there are no TCC grants to clear, so the
-launch proceeds normally. Once a Clovy app with that identifier has been built
-and run at least once, LaunchServices knows the bundle and subsequent resets
-succeed.
-
-The Tauri dev runner executes a hard-linked product-name alias of Cargo's
-`os-june` binary. The normal alias is `target/**/Clovy`; supported issue
-worktrees use a visible name such as `target/**/Clovy JUN-278 Codex`. The
-authenticated helper accepts only the generated name shapes inside this
-checkout's Cargo target tree and requires the alias to share the canonical
-binary's filesystem identity. If the Plugins surface reports that the driver
-stopped while the default self-test passes, rerun the self-test through the
-exact live launcher to check this boundary:
+The Tauri dev runner starts the app from
+`target/<profile>/Clovy Dev.app/Contents/MacOS/os-june`. The authenticated
+debug helper accepts only `os-june` in one of this checkout's Cargo profile
+directories (marked by Cargo's `.cargo-lock`): Cargo's own binary, or the main
+executable of a bundle directly inside that directory. Other names, deeper
+bundles, and paths outside this checkout's target tree are refused. If the
+Plugins surface reports that the driver stopped while the default self-test
+passes, rerun the self-test through the exact live launcher to check this
+boundary:
 
 ```sh
 node scripts/computer-use-self-test.mjs --permissions-only \
-  --host "src-tauri/target/debug/Clovy JUN-278 Codex"
+  --host "src-tauri/target/debug/Clovy Dev.app/Contents/MacOS/os-june"
 ```
 
-The launch log prints the effective identifier and reset result. The production
-helper always keeps `co.opensoftware.june.computer-use-driver`; release builds
-never run the automatic reset. A successful reset removes prior grants but does
-not grant either permission or bypass the explanatory Continue action. A
-deferred Screen Recording reset means the app bundle was not known to
-LaunchServices; macOS will prompt for Screen Recording on first capture as if
-no prior grant existed.
+The production helper always keeps `co.opensoftware.june.computer-use-driver`
+and its release signature.
 
 ## Build and release diagnosis
 

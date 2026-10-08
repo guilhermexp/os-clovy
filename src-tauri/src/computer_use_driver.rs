@@ -378,9 +378,10 @@ fn process_is_clovy(pid: libc::pid_t, audit_token: Option<&[u8]>) -> bool {
                 .is_some_and(|token| packaged_process_signature_matches(token, helper_app));
     }
 
-    // Development builds are not nested yet. Accept only the Cargo binary or
-    // the byte-identical product-named launcher materialized by the Tauri dev runner,
-    // both inside this checkout's Cargo target tree.
+    // Development builds are not nested. Accept only `os-june` built in one of
+    // this checkout's Cargo profile directories: Cargo's own binary, or the
+    // main executable of the dev runner's signed bundle directly inside that
+    // directory (`target/debug/Clovy Dev.app/Contents/MacOS/os-june`).
     cfg!(debug_assertions)
         && development_process_path_is_clovy(
             &process_path,
@@ -398,50 +399,58 @@ fn development_process_path_is_clovy(
     process_path: &std::path::Path,
     target_root: &std::path::Path,
 ) -> bool {
-    if !process_path.starts_with(target_root) {
-        return false;
-    }
-    let Some(name) = process_path.file_name() else {
-        return false;
-    };
-    if name == "os-june" {
-        return true;
-    }
-    if !development_launcher_name_is_allowed(name) {
-        return false;
-    }
+    use std::ffi::OsStr;
 
-    // The dev runner creates its product-named launcher as a hard link to the
-    // canonical Cargo binary. Requiring the same device and inode keeps the
-    // human-readable suffix from widening this trust boundary to another
-    // executable that merely copied an allowed name into target/.
-    let Some(profile_dir) = process_path.parent() else {
+    let Ok(relative) = process_path.strip_prefix(target_root) else {
         return false;
     };
-    same_file(process_path, &profile_dir.join("os-june"))
-}
-
-#[cfg(target_os = "macos")]
-fn development_launcher_name_is_allowed(name: &std::ffi::OsStr) -> bool {
-    if name == "Clovy" || name == "June" {
-        return true;
+    // The deepest accepted shape is
+    // `<triple>/<profile>/<bundle>.app/Contents/MacOS/os-june`.
+    let mut names = [OsStr::new(""); 6];
+    let mut depth = 0;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        let Some(slot) = names.get_mut(depth) else {
+            return false;
+        };
+        *slot = name;
+        depth += 1;
     }
-    let Some(name) = name.to_str() else {
-        return false;
+    let names = &names[..depth];
+    let is_main_executable = |rest: &[&OsStr]| match rest {
+        [executable] => *executable == OsStr::new("os-june"),
+        [bundle, contents, macos, executable] => {
+            std::path::Path::new(bundle)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+                && *contents == OsStr::new("Contents")
+                && *macos == OsStr::new("MacOS")
+                && *executable == OsStr::new("os-june")
+        }
+        _ => false,
     };
-    let mut parts = name.split(' ');
-    let (Some(product), Some(issue), Some(harness), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
+    // Cargo marks every profile directory (`debug`, `<triple>/release`, ...)
+    // with `.cargo-lock`; any other directory under target/ is not a build
+    // output this helper trusts. `prefix` is how many names lead to it.
+    let is_profile_dir = |prefix: usize| {
+        process_path
+            .ancestors()
+            .nth(depth - prefix)
+            .is_some_and(|profile| profile.join(".cargo-lock").is_file())
     };
-    let Some(issue_number) = issue.strip_prefix("JUN-") else {
-        return false;
-    };
-    matches!(product, "Clovy" | "June")
-        && !issue_number.is_empty()
-        && issue_number.bytes().all(|byte| byte.is_ascii_digit())
-        && matches!(harness, "Codex" | "Claude")
+    match names {
+        [_profile, rest @ ..] if is_main_executable(rest) => is_profile_dir(1),
+        [triple, _profile, rest @ ..] => {
+            triple
+                .to_str()
+                .is_some_and(|triple| triple.ends_with("-apple-darwin"))
+                && is_main_executable(rest)
+                && is_profile_dir(2)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1147,43 +1156,47 @@ mod tests {
     }
 
     #[test]
-    fn development_peer_accepts_cargo_and_tauri_runner_names_only() {
-        let target = std::path::Path::new("/repo/src-tauri/target");
+    fn development_peer_accepts_only_os_june_in_a_cargo_profile_directory() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let target = workspace.path().join("target");
+        for profile in ["debug", "aarch64-apple-darwin/release"] {
+            std::fs::create_dir_all(target.join(profile)).expect("profile directory");
+            std::fs::write(target.join(profile).join(".cargo-lock"), b"").expect("cargo lock");
+        }
+        std::fs::create_dir_all(target.join("swift-module-cache")).expect("non-profile directory");
 
-        assert!(development_process_path_is_clovy(
-            std::path::Path::new("/repo/src-tauri/target/debug/os-june"),
-            target,
-        ));
+        for accepted in [
+            "debug/os-june",
+            "debug/Clovy Dev.app/Contents/MacOS/os-june",
+            "aarch64-apple-darwin/release/os-june",
+            "aarch64-apple-darwin/release/Clovy Dev permproof.app/Contents/MacOS/os-june",
+        ] {
+            assert!(
+                development_process_path_is_clovy(&target.join(accepted), &target),
+                "{accepted} should be accepted"
+            );
+        }
+        for rejected in [
+            "debug/Clovy",
+            "debug/Clovy JUN-278 Codex",
+            "debug/clovy-lookalike",
+            "debug/Clovy Dev.app/Contents/MacOS/Clovy",
+            "debug/Clovy Dev.app/Contents/Resources/os-june",
+            "debug/bundle/macos/Clovy.app/Contents/MacOS/os-june",
+            "debug/../debug/os-june",
+            "swift-module-cache/os-june",
+            "swift-module-cache/Clovy Dev.app/Contents/MacOS/os-june",
+            "x86_64-apple-darwin/debug/os-june",
+        ] {
+            assert!(
+                !development_process_path_is_clovy(&target.join(rejected), &target),
+                "{rejected} should be rejected"
+            );
+        }
         assert!(!development_process_path_is_clovy(
-            std::path::Path::new("/repo/src-tauri/target/debug/clovy-lookalike"),
-            target,
+            &workspace.path().join("elsewhere/debug/os-june"),
+            &target
         ));
-        assert!(!development_process_path_is_clovy(
-            std::path::Path::new("/tmp/target/debug/June"),
-            target,
-        ));
-
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "Clovy"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "Clovy JUN-278 Codex"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-278 Codex"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-00278 Claude"
-        )));
-        assert!(!development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-278 Unknown"
-        )));
-        assert!(!development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-two Codex"
-        )));
     }
 
     #[test]
@@ -1232,27 +1245,6 @@ mod tests {
         let probe = unsafe { libc::kill(pid, 0) };
         assert_eq!(probe, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
-    }
-
-    #[test]
-    fn development_peer_accepts_the_issue_suffixed_tauri_launcher() {
-        let workspace = tempfile::tempdir().expect("temporary workspace");
-        let target = workspace.path().join("target");
-        let profile = target.join("debug");
-        std::fs::create_dir_all(&profile).expect("debug profile");
-        let cargo_binary = profile.join("os-june");
-        std::fs::write(&cargo_binary, b"june development binary").expect("cargo binary");
-        let launcher = profile.join("Clovy JUN-278 Codex");
-        std::fs::hard_link(&cargo_binary, &launcher).expect("Tauri launcher");
-
-        assert!(development_process_path_is_clovy(&launcher, &target));
-
-        let copied_lookalike = profile.join("Clovy JUN-279 Codex");
-        std::fs::copy(&cargo_binary, &copied_lookalike).expect("copied lookalike");
-        assert!(!development_process_path_is_clovy(
-            &copied_lookalike,
-            &target
-        ));
     }
 
     #[tokio::test]

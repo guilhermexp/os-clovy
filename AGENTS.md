@@ -85,7 +85,7 @@ os-clovy/
 │   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated local socket, read-only tools/resources (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
 │   ├── src/chat_engine/     # agent CLIs as a chat session's engine: resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface
-│   └── native/              # macOS system-audio helper (Swift) + dictation helper
+│   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060)
 ├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)
 │   └── crates/              # domain / services / providers / config / api / app  (hexagonal)
 ├── docs/                    # see docs/index.md — ADRs, subsystem docs, runbooks, PRDs, QA
@@ -297,6 +297,13 @@ harness tickets, not `JUN-*`.
   use the isolated `co.opensoftware.june-dev` dirs; never set
   `OS_CLOVY_USE_PROD_DATA_DIR` in tests or verification. Keychain items created
   by dev builds must use a `-dev` service suffix.
+- **Dev permissions:** `pnpm tauri:dev` runs `src-tauri/target/<profile>/Clovy Dev.app`
+  (bundle id `<identifier>.dev`), signed with the single Apple Development
+  identity or `CLOVY_DEV_SIGNING_IDENTITY`, and never resets TCC grants
+  ([ADR-0060](docs/adr/0060-development-app-runs-as-a-signed-bundle-that-owns-its-grants.md)).
+  `CLOVY_DEV_APP_IDENTIFIER=<id>` gives a run its own compiled identity, data
+  directory (`<id>-dev`), and bundle. Never `tccutil reset` a release
+  identifier.
 
 ## Verification
 
@@ -339,7 +346,13 @@ Functional proof (Reality) for desktop features:
    is an incident: stop this run's processes and report it.
 2. Readiness: wait for the main window; macOS permissions the feature needs
    (Accessibility, Screen Recording, Microphone, Notifications) must already be
-   granted, otherwise the proof is blocked, not faked.
+   granted, otherwise the proof is blocked, not faked. A newly signed app
+   identity may ask for the protected folder holding the checkout (Files and
+   Folders > Documents for this repository), possibly before its window
+   appears, and may ask the owner to authorize reading an existing `-dev`
+   Keychain item. Confirm what macOS actually shows; both are the owner's
+   local decisions, never unlocked or changed by the run, and folder access
+   alone does not make the app ready.
 3. Action: drive the real UI as the user would (computer use / clicks), or the
    Tauri command the UI calls when the UI path is the thing under test.
 4. Observable: screenshot of the window showing the result, plus persisted

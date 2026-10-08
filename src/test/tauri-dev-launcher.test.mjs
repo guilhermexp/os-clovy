@@ -1,0 +1,156 @@
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { computerUseBundleIdentifier } from "../../scripts/computer-use-dev.mjs";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const sandboxes = [];
+
+afterEach(() => {
+  for (const sandbox of sandboxes.splice(0)) {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+// Sandbox stand-in for /usr/bin/tccutil. `tccutil reset SERVICE [BUNDLE_ID]`
+// removes the matching authorizations from the sandbox store, as the real tool
+// does for TCC, so a launcher that revokes grants changes observable state.
+const SANDBOX_TCCUTIL = `#!/usr/bin/env node
+const fs = require("node:fs");
+const store = process.env.CLOVY_SANDBOX_TCC_STORE;
+const [command, service, bundle] = process.argv.slice(2);
+if (command !== "reset" || !service) process.exit(64);
+const grants = JSON.parse(fs.readFileSync(store, "utf8"));
+const kept = grants.filter(
+  (grant) =>
+    !((service === "All" || grant.service === service) && (!bundle || grant.bundle === bundle)),
+);
+fs.writeFileSync(store, JSON.stringify(kept));
+`;
+
+// Loaded with `node --import` before the launcher: macOS system tools named by
+// absolute path run against the sandbox instead (tccutil against the sandbox
+// store, LaunchServices registration as a no-op). Everything else runs as is.
+const SANDBOX_SYSTEM_TOOLS = `
+import { createRequire, syncBuiltinESMExports } from "node:module";
+
+const require = createRequire(import.meta.url);
+const childProcess = require("node:child_process");
+const redirects = new Map([
+  ["/usr/bin/tccutil", process.env.CLOVY_SANDBOX_TCCUTIL],
+  [
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+    "/usr/bin/true",
+  ],
+]);
+for (const name of ["spawn", "spawnSync", "execFile", "execFileSync"]) {
+  const original = childProcess[name];
+  childProcess[name] = (command, ...rest) => original(redirects.get(command) ?? command, ...rest);
+}
+syncBuiltinESMExports();
+`;
+
+const FAKE_TAURI = `#!/bin/sh
+printf '%s\\n' "$@" > "$CLOVY_SANDBOX_TAURI_ARGS"
+`;
+
+function createSandbox() {
+  const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), "clovy-tauri-dev-launcher-")));
+  sandboxes.push(sandbox);
+  cpSync(path.join(repoRoot, "scripts"), path.join(sandbox, "scripts"), { recursive: true });
+  // Helper preparation compiles with Cargo; the launcher only needs it to succeed.
+  writeFileSync(path.join(sandbox, "scripts", "prepare-cua-driver.mjs"), "");
+  mkdirSync(path.join(sandbox, "src-tauri"), { recursive: true });
+  for (const file of ["cua-driver-pin.json", "tauri.conf.json", "tauri.macos.conf.json"]) {
+    cpSync(path.join(repoRoot, "src-tauri", file), path.join(sandbox, "src-tauri", file));
+  }
+  const bin = path.join(sandbox, "bin");
+  mkdirSync(bin);
+  for (const [name, source] of [
+    ["tccutil", SANDBOX_TCCUTIL],
+    ["tauri", FAKE_TAURI],
+  ]) {
+    writeFileSync(path.join(bin, name), source);
+    chmodSync(path.join(bin, name), 0o755);
+  }
+  writeFileSync(path.join(sandbox, "system-tools.mjs"), SANDBOX_SYSTEM_TOOLS);
+  return { sandbox, bin };
+}
+
+describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
+  it("starts Tauri while existing authorizations and signed helper copies survive", () => {
+    const { sandbox, bin } = createSandbox();
+    const pin = JSON.parse(
+      readFileSync(path.join(sandbox, "src-tauri", "cua-driver-pin.json"), "utf8"),
+    );
+    const helperIdentifier = computerUseBundleIdentifier({
+      baseIdentifier: pin.bundleIdentifier,
+      profile: "debug",
+      worktreeRoot: sandbox,
+    });
+    const helpers = [
+      path.join(sandbox, ".tauri-helper", pin.bundleName),
+      path.join(sandbox, "src-tauri", "target", "debug", "native", "bin", pin.bundleName),
+    ];
+    for (const helper of helpers) {
+      mkdirSync(helper, { recursive: true });
+      writeFileSync(path.join(helper, "granted-copy"), "signed helper the user authorized");
+    }
+    const store = path.join(sandbox, "authorizations.json");
+    const authorizations = [
+      { service: "Accessibility", bundle: helperIdentifier },
+      { service: "ScreenCapture", bundle: "co.opensoftware.june" },
+      { service: "Accessibility", bundle: "co.opensoftware.june.dev" },
+      { service: "ScreenCapture", bundle: "co.opensoftware.june.dev" },
+      { service: "Microphone", bundle: "co.opensoftware.june.dev" },
+    ];
+    writeFileSync(store, JSON.stringify(authorizations));
+    const tauriArgs = path.join(sandbox, "tauri-args.txt");
+
+    const launch = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        path.join(sandbox, "system-tools.mjs"),
+        path.join(sandbox, "scripts", "tauri-dev.mjs"),
+      ],
+      {
+        cwd: sandbox,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          CARGO_TARGET_DIR: "",
+          CLOVY_DEV_APP_IDENTIFIER: "",
+          CLOVY_DEV_SIGNING_IDENTITY: "-",
+          CLOVY_DEV_SKIP_LOCAL_API: "1",
+          CLOVY_SANDBOX_TAURI_ARGS: tauriArgs,
+          CLOVY_SANDBOX_TCC_STORE: store,
+          CLOVY_SANDBOX_TCCUTIL: path.join(bin, "tccutil"),
+          VITE_PORT: "1999",
+        },
+        timeout: 30_000,
+      },
+    );
+
+    expect(launch.status, launch.stderr).toBe(0);
+    expect(readFileSync(tauriArgs, "utf8").split("\n")).toContain("dev");
+    expect(JSON.parse(readFileSync(store, "utf8"))).toEqual(authorizations);
+    for (const helper of helpers) {
+      expect(existsSync(path.join(helper, "granted-copy")), helper).toBe(true);
+    }
+  });
+});

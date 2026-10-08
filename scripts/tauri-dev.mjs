@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  cleanStagedComputerUseBundles,
-  computerUseBundleIdentifier,
-  resetComputerUseDevGrants,
-} from "./computer-use-dev.mjs";
 import { devAppIdentityForBranch } from "./dev-app-identity.mjs";
 import { chooseDevPort } from "./dev-ports.mjs";
+import {
+  DEV_SIGNING_IDENTITY_ENV,
+  DevSigningIdentityError,
+  resolveDevSigningIdentity,
+} from "./dev-signing-identity.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(SCRIPT_DIR, "..");
@@ -19,52 +19,37 @@ const branch = spawnSync("git", ["branch", "--show-current"], {
   cwd: ROOT_DIR,
   encoding: "utf8",
 });
-const devAppIdentity = devAppIdentityForBranch(branch.status === 0 ? branch.stdout : "");
+const defaultIdentity = devAppIdentityForBranch("");
+const devAppIdentity = devAppIdentityForBranch(branch.status === 0 ? branch.stdout : "", {
+  identifierOverride: process.env.CLOVY_DEV_APP_IDENTIFIER,
+});
 
-if (devAppIdentity.productName !== "Clovy") {
+if (devAppIdentity.identifier !== defaultIdentity.identifier) {
   console.error(
     `Using development app identity ${devAppIdentity.productName} (${devAppIdentity.identifier}).`,
   );
 }
 
+// macOS keeps the grants of the dev app bundle and its helpers across restarts
+// and rebuilds only while every build is signed by the same certificate
+// (docs/development.md). Resolve it once and hand the same SHA-1 to the
+// Computer use helper, build.rs, and the runner that signs the app bundle.
+let devSigningIdentity;
 if (process.platform === "darwin") {
+  try {
+    devSigningIdentity = resolveDevSigningIdentity().identity;
+  } catch (error) {
+    if (!(error instanceof DevSigningIdentityError)) throw error;
+    console.error(error.message);
+    process.exit(1);
+  }
+
   const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-cua-driver.mjs")], {
     cwd: ROOT_DIR,
+    env: { ...process.env, [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity },
     stdio: "inherit",
   });
   if (prepare.status !== 0) process.exit(prepare.status ?? 1);
-
-  const pin = JSON.parse(
-    readFileSync(resolve(ROOT_DIR, "src-tauri", "cua-driver-pin.json"), "utf8"),
-  );
-  const helperBundleIdentifier = computerUseBundleIdentifier({
-    baseIdentifier: pin.bundleIdentifier,
-    profile: "debug",
-    worktreeRoot: ROOT_DIR,
-  });
-  const targetDir = process.env.CARGO_TARGET_DIR
-    ? resolve(ROOT_DIR, process.env.CARGO_TARGET_DIR)
-    : resolve(ROOT_DIR, "src-tauri", "target");
-  const removed = cleanStagedComputerUseBundles({
-    worktreeRoot: ROOT_DIR,
-    bundleName: pin.bundleName,
-    targetDir,
-  });
-  const reset = resetComputerUseDevGrants({
-    bundlePath: resolve(ROOT_DIR, ".tauri-helper", pin.bundleName),
-    helperBundleIdentifier,
-    appBundleIdentifier: devAppIdentity.identifier,
-  });
-  const tccSummary = reset
-    .map((r) =>
-      r.status === "reset"
-        ? `reset ${r.service} for ${r.bundleIdentifier}`
-        : `deferred ${r.service} for ${r.bundleIdentifier} (bundle not yet registered with LaunchServices)`,
-    )
-    .join("; ");
-  console.error(
-    `Computer use TCC: ${tccSummary}; removed ${removed.length} stale staged bundle${removed.length === 1 ? "" : "s"}.`,
-  );
 }
 
 // A port is "free" when a connection is refused. Mirrors the probe in
@@ -173,6 +158,8 @@ const child = spawn(tauri.command, [...tauri.args, "dev", ...tauriArgs], {
         }),
     ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
     OS_CLOVY_DEV_APP_NAME: devAppIdentity.productName,
+    OS_CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
+    ...(devSigningIdentity ? { [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity } : {}),
     ...(replayOnboarding ? { VITE_CLOVY_REPLAY_ONBOARDING: "1" } : {}),
   },
   shell: false,

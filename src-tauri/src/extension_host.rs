@@ -95,9 +95,13 @@ fn extension_id_from_manifest_key(key: &str) -> Result<String, AppError> {
 pub const NATIVE_HOST_NAME: &str = "co.opensoftware.clovy.extension";
 pub const LEGACY_NATIVE_HOST_NAME: &str = "co.opensoftware.june.extension";
 
-/// Must match the bundle identifier in `tauri.conf.json`; the shim has no
-/// AppHandle, so it rebuilds the app data dir path from this constant.
+/// The release app's bundle identifier. Its data directory belongs to the
+/// installed app and holds the descriptor pointer every shim reads.
 const APP_BUNDLE_IDENTIFIER: &str = "co.opensoftware.june";
+/// The identifier this build was compiled with (`build.rs`): the release
+/// identifier, or a development identity such as `CLOVY_DEV_APP_IDENTIFIER`.
+/// The shim has no AppHandle, so it finds its own data directory from this.
+const COMPILED_APP_IDENTIFIER: &str = env!("CLOVY_APP_IDENTIFIER");
 
 const DESCRIPTOR_FILE_NAME: &str = "extension-host.json";
 const DESCRIPTOR_POINTER_FILE_NAME: &str = "extension-host-path";
@@ -135,9 +139,16 @@ fn descriptor_pointer_path(home: &std::path::Path) -> PathBuf {
     bundle_data_dir(home).join(DESCRIPTOR_POINTER_FILE_NAME)
 }
 
-fn allowed_descriptor_paths(home: &std::path::Path) -> [PathBuf; 2] {
+/// The descriptors a pointer may select: the installed release app's, and the
+/// development profile of the identity this build was compiled with. Any other
+/// path, including another identity's profile, is rejected.
+fn allowed_descriptor_paths(home: &std::path::Path, identifier: &str) -> [PathBuf; 2] {
     let production = bundle_data_dir(home);
-    let development = crate::app_paths::app_data_dir_for_build(production.clone(), true, false);
+    let development = crate::app_paths::app_data_dir_for_build(
+        app_support_dir(home).join(identifier),
+        true,
+        false,
+    );
     [descriptor_path(&production), descriptor_path(&development)]
 }
 
@@ -180,9 +191,10 @@ fn read_descriptor_pointer(pointer_path: &std::path::Path, allowed: &[PathBuf]) 
 fn persist_descriptor_selection(
     home: &std::path::Path,
     data_dir: &std::path::Path,
+    identifier: &str,
 ) -> std::io::Result<PathBuf> {
     let selected_descriptor = descriptor_path(data_dir);
-    if !allowed_descriptor_paths(home).contains(&selected_descriptor) {
+    if !allowed_descriptor_paths(home, identifier).contains(&selected_descriptor) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "extension host descriptor is outside Clovy's app data directories",
@@ -341,18 +353,34 @@ fn write_descriptor(
     Ok(path)
 }
 
-/// The build-default app data dir used only as a compatibility fallback when
-/// an older native-host registration has no durable descriptor pointer.
-pub fn shim_data_dir() -> Option<PathBuf> {
+/// The build-default app data dir of the compiled identity, used only as a
+/// compatibility fallback when an older native-host registration has no
+/// durable descriptor pointer.
+#[cfg(any(target_os = "macos", test))]
+fn shim_data_dir(
+    home: &std::path::Path,
+    identifier: &str,
+    debug_assertions: bool,
+    use_prod: bool,
+) -> PathBuf {
+    crate::app_paths::app_data_dir_for_build(
+        app_support_dir(home).join(identifier),
+        debug_assertions,
+        use_prod,
+    )
+}
+
+/// Resolve the descriptor selected when the native host was registered.
+/// Chrome does not inherit Clovy's environment, so the shim must not recompute
+/// an `OS_CLOVY_USE_PROD_DATA_DIR` choice from its own process environment.
+/// The June-era variable remains a compatibility fallback.
+pub fn shim_descriptor_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME")?;
-        let base = PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join(APP_BUNDLE_IDENTIFIER);
-        Some(crate::app_paths::app_data_dir_for_build(
-            base,
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        Some(shim_descriptor_path_for(
+            &home,
+            COMPILED_APP_IDENTIFIER,
             cfg!(debug_assertions),
             crate::env_compat::var_os("OS_CLOVY_USE_PROD_DATA_DIR", "OS_JUNE_USE_PROD_DATA_DIR")
                 .is_some(),
@@ -364,22 +392,17 @@ pub fn shim_data_dir() -> Option<PathBuf> {
     }
 }
 
-/// Resolve the descriptor selected when the native host was registered.
-/// Chrome does not inherit Clovy's environment, so the shim must not recompute
-/// an `OS_CLOVY_USE_PROD_DATA_DIR` choice from its own process environment.
-/// The June-era variable remains a compatibility fallback.
-pub fn shim_descriptor_path() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = PathBuf::from(std::env::var_os("HOME")?);
-        let allowed = allowed_descriptor_paths(&home);
-        read_descriptor_pointer(&descriptor_pointer_path(&home), &allowed)
-            .or_else(|| shim_data_dir().map(|dir| descriptor_path(&dir)))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
+#[cfg(any(target_os = "macos", test))]
+fn shim_descriptor_path_for(
+    home: &std::path::Path,
+    identifier: &str,
+    debug_assertions: bool,
+    use_prod: bool,
+) -> PathBuf {
+    let allowed = allowed_descriptor_paths(home, identifier);
+    read_descriptor_pointer(&descriptor_pointer_path(home), &allowed).unwrap_or_else(|| {
+        descriptor_path(&shim_data_dir(home, identifier, debug_assertions, use_prod))
+    })
 }
 
 // --- pairing state ----------------------------------------------------------
@@ -736,7 +759,7 @@ async fn start_listener(app: AppHandle) -> Result<(), AppError> {
             "Could not resolve the user home directory.",
         )
     })?);
-    persist_descriptor_selection(&home, &data_dir)
+    persist_descriptor_selection(&home, &data_dir, COMPILED_APP_IDENTIFIER)
         .map_err(|error| AppError::new("extension_host_descriptor_failed", error.to_string()))?;
 
     let host = app.state::<ExtensionHost>().inner().clone();
@@ -1015,7 +1038,7 @@ pub fn register_browser_extension_host(
             "Could not resolve the user home directory.",
         )
     })?);
-    persist_descriptor_selection(&home, &data_dir)
+    persist_descriptor_selection(&home, &data_dir, COMPILED_APP_IDENTIFIER)
         .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
     let mut manifest_paths = Vec::with_capacity(hosts_dirs.len());
     for hosts_dir in hosts_dirs {
@@ -1303,7 +1326,7 @@ mod tests {
     fn descriptor_pointer_preserves_the_registered_dev_or_prod_selection() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path();
-        let allowed = allowed_descriptor_paths(home);
+        let allowed = allowed_descriptor_paths(home, APP_BUNDLE_IDENTIFIER);
         let pointer = descriptor_pointer_path(home);
 
         write_descriptor_pointer(&pointer, &allowed[1]).expect("write dev selection");
@@ -1334,7 +1357,10 @@ mod tests {
         let pointer = temp.path().join("pointer");
         std::fs::write(&pointer, "/tmp/untrusted/extension-host.json").expect("write pointer");
         assert_eq!(
-            read_descriptor_pointer(&pointer, &allowed_descriptor_paths(temp.path())),
+            read_descriptor_pointer(
+                &pointer,
+                &allowed_descriptor_paths(temp.path(), APP_BUNDLE_IDENTIFIER)
+            ),
             None
         );
     }
@@ -1347,13 +1373,54 @@ mod tests {
         let pointer = descriptor_pointer_path(home);
         assert!(!pointer.exists());
 
-        let selected = persist_descriptor_selection(home, &production_data_dir)
-            .expect("persist listener selection");
+        let selected =
+            persist_descriptor_selection(home, &production_data_dir, APP_BUNDLE_IDENTIFIER)
+                .expect("persist listener selection");
 
         assert_eq!(selected, descriptor_path(&production_data_dir));
         assert_eq!(
-            read_descriptor_pointer(&pointer, &allowed_descriptor_paths(home)),
+            read_descriptor_pointer(
+                &pointer,
+                &allowed_descriptor_paths(home, APP_BUNDLE_IDENTIFIER)
+            ),
             Some(selected)
+        );
+    }
+
+    #[test]
+    fn an_overridden_identity_routes_the_native_host_to_its_own_dev_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        let identity = "co.opensoftware.june.permproof";
+        let own_dev = app_support_dir(home).join("co.opensoftware.june.permproof-dev");
+        let normal_dev = app_support_dir(home).join("co.opensoftware.june-dev");
+
+        let selected = persist_descriptor_selection(home, &own_dev, identity)
+            .expect("the build's own dev profile is selectable");
+        assert_eq!(selected, descriptor_path(&own_dev));
+        assert_eq!(
+            shim_descriptor_path_for(home, identity, true, false),
+            descriptor_path(&own_dev)
+        );
+
+        // Another identity's profile is neither selectable by this build nor
+        // honored when a pointer names it; the shim stays on its own profile.
+        assert!(persist_descriptor_selection(home, &normal_dev, identity).is_err());
+        write_descriptor_pointer(
+            &descriptor_pointer_path(home),
+            &descriptor_path(&normal_dev),
+        )
+        .expect("write foreign selection");
+        assert_eq!(
+            shim_descriptor_path_for(home, identity, true, false),
+            descriptor_path(&own_dev)
+        );
+
+        // Without a pointer the release identity keeps its own fallback.
+        std::fs::remove_file(descriptor_pointer_path(home)).expect("remove pointer");
+        assert_eq!(
+            shim_descriptor_path_for(home, APP_BUNDLE_IDENTIFIER, false, false),
+            descriptor_path(&bundle_data_dir(home))
         );
     }
 

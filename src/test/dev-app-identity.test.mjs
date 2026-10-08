@@ -58,6 +58,17 @@ describe("development app identity", () => {
       identifier: "co.opensoftware.june",
     });
   });
+
+  it("lets an explicit identifier isolate a run from any branch", () => {
+    expect(
+      devAppIdentityForBranch("codex/jun-278-computer-use", {
+        identifierOverride: " co.opensoftware.june.permproof ",
+      }),
+    ).toEqual({ productName: "Clovy", identifier: "co.opensoftware.june.permproof" });
+    expect(() =>
+      devAppIdentityForBranch("main", { identifierOverride: "../co.opensoftware.june" }),
+    ).toThrow("Invalid CLOVY_DEV_APP_IDENTIFIER: ../co.opensoftware.june");
+  });
 });
 
 describe("macOS release identity", () => {
