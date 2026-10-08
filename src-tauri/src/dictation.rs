@@ -3600,8 +3600,18 @@ fn save_settings(
 fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let manifest_dir = PathBuf::from(manifest_dir);
+    // Debug builds use the helper build.rs prepares and signs in this checkout,
+    // resolved at compile time like the Computer use and system audio helpers:
+    // `pnpm tauri:dev` runs the signed dev bundle without Cargo's runtime
+    // environment. Release builds keep the runtime `CARGO_MANIFEST_DIR`
+    // fallback ahead of their bundled copies.
+    #[cfg(debug_assertions)]
+    let manifest_dir = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    #[cfg(not(debug_assertions))]
+    let runtime_manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok().map(PathBuf::from);
+    #[cfg(not(debug_assertions))]
+    let manifest_dir = runtime_manifest_dir.as_deref();
+    if let Some(manifest_dir) = manifest_dir {
         #[cfg(target_os = "macos")]
         if let Some(repo_dir) = manifest_dir.parent() {
             paths.push(

@@ -100,3 +100,20 @@ permissions again after restarts and rebuilds.
   first launch.
 
 See [docs/development.md](../development.md#the-macos-development-app).
+
+## Addendum - bundle resources and debug helper paths (2026-10-08)
+
+This addendum supersedes the resources consequence above ("The runner copies
+the browser extension files there; helpers keep their repository-relative
+debug paths"). The rest of this ADR stands.
+
+- The runner stages every resource in the common `bundle.resources` map of
+  `tauri.conf.json` (today the browser extension files and agent skills) at
+  its bundle path under `Contents/Resources`, and those trees are part of the
+  bundle fingerprint, so a changed resource rebuilds the bundle.
+- The dev bundle runs without Cargo's runtime environment, so a helper path
+  read from a runtime `CARGO_MANIFEST_DIR` finds nothing. Debug builds resolve
+  the dictation helper from this checkout at compile time, like the Computer
+  use and system audio helpers. Release builds keep the runtime
+  `CARGO_MANIFEST_DIR` fallback with the same precedence over the bundled
+  candidates.

@@ -85,13 +85,25 @@ export function prepareDevAppBundle({
   repoRoot = defaultRepoRoot,
   run = spawnSync,
 }) {
-  const baseIdentifier = readJson(path.join(repoRoot, "src-tauri", "tauri.conf.json")).identifier;
+  const tauriConfig = readJson(path.join(repoRoot, "src-tauri", "tauri.conf.json"));
+  const baseIdentifier = tauriConfig.identifier;
   const identity = devAppBundleIdentity({ appName, appIdentifier, baseIdentifier });
   const bundlePath = path.join(profileDir, identity.bundleDirectoryName);
   const executable = path.join(bundlePath, "Contents", "MacOS", MAIN_EXECUTABLE);
   const infoPlist = devInfoPlist({ repoRoot, identity, run });
   const icon = path.join(repoRoot, "src-tauri", "icons", "icon.icns");
-  const extensionDir = path.join(repoRoot, "extension", "dist");
+  // Tauri resolves resources from Contents/Resources once the app runs from a
+  // bundle, so the dev bundle carries the resources tauri.conf.json declares
+  // for every platform (browser extension, agent skills) at their bundle
+  // paths. Helpers stay out: debug builds resolve them from this checkout.
+  const declaredResources = tauriConfig.bundle?.resources ?? {};
+  if (Array.isArray(declaredResources)) {
+    throw new Error("tauri.conf.json bundle.resources must map sources to bundle paths");
+  }
+  const resources = Object.entries(declaredResources).map(([source, target]) => [
+    path.resolve(repoRoot, "src-tauri", source),
+    target,
+  ]);
   const sources = [MAIN_EXECUTABLE, ...SIBLING_EXECUTABLES].map((name) => {
     const source = path.join(profileDir, name);
     if (!existsSync(source)) throw new Error(`Cargo did not produce ${source}`);
@@ -105,7 +117,7 @@ export function prepareDevAppBundle({
       infoPlist,
       icon: sha256(readFileSync(icon)),
       sources: sources.map(([name, source]) => [name, fileIdentity(source)]),
-      extension: treeIdentity(extensionDir),
+      resources: resources.map(([source, target]) => [target, resourceIdentity(source)]),
     }),
   );
   const stampPath = path.join(profileDir, `.${identity.bundleDirectoryName}.stamp`);
@@ -125,13 +137,10 @@ export function prepareDevAppBundle({
   mkdirSync(path.join(contents, "Resources"), { recursive: true });
   writeFileSync(path.join(contents, "Info.plist"), infoPlist);
   copyFileSync(icon, path.join(contents, "Resources", "icon.icns"));
-  // Tauri resolves resources from Contents/Resources once the app runs from a
-  // bundle. The dev readers that still need a resource there are the browser
-  // extension files; every helper keeps its repository-relative debug path.
-  if (existsSync(extensionDir)) {
-    cpSync(extensionDir, path.join(contents, "Resources", "native", "extension"), {
-      recursive: true,
-    });
+  for (const [source, target] of resources) {
+    if (existsSync(source)) {
+      cpSync(source, path.join(contents, "Resources", target), { recursive: true });
+    }
   }
   for (const [name, source] of sources) {
     const destination = path.join(contents, "MacOS", name);
@@ -260,6 +269,11 @@ function codesign(target, signingIdentity, run) {
 function fileIdentity(file) {
   const stats = statSync(file);
   return [stats.dev, stats.ino, stats.size, stats.mtimeMs];
+}
+
+function resourceIdentity(source) {
+  if (!existsSync(source)) return null;
+  return statSync(source).isDirectory() ? treeIdentity(source) : fileIdentity(source);
 }
 
 function treeIdentity(directory) {

@@ -227,6 +227,12 @@ The launcher never resets permissions.
   extension's native messaging host follows the compiled identity too: the
   shim built with it reads only the release app's descriptor or the one in
   `<identifier>-dev`, never another profile's.
+- **Bundle contents:** besides `os-june`, `clovy-mcp`, and `clovy-nm-shim`,
+  the bundle carries the resources `tauri.conf.json` declares for every
+  platform (browser extension files, agent skills) at their bundle paths, and
+  rebuilds when they change. Helpers are not copied in: debug builds resolve
+  the Computer use, dictation, and system audio helpers from `.tauri-helper`
+  at compile time, since the bundle runs without Cargo's runtime environment.
 - **Signing identity:** `CLOVY_DEV_SIGNING_IDENTITY` (a SHA-1 or exact name
   from `security find-identity -v -p codesigning`), otherwise the single valid
   Apple Development identity. Several Apple Development identities, or none,
