@@ -76,20 +76,16 @@ verifiable.
 
 <table>
   <tr>
-    <td width="33%">
+    <td width="50%">
       <img src=".github/assets/clovy-meeting-notes.jpg" alt="A meeting note in Clovy with a live transcription preview while recording">
     </td>
-    <td width="33%">
+    <td width="50%">
       <img src=".github/assets/clovy-agent-analysis.jpg" alt="A Clovy agent session in private mode, reporting its analysis of a spreadsheet">
-    </td>
-    <td width="33%">
-      <img src=".github/assets/clovy-model-picker.jpg" alt="The Clovy model picker, with each model labeled with pricing and context window, and a privacy tier where the catalog provides one">
     </td>
   </tr>
   <tr>
     <td align="center">Meeting notes with live transcription, no bot in the call</td>
     <td align="center">The agent working through a spreadsheet in private mode</td>
-    <td align="center">Privacy tiers shown where the catalog provides them</td>
   </tr>
 </table>
 

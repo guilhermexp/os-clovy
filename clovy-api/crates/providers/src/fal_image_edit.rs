@@ -27,14 +27,26 @@
 //!   requested size, its ratio kept to the nearest pixel, and sent as PNG;
 //!   nothing is cut or padded.
 //! - In both normal cases the result's header must report the requested
-//!   size; any other size is a failed edit, never reinterpreted or cropped.
+//!   size, and the result then goes back as received; any other size is a
+//!   failed edit, never reinterpreted or cropped, except the observed size
+//!   below.
 //! - Canvas case (ratio above 4, or an orientation to apply): the whole
 //!   source, upright, is scaled without stretching into a centered rectangle
 //!   of a neutral gray canvas of exactly the requested size. The result must
-//!   come back at that size and is cropped to that rectangle. The crop assumes
-//!   the model keeps the input's layout; fal does not document that, so it is
-//!   a hypothesis for the external proof, and the size check proves geometry
-//!   only, not content.
+//!   come back at that size (or the observed size below) and is cropped to
+//!   that rectangle. The crop assumes the model keeps the input's layout; fal
+//!   does not document that, so it is a hypothesis for the external proof,
+//!   and the size check proves geometry only, not content.
+//! - Observed size. For a requested size off a 32-pixel grid, real
+//!   `fal-ai/flux-2/edit` runs answered the whole frame at each requested
+//!   side rounded up to the next multiple of 32. fal documents no such
+//!   rounding, so this is an observation recorded for that one curated
+//!   endpoint (`EDIT_ENDPOINTS`), not a published contract, and how the model
+//!   maps its input onto that size is not known. That one size is also
+//!   accepted: its whole frame is decoded, scaled back to the requested size
+//!   (undoing the small ratio change the rounding made) and, for a canvas,
+//!   then cropped. A requested side already on the grid must come back
+//!   exact, and every other size, however close, is still a failed edit.
 //!
 //! Blocking work. Header reads, decoding, scaling, encoding and the result's
 //! checks run on blocking threads that own the source text and the result
@@ -74,8 +86,10 @@ use std::{
     time::Duration,
 };
 
-/// Curated edit endpoints, keyed by the model id Clovy prices.
-const EDIT_ENDPOINTS: [&str; 1] = ["fal-ai/flux-2/edit"];
+/// Curated edit endpoints, keyed by the model id Clovy prices, each with the
+/// side multiple its results were observed to be rounded up to (see
+/// [`observed_result_size`]); `None` accepts only the requested size.
+const EDIT_ENDPOINTS: [(&str, Option<u32>); 1] = [("fal-ai/flux-2/edit", Some(32))];
 /// Requested output sides stay within the schema's `image_size` limits.
 const MIN_SIDE: u32 = 512;
 const MAX_SIDE: u32 = 2048;
@@ -116,9 +130,9 @@ impl ImageEditor for FalImageEditor {
         if request.image_base64.trim().is_empty() {
             return Err(invalid_input("image_edit_source_empty"));
         }
-        let Some(endpoint) = EDIT_ENDPOINTS
+        let Some((endpoint, output_grid)) = EDIT_ENDPOINTS
             .into_iter()
-            .find(|endpoint| *endpoint == request.model.0)
+            .find(|(endpoint, _)| *endpoint == request.model.0)
         else {
             return Err(invalid_input("image_edit_model_unsupported"));
         };
@@ -161,7 +175,10 @@ impl ImageEditor for FalImageEditor {
             EditPlan::AsIs { size, .. } | EditPlan::Reduced { size, .. } => (size, None),
             EditPlan::Canvas { size, content, .. } => (size, Some(content)),
         };
-        let asset = finish(asset, size, content).await.map_err(edit_error)?;
+        let observed = observed_result_size(size, output_grid);
+        let asset = finish(asset, size, observed, content)
+            .await
+            .map_err(edit_error)?;
         Ok(GeneratedImage {
             image_base64: base64::engine::general_purpose::STANDARD.encode(&asset.bytes),
             mime_type: asset.mime_type.to_string(),
@@ -171,7 +188,9 @@ impl ImageEditor for FalImageEditor {
     }
 }
 
-/// How one edit's source is sent and its result read back.
+/// How one edit's source is sent and its result read back. A result "must
+/// have `size`" either as it comes or, at the endpoint's observed size, once
+/// scaled back (see [`observed_result_size`]).
 enum EditPlan {
     /// The source, within the pixel budget, goes exactly as received (the
     /// request's own text, untrimmed); the result must have `size`.
@@ -573,35 +592,54 @@ fn image_error_kind(error: &ImageError) -> &'static str {
     }
 }
 
-/// A result for a source sent whole must report the requested size in its
-/// header; any other size is not the edit asked for.
-fn require_size(asset: ImageAsset, size: ImageSize) -> Result<ImageAsset, FalError> {
+/// The one result size accepted besides the planned `size`: each side rounded
+/// up to the endpoint's observed `output_grid`. `None` when the endpoint has
+/// no observed grid or `size` already sits on it: only `size` is accepted.
+fn observed_result_size(size: ImageSize, output_grid: Option<u32>) -> Option<ImageSize> {
+    let grid = output_grid?;
+    let rounded = ImageSize {
+        width: size.width.next_multiple_of(grid),
+        height: size.height.next_multiple_of(grid),
+    };
+    (rounded != size).then_some(rounded)
+}
+
+/// A result for a source sent whole goes back untouched when its header
+/// reports the planned `size`. When it reports the `observed` size instead,
+/// its whole frame is scaled back to `size`; any other size is not the edit
+/// asked for, and is refused before any pixel is decoded.
+fn require_size(
+    asset: ImageAsset,
+    size: ImageSize,
+    observed: Option<ImageSize>,
+) -> Result<ImageAsset, FalError> {
     let Ok(view) = read_header(Cursor::new(&asset.bytes)) else {
         return Err(FalError::MediaUnavailable);
     };
-    if view.width != size.width || view.height != size.height {
-        tracing::error!(
-            requested_width = size.width,
-            requested_height = size.height,
-            width = view.width,
-            height = view.height,
-            "fal image edit: output size differs from the requested size"
-        );
-        return Err(FalError::MediaUnavailable);
+    let returned = ImageSize {
+        width: view.width,
+        height: view.height,
+    };
+    if returned == size {
+        return Ok(asset);
     }
-    Ok(asset)
+    if Some(returned) != observed {
+        return Err(size_mismatch(size, returned));
+    }
+    redraw(&asset.bytes, size, observed, None)
 }
 
-/// Checks the result on a blocking thread that owns its bytes: it must have
-/// exactly `size`, and a canvas edit is then cropped back to `content`.
+/// Checks the result on a blocking thread that owns its bytes and returns it
+/// at exactly `size`; a canvas edit is then cropped back to `content`.
 async fn finish(
     asset: ImageAsset,
     size: ImageSize,
+    observed: Option<ImageSize>,
     content: Option<Rect>,
 ) -> Result<ImageAsset, FalError> {
     tokio::task::spawn_blocking(move || match content {
-        None => require_size(asset, size),
-        Some(content) => crop_result(&asset.bytes, size, content),
+        None => require_size(asset, size, observed),
+        Some(content) => redraw(&asset.bytes, size, observed, Some(content)),
     })
     .await
     .map_err(|error| {
@@ -613,25 +651,44 @@ async fn finish(
     })?
 }
 
-/// The output must have exactly the requested size: the crop rectangle comes
-/// from that geometry, never from a guess about a different one.
-fn crop_result(bytes: &[u8], size: ImageSize, content: Rect) -> Result<ImageAsset, FalError> {
+/// Decodes the result and returns it as PNG at exactly `size`: as it came, or,
+/// at the `observed` size, with its whole frame scaled back to `size`, nothing
+/// cut. A canvas edit is then cropped to `content`, which comes from the
+/// planned geometry, never from a guess about a different one.
+fn redraw(
+    bytes: &[u8],
+    size: ImageSize,
+    observed: Option<ImageSize>,
+    content: Option<Rect>,
+) -> Result<ImageAsset, FalError> {
     let edited = image::load_from_memory(bytes).map_err(|_| FalError::MediaUnavailable)?;
-    if edited.width() != size.width || edited.height() != size.height {
-        tracing::error!(
+    let returned = ImageSize {
+        width: edited.width(),
+        height: edited.height(),
+    };
+    let edited = if returned == size {
+        edited
+    } else if Some(returned) == observed {
+        tracing::info!(
             requested_width = size.width,
             requested_height = size.height,
-            width = edited.width(),
-            height = edited.height(),
-            "fal image edit: output size differs from the requested size"
+            width = returned.width,
+            height = returned.height,
+            "fal image edit: output at the observed size, scaled back to the requested size"
         );
-        return Err(FalError::MediaUnavailable);
-    }
-    let cropped = edited.crop_imm(content.x, content.y, content.width, content.height);
-    let png = encode_png(&cropped).map_err(|error| {
+        edited.resize_exact(size.width, size.height, FilterType::Lanczos3)
+    } else {
+        return Err(size_mismatch(size, returned));
+    };
+    let edited = if let Some(content) = content {
+        edited.crop_imm(content.x, content.y, content.width, content.height)
+    } else {
+        edited
+    };
+    let png = encode_png(&edited).map_err(|error| {
         tracing::error!(
             kind = image_error_kind(&error),
-            "fal image edit: cropped result could not be encoded"
+            "fal image edit: result could not be encoded"
         );
         FalError::Upstream { retryable: false }
     })?;
@@ -639,6 +696,18 @@ fn crop_result(bytes: &[u8], size: ImageSize, content: Rect) -> Result<ImageAsse
         bytes: png,
         mime_type: "image/png",
     })
+}
+
+/// Logs a result that has neither the planned nor the observed size.
+fn size_mismatch(size: ImageSize, returned: ImageSize) -> FalError {
+    tracing::error!(
+        requested_width = size.width,
+        requested_height = size.height,
+        width = returned.width,
+        height = returned.height,
+        "fal image edit: output size differs from the requested size"
+    );
+    FalError::MediaUnavailable
 }
 
 fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, ImageError> {
@@ -715,6 +784,11 @@ mod tests {
     const FRAME: [Rgb<u8>; 4] = [TOP, RIGHT, BOTTOM, LEFT];
     /// What the fake edit returns, unlike any source color.
     const EDITED: Rgba<u8> = Rgba([90, 90, 90, 255]);
+    /// Band thickness of the picture the fake answers in the result size
+    /// tests: thinner than any side difference between an observed-grid size
+    /// and the planned one, so a result cut at an edge, instead of scaled
+    /// whole, loses that edge's band.
+    const THIN_BAND: u32 = 8;
 
     fn editor(server: &MockServer) -> FalImageEditor {
         let config = UpstreamConfig {
@@ -742,7 +816,11 @@ mod tests {
     /// color: a copy that lost an edge, or only kept a central part, misses a
     /// band.
     fn framed(width: u32, height: u32) -> RgbImage {
-        let band = (width.min(height) / 20).max(1);
+        framed_by(width, height, (width.min(height) / 20).max(1))
+    }
+
+    /// [`framed`] with every band `band` pixels thick.
+    fn framed_by(width: u32, height: u32, band: u32) -> RgbImage {
         RgbImage::from_fn(width, height, |x, y| {
             if y < band {
                 TOP
@@ -902,6 +980,31 @@ mod tests {
             .expect("edit succeeds");
 
         (sent_image(&server).await, size, image)
+    }
+
+    /// Edits `source`, a `format` image whose upright size plans `size`,
+    /// against a fake fal answering a [`framed_by`] picture with
+    /// [`THIN_BAND`] bands at `returned`. Gives what fal received and
+    /// Clovy's result.
+    async fn edit_answered_at(
+        source: Vec<u8>,
+        format: ImageFormat,
+        size: ImageSize,
+        (width, height): (u32, u32),
+    ) -> (DynamicImage, Result<GeneratedImage, DomainError>) {
+        let server = queue_server().await;
+        let answer = encode(framed_by(width, height, THIN_BAND), ImageFormat::Png);
+        let answer = base64::engine::general_purpose::STANDARD.encode(answer);
+        mount_queue(&server, size, &answer).await;
+
+        let result = editor(&server)
+            .edit(ImageEditRequest {
+                mime_type: format.to_mime_type().to_string(),
+                ..request(base64::engine::general_purpose::STANDARD.encode(source))
+            })
+            .await;
+
+        (sent_image(&server).await, result)
     }
 
     /// `rounded` is `base * rounded_part / base_part` to the nearest pixel.
@@ -1134,6 +1237,117 @@ mod tests {
 
             assert_eq!(error, DomainError::UpstreamProvider, "{width}x{height}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_result_on_the_observed_grid_comes_back_whole_at_the_planned_size() {
+        // Real fal-ai/flux-2/edit runs (C10, C12) answered 1280x864, each side
+        // rounded up to a multiple of 32, for this source planned at 1254x836.
+        let size = output_size(1536, 1024);
+        assert_eq!((size.width, size.height), (1254, 836));
+        let source = encode(framed(1536, 1024), ImageFormat::Png);
+
+        let (sent, result) = edit_answered_at(source, ImageFormat::Png, size, (1280, 864)).await;
+
+        assert_eq!(sent.dimensions(), (1254, 836), "the whole source, reduced");
+        assert!(shows_frame(&sent, FRAME));
+        let image = result.expect("edit succeeds");
+        let edited = decode(&image.image_base64);
+        assert_eq!(edited.dimensions(), (1254, 836));
+        assert!(shows_frame(&edited, FRAME), "scaled whole, no edge cut");
+        assert_eq!(image.mime_type, "image/png");
+    }
+
+    #[tokio::test]
+    async fn an_unscaled_source_receives_whole_results_at_the_planned_size() {
+        // 900x600 fits the budget, so it goes as received; it also plans 1254x836.
+        let size = output_size(900, 600);
+        assert_eq!((size.width, size.height), (1254, 836));
+        for returned in [(1254, 836), (1280, 864)] {
+            let source = encode(framed(900, 600), ImageFormat::Png);
+
+            let (sent, result) = edit_answered_at(source, ImageFormat::Png, size, returned).await;
+
+            assert_eq!(
+                sent.dimensions(),
+                (900, 600),
+                "{returned:?}: sent as received"
+            );
+            let image = result
+                .map_err(|error| format!("{returned:?}: {error:?}"))
+                .expect("edit succeeds");
+            let edited = decode(&image.image_base64);
+            assert_eq!(
+                edited.dimensions(),
+                (size.width, size.height),
+                "{returned:?}"
+            );
+            assert!(shows_frame(&edited, FRAME), "{returned:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_upright_canvas_result_on_the_observed_grid_comes_back_whole() {
+        // Stored 1600x1200 with Orientation 6: drawn upright on a 886x1181
+        // canvas, whose sides rounded up to a multiple of 32 are 896x1184.
+        let size = output_size(1200, 1600);
+        assert_eq!((size.width, size.height), (886, 1181));
+        let jpeg = with_orientation_6(&encode(framed(1600, 1200), ImageFormat::Jpeg));
+
+        let (sent, result) = edit_answered_at(jpeg, ImageFormat::Jpeg, size, (896, 1184)).await;
+
+        assert_eq!(sent.dimensions(), (886, 1181));
+        let image = result.expect("edit succeeds");
+        let edited = decode(&image.image_base64);
+        assert_eq!(edited.dimensions(), (886, 1181));
+        assert!(shows_frame(&edited, FRAME), "scaled whole, no edge cut");
+    }
+
+    #[tokio::test]
+    async fn no_other_result_size_is_accepted_however_close() {
+        // 300x200 goes as received and plans 1254x836, observed grid 1280x864;
+        // 1024x1024 plans itself, already on the grid.
+        let cases = [
+            ((300, 200), (1280, 836)),
+            ((300, 200), (1254, 864)),
+            ((300, 200), (1248, 832)),
+            ((300, 200), (1281, 864)),
+            ((300, 200), (1280, 865)),
+            ((300, 200), (1280, 896)),
+            ((300, 200), (1312, 864)),
+            ((300, 200), (864, 1280)),
+            ((1024, 1024), (1056, 1056)),
+            ((1024, 1024), (1024, 1056)),
+        ];
+        for ((width, height), returned) in cases {
+            let source = encode(framed(width, height), ImageFormat::Png);
+
+            let (_, result) = edit_answered_at(
+                source,
+                ImageFormat::Png,
+                output_size(width, height),
+                returned,
+            )
+            .await;
+
+            assert_eq!(
+                result.err(),
+                Some(DomainError::UpstreamProvider),
+                "{width}x{height} answered {returned:?}"
+            );
+        }
+        // On a canvas planned at 886x1181: one pixel off its grid size 896x1184.
+        let size = output_size(1200, 1600);
+        let jpeg = with_orientation_6(&encode(framed(1600, 1200), ImageFormat::Jpeg));
+        let returned = (896, 1185);
+
+        let (_, result) = edit_answered_at(jpeg, ImageFormat::Jpeg, size, returned).await;
+
+        assert_eq!(
+            result.err(),
+            Some(DomainError::UpstreamProvider),
+            "{returned:?}"
+        );
     }
 
     #[tokio::test]
