@@ -51,8 +51,12 @@ API env example binds local mode to `127.0.0.1`; if you bind it to a network
 interface, replace the default local bearer token in both env files first.
 
 Provider keys and the OS Accounts App API key belong only in `clovy-api/.env`,
-never in the root desktop `.env`. Add `CLOVY__UPSTREAMS__OPENAI__API_KEY` only
-if you want to use OpenAI transcription models.
+never in the root desktop `.env`. Outside local mode Clovy API refuses to start
+without all four service keys. In local mode a blank or placeholder key is
+allowed: requests to that provider then need the user's own key, sent by the
+desktop app, and fail with `<provider>_not_configured` without one. A missing
+service key does not remove a model from the `/v1/models` catalog: Groq and
+OpenRouter models report `serviceAvailable: false` instead.
 
 ## Local connector OAuth
 
@@ -136,9 +140,15 @@ itself. `ephemeral-api` leaves the CVM running until `ephemeral-api-down`.
 Prerequisites: Docker running, the `phala` CLI installed and authenticated
 (`phala auth login`), and a `clovy-api/.env` holding the upstream provider
 keys. The script also needs `jq`, `curl`, `openssl`, `perl`, and `uuidgen`. It
-copies `CLOVY__UPSTREAMS__VENICE__API_KEY` and `CLOVY__UPSTREAMS__OPENAI__API_KEY`
-from `clovy-api/.env` verbatim; a key that is missing there stays missing, and
-Clovy API drops the models whose provider it cannot reach.
+copies `CLOVY__UPSTREAMS__GROQ__API_KEY`, `CLOVY__UPSTREAMS__OPENROUTER__API_KEY`,
+`CLOVY__UPSTREAMS__FAL__API_KEY`, and `CLOVY__UPSTREAMS__TAVILY__API_KEY` from
+`clovy-api/.env` into the CVM's sealed env verbatim, falling back to the
+`JUNE__UPSTREAMS__<PROVIDER>__API_KEY` alias when the Clovy name is missing or
+empty. Leftover Venice and OpenAI keys are not copied. A quoted value or one
+with a trailing comment stops the script before the deploy, because the sealed
+env would keep the quotes or comment as part of the key. A key missing under
+both names stays missing; the CVM runs in local mode, so that provider then
+works only with the user's own key, as described above.
 
 Cost: `tdx.small` bills $0.058/hr from creation until you delete the CVM. The
 image is pushed to `ttl.sh` with a `4h` tag. Tags there expire; the CVM keeps

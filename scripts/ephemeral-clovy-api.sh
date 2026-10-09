@@ -211,8 +211,10 @@ cmd_up() {
     printf 'CLOVY__LOCAL_DEV__ENABLED=true\n'
     printf 'CLOVY__LOCAL_DEV__BEARER_TOKEN=%s\n' "$token"
     printf 'CLOVY__LOCAL_DEV__USER_ID=%s\n' "$LOCAL_DEV_USER_ID"
-    copy_compat_env_line CLOVY__UPSTREAMS__VENICE__API_KEY JUNE__UPSTREAMS__VENICE__API_KEY
-    copy_compat_env_line CLOVY__UPSTREAMS__OPENAI__API_KEY JUNE__UPSTREAMS__OPENAI__API_KEY
+    copy_compat_env_line CLOVY__UPSTREAMS__GROQ__API_KEY JUNE__UPSTREAMS__GROQ__API_KEY
+    copy_compat_env_line CLOVY__UPSTREAMS__OPENROUTER__API_KEY JUNE__UPSTREAMS__OPENROUTER__API_KEY
+    copy_compat_env_line CLOVY__UPSTREAMS__FAL__API_KEY JUNE__UPSTREAMS__FAL__API_KEY
+    copy_compat_env_line CLOVY__UPSTREAMS__TAVILY__API_KEY JUNE__UPSTREAMS__TAVILY__API_KEY
   } >"$env_file"
 
   # Record the CVM before the deploy, not after: the state file is what makes
