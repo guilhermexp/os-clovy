@@ -523,14 +523,14 @@ impl Write for Captured {
 }
 
 impl Captured {
-    /// Waits until `count` messages arrived (the app answers on another
-    /// thread) and returns them by id.
+    /// Waits for `count` complete newline-delimited messages from the relay.
+    /// The app serializes each message across writes on another thread.
     pub(crate) fn messages(&self, count: usize) -> Vec<Value> {
         for _ in 0..200 {
-            let text = String::from_utf8(lock(&self.0).clone()).unwrap();
-            let messages: Vec<Value> = text
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
+            let messages: Vec<Value> = lock(&self.0)
+                .split_inclusive(|byte| *byte == b'\n')
+                .take_while(|line| line.ends_with(b"\n"))
+                .map(|line| serde_json::from_slice(line).unwrap())
                 .collect();
             if messages.len() >= count {
                 return messages;

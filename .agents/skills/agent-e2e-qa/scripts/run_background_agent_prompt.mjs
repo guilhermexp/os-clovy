@@ -402,24 +402,24 @@ function browserInitScript() {
       if (cmd === "provider_model_settings") {
         return {
           settings: {
-            transcriptionProvider: "venice",
-            transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
-            generationModel: "zai-org-glm-5-2",
+            transcriptionProvider: "groq",
+            transcriptionModel: "whisper-large-v3-turbo",
+            generationModel: "z-ai/glm-5.2",
           },
         };
       }
-      if (cmd === "list_venice_models") {
+      if (cmd === "list_provider_models") {
         return {
           mode: args?.request?.mode || "generation",
           modelType: "text",
-          selectedModel: "zai-org-glm-5-2",
+          selectedModel: "z-ai/glm-5.2",
           models: [
             {
-              provider: "venice",
-              id: "zai-org-glm-5-2",
+              provider: "openrouter",
+              id: "z-ai/glm-5.2",
               name: "GLM 5.2",
               modelType: "text",
-              privacy: "private",
+              privacy: null,
               traits: [],
               capabilities: [],
             },
