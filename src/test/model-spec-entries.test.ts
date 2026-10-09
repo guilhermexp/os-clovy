@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { modelSpecEntries } from "../components/settings/ModelPickerDialog";
-import type { VeniceModelDto } from "../lib/tauri";
+import type { ProviderModelDto } from "../lib/tauri";
 
-function model(overrides: Partial<VeniceModelDto>): VeniceModelDto {
+function model(overrides: Partial<ProviderModelDto>): ProviderModelDto {
   return {
-    provider: "venice",
+    provider: "openrouter",
     id: "test-model",
     name: "Test model",
     modelType: "text",
     traits: [],
     capabilities: [],
     ...overrides,
-  } as VeniceModelDto;
+  } as ProviderModelDto;
 }
 
 describe("modelSpecEntries", () => {

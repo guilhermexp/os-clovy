@@ -398,6 +398,14 @@ export type DictationHelperEvent = {
 };
 
 export type ProviderModelMode = "transcription" | "generation" | "image" | "video";
+export type BuiltinProvider = "groq" | "openrouter" | "fal" | "tavily";
+
+export type ProviderApiKeysConfigured = {
+  groq: boolean;
+  openrouter: boolean;
+  fal: boolean;
+  tavily: boolean;
+};
 
 export type ProviderModelSettingsDto = {
   transcriptionProvider: string;
@@ -408,10 +416,11 @@ export type ProviderModelSettingsDto = {
   remoteGenerationModel: string;
   imageModel: string;
   videoModel: string;
-  veniceApiKeyConfigured: boolean;
+  providerApiKeysConfigured: ProviderApiKeysConfigured;
   localGeneration: LocalGenerationSettingsDto;
-  /** Venice safe mode for image generation/editing (blurs adult content). On
-   * by default; the user opts out via Settings or the consent dialog. */
+  /** Safe mode for image generation/editing: asks the image provider to filter
+   * adult content. On by default; the user opts out via Settings or the consent
+   * dialog. Turning it off is a request the provider may not honor. */
   imageSafeMode: boolean;
   /** Whether the user chose "don't ask again" on the safe-mode consent dialog. */
   imageSafeModePromptDismissed: boolean;
@@ -492,7 +501,7 @@ export type P3aQuestionCatalogResponse = {
   questions: P3aQuestionDto[];
 };
 
-export type VeniceModelDto = {
+export type ProviderModelDto = {
   provider: string;
   id: string;
   name: string;
@@ -508,13 +517,17 @@ export type VeniceModelDto = {
   creditsPerMillionSeconds?: number;
   inputCreditsPerMillionTokens?: number;
   outputCreditsPerMillionTokens?: number;
+  /** False when Clovy holds no service key for the row's provider: the model is
+   * usable only with the user's own key for that provider. Absent means
+   * available (older Clovy API builds do not send it). */
+  serviceAvailable?: boolean;
 };
 
-export type VeniceModelsResponse = {
+export type ProviderModelsResponse = {
   mode: ProviderModelMode;
   modelType: string;
   selectedModel: string;
-  models: VeniceModelDto[];
+  models: ProviderModelDto[];
 };
 
 export type SourceState =
@@ -1447,14 +1460,14 @@ export async function p3aRecord(questionId: string) {
   });
 }
 
-export async function listVeniceModels(mode: ProviderModelMode) {
-  return invoke<VeniceModelsResponse>("list_venice_models", {
+export async function listProviderModels(mode: ProviderModelMode) {
+  return invoke<ProviderModelsResponse>("list_provider_models", {
     request: { mode },
   });
 }
 
-export async function setVeniceModel(mode: ProviderModelMode, modelId: string) {
-  return invoke<ProviderModelSettingsDto>("set_venice_model", {
+export async function setProviderModel(mode: ProviderModelMode, modelId: string) {
+  return invoke<ProviderModelSettingsDto>("set_provider_model", {
     request: { mode, modelId },
   });
 }
@@ -1465,18 +1478,20 @@ export async function setCostQuality(value: number) {
   });
 }
 
-export async function setVeniceApiKey(apiKey: string) {
-  return invoke<ProviderModelSettingsDto>("set_venice_api_key", {
-    request: { apiKey },
+export async function setProviderApiKey(provider: BuiltinProvider, apiKey: string) {
+  return invoke<ProviderModelSettingsDto>("set_provider_api_key", {
+    request: { provider, apiKey },
   });
 }
 
-export async function clearVeniceApiKey() {
-  return invoke<ProviderModelSettingsDto>("clear_venice_api_key");
+export async function clearProviderApiKey(provider: BuiltinProvider) {
+  return invoke<ProviderModelSettingsDto>("clear_provider_api_key", {
+    request: { provider },
+  });
 }
 
-// Toggles Venice safe mode for image generation/editing. On by default; when
-// on, Venice blurs adult content.
+// Toggles safe mode for image generation/editing. On by default; when
+// on, the provider blurs adult content.
 export async function setImageSafeMode(enabled: boolean) {
   return invoke<ProviderModelSettingsDto>("set_image_safe_mode", {
     request: { enabled },

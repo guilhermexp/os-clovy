@@ -9,37 +9,34 @@ import {
   type ModelPickerFlyout,
   ModelPickerPopover,
 } from "./components/settings/ModelPickerPopover";
-import type { VeniceModelDto } from "./lib/tauri";
+import type { ProviderModelDto } from "./lib/tauri";
 import type { ThinkingLevel } from "./lib/thinking-level";
 import "./styles/app.css";
 
-const autoModel: VeniceModelDto = {
+const autoModel: ProviderModelDto = {
   provider: "open-software",
   id: "open-software/auto",
   name: "Auto",
   modelType: "text",
-  privacy: "private",
   traits: [],
   capabilities: ["supportsFunctionCalling"],
 };
 
-const generationModels: VeniceModelDto[] = [
+const generationModels: ProviderModelDto[] = [
   autoModel,
   {
-    provider: "venice",
-    id: "zai-org-glm-5-2",
+    provider: "openrouter",
+    id: "z-ai/glm-5.2",
     name: "GLM 5.2",
     modelType: "text",
-    privacy: "private",
     traits: [],
     capabilities: ["supportsFunctionCalling"],
   },
   {
-    provider: "venice",
-    id: "kimi-k2-6",
+    provider: "openrouter",
+    id: "moonshotai/kimi-k2.6",
     name: "Kimi K2.6",
     modelType: "text",
-    privacy: "private",
     traits: [],
     capabilities: ["supportsFunctionCalling", "supportsVision"],
   },

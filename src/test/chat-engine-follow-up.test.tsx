@@ -72,7 +72,7 @@ describe("CLI chat engine follow-up queuing", () => {
       }
       if (command === "list_agent_artifacts") return Promise.resolve([]);
       if (command === "list_agent_skills") return Promise.resolve([]);
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "__clovy_cli_engine__:claude",
@@ -107,7 +107,14 @@ describe("CLI chat engine follow-up queuing", () => {
       if (command === "provider_model_settings") {
         return Promise.resolve({
           settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         });
       }
       if (command === "start_agent_run") {

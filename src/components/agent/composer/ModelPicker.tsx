@@ -8,13 +8,15 @@ import { createPortal } from "react-dom";
 
 import { t as translate, useT } from "../../../i18n";
 import {
+  BUILTIN_PROVIDER_NAME_KEYS,
   modelIsPrivate,
+  modelMissingProviderKey,
   modelSupportsTools,
   type ModelPrivacyBadge,
 } from "../../../lib/model-privacy";
 import { modelMatchesQuery } from "../../../lib/model-search";
 import { suggestedModelsForMode } from "../../../lib/suggested-models";
-import type { VeniceModelDto } from "../../../lib/tauri";
+import type { ProviderApiKeysConfigured, ProviderModelDto } from "../../../lib/tauri";
 import {
   THINKING_LEVELS,
   thinkingOptionForLevel,
@@ -45,7 +47,7 @@ export function ComposerModelPicker({
   onToggleOpen,
 }: {
   open: boolean;
-  model?: VeniceModelDto;
+  model?: ProviderModelDto;
   /** Ghosted designation beside the name: the Auto routing preference
    * ("Auto Quality"), quieter than the model name. */
   detail?: string;
@@ -261,7 +263,7 @@ export function ComposerModelPopover({
   search,
   popoverRef,
   searchRef,
-  veniceApiKeyConfigured = false,
+  providerApiKeysConfigured,
   thinkingLevel,
   onFlyoutChange,
   onSearchChange,
@@ -269,18 +271,20 @@ export function ComposerModelPopover({
   onSelectThinking,
 }: {
   flyout: ComposerModelFlyout;
-  model?: VeniceModelDto;
-  options: VeniceModelDto[];
+  model?: ProviderModelDto;
+  options: ProviderModelDto[];
   costQuality?: number;
   search: string;
   popoverRef: RefObject<HTMLDivElement>;
   searchRef: RefObject<HTMLInputElement>;
-  /** With a Venice API key saved and Auto as the active selection, the
-   * popover leads with the billing note from the settings picker: Auto is a
-   * Clovy-managed route, so it meters Clovy credits and never uses the key.
-   * This popover has no Auto section, so the note is the only billing signal
-   * on this surface (JUN-329). */
-  veniceApiKeyConfigured?: boolean;
+  /** Which providers have the user's own key saved. Rows Clovy cannot serve
+   * without that key (`serviceAvailable: false`) stay out of the list and a
+   * note says which key to add. With an OpenRouter key saved and Auto as the
+   * active selection, the popover also leads with the billing note from the
+   * settings picker: Auto is a Clovy-managed route, so it meters Clovy credits
+   * and never uses the key. This popover has no Auto section, so the note is
+   * the only billing signal on this surface (JUN-329). */
+  providerApiKeysConfigured?: ProviderApiKeysConfigured;
   thinkingLevel?: ThinkingLevel;
   onFlyoutChange: (flyout: ComposerModelFlyout) => void;
   onSearchChange: (value: string) => void;
@@ -297,7 +301,7 @@ export function ComposerModelPopover({
   // Styled hover card for catalog rows (replaces the native title tooltip):
   // fixed-positioned next to the hovered row, on the panel's outer side.
   const [catalogHover, setCatalogHover] = useState<{
-    model: VeniceModelDto;
+    model: ProviderModelDto;
     rowRect: HoverBridgeRect;
     top: number;
     x: number;
@@ -460,12 +464,25 @@ export function ComposerModelPopover({
     setCatalogHover(null);
   }, [flyout, search, privateOnly]);
 
-  const suggested = suggestedModelsForMode("generation", options);
+  const usable = providerApiKeysConfigured
+    ? options.filter((option) => !modelMissingProviderKey(option, providerApiKeysConfigured))
+    : options;
+  const missingProviderKeys = providerApiKeysConfigured
+    ? [
+        ...new Set(
+          options.flatMap((option) => {
+            const provider = modelMissingProviderKey(option, providerApiKeysConfigured);
+            return provider ? [provider] : [];
+          }),
+        ),
+      ]
+    : [];
+  const suggested = suggestedModelsForMode("generation", usable);
   const query = search.trim().toLowerCase();
   // Clovy's agent needs tool calls, so models without tool support can never
   // be picked — leave them out of the quick-switch list entirely instead of
   // showing dead rows. (Settings still lists them, greyed, for context.)
-  const selectable = options.filter((option) => !option.provider || modelSupportsTools(option));
+  const selectable = usable.filter((option) => !option.provider || modelSupportsTools(option));
   const privacyFiltered = privateOnly ? selectable.filter(modelIsPrivate) : selectable;
   const filteredOptions = query
     ? privacyFiltered.filter((option) => modelMatchesQuery(option, query))
@@ -479,7 +496,7 @@ export function ComposerModelPopover({
   filteredOptionsRef.current = filteredOptions;
 
   const showCatalogHover = useCallback(
-    (option: VeniceModelDto, row: HTMLElement) => {
+    (option: ProviderModelDto, row: HTMLElement) => {
       cancelCatalogClose();
       const panel = flyoutRef.current;
       if (!panel) return;
@@ -572,9 +589,16 @@ export function ComposerModelPopover({
       }}
     >
       <p className="agent-composer-model-title">{t("chat.model.suggested")}</p>
-      {veniceApiKeyConfigured && model.id === AUTO_MODEL_ID ? (
+      {providerApiKeysConfigured?.openrouter && model.id === AUTO_MODEL_ID ? (
         <p className="agent-composer-model-auto-note">{t("chat.model.autoBillingNote")}</p>
       ) : null}
+      {missingProviderKeys.map((provider) => (
+        <p key={provider} className="agent-composer-model-auto-note">
+          {t("chat.model.providerKeyNeeded", {
+            provider: t(BUILTIN_PROVIDER_NAME_KEYS[provider]),
+          })}
+        </p>
+      ))}
       <div
         className="agent-composer-model-menu"
         role="listbox"
@@ -860,7 +884,7 @@ export function ComposerModelPopover({
 // or anonymized (identity stripped, prompts may be retained). Name the model
 // so it's clear what's running; fall back to the plain line when none is known.
 export function heroPrivacyFootnote(
-  model: VeniceModelDto | undefined,
+  model: ProviderModelDto | undefined,
   badge: ModelPrivacyBadge | undefined,
 ): string {
   if (!model) return translate("chat.privacy.runsLocally");
@@ -886,11 +910,11 @@ function ComposerModelOption({
   onSelect,
   onHover,
 }: {
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   selected: boolean;
   active?: boolean;
   onSelect: (modelId: string, costQuality?: number) => void;
-  onHover: (model: VeniceModelDto, row: HTMLElement, immediate: boolean) => void;
+  onHover: (model: ProviderModelDto, row: HTMLElement, immediate: boolean) => void;
 }) {
   return (
     <button
@@ -913,7 +937,7 @@ function ComposerModelOption({
   );
 }
 
-function ComposerModelOptionText({ model }: { model: VeniceModelDto }) {
+function ComposerModelOptionText({ model }: { model: ProviderModelDto }) {
   return (
     <span className="agent-composer-model-row-copy">
       <span className="agent-composer-model-row-name">{model.name}</span>

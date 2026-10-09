@@ -4,7 +4,7 @@ use crate::{
         log_settled, new_charge_operation_id, release_hold, zero_receipt,
     },
     error::ServiceError,
-    metering::{log_skipped_user_venice_key, uses_user_venice_key_for_model},
+    metering::{log_skipped_user_key_for_model, uses_user_key_for_model},
     pricing::PricingTable,
     util::sha256_hex,
 };
@@ -45,8 +45,7 @@ impl AgentChatService {
     pub async fn complete(&self, params: AgentChatParams) -> Result<AgentChatOutput, ServiceError> {
         self.pricing
             .ensure_model_kind(&params.model_id.0, ModelKind::Text)?;
-        let inference_privacy = self.pricing.inference_privacy(&params.model_id.0);
-        if uses_user_venice_key_for_model(
+        if uses_user_key_for_model(
             &self.pricing,
             &params.model_id.0,
             &params.provider_credentials,
@@ -57,11 +56,16 @@ impl AgentChatService {
                     body: params.body,
                     model: params.model_id.clone(),
                     provider_credentials: params.provider_credentials.clone(),
-                    inference_privacy,
+                    price_cap: None,
                     unmetered: true,
                 })
                 .await?;
-            log_skipped_user_venice_key(ActionSlug::AgentChat, &params.user_id, &params.model_id.0);
+            log_skipped_user_key_for_model(
+                &self.pricing,
+                ActionSlug::AgentChat,
+                &params.user_id,
+                &params.model_id.0,
+            );
             return Ok(AgentChatOutput {
                 completion,
                 receipt: zero_receipt(),
@@ -83,7 +87,7 @@ impl AgentChatService {
                 body: params.body,
                 model: params.model_id.clone(),
                 provider_credentials: params.provider_credentials.clone(),
-                inference_privacy,
+                price_cap: self.pricing.price_cap(&params.model_id.0),
                 unmetered: false,
             })
             .await
@@ -128,8 +132,7 @@ impl AgentChatService {
     ) -> Result<AgentChatStreamOutput, ServiceError> {
         self.pricing
             .ensure_model_kind(&params.model_id.0, ModelKind::Text)?;
-        let inference_privacy = self.pricing.inference_privacy(&params.model_id.0);
-        if uses_user_venice_key_for_model(
+        if uses_user_key_for_model(
             &self.pricing,
             &params.model_id.0,
             &params.provider_credentials,
@@ -140,14 +143,19 @@ impl AgentChatService {
                     body: params.body,
                     model: params.model_id.clone(),
                     provider_credentials: params.provider_credentials.clone(),
-                    inference_privacy,
+                    price_cap: None,
                     unmetered: true,
                 })
                 .await?;
             tokio::spawn(async move {
                 let _ = stream.outcome.await;
             });
-            log_skipped_user_venice_key(ActionSlug::AgentChat, &params.user_id, &params.model_id.0);
+            log_skipped_user_key_for_model(
+                &self.pricing,
+                ActionSlug::AgentChat,
+                &params.user_id,
+                &params.model_id.0,
+            );
             return Ok(AgentChatStreamOutput {
                 content_type: stream.content_type,
                 provider: stream.provider,
@@ -172,7 +180,7 @@ impl AgentChatService {
                 body: params.body,
                 model: params.model_id.clone(),
                 provider_credentials: params.provider_credentials.clone(),
-                inference_privacy,
+                price_cap: self.pricing.price_cap(&params.model_id.0),
                 unmetered: false,
             })
             .await

@@ -7294,7 +7294,7 @@ button.agent-user-attachment:hover {
   border-bottom: 0;
 }
 
-/* Billing note under the Auto toggle while a Venice API key is saved: Auto
+/* Billing note under the Auto toggle while an OpenRouter API key is saved: Auto
  * never uses the key, so the credits impact stays visible right where Auto
  * gets switched on. Quiet caption on the same gutter as the toggle label. */
 .agent-composer-model-auto-note {
@@ -14514,7 +14514,7 @@ button.agent-user-attachment:hover {
 }
 
 .settings-model-row .settings-row-description,
-.settings-row-venice-key .settings-row-description {
+.settings-row-provider-key .settings-row-description {
   display: block;
   overflow: visible;
   white-space: normal;
@@ -14546,14 +14546,13 @@ button.agent-user-attachment:hover {
   height: var(--control-md);
 }
 
-.settings-row-venice-key {
+.settings-row-provider-key {
   align-items: start;
 }
 
-.settings-row-venice-key .settings-row-info {
+.settings-row-provider-key .settings-row-info {
   max-width: 58ch;
 }
-
 .settings-row-substatus {
   color: color-mix(in oklch, var(--success) 70%, var(--foreground));
 }
@@ -19344,7 +19343,7 @@ button.memory-project:hover {
   max-width: 100%;
 }
 
-/* Hover callout card (HoverTip) — the Venice-style explainer behind privacy
+/* Hover callout card (HoverTip) — the explainer behind privacy
  * pills. Body-portaled at a fixed position, so it must sit above dialogs
  * (backdrop is z-index 112) and above the model picker popover (130), which
  * hosts a privacy-ghost tip inside its own rows. As the topmost transient

@@ -4,7 +4,7 @@ use crate::{
         charge, clamp_to_cap, release_hold, zero_receipt,
     },
     error::ServiceError,
-    metering::{log_skipped_user_venice_key, uses_user_venice_key_for_model},
+    metering::{log_skipped_user_key_for_model, uses_user_key_for_model},
     pricing::PricingTable,
     util::{ceil_seconds, sha256_hex},
 };
@@ -111,12 +111,12 @@ impl NoteTranscribeService {
             actual,
             estimate,
         };
-        if uses_user_venice_key_for_model(
+        if uses_user_key_for_model(
             &self.pricing,
             &prepared.params.model_id.0,
             &prepared.params.provider_credentials,
         ) {
-            return self.transcribe_with_user_venice_key(prepared).await;
+            return self.transcribe_with_user_key(prepared).await;
         }
         if prepared.params.preview {
             return self.transcribe_preview(prepared).await;
@@ -124,7 +124,7 @@ impl NoteTranscribeService {
         self.transcribe_charged(prepared).await
     }
 
-    async fn transcribe_with_user_venice_key(
+    async fn transcribe_with_user_key(
         &self,
         prepared: PreparedNoteTranscription,
     ) -> Result<NoteTranscribeOutput, ServiceError> {
@@ -154,7 +154,8 @@ impl NoteTranscribeService {
                 provider_credentials: params.provider_credentials.clone(),
             })
             .await?;
-        log_skipped_user_venice_key(
+        log_skipped_user_key_for_model(
+            &self.pricing,
             ActionSlug::NoteTranscribe,
             &params.user_id,
             &params.model_id.0,

@@ -1,6 +1,6 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
 
-import type { VeniceModelDto } from "../../lib/tauri";
+import type { ProviderModelDto } from "../../lib/tauri";
 import {
   createHoverBridgeTracker,
   type HoverBridgePoint,
@@ -144,7 +144,7 @@ export function useModelDetailHoverBridge({
 // The catalog hovercard's anchoring: the hovered row's rect and the card's
 // preferred side, computed by the caller's `showCatalogHover`.
 export type CatalogHoverAnchor = {
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   rowRect: HoverBridgeRect;
   side: "left" | "right";
 };
@@ -168,8 +168,8 @@ export function useCatalogHoverBridge({
   catalogHover: CatalogHoverAnchor | null;
   cardRef: RefObject<HTMLElement | null>;
   listRef: RefObject<HTMLElement | null>;
-  resolveOption: (id: string) => VeniceModelDto | undefined;
-  showCatalogHover: (option: VeniceModelDto, row: HTMLElement) => void;
+  resolveOption: (id: string) => ProviderModelDto | undefined;
+  showCatalogHover: (option: ProviderModelDto, row: HTMLElement) => void;
   cancelHoverIntent: () => void;
   cancelCatalogClose: () => void;
   scheduleCatalogClose: () => void;

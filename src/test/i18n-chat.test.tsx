@@ -7,7 +7,7 @@ import { heroPrivacyFootnote } from "../components/agent/composer/ModelPicker";
 import { reportCategoryDef } from "../components/agent/composer/reportCategory";
 import { applyInterfaceLocale } from "../i18n/locale";
 import type { AgentChatPart, AgentChatTurn } from "../lib/agent-chat-runtime";
-import type { VeniceModelDto } from "../lib/tauri";
+import type { ProviderModelDto } from "../lib/tauri";
 
 const approvalTurn: AgentChatTurn = {
   id: "turn-1",
@@ -100,7 +100,7 @@ describe("chat i18n", () => {
     });
 
     it("interpolates the model name into the privacy footnote", () => {
-      const model = { id: "m", name: "GLM 5" } as VeniceModelDto;
+      const model = { id: "m", name: "GLM 5" } as ProviderModelDto;
       expect(heroPrivacyFootnote(model, { mode: "private" } as never)).toBe(
         "O Clovy roda localmente. As chamadas para GLM 5 são privadas.",
       );

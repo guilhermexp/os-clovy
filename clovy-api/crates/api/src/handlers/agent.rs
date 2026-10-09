@@ -1,7 +1,7 @@
 use crate::{
     auth::{authenticated_user, provider_credentials},
     error::ApiError,
-    handlers::notes::{AUTO_TEXT_MODEL, credentials_for_resolved_model, resolve_priced_text_model},
+    handlers::notes::{AgentModelRequirements, AutoSelection, resolve_text_model_and_credentials},
     state::ApiState,
     validation,
 };
@@ -12,12 +12,9 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
-use clovy_config::ModelPriceConfig;
-use clovy_domain::{ModelId, ModelKind, UpstreamRouteMetadata};
+use clovy_domain::{ModelId, UpstreamProvider, UpstreamRouteMetadata};
 use clovy_services::{AgentChatParams, AgentChatStreamOutput};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-
-const PREFERRED_VISION_TEXT_MODEL: &str = "kimi-k2-6";
 
 pub(crate) async fn chat_completions(
     State(state): State<ApiState>,
@@ -25,7 +22,7 @@ pub(crate) async fn chat_completions(
     Json(mut body): Json<serde_json::Value>,
 ) -> Result<Response, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Openrouter)?;
     let requested_model_id = body
         .get("model")
         .and_then(serde_json::Value::as_str)
@@ -35,24 +32,40 @@ pub(crate) async fn chat_completions(
         .to_string();
     validation::validate_text_len("model", &requested_model_id, validation::MAX_MODEL_CHARS)?;
     validation::validate_agent_chat_body(&body)?;
-    let model_id = resolve_priced_agent_text_model(&state, &requested_model_id, &body)?;
-    if state.local_dev_enabled() && model_id != AUTO_TEXT_MODEL && model_id != requested_model_id {
-        tracing::warn!(
-            requested_model = %requested_model_id,
-            resolved_model = %model_id,
-            "local dev substituted a concrete text model for unavailable Auto"
-        );
-    }
-    let provider_credentials = credentials_for_resolved_model(
-        provider_credentials,
-        &requested_model_id,
-        &model_id,
-        state.pricing().is_venice_model(&model_id),
-    )?;
-    if let Some(object) = body.as_object_mut() {
-        if model_id != AUTO_TEXT_MODEL {
-            object.remove("auto");
+
+    let cost_quality = if let Some(auto_value) = body.get("auto") {
+        if let Some(cq) = auto_value.get("cost_quality") {
+            let cq_num = cq
+                .as_f64()
+                .ok_or_else(|| ApiError::unprocessable("cost_quality_invalid"))?;
+            if !cq_num.is_finite() || !(0.0..=1.0).contains(&cq_num) {
+                return Err(ApiError::unprocessable("cost_quality_invalid"));
+            }
+            Some(cq_num)
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    if let Some(object) = body.as_object_mut() {
+        object.remove("auto");
+    }
+
+    let requirements = AgentModelRequirements::from_body(&body);
+    let (model_id, provider_credentials) = resolve_text_model_and_credentials(
+        &state,
+        &requested_model_id,
+        AutoSelection {
+            cost_quality,
+            requirements: Some(requirements),
+        },
+        provider_credentials,
+    )?;
+    state.ensure_provider_configured(UpstreamProvider::Openrouter, &provider_credentials)?;
+
+    if let Some(object) = body.as_object_mut() {
         object.insert(
             "model".to_string(),
             serde_json::Value::String(model_id.clone()),
@@ -130,14 +143,8 @@ fn insert_upstream_route_headers(
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct AgentModelRequirements {
-    vision: bool,
-    tools: bool,
-}
-
 impl AgentModelRequirements {
-    fn from_body(body: &serde_json::Value) -> Self {
+    pub(crate) fn from_body(body: &serde_json::Value) -> Self {
         Self {
             vision: body.get("messages").is_some_and(chat_items_contain_image),
             tools: body
@@ -146,55 +153,6 @@ impl AgentModelRequirements {
                 .is_some_and(|tools| !tools.is_empty()),
         }
     }
-
-    fn is_empty(self) -> bool {
-        !self.vision && !self.tools
-    }
-}
-
-fn resolve_priced_agent_text_model(
-    state: &ApiState,
-    requested_model_id: &str,
-    body: &serde_json::Value,
-) -> Result<String, ApiError> {
-    let resolved_model_id = resolve_priced_text_model(state, requested_model_id)?;
-    let requirements = AgentModelRequirements::from_body(body);
-    if resolved_model_id == AUTO_TEXT_MODEL
-        || resolved_model_id == requested_model_id
-        || requirements.is_empty()
-        || state
-            .pricing()
-            .priced_model(&resolved_model_id, ModelKind::Text)
-            .is_ok_and(|model| model_supports_requirements(&model, requirements))
-    {
-        return Ok(resolved_model_id);
-    }
-
-    let compatible_model = state
-        .pricing()
-        .priced_model(PREFERRED_VISION_TEXT_MODEL, ModelKind::Text)
-        .ok()
-        .filter(|model| model_supports_requirements(model, requirements))
-        .map(|_| PREFERRED_VISION_TEXT_MODEL.to_string())
-        .or_else(|| {
-            state
-                .pricing()
-                .find_priced_model(ModelKind::Text, |model_id, model| {
-                    model_id != AUTO_TEXT_MODEL && model_supports_requirements(model, requirements)
-                })
-                .map(|(model_id, _)| model_id)
-        });
-
-    if compatible_model.is_none() {
-        tracing::warn!(
-            requested_model = %requested_model_id,
-            vision_required = requirements.vision,
-            tools_required = requirements.tools,
-            "no priced text model satisfies the agent request capabilities"
-        );
-    }
-
-    compatible_model.ok_or_else(|| ApiError::unprocessable("model_capability_unavailable"))
 }
 
 fn chat_items_contain_image(value: &serde_json::Value) -> bool {
@@ -210,30 +168,10 @@ fn chat_items_contain_image(value: &serde_json::Value) -> bool {
     }
 }
 
-fn model_supports_requirements(
-    model: &ModelPriceConfig,
-    requirements: AgentModelRequirements,
-) -> bool {
-    (!requirements.vision || has_capability(&model.capabilities, "supportsvision"))
-        && (!requirements.tools
-            || has_capability(&model.capabilities, "functioncalling")
-            || has_capability(&model.capabilities, "toolcalling"))
-}
-
-fn has_capability(capabilities: &[String], expected: &str) -> bool {
-    capabilities.iter().any(|capability| {
-        capability
-            .chars()
-            .filter(char::is_ascii_alphabetic)
-            .map(|character| character.to_ascii_lowercase())
-            .collect::<String>()
-            .contains(expected)
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AgentModelRequirements, has_capability};
+    use super::AgentModelRequirements;
+    use crate::handlers::notes::has_capability;
 
     #[test]
     fn infers_image_and_tool_requirements_from_chat_content() {

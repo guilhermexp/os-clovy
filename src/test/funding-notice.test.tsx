@@ -81,7 +81,7 @@ describe("FundingNotice", () => {
 
   it("explains Auto funding and offers the model picker beside the plan action", async () => {
     const user = userEvent.setup();
-    const onSelectVeniceModel = vi.fn();
+    const onSelectOpenRouterModel = vi.fn();
     render(
       <FundingNotice
         account={baseAccount}
@@ -93,27 +93,27 @@ describe("FundingNotice", () => {
             provider: "open-software",
             capabilities: ["supportsFunctionCalling"],
           },
-          veniceApiKeyConfigured: true,
-          onSelectVeniceModel,
+          providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
+          onSelectOpenRouterModel,
         }}
       />,
     );
 
     expect(
       screen.getByText(
-        "Auto can route beyond Venice, so it uses Clovy credits. Your Venice API key applies only when you select a Venice model.",
+        "Auto is billed to Clovy credits and does not use your OpenRouter key. Select an OpenRouter model to continue with your key.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Or go Max" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Select a Venice model" }));
-    expect(onSelectVeniceModel).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Select an OpenRouter model" }));
+    expect(onSelectOpenRouterModel).toHaveBeenCalledOnce();
 
     await user.click(screen.getByRole("button", { name: "Upgrade to Pro" }));
     expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("pro");
   });
 
-  it("keeps the generic funding notice when no Venice key is configured", () => {
+  it("keeps the generic funding notice when no OpenRouter key is configured", () => {
     render(
       <FundingNotice
         account={baseAccount}
@@ -125,8 +125,8 @@ describe("FundingNotice", () => {
             provider: "open-software",
             capabilities: ["supportsFunctionCalling"],
           },
-          veniceApiKeyConfigured: false,
-          onSelectVeniceModel: vi.fn(),
+          providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
+          onSelectOpenRouterModel: vi.fn(),
         }}
       />,
     );
@@ -134,7 +134,7 @@ describe("FundingNotice", () => {
     expect(
       screen.getByText("Your starter credits are used up. Upgrade to keep using Clovy."),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Select a Venice model" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Select an OpenRouter model" })).toBeNull();
   });
 
   it("offers Max checkout for those who want to go beyond Pro", async () => {

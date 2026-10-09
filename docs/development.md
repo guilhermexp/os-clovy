@@ -7,13 +7,15 @@ example files win.
 
 ## Quick start
 
-Clone the repo, copy both env examples, add at least one provider key, and run
-the desktop app:
+Clone the repo, copy both env examples, add the service keys for the providers
+you want to exercise, and run the desktop app:
 
 ```sh
 cp .env.example .env
 cp clovy-api/.env.example clovy-api/.env
-# Edit clovy-api/.env and set CLOVY__UPSTREAMS__VENICE__API_KEY.
+# Edit clovy-api/.env and set the keys you need: CLOVY__UPSTREAMS__GROQ__API_KEY
+# (transcription), CLOVY__UPSTREAMS__OPENROUTER__API_KEY (remote text),
+# CLOVY__UPSTREAMS__FAL__API_KEY (images and video), CLOVY__UPSTREAMS__TAVILY__API_KEY (web).
 pnpm install
 pnpm tauri:dev
 ```

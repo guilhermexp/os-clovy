@@ -1720,9 +1720,8 @@ test("pins an Auto-routed non-GLM model without renaming reasoning", async () =>
         ],
         done: true,
         route: {
-          provider: "venice",
-          privacyLevel: "preferred",
-          endpoint: "venice-kimi",
+          provider: "openrouter",
+          endpoint: "moonshotai/kimi-k2.6",
         },
       };
     }

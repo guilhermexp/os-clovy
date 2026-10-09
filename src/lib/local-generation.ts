@@ -1,5 +1,5 @@
 import { t } from "../i18n/translate";
-import type { LocalGenerationSettingsDto, VeniceModelDto } from "./tauri";
+import type { LocalGenerationSettingsDto, ProviderModelDto } from "./tauri";
 
 // Bring-your-own local text generation. The model catalog is derived
 // client-side from provider settings, so the user's configured local endpoint
@@ -52,7 +52,7 @@ export function localGenerationEndpointId(optionId: string): string | null {
  * the configured endpoint. Keep the original choice visible; sends fail closed
  * in Clovy's on-device provider proxy until the user reconfigures or selects
  * another model. */
-export function unavailableLocalGenerationOption(optionId: string): VeniceModelDto | null {
+export function unavailableLocalGenerationOption(optionId: string): ProviderModelDto | null {
   const modelId = rawLocalGenerationModelId(optionId);
   if (!modelId) return null;
   return {
@@ -101,13 +101,13 @@ export function isLoopbackUrl(url: string): boolean {
  * endpoint; a remote endpoint is marked "external" since prompts leave the
  * device. */
 export function withLocalGenerationOption(
-  models: VeniceModelDto[],
+  models: ProviderModelDto[],
   localGeneration: LocalGenerationSettingsDto,
-): VeniceModelDto[] {
+): ProviderModelDto[] {
   const modelId = localGeneration.modelId.trim();
   if (!modelId) return models;
   const loopback = isLoopbackUrl(localGeneration.baseUrl);
-  const localModel: VeniceModelDto = {
+  const localModel: ProviderModelDto = {
     provider: "local",
     id: localGenerationOptionId(modelId),
     name: `Local: ${modelId}`,

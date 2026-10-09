@@ -41,6 +41,8 @@ use std::{
 };
 use tower::ServiceExt;
 
+pub(crate) use clovy_api::UpstreamServiceKeys;
+
 pub(crate) const AUTHORIZATION: &str = "Bearer valid-token";
 pub(crate) const TEST_COMMIT: &str = "0123abc4567890def0123abc4567890def012345";
 
@@ -81,17 +83,10 @@ pub(crate) fn test_state_with_issue_sink_and_timeout(
     request_timeout_secs: u64,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
-        pricing: models(),
-        local_dev_enabled: false,
         issue_reports: test_issue_report_service(issue_reports),
         attestation,
-        transcriber: Arc::new(FakeTranscriber),
-        generator: Arc::new(FakeGenerator),
-        chat_completer: Arc::new(FakeChatCompleter),
         request_timeout_secs,
-        p3a_sink: Arc::new(RecordingP3aSink::default()),
-        browser_transports: BrowserTransportsConfig::default(),
-        share: None,
+        ..default_test_state_deps()
     })
 }
 
@@ -118,17 +113,10 @@ pub(crate) fn test_state_with_sinks_and_transcriber(
     transcriber: Arc<dyn Transcriber>,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
-        pricing: models(),
-        local_dev_enabled: false,
         issue_reports,
         attestation,
         transcriber,
-        generator: Arc::new(FakeGenerator),
-        chat_completer: Arc::new(FakeChatCompleter),
-        request_timeout_secs: 5,
-        p3a_sink: Arc::new(RecordingP3aSink::default()),
-        browser_transports: BrowserTransportsConfig::default(),
-        share: None,
+        ..default_test_state_deps()
     })
 }
 
@@ -137,33 +125,16 @@ pub(crate) fn test_state_with_generator_and_timeout(
     request_timeout_secs: u64,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
-        pricing: models(),
-        local_dev_enabled: false,
-        issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        attestation: test_attestation(),
-        transcriber: Arc::new(FakeTranscriber),
         generator,
-        chat_completer: Arc::new(FakeChatCompleter),
         request_timeout_secs,
-        p3a_sink: Arc::new(RecordingP3aSink::default()),
-        browser_transports: BrowserTransportsConfig::default(),
-        share: None,
+        ..default_test_state_deps()
     })
 }
 
 pub(crate) fn test_state_with_p3a_sink(p3a_sink: Arc<dyn P3aSink>) -> ApiState {
     test_state_from_deps(TestStateDeps {
-        pricing: models(),
-        local_dev_enabled: false,
-        issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        attestation: test_attestation(),
-        transcriber: Arc::new(FakeTranscriber),
-        generator: Arc::new(FakeGenerator),
-        chat_completer: Arc::new(FakeChatCompleter),
-        request_timeout_secs: 5,
         p3a_sink,
-        browser_transports: BrowserTransportsConfig::default(),
-        share: None,
+        ..default_test_state_deps()
     })
 }
 
@@ -171,37 +142,20 @@ pub(crate) fn test_state_with_share(
     share: Option<Arc<clovy_services::ShareService>>,
     share_viewer: clovy_api::ShareViewerInfo,
 ) -> ApiState {
-    let mut state = TestStateDeps {
-        pricing: models(),
-        local_dev_enabled: false,
-        issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        attestation: test_attestation(),
-        transcriber: Arc::new(FakeTranscriber),
-        generator: Arc::new(FakeGenerator),
-        chat_completer: Arc::new(FakeChatCompleter),
-        request_timeout_secs: 5,
-        p3a_sink: Arc::new(RecordingP3aSink::default()),
-        browser_transports: BrowserTransportsConfig::default(),
-        share,
-    };
-    let _ = &mut state;
-    test_state_from_deps_with_viewer(state, share_viewer)
-}
-
-pub(crate) fn test_state_with_local_text_pricing(
-    generator: Arc<dyn Generator>,
-    chat_completer: Arc<dyn AgentChatCompleter>,
-) -> ApiState {
-    test_state_with_text_pricing_without_auto(true, generator, chat_completer)
+    test_state_from_deps_with_viewer(
+        TestStateDeps {
+            share,
+            ..default_test_state_deps()
+        },
+        share_viewer,
+    )
 }
 
 pub(crate) fn test_state_with_text_pricing_without_auto(
-    local_dev_enabled: bool,
     generator: Arc<dyn Generator>,
     chat_completer: Arc<dyn AgentChatCompleter>,
 ) -> ApiState {
     test_state_with_text_pricing_without_auto_and_kimi_capabilities(
-        local_dev_enabled,
         generator,
         chat_completer,
         vec![
@@ -212,7 +166,6 @@ pub(crate) fn test_state_with_text_pricing_without_auto(
 }
 
 pub(crate) fn test_state_with_text_pricing_without_auto_and_kimi_capabilities(
-    local_dev_enabled: bool,
     generator: Arc<dyn Generator>,
     chat_completer: Arc<dyn AgentChatCompleter>,
     kimi_capabilities: Vec<String>,
@@ -220,13 +173,13 @@ pub(crate) fn test_state_with_text_pricing_without_auto_and_kimi_capabilities(
     let mut pricing = models();
     pricing.remove("open-software/auto");
     pricing.insert(
-        "zai-org-glm-5-2".to_string(),
+        "z-ai/glm-5.2".to_string(),
         ModelPriceConfig {
             unit: PriceUnit::Tokens,
             credits_per_million_seconds: None,
             input_credits_per_million_tokens: Some(500),
             output_credits_per_million_tokens: Some(500),
-            provider: ModelProvider::Venice,
+            provider: ModelProvider::Openrouter,
             model_type: ModelType::Text,
             display_name: "GLM 5.2".to_string(),
             description: None,
@@ -238,13 +191,13 @@ pub(crate) fn test_state_with_text_pricing_without_auto_and_kimi_capabilities(
         },
     );
     pricing.insert(
-        "kimi-k2-6".to_string(),
+        "moonshotai/kimi-k2.6".to_string(),
         ModelPriceConfig {
             unit: PriceUnit::Tokens,
             credits_per_million_seconds: None,
             input_credits_per_million_tokens: Some(500),
             output_credits_per_million_tokens: Some(500),
-            provider: ModelProvider::Venice,
+            provider: ModelProvider::Openrouter,
             model_type: ModelType::Text,
             display_name: "Kimi K2.6".to_string(),
             description: None,
@@ -257,47 +210,50 @@ pub(crate) fn test_state_with_text_pricing_without_auto_and_kimi_capabilities(
     );
     test_state_from_deps(TestStateDeps {
         pricing,
-        local_dev_enabled,
-        issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        attestation: test_attestation(),
-        transcriber: Arc::new(FakeTranscriber),
         generator,
         chat_completer,
-        request_timeout_secs: 5,
-        p3a_sink: Arc::new(RecordingP3aSink::default()),
-        browser_transports: BrowserTransportsConfig::default(),
-        share: None,
+        ..default_test_state_deps()
     })
 }
 
 pub(crate) struct TestStateDeps {
     pub(crate) pricing: BTreeMap<String, ModelPriceConfig>,
-    pub(crate) local_dev_enabled: bool,
     pub(crate) issue_reports: Arc<IssueReportService>,
     pub(crate) attestation: AttestationInfo,
     pub(crate) transcriber: Arc<dyn Transcriber>,
     pub(crate) generator: Arc<dyn Generator>,
+    pub(crate) cleaner: Arc<dyn Cleaner>,
     pub(crate) chat_completer: Arc<dyn AgentChatCompleter>,
     pub(crate) request_timeout_secs: u64,
     pub(crate) p3a_sink: Arc<dyn P3aSink>,
     pub(crate) browser_transports: BrowserTransportsConfig,
     pub(crate) share: Option<Arc<clovy_services::ShareService>>,
+    pub(crate) upstream_service_keys: UpstreamServiceKeys,
 }
 
 pub(crate) fn default_test_state_deps() -> TestStateDeps {
     TestStateDeps {
         pricing: models(),
-        local_dev_enabled: false,
         issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
         attestation: test_attestation(),
         transcriber: Arc::new(FakeTranscriber),
         generator: Arc::new(FakeGenerator),
+        cleaner: Arc::new(FakeCleaner::default()),
         chat_completer: Arc::new(FakeChatCompleter),
         request_timeout_secs: 5,
         p3a_sink: Arc::new(RecordingP3aSink::default()),
         browser_transports: BrowserTransportsConfig::default(),
         share: None,
+        upstream_service_keys: UpstreamServiceKeys::for_providers(
+            clovy_domain::UpstreamProvider::ALL,
+        ),
     }
+}
+
+pub(crate) fn test_state_with_cleaner(cleaner: Arc<dyn Cleaner>) -> ApiState {
+    let mut deps = default_test_state_deps();
+    deps.cleaner = cleaner;
+    test_state_from_deps(deps)
 }
 
 pub(crate) fn test_state_from_deps(deps: TestStateDeps) -> ApiState {
@@ -311,32 +267,34 @@ pub(crate) fn test_state_from_deps_with_viewer(
 ) -> ApiState {
     let pricing = Arc::new(PricingTable::new(deps.pricing));
     let os_accounts = Arc::new(FakeOsAccounts);
-    let cleaner = Arc::new(FakeCleaner);
+    let cleaner = deps.cleaner;
     let duration_probe = Arc::new(FakeDurationProbe);
     let image = Arc::new(ImageService::new(ImageServiceDeps {
         os_accounts: os_accounts.clone(),
         generator: Arc::new(FakeImageGenerator),
         editor: Arc::new(FakeImageEditor),
-        pricing: BTreeMap::from([("venice-sd35".to_string(), ImageModelPrice::venice(20))]),
+        pricing: BTreeMap::from([("fal-ai/flux/dev".to_string(), ImageModelPrice::new(20))]),
+        default_model: "fal-ai/flux/dev".to_string(),
         edit_pricing: BTreeMap::from([(
-            "firered-image-edit".to_string(),
-            ImageModelPrice::venice(80),
+            "fal-ai/flux-2/edit".to_string(),
+            ImageModelPrice::new(80),
         )]),
-        default_edit_model: "firered-image-edit".to_string(),
+        default_edit_model: "fal-ai/flux-2/edit".to_string(),
         hold_ttl_seconds: 30,
     }));
     let video = Arc::new(VideoService::new(VideoServiceDeps {
         os_accounts: os_accounts.clone(),
         provider: Arc::new(FakeVideoProvider),
         pricing: BTreeMap::from([(
-            "wan-2.2-a14b-text-to-video".to_string(),
-            VideoModelPrice::venice(2000),
+            "fal-ai/wan/v2.2-a14b/text-to-video".to_string(),
+            VideoModelPrice::new(2000),
         )]),
+        default_model: "fal-ai/wan/v2.2-a14b/text-to-video".to_string(),
         animate_pricing: BTreeMap::from([(
-            "wan-2.6-image-to-video".to_string(),
-            VideoModelPrice::venice(2000),
+            "fal-ai/wan/v2.2-a14b/image-to-video".to_string(),
+            VideoModelPrice::new(2000),
         )]),
-        default_animate_model: "wan-2.6-image-to-video".to_string(),
+        default_animate_model: "fal-ai/wan/v2.2-a14b/image-to-video".to_string(),
         max_credits_per_request: 20_000,
         hold_ttl_seconds: 600,
     }));
@@ -344,7 +302,6 @@ pub(crate) fn test_state_from_deps_with_viewer(
     ApiState::new(ApiStateParams {
         pricing: pricing.clone(),
         computer_use: clovy_config::ComputerUseConfig::default(),
-        local_dev_enabled: deps.local_dev_enabled,
         token_verifier: Arc::new(FakeTokenVerifier),
         companion_store: None,
         companion_snapshot: clovy_domain::CompanionSnapshot::default(),
@@ -412,105 +369,71 @@ pub(crate) fn test_state_from_deps_with_viewer(
         },
         attestation: deps.attestation,
         browser_transports: deps.browser_transports,
+        upstream_service_keys: deps.upstream_service_keys,
     })
 }
 
 pub(crate) fn models() -> BTreeMap<String, ModelPriceConfig> {
+    const TOOLS: &str = "supportsFunctionCalling";
     [
         (
-            "nvidia/parakeet-tdt-0.6b-v3",
-            ModelPriceConfig {
-                unit: PriceUnit::Seconds,
-                credits_per_million_seconds: Some(250_000),
-                input_credits_per_million_tokens: None,
-                output_credits_per_million_tokens: None,
-                provider: ModelProvider::Venice,
-                model_type: ModelType::Asr,
-                display_name: "Private ASR Model".to_string(),
-                description: None,
-                privacy: None,
-                pricing: None,
-                context_tokens: None,
-                traits: Vec::new(),
-                capabilities: Vec::new(),
-            },
+            "whisper-large-v3-turbo",
+            asr_model("Whisper Large v3 Turbo"),
+        ),
+        ("asr-model", asr_model("ASR Model")),
+        ("z-ai/glm-5.2", text_model("GLM 5.2", &[TOOLS])),
+        (
+            "moonshotai/kimi-k2.6",
+            text_model("Kimi K2.6", &["supportsVision", TOOLS]),
         ),
         (
-            "asr-model",
-            ModelPriceConfig {
-                unit: PriceUnit::Seconds,
-                credits_per_million_seconds: Some(250_000),
-                input_credits_per_million_tokens: None,
-                output_credits_per_million_tokens: None,
-                provider: ModelProvider::Openai,
-                model_type: ModelType::Asr,
-                display_name: "ASR Model".to_string(),
-                description: None,
-                privacy: None,
-                pricing: None,
-                context_tokens: None,
-                traits: Vec::new(),
-                capabilities: Vec::new(),
-            },
+            "nvidia/nemotron-3-nano-30b-a3b",
+            text_model("Nemotron 3", &[TOOLS]),
         ),
-        (
-            "text-model",
-            ModelPriceConfig {
-                unit: PriceUnit::Tokens,
-                credits_per_million_seconds: None,
-                input_credits_per_million_tokens: Some(500),
-                output_credits_per_million_tokens: Some(500),
-                provider: ModelProvider::Openai,
-                model_type: ModelType::Text,
-                display_name: "Text Model".to_string(),
-                description: None,
-                privacy: None,
-                pricing: None,
-                context_tokens: None,
-                traits: Vec::new(),
-                capabilities: Vec::new(),
-            },
-        ),
-        (
-            "venice-text-model",
-            ModelPriceConfig {
-                unit: PriceUnit::Tokens,
-                credits_per_million_seconds: None,
-                input_credits_per_million_tokens: Some(500),
-                output_credits_per_million_tokens: Some(500),
-                provider: ModelProvider::Venice,
-                model_type: ModelType::Text,
-                display_name: "Venice Text Model".to_string(),
-                description: None,
-                privacy: None,
-                pricing: None,
-                context_tokens: None,
-                traits: Vec::new(),
-                capabilities: Vec::new(),
-            },
-        ),
-        (
-            "open-software/auto",
-            ModelPriceConfig {
-                unit: PriceUnit::Tokens,
-                credits_per_million_seconds: None,
-                input_credits_per_million_tokens: Some(500),
-                output_credits_per_million_tokens: Some(500),
-                provider: ModelProvider::Venice,
-                model_type: ModelType::Text,
-                display_name: "Auto".to_string(),
-                description: None,
-                privacy: None,
-                pricing: None,
-                context_tokens: None,
-                traits: Vec::new(),
-                capabilities: Vec::new(),
-            },
-        ),
+        ("text-model", text_model("Text Model", &[TOOLS])),
+        ("open-software/auto", text_model("Auto", &[])),
     ]
     .into_iter()
     .map(|(id, model)| (id.to_string(), model))
     .collect()
+}
+
+/// A Groq speech-to-text row, priced per second of audio.
+fn asr_model(display_name: &str) -> ModelPriceConfig {
+    ModelPriceConfig {
+        unit: PriceUnit::Seconds,
+        credits_per_million_seconds: Some(250_000),
+        input_credits_per_million_tokens: None,
+        output_credits_per_million_tokens: None,
+        provider: ModelProvider::Groq,
+        model_type: ModelType::Asr,
+        display_name: display_name.to_string(),
+        description: None,
+        privacy: None,
+        pricing: None,
+        context_tokens: None,
+        traits: Vec::new(),
+        capabilities: Vec::new(),
+    }
+}
+
+/// An `OpenRouter` text row, priced per token, declaring `capabilities`.
+fn text_model(display_name: &str, capabilities: &[&str]) -> ModelPriceConfig {
+    ModelPriceConfig {
+        unit: PriceUnit::Tokens,
+        credits_per_million_seconds: None,
+        input_credits_per_million_tokens: Some(500),
+        output_credits_per_million_tokens: Some(500),
+        provider: ModelProvider::Openrouter,
+        model_type: ModelType::Text,
+        display_name: display_name.to_string(),
+        description: None,
+        privacy: None,
+        pricing: None,
+        context_tokens: None,
+        traits: Vec::new(),
+        capabilities: capabilities.iter().map(ToString::to_string).collect(),
+    }
 }
 
 pub(crate) async fn send(request: Request<Body>) -> axum::response::Response {
@@ -564,6 +487,22 @@ pub(crate) fn get_request_with_auth(
     authorization: Option<&str>,
 ) -> Result<Request<Body>, axum::http::Error> {
     let mut builder = Request::builder().method(Method::GET).uri(uri);
+    if let Some(authorization) = authorization {
+        builder = builder.header(header::AUTHORIZATION, authorization);
+    }
+    builder.body(Body::empty())
+}
+
+pub(crate) fn get_request_with_header(
+    uri: &str,
+    authorization: Option<&str>,
+    header_name: &'static str,
+    header_val: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header(header_name, header_val);
     if let Some(authorization) = authorization {
         builder = builder.header(header::AUTHORIZATION, authorization);
     }
@@ -796,7 +735,7 @@ impl Transcriber for FakeTranscriber {
         Ok(Transcript {
             text: "Transcribed audio".to_string(),
             language: request.language,
-            provider: "fake-transcriber".to_string(),
+            provider: "groq".to_string(),
         })
     }
 }
@@ -809,19 +748,22 @@ impl Generator for FakeGenerator {
         if request.transcript.contains("boom") {
             return Err(DomainError::UpstreamProvider);
         }
-        let content = if request.provider_credentials.has_venice_api_key() {
-            "Generated note body with user Venice key"
+        let content = if request
+            .provider_credentials
+            .has_user_key(clovy_domain::UpstreamProvider::Openrouter)
+        {
+            "Generated note body with user OpenRouter key"
         } else {
             "Generated note body"
         };
         Ok(GeneratedNote {
             content: content.to_string(),
             title_suggestion: Some("Generated title".to_string()),
-            provider: "fake-generator".to_string(),
+            provider: "openrouter".to_string(),
             route: UpstreamRouteMetadata {
-                provider: Some("phala".to_string()),
-                privacy_level: Some("no-retention".to_string()),
-                endpoint: Some("venice-private".to_string()),
+                provider: Some("openrouter".to_string()),
+                privacy_level: None,
+                endpoint: None,
             },
             usage: TokenUsage {
                 prompt_tokens: 500,
@@ -831,18 +773,24 @@ impl Generator for FakeGenerator {
     }
 }
 
-pub(crate) struct FakeCleaner;
+#[derive(Default)]
+pub(crate) struct FakeCleaner {
+    pub(crate) requests: Mutex<Vec<CleanupRequest>>,
+}
 
 #[async_trait]
 impl Cleaner for FakeCleaner {
-    async fn cleanup(&self, _request: CleanupRequest) -> Result<CleanedText, DomainError> {
+    async fn cleanup(&self, request: CleanupRequest) -> Result<CleanedText, DomainError> {
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.push(request);
+        }
         Ok(CleanedText {
             text: "Cleaned dictation".to_string(),
-            provider: "fake-cleaner".to_string(),
+            provider: "openrouter".to_string(),
             route: UpstreamRouteMetadata {
-                provider: Some("phala".to_string()),
-                privacy_level: Some("no-retention".to_string()),
-                endpoint: Some("venice-private".to_string()),
+                provider: Some("openrouter".to_string()),
+                privacy_level: None,
+                endpoint: None,
             },
             usage: TokenUsage {
                 prompt_tokens: 100,
@@ -860,7 +808,10 @@ impl AgentChatCompleter for FakeChatCompleter {
         &self,
         request: AgentChatRequest,
     ) -> Result<AgentChatCompletion, DomainError> {
-        let id = if request.provider_credentials.has_venice_api_key() {
+        let id = if request
+            .provider_credentials
+            .has_user_key(clovy_domain::UpstreamProvider::Openrouter)
+        {
             "chatcmpl_user_key"
         } else {
             "chatcmpl_test"
@@ -868,11 +819,11 @@ impl AgentChatCompleter for FakeChatCompleter {
         Ok(AgentChatCompletion {
             body: format!(r#"{{"id":"{id}"}}"#).into_bytes(),
             content_type: "application/json".to_string(),
-            provider: "fake-chat".to_string(),
+            provider: "openrouter".to_string(),
             route: UpstreamRouteMetadata {
-                provider: Some("phala".to_string()),
-                privacy_level: Some("no-retention".to_string()),
-                endpoint: Some("venice-private".to_string()),
+                provider: Some("openrouter".to_string()),
+                privacy_level: None,
+                endpoint: None,
             },
             usage: TokenUsage {
                 prompt_tokens: 100,
@@ -896,11 +847,11 @@ impl AgentChatCompleter for FakeChatCompleter {
         });
         Ok(AgentChatStream {
             content_type: "text/event-stream".to_string(),
-            provider: "fake-chat".to_string(),
+            provider: "openrouter".to_string(),
             route: UpstreamRouteMetadata {
-                provider: Some("phala".to_string()),
-                privacy_level: Some("no-retention".to_string()),
-                endpoint: Some("venice-private".to_string()),
+                provider: Some("openrouter".to_string()),
+                privacy_level: None,
+                endpoint: None,
             },
             chunks: chunks_rx,
             outcome: outcome_rx,
@@ -923,7 +874,7 @@ impl ImageGenerator for FakeImageGenerator {
             image_base64: "aGVsbG8=".to_string(),
             mime_type: "image/png".to_string(),
             model: request.model.0,
-            provider: "fake-image".to_string(),
+            provider: "fal".to_string(),
         })
     }
 }
@@ -940,7 +891,7 @@ impl ImageEditor for FakeImageEditor {
             image_base64: "ZWRpdGVk".to_string(),
             mime_type: "image/png".to_string(),
             model: request.model.0,
-            provider: "fake-image".to_string(),
+            provider: "fal".to_string(),
         })
     }
 }
@@ -961,7 +912,7 @@ impl VideoProvider for FakeVideoProvider {
         // already complete (VPS-backed URL) and "inline" one whose bytes came
         // back inline (non-VPS), so tests can pin both completed status
         // shapes; every other job stays processing forever.
-        let venice_queue_id = if request.prompt.contains("instantly") {
+        let provider_request_id = if request.prompt.contains("instantly") {
             "vq_completed".to_string()
         } else if request.prompt.contains("inline") {
             "vq_completed_inline".to_string()
@@ -969,7 +920,7 @@ impl VideoProvider for FakeVideoProvider {
             "vq_boundary".to_string()
         };
         Ok(VideoQueued {
-            venice_queue_id,
+            provider_request_id,
             download_url: None,
         })
     }
@@ -979,18 +930,23 @@ impl VideoProvider for FakeVideoProvider {
         _request: VideoAnimationRequest,
     ) -> Result<VideoQueued, DomainError> {
         Ok(VideoQueued {
-            venice_queue_id: "vq_boundary_animate".to_string(),
+            provider_request_id: "vq_boundary_animate".to_string(),
             download_url: None,
         })
     }
 
-    async fn retrieve(&self, _model: &str, queue_id: &str) -> Result<VideoRetrieved, DomainError> {
-        if queue_id == "vq_completed" {
+    async fn retrieve(
+        &self,
+        _model: &str,
+        provider_request_id: &str,
+        _user_api_key: Option<&str>,
+    ) -> Result<VideoRetrieved, DomainError> {
+        if provider_request_id == "vq_completed" {
             return Ok(VideoRetrieved::CompletedUrl {
                 download_url: "https://videos.example.com/generated.mp4".to_string(),
             });
         }
-        if queue_id == "vq_completed_inline" {
+        if provider_request_id == "vq_completed_inline" {
             return Ok(VideoRetrieved::CompletedBytes {
                 bytes: b"fake-mp4-bytes".to_vec(),
                 mime_type: "video/mp4".to_string(),
@@ -1010,7 +966,7 @@ impl WebSearcher for FakeWebSearcher {
     async fn search(&self, request: WebSearchRequest) -> Result<WebSearchResults, DomainError> {
         Ok(WebSearchResults {
             query: request.query,
-            provider: "brave".to_string(),
+            provider: "tavily".to_string(),
             results: vec![WebSearchResult {
                 title: "Result one".to_string(),
                 url: "https://example.com/one".to_string(),
@@ -1026,7 +982,7 @@ pub(crate) struct FakeWebFetcher;
 #[async_trait]
 impl WebFetcher for FakeWebFetcher {
     async fn fetch(&self, request: WebFetchRequest) -> Result<WebFetchResult, DomainError> {
-        // Mirror Venice rejecting bot-walled sites with a deterministic error.
+        // Mirror upstream rejecting bot-walled sites with a deterministic error.
         if request.url.contains("x.com") {
             return Err(DomainError::InvalidInput {
                 reason: "web_fetch_unsupported_url".to_string(),
@@ -1036,7 +992,7 @@ impl WebFetcher for FakeWebFetcher {
             url: request.url,
             content: "# Heading\n\nBody.".to_string(),
             format: "markdown".to_string(),
-            provider: "venice".to_string(),
+            provider: "tavily".to_string(),
         })
     }
 }

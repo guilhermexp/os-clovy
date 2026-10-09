@@ -58,11 +58,12 @@ import {
   dictationHelperCommand,
   clovyHomeChat,
   type ClovyHomeChatResponse,
-  listVeniceModels,
+  listProviderModels,
   providerModelSettings,
   pruneStagedAgentAttachments,
   setCostQuality as setProviderCostQuality,
-  type VeniceModelDto,
+  type ProviderApiKeysConfigured,
+  type ProviderModelDto,
 } from "../../lib/tauri";
 import { shouldBlockTextOnFunding } from "../../lib/account-gate";
 import { dispatchAgentSessionStatus, dispatchAgentSessionsChanged } from "../../lib/agent-events";
@@ -226,7 +227,7 @@ export {
 export const AGENT_RUNTIME_EVENT = "clovy://agent-runtime-event";
 const DEFAULT_MODEL = AUTO_MODEL_ID;
 const AGENT_SUGGESTED_MODEL_IDS = [AUTO_MODEL_ID] as const;
-const AGENT_AUTO_MODEL: VeniceModelDto = {
+const AGENT_AUTO_MODEL: ProviderModelDto = {
   provider: "",
   id: AUTO_MODEL_ID,
   name: "Auto",
@@ -234,7 +235,6 @@ const AGENT_AUTO_MODEL: VeniceModelDto = {
     return translate("agent.autoModel.description");
   },
   modelType: "text",
-  privacy: "private",
   traits: [],
   capabilities: [],
 };
@@ -392,8 +392,14 @@ export function AgentWorkspace({
   const [compactOpen, setCompactOpen] = useState(false);
   const [compacting, setCompacting] = useState(false);
   const [compactResult, setCompactResult] = useState<string>();
-  const [models, setModels] = useState<VeniceModelDto[]>([]);
-  const [veniceApiKeyConfigured, setVeniceApiKeyConfigured] = useState(false);
+  const [models, setModels] = useState<ProviderModelDto[]>([]);
+  const [providerApiKeysConfigured, setProviderApiKeysConfigured] =
+    useState<ProviderApiKeysConfigured>({
+      groq: false,
+      openrouter: false,
+      fal: false,
+      tavily: false,
+    });
 
   useLayoutEffect(() => {
     if (!usageOpen || !usagePanelRef.current) return;
@@ -748,7 +754,7 @@ export function AgentWorkspace({
     {
       activeModelId: model || undefined,
       activeModel,
-      veniceApiKeyConfigured,
+      providerApiKeysConfigured,
     },
   )
     ? creditActionsDisabledReason
@@ -883,7 +889,7 @@ export function AgentWorkspace({
         setError(undefined);
       })
       .catch((cause) => setError(messageFromError(cause)));
-    void listVeniceModels("generation")
+    void listProviderModels("generation")
       .then((response) => {
         setModels(response.models);
         if (homeMode) {
@@ -897,7 +903,7 @@ export function AgentWorkspace({
     const costQualityRequestRevision = costQualityIntentRevisionRef.current;
     void providerModelSettings()
       .then((response) => {
-        setVeniceApiKeyConfigured(response.effectiveSettings.veniceApiKeyConfigured);
+        setProviderApiKeysConfigured(response.effectiveSettings.providerApiKeysConfigured);
         if (costQualityRequestRevision !== costQualityIntentRevisionRef.current) return;
         confirmedCostQualityRef.current = response.settings.costQuality;
         if (!sessionCostQualityExplicitRef.current) {
@@ -905,7 +911,9 @@ export function AgentWorkspace({
           setCostQuality(response.settings.costQuality);
         }
       })
-      .catch(() => setVeniceApiKeyConfigured(false));
+      .catch(() =>
+        setProviderApiKeysConfigured({ groq: false, openrouter: false, fal: false, tavily: false }),
+      );
   }, [homeMode, initialAgentSession, initialSessionId, refreshSessions]);
 
   const pendingDraftTakesPriorityRef = useRef(Boolean(pendingRequestRef.current?.prompt));
@@ -2685,6 +2693,7 @@ export function AgentWorkspace({
         }
       }}
       costQuality={costQuality}
+      providerApiKeysConfigured={providerApiKeysConfigured}
       onCostQualityChange={applyCostQuality}
       thinkingLevel={thinkingLevel}
       setThinkingLevel={(level) => {
@@ -3299,6 +3308,7 @@ function AgentComposer({
   model,
   setModel,
   costQuality,
+  providerApiKeysConfigured,
   onCostQualityChange,
   thinkingLevel,
   setThinkingLevel,
@@ -3339,10 +3349,11 @@ function AgentComposer({
   model: string;
   setModel: (value: string, costQuality?: number) => void;
   costQuality: number;
+  providerApiKeysConfigured: ProviderApiKeysConfigured;
   onCostQualityChange: (value: number) => void;
   thinkingLevel: ThinkingLevel;
   setThinkingLevel: (value: ThinkingLevel) => void;
-  models: VeniceModelDto[];
+  models: ProviderModelDto[];
   safetyMode: AgentSafetyMode;
   setSafetyMode: (value: AgentSafetyMode) => void;
   attachments: string[];
@@ -3811,6 +3822,7 @@ function AgentComposer({
           model={activeModel}
           options={modelOptions(pickerModels, model)}
           costQuality={costQuality}
+          providerApiKeysConfigured={providerApiKeysConfigured}
           search={modelSearch}
           popoverRef={modelPopoverRef}
           searchRef={modelSearchRef}

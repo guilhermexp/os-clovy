@@ -16,22 +16,22 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0004](adr/0004-out-of-process-system-audio-helper.md) — macOS system audio via an out-of-process helper (file IPC + Unix signals)
 - [adr/0005](adr/0005-source-separated-audio-capture.md) — one WAV per source, re-interleaved as turns
 - [adr/0006](adr/0006-embed-hermes-sandboxed-runtime.md) — embed the pinned Hermes runtime as sandboxed child processes (superseded by ADR-0038)
-- [adr/0007](adr/0007-model-capability-source-of-truth.md) — model capabilities come from the live Venice catalog, not marketing traits
-- [adr/0008](adr/0008-image-generation-and-editing-tools.md) — image generation/editing: `/image` fast path + LLM tools, via Venice
+- [adr/0007](adr/0007-model-capability-source-of-truth.md) — capabilities come from the provider catalog, not marketing traits; the 2026-10-08 addendum replaces Venice with OpenRouter
+- [adr/0008](adr/0008-image-generation-and-editing-tools.md) — image generation/editing: `/image` fast path + LLM tools; the 2026-10-08 addendum replaces the historical Venice adapter with fal
 - [adr/0009](adr/0009-hermes-config-shared-ownership-merge.md) — config.yaml is shared with the Hermes dashboard; Clovy deep-merges on spawn, never overwrites (superseded by ADR-0038)
 - [adr/0010](adr/0010-note-references-in-agent-chat.md) — note references in agent chat: `@note:<id>` text token + `get_meeting_note` fetch-by-id
 - [adr/0011](adr/0011-bundled-hermes-skills.md) — selected Hermes skills ship as read-only app resources when the runtime pin cannot move (superseded by ADR-0038)
 - [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); Clovy API generates the team-facing diagnosis
 - [adr/0013](adr/0013-stream-inference-responses-through-june-api.md) — inference responses stream through Clovy API (SSE pass-through + keep-alive heartbeats); charges settle after the stream ends
 - [adr/0014](adr/0014-pinned-dictation-paste-target.md) — the dictation paste target is pinned when the recording stops, never re-resolved at paste time
-- [adr/0015](adr/0015-video-generation-tools.md) — video generation: `/video` fast path + LLM tools, async job + poll, quote-priced, via Venice
+- [adr/0015](adr/0015-video-generation-tools.md) — `/video` fast path + LLM tools, async job + poll; the 2026-10-08 addendum replaces Venice quotes with endpoint-specific fal estimates
 - [adr/0016](adr/0016-private-connectors-local-mode.md) — private connectors (local mode): Keychain-only token custody, app-proxied MCP calls straight to Google, trust modes enforced in the Rust proxy, earned autonomy, event-trigger daemon
 - [adr/0017](adr/0017-browser-use-via-june-extension.md) — browser use in the user's own browser via the Clovy extension, two tracks behind one broker; computer use productizes the pinned toolset (MCP-server shape superseded by ADR-0040)
 - [adr/0018](adr/0018-session-model-changes-apply-at-agent-run-boundaries.md) — session model changes are staged at Send and applied only at the next idle agent-run boundary
 - [adr/0019](adr/0019-windows-dictation-helper.md) — Windows dictation uses a platform-native helper process
 - [adr/0020](adr/0020-windows-dictation-keyboard-hook.md) — Windows shortcuts combine `RegisterHotKey` with a narrow keyboard hook
 - [adr/0021](adr/0021-june-api-v1-compatibility-policy.md) — `/v1` is additive-only for shipped app versions: per-version contract fixtures gate CI and production promotes, clients send `x-june-app-version`, error codes never renumber
-- [adr/0022](adr/0022-venice-private-first-model-routing.md) — service-managed text uses Venice private zero-retention first with Phala TEE fallback; existing `/v1` provider semantics stay compatible and pricing is fallback-safe
+- [adr/0022](adr/0022-venice-private-first-model-routing.md) — historical Venice/Phala routing and privacy decision; the 2026-10-08 addendum replaces it with OpenRouter without inherited TEE or zero-retention claims
 - [adr/0023](adr/0023-attested-os-api-service-chain.md) - superseded by ADR-0024
 - [adr/0024](adr/0024-independent-product-verification.md) - Clovy, Open Software API, and Chat publish independent verification evidence without cross-product release pinning
 - [adr/0025](adr/0025-targeted-hermes-approval-protocol.md) - MCP approvals use stable request identity, targeted resolution, bounded queues, and fail-closed retirement (superseded by ADR-0038)

@@ -7,7 +7,7 @@ import { AGENT_RUN_AUTO_MODEL_PREFIX } from "../lib/agent-model-selection";
 import { loadSessionModels, rememberSessionModel } from "../lib/agent-session-models";
 
 const mocks = vi.hoisted(() => ({
-  listVeniceModels: vi.fn(),
+  listProviderModels: vi.fn(),
   providerModelSettings: vi.fn(),
 }));
 
@@ -17,21 +17,21 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../lib/tauri", () => ({
   dictationHelperCommand: vi.fn(),
-  listVeniceModels: mocks.listVeniceModels,
+  listProviderModels: mocks.listProviderModels,
   providerModelSettings: mocks.providerModelSettings,
 }));
 
 describe("note chat model truthfulness", () => {
   beforeEach(() => {
     window.localStorage.clear();
-    mocks.listVeniceModels.mockReset();
-    mocks.listVeniceModels.mockResolvedValue({
+    mocks.listProviderModels.mockReset();
+    mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
       modelType: "text",
       selectedModel: "concrete-default",
       models: [
         {
-          provider: "venice",
+          provider: "openrouter",
           id: "concrete-default",
           name: "Concrete default",
           modelType: "text",
@@ -46,7 +46,7 @@ describe("note chat model truthfulness", () => {
       effectiveSettings: {
         generationModel: "concrete-default",
         costQuality: 100,
-        veniceApiKeyConfigured: false,
+        providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       },
     });
   });
@@ -78,7 +78,7 @@ describe("note chat model truthfulness", () => {
       />,
     );
 
-    await waitFor(() => expect(mocks.listVeniceModels).toHaveBeenCalledOnce());
+    await waitFor(() => expect(mocks.listProviderModels).toHaveBeenCalledOnce());
     expect(setModel).not.toHaveBeenCalled();
     expect(loadSessionModels()["note-session"]).toBe(stagedAuto);
   });

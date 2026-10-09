@@ -99,7 +99,7 @@ async fn llm_note_generated_by_fake_cli_is_persisted_like_a_clovy_note() {
             &artifact.id,
             "We will ship the updater fix this week.",
             Some("en".to_string()),
-            "venice",
+            crate::providers::PROVIDER_GROQ,
         )
         .await
         .unwrap();

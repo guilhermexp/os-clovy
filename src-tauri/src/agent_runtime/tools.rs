@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use sqlx::{query::query, row::Row};
 use std::{
     fs,
+    future::Future,
     path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
@@ -574,77 +575,186 @@ async fn edit_image(context: &ToolContext, arguments: &Value) -> Result<Value, A
 }
 
 async fn generate_video(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let prompt = required_string(arguments, "prompt")?.trim();
-    let job = crate::providers::video_generate(crate::providers::GenerateVideoRequest {
-        prompt: prompt.to_string(),
+    let call = parse_video_call(arguments, context.call_id.clone())?;
+    let prompt = match &call {
+        VideoCall::Create(request) => Some(request.prompt.clone()),
+        VideoCall::Resume { .. } => None,
+    };
+    let mut cancelled = context.cancellations.register(&context.run_id).await;
+    let (job_id, outcome) = run_video_call(
+        call,
+        crate::providers::video_generate,
+        |job_id| {
+            crate::providers::video_status(
+                context.app.clone(),
+                crate::providers::VideoStatusRequest { job_id },
+            )
+        },
+        &mut cancelled,
+    )
+    .await?;
+    let (path, mime_type, model) = match outcome {
+        VideoJobOutcome::Completed {
+            path,
+            mime_type,
+            model,
+        } => (path, mime_type, model),
+        VideoJobOutcome::WaitingForProviderKey { reason } => {
+            // A normal result, not a failure: the run goes on, and the model
+            // keeps the job id to continue this same job once the key is fixed.
+            let message = waiting_for_provider_key_message(&reason);
+            return Ok(json!({
+                "status": "waitingForProviderKey",
+                "provider": crate::providers::BuiltinProvider::Fal.id(),
+                "jobId": job_id,
+                "reason": reason,
+                "message": message,
+            }));
+        }
+    };
+    let source = PathBuf::from(path);
+    let destination = resolve_path(
+        context,
+        &format!(
+            "artifacts/generated-video-{}.mp4",
+            uuid::Uuid::new_v4().simple()
+        ),
+        false,
+    )?;
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
+    }
+    tokio::fs::copy(&source, &destination)
+        .await
+        .map_err(io_error)?;
+    record_artifact_with_mime(context, &destination, "created", None, &mime_type).await?;
+    Ok(json!({
+        "mediaType": "video",
+        "path": crate::filesystem::normalize_path_for_external_use(&destination),
+        "mimeType": mime_type,
+        "model": model,
+        "prompt": prompt,
+        "requestId": context.call_id,
+        "name": destination.file_name().map(|name| name.to_string_lossy().into_owned())
+    }))
+}
+
+/// One `generate_video` call: start a new video, or continue the job an earlier
+/// call left waiting for the user's fal key. A continuation carries only the
+/// job id, so nothing in it can start another generation.
+enum VideoCall {
+    Create(crate::providers::GenerateVideoRequest),
+    Resume { job_id: String },
+}
+
+fn parse_video_call(arguments: &Value, call_id: Option<String>) -> Result<VideoCall, AppError> {
+    if let Some(job_id) = optional_nonempty_string(arguments, "jobId")? {
+        return Ok(VideoCall::Resume { job_id });
+    }
+    Ok(VideoCall::Create(crate::providers::GenerateVideoRequest {
+        prompt: required_string(arguments, "prompt")?.trim().to_string(),
         model: None,
-        request_id: context.call_id.clone(),
+        request_id: call_id,
         duration: optional_nonempty_string(arguments, "duration")?,
         resolution: None,
         aspect_ratio: optional_nonempty_string(arguments, "aspectRatio")?,
         audio: arguments.get("audio").and_then(Value::as_bool),
-    })
-    .await?;
-    let mut cancelled = context.cancellations.register(&context.run_id).await;
+    }))
+}
+
+/// Where following one video job ended, short of an error.
+#[derive(Debug, PartialEq)]
+enum VideoJobOutcome {
+    Completed {
+        path: String,
+        mime_type: String,
+        model: String,
+    },
+    /// The job stays on the server, but this desktop cannot reach it until the
+    /// user saves a valid key from the fal account that started it.
+    WaitingForProviderKey { reason: String },
+}
+
+/// Runs one call. A new video sends its single submit and follows the job it
+/// gets back; a continuation follows the named job with no submit. A failed
+/// submit is an error, never a job. Returns the job id with the outcome so a
+/// waiting result can name it.
+async fn run_video_call<S, SFut, P, PFut>(
+    call: VideoCall,
+    submit: S,
+    mut poll: P,
+    cancelled: &mut ToolCancellationRegistration,
+) -> Result<(String, VideoJobOutcome), AppError>
+where
+    S: FnOnce(crate::providers::GenerateVideoRequest) -> SFut,
+    SFut: Future<Output = Result<crate::clovy_api::VideoJobDto, AppError>>,
+    P: FnMut(String) -> PFut,
+    PFut: Future<Output = Result<crate::clovy_api::VideoStatusDto, AppError>>,
+{
+    let job_id = match call {
+        VideoCall::Create(request) => submit(request).await?.job_id,
+        VideoCall::Resume { job_id } => job_id,
+    };
     loop {
-        let status = crate::providers::video_status(
-            context.app.clone(),
-            crate::providers::VideoStatusRequest {
-                job_id: job.job_id.clone(),
-            },
-        );
         let result = tokio::select! {
-            result = status => result?,
-            _ = &mut cancelled.receiver => {
-                return Err(AppError::new("agent_tool_cancelled", "Video generation was cancelled."));
-            }
+            result = poll(job_id.clone()) => result,
+            _ = cancelled.cancelled() => return Err(video_cancelled()),
         };
         match result {
-            crate::clovy_api::VideoStatusDto::Processing { .. } => {
+            Ok(crate::clovy_api::VideoStatusDto::Processing { .. }) => {
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                    _ = &mut cancelled.receiver => {
-                        return Err(AppError::new("agent_tool_cancelled", "Video generation was cancelled."));
-                    }
+                    _ = cancelled.cancelled() => return Err(video_cancelled()),
                 }
             }
-            crate::clovy_api::VideoStatusDto::Failed { reason } => {
+            Ok(crate::clovy_api::VideoStatusDto::Failed { reason }) => {
                 return Err(AppError::new("video_generation_failed", reason));
             }
-            crate::clovy_api::VideoStatusDto::Completed {
+            Ok(crate::clovy_api::VideoStatusDto::Completed {
                 path,
                 mime_type,
                 model,
                 ..
-            } => {
-                let source = PathBuf::from(path);
-                let destination = resolve_path(
-                    context,
-                    &format!(
-                        "artifacts/generated-video-{}.mp4",
-                        uuid::Uuid::new_v4().simple()
-                    ),
-                    false,
-                )?;
-                if let Some(parent) = destination.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
-                }
-                tokio::fs::copy(&source, &destination)
-                    .await
-                    .map_err(io_error)?;
-                record_artifact_with_mime(context, &destination, "created", None, &mime_type)
-                    .await?;
-                return Ok(json!({
-                    "mediaType": "video",
-                    "path": crate::filesystem::normalize_path_for_external_use(&destination),
-                    "mimeType": mime_type,
-                    "model": model,
-                    "prompt": prompt,
-                    "requestId": context.call_id,
-                    "name": destination.file_name().map(|name| name.to_string_lossy().into_owned())
-                }));
+            }) => {
+                let outcome = VideoJobOutcome::Completed {
+                    path,
+                    mime_type,
+                    model,
+                };
+                return Ok((job_id, outcome));
             }
+            Err(error) if video_poll_waits_for_provider_key(&error) => {
+                let outcome = VideoJobOutcome::WaitingForProviderKey { reason: error.code };
+                return Ok((job_id, outcome));
+            }
+            Err(error) => return Err(error),
         }
+    }
+}
+
+fn video_cancelled() -> AppError {
+    AppError::new("agent_tool_cancelled", "Video generation was cancelled.")
+}
+
+/// Poll failures that leave the job on the server and clear once the user saves
+/// a valid key from the fal account that started it (a rotated key from that
+/// account works): Clovy API's three key answers, and this desktop failing to
+/// read the saved key, which keeps the poll from reaching Clovy API at all.
+fn video_poll_waits_for_provider_key(error: &AppError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "fal_api_key_required"
+            | "fal_api_key_rejected"
+            | "fal_request_inaccessible"
+            | "provider_api_key_unavailable"
+    )
+}
+
+fn waiting_for_provider_key_message(reason: &str) -> &'static str {
+    if reason == "provider_api_key_unavailable" {
+        "Clovy could not read your saved fal key, so it could not check on this video. Save a valid key from the fal account that started it in Settings, then ask to continue this video."
+    } else {
+        "fal could not continue this video with the key Clovy has now. Save a valid key from the fal account that started it in Settings, then ask to continue this video."
     }
 }
 
@@ -1683,5 +1793,192 @@ mod tests {
         let vault = Path::new("/Users/example/Vault");
         let other = Path::new("/Users/other/Documents");
         assert!(!is_within(other, vault));
+    }
+
+    fn completed_video() -> crate::clovy_api::VideoStatusDto {
+        crate::clovy_api::VideoStatusDto::Completed {
+            path: "/tmp/generated-video.mp4".to_string(),
+            mime_type: "video/mp4".to_string(),
+            size_bytes: 3,
+            model: "fal-ai/wan/v2.2-a14b/text-to-video".to_string(),
+        }
+    }
+
+    fn completed_outcome() -> VideoJobOutcome {
+        VideoJobOutcome::Completed {
+            path: "/tmp/generated-video.mp4".to_string(),
+            mime_type: "video/mp4".to_string(),
+            model: "fal-ai/wan/v2.2-a14b/text-to-video".to_string(),
+        }
+    }
+
+    /// One fake Clovy API video service for every call of a test: it counts
+    /// submits, records the polled job ids, and answers polls from a script.
+    #[derive(Default)]
+    struct FakeVideoService {
+        submit_failure: Option<&'static str>,
+        submits: std::cell::Cell<usize>,
+        polled: std::cell::RefCell<Vec<String>>,
+        answers: std::cell::RefCell<
+            std::collections::VecDeque<Result<crate::clovy_api::VideoStatusDto, AppError>>,
+        >,
+    }
+
+    impl FakeVideoService {
+        fn answering(answers: Vec<Result<crate::clovy_api::VideoStatusDto, AppError>>) -> Self {
+            Self {
+                answers: std::cell::RefCell::new(answers.into()),
+                ..Self::default()
+            }
+        }
+
+        /// One `generate_video` call, from the model's arguments to its outcome.
+        async fn call(
+            &self,
+            arguments: Value,
+            cancelled: &mut ToolCancellationRegistration,
+        ) -> Result<(String, VideoJobOutcome), AppError> {
+            run_video_call(
+                parse_video_call(&arguments, Some("call-1".to_string()))?,
+                |_request| {
+                    self.submits.set(self.submits.get() + 1);
+                    let job = match self.submit_failure {
+                        Some(code) => Err(AppError::new(code, "submit failed")),
+                        None => Ok(crate::clovy_api::VideoJobDto {
+                            job_id: "job-1".to_string(),
+                        }),
+                    };
+                    async move { job }
+                },
+                |job_id| {
+                    self.polled.borrow_mut().push(job_id);
+                    let answer = self
+                        .answers
+                        .borrow_mut()
+                        .pop_front()
+                        .expect("no poll beyond the script");
+                    async move { answer }
+                },
+                cancelled,
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_video_waiting_for_the_fal_key_continues_the_same_job_with_no_new_submit() {
+        for reason in [
+            "fal_api_key_required",
+            "fal_api_key_rejected",
+            "fal_request_inaccessible",
+            // The saved key could not be read, so the poll never left the desktop.
+            "provider_api_key_unavailable",
+        ] {
+            let service = FakeVideoService::answering(vec![
+                Err(AppError::new(reason, "key problem")),
+                Ok(completed_video()),
+            ]);
+            let registry = ToolCancellationRegistry::default();
+            let mut cancelled = registry.register("run-1").await;
+
+            let (job_id, outcome) = service
+                .call(json!({ "prompt": "a calm lake" }), &mut cancelled)
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                VideoJobOutcome::WaitingForProviderKey {
+                    reason: reason.to_string()
+                }
+            );
+
+            // The user saves a valid key; the model continues with only the job id.
+            let (resumed_job_id, outcome) = service
+                .call(json!({ "jobId": job_id }), &mut cancelled)
+                .await
+                .unwrap();
+            assert_eq!(resumed_job_id, "job-1");
+            assert_eq!(outcome, completed_outcome());
+            assert_eq!(service.submits.get(), 1, "{reason}");
+            assert_eq!(*service.polled.borrow(), ["job-1", "job-1"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_video_that_cannot_continue_ends_without_a_fake_result_or_a_new_job() {
+        let registry = ToolCancellationRegistry::default();
+        let mut cancelled = registry.register("run-1").await;
+
+        // Gone from the server for any reason, its lifetime included: terminal,
+        // and nothing is created in its place.
+        let service = FakeVideoService::answering(vec![Err(AppError::new(
+            "video_job_unavailable",
+            "not available",
+        ))]);
+        let error = service
+            .call(json!({ "jobId": "job-1" }), &mut cancelled)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "video_job_unavailable");
+        assert_eq!(service.submits.get(), 0);
+
+        // A failed job or another poll error stays an error, not a waiting result.
+        for (answer, code) in [
+            (
+                Ok(crate::clovy_api::VideoStatusDto::Failed {
+                    reason: "content_rejected".to_string(),
+                }),
+                "video_generation_failed",
+            ),
+            (
+                Err(AppError::new(
+                    "clovy_request_failed",
+                    "upstream_provider_failed",
+                )),
+                "clovy_request_failed",
+            ),
+        ] {
+            let service = FakeVideoService::answering(vec![answer]);
+            let error = service
+                .call(json!({ "prompt": "a calm lake" }), &mut cancelled)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(service.submits.get(), 1);
+        }
+
+        // A submit that fails leaves no job to wait for or poll.
+        let service = FakeVideoService {
+            submit_failure: Some("provider_api_key_unavailable"),
+            ..FakeVideoService::default()
+        };
+        let error = service
+            .call(json!({ "prompt": "a calm lake" }), &mut cancelled)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "provider_api_key_unavailable");
+        assert!(service.polled.borrow().is_empty());
+
+        // Stop while a continued job is still running ends the call as cancelled.
+        let mut stopping = registry.register("run-2").await;
+        registry.cancel("run-2").await;
+        let submits = std::cell::Cell::new(0);
+        let error = run_video_call(
+            parse_video_call(&json!({ "jobId": "job-1" }), None).unwrap(),
+            |_request| {
+                submits.set(submits.get() + 1);
+                async {
+                    Ok(crate::clovy_api::VideoJobDto {
+                        job_id: "job-2".to_string(),
+                    })
+                }
+            },
+            |_job_id| std::future::pending::<Result<crate::clovy_api::VideoStatusDto, AppError>>(),
+            &mut stopping,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "agent_tool_cancelled");
+        assert_eq!(submits.get(), 0);
     }
 }

@@ -9,29 +9,33 @@
 
 ## Problem Statement
 
-A user installing Clovy today can record meetings, get transcripts, and
-generate notes — but only if **they** supply their own OpenAI and Venice API
-keys in a local `.env`. The moment Clovy is distributed as a `.app` to anyone
-who isn't a developer:
+> **Historical context.** This section records the situation that motivated
+> Clovy API, before it existed. It is not the current state of the product.
 
-- The user has no way to acquire or configure provider keys.
-- Any keys we baked into the binary would be extractable — anyone running
-  `strings` on the `.app` could siphon our OpenAI / Venice budget and run
-  unlimited inference on our bill.
-- We have **OS Accounts credits** wired up for identity and balance display
-  (`os_accounts.rs`), but nothing actually charges the credits — the wallet
-  reads correctly and never decrements.
+A user installing Clovy before Clovy API could record meetings, get
+transcripts, and generate notes, but only if **they** supplied their own
+OpenAI and Venice API keys in a local `.env`. Distributing Clovy as a `.app` to
+anyone who isn't a developer had three problems:
 
-The result: Clovy cannot be shipped publicly as a paid product because there
-is no safe way to bill metered AI usage from a public client. It also cannot
-be used by anyone without the technical knowledge to register their own
-upstream provider accounts.
+- The user had no way to acquire or configure provider keys.
+- Any keys baked into the binary would be extractable: anyone running
+  `strings` on the `.app` could siphon the service budget and run unlimited
+  inference on Clovy's bill.
+- **OS Accounts credits** were wired up for identity and balance display
+  (`os_accounts.rs`), but nothing charged them: the wallet read correctly and
+  never decremented.
+
+The result: Clovy could not be shipped publicly as a paid product, because
+there was no safe way to bill metered AI usage from a public client, and it
+could not be used by anyone without the technical knowledge to register their
+own upstream provider accounts.
 
 ## Solution
 
 Build **Clovy API**, a confidential backend service that:
 
-1. Holds the OpenAI and Venice API keys (which Clovy no longer ships).
+1. Holds the upstream service keys (Groq for audio, OpenRouter for text, fal for
+   images and video, Tavily for web search and fetch), which Clovy never ships.
 2. Holds the OS Accounts App API key (`osk_…`) that authenticates Clovy to OS
    Accounts as a billing-capable app.
 3. Verifies every incoming request's OS Accounts access token locally
@@ -42,13 +46,27 @@ Build **Clovy API**, a confidential backend service that:
 5. Returns the work result (transcript, note, cleaned text, model list) to
    Clovy.
 
-After this lands, Clovy ships with **zero upstream provider keys**, every AI
-call is billed against the signed-in user's OS Accounts wallet at the
-configured **credit price** for the chosen **upstream model**, and the
-existing "Top up credits" affordance in the Account settings becomes the only
-way to fund usage. Users see "Insufficient credits → Top up" instead of a
-generic provider error when they run dry. Usage credit prices pass through
-upstream cost without an additional Clovy markup.
+After this lands, Clovy ships with **zero upstream provider keys**. Every
+Clovy-funded call that goes through Clovy API is billed against the signed-in
+user's OS Accounts wallet at the configured **credit price** for the chosen
+**upstream model**, and the existing "Top up credits" affordance in the Account
+settings funds that usage. Users see "Insufficient credits → Top up" instead of
+a generic provider error when they run dry.
+
+Usage outside the wallet stays available:
+
+- A user's own provider key, sent per route as `x-<provider>-api-key`, runs that
+  call on the user's provider account; Clovy API forwards it and skips wallet
+  metering. An explicit Auto request is the exception: Clovy picks the model, so
+  it drops the key and funds the call.
+- Agent CLIs and the user's own OpenAI-compatible endpoints run on the desktop
+  and never pass through Clovy API.
+
+Credit prices relate to upstream cost as follows: usage-priced text and audio
+models pass upstream cost through without a Clovy markup; image generation and
+editing are flat prices set at about 2x fal's list price; video applies a 2.0x
+markup to fal's per-request quote; web search and fetch are flat prices. The
+media prices are list-price estimates, not charges observed on an account.
 
 ## User Stories
 
@@ -101,9 +119,8 @@ upstream cost without an additional Clovy markup.
 14. As a **Clovy user using dictation**, I want the latency of dictation to
     stay tight (text appears within a fraction of a second of release), so
     that the new billing pipeline doesn't make the feature feel sluggish.
-15. As a **Clovy user**, I want to choose between OpenAI and Venice models
-    for transcription in Settings exactly as today, so that the model picker
-    UX is preserved.
+15. As a **Clovy user**, I want to choose between the Groq Whisper models
+    for transcription in Settings, so that I can trade speed for accuracy.
 16. As a **Clovy user**, I want models that Clovy hasn't priced to NOT
     appear in the picker, so that I never select an option that will fail at
     request time.
@@ -116,9 +133,11 @@ upstream cost without an additional Clovy markup.
 18. As a **Clovy developer**, I want to clone the repo and build both the
     Tauri client and Clovy API from the same `git clone`, so that
     end-to-end changes are one PR.
-19. As a **Clovy developer**, I want no upstream provider keys (`OPENAI_API_KEY`,
-    `VENICE_API_KEY`) anywhere in the Tauri-side `.env` or codebase, so that
-    a leaked Clovy build cannot drain our provider budgets.
+19. As a **Clovy developer**, I want no Clovy service keys for upstream
+    providers anywhere in the Tauri-side `.env` or codebase, so that a leaked
+    Clovy build cannot drain our provider budgets. A user's own provider key
+    stays in that user's local secret store and is sent only to the route
+    that uses it.
 
 ### Developer — Clovy API backend
 
@@ -197,12 +216,21 @@ upstream cost without an additional Clovy markup.
 ### Deep modules and their interfaces (no file paths)
 
 - **`Transcriber` (trait, `clovy-domain`)** — `transcribe(audio, model) ->
-  Result<Transcript, DomainError>`. Two impls in `clovy-providers`:
-  OpenAI and Venice. Interface unchanged across upstreams.
+  Result<Transcript, DomainError>`. One impl in `clovy-providers`: Groq
+  Whisper. Interface unchanged across upstreams. A request's `context` goes to
+  Whisper verbatim as its `prompt` (the **ASR hint**), never truncated or
+  rewritten server-side; a prompt Groq refuses (400/422) is reported as
+  `transcription_rejected`, without its body, the key or the audio. Groq
+  documents a 224-token prompt limit, so the desktop builds a bounded,
+  dictionary-only hint; other API consumers own their own bound.
 - **`Generator` (trait, `clovy-domain`)** — `generate(prompt_inputs, model)
-  -> Result<GeneratedNote, DomainError>`. One impl (Venice) for now.
-- **`Cleaner` (trait, `clovy-domain`)** — `cleanup(text, context, style,
-  model) -> Result<String, DomainError>`. One impl (Venice).
+  -> Result<GeneratedNote, DomainError>`. One impl (OpenRouter).
+- **`Cleaner` (trait, `clovy-domain`)** — `cleanup(kind, text, context,
+  style, model) -> Result<String, DomainError>`. One impl (OpenRouter). Two
+  kinds with their own instructions: dictation cleanup, and note-transcript
+  correction (`style = "note_transcript_cleanup"`), which receives the **full
+  correction context** (whole dictionary plus previous transcript), unlike the
+  bounded ASR hint.
 - **`OsAccountsClient` (trait, `clovy-domain`)** — `authorize(user, action,
   estimate, hold_ttl) -> Result<Authorization, _>` and `charge(token,
   credits, idempotency_key) -> Result<Receipt, _>`. One impl
@@ -249,9 +277,28 @@ All routes prefixed with `/v1/`. All non-public responses wrapped in
 | `POST` | `/v1/transcribe` | `note_transcribe` | multipart audio + `{title, context?, model?}` | Server probes WAV duration → authorize → upstream → charge. |
 | `POST` | `/v1/generate` | `note_generate` | JSON `{title, transcript, manualNotes?, language?, existingGeneratedNote?, model?}` | Charge based on actual `prompt_tokens + completion_tokens` from upstream `usage`. |
 | `POST` | `/v1/dictate` | `dictate_transcribe` | multipart audio + `{model}` | Latency-sensitive; same shape as `/v1/transcribe` but separate action slug for OS Accounts analytics. |
-| `POST` | `/v1/dictate/cleanup` | `dictate_cleanup` | JSON `{text, dictionaryContext?, style, model}` | Mirrors today's `cleanup_dictation_text`. |
-| `GET` | `/v1/models?type=asr\|text` | *(unmetered)* | — | Union of OpenAI + Venice models filtered to those with a configured credit price. Settings UI's source of truth. |
+| `POST` | `/v1/dictate/cleanup` | `dictate_cleanup` | JSON `{text, dictionaryContext?, style, model}` | Dictation cleanup; `style = "note_transcript_cleanup"` runs note-transcript correction over the full `dictionaryContext` instead. |
+| `GET` | `/v1/models?type=asr\|text` | *(unmetered)* | — | Groq ASR and OpenRouter text models with a configured credit price, whether or not Clovy holds that provider's service key (`serviceAvailable`). Settings UI's source of truth. |
 | `GET` | `/livez` | *(unmetered)* | — | Health for Railway. |
+
+**Provider keys.** A user's own key rides as `x-<provider>-api-key`
+(`x-groq-api-key`, `x-openrouter-api-key`, `x-fal-api-key`,
+`x-tavily-api-key`), and each route accepts only its own provider's header.
+Any other non-blank `x-<name>-api-key` is refused with
+`400 <name>_api_key_not_accepted` before funding or forwarding, so a key never
+pays for, or reaches, a provider it was not meant for.
+
+**Retired Venice key: a breaking header.** Released clients that stored a
+Venice key still send `x-venice-api-key`. It is refused
+(`venice_api_key_not_accepted`) rather than ignored, because ignoring it would
+silently move a user who chose their own key onto Clovy credits. Those
+installs fail every keyed route until they update. Request and response bodies,
+the historical client-contract fixtures and the error-code registry are
+unchanged, and retired model ids are still served by a fallback. This break is
+in tension with the v1 compatibility policy (ADR 0021): the cutover covers
+local development with the current client and the new credentials only. A
+publication and support decision for installs still holding a Venice key is
+required before any production deploy.
 
 ### Estimate strategy (server-side only)
 
@@ -301,8 +348,9 @@ defaults + `config.toml` + env, no `std::env::var` calls outside):
 - `[server]` — `port` (Railway injects `PORT`), `request_timeout_secs`.
 - `[os_accounts]` — `api_url`, `app_api_key` (`osk_…`, env-only), `iss`,
   `aud`, `jwks_refresh_secs`.
-- `[upstreams.openai]` — `api_key` (env-only), `base_url`.
-- `[upstreams.venice]` — `api_key` (env-only), `base_url`.
+- `[upstreams.groq]`, `[upstreams.openrouter]`, `[upstreams.fal]`,
+  `[upstreams.tavily]` — `api_key` (env-only, required outside local dev),
+  `base_url`.
 - `[pricing]` — table keyed by `model_id`, each entry `{ unit: "seconds" |
   "tokens", credits_per_unit: u64 }`. Values pass through upstream cost
   without an additional Clovy markup. Loaded from
@@ -453,7 +501,7 @@ be added incrementally as bugs surface.
 - **Glossary alignment.** Throughout the implementation, prefer the
   vocabulary from `CONTEXT.md`: **Clovy** (the app), **Clovy API**
   (the backend), **OS Accounts** (the platform), **upstream provider**
-  (OpenAI / Venice), **dictation** vs **note transcription** vs **note
+  (Groq / OpenRouter / fal / Tavily), **dictation** vs **note transcription** vs **note
   generation** (never "transcribe" or "generate" alone), **credit
   price** (per upstream model). Avoid: "proxy" (overloaded with
   HTTP-CONNECT), "transcribe" without qualifier, "credits" referring to

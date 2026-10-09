@@ -50,7 +50,7 @@ type Props = {
 };
 
 export type TextFundingNoticeContext = TextFundingModelContext & {
-  onSelectVeniceModel: () => void;
+  onSelectOpenRouterModel: () => void;
 };
 
 const POLL_INTERVAL_MS = 10_000;
@@ -339,8 +339,8 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
 
   const upgradePending = awaitingBrowser || awaitingGrant;
   const waiting = upgradePending || openedPortal;
-  const autoVeniceRecovery = Boolean(
-    textFundingContext?.veniceApiKeyConfigured &&
+  const autoOpenRouterRecovery = Boolean(
+    textFundingContext?.providerApiKeysConfigured.openrouter &&
       textFundingContext.activeModelId === AUTO_MODEL_ID,
   );
 
@@ -368,8 +368,8 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
               ? maxUpgradeSlowStatus(maxGrantWait)
               : openedPortal
                 ? copy.waiting
-                : autoVeniceRecovery
-                  ? t("account.funding.autoVenice")
+                : autoOpenRouterRecovery
+                  ? t("account.funding.autoOpenRouter")
                   : copy.body}
       </p>
       <div className="funding-notice-actions">
@@ -428,14 +428,14 @@ export function FundingNotice({ account, onRefresh, textFundingContext, active =
               {checking ? t("account.funding.checking") : t("account.funding.checkAgain")}
             </button>
           </>
-        ) : autoVeniceRecovery ? (
+        ) : autoOpenRouterRecovery ? (
           <>
             <button
               type="button"
               className="btn btn-ghost"
-              onClick={textFundingContext?.onSelectVeniceModel}
+              onClick={textFundingContext?.onSelectOpenRouterModel}
             >
-              {t("account.funding.selectVenice")}
+              {t("account.funding.selectOpenRouter")}
             </button>
             <button
               type="button"

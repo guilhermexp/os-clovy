@@ -1,7 +1,7 @@
 import { t } from "../i18n/translate";
 import { AUTO_MODEL_ID } from "./agent-model-selection";
 import { modelAvailableForMode } from "./model-privacy";
-import type { AccountStatus, VeniceModelDto } from "./tauri";
+import type { AccountStatus, ProviderApiKeysConfigured, ProviderModelDto } from "./tauri";
 
 // Single source of truth for whether an action that depends on OS Accounts
 // should be blocked behind the sign-in prompt. Keep this pure — it's called
@@ -93,11 +93,11 @@ export function shouldBlockOnFunding(account: AccountStatus): boolean {
  * of trusting a synthetic picker stub or an id convention. */
 export type TextFundingModelContext = {
   activeModelId?: string;
-  activeModel?: Pick<VeniceModelDto, "id" | "provider" | "capabilities">;
-  veniceApiKeyConfigured: boolean;
+  activeModel?: Pick<ProviderModelDto, "id" | "provider" | "capabilities">;
+  providerApiKeysConfigured: ProviderApiKeysConfigured;
 };
 
-/** Split text generation from the general Clovy-credit gate. Explicit Venice
+/** Split text generation from the general Clovy-credit gate. Explicit OpenRouter
  * BYOK text can continue while Clovy funding is unavailable, but only when the
  * configured key and the active concrete catalog entry prove that route. */
 export function shouldBlockTextOnFunding(
@@ -107,11 +107,11 @@ export function shouldBlockTextOnFunding(
   if (!fundingRequired) return false;
   const model = context.activeModel;
   return !(
-    context.veniceApiKeyConfigured &&
+    context.providerApiKeysConfigured.openrouter &&
     context.activeModelId &&
     context.activeModelId !== AUTO_MODEL_ID &&
     model?.id === context.activeModelId &&
-    model.provider === "venice" &&
+    model.provider === "openrouter" &&
     modelAvailableForMode("generation", model)
   );
 }

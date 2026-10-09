@@ -166,6 +166,33 @@ describe("agent runtime adapter", () => {
     ]);
   });
 
+  it("shows a video paused for the fal key as an error for its job, never a finished asset", () => {
+    const [turn] = agentItemsToChatTurns([
+      {
+        id: "video-waiting",
+        sessionId: "session-1",
+        runId: "run-1",
+        sequence: 1,
+        createdAt: "2026-07-22T12:00:00Z",
+        kind: "tool_result" as const,
+        callId: "video-call",
+        name: "generate_video",
+        output: {
+          status: "waitingForProviderKey",
+          provider: "fal",
+          jobId: "job-1",
+          reason: "fal_api_key_rejected",
+          message: "Save a valid key from the fal account that started it.",
+        },
+        isError: false,
+      },
+    ]);
+
+    const video = turn?.parts.at(-1);
+    expect(video).toMatchObject({ type: "video", status: "error", jobId: "job-1" });
+    expect(video).not.toHaveProperty("path");
+  });
+
   it("builds a streaming transcript and ignores duplicate or stale events", () => {
     const started: AgentRuntimeEvent = {
       ...frame,

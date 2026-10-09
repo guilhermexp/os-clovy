@@ -146,16 +146,28 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   agent route, model picker, and capability lookups work unchanged. Agent
   requests resolve their endpoint by model id (chat endpoint first, then any
   endpoint serving that model). A CLI chosen for chat makes new chat sessions
-  start on that CLI: `list_venice_models("generation").selectedModel` returns
+  start on that CLI: `list_provider_models("generation").selectedModel` returns
   its engine id (below). Picking a Clovy model in the text-model picker moves
-  chat back to Clovy.
+  chat back to Clovy, whose remote text runs on OpenRouter through Clovy API
+  (`generationProvider = "openrouter"`). An agent session that recorded a text
+  model id from before the OpenRouter cutover is resolved to the same model's
+  current id at the remote boundary; the session's runs and messages keep the
+  id they recorded. An agent request that carries tools, `tool_choice`, or
+  `response_format` reaches OpenRouter with `provider.require_parameters:
+  true`, so a route that cannot honor them declines the request instead of
+  running it without tools; the run then fails (the exact status OpenRouter
+  returns in that case has not been observed yet).
 - **Notes.** `clovy_api::generate_note_from_transcript` uses the notes
   selection: Clovy API (with the saved remote model), the endpoint, or the CLI
   (same system prompt and source layout as the endpoint route; stored provider
   `cli:<id>`).
 - **Dictation cleanup.** `clovy_api::cleanup_text` (dictation and note
   transcript cleanup) uses the dictation-cleanup selection with Clovy API's
-  cleanup prompt and message layout.
+  cleanup prompt and message layout. Note transcripts send style
+  `note_transcript_cleanup`, which selects the note correction prompt on every
+  route, with the full dictionary and earlier same-source turns as context; the
+  Whisper prompt itself only carries the short dictionary hint (see
+  [configuration.md](configuration.md#transcription-context)).
 - **Activity.** Defaults to none; Clovy API is not allowed.
 
 ## CLI chat engine

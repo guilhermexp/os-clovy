@@ -145,27 +145,107 @@ impl TokenUsage {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// A user's own upstream API keys, as presented on one request. Each route
+/// accepts exactly one provider's key; the API boundary rejects the others
+/// before funding or forwarding, so a key never crosses to a provider that did
+/// not issue it. `Debug` never prints a key.
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct ProviderCredentials {
-    pub venice_api_key: Option<String>,
+    pub groq_api_key: Option<String>,
+    pub openrouter_api_key: Option<String>,
+    pub fal_api_key: Option<String>,
+    pub tavily_api_key: Option<String>,
 }
 
 impl ProviderCredentials {
-    pub fn has_venice_api_key(&self) -> bool {
-        self.venice_api_key
-            .as_deref()
+    /// Credentials carrying only `key` for `provider`.
+    pub fn for_provider(provider: UpstreamProvider, key: String) -> Self {
+        let mut credentials = Self::default();
+        *credentials.slot_mut(provider) = Some(key);
+        credentials
+    }
+
+    /// The user's key for `provider`, trimmed; `None` when absent or blank.
+    pub fn user_key(&self, provider: UpstreamProvider) -> Option<&str> {
+        self.slot(provider)
             .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn has_user_key(&self, provider: UpstreamProvider) -> bool {
+        self.user_key(provider).is_some()
+    }
+
+    /// Drops the user's key for `provider`, so the call runs on Clovy's
+    /// service key and funding.
+    pub fn clear(&mut self, provider: UpstreamProvider) {
+        *self.slot_mut(provider) = None;
+    }
+
+    fn slot(&self, provider: UpstreamProvider) -> Option<&str> {
+        match provider {
+            UpstreamProvider::Groq => self.groq_api_key.as_deref(),
+            UpstreamProvider::Openrouter => self.openrouter_api_key.as_deref(),
+            UpstreamProvider::Fal => self.fal_api_key.as_deref(),
+            UpstreamProvider::Tavily => self.tavily_api_key.as_deref(),
+        }
+    }
+
+    fn slot_mut(&mut self, provider: UpstreamProvider) -> &mut Option<String> {
+        match provider {
+            UpstreamProvider::Groq => &mut self.groq_api_key,
+            UpstreamProvider::Openrouter => &mut self.openrouter_api_key,
+            UpstreamProvider::Fal => &mut self.fal_api_key,
+            UpstreamProvider::Tavily => &mut self.tavily_api_key,
+        }
     }
 }
 
-/// Privacy class advertised by the selected upstream model. This controls
-/// which model-routing-service policy is requested for service-managed calls.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum InferencePrivacy {
-    #[default]
-    Private,
-    Anonymized,
+impl fmt::Debug for ProviderCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("ProviderCredentials");
+        for provider in UpstreamProvider::ALL {
+            let state = if self.has_user_key(provider) {
+                "<redacted>"
+            } else {
+                "<unset>"
+            };
+            debug.field(provider.as_str(), &state);
+        }
+        debug.finish()
+    }
+}
+
+/// The upstream that serves one capability and may accept a user's own key:
+/// Groq for audio, `OpenRouter` for text, fal for images and video, Tavily for
+/// web search and fetch.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum UpstreamProvider {
+    Groq,
+    Openrouter,
+    Fal,
+    Tavily,
+}
+
+impl UpstreamProvider {
+    pub const ALL: [Self; 4] = [Self::Groq, Self::Openrouter, Self::Fal, Self::Tavily];
+
+    /// Wire name: the provider label in responses and the `x-<name>-api-key`
+    /// request header.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Groq => "groq",
+            Self::Openrouter => "openrouter",
+            Self::Fal => "fal",
+            Self::Tavily => "tavily",
+        }
+    }
+}
+
+impl fmt::Display for UpstreamProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -246,24 +326,43 @@ pub struct GenerationRequest {
     pub existing_generated_note: Option<String>,
     pub model: ModelId,
     pub system_prompt: String,
-    pub cost_quality: Option<f64>,
     pub provider_credentials: ProviderCredentials,
-    pub inference_privacy: InferencePrivacy,
+    /// See `AgentChatRequest::price_cap`.
+    pub price_cap: Option<TokenPriceCap>,
     /// See `AgentChatRequest::unmetered`.
     pub unmetered: bool,
 }
 
+/// Which text cleanup a request asks for. Both run on the cleanup route and
+/// model, but they are different jobs with different rules.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CleanupKind {
+    /// Dictation cleanup: remove fillers, apply self-corrections, punctuate
+    /// and lay out per the style and insertion surface.
+    #[default]
+    Dictation,
+    /// Note transcript correction: fix only likely transcription mistakes
+    /// (spelling, casing, names, products, acronyms, dictionary terms) and
+    /// keep the spoken language, meaning, wording and punctuation. Never
+    /// summarizes, answers or adds content.
+    NoteTranscript,
+}
+
 #[derive(Clone, Debug)]
 pub struct CleanupRequest {
+    pub kind: CleanupKind,
     pub text: String,
     pub dictionary_context: Option<String>,
     /// Recognized insertion-surface slug ("email"); shapes output layout.
+    /// Dictation only.
     pub app_context: Option<String>,
+    /// Dictation style; unused for a note transcript correction.
     pub style: String,
     pub model: ModelId,
     pub system_prompt: String,
     pub provider_credentials: ProviderCredentials,
-    pub inference_privacy: InferencePrivacy,
+    /// See `AgentChatRequest::price_cap`.
+    pub price_cap: Option<TokenPriceCap>,
 }
 
 #[derive(Clone, Debug)]
@@ -271,12 +370,23 @@ pub struct AgentChatRequest {
     pub body: serde_json::Value,
     pub model: ModelId,
     pub provider_credentials: ProviderCredentials,
-    pub inference_privacy: InferencePrivacy,
+    /// The settlement price of a metered request. `None` when the user's own
+    /// key pays the upstream (`unmetered`).
+    pub price_cap: Option<TokenPriceCap>,
     /// True when the caller settles no OS Accounts charge for this request
     /// (user-supplied upstream key). Providers may then use their full-route
     /// client: the shortened metered window exists only to keep settlement
     /// inside the authorization hold, and there is no hold to protect.
     pub unmetered: bool,
+}
+
+/// The token price Clovy settles a metered text request at, in USD per
+/// million tokens. A text provider must not run the request on an upstream
+/// route that costs more, so the upstream cost never exceeds the charge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TokenPriceCap {
+    pub prompt_usd_per_million: f64,
+    pub completion_usd_per_million: f64,
 }
 
 /// What an image generator needs: a prompt, the model, optional pixel
@@ -288,19 +398,19 @@ pub struct ImageGenerationRequest {
     pub model: ModelId,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// Venice `safe_mode` (blurs adult content). `None` leaves it unset so Venice
-    /// applies its own default; a value forces it on/off. Carried so the on-device
-    /// safe-mode setting can flow through to generation.
+    /// The on-device safe-mode setting. `None` leaves the model's own default.
+    /// `Some(true)` asks for the model's safety checker where it has one;
+    /// `Some(false)` only asks to turn it off, which the provider may refuse
+    /// (fal honors it only for accounts authorized to disable it).
     pub safe_mode: Option<bool>,
     pub provider_credentials: ProviderCredentials,
 }
 
 /// What an image editor needs: the source image bytes (base64, no `data:`
-/// prefix) plus its mime, the edit instruction, the model, optional Venice
-/// safe mode, and provider credentials. Image editing is a SEPARATE
-/// Venice endpoint and model catalog from generation, with a raw-binary
-/// response, so it has its own domain type and provider rather than reusing
-/// the generator.
+/// prefix) plus its mime, the edit instruction, the model, optional safe
+/// mode, and provider credentials. Editing uses its own model endpoints and
+/// catalog, separate from generation, so it has its own domain type and
+/// provider rather than reusing the generator.
 #[derive(Clone, Debug)]
 pub struct ImageEditRequest {
     pub image_base64: String,
@@ -323,32 +433,31 @@ pub struct GeneratedImage {
     pub provider: String,
 }
 
-/// What a text-to-video generation needs: a prompt, the model, Venice's
-/// duration/resolution/aspect-ratio/audio knobs, and an optional negative
-/// prompt. Deliberately carries no user id or caller key, so the provider sees
-/// only the inference inputs and Clovy's configured upstream key. Video is an
-/// async job: this queues the job and returns a Venice queue handle, not the
-/// bytes.
+/// What a text-to-video generation needs: a prompt, the model, the model's
+/// duration/resolution/aspect-ratio/audio knobs, an optional negative prompt,
+/// and the caller's provider credentials. Deliberately carries no user id.
+/// Video is an async job: this queues the job and returns the provider's
+/// request handle, not the bytes.
 #[derive(Clone, Debug)]
 pub struct VideoGenerationRequest {
     pub prompt: String,
     pub model: ModelId,
-    /// Venice `duration` string enum ("1s".."30s", "1 gen", "Auto").
+    /// Requested clip length as the client sends it ("5s").
     pub duration: String,
-    /// Venice `resolution` string enum ("256p".."2160p", "4k", ...). `None`
-    /// leaves it to Venice's per-model default.
+    /// Requested resolution ("720p"). `None` leaves the model default.
     pub resolution: Option<String>,
-    /// Venice `aspect_ratio` string enum ("1:1", "16:9", ...).
+    /// Requested aspect ratio ("16:9"). `None` leaves the model default.
     pub aspect_ratio: Option<String>,
     pub audio: Option<bool>,
     pub negative_prompt: Option<String>,
+    pub provider_credentials: ProviderCredentials,
 }
 
 /// What an image-to-video (animate) job needs: the source image bytes (base64,
-/// no `data:` prefix) plus its mime, a prompt, the model, and the same Venice
-/// knobs as generation. Image-to-video is a SEPARATE Venice model catalog from
-/// text-to-video (default `default_video_animate_model`), so it has its own
-/// domain type mirroring `ImageEditRequest`.
+/// no `data:` prefix) plus its mime, a prompt, the model, and the same knobs
+/// as generation. Image-to-video models are separate from text-to-video
+/// models (default `default_video_animate_model`), so it has its own domain
+/// type mirroring `ImageEditRequest`.
 #[derive(Clone, Debug)]
 pub struct VideoAnimationRequest {
     pub image_base64: String,
@@ -360,11 +469,11 @@ pub struct VideoAnimationRequest {
     pub aspect_ratio: Option<String>,
     pub audio: Option<bool>,
     pub negative_prompt: Option<String>,
+    pub provider_credentials: ProviderCredentials,
 }
 
-/// The free Venice price oracle input: everything that shapes a video quote.
-/// Carries no prompt and no credentials — the quote is Clovy's own pricing
-/// basis, always run against Clovy's configured Venice key.
+/// Everything that shapes a video price: model and output knobs. Carries no
+/// prompt and no credentials; the quote is Clovy's own pricing basis.
 #[derive(Clone, Debug)]
 pub struct VideoQuoteRequest {
     pub model: ModelId,
@@ -374,38 +483,38 @@ pub struct VideoQuoteRequest {
     pub audio: Option<bool>,
 }
 
-/// A queued Venice video job: Clovy's handle onto the async lifecycle. The
-/// `download_url` is present only for VPS-backed models (a 24h pre-signed mp4
-/// URL); otherwise the bytes come from `retrieve`.
+/// A queued video job: Clovy's handle onto the provider's async lifecycle.
+/// `provider_request_id` is the provider's own job id; `download_url` is set
+/// only by a provider that hands out a pre-signed result URL at queue time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VideoQueued {
-    pub venice_queue_id: String,
+    pub provider_request_id: String,
     pub download_url: Option<String>,
 }
 
-/// The outcome of a single Venice `retrieve` poll, discriminated by the
-/// response `Content-Type` (application/json vs video/mp4).
+/// The outcome of a single status poll of a queued video job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VideoRetrieved {
-    /// Still running. Venice reports timing estimates in milliseconds.
+    /// Still running. Timing estimates in milliseconds, zero when the provider
+    /// reports none.
     Processing {
         average_execution_ms: u64,
         execution_ms: u64,
     },
-    /// COMPLETED, non-VPS: the raw `video/mp4` bytes came back inline.
+    /// Completed: the video bytes, downloaded within the response cap.
     CompletedBytes { bytes: Vec<u8>, mime_type: String },
-    /// COMPLETED, VPS-backed: the retrieve returned JSON without bytes; the
-    /// mp4 lives at a pre-signed URL. The URL may be empty here when Venice's
-    /// retrieve response omits it — the service falls back to the `download_url`
-    /// captured at queue time.
+    /// Completed at a pre-signed URL instead of inline bytes. The URL may be
+    /// empty when the poll omits it; the service then falls back to the
+    /// `download_url` captured at queue time.
     CompletedUrl { download_url: String },
 }
 
 /// A generated video handed back from the service to the API boundary. Never
-/// stored in the registry: `bytes` (when present) are fetched from Venice on
-/// the completing poll and streamed straight to the HTTP response, so nothing
-/// byte-sized is pinned in memory. `bytes` is `#[serde(skip)]` — the status
-/// handler streams them as `video/mp4` rather than base64-through-JSON.
+/// stored in the registry: `bytes` (when present) are fetched from the
+/// provider on the completing poll and streamed straight to the HTTP
+/// response, so nothing byte-sized is pinned in memory. `bytes` is
+/// `#[serde(skip)]` — the status handler streams them as `video/mp4` rather
+/// than base64-through-JSON.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneratedVideo {
@@ -418,24 +527,12 @@ pub struct GeneratedVideo {
     pub size_bytes: Option<u64>,
 }
 
-/// Which upstream engine Venice should run a web search against. Brave is the
-/// default and runs under zero data retention; Google is anonymized and
-/// proxied through Venice so the query is not associated with an identity.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebSearchProvider {
-    #[default]
-    Brave,
-    Google,
-}
-
 #[derive(Clone, Debug)]
 pub struct WebSearchRequest {
     pub query: String,
     /// Number of results to return. The provider clamps this to its own bounds;
     /// `None` lets the provider apply its default.
     pub limit: Option<u32>,
-    pub provider: WebSearchProvider,
     pub provider_credentials: ProviderCredentials,
 }
 
@@ -610,8 +707,11 @@ pub trait ImageEditor: Send + Sync {
     async fn edit(&self, request: ImageEditRequest) -> Result<GeneratedImage, DomainError>;
 }
 
-/// Venice's asynchronous, dynamically priced video API. Quoting is free and is
-/// Clovy's price oracle; queueing starts an async job; retrieving polls it. The
+/// An asynchronous video provider. Quoting prices a request without a network
+/// call or credentials; queueing starts a job; retrieving polls it on the
+/// account that queued it: `user_api_key` is `None` for a job Clovy queued with
+/// its own service key and `Some` (the user's key, supplied again on every poll
+/// because Clovy never stores it on the job) for a user-funded job. The
 /// provider does inference/transport only — billing (quote -> credits ->
 /// authorize -> charge-once) lives in `VideoService`.
 #[async_trait]
@@ -622,7 +722,12 @@ pub trait VideoProvider: Send + Sync {
         &self,
         request: VideoAnimationRequest,
     ) -> Result<VideoQueued, DomainError>;
-    async fn retrieve(&self, model: &str, queue_id: &str) -> Result<VideoRetrieved, DomainError>;
+    async fn retrieve(
+        &self,
+        model: &str,
+        provider_request_id: &str,
+        user_api_key: Option<&str>,
+    ) -> Result<VideoRetrieved, DomainError>;
 }
 
 #[async_trait]
@@ -924,7 +1029,7 @@ pub trait CompanionStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::AudioFormat;
+    use super::{AudioFormat, ProviderCredentials, UpstreamProvider};
 
     #[test]
     fn audio_format_detects_mp4_containers_case_insensitively() {
@@ -943,5 +1048,24 @@ mod tests {
         assert_eq!(AudioFormat::Mp4.upstream_filename(), "audio.m4a");
         assert_eq!(AudioFormat::Wav.mime(), "audio/wav");
         assert_eq!(AudioFormat::Mp4.mime(), "audio/mp4");
+    }
+
+    #[test]
+    fn credentials_debug_names_configured_providers_without_keys() {
+        let credentials = ProviderCredentials {
+            groq_api_key: Some("gsk_user_secret".to_string()),
+            openrouter_api_key: Some("   ".to_string()),
+            fal_api_key: None,
+            tavily_api_key: Some("tvly-user-secret".to_string()),
+        };
+
+        let debug = format!("{credentials:?}");
+
+        assert!(!debug.contains("gsk_user_secret"), "{debug}");
+        assert!(!debug.contains("tvly-user-secret"), "{debug}");
+        assert!(debug.contains("groq: \"<redacted>\""), "{debug}");
+        assert!(debug.contains("openrouter: \"<unset>\""), "{debug}");
+        assert!(credentials.has_user_key(UpstreamProvider::Tavily));
+        assert!(!credentials.has_user_key(UpstreamProvider::Openrouter));
     }
 }

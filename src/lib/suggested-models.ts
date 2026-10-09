@@ -1,6 +1,6 @@
 import { type MessageKey, t } from "../i18n/translate";
 import { modelSupportsImageInput, modelSupportsTools } from "./model-privacy";
-import type { ProviderModelMode, VeniceModelDto } from "./tauri";
+import type { ProviderModelMode, ProviderModelDto } from "./tauri";
 
 export type SuggestedModel = {
   id: string;
@@ -15,7 +15,7 @@ export type SuggestedModel = {
 // Auto owns the visible text suggestions, but image attachment recovery still
 // needs a concrete vision-capable model. Keep that operational fallback
 // independent from picker curation.
-const PREFERRED_VISION_FALLBACK_IDS = ["kimi-k2-6"];
+const PREFERRED_VISION_FALLBACK_IDS = ["moonshotai/kimi-k2.6"];
 
 /**
  * The composer pill's ghosted designation while Auto is selected ("Auto
@@ -34,29 +34,27 @@ export function autoPillDesignation(costQuality: number | undefined): string | u
 
 /**
  * Curated picks for the model picker's "Suggested" tab — the handful of
- * models we actually recommend, weighed on benchmark performance, price,
- * tool use, and privacy. Clovy's agent needs tool calling, so every text pick
- * supports tools; each model's live catalog privacy badge remains the source
- * of truth for whether it is private or anonymized.
+ * models we actually recommend, weighed on benchmark performance, price, and
+ * tool use. Clovy's agent needs tool calling, so every text pick supports
+ * tools. No pick claims a privacy property: the catalog reports none for
+ * these providers.
  *
  * Auto lives in the picker's pinned toggle section, not in these rows: the
  * suggested rows stay concrete models so they double as the landing spots
  * when Auto is switched off (the first pick is the toggle-off fallback).
  *
- * Curation snapshot (July 2026), from the live Venice catalog plus public
- * benchmarks (SWE-bench agentic coding, Artificial Analysis intelligence
- * index):
- * - GLM 5.2: latest GLM flagship and Clovy's default text model, with
- *   reasoning effort controls, tool use, 200K context, $1.75/$5.50 per 1M
- *   tokens.
- * - Kimi K3: newest Kimi flagship, built for multimodal reasoning and long
- *   agentic tool runs, 1M context, $3.75/$18.75 in anonymous mode.
- * - Kimi K2.6: private Kimi alternative with multimodal reasoning, tool use,
- *   and 256K context, $0.85/$4.66 with zero data retention.
- * - GLM 5.1: previous GLM flagship, top-tier agentic coding and tool use
- *   among open models, 200K context, $1.75/$5.50 per 1M tokens.
- * - Parakeet: fast, accurate everyday dictation at the lowest price tier.
- * - Whisper Large v3: best multilingual accuracy at the same low price.
+ * Curation snapshot (October 2026), from the public OpenRouter catalog and
+ * Groq's speech-to-text docs:
+ * - GLM 5.2: Clovy's default text model; text input, tools, structured
+ *   output, 1M-token context.
+ * - Kimi K3: newest Kimi flagship; text, image, and video input, tools,
+ *   1M-token context.
+ * - Kimi K2.6: Kimi with text and image input and tools, 256K-token context
+ *   (also the image-attachment fallback below).
+ * - GLM 5.1: previous GLM flagship; text input, tools, 200K-token context.
+ * - Whisper Large v3 Turbo: Groq's multilingual default, lowest price per
+ *   audio hour.
+ * - Whisper Large v3: Groq's most accurate Whisper for error-sensitive audio.
  *
  * The default text model (DEFAULT_GENERATION_MODEL in the Rust providers
  * module, mirrored by the frontend and clovy-api defaults) is the first
@@ -67,32 +65,30 @@ export function autoPillDesignation(costQuality: number | undefined): string | u
  */
 export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
   generation: [
-    suggestion("zai-org-glm-5-2", "lib.suggested.glm52"),
-    suggestion("kimi-k3", "lib.suggested.kimiK3"),
-    suggestion("kimi-k2-6", "lib.suggested.kimiK26"),
-    suggestion("zai-org-glm-5-1", "lib.suggested.glm51"),
+    suggestion("z-ai/glm-5.2", "lib.suggested.glm52"),
+    suggestion("moonshotai/kimi-k3", "lib.suggested.kimiK3"),
+    suggestion("moonshotai/kimi-k2.6", "lib.suggested.kimiK26"),
+    suggestion("z-ai/glm-5.1", "lib.suggested.glm51"),
   ],
   transcription: [
-    suggestion("nvidia/parakeet-tdt-0.6b-v3", "lib.suggested.parakeet"),
-    suggestion("openai/whisper-large-v3", "lib.suggested.whisper"),
+    suggestion("whisper-large-v3-turbo", "lib.suggested.whisperTurbo"),
+    suggestion("whisper-large-v3", "lib.suggested.whisper"),
   ],
   // Image models come from the curated local list in lib/image-models.ts, not
   // a fetched catalog; these picks are the shortlist the picker surfaces above
-  // "All models". The default (DEFAULT_IMAGE_MODEL, venice-sd35) stays first so
-  // it is always visible without expanding.
+  // "All models". The default (DEFAULT_IMAGE_MODEL, fal-ai/flux/dev) stays
+  // first so it is always visible without expanding.
   image: [
-    suggestion("venice-sd35", "lib.suggested.veniceSd35"),
-    suggestion("z-image-turbo", "lib.suggested.zImageTurbo"),
-    suggestion("qwen-image", "lib.suggested.qwenImage"),
-    suggestion("lustify-v8", "lib.suggested.lustifyV8"),
+    suggestion("fal-ai/flux/dev", "lib.suggested.fluxDev"),
+    suggestion("fal-ai/flux/schnell", "lib.suggested.fluxSchnell"),
+    suggestion("fal-ai/qwen-image", "lib.suggested.qwenImage"),
   ],
-  // Video is a small curated local list (lib/video-models.ts); all three
-  // private-tier models are suggested so they show without expanding "All
-  // models". The default (DEFAULT_VIDEO_MODEL, wan-2.2-a14b) stays first.
+  // Video is a small curated local list (lib/video-models.ts); both models are
+  // suggested so they show without expanding "All models". The default
+  // (DEFAULT_VIDEO_MODEL, Wan 2.2 A14B) stays first.
   video: [
-    suggestion("wan-2.2-a14b-text-to-video", "lib.suggested.wan22"),
-    suggestion("grok-imagine-text-to-video-private", "lib.suggested.grokImagineVideo"),
-    suggestion("ltx-2-19b-full-text-to-video", "lib.suggested.ltx2"),
+    suggestion("fal-ai/wan/v2.2-a14b/text-to-video", "lib.suggested.wan22"),
+    suggestion("alibaba/wan-3.0/text-to-video", "lib.suggested.wan30"),
   ],
 };
 
@@ -123,13 +119,15 @@ export const DEFAULT_GENERATION_SUGGESTION_ID = SUGGESTED_MODELS.generation[0].i
  * preferred model is eligible we fall back to the first eligible catalog model.
  * A retired preference is ignored because it is resolved against the live catalog.
  */
-export function preferredVisionFallbackModel(models: VeniceModelDto[]): VeniceModelDto | undefined {
+export function preferredVisionFallbackModel(
+  models: ProviderModelDto[],
+): ProviderModelDto | undefined {
   const eligible = models.filter(
     (model) => modelSupportsImageInput(model) && modelSupportsTools(model),
   );
   const preferred = PREFERRED_VISION_FALLBACK_IDS.map((id) =>
     eligible.find((model) => model.id === id),
-  ).find((model): model is VeniceModelDto => model !== undefined);
+  ).find((model): model is ProviderModelDto => model !== undefined);
   return preferred ?? eligible[0];
 }
 
@@ -138,10 +136,10 @@ export function preferredVisionFallbackModel(models: VeniceModelDto[]): VeniceMo
  * name and description without changing the persisted model id. */
 export function suggestedModelsForMode(
   mode: ProviderModelMode,
-  options: VeniceModelDto[],
+  options: ProviderModelDto[],
 ): Array<{
   key: string;
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   reason: string;
   costQuality?: number;
 }> {

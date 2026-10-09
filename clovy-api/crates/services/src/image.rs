@@ -4,43 +4,47 @@ use crate::{
         log_settled, new_charge_operation_id, release_hold, zero_receipt,
     },
     error::ServiceError,
-    metering::{log_skipped_user_venice_key, uses_user_venice_key},
-    util::sha256_hex,
+    metering::log_skipped_user_key,
+    util::{served_model, sha256_hex},
 };
-use clovy_config::ModelProvider;
 use clovy_domain::{
     ActionSlug, Credits, GeneratedImage, ImageEditRequest, ImageEditor, ImageGenerationRequest,
-    ImageGenerator, ModelId, OsAccountsClient, ProviderCredentials, Receipt, UserId,
+    ImageGenerator, ModelId, OsAccountsClient, ProviderCredentials, Receipt, UpstreamProvider,
+    UserId,
 };
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex as StdMutex, MutexGuard,
+        Arc, Mutex as StdMutex, MutexGuard, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, futures::Notified};
 
-/// Metered image generation. Each generation is flat-priced per model (Venice
-/// bills per image), so the authorize estimate and the settled charge are the
-/// same configured credit amount rather than a usage-derived figure. A model
-/// with no configured price is rejected before the wallet or Venice is touched;
+/// Metered image generation. Each generation is flat-priced per model (the
+/// upstream bills per image), so the authorize estimate and the settled charge
+/// are the same configured credit amount rather than a usage-derived figure. A retired
+/// or unknown model id is served by the default model (ADR 0021); an unpriced default is
+/// rejected before the wallet or provider is touched;
 /// a failed or rejected generation returns the error WITHOUT charging (the hold
 /// simply expires), matching the web and agent chat paths.
 pub struct ImageServiceDeps {
     pub os_accounts: Arc<dyn OsAccountsClient>,
     pub generator: Arc<dyn ImageGenerator>,
     pub editor: Arc<dyn ImageEditor>,
-    /// Flat price and upstream provider per image model. A model absent here
-    /// is rejected as `model_not_priced`.
+    /// Flat price per image model. A model absent here is a retired or unknown
+    /// id and falls back to `default_model` (ADR 0021: shipped clients keep
+    /// sending ids that stopped being served).
     pub pricing: BTreeMap<String, ImageModelPrice>,
-    /// Flat price and upstream provider per EDITED image, keyed by edit model
-    /// id (a separate catalog). A model absent here is rejected as
-    /// `model_not_priced`.
+    /// Generation model used for a retired or unknown model id. Must be a key
+    /// in `pricing`, or such requests fail `model_not_priced`.
+    pub default_model: String,
+    /// Flat price per EDITED image, keyed by edit model id (a separate catalog).
+    /// A model absent here falls back to `default_edit_model`.
     pub edit_pricing: BTreeMap<String, ImageModelPrice>,
     /// Edit model used when an edit request names none (the image MCP never
-    /// does). Must be a key in `edit_pricing`.
+    /// does) or names a retired one. Must be a key in `edit_pricing`.
     pub default_edit_model: String,
     pub hold_ttl_seconds: u64,
 }
@@ -48,15 +52,11 @@ pub struct ImageServiceDeps {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImageModelPrice {
     pub credits: u64,
-    pub provider: ModelProvider,
 }
 
 impl ImageModelPrice {
-    pub fn venice(credits: u64) -> Self {
-        Self {
-            credits,
-            provider: ModelProvider::Venice,
-        }
+    pub fn new(credits: u64) -> Self {
+        Self { credits }
     }
 }
 
@@ -65,6 +65,7 @@ pub struct ImageService {
     generator: Arc<dyn ImageGenerator>,
     editor: Arc<dyn ImageEditor>,
     pricing: BTreeMap<String, ImageModelPrice>,
+    default_model: String,
     edit_pricing: BTreeMap<String, ImageModelPrice>,
     default_edit_model: String,
     hold_ttl_seconds: u64,
@@ -78,6 +79,7 @@ impl ImageService {
             generator: deps.generator,
             editor: deps.editor,
             pricing: deps.pricing,
+            default_model: deps.default_model,
             edit_pricing: deps.edit_pricing,
             default_edit_model: deps.default_edit_model,
             hold_ttl_seconds: deps.hold_ttl_seconds,
@@ -92,20 +94,23 @@ impl ImageService {
 
     pub async fn generate(
         &self,
-        params: ImageGenerateParams,
+        mut params: ImageGenerateParams,
     ) -> Result<ImageGenerateOutput, ServiceError> {
-        // Reject an unpriced model before touching the wallet or Venice.
+        params.model = served_model(&self.pricing, Some(&params.model), &self.default_model);
+        // Reject an unpriced model before touching the wallet or provider.
         let price = self
             .pricing
             .get(&params.model)
             .copied()
             .ok_or(ServiceError::ModelNotPriced)?;
         let estimate = Credits(price.credits);
-        let uses_user_key = price.provider == ModelProvider::Venice
-            && uses_user_venice_key(&params.provider_credentials);
+        let uses_user_key = params
+            .provider_credentials
+            .has_user_key(UpstreamProvider::Fal);
         if let Some(key) = image_ledger_key(&params) {
             match self.request_ledger.claim(key).await {
                 ImageLedgerClaim::Replay(output) => return Ok(output),
+                ImageLedgerClaim::Failed(error) => return Err(error),
                 ImageLedgerClaim::ChargePending { key, pending } => {
                     return self.settle_pending_ledger_charge(key, pending).await;
                 }
@@ -113,7 +118,7 @@ impl ImageService {
                     if uses_user_key {
                         return Self::finish_claimed_output(
                             guard,
-                            self.generate_with_user_venice_key(&params).await,
+                            self.generate_with_user_key(&params).await,
                         );
                     }
                     return self
@@ -126,14 +131,14 @@ impl ImageService {
             }
         }
         if uses_user_key {
-            return self.generate_with_user_venice_key(&params).await;
+            return self.generate_with_user_key(&params).await;
         }
         let pending = self.prepare_generate_charge(&params, estimate).await?;
         self.settle_pending_charge_cancellation_safe(None, pending)
             .await
     }
 
-    async fn generate_with_user_venice_key(
+    async fn generate_with_user_key(
         &self,
         params: &ImageGenerateParams,
     ) -> Result<ImageGenerateOutput, ServiceError> {
@@ -148,7 +153,12 @@ impl ImageService {
                 provider_credentials: params.provider_credentials.clone(),
             })
             .await?;
-        log_skipped_user_venice_key(ActionSlug::ImageGenerate, &params.user_id, &params.model);
+        log_skipped_user_key(
+            ActionSlug::ImageGenerate,
+            &params.user_id,
+            &params.model,
+            UpstreamProvider::Fal,
+        );
         Ok(ImageGenerateOutput {
             image,
             receipt: zero_receipt(),
@@ -209,28 +219,31 @@ impl ImageService {
         })
     }
 
-    /// Metered image edit, mirroring `generate`: resolve the edit
-    /// model (requests name none, so the default governs), reject an unpriced
-    /// model before any wallet/Venice call, authorize a hold, edit, then charge
+    /// Metered image edit, mirroring `generate`: resolve the edit model (requests
+    /// name none, so the default governs; a retired id is served by the default
+    /// too), reject an unpriced default before any wallet or provider call,
+    /// authorize a hold, edit, then charge
     /// the flat edit price under a unique key. A failed/rejected edit returns the
     /// error WITHOUT charging (the hold is released).
     pub async fn edit(&self, params: ImageEditParams) -> Result<ImageGenerateOutput, ServiceError> {
-        let model = params
-            .model
-            .clone()
-            .filter(|model| !model.trim().is_empty())
-            .unwrap_or_else(|| self.default_edit_model.clone());
+        let model = served_model(
+            &self.edit_pricing,
+            params.model.as_deref(),
+            &self.default_edit_model,
+        );
         let price = self
             .edit_pricing
             .get(&model)
             .copied()
             .ok_or(ServiceError::ModelNotPriced)?;
         let estimate = Credits(price.credits);
-        let uses_user_key = price.provider == ModelProvider::Venice
-            && uses_user_venice_key(&params.provider_credentials);
+        let uses_user_key = params
+            .provider_credentials
+            .has_user_key(UpstreamProvider::Fal);
         if let Some(key) = edit_ledger_key(&params, &model) {
             match self.request_ledger.claim(key).await {
                 ImageLedgerClaim::Replay(output) => return Ok(output),
+                ImageLedgerClaim::Failed(error) => return Err(error),
                 ImageLedgerClaim::ChargePending { key, pending } => {
                     return self.settle_pending_ledger_charge(key, pending).await;
                 }
@@ -238,7 +251,7 @@ impl ImageService {
                     if uses_user_key {
                         return Self::finish_claimed_output(
                             guard,
-                            self.edit_with_user_venice_key(&params, &model).await,
+                            self.edit_with_user_key(&params, &model).await,
                         );
                     }
                     return self
@@ -251,14 +264,14 @@ impl ImageService {
             }
         }
         if uses_user_key {
-            return self.edit_with_user_venice_key(&params, &model).await;
+            return self.edit_with_user_key(&params, &model).await;
         }
         let pending = self.prepare_edit_charge(&params, &model, estimate).await?;
         self.settle_pending_charge_cancellation_safe(None, pending)
             .await
     }
 
-    async fn edit_with_user_venice_key(
+    async fn edit_with_user_key(
         &self,
         params: &ImageEditParams,
         model: &str,
@@ -274,7 +287,12 @@ impl ImageService {
                 provider_credentials: params.provider_credentials.clone(),
             })
             .await?;
-        log_skipped_user_venice_key(ActionSlug::ImageEdit, &params.user_id, model);
+        log_skipped_user_key(
+            ActionSlug::ImageEdit,
+            &params.user_id,
+            model,
+            UpstreamProvider::Fal,
+        );
         Ok(ImageGenerateOutput {
             image,
             receipt: zero_receipt(),
@@ -341,7 +359,7 @@ impl ImageService {
         let pending = match pending {
             Ok(pending) => pending,
             Err(error) => {
-                guard.fail();
+                guard.fail(&error);
                 return Err(error);
             }
         };
@@ -360,7 +378,7 @@ impl ImageService {
                 Ok(output)
             }
             Err(error) => {
-                guard.fail();
+                guard.fail(&error);
                 Err(error)
             }
         }
@@ -384,6 +402,7 @@ impl ImageService {
             }
             match self.request_ledger.claim(key.clone()).await {
                 ImageLedgerClaim::Replay(output) => return Ok(output),
+                ImageLedgerClaim::Failed(error) => return Err(error),
                 ImageLedgerClaim::ChargePending {
                     key: next_key,
                     pending: next_pending,
@@ -392,8 +411,9 @@ impl ImageService {
                     pending = next_pending;
                 }
                 ImageLedgerClaim::Run { guard } => {
-                    guard.fail();
-                    return Err(ServiceError::MeteringProvider);
+                    let error = ServiceError::MeteringProvider;
+                    guard.fail(&error);
+                    return Err(error);
                 }
             }
         }
@@ -413,7 +433,11 @@ impl ImageService {
         match handle.await {
             Ok(result) => result,
             Err(error) => {
-                tracing::warn!(%error, "image settlement task failed");
+                tracing::warn!(
+                    panicked = error.is_panic(),
+                    cancelled = error.is_cancelled(),
+                    "image settlement task failed"
+                );
                 Err(ServiceError::MeteringProvider)
             }
         }
@@ -438,7 +462,7 @@ impl ImageService {
     }
 
     /// Each paid image attempt gets a globally unique settlement scope. The
-    /// request ledger absorbs same-request retries before they reach Venice;
+    /// request ledger absorbs same-request retries before they reach upstream;
     /// keeping the settlement key attempt-unique preserves the invariant that
     /// fresh upstream work after a process restart never replays an old charge.
     fn idempotency_key(params: &ImageGenerateParams, operation_id: &str) -> String {
@@ -527,7 +551,7 @@ struct ImageRequestLedgerInner {
 
 enum ImageLedgerEntry {
     InFlight {
-        notify: Arc<Notify>,
+        notify: Arc<AttemptNotify>,
         started_at: Instant,
         owner: u64,
     },
@@ -536,7 +560,7 @@ enum ImageLedgerEntry {
         created_at: Instant,
     },
     Settling {
-        notify: Arc<Notify>,
+        notify: Arc<AttemptNotify>,
         user_id: UserId,
         created_at: Instant,
     },
@@ -546,8 +570,39 @@ enum ImageLedgerEntry {
     },
 }
 
+/// What the waiters of a ledger entry share: the wakeup and, for an attempt
+/// that failed or was interrupted, its outcome. A waiter attached to such an
+/// attempt returns that outcome; it never takes the request over and runs the
+/// provider again behind the client's back.
+#[derive(Default)]
+struct AttemptNotify {
+    waiters: Notify,
+    failure: OnceLock<ServiceError>,
+}
+
+impl AttemptNotify {
+    fn notified(&self) -> Notified<'_> {
+        self.waiters.notified()
+    }
+
+    fn notify_waiters(&self) {
+        self.waiters.notify_waiters();
+    }
+
+    fn fail(&self, error: ServiceError) {
+        // An attempt ends once; its first outcome is the one waiters see.
+        let _ = self.failure.set(error);
+    }
+
+    fn failure(&self) -> Option<&ServiceError> {
+        self.failure.get()
+    }
+}
+
 enum ImageLedgerClaim {
     Replay(ImageGenerateOutput),
+    /// The attempt this claim waited on failed or was interrupted.
+    Failed(ServiceError),
     ChargePending {
         key: String,
         pending: PendingImageCharge,
@@ -591,9 +646,10 @@ impl ImageLedgerRun {
         }
     }
 
-    fn fail(mut self) {
+    fn fail(mut self, error: &ServiceError) {
         if let Some(key) = self.key.take() {
-            self.ledger.remove_in_flight(&key, self.owner);
+            self.ledger
+                .remove_in_flight(&key, self.owner, error.clone());
         }
     }
 }
@@ -601,7 +657,10 @@ impl ImageLedgerRun {
 impl Drop for ImageLedgerRun {
     fn drop(&mut self) {
         if let Some(key) = self.key.take() {
-            self.ledger.remove_in_flight(&key, self.owner);
+            // Dropped mid-attempt (the request was cancelled): the provider's
+            // outcome is unknown, so its waiters get the ambiguous upstream error.
+            self.ledger
+                .remove_in_flight(&key, self.owner, ServiceError::UpstreamProvider);
         }
     }
 }
@@ -616,6 +675,7 @@ impl ImageRequestLedger {
 
     async fn claim(&self, key: String) -> ImageLedgerClaim {
         loop {
+            let attempt;
             let notified = {
                 let mut entries = self.entries();
                 prune_expired_entries(&mut entries, Instant::now(), self.pending_ttl);
@@ -632,13 +692,16 @@ impl ImageRequestLedger {
                     Some(
                         ImageLedgerEntry::InFlight { notify, .. }
                         | ImageLedgerEntry::Settling { notify, .. },
-                    ) => notify.clone().notified_owned(),
+                    ) => {
+                        attempt = Arc::clone(notify);
+                        attempt.notified()
+                    }
                     None => {
                         let owner = self.inner.next_owner.fetch_add(1, Ordering::Relaxed);
                         entries.insert(
                             key.clone(),
                             ImageLedgerEntry::InFlight {
-                                notify: Arc::new(Notify::new()),
+                                notify: Arc::new(AttemptNotify::default()),
                                 started_at: Instant::now(),
                                 owner,
                             },
@@ -654,6 +717,9 @@ impl ImageRequestLedger {
                 }
             };
             notified.await;
+            if let Some(error) = attempt.failure() {
+                return ImageLedgerClaim::Failed(error.clone());
+            }
         }
     }
 
@@ -721,7 +787,7 @@ impl ImageRequestLedger {
                 entries.insert(
                     key,
                     ImageLedgerEntry::Settling {
-                        notify: Arc::new(Notify::new()),
+                        notify: Arc::new(AttemptNotify::default()),
                         user_id: pending.user_id.clone(),
                         created_at: pending.created_at,
                     },
@@ -746,7 +812,7 @@ impl ImageRequestLedger {
             entries.insert(
                 key,
                 ImageLedgerEntry::Settling {
-                    notify: Arc::new(Notify::new()),
+                    notify: Arc::new(AttemptNotify::default()),
                     user_id: pending.user_id.clone(),
                     created_at: pending.created_at,
                 },
@@ -857,7 +923,8 @@ impl ImageRequestLedger {
         }
     }
 
-    fn remove_in_flight(&self, key: &str, owner: u64) {
+    /// Ends an attempt that did not produce an image: its waiters get `outcome`.
+    fn remove_in_flight(&self, key: &str, owner: u64, outcome: ServiceError) {
         let notify = {
             let mut entries = self.entries();
             match entries.get(key) {
@@ -880,6 +947,7 @@ impl ImageRequestLedger {
             }
         };
         if let Some(notify) = notify {
+            notify.fail(outcome);
             notify.notify_waiters();
         }
     }
@@ -1164,16 +1232,19 @@ pub struct ImageGenerateOutput {
 }
 
 #[cfg(test)]
+mod waiter_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         ImageEditParams, ImageGenerateParams, ImageModelPrice, ImageService, ImageServiceDeps,
     };
     use async_trait::async_trait;
-    use clovy_config::{DEFAULT_IMAGE_HOLD_TTL_SECS, ModelProvider};
+    use clovy_config::DEFAULT_IMAGE_HOLD_TTL_SECS;
     use clovy_domain::{
         Authorization, AuthorizeRequest, ChargeRequest, DomainError, GeneratedImage,
         ImageEditRequest, ImageEditor, ImageGenerationRequest, ImageGenerator, OsAccountsClient,
-        ProviderCredentials, Receipt, UserId,
+        ProviderCredentials, Receipt, UpstreamProvider, UserId,
     };
     use pretty_assertions::assert_eq;
     use std::{
@@ -1477,7 +1548,7 @@ mod tests {
                 image_base64: "aGVsbG8=".to_string(),
                 mime_type: "image/png".to_string(),
                 model: request.model.0,
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             })
         }
     }
@@ -1504,7 +1575,7 @@ mod tests {
                 image_base64: format!("generated-{call}"),
                 mime_type: "image/png".to_string(),
                 model: request.model.0,
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             })
         }
     }
@@ -1531,7 +1602,7 @@ mod tests {
                 image_base64: format!("generated-{call}"),
                 mime_type: "image/png".to_string(),
                 model: request.model.0,
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             })
         }
     }
@@ -1573,7 +1644,7 @@ mod tests {
                 image_base64: "ZGVsYXllZA==".to_string(),
                 mime_type: "image/png".to_string(),
                 model: request.model.0,
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             })
         }
     }
@@ -1587,7 +1658,7 @@ mod tests {
                 image_base64: "ZWRpdGVk".to_string(),
                 mime_type: "image/png".to_string(),
                 model: request.model.0,
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             })
         }
     }
@@ -1611,7 +1682,7 @@ mod tests {
                 image_base64: format!("edited-{call}"),
                 mime_type: "image/png".to_string(),
                 model: request.model.0,
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             })
         }
     }
@@ -1641,10 +1712,11 @@ mod tests {
             os_accounts,
             generator,
             editor,
-            pricing: BTreeMap::from([("venice-sd35".to_string(), ImageModelPrice::venice(20))]),
+            pricing: BTreeMap::from([("flux-dev".to_string(), ImageModelPrice::new(20))]),
+            default_model: "flux-dev".to_string(),
             edit_pricing: BTreeMap::from([(
                 "firered-image-edit".to_string(),
-                ImageModelPrice::venice(80),
+                ImageModelPrice::new(80),
             )]),
             default_edit_model: "firered-image-edit".to_string(),
             hold_ttl_seconds,
@@ -1681,7 +1753,7 @@ mod tests {
     async fn authorizes_then_charges_the_flat_model_price() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let output = service(os_accounts.clone(), Arc::new(FixedGenerator))
-            .generate(params("venice-sd35"))
+            .generate(params("flux-dev"))
             .await
             .expect("generation succeeds");
 
@@ -1707,13 +1779,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unpriced_model_is_rejected_before_any_wallet_call() {
+    async fn retired_model_is_served_and_charged_as_the_default_model() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
-        let result = service(os_accounts.clone(), Arc::new(FixedGenerator))
-            .generate(params("some-unlisted-model"))
-            .await;
+        let output = service(os_accounts.clone(), Arc::new(FixedGenerator))
+            .generate(params("retired-image-model"))
+            .await
+            .expect("a retired id falls back to the default model");
 
-        assert!(matches!(result, Err(crate::ServiceError::ModelNotPriced)));
+        assert_eq!(output.image.model, "flux-dev");
+        assert_eq!(output.receipt.credits_charged.0, 20);
+        assert_eq!(
+            os_accounts.events()[0],
+            Call::Authorize {
+                action: "image_generate".to_string(),
+                estimate: 20,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn unpriced_default_model_is_rejected_before_any_wallet_call() {
+        let os_accounts = Arc::new(RecordingOsAccounts::new(true));
+        let service = ImageService::new(ImageServiceDeps {
+            os_accounts: os_accounts.clone(),
+            generator: Arc::new(FixedGenerator),
+            editor: Arc::new(FixedEditor),
+            pricing: BTreeMap::from([("flux-dev".to_string(), ImageModelPrice::new(20))]),
+            default_model: "not-priced".to_string(),
+            edit_pricing: BTreeMap::new(),
+            default_edit_model: "not-priced".to_string(),
+            hold_ttl_seconds: 60,
+        });
+
+        let generated = service.generate(params("retired-image-model")).await;
+        let edited = service.edit(edit_params()).await;
+
+        assert!(matches!(
+            generated,
+            Err(crate::ServiceError::ModelNotPriced)
+        ));
+        assert!(matches!(edited, Err(crate::ServiceError::ModelNotPriced)));
         // Never authorized or charged.
         assert!(os_accounts.events().is_empty());
     }
@@ -1722,7 +1827,7 @@ mod tests {
     async fn insufficient_balance_denial_does_not_generate_or_charge() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(false));
         let result = service(os_accounts.clone(), Arc::new(FixedGenerator))
-            .generate(params("venice-sd35"))
+            .generate(params("flux-dev"))
             .await;
 
         assert!(matches!(
@@ -1743,7 +1848,7 @@ mod tests {
     async fn failed_generation_authorizes_but_never_bills() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let result = service(os_accounts.clone(), Arc::new(FailingGenerator))
-            .generate(params("venice-sd35"))
+            .generate(params("flux-dev"))
             .await;
 
         assert!(matches!(result, Err(crate::ServiceError::UpstreamProvider)));
@@ -1767,12 +1872,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_venice_key_generates_without_wallet_authorize_or_charge() {
+    async fn user_fal_key_generates_without_wallet_authorize_or_charge() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
-        let mut params = params("venice-sd35");
-        params.provider_credentials = ProviderCredentials {
-            venice_api_key: Some("vc_user_key".to_string()),
-        };
+        let mut params = params("flux-dev");
+        params.provider_credentials =
+            ProviderCredentials::for_provider(UpstreamProvider::Fal, "fal_user_key".to_string());
         let output = service(os_accounts.clone(), Arc::new(FixedGenerator))
             .generate(params)
             .await
@@ -1783,15 +1887,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_venice_key_generation_request_id_replays_without_regenerating() {
+    async fn user_fal_key_generation_request_id_replays_without_regenerating() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let generator = Arc::new(CountingGenerator::default());
         let service = service(os_accounts.clone(), generator.clone());
-        let mut params = params("venice-sd35");
+        let mut params = params("flux-dev");
         params.request_id = Some("req_byok_generate".to_string());
-        params.provider_credentials = ProviderCredentials {
-            venice_api_key: Some("vc_user_key".to_string()),
-        };
+        params.provider_credentials =
+            ProviderCredentials::for_provider(UpstreamProvider::Fal, "fal_user_key".to_string());
 
         let first = service
             .generate(params.clone())
@@ -1810,27 +1913,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_venice_key_does_not_skip_non_venice_image_model_metering() {
+    async fn non_fal_key_does_not_skip_image_metering() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let service = ImageService::new(ImageServiceDeps {
             os_accounts: os_accounts.clone(),
             generator: Arc::new(FixedGenerator),
             editor: Arc::new(FixedEditor),
-            pricing: BTreeMap::from([(
-                "openai-image".to_string(),
-                ImageModelPrice {
-                    credits: 20,
-                    provider: ModelProvider::Openai,
-                },
-            )]),
+            pricing: BTreeMap::from([("other-image".to_string(), ImageModelPrice::new(20))]),
+            default_model: "other-image".to_string(),
             edit_pricing: BTreeMap::new(),
             default_edit_model: "firered-image-edit".to_string(),
             hold_ttl_seconds: 60,
         });
-        let mut params = params("openai-image");
-        params.provider_credentials = ProviderCredentials {
-            venice_api_key: Some("vc_user_key".to_string()),
-        };
+        let mut params = params("other-image");
+        params.provider_credentials =
+            ProviderCredentials::for_provider(UpstreamProvider::Openrouter, "or_key".to_string());
         let output = service.generate(params).await.expect("generation succeeds");
 
         assert_eq!(output.receipt.credits_charged.0, 20);
@@ -1858,7 +1955,7 @@ mod tests {
             Arc::new(FixedEditor),
             OLD_IMAGE_HOLD_TTL_SECONDS,
         )
-        .generate(params("venice-sd35"))
+        .generate(params("flux-dev"))
         .await;
         assert!(matches!(
             old_result,
@@ -1874,7 +1971,7 @@ mod tests {
         );
 
         let output = service
-            .generate(params("venice-sd35"))
+            .generate(params("flux-dev"))
             .await
             .expect("settlement succeeds before the widened image hold expires");
 
@@ -1890,7 +1987,7 @@ mod tests {
         let service = service(os_accounts.clone(), Arc::new(FixedGenerator));
         for _ in 0..2 {
             service
-                .generate(params("venice-sd35"))
+                .generate(params("flux-dev"))
                 .await
                 .expect("generation succeeds");
         }
@@ -1914,7 +2011,7 @@ mod tests {
         let generator: Arc<dyn ImageGenerator> = Arc::new(FixedGenerator);
         for _ in 0..2 {
             service(os_accounts.clone(), generator.clone())
-                .generate(params("venice-sd35"))
+                .generate(params("flux-dev"))
                 .await
                 .expect("generation succeeds");
         }
@@ -1929,7 +2026,7 @@ mod tests {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let generator = Arc::new(CountingGenerator::default());
         let service = service(os_accounts.clone(), generator.clone());
-        let mut params = params("venice-sd35");
+        let mut params = params("flux-dev");
         params.request_id = Some("req_1".to_string());
         let first = service
             .generate(params.clone())
@@ -1948,7 +2045,7 @@ mod tests {
         let os_accounts = Arc::new(BlockingChargeOsAccounts::default());
         let generator = Arc::new(NotifyingCountingGenerator::default());
         let service = Arc::new(service(os_accounts.clone(), generator.clone()));
-        let mut params = params("venice-sd35");
+        let mut params = params("flux-dev");
         params.request_id = Some("req_cancel_after_provider".to_string());
 
         let first = tokio::spawn({
@@ -1986,7 +2083,7 @@ mod tests {
                 .generate(ImageGenerateParams {
                     request_id: Some("req_1".to_string()),
                     prompt: prompt.to_string(),
-                    ..params("venice-sd35")
+                    ..params("flux-dev")
                 })
                 .await
                 .expect("generation succeeds");
@@ -2002,7 +2099,7 @@ mod tests {
         let os_accounts = Arc::new(ChargeFailsOnceOsAccounts::default());
         let generator = Arc::new(CountingGenerator::default());
         let service = service(os_accounts.clone(), generator.clone());
-        let mut params = params("venice-sd35");
+        let mut params = params("flux-dev");
         params.request_id = Some("req_ambiguous_charge".to_string());
 
         let first = service.generate(params.clone()).await;
@@ -2028,7 +2125,7 @@ mod tests {
             Arc::new(FixedEditor),
             1,
         );
-        let mut params = params("venice-sd35");
+        let mut params = params("flux-dev");
         params.request_id = Some("req_expired_pending_charge".to_string());
 
         let first = service.generate(params.clone()).await;
@@ -2141,7 +2238,9 @@ mod tests {
                         .expect("pending charge inserted");
                     ledger.complete_pending(pending_key, sample_output());
                 }
-                super::ImageLedgerClaim::Replay(_) => panic!("fresh key must run"),
+                super::ImageLedgerClaim::Replay(_) | super::ImageLedgerClaim::Failed(_) => {
+                    panic!("fresh key must run")
+                }
                 super::ImageLedgerClaim::ChargePending { .. } => {
                     panic!("fresh key must not have a pending charge")
                 }
@@ -2174,7 +2273,9 @@ mod tests {
                         .charge_pending(sample_pending_at(created_at + offset))
                         .expect("pending charge inserted");
                 }
-                super::ImageLedgerClaim::Replay(_) => panic!("fresh key must run"),
+                super::ImageLedgerClaim::Replay(_) | super::ImageLedgerClaim::Failed(_) => {
+                    panic!("fresh key must run")
+                }
                 super::ImageLedgerClaim::ChargePending { .. } => {
                     panic!("fresh key must not have a pending charge")
                 }
@@ -2325,7 +2426,7 @@ mod tests {
         entries.insert(
             "stale".to_string(),
             super::ImageLedgerEntry::InFlight {
-                notify: Arc::new(tokio::sync::Notify::new()),
+                notify: Arc::new(super::AttemptNotify::default()),
                 started_at,
                 owner: 1,
             },
@@ -2377,7 +2478,9 @@ mod tests {
                     .start_settling(&sample_pending_for_user_at(user_id, created_at))
                     .expect("settling entry inserted");
             }
-            super::ImageLedgerClaim::Replay(_) => panic!("fresh key must run"),
+            super::ImageLedgerClaim::Replay(_) | super::ImageLedgerClaim::Failed(_) => {
+                panic!("fresh key must run")
+            }
             super::ImageLedgerClaim::ChargePending { .. } => {
                 panic!("fresh key must not have a pending charge")
             }
@@ -2416,7 +2519,7 @@ mod tests {
                 image_base64: "aGVsbG8=".to_string(),
                 mime_type: "image/png".to_string(),
                 model: "flux-2-pro".to_string(),
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             },
             action_token: "agt_test".to_string(),
             credits: clovy_domain::Credits(60),
@@ -2431,7 +2534,7 @@ mod tests {
                 image_base64: "aGVsbG8=".to_string(),
                 mime_type: "image/png".to_string(),
                 model: "flux-2-pro".to_string(),
-                provider: "venice".to_string(),
+                provider: "fal".to_string(),
             },
             receipt: Receipt {
                 credits_charged: clovy_domain::Credits(60),
@@ -2441,12 +2544,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_venice_key_edits_without_wallet_authorize_or_charge() {
+    async fn user_fal_key_edits_without_wallet_authorize_or_charge() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let mut params = edit_params();
-        params.provider_credentials = ProviderCredentials {
-            venice_api_key: Some("vc_user_key".to_string()),
-        };
+        params.provider_credentials =
+            ProviderCredentials::for_provider(UpstreamProvider::Fal, "fal_user_key".to_string());
         let output = service(os_accounts.clone(), Arc::new(FixedGenerator))
             .edit(params)
             .await
@@ -2457,7 +2559,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_venice_key_edit_request_id_replays_without_reediting() {
+    async fn user_fal_key_edit_request_id_replays_without_reediting() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let editor = Arc::new(CountingEditor::default());
         let service = service_with_editor(
@@ -2467,10 +2569,8 @@ mod tests {
         );
         let mut params = edit_params();
         params.request_id = Some("req_byok_edit".to_string());
-        params.provider_credentials = ProviderCredentials {
-            venice_api_key: Some("vc_user_key".to_string()),
-        };
-
+        params.provider_credentials =
+            ProviderCredentials::for_provider(UpstreamProvider::Fal, "fal_user_key".to_string());
         let first = service
             .edit(params.clone())
             .await
@@ -2485,17 +2585,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_with_an_unpriced_model_is_rejected_before_any_wallet_call() {
+    async fn edit_with_a_retired_model_is_served_by_the_default_edit_model() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
-        let result = service(os_accounts.clone(), Arc::new(FixedGenerator))
+        let output = service(os_accounts.clone(), Arc::new(FixedGenerator))
             .edit(ImageEditParams {
-                model: Some("some-unpriced-edit-model".to_string()),
+                model: Some("retired-edit-model".to_string()),
                 ..edit_params()
             })
-            .await;
+            .await
+            .expect("a retired edit id falls back to the default edit model");
 
-        assert!(matches!(result, Err(crate::ServiceError::ModelNotPriced)));
-        assert!(os_accounts.events().is_empty());
+        assert_eq!(output.image.model, "firered-image-edit");
+        assert_eq!(output.receipt.credits_charged.0, 80);
     }
 
     fn charge_keys(events: Vec<Call>) -> Vec<String> {

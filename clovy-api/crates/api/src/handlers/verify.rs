@@ -223,14 +223,11 @@ the digest yourself instead of trusting our CI) are in progress; see
 
 <h2>What this does not cover</h2>
 <p>This evidence supports the reported <strong>code identity</strong> inside the
-confidential VM, not what upstream providers do. Everything leaving the TEE for model inference
-(audio for transcription, prompts and context for note generation and the
-agent) goes through Venice. By default it runs on Venice private models: zero
-data retention, no training. If you select an anonymized model not run by
-Venice, the request is still routed and anonymized by Venice, but the
-underlying model provider may retain data under its own privacy policy.
-End-to-end private inference is a separate workstream.</p>
-
+confidential VM, not what upstream providers do. Model inference requests leave the
+TEE to third-party providers (Groq for audio transcription, OpenRouter for text and agent
+completion, fal for image and video generation, and Tavily for web search and fetch).
+These third-party requests carry no confidential-compute or zero-data-retention claim and are
+subject to each provider's standard terms and privacy policies.</p>
 <footer>
   <p>Open Software · <a href="@REPO_URL@">source</a> · <a href="@TRUST_CENTER_URL@">attestation</a></p>
 </footer>

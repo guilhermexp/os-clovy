@@ -97,3 +97,31 @@ Fixture lifecycle:
 - The suite does not verify the client side of the contract (that the app
   parses what the server sends); that remains covered by the client's own
   tests. It also cannot catch semantic changes that keep the same shape.
+
+## Addendum - local provider cutover and retired credentials (2026-10-08)
+
+The owner selected a clean Venice removal for local development: Groq audio,
+OpenRouter remote text, fal media, and Tavily web. The updated client uses
+the new provider credentials; a Venice key cannot authenticate to those
+vendors and is never copied, forwarded to them, or silently ignored in
+favor of a charge to Clovy credits.
+
+The API rejects a non-empty provider-key header that does not belong to the
+route through the common credential boundary. This includes the retired
+`x-venice-api-key`, which receives `venice_api_key_not_accepted` before
+funding or forwarding; there is no Venice execution branch or compatibility
+alias. This is a semantic break for a client that still sends its old
+Venice key, not evidence that every shipped client remains compatible.
+
+Request/response bodies, casing, the numeric error registry, and historical
+client-contract fixtures remain subject to the original policy. Retired
+model IDs use the configured working defaults rather than reactivating
+Venice; old web search selector fields are accepted as unknown input and
+do not select an old provider. Passing those fixtures does not prove the
+retired-key case is compatible.
+
+This records the local cutover and its safety boundary, not permission to
+publish a breaking production API. A publication/support decision is
+required before any deployment that affects in-support clients. The
+accepted production compatibility policy above and its historical text
+remain unchanged.

@@ -1,15 +1,14 @@
 use clap::{Parser, Subcommand};
-use clovy_api::{ApiLimits, ApiState, ApiStateParams, AttestationInfo, ShareViewerInfo};
-use clovy_config::{
-    AppConfig, ModelPriceConfig, ModelProvider, OPENAI_API_KEY_PLACEHOLDER,
-    VENICE_API_KEY_PLACEHOLDER, image_client_timeout_secs,
+use clovy_api::{
+    ApiLimits, ApiState, ApiStateParams, AttestationInfo, ShareViewerInfo, UpstreamServiceKeys,
 };
+use clovy_config::{AppConfig, ModelPriceConfig, image_client_timeout_secs};
 use clovy_providers::{
-    JwksTokenVerifier, LocalDevOsAccountsClient, LocalDevTokenVerifier, LogIssueReportSink,
-    LogP3aSink, MultiFormatDurationProbe, OsAccountsHttpClient, OsAccountsP3aSink,
-    OsPlatformIssueReportSink, RoutingTranscriber, VeniceAgentChat, VeniceAugment, VeniceCleaner,
-    VeniceGenerator, VeniceImageEditor, VeniceImageGenerator, VeniceModelCatalog,
-    VeniceVideoProvider, client_with_timeout, default_client, issue_report_client, jwks_client,
+    FalImageEditor, FalImageGenerator, FalVideoProvider, GroqTranscriber, JwksTokenVerifier,
+    LocalDevOsAccountsClient, LocalDevTokenVerifier, LogIssueReportSink, LogP3aSink,
+    MultiFormatDurationProbe, OpenRouterAgentChat, OpenRouterCleaner, OpenRouterGenerator,
+    OpenRouterModelCatalog, OsAccountsHttpClient, OsAccountsP3aSink, OsPlatformIssueReportSink,
+    TavilyAugment, default_client, issue_report_client, jwks_client, upstream_client,
 };
 use clovy_services::{
     AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps, ImageModelPrice,
@@ -46,16 +45,16 @@ async fn serve() -> anyhow::Result<()> {
     let config = clovy_config::load()?;
     let address: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
     let http = default_client();
-    let upstream_http = client_with_timeout(Duration::from_secs(
+    let upstream_http = upstream_client(Duration::from_secs(
         config.server.request_timeout_secs.max(1),
-    ));
+    ))?;
     // Shared bounded client for every long-running metered inference call
     // (image generate/edit, note generation, agent chat): route timeout minus
     // the authorize + settlement budgets, so settlement always lands inside
     // the hold TTL.
-    let metered_inference_http = client_with_timeout(Duration::from_secs(
-        image_client_timeout_secs(config.server.request_timeout_secs),
-    ));
+    let metered_inference_http = upstream_client(Duration::from_secs(image_client_timeout_secs(
+        config.server.request_timeout_secs,
+    )))?;
     // os-platform attachment uploads can carry the full 300 MiB file budget.
     // Give that dedicated client the route's configured window instead of the
     // shared client's 60 seconds. The client deliberately has no retry layer:
@@ -64,7 +63,7 @@ async fn serve() -> anyhow::Result<()> {
         issue_report_client(Duration::from_secs(config.server.request_timeout_secs))?;
     let initial_pricing = try_load_pricing(&config, upstream_http.clone())
         .await
-        .unwrap_or_else(|| configured_pricing(&config));
+        .unwrap_or_else(|| config.pricing.clone());
     tracing::info!(
         count = initial_pricing.len(),
         "loaded initial model catalog"
@@ -186,43 +185,32 @@ async fn load_companion_runtime(config: &AppConfig) -> CompanionRuntime {
     }
 }
 
+/// The model catalog: the packaged pricing extended by `OpenRouter`'s public
+/// model list (no key needed). Every priced model stays listed whether or not
+/// Clovy holds that provider's service key: a request then needs the user's
+/// own key and otherwise fails `<provider>_not_configured`, so the catalog is
+/// never emptied by a missing key. `None` keeps the last known catalog when
+/// `OpenRouter` is unreachable.
 async fn try_load_pricing(
     config: &AppConfig,
     http: reqwest::Client,
 ) -> Option<BTreeMap<String, ModelPriceConfig>> {
-    if !provider_is_configured(config, ModelProvider::Venice) {
-        tracing::info!("Venice API key is not configured; skipping Venice model catalog");
-        return Some(configured_pricing(config));
-    }
-    match VeniceModelCatalog::from_config(http, &config.upstreams.venice)
+    match OpenRouterModelCatalog::from_config(http, &config.upstreams.openrouter)
         .priced_models()
         .await
     {
         Ok(models) => {
             let mut pricing = config.pricing.clone();
             pricing.extend(models);
-            apply_private_route_price_floors(&mut pricing);
-            Some(filter_pricing_for_environment(config, pricing))
+            Some(pricing)
         }
         Err(error) => {
-            tracing::warn!(%error, "failed to refresh Venice model catalog; keeping the last known catalog");
+            tracing::warn!(
+                %error,
+                "failed to refresh the OpenRouter model catalog; keeping the last known catalog"
+            );
             None
         }
-    }
-}
-
-fn configured_pricing(config: &AppConfig) -> BTreeMap<String, ModelPriceConfig> {
-    filter_pricing_for_environment(config, config.pricing.clone())
-}
-
-fn filter_pricing_for_environment(
-    config: &AppConfig,
-    pricing: BTreeMap<String, ModelPriceConfig>,
-) -> BTreeMap<String, ModelPriceConfig> {
-    if config.local_dev.enabled {
-        filter_unconfigured_provider_models(config, pricing)
-    } else {
-        pricing
     }
 }
 
@@ -231,9 +219,6 @@ fn spawn_model_catalog_refresh(
     http: reqwest::Client,
     pricing: Arc<PricingTable>,
 ) {
-    if !provider_is_configured(config, ModelProvider::Venice) {
-        return;
-    }
     let config = config.clone();
     let refresh_every = Duration::from_secs(config.server.model_catalog_refresh_secs);
     let task = tokio::spawn(async move {
@@ -254,33 +239,35 @@ fn spawn_model_catalog_refresh(
     drop(task);
 }
 
-/// The routed catalog currently reports the cheapest eligible endpoint, while
-/// Clovy settles by requested model ID. Floor routed text models at the most
-/// expensive endpoint eligible for `preferred` so a Phala fallback cannot be
-/// sold below cost. Remove this once settlement is authenticated per route.
-fn apply_private_route_price_floors(pricing: &mut BTreeMap<String, ModelPriceConfig>) {
-    for (model_id, input_floor, output_floor) in [
-        ("openai/gpt-oss-120b", 150, 600),
-        ("google/gemma-3-27b-it", 150, 460),
-        ("z-ai/glm-5.2", 1_400, 4_400),
-        ("qwen/qwen3.6-27b", 325, 3_250),
-        ("moonshotai/kimi-k2.6", 1_090, 4_600),
-    ] {
-        let Some(model) = pricing.get_mut(model_id) else {
-            continue;
-        };
-        model.input_credits_per_million_tokens = Some(
-            model
-                .input_credits_per_million_tokens
-                .unwrap_or_default()
-                .max(input_floor),
-        );
-        model.output_credits_per_million_tokens = Some(
-            model
-                .output_credits_per_million_tokens
-                .unwrap_or_default()
-                .max(output_floor),
-        );
+/// Which upstreams Clovy can fund with its own service key. A missing key is
+/// allowed only in local dev (validated at load); requests to that upstream
+/// then need the user's own key.
+fn upstream_service_keys(config: &AppConfig) -> UpstreamServiceKeys {
+    let keys = UpstreamServiceKeys::for_providers(
+        clovy_domain::UpstreamProvider::ALL
+            .into_iter()
+            .filter(|provider| upstream_config(config, *provider).has_service_key()),
+    );
+    for provider in clovy_domain::UpstreamProvider::ALL {
+        if !keys.has(provider) {
+            tracing::warn!(
+                upstream = provider.as_str(),
+                "no service key configured; requests to this upstream need the user's own key"
+            );
+        }
+    }
+    keys
+}
+
+fn upstream_config(
+    config: &AppConfig,
+    provider: clovy_domain::UpstreamProvider,
+) -> &clovy_config::UpstreamConfig {
+    match provider {
+        clovy_domain::UpstreamProvider::Groq => &config.upstreams.groq,
+        clovy_domain::UpstreamProvider::Openrouter => &config.upstreams.openrouter,
+        clovy_domain::UpstreamProvider::Fal => &config.upstreams.fal,
+        clovy_domain::UpstreamProvider::Tavily => &config.upstreams.tavily,
     }
 }
 
@@ -296,45 +283,38 @@ fn build_router(
     stores: RuntimeStores,
 ) -> axum::Router {
     let os_accounts = build_os_accounts_client(config, clients.default);
-    let routing_pricing = pricing.clone();
-    let transcriber: Arc<dyn clovy_domain::Transcriber> =
-        Arc::new(RoutingTranscriber::from_config(
-            clients.upstream.clone(),
-            &config.upstreams,
-            Arc::new(move |model_id| {
-                routing_pricing
-                    .priced_model(model_id, clovy_domain::ModelKind::Asr)
-                    .is_ok_and(|model| model.provider == ModelProvider::Openai)
-            }),
-        ));
+    let transcriber: Arc<dyn clovy_domain::Transcriber> = Arc::new(GroqTranscriber::from_config(
+        clients.upstream.clone(),
+        &config.upstreams.groq,
+    ));
     // Note generation and agent chat can now run long (streamed/kept-alive
     // responses), so their upstream window must leave the settlement budget
     // inside the authorization hold — the same route/client/hold math the
     // image path pins (see image_client_timeout_secs and
     // validate_long_inference_hold_ttl). The full-route `upstream` client
     // would let a 300-600s call reach `charge` after its hold expired.
-    // Unmetered (user-Venice-key) requests have no hold to protect and keep
-    // the full-route client — see AgentChatRequest::unmetered.
-    let generator: Arc<dyn clovy_domain::Generator> = Arc::new(VeniceGenerator::from_config(
+    // Unmetered (user-OpenRouter-key) requests have no hold to protect and
+    // keep the full-route client — see AgentChatRequest::unmetered.
+    let generator: Arc<dyn clovy_domain::Generator> = Arc::new(OpenRouterGenerator::from_config(
         clients.metered_inference.clone(),
         clients.upstream.clone(),
-        &config.upstreams.venice,
+        &config.upstreams.openrouter,
     ));
-    let cleaner: Arc<dyn clovy_domain::Cleaner> = Arc::new(VeniceCleaner::from_config(
+    let cleaner: Arc<dyn clovy_domain::Cleaner> = Arc::new(OpenRouterCleaner::from_config(
         clients.upstream.clone(),
-        &config.upstreams.venice,
+        &config.upstreams.openrouter,
     ));
     let agent_chat_completer: Arc<dyn clovy_domain::AgentChatCompleter> =
-        Arc::new(VeniceAgentChat::from_config(
+        Arc::new(OpenRouterAgentChat::from_config(
             clients.metered_inference.clone(),
             clients.upstream.clone(),
-            &config.upstreams.venice,
+            &config.upstreams.openrouter,
         ));
-    // One client backs both web traits (search + fetch) over the same Venice
+    // One client backs both web traits (search + fetch) over the same Tavily
     // credential and base URL.
-    let web_augment = Arc::new(VeniceAugment::from_config(
+    let web_augment = Arc::new(TavilyAugment::from_config(
         clients.upstream.clone(),
-        &config.upstreams.venice,
+        &config.upstreams.tavily,
     ));
     let duration_probe: Arc<dyn clovy_domain::AudioDurationProbe> =
         Arc::new(MultiFormatDurationProbe);
@@ -387,14 +367,14 @@ fn build_router(
         os_accounts: os_accounts.clone(),
         generator: build_image_generator(
             clients.metered_inference,
-            &config.upstreams.venice,
+            &config.upstreams.fal,
             Duration::from_secs(image_client_timeout_secs(
                 config.server.request_timeout_secs,
             )),
         ),
         editor: build_image_editor(
             clients.metered_inference,
-            &config.upstreams.venice,
+            &config.upstreams.fal,
             Duration::from_secs(image_client_timeout_secs(
                 config.server.request_timeout_secs,
             )),
@@ -402,12 +382,13 @@ fn build_router(
         pricing: config
             .image_pricing
             .iter()
-            .map(|(model, credits)| (model.clone(), ImageModelPrice::venice(*credits)))
+            .map(|(model, credits)| (model.clone(), ImageModelPrice::new(*credits)))
             .collect(),
+        default_model: config.default_image_model.clone(),
         edit_pricing: config
             .image_edit_pricing
             .iter()
-            .map(|(model, credits)| (model.clone(), ImageModelPrice::venice(*credits)))
+            .map(|(model, credits)| (model.clone(), ImageModelPrice::new(*credits)))
             .collect(),
         default_edit_model: config.default_image_edit_model.clone(),
         // Edits are the same latency class as generation, so they reuse the
@@ -418,7 +399,7 @@ fn build_router(
         os_accounts: os_accounts.clone(),
         provider: build_video_provider(
             clients.metered_inference,
-            &config.upstreams.venice,
+            &config.upstreams.fal,
             Duration::from_secs(image_client_timeout_secs(
                 config.server.request_timeout_secs,
             )),
@@ -427,12 +408,13 @@ fn build_router(
         pricing: config
             .video_pricing
             .iter()
-            .map(|(model, markup)| (model.clone(), VideoModelPrice::venice(*markup)))
+            .map(|(model, markup)| (model.clone(), VideoModelPrice::new(*markup)))
             .collect(),
+        default_model: config.default_video_model.clone(),
         animate_pricing: config
             .video_animate_pricing
             .iter()
-            .map(|(model, markup)| (model.clone(), VideoModelPrice::venice(*markup)))
+            .map(|(model, markup)| (model.clone(), VideoModelPrice::new(*markup)))
             .collect(),
         default_animate_model: config.default_video_animate_model.clone(),
         max_credits_per_request: config.video_max_credits_per_request,
@@ -485,7 +467,7 @@ fn build_router(
     let state = ApiState::new(ApiStateParams {
         pricing,
         computer_use: config.computer_use.clone(),
-        local_dev_enabled: config.local_dev.enabled,
+        upstream_service_keys: upstream_service_keys(config),
         token_verifier,
         companion_store: stores.companion.store,
         companion_snapshot: stores.companion.snapshot,
@@ -553,37 +535,37 @@ struct HttpClients<'a> {
 
 fn build_image_generator(
     upstream_http: &reqwest::Client,
-    venice: &clovy_config::UpstreamConfig,
+    fal: &clovy_config::UpstreamConfig,
     leg_budget: Duration,
 ) -> Arc<dyn clovy_domain::ImageGenerator> {
-    Arc::new(VeniceImageGenerator::from_config(
+    Arc::new(FalImageGenerator::from_config(
         upstream_http.clone(),
-        venice,
+        fal,
         leg_budget,
     ))
 }
 
 fn build_image_editor(
     upstream_http: &reqwest::Client,
-    venice: &clovy_config::UpstreamConfig,
+    fal: &clovy_config::UpstreamConfig,
     leg_budget: Duration,
 ) -> Arc<dyn clovy_domain::ImageEditor> {
-    Arc::new(VeniceImageEditor::from_config(
+    Arc::new(FalImageEditor::from_config(
         upstream_http.clone(),
-        venice,
+        fal,
         leg_budget,
     ))
 }
 
 fn build_video_provider(
     upstream_http: &reqwest::Client,
-    venice: &clovy_config::UpstreamConfig,
+    fal: &clovy_config::UpstreamConfig,
     call_timeout: Duration,
     max_response_bytes: u64,
 ) -> Arc<dyn clovy_domain::VideoProvider> {
-    Arc::new(VeniceVideoProvider::from_config(
+    Arc::new(FalVideoProvider::from_config(
         upstream_http.clone(),
-        venice,
+        fal,
         call_timeout,
         max_response_bytes,
     ))
@@ -622,42 +604,6 @@ fn build_token_verifier(config: &AppConfig) -> Arc<dyn clovy_domain::TokenVerifi
             &config.os_accounts,
         ))
     }
-}
-
-fn filter_unconfigured_provider_models(
-    config: &AppConfig,
-    pricing_config: BTreeMap<String, ModelPriceConfig>,
-) -> BTreeMap<String, ModelPriceConfig> {
-    let original_len = pricing_config.len();
-    let filtered = pricing_config
-        .into_iter()
-        .filter(|(_, model)| provider_is_configured(config, model.provider))
-        .collect::<BTreeMap<_, _>>();
-    let removed = original_len.saturating_sub(filtered.len());
-    if removed > 0 {
-        tracing::info!(
-            removed,
-            remaining = filtered.len(),
-            "filtered models whose provider API keys are not configured"
-        );
-    }
-    filtered
-}
-
-fn provider_is_configured(config: &AppConfig, provider: ModelProvider) -> bool {
-    match provider {
-        ModelProvider::Openai => {
-            provider_key_is_configured(&config.upstreams.openai.api_key, OPENAI_API_KEY_PLACEHOLDER)
-        }
-        ModelProvider::Venice => {
-            provider_key_is_configured(&config.upstreams.venice.api_key, VENICE_API_KEY_PLACEHOLDER)
-        }
-    }
-}
-
-fn provider_key_is_configured(api_key: &str, placeholder: &str) -> bool {
-    let api_key = api_key.trim();
-    !api_key.is_empty() && api_key != placeholder
 }
 
 fn build_issue_report_sink(
@@ -703,44 +649,52 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
-    #[test]
-    fn canonical_catalog_prices_cover_every_preferred_fallback() {
-        let mut pricing = AppConfig::default().pricing;
-        let template = pricing["kimi-k2-6"].clone();
+    /// Local dev without service keys used to drop every priced model (an
+    /// empty catalog, so dictation failed `model_not_priced`). The catalog now
+    /// keeps the packaged Groq and `OpenRouter` rows plus the live `OpenRouter`
+    /// list whether or not any key is configured, so a user's own key can use
+    /// them.
+    #[tokio::test]
+    async fn catalog_keeps_every_priced_model_without_service_keys() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "vendor/new-text-model",
+                    "name": "Vendor: New text model",
+                    "description": "A text model listed only by the live catalog.",
+                    "context_length": 8192,
+                    "architecture": {
+                        "input_modalities": ["text"],
+                        "output_modalities": ["text"]
+                    },
+                    "pricing": { "prompt": "0.000001", "completion": "0.000002" },
+                    "supported_parameters": ["tools"]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let mut config = AppConfig::default();
+        config.local_dev.enabled = true;
+        config.upstreams.openrouter.base_url = server.uri();
+
+        let pricing = try_load_pricing(&config, reqwest::Client::new())
+            .await
+            .unwrap_or_default();
+
         for model_id in [
-            "openai/gpt-oss-120b",
-            "google/gemma-3-27b-it",
+            "whisper-large-v3-turbo",
+            "whisper-large-v3",
             "z-ai/glm-5.2",
-            "qwen/qwen3.6-27b",
-            "moonshotai/kimi-k2.6",
+            "vendor/new-text-model",
         ] {
-            let mut canonical = template.clone();
-            canonical.input_credits_per_million_tokens = Some(1);
-            canonical.output_credits_per_million_tokens = Some(1);
-            pricing.insert(model_id.to_string(), canonical);
-        }
-
-        apply_private_route_price_floors(&mut pricing);
-
-        for (model_id, input, output) in [
-            ("openai/gpt-oss-120b", 150, 600),
-            ("google/gemma-3-27b-it", 150, 460),
-            ("z-ai/glm-5.2", 1_400, 4_400),
-            ("qwen/qwen3.6-27b", 325, 3_250),
-            ("moonshotai/kimi-k2.6", 1_090, 4_600),
-        ] {
-            let canonical = &pricing[model_id];
-            assert_eq!(
-                canonical.input_credits_per_million_tokens,
-                Some(input),
-                "{model_id} input price"
-            );
-            assert_eq!(
-                canonical.output_credits_per_million_tokens,
-                Some(output),
-                "{model_id} output price"
-            );
+            assert!(pricing.contains_key(model_id), "{model_id} missing");
         }
     }
 }

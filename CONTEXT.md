@@ -42,26 +42,25 @@ it; it never depends on them.
 _Avoid_: accounts, the identity service, the auth service.
 
 **Upstream provider**:
-A third-party AI service Clovy API calls on the user's behalf — currently
-**OpenAI** (transcription only), **Venice** (transcription, generation, agent
-chat, web), and **Phala** (TEE fallback for routed text inference).
-Service-managed upstream provider API keys live only in Clovy API's environment,
-never in Clovy. A user's explicit Venice BYOK credential is stored locally by
-Clovy and forwarded only on eligible Venice requests. In code, each direct
-integration sits behind a domain trait
-(`Transcriber`, `Generator`, `AgentChatCompleter`, ...) defined in
-`clovy-domain` and implemented in `clovy-providers`; routed text calls reuse the
-OpenAI-compatible Venice adapter and report the selected upstream as additive
-route metadata.
+A third-party service Clovy API calls on the user's behalf: **Groq** for
+audio, **OpenRouter** for remote text, **fal** for images/video, and
+**Tavily** for web search/extraction. Service-managed keys belong to Clovy
+API, while an explicit **BYOK** key belongs to the user and is used only
+for that upstream provider's eligible actions.
 _Avoid_: AI provider, model provider, vendor, "the LLM".
 
 **Model routing service**:
-The Open Software API (`os-api`) used for service-managed text inference. Clovy
-API requests `preferred` private routing; the service selects Venice private
-zero-retention first and Phala TEE as fallback, without falling below
-zero-retention. Venice BYOK requests remain direct and do not use this routing
-policy.
+Clovy API's remote text model selection and routing boundary, using
+OpenRouter's current catalog and capabilities. An effective hosting route
+does not inherit the historical Venice/Phala private-only policy.
 _Avoid_: gateway, router (unqualified).
+
+**BYOK**:
+A user's own key for one of Clovy API's upstream providers, with inference
+funded by that provider account rather than Clovy credits. It is distinct
+from an **own provider**, which is a CLI or endpoint used instead of Clovy
+API.
+_Avoid_: own provider, Venice key (the credential is provider-specific).
 
 **Own provider**:
 A text-generation provider the user brings, used instead of Clovy API: an
@@ -71,8 +70,9 @@ subscription, or a named **OpenAI-compatible endpoint** (name, base URL, model,
 optional key kept in the Keychain). The legacy single "local model" is the
 endpoint `local`. Own providers never transcribe audio. See
 [docs/llm-providers.md](docs/llm-providers.md).
-_Avoid_: upstream provider (that is Clovy API's side), BYOK (reserved for the
-Venice key), local model (unless the endpoint is on this machine).
+_Avoid_: upstream provider (that is Clovy API's side), BYOK (that is an
+upstream key used through Clovy API), local model (unless the endpoint is
+on this machine).
 
 **Provider use (usage selection)**:
 Which provider serves each use: **chat**, **notes**, **dictation cleanup**, or
@@ -204,6 +204,18 @@ turning it off stops the preview lanes (gated at capture start and re-checked
 per chunk, so it also takes effect mid-recording) (JUN-375, ADR-0002
 addendum).
 _Avoid_: realtime transcription, live captions, streaming.
+
+**ASR hint**:
+The bounded dictionary spelling guidance supplied to speech recognition,
+distinct from the complete context used to correct recognized text.
+_Avoid_: full correction context, instructions, previous transcript.
+
+**Correction context**:
+The authorized dictionary and prior same-source transcript used by the
+selected text engine to correct a note transcript; dictation cleanup
+retains its own complete dictionary context. It is not an ASR hint and does
+not include another audio source's transcript.
+_Avoid_: ASR hint, recognition prompt, cross-source transcript.
 
 **Transcript coverage**:
 How much of a recording's detected speech ended up in persisted, successful
@@ -415,11 +427,11 @@ _Avoid_: interrupt/stop (a steer never halts the run), follow-up (that is the
 fallback delivery, not the steer), mid-run message.
 
 **Model capability**:
-An authoritative boolean flag from the live Venice catalog `capabilities`
-(`supportsFunctionCalling` → tools, `supportsVision` → image input), never
-inferred from marketing `traits` (see
-[ADR-0007](docs/adr/0007-model-capability-source-of-truth.md)).
-_Avoid_: trait (`traits` is a separate, non-authoritative Venice field).
+A flag describing a supported model action, derived from the current
+catalog's modalities and supported parameters, never from marketing traits.
+An aggregate catalog flag does not prove support on every effective hosting
+route; see [ADR-0007](docs/adr/0007-model-capability-source-of-truth.md).
+_Avoid_: trait, guaranteed hosting-route capability.
 
 **Attachment**:
 A file or image referenced by path. Agent-composer attachments are copied by
@@ -575,9 +587,10 @@ _Avoid_: transcription (ambiguous between dictation and note transcribe — say
 which).
 
 **Note generation**:
-The step that turns a note transcription (plus any manual notes) into a
-structured markdown note, currently via a Venice chat-completion call. Always
-follows a successful note transcription; not used in dictation.
+The step that turns a note transcription and manual notes into structured
+markdown using the selected text engine, with remote text routed through
+OpenRouter. It follows successful note transcription and is distinct from
+dictation cleanup.
 _Avoid_: notes generation, AI summarisation.
 
 **Interface language** vs **transcription language**:
@@ -594,61 +607,43 @@ _Avoid_: "language" alone when the context does not make clear which one;
 "locale" for the transcription hint.
 
 **Image generation**:
-Producing a new image from a text **prompt** (text-to-image), via Venice. The
-user reaches it two ways: an explicit `/image` command (a fast, no-model shot),
-or the assistant calling it as a tool mid-conversation. Distinct from **image
-editing**. See [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md).
+Producing a new image from a text **prompt** through fal, using an explicit
+`/image` action or an assistant tool call. It is distinct from **image
+editing**; see [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md).
 _Avoid_: rendering, drawing (say **image generation**).
 
 **Image editing**:
-Producing a new image by transforming an *existing* image plus an instruction
-(image-to-image / inpaint), via Venice's separate edit models. Always references
-a prior image (a generated one, by filename); never starts from a blank canvas.
-Distinct from **image generation**.
+Transforming an existing image plus an instruction through fal's editing
+model, preserving its oriented aspect ratio. It is distinct from **image
+generation**, which starts from a text prompt.
 _Avoid_: image-to-image jargon, regenerate (that's a fresh **image generation**).
 
 **Video generation**:
-Producing a new video from a text **prompt** (text-to-video), via Venice. Reached
-the same two ways as image generation — an explicit `/video` command (a fast,
-no-model shot) or the assistant calling it as a tool mid-conversation — but the
-Venice call is **asynchronous** (queue a job, poll until ready) and **priced per
-request** from a live quote, not flat per model. Distinct from **image-to-video**.
-See [ADR 0015](docs/adr/0015-video-generation-tools.md).
+Producing a new video from a text **prompt** through fal's asynchronous
+job flow, using `/video` or an assistant tool call. It is distinct from
+**image-to-video**; see [ADR 0015](docs/adr/0015-video-generation-tools.md).
 _Avoid_: txt2vid jargon, rendering (say **video generation**).
 
 **Image-to-video**:
-Producing a video by animating an *existing* image plus a prompt, via Venice's
-image-to-video models. Always references a prior image (a generated one, by
-capability ref); the video-generation analog of **image editing**. Distinct from
-**video generation** (which starts from a text prompt only).
+Producing a video by animating an existing image plus a prompt through fal.
+It is the video counterpart of **image editing**, distinct from text-only
+**video generation**.
 _Avoid_: img2vid jargon, animate (unqualified — say **image-to-video**).
 
 **Safe mode**:
-The per-device toggle that asks Venice to blur adult content on generated and
-edited images (`safe_mode`). On by default; the user turns it off in Settings
-or via the **safe-mode consent dialog** Clovy shows before or during a
-potentially explicit generation. Enforcement is Venice's; the dialog gate
-only decides when to *offer* the dialog, never what gets generated. On the
-agent path the gate is free (on-device wordlist plus the model's own
-`may_be_explicit` self-report in the tool call); on the /image path the
-wordlist short-circuits and otherwise a small metered model check classifies
-the prompt (language-agnostic, added after the English-only wordlist missed
-non-English prompts). It is ONE switch: **video generation** shares it rather
-than adding a second toggle, but Venice video has no `safe_mode` parameter, so
-for a potentially explicit /video prompt keeping safe mode on *skips* the
-generation (there is no blurred fallback), and turning it off proceeds.
-See [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md) and the
-[ADR 0015 addendum](docs/adr/0015-video-generation-tools.md).
+The shared per-device image/video preference requesting the upstream
+model's supported content safeguards. Turning it off is a request, not a
+promise of unfiltered output or permission to bypass the provider's
+account restrictions; see [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md)
+and [ADR 0015](docs/adr/0015-video-generation-tools.md).
 _Avoid_: NSFW filter/toggle (say **safe mode**), censorship, "video safe
 mode" (there is only one safe mode).
 
 **Credit price** (per upstream model):
-The number of OS Accounts credits Clovy charges per unit of consumed work
-(audio seconds for transcription, tokens for generation) for a given upstream
-model. Stored as a typed lookup keyed by `model_id`; the live Venice catalog
-extends the built-in fallback each boot. An upstream model with no credit
-price is rejected at the boundary before any work runs — there is no "default
-rate".
+The OS Accounts credits charged for supported work on an upstream model
+or action, using current catalog prices or the curated action schedule.
+Missing pricing is rejected before paid work; a list-price estimate is
+not an observed upstream account charge.
 _Avoid_: rate, tariff, cost (cost is the *upstream's* dollar cost to Clovy;
 credit price is what the user pays in credits).
 
@@ -762,9 +757,10 @@ updater retains this June-era release coordinate for compatibility (see
 _Avoid_: "GitHub release" (unqualified).
 
 **Provider settings / Model mode**:
-The persisted choice of which model handles each `ModelMode`
-(`Transcription`, `Generation`, ...), stored in `provider-settings.json`.
-Venice is the default; OpenAI is used only for specific ASR models.
+The persisted model selection for each remote action, separate from
+**provider use** choices for CLI and endpoint engines. Current upstreams
+are Groq for audio, OpenRouter for remote text, fal for media, and Tavily
+for web.
 _Avoid_: model config (unqualified).
 
 **Account snapshot** (`AccountStatus`):
@@ -974,8 +970,8 @@ _Avoid_: do not disturb (that is the macOS Focus feature).
 
 ## Flagged ambiguities
 
-- **"proxy"** usually means **Clovy API** (the thing in front of OpenAI /
-  Venice), not a network proxy in the HTTP-CONNECT sense. Prefer **Clovy API**.
+- **"proxy"** usually means **Clovy API**, the service in front of its upstream
+  providers, not an HTTP-CONNECT network proxy. Prefer **Clovy API**.
   (Clovy also runs a separate on-device **provider proxy** for identity
   stripping — qualify when you mean that.)
 - **"transcribe"** is overloaded between **dictation** (short, latency-

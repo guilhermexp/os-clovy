@@ -1,7 +1,9 @@
 use crate::error::ApiError;
 use crate::share_rate_limit::ShareRateLimiter;
 use clovy_config::BrowserTransportsConfig;
-use clovy_domain::{CompanionSnapshot, CompanionStore, TokenVerifier, UserId};
+use clovy_domain::{
+    CompanionSnapshot, CompanionStore, ProviderCredentials, TokenVerifier, UpstreamProvider, UserId,
+};
 use clovy_services::{
     AgentChatService, DictateService, ImageService, IssueReportService, NoteGenerateService,
     NoteTranscribeService, P3aReportService, PricingTable, ShareService, VideoService,
@@ -126,7 +128,6 @@ pub struct ApiState {
 struct ApiStateInner {
     pricing: Arc<PricingTable>,
     computer_use: clovy_config::ComputerUseConfig,
-    local_dev_enabled: bool,
     token_verifier: Arc<dyn TokenVerifier>,
     companion: Arc<crate::handlers::companion::CompanionRelay>,
     note_transcribe: Arc<NoteTranscribeService>,
@@ -154,6 +155,29 @@ struct ApiStateInner {
     limits: ApiLimits,
     attestation: AttestationInfo,
     browser_transports: BrowserTransportsConfig,
+    upstream_service_keys: UpstreamServiceKeys,
+}
+
+/// The upstreams this Clovy deployment holds a service key for. A request to
+/// an upstream without one needs the caller's own upstream key (BYOK).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UpstreamServiceKeys {
+    configured: [bool; UpstreamProvider::ALL.len()],
+}
+
+impl UpstreamServiceKeys {
+    /// Service keys for exactly `providers`.
+    pub fn for_providers(providers: impl IntoIterator<Item = UpstreamProvider>) -> Self {
+        let mut keys = Self::default();
+        for provider in providers {
+            keys.configured[provider as usize] = true;
+        }
+        keys
+    }
+
+    pub fn has(&self, provider: UpstreamProvider) -> bool {
+        self.configured[provider as usize]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -196,7 +220,6 @@ pub struct ShareViewerInfo {
 pub struct ApiStateParams {
     pub pricing: Arc<PricingTable>,
     pub computer_use: clovy_config::ComputerUseConfig,
-    pub local_dev_enabled: bool,
     pub token_verifier: Arc<dyn TokenVerifier>,
     pub companion_store: Option<Arc<dyn CompanionStore>>,
     pub companion_snapshot: CompanionSnapshot,
@@ -216,6 +239,7 @@ pub struct ApiStateParams {
     pub limits: ApiLimits,
     pub attestation: AttestationInfo,
     pub browser_transports: BrowserTransportsConfig,
+    pub upstream_service_keys: UpstreamServiceKeys,
 }
 
 impl ApiState {
@@ -226,7 +250,6 @@ impl ApiState {
             inner: Arc::new(ApiStateInner {
                 pricing: params.pricing,
                 computer_use: params.computer_use,
-                local_dev_enabled: params.local_dev_enabled,
                 token_verifier: params.token_verifier,
                 companion: Arc::new(crate::handlers::companion::CompanionRelay::new(
                     params.companion_store,
@@ -255,8 +278,27 @@ impl ApiState {
                 limits: params.limits,
                 attestation: params.attestation,
                 browser_transports: params.browser_transports,
+                upstream_service_keys: params.upstream_service_keys,
             }),
         }
+    }
+
+    pub fn service_key_configured(&self, provider: UpstreamProvider) -> bool {
+        self.inner.upstream_service_keys.has(provider)
+    }
+
+    pub(crate) fn ensure_provider_configured(
+        &self,
+        provider: UpstreamProvider,
+        credentials: &ProviderCredentials,
+    ) -> Result<(), ApiError> {
+        if !self.service_key_configured(provider) && !credentials.has_user_key(provider) {
+            return Err(ApiError::unprocessable(format!(
+                "{}_not_configured",
+                provider.as_str()
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn share(&self) -> Option<&ShareService> {
@@ -289,10 +331,6 @@ impl ApiState {
 
     pub(crate) fn computer_use(&self) -> &clovy_config::ComputerUseConfig {
         &self.inner.computer_use
-    }
-
-    pub(crate) fn local_dev_enabled(&self) -> bool {
-        self.inner.local_dev_enabled
     }
 
     pub(crate) fn token_verifier(&self) -> &dyn TokenVerifier {

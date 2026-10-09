@@ -5,15 +5,15 @@ use crate::{
     },
     error::ServiceError,
     language::fill_missing_language,
-    metering::{log_skipped_user_venice_key, uses_user_venice_key_for_model},
+    metering::{log_skipped_user_key_for_model, uses_user_key_for_model},
     pricing::PricingTable,
     prompts,
     util::ceil_seconds,
 };
 use clovy_domain::{
-    ActionSlug, AudioDurationProbe, AudioFormat, CleanedText, Cleaner, CleanupRequest, Credits,
-    ModelId, ModelKind, OsAccountsClient, ProviderCredentials, Receipt, Transcriber, Transcript,
-    TranscriptionRequest, UserId,
+    ActionSlug, AudioDurationProbe, AudioFormat, CleanedText, Cleaner, CleanupKind, CleanupRequest,
+    Credits, ModelId, ModelKind, OsAccountsClient, ProviderCredentials, Receipt, Transcriber,
+    Transcript, TranscriptionRequest, UserId,
 };
 use std::sync::Arc;
 
@@ -67,7 +67,7 @@ impl DictateService {
         // Captured before `params.language` is moved into the request below, so
         // enrichment can fall back to the user-configured language.
         let requested_language = params.language.clone();
-        if uses_user_venice_key_for_model(
+        if uses_user_key_for_model(
             &self.pricing,
             &params.model_id.0,
             &params.provider_credentials,
@@ -85,7 +85,8 @@ impl DictateService {
                 .await
                 .map_err(ServiceError::from)?;
             let transcript = fill_missing_language(transcript, requested_language.as_deref());
-            log_skipped_user_venice_key(
+            log_skipped_user_key_for_model(
+                &self.pricing,
                 ActionSlug::DictateTranscribe,
                 &params.user_id,
                 &params.model_id.0,
@@ -157,8 +158,11 @@ impl DictateService {
     ) -> Result<DictateCleanupOutput, ServiceError> {
         self.pricing
             .ensure_model_kind(&params.model_id.0, ModelKind::Text)?;
-        let inference_privacy = self.pricing.inference_privacy(&params.model_id.0);
-        if uses_user_venice_key_for_model(
+        let system_prompt = match params.kind {
+            CleanupKind::Dictation => prompts::DICTATE_CLEANUP,
+            CleanupKind::NoteTranscript => prompts::NOTE_TRANSCRIPT_CLEANUP,
+        };
+        if uses_user_key_for_model(
             &self.pricing,
             &params.model_id.0,
             &params.provider_credentials,
@@ -166,17 +170,19 @@ impl DictateService {
             let cleaned = self
                 .cleaner
                 .cleanup(CleanupRequest {
+                    kind: params.kind,
                     text: params.text,
                     dictionary_context: params.dictionary_context,
                     app_context: params.app_context,
                     style: params.style,
                     model: params.model_id.clone(),
-                    system_prompt: prompts::DICTATE_CLEANUP.to_string(),
+                    system_prompt: system_prompt.to_string(),
                     provider_credentials: params.provider_credentials.clone(),
-                    inference_privacy,
+                    price_cap: None,
                 })
                 .await?;
-            log_skipped_user_venice_key(
+            log_skipped_user_key_for_model(
+                &self.pricing,
                 ActionSlug::DictateCleanup,
                 &params.user_id,
                 &params.model_id.0,
@@ -197,14 +203,15 @@ impl DictateService {
         let cleaned = match self
             .cleaner
             .cleanup(CleanupRequest {
+                kind: params.kind,
                 text: params.text,
                 dictionary_context: params.dictionary_context,
                 app_context: params.app_context,
                 style: params.style,
                 model: params.model_id.clone(),
-                system_prompt: prompts::DICTATE_CLEANUP.to_string(),
+                system_prompt: system_prompt.to_string(),
                 provider_credentials: params.provider_credentials.clone(),
-                inference_privacy,
+                price_cap: self.pricing.price_cap(&params.model_id.0),
             })
             .await
         {
@@ -262,6 +269,7 @@ pub struct DictateTranscribeParams {
 #[derive(Clone, Debug)]
 pub struct DictateCleanupParams {
     pub user_id: UserId,
+    pub kind: CleanupKind,
     pub session_id: String,
     pub utterance_id: String,
     pub text: String,

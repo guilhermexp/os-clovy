@@ -16,7 +16,7 @@ use crate::{
     domain::types::AppError,
     providers::{
         LocalGenerationSettings, ProviderModelSettings, DEFAULT_GENERATION_MODEL, PROVIDER_LOCAL,
-        PROVIDER_VENICE,
+        PROVIDER_OPENROUTER,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -372,7 +372,7 @@ fn sync_chat_route(settings: &mut ProviderModelSettings) {
         settings.generation_provider = PROVIDER_LOCAL.to_string();
         settings.generation_model = model_id;
     } else if settings.generation_provider == PROVIDER_LOCAL {
-        settings.generation_provider = PROVIDER_VENICE.to_string();
+        settings.generation_provider = PROVIDER_OPENROUTER.to_string();
         settings.generation_model = if settings.remote_generation_model.trim().is_empty() {
             DEFAULT_GENERATION_MODEL.to_string()
         } else {
@@ -685,7 +685,7 @@ mod tests {
         assert!(settings.endpoint("local").is_some());
         assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
         assert_eq!(settings.llm_usage.notes, ProviderRef::Clovy);
-        assert_eq!(settings.generation_provider, PROVIDER_VENICE);
+        assert_eq!(settings.generation_provider, PROVIDER_OPENROUTER);
     }
 
     #[test]
@@ -968,7 +968,7 @@ mod tests {
                 id: CliKind::Claude
             }
         );
-        assert_eq!(settings.generation_provider, PROVIDER_VENICE);
+        assert_eq!(settings.generation_provider, PROVIDER_OPENROUTER);
         assert_eq!(settings.generation_model, settings.remote_generation_model);
     }
 
@@ -984,7 +984,7 @@ mod tests {
         delete_endpoint(&mut settings, "ep", &store).unwrap();
         assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
         assert_eq!(settings.llm_usage.activity, ProviderRef::None);
-        assert_eq!(settings.generation_provider, PROVIDER_VENICE);
+        assert_eq!(settings.generation_provider, PROVIDER_OPENROUTER);
     }
 
     #[test]

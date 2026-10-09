@@ -1,4 +1,4 @@
-import { setVeniceModel, type ProviderModelSettingsDto } from "./tauri";
+import { setProviderModel, type ProviderModelSettingsDto } from "./tauri";
 
 type ModelWriter = (modelId: string) => Promise<ProviderModelSettingsDto | void>;
 
@@ -9,7 +9,7 @@ let writeTail: Promise<void> = Promise.resolve();
  * failure, leaving the most recent selection with the final word. */
 export function persistAgentDefaultModel(
   modelId: string,
-  writer: ModelWriter = (nextModelId) => setVeniceModel("generation", nextModelId),
+  writer: ModelWriter = (nextModelId) => setProviderModel("generation", nextModelId),
 ): Promise<void> {
   const write = writeTail.catch(() => undefined).then(() => writer(modelId));
   writeTail = write.then(() => undefined);

@@ -11,7 +11,7 @@ import {
 import { formatNumber, intlLocale, t as translate, useT } from "../../i18n";
 import { formatCreditsAsUsd, pricingLabel } from "../../lib/model-pricing";
 import { suggestedModelsForMode } from "../../lib/suggested-models";
-import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
+import type { ProviderModelMode, ProviderModelDto } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
 import { HoverTip } from "../ui/HoverTip";
 import { ModelPrivacyChip } from "../ui/ModelPrivacyChip";
@@ -21,12 +21,12 @@ export const AUTO_MODEL_ID = "open-software/auto";
 
 type ModelPickerEntry = {
   key: string;
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   reason?: string;
   costQuality?: number;
 };
 
-function withClovyModelName(model: VeniceModelDto): VeniceModelDto {
+function withClovyModelName(model: ProviderModelDto): ProviderModelDto {
   return model.id === AUTO_MODEL_ID && model.name !== "Auto" ? { ...model, name: "Auto" } : model;
 }
 
@@ -36,7 +36,7 @@ function withClovyModelName(model: VeniceModelDto): VeniceModelDto {
 // AppSettings.tsx verbatim so the workspace can open the picker without
 // pulling in the whole settings surface.
 
-export function ModelMeta({ model }: { model: VeniceModelDto }) {
+export function ModelMeta({ model }: { model: ProviderModelDto }) {
   const t = useT();
   const flags = modelPrivacyFlags(model);
   const privacyBadge = modelPrivacyBadge(model, flags);
@@ -100,7 +100,7 @@ export function ModelPickerDialog({
   open: boolean;
   mode: ProviderModelMode;
   value: string;
-  options: VeniceModelDto[];
+  options: ProviderModelDto[];
   costQuality?: number;
   search: string;
   onSearchChange: (value: string) => void;
@@ -259,7 +259,7 @@ export function ModelPickerDialog({
   );
 }
 
-export function selectedModel(options: VeniceModelDto[], value: string) {
+export function selectedModel(options: ProviderModelDto[], value: string) {
   return withClovyModelName(
     options.find((model) => model.id === value) ?? {
       provider: "",
@@ -272,7 +272,7 @@ export function selectedModel(options: VeniceModelDto[], value: string) {
   );
 }
 
-export function contextLabel(model: VeniceModelDto) {
+export function contextLabel(model: ProviderModelDto) {
   if (!model.contextTokens) return undefined;
   if (model.contextTokens >= 1_000_000) {
     return translate("settingsPanels.models.contextMillions", {
@@ -303,7 +303,7 @@ function trimNumber(value: number) {
 // pairs so the card renders a compact spec table instead of a prose sentence.
 // Falls back to a single "Pricing" row when there is no clean input/output
 // credit split.
-export function modelSpecEntries(model: VeniceModelDto): { label: string; value: string }[] {
+export function modelSpecEntries(model: ProviderModelDto): { label: string; value: string }[] {
   // Auto is a routing preference, not a concrete model. Its eventual model,
   // price, and context window vary by request, so fixed catalog specs would be
   // misleading even when the compatibility catalog provides placeholders.
@@ -349,7 +349,7 @@ export function modelSpecEntries(model: VeniceModelDto): { label: string; value:
   return entries;
 }
 
-export function modelOptions(models: VeniceModelDto[], selectedModel: string) {
+export function modelOptions(models: ProviderModelDto[], selectedModel: string) {
   const modelId = selectedModel.trim();
   const namedModels = models.map(withClovyModelName);
   if (!modelId || namedModels.some((model) => model.id === modelId)) {

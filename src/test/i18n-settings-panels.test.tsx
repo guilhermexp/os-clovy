@@ -105,7 +105,7 @@ describe("settings panels in pt-BR", () => {
 
   it("formats model context and spec labels with Portuguese words and digits", () => {
     const model = {
-      provider: "venice",
+      provider: "openrouter",
       id: "test-model",
       name: "Test model",
       modelType: "text",

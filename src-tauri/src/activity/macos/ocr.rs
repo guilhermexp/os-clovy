@@ -27,26 +27,49 @@ pub struct TextObservation {
     pub height: f64,
 }
 
-/// Sorts observations top-to-bottom, left-to-right on the same line, then joins.
+/// Orders observations top-to-bottom, left-to-right on the same line, then
+/// joins them one per line.
+///
+/// After a total top-to-bottom order, the first observation of a line anchors
+/// it: each following observation joins while it sits less than half the
+/// taller of the two heights (at least 0.005) below the anchor, and the first
+/// one that does not anchors the next line. Each line is then ordered left to
+/// right. Both orders are total: position ties go to the taller observation,
+/// then to text order, so the anchor and the result do not depend on the
+/// order Vision returns observations in.
 pub fn sort_and_join_observations(mut obs: Vec<TextObservation>) -> String {
     if obs.is_empty() {
         return String::new();
     }
 
-    obs.sort_by(|a, b| {
-        // Vertical tolerance for considering elements on the same line
-        let tol = 0.5 * a.height.max(b.height).max(0.01);
-        if (a.top_y - b.top_y).abs() < tol {
-            a.left_x
-                .partial_cmp(&b.left_x)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        } else {
-            // Higher Y in Vision means closer to the top of the image
-            b.top_y
-                .partial_cmp(&a.top_y)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }
+    // Higher Y in Vision means closer to the top of the image.
+    obs.sort_unstable_by(|a, b| {
+        b.top_y
+            .total_cmp(&a.top_y)
+            .then_with(|| a.left_x.total_cmp(&b.left_x))
+            .then_with(|| b.height.total_cmp(&a.height))
+            .then_with(|| a.text.cmp(&b.text))
     });
+    let mut start = 0;
+    while start < obs.len() {
+        let anchor = &obs[start];
+        let line_len = 1 + obs[start + 1..]
+            .iter()
+            .take_while(|item| {
+                let tol = 0.5 * anchor.height.max(item.height).max(0.01);
+                anchor.top_y - item.top_y < tol
+            })
+            .count();
+        let line = &mut obs[start..start + line_len];
+        line.sort_unstable_by(|a, b| {
+            a.left_x
+                .total_cmp(&b.left_x)
+                .then_with(|| b.top_y.total_cmp(&a.top_y))
+                .then_with(|| b.height.total_cmp(&a.height))
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        start += line_len;
+    }
 
     let mut result = String::new();
     for item in obs {
@@ -402,3 +425,7 @@ mod tests {
         let _ = ocr_text(&win);
     }
 }
+
+#[cfg(test)]
+#[path = "ocr_sort_regression_tests.rs"]
+mod sort_regression_tests;

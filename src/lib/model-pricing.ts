@@ -1,7 +1,7 @@
 import { formatNumber, intlLocale, t } from "../i18n/translate";
-import type { VeniceModelDto } from "./tauri";
+import type { ProviderModelDto } from "./tauri";
 
-export function pricingLabel(model: VeniceModelDto) {
+export function pricingLabel(model: ProviderModelDto) {
   const pricing = model.pricing;
   if (pricing && typeof pricing === "object") {
     const display = (pricing as Record<string, unknown>).display;

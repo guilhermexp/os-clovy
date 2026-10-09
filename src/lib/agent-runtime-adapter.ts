@@ -567,6 +567,18 @@ function generatedImagePart(output: unknown): AgentChatPart | undefined {
 function generatedVideoPart(output: unknown): AgentChatPart | undefined {
   if (!output || typeof output !== "object") return undefined;
   const value = output as Record<string, unknown>;
+  // The fal key could not be used, so the job waits on the server for the agent
+  // to continue it by job id: this attempt shows why it paused, never a
+  // finished video without an asset.
+  if (value.status === "waitingForProviderKey" && typeof value.jobId === "string") {
+    return {
+      type: "video",
+      status: "error",
+      prompt: "",
+      jobId: value.jobId,
+      error: t("chat.media.videoWaitingForProviderKey"),
+    };
+  }
   if (value.mediaType !== "video" || typeof value.path !== "string") return undefined;
   return {
     type: "video",

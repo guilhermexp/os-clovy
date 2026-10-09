@@ -1,9 +1,14 @@
 import { t } from "../i18n/translate";
 import { agentModelSelection, agentRunModelId, AUTO_MODEL_ID } from "./agent-model-selection";
-import { modelAvailableForMode, modelPrivacyBadge } from "./model-privacy";
+import { modelAvailableForMode, modelMissingProviderKey, modelPrivacyBadge } from "./model-privacy";
 import { pricingLabel } from "./model-pricing";
 import { suggestedModelsForMode } from "./suggested-models";
-import type { CompanionModelOption, CompanionSessionModelSelection, VeniceModelDto } from "./tauri";
+import type {
+  CompanionModelOption,
+  CompanionSessionModelSelection,
+  ProviderApiKeysConfigured,
+  ProviderModelDto,
+} from "./tauri";
 
 const AUTO_MODEL: CompanionModelOption = {
   id: AUTO_MODEL_ID,
@@ -15,8 +20,17 @@ const AUTO_MODEL: CompanionModelOption = {
   routing: "automatic",
 };
 
-export function companionModelOptions(models: VeniceModelDto[]): CompanionModelOption[] {
-  const available = models.filter((model) => modelAvailableForMode("generation", model));
+/** Auto plus the curated generation models that can run right now. A row that
+ * needs the user's own provider key is left out until that key is saved: the
+ * companion cannot save keys, so it could only fail. */
+export function companionModelOptions(
+  models: ProviderModelDto[],
+  providerKeys: ProviderApiKeysConfigured,
+): CompanionModelOption[] {
+  const available = models.filter(
+    (model) =>
+      modelAvailableForMode("generation", model) && !modelMissingProviderKey(model, providerKeys),
+  );
   const curated = suggestedModelsForMode("generation", available).flatMap(
     ({ model, reason }): CompanionModelOption[] => {
       const id = model.id.trim();
@@ -50,7 +64,7 @@ export function companionModelOptions(models: VeniceModelDto[]): CompanionModelO
 export function companionSessionModelSelection(
   storedSessionId: string,
   storedModel: string,
-  models: VeniceModelDto[],
+  models: ProviderModelDto[],
   defaultCostQuality: number,
 ): CompanionSessionModelSelection {
   const decoded = agentModelSelection(storedModel);

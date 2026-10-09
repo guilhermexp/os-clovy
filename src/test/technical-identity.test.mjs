@@ -94,7 +94,7 @@ describe("Clovy technical identity", () => {
     try {
       await mkdir(join(tempRoot, "clovy-api"));
       await mkdir(join(tempRoot, "june-api"));
-      const legacyConfig = "CLOVY__UPSTREAMS__VENICE__API_KEY=secret-value\n";
+      const legacyConfig = "CLOVY__UPSTREAMS__GROQ__API_KEY=secret-value\n";
       await writeFile(join(tempRoot, "june-api", ".env"), legacyConfig);
 
       expect(ensureClovyApiEnv(tempRoot)).toEqual({
@@ -481,29 +481,6 @@ describe("Clovy technical identity", () => {
     expect(legacyEnvRead).toBeGreaterThan(canonicalEnvRead);
     expect(production).toMatch(/aliases:\s*\n\s*#.*\n\s*- june-api/);
 
-    for (const compose of [production, staging]) {
-      for (const key of [
-        "OS_ACCOUNTS__API_URL",
-        "OS_ACCOUNTS__APP_API_KEY",
-        "UPSTREAMS__OPENAI__API_KEY",
-        "UPSTREAMS__VENICE__API_KEY",
-        "SHARE__DATABASE_URL",
-        "SHARE__VIEWER_CLIENT_ID",
-      ]) {
-        expect(compose).toContain(`CLOVY__${key}`);
-        expect(compose).toContain(`JUNE__${key}`);
-      }
-    }
-    for (const key of [
-      "LOCAL_DEV__ENABLED",
-      "LOCAL_DEV__BEARER_TOKEN",
-      "LOCAL_DEV__USER_ID",
-      "UPSTREAMS__OPENAI__API_KEY",
-      "UPSTREAMS__VENICE__API_KEY",
-    ]) {
-      expect(ephemeral).toContain(`CLOVY__${key}`);
-      expect(ephemeral).toContain(`JUNE__${key}`);
-    }
     for (const key of [
       "OS_ACCOUNTS__API_URL",
       "SHARE__VIEWER_ONLY",

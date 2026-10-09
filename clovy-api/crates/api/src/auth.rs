@@ -1,8 +1,11 @@
 use crate::{error::ApiError, state::ApiState, validation};
 use axum::http::{HeaderMap, header};
-use clovy_domain::{ProviderCredentials, UserId};
+use clovy_domain::{ProviderCredentials, UpstreamProvider, UserId};
 
-const VENICE_API_KEY_HEADER: &str = "x-venice-api-key";
+pub(crate) const GROQ_API_KEY_HEADER: &str = "x-groq-api-key";
+pub(crate) const OPENROUTER_API_KEY_HEADER: &str = "x-openrouter-api-key";
+pub(crate) const FAL_API_KEY_HEADER: &str = "x-fal-api-key";
+pub(crate) const TAVILY_API_KEY_HEADER: &str = "x-tavily-api-key";
 pub(crate) const CREDITS_SPEND_SCOPE: &str = "credits:spend";
 pub(crate) const PROFILE_READ_SCOPE: &str = "profile:read";
 
@@ -48,70 +51,202 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .ok_or_else(|| ApiError::unauthorized("missing_bearer_token"))
 }
 
-pub(crate) fn provider_credentials(headers: &HeaderMap) -> Result<ProviderCredentials, ApiError> {
-    let venice_api_key = headers
-        .get(VENICE_API_KEY_HEADER)
-        .map(|value| {
-            value
-                .to_str()
-                .map_err(|_| ApiError::bad_request("venice_api_key_invalid"))
-        })
-        .transpose()?
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    validation::validate_optional_text_len(
-        "venice_api_key",
-        venice_api_key.as_deref(),
-        validation::MAX_PROVIDER_API_KEY_CHARS,
-    )?;
-    if let Some(api_key) = venice_api_key.as_deref() {
-        validate_venice_api_key(api_key)?;
+/// Provider credentials ride as `x-<provider>-api-key`. A route accepts only its
+/// own provider's header; any other non-blank one (another current provider's,
+/// or a retired provider's a shipped client still sends) is refused before
+/// funding or forwarding, so a key never pays for, or reaches, a provider it
+/// was not meant for.
+pub(crate) fn provider_credentials(
+    headers: &HeaderMap,
+    accepted: UpstreamProvider,
+) -> Result<ProviderCredentials, ApiError> {
+    let accepted_header = provider_header_name(accepted);
+    for (name, value) in headers {
+        if name.as_str() == accepted_header {
+            continue;
+        }
+        let Some(provider) = credential_header_provider(name.as_str()) else {
+            continue;
+        };
+        let is_non_blank = value.to_str().map_or(true, |text| !text.trim().is_empty());
+        if is_non_blank {
+            return Err(ApiError::bad_request(format!(
+                "{provider}_api_key_not_accepted"
+            )));
+        }
     }
-    Ok(ProviderCredentials { venice_api_key })
+
+    let Some(raw_value) = headers.get(accepted_header) else {
+        return Ok(ProviderCredentials::default());
+    };
+
+    let raw_str = raw_value
+        .to_str()
+        .map_err(|_| ApiError::bad_request(format!("{}_api_key_invalid", accepted.as_str())))?;
+    let trimmed = raw_str.trim();
+    if trimmed.is_empty() {
+        return Ok(ProviderCredentials::default());
+    }
+    if raw_str
+        .chars()
+        .any(|character| !character.is_ascii() || character.is_control())
+    {
+        return Err(ApiError::bad_request(format!(
+            "{}_api_key_invalid",
+            accepted.as_str()
+        )));
+    }
+    if trimmed.len() > validation::MAX_PROVIDER_API_KEY_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "{}_api_key_too_long",
+            accepted.as_str()
+        )));
+    }
+
+    Ok(ProviderCredentials::for_provider(
+        accepted,
+        trimmed.to_string(),
+    ))
 }
 
-fn validate_venice_api_key(api_key: &str) -> Result<(), ApiError> {
-    if api_key.chars().any(char::is_control) {
-        return Err(ApiError::bad_request("venice_api_key_invalid"));
+fn provider_header_name(provider: UpstreamProvider) -> &'static str {
+    match provider {
+        UpstreamProvider::Groq => GROQ_API_KEY_HEADER,
+        UpstreamProvider::Openrouter => OPENROUTER_API_KEY_HEADER,
+        UpstreamProvider::Fal => FAL_API_KEY_HEADER,
+        UpstreamProvider::Tavily => TAVILY_API_KEY_HEADER,
     }
-    Ok(())
+}
+
+/// The provider a `x-<provider>-api-key` header names, when it is a short
+/// lowercase token; any other header is not a provider credential.
+fn credential_header_provider(name: &str) -> Option<&str> {
+    const MAX_PROVIDER_NAME_CHARS: usize = 32;
+    name.strip_prefix("x-")
+        .and_then(|rest| rest.strip_suffix("-api-key"))
+        .filter(|provider| {
+            !provider.is_empty()
+                && provider.len() <= MAX_PROVIDER_NAME_CHARS
+                && provider
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        VENICE_API_KEY_HEADER, client_address, provider_credentials, validate_venice_api_key,
+        FAL_API_KEY_HEADER, GROQ_API_KEY_HEADER, OPENROUTER_API_KEY_HEADER, TAVILY_API_KEY_HEADER,
+        client_address, provider_credentials,
     };
     use axum::http::{HeaderMap, HeaderValue};
+    use clovy_domain::UpstreamProvider;
+    use std::error::Error;
 
     #[test]
-    fn provider_credentials_accepts_opaque_venice_key() {
+    fn provider_credentials_accepts_opaque_key_for_accepted_provider() -> Result<(), Box<dyn Error>>
+    {
         let mut headers = HeaderMap::new();
         headers.insert(
-            VENICE_API_KEY_HEADER,
-            HeaderValue::from_static("legacy-or-future-key-format"),
+            OPENROUTER_API_KEY_HEADER,
+            HeaderValue::from_static("sk-or-v1-user-secret"),
         );
 
-        let credentials = provider_credentials(&headers).expect("key should parse");
-
+        let credentials = provider_credentials(&headers, UpstreamProvider::Openrouter)?;
         assert_eq!(
-            credentials.venice_api_key.as_deref(),
-            Some("legacy-or-future-key-format")
+            credentials.user_key(UpstreamProvider::Openrouter),
+            Some("sk-or-v1-user-secret")
         );
+        Ok(())
     }
 
     #[test]
-    fn provider_credentials_rejects_control_characters() {
-        let error = validate_venice_api_key("invalid\tkey").expect_err("key should fail");
+    fn provider_credentials_rejects_foreign_provider_header() -> Result<(), Box<dyn Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GROQ_API_KEY_HEADER,
+            HeaderValue::from_static("gsk_user_secret"),
+        );
 
+        let error = provider_credentials(&headers, UpstreamProvider::Openrouter)
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(
             error,
-            crate::ApiError::BadRequest {
-                message,
-                ..
-            } if message == "venice_api_key_invalid"
+            crate::ApiError::BadRequest { message, .. } if message == "groq_api_key_not_accepted"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn provider_credentials_rejects_a_retired_provider_header_but_not_other_headers()
+    -> Result<(), Box<dyn Error>> {
+        // A shipped client may still send its old provider's key; it is refused
+        // like any other foreign key, never charged to Clovy or forwarded.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-venice-api-key", HeaderValue::from_static("legacy-key"));
+        let error = provider_credentials(&headers, UpstreamProvider::Openrouter)
+            .err()
+            .ok_or("expected error")?;
+        assert!(matches!(
+            error,
+            crate::ApiError::BadRequest { message, .. } if message == "venice_api_key_not_accepted"
+        ));
+
+        let mut unrelated = HeaderMap::new();
+        unrelated.insert("x-api-key", HeaderValue::from_static("value"));
+        unrelated.insert("x-clovy-app-version", HeaderValue::from_static("0.1.0"));
+        assert!(provider_credentials(&unrelated, UpstreamProvider::Openrouter).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_credentials_ignores_blank_foreign_header() -> Result<(), Box<dyn Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(GROQ_API_KEY_HEADER, HeaderValue::from_static("   "));
+        headers.insert(
+            OPENROUTER_API_KEY_HEADER,
+            HeaderValue::from_static("sk-or-v1-user-secret"),
+        );
+
+        let credentials = provider_credentials(&headers, UpstreamProvider::Openrouter)?;
+        assert_eq!(
+            credentials.user_key(UpstreamProvider::Openrouter),
+            Some("sk-or-v1-user-secret")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_credentials_rejects_control_characters() -> Result<(), Box<dyn Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(FAL_API_KEY_HEADER, HeaderValue::from_static("invalid\tkey"));
+
+        let error = provider_credentials(&headers, UpstreamProvider::Fal)
+            .err()
+            .ok_or("expected error")?;
+        assert!(matches!(
+            error,
+            crate::ApiError::BadRequest { message, .. } if message == "fal_api_key_invalid"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn provider_credentials_rejects_too_long_key() -> Result<(), Box<dyn Error>> {
+        let mut headers = HeaderMap::new();
+        let long_key = "a".repeat(crate::validation::MAX_PROVIDER_API_KEY_CHARS + 1);
+        let header_val = HeaderValue::from_str(&long_key)?;
+        headers.insert(TAVILY_API_KEY_HEADER, header_val);
+
+        let error = provider_credentials(&headers, UpstreamProvider::Tavily)
+            .err()
+            .ok_or("expected error")?;
+        assert!(matches!(
+            error,
+            crate::ApiError::BadRequest { message, .. } if message == "tavily_api_key_too_long"
+        ));
+        Ok(())
     }
 
     #[test]

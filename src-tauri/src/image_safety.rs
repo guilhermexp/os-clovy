@@ -4,9 +4,10 @@ use std::{future::Future, time::Duration};
 use tokio::time::timeout;
 
 // Deliberately conservative (ADR 0008 addendum, JUN-209): this list only
-// gates the safe-mode consent dialog, never what gets generated - Venice
-// `safe_mode` is the enforcement. Keep terms unambiguous; euphemisms are an
-// accepted miss, and broadening the list mostly buys false-positive dialogs.
+// gates the safe-mode consent dialog, never what gets generated - the image
+// provider's safety filter, requested through `safe_mode`, is the enforcement.
+// Keep terms unambiguous; euphemisms are an accepted miss, and broadening the
+// list mostly buys false-positive dialogs.
 const EXPLICIT_TERMS: &[&str] = &[
     "bdsm",
     "bottomless",

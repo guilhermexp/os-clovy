@@ -67,7 +67,7 @@ export type EditChatImageDeps = {
 export type EditChatImageResult = GenerateChatImageResult;
 
 /** File extension for the workspace import, by mime. Defaults to png (what the
- * backend always requests from Venice). */
+ * backend always requests from the provider). */
 const EXTENSION_BY_MIME: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",

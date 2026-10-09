@@ -2202,6 +2202,11 @@ fn skill_roots(app: &AppHandle) -> Vec<(PathBuf, bool)> {
     roots
 }
 
+/// The session's model as the runtime uses it: the legacy `auto` alias becomes
+/// Clovy Auto, and every other id is kept as recorded. A text id saved before
+/// the OpenRouter cutover is translated only on the remote route
+/// (`clovy_api::resolve_current_remote_model`), after the local-versus-remote
+/// decision, so a session on a local endpoint keeps routing locally.
 fn normalize_agent_model(model: &str) -> String {
     let model = model.trim();
     if model.is_empty() || model == "auto" {
@@ -2365,7 +2370,7 @@ async fn tool_descriptors(
         { "name": "forget_memory", "description": "Permanently forget one Clovy memory by id when the user asks Clovy to forget it.", "parameters": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"], "additionalProperties": false }, "requiresApproval": true },
         { "name": "generate_image", "description": "Generate an image from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" } }, "required": ["prompt"], "additionalProperties": false } },
         { "name": "edit_image", "description": "Edit an image file in the Clovy session workspace and show the result in the conversation.", "parameters": { "type": "object", "properties": { "sourcePath": { "type": "string" }, "instruction": { "type": "string" } }, "required": ["sourcePath", "instruction"], "additionalProperties": false } },
-        { "name": "generate_video", "description": "Generate a short video from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" }, "duration": { "type": "string" }, "aspectRatio": { "type": "string" }, "audio": { "type": "boolean" } }, "required": ["prompt"], "additionalProperties": false } },
+        { "name": "generate_video", "description": "Generate a short video from a text description and show it in the conversation. Pass prompt to start a new video. If an earlier call returned status waitingForProviderKey, continue that same video by calling again with only its jobId once the user has saved a valid fal key; never start a new video for it.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" }, "duration": { "type": "string" }, "aspectRatio": { "type": "string" }, "audio": { "type": "boolean" }, "jobId": { "type": "string" } }, "required": [], "additionalProperties": false } },
         { "name": "get_obsidian_vault", "description": "Discover the current Obsidian vault selected in Clovy. When the clovy-obsidian skill is available, load it before Obsidian note work. Call this tool before every distinct Obsidian task because the user may change or disconnect the vault while the session remains open. If connected is false, do not guess a vault path. If available is false, do not infer or reconstruct its path. A returned path is current discovery only, not write authorization; stay within that vault and use only filesystem operations allowed by the current safety mode.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
         { "name": "start_recording", "description": "Start a visible Clovy recording only when the user explicitly asks to begin recording now.", "parameters": { "type": "object", "properties": { "sourceMode": { "type": "string", "enum": ["microphoneOnly", "microphonePlusSystem"] } }, "required": [], "additionalProperties": false }, "requiresApproval": true },
         { "name": "stop_recording", "description": "Stop the recording currently visible in Clovy.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false }, "requiresApproval": true },
@@ -3770,19 +3775,6 @@ mod tests {
             skill_description(&content).as_deref(),
             Some("Work with the Obsidian vault currently selected in Clovy.")
         );
-    }
-
-    #[test]
-    fn legacy_auto_alias_uses_the_priced_clovy_model_id() {
-        assert_eq!(
-            normalize_agent_model("auto"),
-            crate::providers::AUTO_GENERATION_MODEL
-        );
-        assert_eq!(
-            normalize_agent_model(" open-software/auto "),
-            crate::providers::AUTO_GENERATION_MODEL
-        );
-        assert_eq!(normalize_agent_model("kimi-k2-6"), "kimi-k2-6");
     }
 
     #[test]

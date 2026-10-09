@@ -20,12 +20,12 @@ O sistema SHALL transcrever ditado e notas por Groq, com Whisper multilíngue v�
 - Test: integration — caminho de processamento/HTTP com erros e boundaries existentes; prova nativa de nota em perfil sandbox com configuração real.
 
 ### Requirement: Idioma e contexto de áudio
-O sistema SHALL preservar o idioma opcional e o contexto/dicionário já construídos no contrato de áudio, respeitando limites do provedor, sem enviar título da nota ou dados alheios ao contexto autorizado.
+O sistema SHALL preservar o idioma opcional e o contexto/dicionário autorizados respeitando limites do provedor, sem enviar título da nota ou dados alheios. O desktop SHALL separar hint ASR limitado a termos inteiros e 200 bytes UTF-8, incluindo delimitadores, do contexto completo que continua na correção existente de notas e na única passada existente de cleanup de ditado no motor escolhido; se o cleanup falha, o texto bruto permanece. Não existe interruptor de cleanup no desktop atual. Esse envelope não é contador exato de tokens nem nova restrição do campo público `context`.
 
 #### Scenario: Áudio em português com contexto
 - **WHEN** o usuário escolhe português e fornece vocabulário no dicionário
-- **THEN** Groq recebe idioma/contexto apropriados e o resultado mantém o contrato existente de texto e idioma opcional, sem novo contrato de segmentos ou palavras
-- Test: integration — boundary multipart/parser com idioma, contexto e ausência de título, mais prova externa autorizada com vocabulário do dono.
+- **THEN** Groq recebe idioma e hint apropriados sem corte de termo/UTF-8, a correção existente recebe contexto completo segundo o motor escolhido, e o resultado mantém texto e idioma opcionais sem novo contrato de segmentos ou palavras
+- Test: integration — boundary multipart/parser com idioma/hint e ausência de título, casos multibyte/delimitadores/termo que não cabe e contexto completo na correção real; prova externa autorizada com vocabulário do dono.
 
 ### Requirement: Erro de ASR observável
 O sistema SHALL informar falta de configuração, modelo inválido, rejeição do provedor, áudio sem fala e falha de transcrição sem fingir sucesso ou culpar permissões concedidas.

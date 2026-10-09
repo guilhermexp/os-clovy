@@ -98,6 +98,8 @@ export default defineMessages({
     "chat.media.generatingVideo": "Generating video",
     "chat.media.imageFailed": "Could not generate the image.",
     "chat.media.videoFailed": "Could not generate the video.",
+    "chat.media.videoWaitingForProviderKey":
+      "This video is paused because Clovy could not use your fal key for it. Save a valid key from the fal account that started it in Settings, under More options, then ask Clovy to continue this video.",
     "chat.media.generatedImage": "Generated image",
     "chat.media.generatedVideo": "Generated video",
     "chat.media.openImage": "Open image",
@@ -161,7 +163,9 @@ export default defineMessages({
     "chat.model.chooseTextModel": "Choose text model",
     "chat.model.suggested": "Suggested",
     "chat.model.autoBillingNote":
-      "Auto is billed to Clovy credits and does not use your Venice API key.",
+      "Auto is billed to Clovy credits and does not use your OpenRouter key.",
+    "chat.model.providerKeyNeeded":
+      "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
     "chat.model.suggestedTextModels": "Suggested text models",
     "chat.model.loadingSuggested": "Loading suggested models.",
     "chat.model.allModels": "All models",
@@ -301,6 +305,8 @@ export default defineMessages({
     "chat.media.generatingVideo": "Gerando vídeo",
     "chat.media.imageFailed": "Não foi possível gerar a imagem.",
     "chat.media.videoFailed": "Não foi possível gerar o vídeo.",
+    "chat.media.videoWaitingForProviderKey":
+      "Este vídeo está pausado porque o Clovy não conseguiu usar sua chave da fal para ele. Salve uma chave válida da conta fal que iniciou o vídeo em Configurações, em Mais opções, e depois peça ao Clovy para continuar este vídeo.",
     "chat.media.generatedImage": "Imagem gerada",
     "chat.media.generatedVideo": "Vídeo gerado",
     "chat.media.openImage": "Abrir imagem",
@@ -364,7 +370,9 @@ export default defineMessages({
     "chat.model.chooseTextModel": "Escolher modelo de texto",
     "chat.model.suggested": "Sugeridos",
     "chat.model.autoBillingNote":
-      "O Auto é cobrado dos créditos do Clovy e não usa sua chave de API da Venice.",
+      "O Auto é cobrado dos créditos do Clovy e não usa sua chave da OpenRouter.",
+    "chat.model.providerKeyNeeded":
+      "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
     "chat.model.suggestedTextModels": "Modelos de texto sugeridos",
     "chat.model.loadingSuggested": "Carregando modelos sugeridos.",
     "chat.model.allModels": "Todos os modelos",

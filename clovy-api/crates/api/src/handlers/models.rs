@@ -31,6 +31,7 @@ pub struct ModelDto {
     pub credits_per_million_seconds: Option<u64>,
     pub input_credits_per_million_tokens: Option<u64>,
     pub output_credits_per_million_tokens: Option<u64>,
+    pub service_available: bool,
 }
 
 pub(crate) async fn list_models(
@@ -46,7 +47,7 @@ pub(crate) async fn list_models(
         .pricing()
         .priced_models(kind)
         .into_iter()
-        .map(|(id, model)| to_dto(&id, &model))
+        .map(|(id, model)| to_dto(&id, &model, &state))
         .collect();
     Ok(Json(ApiResponse::ok(models)))
 }
@@ -59,7 +60,12 @@ fn parse_model_kind(value: &str) -> Result<ModelKind, ApiError> {
     }
 }
 
-fn to_dto(id: &str, model: &ModelPriceConfig) -> ModelDto {
+fn to_dto(id: &str, model: &ModelPriceConfig, state: &ApiState) -> ModelDto {
+    let upstream_provider = match model.provider {
+        clovy_config::ModelProvider::Groq => clovy_domain::UpstreamProvider::Groq,
+        clovy_config::ModelProvider::Openrouter => clovy_domain::UpstreamProvider::Openrouter,
+    };
+    let service_available = state.service_key_configured(upstream_provider);
     ModelDto {
         provider: model.provider.as_str().to_string(),
         id: id.to_string(),
@@ -76,6 +82,7 @@ fn to_dto(id: &str, model: &ModelPriceConfig) -> ModelDto {
         credits_per_million_seconds: model.credits_per_million_seconds,
         input_credits_per_million_tokens: model.input_credits_per_million_tokens,
         output_credits_per_million_tokens: model.output_credits_per_million_tokens,
+        service_available,
     }
 }
 
@@ -132,7 +139,7 @@ mod tests {
             credits_per_million_seconds: Some(50_000),
             input_credits_per_million_tokens: None,
             output_credits_per_million_tokens: None,
-            provider: ModelProvider::Openai,
+            provider: ModelProvider::Groq,
             model_type: ModelType::Asr,
             display_name: "ASR".to_string(),
             description: None,

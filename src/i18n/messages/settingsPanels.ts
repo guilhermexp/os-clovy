@@ -373,7 +373,9 @@ export default defineMessages({
     "settingsPanels.picker.matchingModelsAria": "Matching models",
     "settingsPanels.picker.autoAria": "Choose the model automatically",
     "settingsPanels.picker.autoBillingNote":
-      "Auto is billed to Clovy credits and does not use your Venice API key.",
+      "Auto is billed to Clovy credits and does not use your OpenRouter key.",
+    "settingsPanels.picker.providerKeyNeeded":
+      "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
     "settingsPanels.picker.autoPreference": "Auto preference",
     "settingsPanels.picker.thinkingLevel": "Thinking level",
     "settingsPanels.picker.loadingSuggested": "Loading suggested models.",
@@ -898,7 +900,9 @@ export default defineMessages({
     "settingsPanels.picker.matchingModelsAria": "Modelos encontrados",
     "settingsPanels.picker.autoAria": "Escolher o modelo automaticamente",
     "settingsPanels.picker.autoBillingNote":
-      "O Auto é cobrado em créditos do Clovy e não usa sua chave de API da Venice.",
+      "O Auto é cobrado em créditos do Clovy e não usa sua chave da OpenRouter.",
+    "settingsPanels.picker.providerKeyNeeded":
+      "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
     "settingsPanels.picker.autoPreference": "Preferência do Auto",
     "settingsPanels.picker.thinkingLevel": "Nível de raciocínio",
     "settingsPanels.picker.loadingSuggested": "Carregando modelos sugeridos.",

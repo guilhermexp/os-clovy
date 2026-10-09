@@ -3,8 +3,10 @@
 Clovy has two independent env surfaces: the **desktop app / client** (repo-root
 `.env`, copied from `.env.example`) and **Clovy API**
 (`clovy-api/.env` + `clovy-api/config.toml`). The client env must never hold a
-server secret — upstream provider keys and the OS Accounts App API key live only
-in Clovy API.
+server secret — service provider keys and the OS Accounts App API key live only
+in Clovy API. A user's own Groq, OpenRouter, fal, or Tavily key is not env
+configuration: it is saved from Settings into the Keychain (see
+[User provider keys](#user-provider-keys)).
 
 The fully-commented sources of truth are `.env.example`,
 `clovy-api/.env.example`, and `clovy-api/config.toml`. This page summarizes them;
@@ -16,8 +18,10 @@ when they disagree, the files win.
 `JUNE__SECTION__FIELD` env vars ← canonical `CLOVY__SECTION__FIELD` env vars (a
 double underscore separates sections; single underscores in field names stay
 literal, so `APP_API_KEY` → `app_api_key`).
-Secrets are env-only and redacted in logs. Pricing layers once more:
-built-in fallback ← `config.toml` ← the **live Venice catalog at boot**.
+Secrets are env-only and redacted in logs. Prices layer once more: built-in
+fallback ← `config.toml` ← provider catalog data that Clovy API loads (remote
+text prices come from the OpenRouter catalog; Groq ASR and fal media prices are
+curated). `clovy-api/.env.example` and `config.toml` are authoritative.
 
 ## Desktop app / client (repo-root `.env`)
 
@@ -31,9 +35,6 @@ built-in fallback ← `config.toml` ← the **live Venice catalog at boot**.
 | `OS_ACCOUNTS_LOOPBACK_PORT` | Login redirect loopback port; must match the registered `http://127.0.0.1:<port>/callback` | `8765` |
 | `OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store tokens in a file, not the Keychain (avoids prompts) | `0` |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Google Desktop OAuth credential for Gmail/Calendar connectors. Google requires both at token exchange; the second value is not confidential in an installed app and grants no user-data access by itself | unset |
-| `VENICE_TRANSCRIPTION_MODEL` / `OPENAI_TRANSCRIPTION_MODEL` | Initial transcription model (Settings can override) | see `.env.example` |
-| `VENICE_GENERATION_MODEL` | Initial note-generation model | `zai-org-glm-5-2` |
-| `VENICE_TITLE_SUGGESTION_MODEL` | Fast model for note-title suggestions | fallback to cleanup model |
 | `OS_NOTETAKER_TRANSCRIPTION_LANGUAGE` | Optional ISO-639-1 language hint | unset |
 
 Dev-only toggles also read in code: `OS_CLOVY_ENABLE_DEV_SINGLE_INSTANCE`,
@@ -54,8 +55,10 @@ through the bridge release.
 
 | Var | Purpose |
 |-----|---------|
-| `CLOVY__UPSTREAMS__VENICE__API_KEY` | Venice key (default text / dictation / private transcription) |
-| `CLOVY__UPSTREAMS__OPENAI__API_KEY` | OpenAI key (optional; OpenAI ASR only) |
+| `CLOVY__UPSTREAMS__GROQ__API_KEY` | Groq service key: dictation and note transcription (Whisper) |
+| `CLOVY__UPSTREAMS__OPENROUTER__API_KEY` | OpenRouter service key: remote text (chat, notes, dictation cleanup) |
+| `CLOVY__UPSTREAMS__FAL__API_KEY` | fal service key: image generation and editing, video generation and animation |
+| `CLOVY__UPSTREAMS__TAVILY__API_KEY` | Tavily service key: web search and page extraction |
 | `CLOVY__OS_ACCOUNTS__APP_API_KEY` | The `osk_` App API key Clovy API uses to authorize/charge |
 | `CLOVY__ISSUE_REPORTS__OS_PLATFORM_API_KEY` | Bot key to file issue reports as os-platform Issues (else log-only) |
 | `CLOVY__COMPANION__DATABASE_URL` | Postgres trust-metadata store; required to enable the production companion relay |
@@ -79,7 +82,70 @@ June-era `JUNE__*` variables remain lower-precedence compatibility inputs.
 - **Metering estimate:** `flat_estimate_credits` 250 — the flat credit Hold per metered action; skips per-request estimation.
 - **Hold TTLs (secs):** `note_transcribe` 60, `note_generate` 300, `dictate_transcribe` 30, `dictate_cleanup` 30, `web` 30, `image` defaults to `request_timeout_secs` + 30 (630) — validation rejects an image TTL that cannot outlive the request timeout, so a slow generation can still settle its charge.
 - **Web tools:** `web_search_credits` 20, `web_fetch_credits` 20 (flat).
+- **Media:** `image_pricing` (flat credits per generated image), `image_edit_pricing` (per edited image), and `video_pricing` / `video_animate_pricing` (markup on fal's quote). `fal-ai/flux-2/edit` is 96 credits, an estimate and not a proven account price: up to 2 MP in plus 2 MP out at fal's documented $0.012/MP is $0.048, with the existing margin of about 2x; fal's billing unit and rounding are not documented. A request naming a retired or unknown model is served by `default_image_model`, `default_image_edit_model`, `default_video_model`, or `default_video_animate_model` ([ADR-0021](adr/0021-june-api-v1-compatibility-policy.md)).
+- **Image edit geometry:** an edit request carries no size. Clovy API keeps the oriented source's proportions. The image it sends holds at most 1024x1024 pixels, and the output size it asks fal for is explicit, 512 to 2048 per side within the same pixel budget. A source that fits and needs no orientation or canvas work is sent as is. A larger source is resized by Clovy API before anything reaches fal, as a whole image, keeping proportions and edges, never cropped or stretched; extreme ratios get neutral padding that is removed from the result. That resize costs Clovy API CPU and memory inside its blocking preparation work. The decoder keeps its default 512 MiB allocation limit (`max_alloc`), so an image that needs more is refused there with a useful error. Aborting the request does not interrupt a decode that is already running.
 - **Preview cap:** `note_transcribe_preview_max_audio_secs` 30.
 - **OS Accounts token contract:** `iss` `https://accounts.opensoftware.co`, `aud` `open-software-apps`, `jwks_refresh_secs` 300, `jwks_miss_min_backoff_secs` 5.
-- **Pricing:** one `[pricing."<model_id>"]` table per priced model (unit, credits, provider, model_type, capabilities, ...). A model with no pricing entry is rejected at the boundary; the live Venice catalog extends this at boot (see [ADR-0007](adr/0007-model-capability-source-of-truth.md)).
+- **Pricing:** one `[pricing."<model_id>"]` table per priced model (unit, credits, provider, model_type, capabilities, ...). A model with no pricing entry is rejected at the boundary (see [ADR-0007](adr/0007-model-capability-source-of-truth.md) and its addendum).
 - **Attestation / issue reports:** the TEE trust-center URL + the fixed os-platform destination (`open-software` / `june`).
+
+## User provider keys
+
+Settings → More options lets a user save their own key for each provider Clovy
+API calls on their behalf: Groq (transcription), OpenRouter (text models; Clovy
+Auto never uses it), fal (images and video), and Tavily (web search). On save
+the desktop checks the key against the provider's free, documented endpoint
+(Groq `GET /openai/v1/models`, OpenRouter `GET /api/v1/key`, fal
+`GET /v1/models/pricing`, Tavily `GET /usage`) and stores it only if accepted,
+in the Keychain store the endpoints use (`crate::llm::secrets`), under the
+account `builtin:<provider>`. `provider-settings.json` and the settings DTO
+carry only `providerApiKeysConfigured` flags, never a key. A saved key is sent
+only as that provider's private header (`x-groq-api-key`,
+`x-openrouter-api-key`, `x-fal-api-key`, `x-tavily-api-key`) on the routes of
+its capability. Video status polls carry the fal key too: Clovy API never
+stores it, so a job created with it needs it on every poll and never falls
+back to Clovy's key, while a Clovy-funded job ignores it. Any valid key from
+the fal account that started the job works, so rotating the key within that
+account is fine. A poll answered `fal_api_key_required`, `fal_api_key_rejected`,
+or `fal_request_inaccessible` (fal could not find the job with the key sent,
+possibly another account's key), or a poll that could not read the saved key,
+leaves the job in place. The agent's `generate_video` tool then returns a
+`waitingForProviderKey` result carrying the job id instead of failing the run;
+after the user saves a valid key, calling the tool with only that `jobId`
+continues the same job with no new submit. A poll answered 404 `job_not_found`
+(past its lifetime, evicted, lost to a restart, never created, or another
+user's) ends as `video_job_unavailable`, and nothing is recreated
+automatically. A request carrying another provider's key, the retired
+`x-venice-api-key` included, is rejected as `<provider>_api_key_not_accepted`
+before any funding. Clovy API decides funding from the header it receives. A
+key the provider revokes after it was saved is reported as rejected by the
+request that uses it. When Clovy API has
+no service key for a provider, its catalog rows say `serviceAvailable: false`
+and requests without the user's key fail with `<provider>_not_configured`.
+Model pickers and the companion's model list leave out or flag such rows until
+the key is saved; a missing key is a setting, not a macOS permission.
+
+Settings saved before the Groq / OpenRouter / fal cutover are migrated on
+load: transcription becomes Groq Whisper, remote text moves to the same model
+on OpenRouter when Clovy serves it (otherwise the default), and media models
+move to the curated fal defaults, including profile overrides. CLI and
+endpoint choices, endpoint keys, and stored notes, transcripts, and
+conversations are not touched. The retired plaintext Venice key is dropped
+from the file and never copied into the Keychain.
+
+## Transcription context
+
+Groq transcription (notes and dictation) sends Whisper a short spelling hint
+as its `prompt`: whole custom dictionary terms, in dictionary order, joined by
+`, `, within 200 UTF-8 bytes including the separators. A term that does not
+fit is skipped, never cut, and later terms still get their chance; when no term
+fits, no prompt is sent. 200 bytes is a conservative local envelope under
+Groq's documented 224-token prompt limit, not a token count. The hint never
+carries instructions, style, or earlier transcript text, and Clovy API
+forwards it unchanged.
+
+The full context goes to correction instead. Every Groq note transcript is
+corrected on the dictation cleanup selection (Clovy API, an endpoint, or a
+CLI) with style `note_transcript_cleanup`, which selects the note correction
+instructions, and receives the whole dictionary plus the earlier turns of the
+same source. Dictation sends the whole dictionary to its cleanup pass.

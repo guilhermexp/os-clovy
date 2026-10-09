@@ -13,8 +13,18 @@ use url::Url;
 
 const REDACTED: &str = "<redacted>";
 pub const LOCAL_DEV_BEARER_TOKEN_PLACEHOLDER: &str = "local-dev-token";
-pub const OPENAI_API_KEY_PLACEHOLDER: &str = "sk_REPLACE_ME";
-pub const VENICE_API_KEY_PLACEHOLDER: &str = "VENICE_API_KEY_REPLACE_ME";
+pub const GROQ_API_KEY_PLACEHOLDER: &str = "GROQ_API_KEY_REPLACE_ME";
+pub const OPENROUTER_API_KEY_PLACEHOLDER: &str = "OPENROUTER_API_KEY_REPLACE_ME";
+pub const FAL_API_KEY_PLACEHOLDER: &str = "FAL_API_KEY_REPLACE_ME";
+pub const TAVILY_API_KEY_PLACEHOLDER: &str = "TAVILY_API_KEY_REPLACE_ME";
+/// Every published service-key placeholder. A configured key equal to any of
+/// them is not a usable key.
+const UPSTREAM_API_KEY_PLACEHOLDERS: &[&str] = &[
+    GROQ_API_KEY_PLACEHOLDER,
+    OPENROUTER_API_KEY_PLACEHOLDER,
+    FAL_API_KEY_PLACEHOLDER,
+    TAVILY_API_KEY_PLACEHOLDER,
+];
 pub const IMAGE_EDIT_SOURCE_MAX_BYTES: usize = 50 * 1024 * 1024;
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
 /// Matches os-platform's general attachment cap. Clovy API is the authenticated
@@ -98,7 +108,7 @@ pub const DEFAULT_MAX_AGENT_CONCURRENT_REQUESTS_PER_USER: usize = 8;
 // Video is an async job billed at completion: the hold is minted at
 // `/v1/video/generate` and must stay valid until the completing status poll
 // charges. Unlike image (a single synchronous request), the hold has to cover
-// the whole job lifetime — queue, the Venice run, then the settlement charge.
+// the whole job lifetime — queue, the provider run, then the settlement charge.
 // The desktop polls for 900s, so video reserves 750s for the job and 150s for
 // settlement, matching that full client poll window (ADR 0015 Decision 2).
 /// Worst-case seconds a supported video job may take from queue to a completing
@@ -114,12 +124,13 @@ pub const DEFAULT_VIDEO_HOLD_TTL_SECS: u64 =
     DEFAULT_VIDEO_JOB_MAX_SECS + VIDEO_SETTLEMENT_TIMEOUT_MARGIN_SECS;
 /// Desktop `/video` polls for 360 attempts at 2.5s each.
 const VIDEO_CLIENT_POLL_WINDOW_SECS: u64 = 900;
-/// Defensive per-request credit ceiling: Venice caps a video at $10/request; at
-/// the 2.0x default markup that is 20000 credits (`$1 = 1000 credits`). A quote
-/// above this is rejected before authorize so a catalog change cannot authorize
-/// an unbounded hold (ADR 0015 Decision 1).
+/// Defensive per-request credit ceiling. The longest, highest-resolution clip
+/// the curated fal models accept (30s at 1080p, $6.00) costs 12000 credits at
+/// the 2.0x default markup (`$1 = 1000 credits`). A quote above this is
+/// rejected before authorize so a price change cannot authorize an unbounded
+/// hold (ADR 0015 Decision 1).
 pub const DEFAULT_VIDEO_MAX_CREDITS_PER_REQUEST: u64 = 20_000;
-/// Maximum raw video body Clovy API will buffer from Venice retrieve.
+/// Maximum raw video body Clovy API will download from the video provider.
 pub const DEFAULT_VIDEO_MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
 // The hold must fit the platform cap; the job must fit inside the hold.
 const _: () = assert!(DEFAULT_VIDEO_HOLD_TTL_SECS <= OS_ACCOUNTS_MAX_HOLD_TTL_SECS);
@@ -175,38 +186,48 @@ pub struct AppConfig {
     /// into the served model pickers. A model absent here is rejected at the
     /// `/image/generate` boundary (`model_not_priced`), so the settings picker
     /// must only offer models listed here. `$1 = 1000 credits`; values are the
-    /// Venice per-image cost with margin (e.g. SD3.5 costs about $0.01,
-    /// charged 20).
+    /// fal worst-case per-image cost at Clovy's largest size with a ~2x margin
+    /// (FLUX.1 [dev] costs at most $0.05, charged 100).
     #[serde(default = "default_image_pricing")]
     pub image_pricing: BTreeMap<String, u64>,
-    /// Flat credits charged per EDITED image, keyed by edit model id. Editing is
-    /// a separate Venice model catalog from generation (default
-    /// `firered-image-edit`), so it has its own price map. A model absent here is
-    /// rejected at the `/image/edit` boundary (`model_not_priced`). Same units as
-    /// `image_pricing`: Venice per-image cost with margin, `$1 = 1000 credits`.
+    /// Flat credits charged per EDITED image, keyed by edit model id. Edit
+    /// models are separate fal endpoints from generation (default
+    /// `fal-ai/flux-2/edit`), so they have their own price map. A model absent
+    /// here is a retired or unknown id and is served by `default_image_edit_model`
+    /// (ADR 0021). Same
+    /// units as `image_pricing`: worst-case fal cost with margin.
     #[serde(default = "default_image_edit_pricing")]
     pub image_edit_pricing: BTreeMap<String, u64>,
-    /// The edit model used when a request names none — the image MCP never sends
-    /// one, so this on-server default governs every edit. Must be a key in
-    /// `image_edit_pricing`, or edits fail `model_not_priced`.
+    /// The edit model used when a request names none or a retired one — the
+    /// image MCP never sends one, so this on-server default governs every edit.
+    /// Must be a key in `image_edit_pricing`.
     #[serde(default = "default_image_edit_model")]
     pub default_image_edit_model: String,
-    /// Markup (fixed-point thousandths, `2000` = 2.0x) applied to the live Venice
-    /// quote for each text-to-video model, keyed by model id. Video is
+    /// The generation model that serves a request naming a retired or unknown
+    /// image model id (ADR 0021: shipped clients keep sending ids that stopped
+    /// being served). Must be a key in `image_pricing`.
+    #[serde(default = "default_image_model")]
+    pub default_image_model: String,
+    /// Markup (fixed-point thousandths, `2000` = 2.0x) applied to the video
+    /// provider's quote for each text-to-video model, keyed by model id. Video is
     /// quote-priced, not flat-priced: `credits = ceil(quote_usd * markup_millis)`
-    /// (ADR 0015 Decision 1). A model absent here is rejected `model_not_priced`
-    /// at the `/video/generate` boundary before the wallet or Venice is touched,
-    /// so this doubles as the allowlist. `$1 = 1000 credits`.
+    /// (ADR 0015 Decision 1). A model absent here is a retired or unknown id and
+    /// is served by `default_video_model` (ADR 0021), so this doubles as the
+    /// allowlist. `$1 = 1000 credits`.
     #[serde(default = "default_video_pricing")]
     pub video_pricing: BTreeMap<String, u32>,
-    /// Markup per IMAGE-to-video (animate) model, keyed by model id. Image-to-video
-    /// is a separate Venice catalog from text-to-video (mirroring
-    /// `image_edit_pricing`), so it has its own allowlist. Same units as
+    /// The text-to-video model that serves a request naming a retired or
+    /// unknown model id. Must be a key in `video_pricing`.
+    #[serde(default = "default_video_model")]
+    pub default_video_model: String,
+    /// Markup per IMAGE-to-video (animate) model, keyed by model id.
+    /// Image-to-video models are separate from text-to-video models (mirroring
+    /// `image_edit_pricing`), so they have their own allowlist. Same units as
     /// `video_pricing`.
     #[serde(default = "default_video_animate_pricing")]
     pub video_animate_pricing: BTreeMap<String, u32>,
-    /// The image-to-video model used when an animate request names none. Must be
-    /// a key in `video_animate_pricing`, or animate fails `model_not_priced`.
+    /// The image-to-video model used when an animate request names none or a
+    /// retired one. Must be a key in `video_animate_pricing`.
     #[serde(default = "default_video_animate_model")]
     pub default_video_animate_model: String,
     /// Defensive per-request credit ceiling for a quoted video. A computed price
@@ -214,7 +235,7 @@ pub struct AppConfig {
     /// catalog change from authorizing an unbounded hold.
     #[serde(default = "default_video_max_credits_per_request")]
     pub video_max_credits_per_request: u64,
-    /// Maximum raw `video/mp4` bytes Clovy API will retrieve from Venice before
+    /// Maximum raw video bytes Clovy API will download from the provider before
     /// rejecting the job. Keeps one oversized result from exhausting memory and
     /// is enforced before charge settlement.
     #[serde(default = "default_video_max_response_bytes")]
@@ -239,7 +260,9 @@ impl Debug for AppConfig {
             .field("image_pricing", &self.image_pricing)
             .field("image_edit_pricing", &self.image_edit_pricing)
             .field("default_image_edit_model", &self.default_image_edit_model)
+            .field("default_image_model", &self.default_image_model)
             .field("video_pricing", &self.video_pricing)
+            .field("default_video_model", &self.default_video_model)
             .field("video_animate_pricing", &self.video_animate_pricing)
             .field(
                 "default_video_animate_model",
@@ -678,13 +701,13 @@ pub struct OsAccountsConfig {
     /// max concurrency per user) for not needing to probe audio duration or
     /// pre-count tokens. Set via `CLOVY__OS_ACCOUNTS__FLAT_ESTIMATE_CREDITS`.
     pub flat_estimate_credits: u64,
-    /// Flat credits charged per Venice web search (`/v1/web/search`). Venice
-    /// bills roughly $0.01 (about 10 credits) per request; the surplus covers
-    /// overhead. The authorize estimate and the settled charge are both this
-    /// amount, since the upstream call is flat priced.
+    /// Flat credits charged per web search (`/v1/web/search`). A Tavily basic
+    /// search costs one Tavily credit, $0.008 pay-as-you-go (about 8 credits);
+    /// the surplus covers overhead. The authorize estimate and the settled
+    /// charge are both this amount, since the upstream call is flat priced.
     pub web_search_credits: u64,
-    /// Flat credits charged per Venice web fetch (`/v1/web/fetch`). Same ~$0.01
-    /// upstream cost as search.
+    /// Flat credits charged per web fetch (`/v1/web/fetch`). A Tavily basic
+    /// extract of one URL costs at most one Tavily credit.
     pub web_fetch_credits: u64,
     /// Hold TTL for the metered web search and web fetch actions.
     pub authorize_hold_ttl_web_secs: u64,
@@ -759,33 +782,45 @@ impl Debug for OsAccountsConfig {
     }
 }
 
+/// Clovy's service access to each upstream: Groq for audio, `OpenRouter` for
+/// text, fal for images and video, Tavily for web search and fetch.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct UpstreamsConfig {
-    pub openai: UpstreamConfig,
-    pub venice: UpstreamConfig,
+    pub groq: UpstreamConfig,
+    pub openrouter: UpstreamConfig,
+    pub fal: UpstreamConfig,
+    pub tavily: UpstreamConfig,
 }
 
 impl Debug for UpstreamsConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UpstreamsConfig")
-            .field("openai", &self.openai)
-            .field("venice", &self.venice)
+            .field("groq", &self.groq)
+            .field("openrouter", &self.openrouter)
+            .field("fal", &self.fal)
+            .field("tavily", &self.tavily)
             .finish()
     }
 }
 
+/// One upstream API. A request carrying the user's own key for this upstream
+/// goes to the same `base_url` with that key instead of `api_key`.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct UpstreamConfig {
     #[serde(default)]
     pub api_key: String,
     pub base_url: String,
-    /// Base URL for requests authenticated with a user-supplied (BYOK) key.
-    /// `base_url` may point at Clovy's model routing service, which accepts only
-    /// Clovy's service credential; a user's key must be presented to the provider
-    /// that issued it. `None` falls back to the provider's public API URL.
-    #[serde(default)]
-    pub byok_base_url: Option<String>,
+}
+
+impl UpstreamConfig {
+    /// True when Clovy holds a usable service key for this upstream: set, not
+    /// blank, and not a published placeholder. Without one, only requests that
+    /// carry the user's own key can use the upstream.
+    pub fn has_service_key(&self) -> bool {
+        let key = self.api_key.trim();
+        !key.is_empty() && !UPSTREAM_API_KEY_PLACEHOLDERS.contains(&key)
+    }
 }
 
 impl Debug for UpstreamConfig {
@@ -794,23 +829,23 @@ impl Debug for UpstreamConfig {
             .debug_struct("UpstreamConfig")
             .field("api_key", &REDACTED)
             .field("base_url", &self.base_url)
-            .field("byok_base_url", &self.byok_base_url)
             .finish()
     }
 }
 
+/// The upstream that serves a priced text or ASR model.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProvider {
-    Openai,
-    Venice,
+    Groq,
+    Openrouter,
 }
 
 impl ModelProvider {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Openai => "openai",
-            Self::Venice => "venice",
+            Self::Groq => "groq",
+            Self::Openrouter => "openrouter",
         }
     }
 }
@@ -883,113 +918,92 @@ struct TextModelFallback {
     capabilities: &'static [&'static str],
 }
 
-/// Built-in pricing fallback, used only when the live Venice catalog can't be
-/// reached at startup so metered charges still settle. The catalog carries the
-/// authoritative numbers and extends over this on every boot. Split out of
-/// `AppConfig::default` to keep that constructor under the line limit.
+/// Built-in pricing fallback. ASR prices are Groq's published rates; text rows
+/// are the `OpenRouter` catalog prices for Clovy's default models, used only
+/// when the live `OpenRouter` catalog can't be reached at startup so metered
+/// charges still settle. The live catalog carries the authoritative numbers
+/// and extends over this on every boot. Split out of `AppConfig::default` to
+/// keep that constructor under the line limit.
 ///
 /// Usage credit prices pass through upstream cost without a Clovy markup.
 /// `$1 = 1000 credits`.
 fn default_pricing() -> BTreeMap<String, ModelPriceConfig> {
     let mut pricing = BTreeMap::new();
+    // Groq bills Whisper per hour of audio: $0.04 for Large v3 Turbo and
+    // $0.111 for Large v3 (console.groq.com/docs/speech-to-text, 2026-10-08),
+    // here per million seconds rounded up. Groq bills at least 10 seconds per
+    // request; at these rates that costs under one credit, and Clovy rounds
+    // every metered request up to at least one credit.
     pricing.insert(
-        "gpt-4o-mini-transcribe".to_string(),
-        ModelPriceConfig {
-            unit: PriceUnit::Seconds,
-            // OpenAI lists ASR prices per MINUTE ($0.003/min for mini);
-            // converted per second at upstream cost.
-            credits_per_million_seconds: Some(50_000),
-            input_credits_per_million_tokens: None,
-            output_credits_per_million_tokens: None,
-            provider: ModelProvider::Openai,
-            model_type: ModelType::Asr,
-            display_name: "GPT-4o mini transcribe".to_string(),
-            description: Some("Fast OpenAI speech-to-text model.".to_string()),
-            privacy: Some("anonymized".to_string()),
-            // Matches what `models.rs::price_description` derives from the
-            // credit price above (raw metadata only — the API recomputes it).
-            pricing: Some(serde_json::json!({ "display": "$0.00005 per second audio" })),
-            context_tokens: Some(16_000),
-            traits: vec!["prompt".to_string()],
-            capabilities: Vec::new(),
-        },
+        "whisper-large-v3-turbo".to_string(),
+        asr_model_config(
+            "Whisper Large v3 Turbo",
+            11_112,
+            "Fast multilingual Whisper transcription on Groq.",
+        ),
     );
     pricing.insert(
-        "nvidia/parakeet-tdt-0.6b-v3".to_string(),
-        ModelPriceConfig {
-            unit: PriceUnit::Seconds,
-            credits_per_million_seconds: Some(100_000),
-            input_credits_per_million_tokens: None,
-            output_credits_per_million_tokens: None,
-            provider: ModelProvider::Venice,
-            model_type: ModelType::Asr,
-            display_name: "Parakeet TDT 0.6B v3".to_string(),
-            description: None,
-            privacy: Some("private".to_string()),
-            pricing: None,
-            context_tokens: None,
-            traits: Vec::new(),
-            capabilities: Vec::new(),
-        },
+        "whisper-large-v3".to_string(),
+        asr_model_config(
+            "Whisper Large v3",
+            30_834,
+            "Most accurate multilingual Whisper transcription on Groq.",
+        ),
     );
-    // Credit prices for Clovy's legacy text-model ids. os-api's live catalog
-    // uses canonical ids, so those entries extend rather than replace these
-    // aliases. Price each alias for the most expensive enabled private route
-    // so a Phala fallback cannot cost more than Clovy charges. Keep GLM 5.2 in
-    // sync with DEFAULT_GENERATION_MODEL in the Tauri providers module.
+    // OpenRouter catalog prices fetched 2026-10-08, per million tokens rounded
+    // up. Keep GLM 5.2 in sync with DEFAULT_GENERATION_MODEL in the Tauri
+    // providers module, and Kimi K2.6 with the vision fallback.
     for model in [
         TextModelFallback {
-            id: "zai-org-glm-5-2",
-            display_name: "GLM 5.2",
-            input_credits_per_million_tokens: 1_400,
-            output_credits_per_million_tokens: 4_400,
-            context_tokens: 200_000,
-            capabilities: &[
-                "supportsFunctionCalling",
-                "supportsReasoning",
-                "supportsReasoningEffort",
-                "supportsResponseSchema",
-                "supportsWebSearch",
-            ],
+            id: "z-ai/glm-5.2",
+            display_name: "Z.ai: GLM 5.2",
+            input_credits_per_million_tokens: 30,
+            output_credits_per_million_tokens: 10_000,
+            context_tokens: 1_048_576,
+            capabilities: TEXT_TOOL_CAPABILITIES,
         },
         TextModelFallback {
-            id: "kimi-k2-6",
-            display_name: "Kimi K2.6",
-            input_credits_per_million_tokens: 1_090,
-            output_credits_per_million_tokens: 4_600,
-            context_tokens: 256_000,
-            // Kimi K2.6 is natively multimodal (Venice `supportsVision`), so it
-            // is the image-input fallback the frontend switches to when an image
-            // is attached to a non-vision model. Declare vision here too so that
-            // fallback still resolves when the live Venice catalog can't be
-            // reached at boot and only these built-in defaults are available.
-            capabilities: &[
-                "supportsFunctionCalling",
-                "supportsVision",
-                "supportsMultipleImages",
-            ],
+            id: "moonshotai/kimi-k2.6",
+            display_name: "MoonshotAI: Kimi K2.6",
+            input_credits_per_million_tokens: 438,
+            output_credits_per_million_tokens: 2_450,
+            context_tokens: 262_144,
+            // Image input, so it is the vision fallback the agent switches to
+            // when an image is attached to a text-only model. Declared here so
+            // that fallback still resolves when only these defaults load.
+            capabilities: VISION_TOOL_CAPABILITIES,
         },
         TextModelFallback {
-            id: "zai-org-glm-5-1",
-            display_name: "GLM 5.1",
-            input_credits_per_million_tokens: 1_400,
-            output_credits_per_million_tokens: 4_400,
-            context_tokens: 200_000,
-            capabilities: &[
-                "supportsFunctionCalling",
-                "supportsReasoning",
-                "supportsReasoningEffort",
-                "supportsResponseSchema",
-                "supportsWebSearch",
-            ],
+            id: "nvidia/nemotron-3-nano-30b-a3b",
+            display_name: "NVIDIA: Nemotron 3 Nano 30B A3B",
+            input_credits_per_million_tokens: 60,
+            output_credits_per_million_tokens: 240,
+            context_tokens: 262_144,
+            capabilities: TEXT_TOOL_CAPABILITIES,
         },
         TextModelFallback {
-            id: "zai-org-glm-5",
-            display_name: "GLM 5",
-            input_credits_per_million_tokens: 1_400,
-            output_credits_per_million_tokens: 4_400,
-            context_tokens: 198_000,
-            capabilities: &["supportsFunctionCalling"],
+            id: "z-ai/glm-5.1",
+            display_name: "Z.ai: GLM 5.1",
+            input_credits_per_million_tokens: 966,
+            output_credits_per_million_tokens: 3_036,
+            context_tokens: 204_800,
+            capabilities: TEXT_TOOL_CAPABILITIES,
+        },
+        TextModelFallback {
+            id: "z-ai/glm-5",
+            display_name: "Z.ai: GLM 5",
+            input_credits_per_million_tokens: 600,
+            output_credits_per_million_tokens: 1_920,
+            context_tokens: 204_800,
+            capabilities: TEXT_TOOL_CAPABILITIES,
+        },
+        TextModelFallback {
+            id: "moonshotai/kimi-k3",
+            display_name: "MoonshotAI: Kimi K3",
+            input_credits_per_million_tokens: 990,
+            output_credits_per_million_tokens: 14_000,
+            context_tokens: 1_048_576,
+            capabilities: VISION_TOOL_CAPABILITIES,
         },
     ] {
         pricing.insert(model.id.to_string(), text_model_config(model));
@@ -997,106 +1011,130 @@ fn default_pricing() -> BTreeMap<String, ModelPriceConfig> {
     pricing
 }
 
-/// Per-image credit price for the curated Venice image models Clovy offers. Keep
+/// Capability names the `OpenRouter` catalog adapter derives from a model's
+/// `supported_parameters` (`tools`, `reasoning`, `structured_outputs`) and
+/// input modalities (`image`).
+const TEXT_TOOL_CAPABILITIES: &[&str] = &[
+    "supportsFunctionCalling",
+    "supportsReasoning",
+    "supportsResponseSchema",
+];
+const VISION_TOOL_CAPABILITIES: &[&str] = &[
+    "supportsFunctionCalling",
+    "supportsReasoning",
+    "supportsResponseSchema",
+    "supportsVision",
+];
+
+fn asr_model_config(
+    display_name: &str,
+    credits_per_million_seconds: u64,
+    description: &str,
+) -> ModelPriceConfig {
+    ModelPriceConfig {
+        unit: PriceUnit::Seconds,
+        credits_per_million_seconds: Some(credits_per_million_seconds),
+        input_credits_per_million_tokens: None,
+        output_credits_per_million_tokens: None,
+        provider: ModelProvider::Groq,
+        model_type: ModelType::Asr,
+        display_name: display_name.to_string(),
+        description: Some(description.to_string()),
+        privacy: None,
+        pricing: None,
+        context_tokens: None,
+        // Whisper takes a short spelling/context prompt (Groq caps it at 224
+        // tokens).
+        traits: vec!["prompt".to_string()],
+        capabilities: Vec::new(),
+    }
+}
+
+/// Per-image credit price for the curated fal image models Clovy offers. Keep
 /// the ids in sync with `IMAGE_MODELS` in the frontend (`src/lib/image-models.ts`)
-/// and `DEFAULT_IMAGE_MODEL` in the Tauri providers module — every id here must
-/// be a current Venice image model (verified against the models list), or
-/// generation fails `image_generation_rejected`. Values are the Venice per-image
-/// cost with a ~2x margin (mirroring the flat web-tool pricing). Models that
-/// price by resolution use their default 1K tier because Clovy does not expose a
-/// higher-resolution image request control yet. `$1 = 1000 credits`.
+/// and `DEFAULT_IMAGE_MODEL` in the Tauri providers module; every id is a fal
+/// endpoint id the image adapter supports. fal prices these per megapixel
+/// (model pages, 2026-10-08), so each value is the cost at Clovy's largest
+/// image (1280x1280, billed as 2 MP) with a ~2x margin, mirroring the flat
+/// web-tool pricing. `$1 = 1000 credits`.
 fn default_image_pricing() -> BTreeMap<String, u64> {
     BTreeMap::from([
-        ("venice-sd35".to_string(), 20),
-        ("grok-imagine-image-quality".to_string(), 160),
-        ("krea-2-turbo".to_string(), 80),
-        ("flux-2-pro".to_string(), 60),
-        ("flux-2-max".to_string(), 180),
-        ("gpt-image-2".to_string(), 540),
-        ("gpt-image-1-5".to_string(), 520),
-        ("hunyuan-image-v3".to_string(), 180),
-        ("ideogram-v4".to_string(), 120),
-        ("imagineart-1.5-pro".to_string(), 120),
-        ("krea-v2-large".to_string(), 140),
-        ("krea-v2-medium".to_string(), 80),
-        ("luma-uni-1".to_string(), 100),
-        ("luma-uni-1-max".to_string(), 240),
-        ("nano-banana-2".to_string(), 200),
-        ("nano-banana-pro".to_string(), 360),
-        ("nano-banana-2-lite".to_string(), 120),
-        ("recraft-v4".to_string(), 100),
-        ("recraft-v4-pro".to_string(), 580),
-        ("seedream-v4".to_string(), 100),
-        ("seedream-v5-lite".to_string(), 100),
-        ("qwen-image-2".to_string(), 100),
-        ("qwen-image-2-pro".to_string(), 200),
-        ("wan-2-7-text-to-image".to_string(), 75),
-        ("wan-2-7-pro-text-to-image".to_string(), 188),
-        ("grok-imagine-image".to_string(), 80),
-        ("lustify-sdxl".to_string(), 20),
-        ("lustify-v7".to_string(), 20),
-        ("lustify-v8".to_string(), 20),
-        ("qwen-image".to_string(), 60),
-        ("wai-Illustrious".to_string(), 20),
-        ("z-image-turbo".to_string(), 20),
-        ("chroma".to_string(), 20),
-        ("bria-bg-remover".to_string(), 60),
+        // FLUX.1 [dev]: $0.025/MP, at most $0.05.
+        ("fal-ai/flux/dev".to_string(), 100),
+        // FLUX.1 [schnell]: $0.003/MP, at most $0.006.
+        ("fal-ai/flux/schnell".to_string(), 12),
+        // Qwen Image: $0.02/MP, at most $0.04.
+        ("fal-ai/qwen-image".to_string(), 80),
     ])
 }
 
-/// Flat per-edit prices, keyed by Venice edit model id. Edit models are a
-/// separate catalog from generation. `firered-image-edit` costs ~$0.04 -> 80 at
-/// the same ~2x margin as generation (`$1 = 1000 credits`). Additional edit
-/// models get added here (with their own verified price) when offered.
+/// Flat per-edit prices, keyed by fal edit endpoint id (`$1 = 1000 credits`).
+///
+/// FLUX 2 Edit: a list-price estimate from the fal model page, $0.012 per
+/// megapixel of input (resized to 1 MP) plus output; the page's example (1 MP
+/// in, 1024x1024 out) is $0.024. The edit adapter requests an output within
+/// that 1024x1024 pixel budget, but the page does not say how a megapixel is
+/// counted: if it is 10^6 pixels rounded up per image, input and output bill
+/// up to 2 MP each, $0.048. The price takes that conservative reading at the
+/// same ~2x margin as generation: 96. Neither a rate nor a charge observed on
+/// an account, nor a proven maximum. Additional edit models get added here
+/// (with their own verified price) when offered.
 fn default_image_edit_pricing() -> BTreeMap<String, u64> {
-    BTreeMap::from([("firered-image-edit".to_string(), 80)])
+    BTreeMap::from([("fal-ai/flux-2/edit".to_string(), 96)])
 }
 
-/// The default Venice edit model — cheapest of the edit catalog, and the one
-/// every MCP-driven edit uses (the tool never names a model).
+/// The default edit model, and the one every MCP-driven edit uses (the tool
+/// never names a model).
 fn default_image_edit_model() -> String {
-    "firered-image-edit".to_string()
+    "fal-ai/flux-2/edit".to_string()
+}
+
+/// The generation model that serves a retired or unknown image model id.
+fn default_image_model() -> String {
+    "fal-ai/flux/dev".to_string()
 }
 
 /// Curated text-to-video allowlist with per-model markups (`2000` = 2.0x, the
-/// image margin). Every id must be a current Venice text-to-video model, and its
-/// worst-case run at the supported durations must fit `DEFAULT_VIDEO_JOB_MAX_SECS`
-/// so the hold covers the whole job (ADR 0015). `credits = ceil(quote_usd * markup)`.
+/// image margin). Every id is a fal text-to-video endpoint the video adapter
+/// supports and quotes from its published per-second price at the requested
+/// resolution. `credits = ceil(quote_usd * markup)`.
 ///
-/// First-cut curation: every model here must accept the desktop fast-path's fixed
-/// default duration/resolution (5s / 720p) that the proxy injects when the client
-/// names none, so a `/video` shot or an MCP `generate_video` call never queues an
-/// invalid Venice combination. `ltx-2-fast` is deliberately excluded — it only
-/// accepts >=6s and >=1080p, so no global default serves it; per-model
-/// duration/resolution selection (which re-admits it) is a follow-up.
+/// Every model here accepts the desktop fast path's fixed default duration and
+/// resolution (5s / 720p) that the proxy injects when the client names none, so
+/// a `/video` shot or an MCP `generate_video` call never queues an invalid
+/// combination. Whether the longest 1080p clips finish inside
+/// `DEFAULT_VIDEO_JOB_MAX_SECS` is not yet measured on fal.
 fn default_video_pricing() -> BTreeMap<String, u32> {
     // The curated text-to-video allowlist: every id Clovy's picker offers must be
-    // here or it is rejected `model_not_priced` at `/video/generate`. Markup is a
-    // uniform 2.0x on the live Venice quote (ADR 0015 Decision 1) — the per-clip
-    // credit price still comes from the quote, so pricier models cost more
-    // without a per-model markup table. Mirrors `VIDEO_MODELS` in
+    // here; any other id is served by `default_video_model`. Markup is a
+    // uniform 2.0x on the quote (ADR 0015 Decision 1), so pricier models cost
+    // more without a per-model markup table. Mirrors `VIDEO_MODELS` in
     // src/lib/video-models.ts and `KNOWN_VIDEO_MODELS` in the desktop providers
-    // module; keep the three in sync. Kept to three curated `private`-tier models
-    // (fast default / photorealistic / higher-detail). The original Seedance 2.0
-    // default was delisted from Venice's live catalog (quote tolerated it, queue
-    // rejected it with a 400), so it is deliberately absent.
+    // module; keep the three in sync.
     BTreeMap::from([
-        ("wan-2.2-a14b-text-to-video".to_string(), 2000),
-        ("grok-imagine-text-to-video-private".to_string(), 2000),
-        ("ltx-2-19b-full-text-to-video".to_string(), 2000),
+        ("fal-ai/wan/v2.2-a14b/text-to-video".to_string(), 2000),
+        ("alibaba/wan-3.0/text-to-video".to_string(), 2000),
     ])
 }
 
-/// Curated image-to-video (animate) allowlist — a separate Venice catalog from
-/// text-to-video, keyed by model id with the same markup units.
+/// Curated image-to-video (animate) allowlist: fal image-to-video endpoints,
+/// keyed by model id with the same markup units.
 fn default_video_animate_pricing() -> BTreeMap<String, u32> {
-    BTreeMap::from([("wan-2.6-image-to-video".to_string(), 2000)])
+    BTreeMap::from([
+        ("fal-ai/wan/v2.2-a14b/image-to-video".to_string(), 2000),
+        ("alibaba/wan-3.0/image-to-video".to_string(), 2000),
+    ])
 }
 
 /// The default image-to-video model — the one every MCP-driven animate uses
 /// (the tool never names a model). Must be a key in `video_animate_pricing`.
 fn default_video_animate_model() -> String {
-    "wan-2.6-image-to-video".to_string()
+    "fal-ai/wan/v2.2-a14b/image-to-video".to_string()
+}
+
+/// The text-to-video model that serves a retired or unknown video model id.
+fn default_video_model() -> String {
+    "fal-ai/wan/v2.2-a14b/text-to-video".to_string()
 }
 
 fn default_video_max_credits_per_request() -> u64 {
@@ -1117,11 +1155,11 @@ fn text_model_config(model: TextModelFallback) -> ModelPriceConfig {
         credits_per_million_seconds: None,
         input_credits_per_million_tokens: Some(model.input_credits_per_million_tokens),
         output_credits_per_million_tokens: Some(model.output_credits_per_million_tokens),
-        provider: ModelProvider::Venice,
+        provider: ModelProvider::Openrouter,
         model_type: ModelType::Text,
         display_name: model.display_name.to_string(),
         description: None,
-        privacy: Some("private".to_string()),
+        privacy: None,
         pricing: None,
         context_tokens: Some(model.context_tokens),
         traits: Vec::new(),
@@ -1173,15 +1211,21 @@ impl Default for AppConfig {
                 authorize_hold_ttl_video_secs: DEFAULT_VIDEO_HOLD_TTL_SECS,
             },
             upstreams: UpstreamsConfig {
-                openai: UpstreamConfig {
+                groq: UpstreamConfig {
                     api_key: String::new(),
-                    base_url: "https://api.openai.com/v1".to_string(),
-                    byok_base_url: None,
+                    base_url: "https://api.groq.com/openai/v1".to_string(),
                 },
-                venice: UpstreamConfig {
+                openrouter: UpstreamConfig {
                     api_key: String::new(),
-                    base_url: "https://api.venice.ai/api/v1".to_string(),
-                    byok_base_url: None,
+                    base_url: "https://openrouter.ai/api/v1".to_string(),
+                },
+                fal: UpstreamConfig {
+                    api_key: String::new(),
+                    base_url: "https://queue.fal.run".to_string(),
+                },
+                tavily: UpstreamConfig {
+                    api_key: String::new(),
+                    base_url: "https://api.tavily.com".to_string(),
                 },
             },
             attestation: AttestationConfig {
@@ -1200,7 +1244,9 @@ impl Default for AppConfig {
             image_pricing: default_image_pricing(),
             image_edit_pricing: default_image_edit_pricing(),
             default_image_edit_model: default_image_edit_model(),
+            default_image_model: default_image_model(),
             video_pricing: default_video_pricing(),
+            default_video_model: default_video_model(),
             video_animate_pricing: default_video_animate_pricing(),
             default_video_animate_model: default_video_animate_model(),
             video_max_credits_per_request: default_video_max_credits_per_request(),
@@ -1252,16 +1298,10 @@ pub fn load() -> Result<AppConfig, ConfigError> {
 }
 
 const LEGACY_OS_ACCOUNTS_APP_API_KEY_PLACEHOLDER: &str = concat!("osk", "_REPLACE_ME");
-const LEGACY_OPENAI_API_KEY_PLACEHOLDER: &str = concat!("sk", "_REPLACE_ME");
 const OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS: &[&str] = &[
     "REPLACE_WITH_OS_ACCOUNTS_APP_API_KEY",
     LEGACY_OS_ACCOUNTS_APP_API_KEY_PLACEHOLDER,
 ];
-const OPENAI_API_KEY_PLACEHOLDERS: &[&str] = &[
-    "REPLACE_WITH_OPENAI_API_KEY",
-    LEGACY_OPENAI_API_KEY_PLACEHOLDER,
-];
-const VENICE_API_KEY_PLACEHOLDERS: &[&str] = &["VENICE_API_KEY_REPLACE_ME"];
 const LOCAL_DEV_BEARER_TOKEN_PLACEHOLDERS: &[&str] = &[LOCAL_DEV_BEARER_TOKEN_PLACEHOLDER];
 
 fn validate(config: &AppConfig) -> Result<(), ConfigError> {
@@ -1293,37 +1333,37 @@ fn validate(config: &AppConfig) -> Result<(), ConfigError> {
     validate_request_limits(config)?;
     validate_issue_report_diagnosis(config)?;
 
-    let uses_openai = config
-        .pricing
-        .values()
-        .any(|pricing| pricing.provider == ModelProvider::Openai);
-    let uses_venice = config
-        .pricing
-        .values()
-        .any(|pricing| pricing.provider == ModelProvider::Venice);
-    if uses_openai {
-        validate_required_text(
-            "upstreams.openai.base_url",
-            &config.upstreams.openai.base_url,
-        )?;
+    // Every capability's upstream needs its base URL. Outside local dev Clovy
+    // also needs its own service key for each, so service-funded requests work
+    // at startup; requests carrying the user's own key need no service key.
+    for (base_url_field, api_key_field, upstream) in [
+        (
+            "upstreams.groq.base_url",
+            "upstreams.groq.api_key",
+            &config.upstreams.groq,
+        ),
+        (
+            "upstreams.openrouter.base_url",
+            "upstreams.openrouter.api_key",
+            &config.upstreams.openrouter,
+        ),
+        (
+            "upstreams.fal.base_url",
+            "upstreams.fal.api_key",
+            &config.upstreams.fal,
+        ),
+        (
+            "upstreams.tavily.base_url",
+            "upstreams.tavily.api_key",
+            &config.upstreams.tavily,
+        ),
+    ] {
+        validate_absolute_http_url(base_url_field, &upstream.base_url)?;
         if !config.local_dev.enabled {
             validate_required_secret(
-                "upstreams.openai.api_key",
-                &config.upstreams.openai.api_key,
-                OPENAI_API_KEY_PLACEHOLDERS,
-            )?;
-        }
-    }
-    if uses_venice {
-        validate_required_text(
-            "upstreams.venice.base_url",
-            &config.upstreams.venice.base_url,
-        )?;
-        if !config.local_dev.enabled {
-            validate_required_secret(
-                "upstreams.venice.api_key",
-                &config.upstreams.venice.api_key,
-                VENICE_API_KEY_PLACEHOLDERS,
+                api_key_field,
+                &upstream.api_key,
+                UPSTREAM_API_KEY_PLACEHOLDERS,
             )?;
         }
     }
@@ -1435,15 +1475,24 @@ fn validate_video_pricing(config: &AppConfig) -> Result<(), ConfigError> {
             reason: "must be > 0",
         });
     }
-    if !config
-        .video_animate_pricing
-        .contains_key(&config.default_video_animate_model)
-    {
-        return Err(ConfigError::InvalidPricing {
-            model: config.default_video_animate_model.clone(),
-            reason: "default_video_animate_model must be present in video_animate_pricing"
-                .to_string(),
-        });
+    for (field, model, allowlist) in [
+        (
+            "default_video_model",
+            &config.default_video_model,
+            &config.video_pricing,
+        ),
+        (
+            "default_video_animate_model",
+            &config.default_video_animate_model,
+            &config.video_animate_pricing,
+        ),
+    ] {
+        if !allowlist.contains_key(model) {
+            return Err(ConfigError::InvalidPricing {
+                model: model.clone(),
+                reason: format!("{field} must be present in its video pricing allowlist"),
+            });
+        }
     }
     Ok(())
 }
@@ -1660,14 +1709,24 @@ fn validate_image_pricing(config: &AppConfig) -> Result<(), ConfigError> {
             });
         }
     }
-    if !config
-        .image_edit_pricing
-        .contains_key(&config.default_image_edit_model)
-    {
-        return Err(ConfigError::InvalidPricing {
-            model: config.default_image_edit_model.clone(),
-            reason: "default_image_edit_model must be present in image_edit_pricing".to_string(),
-        });
+    for (field, model, allowlist) in [
+        (
+            "default_image_model",
+            &config.default_image_model,
+            &config.image_pricing,
+        ),
+        (
+            "default_image_edit_model",
+            &config.default_image_edit_model,
+            &config.image_edit_pricing,
+        ),
+    ] {
+        if !allowlist.contains_key(model) {
+            return Err(ConfigError::InvalidPricing {
+                model: model.clone(),
+                reason: format!("{field} must be present in its image pricing allowlist"),
+            });
+        }
     }
     Ok(())
 }
@@ -1799,12 +1858,11 @@ mod tests {
         DEFAULT_MAX_ISSUE_REPORT_BYTES, DEFAULT_REQUEST_TIMEOUT_SECS, DEFAULT_VIDEO_HOLD_TTL_SECS,
         DEFAULT_VIDEO_JOB_MAX_SECS, DEFAULT_VIDEO_MAX_RESPONSE_BYTES, IMAGE_EDIT_SOURCE_MAX_BYTES,
         IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS, ISSUE_REPORT_ATTACHMENT_MAX_BYTES, ModelPriceConfig,
-        ModelProvider, ModelType, OPENAI_API_KEY_PLACEHOLDERS,
-        OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS, OS_ACCOUNTS_AUTHORIZE_TIMEOUT_BUDGET_SECS,
-        OS_ACCOUNTS_MAX_HOLD_TTL_SECS, PriceUnit, VENICE_API_KEY_PLACEHOLDERS,
-        VIDEO_CLIENT_POLL_WINDOW_SECS, VIDEO_SETTLEMENT_TIMEOUT_MARGIN_SECS,
-        image_client_timeout_secs, is_loopback_host, merge_compatibility_namespaces, validate,
-        validate_request_limits,
+        ModelProvider, ModelType, OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS,
+        OS_ACCOUNTS_AUTHORIZE_TIMEOUT_BUDGET_SECS, OS_ACCOUNTS_MAX_HOLD_TTL_SECS, PriceUnit,
+        UPSTREAM_API_KEY_PLACEHOLDERS, UpstreamConfig, VIDEO_CLIENT_POLL_WINDOW_SECS,
+        VIDEO_SETTLEMENT_TIMEOUT_MARGIN_SECS, image_client_timeout_secs, is_loopback_host,
+        merge_compatibility_namespaces, validate, validate_request_limits,
     };
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
@@ -1814,8 +1872,10 @@ mod tests {
         config.os_accounts.api_url = "http://127.0.0.1:3000".to_string();
         config.os_accounts.app_api_key = "osk_test".to_string();
         config.os_accounts.p3a_ingest_token = "p3a-test-token".to_string();
-        config.upstreams.openai.api_key = "sk-test".to_string();
-        config.upstreams.venice.api_key = "venice-test".to_string();
+        config.upstreams.groq.api_key = "gsk-test".to_string();
+        config.upstreams.openrouter.api_key = "sk-or-test".to_string();
+        config.upstreams.fal.api_key = "fal-test".to_string();
+        config.upstreams.tavily.api_key = "tvly-test".to_string();
         config
     }
 
@@ -1949,8 +2009,8 @@ mod tests {
     fn default_kimi_declares_vision_but_glm_does_not() {
         // Kimi K2.6 is the image-input fallback the app switches to, so it must
         // read as vision-capable even from these built-in defaults, before the
-        // live Venice catalog loads (JUN-165). The non-vision GLM defaults must
-        // not claim vision, or the fallback could land on one of them.
+        // live OpenRouter catalog loads (JUN-165). The text-only GLM default
+        // must not claim vision, or the fallback could land on it.
         let config = AppConfig::default();
         let declares_vision = |id: &str| {
             config
@@ -1959,15 +2019,15 @@ mod tests {
                 .is_some_and(|model| model.capabilities.iter().any(|c| c == "supportsVision"))
         };
         assert!(
-            declares_vision("kimi-k2-6"),
-            "kimi-k2-6 default capabilities should declare supportsVision"
+            declares_vision("moonshotai/kimi-k2.6"),
+            "moonshotai/kimi-k2.6 default capabilities should declare supportsVision"
         );
         assert!(
-            config.pricing.contains_key("zai-org-glm-5-2"),
-            "zai-org-glm-5-2 should be present in default pricing"
+            config.pricing.contains_key("z-ai/glm-5.2"),
+            "z-ai/glm-5.2 should be present in default pricing"
         );
         assert!(
-            !declares_vision("zai-org-glm-5-2"),
+            !declares_vision("z-ai/glm-5.2"),
             "GLM 5.2 default must not claim vision"
         );
     }
@@ -1986,91 +2046,63 @@ mod tests {
     #[test]
     fn packaged_config_toml_keeps_kimi_vision_in_sync() {
         // config.toml overrides default_pricing() via Figment and ships in the
-        // Docker image, so it is what `/models` serves when the live Venice
+        // Docker image, so it is what `/models` serves when the live OpenRouter
         // catalog is unreachable. It must agree that Kimi is a vision model, or
         // the image-attach fallback breaks in the packaged build (JUN-165).
         let config = packaged_config_toml();
-        // A TOML-only model proves config.toml actually merged, so a failed
-        // load can't make the vision assertion below pass on the default alone.
-        assert!(
-            config
-                .pricing
-                .contains_key("nvidia-nemotron-3-nano-30b-a3b"),
+        // The diagnosis model is set only in config.toml, so it proves the file
+        // actually merged and a failed load can't pass on the default alone.
+        assert_eq!(
+            config.issue_reports.diagnosis_model.as_deref(),
+            Some("z-ai/glm-5.2"),
             "packaged config.toml did not merge"
         );
         let kimi_declares_vision = config
             .pricing
-            .get("kimi-k2-6")
+            .get("moonshotai/kimi-k2.6")
             .is_some_and(|model| model.capabilities.iter().any(|c| c == "supportsVision"));
         assert!(
             kimi_declares_vision,
-            "packaged config.toml must declare supportsVision for kimi-k2-6"
+            "packaged config.toml must declare supportsVision for moonshotai/kimi-k2.6"
         );
     }
 
     #[test]
     fn packaged_config_toml_passes_through_upstream_cost() {
         let config = packaged_config_toml();
+        let rates = |id: &str| {
+            config.pricing.get(id).map(|model| {
+                (
+                    model.provider,
+                    model.credits_per_million_seconds,
+                    model.input_credits_per_million_tokens,
+                    model.output_credits_per_million_tokens,
+                )
+            })
+        };
 
-        // Per-second conversions of OpenAI's per-MINUTE ASR list prices
-        // ($0.003/min mini, $0.006/min 4o) at upstream cost.
+        // Groq's per-HOUR Whisper prices ($0.04 turbo, $0.111 large v3) per
+        // million seconds, rounded up, at upstream cost.
         assert_eq!(
-            config
-                .pricing
-                .get("gpt-4o-mini-transcribe")
-                .and_then(|model| model.credits_per_million_seconds),
-            Some(50_000)
+            rates("whisper-large-v3-turbo"),
+            Some((ModelProvider::Groq, Some(11_112), None, None))
         );
         assert_eq!(
-            config
-                .pricing
-                .get("gpt-4o-transcribe")
-                .and_then(|model| model.credits_per_million_seconds),
-            Some(100_000)
+            rates("whisper-large-v3"),
+            Some((ModelProvider::Groq, Some(30_834), None, None))
         );
-        assert_eq!(
-            config
-                .pricing
-                .get("zai-org-glm-5-2")
-                .and_then(|model| model.input_credits_per_million_tokens),
-            Some(1_400)
-        );
-        assert_eq!(
-            config
-                .pricing
-                .get("zai-org-glm-5-2")
-                .and_then(|model| model.output_credits_per_million_tokens),
-            Some(4_400)
-        );
-        for model_id in ["zai-org-glm-5-1", "zai-org-glm-5"] {
-            let model = config.pricing.get(model_id);
+        // OpenRouter catalog prices per million tokens, rounded up.
+        for (model_id, input, output) in [
+            ("z-ai/glm-5.2", 30, 10_000),
+            ("moonshotai/kimi-k2.6", 438, 2_450),
+            ("nvidia/nemotron-3-nano-30b-a3b", 60, 240),
+        ] {
             assert_eq!(
-                model.and_then(|model| model.input_credits_per_million_tokens),
-                Some(1_400),
-                "{model_id} must use the routed GLM 5.2 input price"
-            );
-            assert_eq!(
-                model.and_then(|model| model.output_credits_per_million_tokens),
-                Some(4_400),
-                "{model_id} must use the routed GLM 5.2 output price"
+                rates(model_id),
+                Some((ModelProvider::Openrouter, None, Some(input), Some(output))),
+                "{model_id}"
             );
         }
-        let kimi = config.pricing.get("kimi-k2-6");
-        assert_eq!(
-            kimi.and_then(|model| model.input_credits_per_million_tokens),
-            Some(1_090)
-        );
-        assert_eq!(
-            kimi.and_then(|model| model.output_credits_per_million_tokens),
-            Some(4_600)
-        );
-        assert_eq!(
-            config
-                .pricing
-                .get("nvidia-nemotron-3-nano-30b-a3b")
-                .and_then(|model| model.input_credits_per_million_tokens),
-            Some(70)
-        );
     }
 
     #[test]
@@ -2078,16 +2110,19 @@ mod tests {
         let mut config = AppConfig::default();
         config.os_accounts.app_api_key = "app_api_key_secret_value".to_string();
         config.local_dev.bearer_token = "local-secret-token".to_string();
-        config.upstreams.openai.api_key = "sk-secret".to_string();
-        config.upstreams.venice.api_key = "vc-secret".to_string();
+        config.upstreams.groq.api_key = "gsk-secret".to_string();
+        config.upstreams.openrouter.api_key = "sk-or-secret".to_string();
+        config.upstreams.fal.api_key = "fal-secret".to_string();
+        config.upstreams.tavily.api_key = "tvly-secret".to_string();
         let dump = format!("{config:?}");
         assert!(
             !dump.contains("app_api_key_secret_value"),
             "app_api_key leaked in Debug: {dump}"
         );
         assert!(!dump.contains("local-secret-token"));
-        assert!(!dump.contains("sk-secret"));
-        assert!(!dump.contains("vc-secret"));
+        for secret in ["gsk-secret", "sk-or-secret", "fal-secret", "tvly-secret"] {
+            assert!(!dump.contains(secret), "{secret} leaked in Debug: {dump}");
+        }
         assert!(dump.contains("<redacted>"));
     }
 
@@ -2101,7 +2136,7 @@ mod tests {
                 credits_per_million_seconds: None,
                 input_credits_per_million_tokens: Some(1),
                 output_credits_per_million_tokens: Some(1),
-                provider: ModelProvider::Venice,
+                provider: ModelProvider::Groq,
                 model_type: ModelType::Asr,
                 display_name: "bad".to_string(),
                 description: None,
@@ -2132,7 +2167,7 @@ mod tests {
                 credits_per_million_seconds: Some(0),
                 input_credits_per_million_tokens: None,
                 output_credits_per_million_tokens: None,
-                provider: ModelProvider::Openai,
+                provider: ModelProvider::Groq,
                 model_type: ModelType::Asr,
                 display_name: "free".to_string(),
                 description: None,
@@ -2189,52 +2224,6 @@ mod tests {
                 reason: "must be > 0"
             })
         ));
-    }
-
-    #[test]
-    fn default_config_prices_the_curated_image_models() {
-        let config = valid_config();
-        for model in [
-            "venice-sd35",
-            "grok-imagine-image-quality",
-            "krea-2-turbo",
-            "flux-2-pro",
-            "flux-2-max",
-            "gpt-image-2",
-            "gpt-image-1-5",
-            "hunyuan-image-v3",
-            "ideogram-v4",
-            "imagineart-1.5-pro",
-            "krea-v2-large",
-            "krea-v2-medium",
-            "luma-uni-1",
-            "luma-uni-1-max",
-            "nano-banana-2",
-            "nano-banana-pro",
-            "nano-banana-2-lite",
-            "recraft-v4",
-            "recraft-v4-pro",
-            "seedream-v4",
-            "seedream-v5-lite",
-            "qwen-image-2",
-            "qwen-image-2-pro",
-            "wan-2-7-text-to-image",
-            "wan-2-7-pro-text-to-image",
-            "grok-imagine-image",
-            "lustify-sdxl",
-            "lustify-v7",
-            "lustify-v8",
-            "qwen-image",
-            "wai-Illustrious",
-            "z-image-turbo",
-            "chroma",
-            "bria-bg-remover",
-        ] {
-            assert!(
-                config.image_pricing.get(model).is_some_and(|c| *c > 0),
-                "missing image price for {model}"
-            );
-        }
     }
 
     #[test]
@@ -2467,25 +2456,6 @@ mod tests {
     }
 
     #[test]
-    fn default_config_prices_the_curated_video_models() {
-        let config = valid_config();
-        assert!(
-            config
-                .video_pricing
-                .get("wan-2.2-a14b-text-to-video")
-                .is_some_and(|markup| *markup > 0),
-            "the curated wan-2.2-a14b video model must have a positive markup"
-        );
-        // The default animate model must be in its own allowlist, or every
-        // MCP-driven animate fails model_not_priced.
-        assert!(
-            config
-                .video_animate_pricing
-                .contains_key(&config.default_video_animate_model)
-        );
-    }
-
-    #[test]
     fn validate_rejects_zero_video_markup() {
         // A zero markup would charge nothing on a paid quote; reject it.
         let mut config = valid_config();
@@ -2523,11 +2493,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_unpriced_default_video_animate_model() {
-        let mut config = valid_config();
-        config.default_video_animate_model = "not-in-the-allowlist".to_string();
+    fn validate_rejects_unpriced_default_media_models() {
+        let unpriced_defaults: [fn(&mut AppConfig); 4] = [
+            |config| config.default_image_model = "not-priced".to_string(),
+            |config| config.default_image_edit_model = "not-priced".to_string(),
+            |config| config.default_video_model = "not-priced".to_string(),
+            |config| config.default_video_animate_model = "not-priced".to_string(),
+        ];
+        for unpriced in unpriced_defaults {
+            let mut config = valid_config();
+            unpriced(&mut config);
 
-        assert!(validate(&config).is_err());
+            assert!(matches!(
+                validate(&config),
+                Err(ConfigError::InvalidPricing { model, .. }) if model == "not-priced"
+            ));
+        }
     }
 
     #[test]
@@ -2640,21 +2621,42 @@ mod tests {
 
     #[test]
     fn validate_rejects_provider_placeholder_keys() {
-        for placeholder in OPENAI_API_KEY_PLACEHOLDERS {
-            let mut config = valid_config();
-            config.upstreams.openai.api_key = (*placeholder).to_string();
+        for placeholder in UPSTREAM_API_KEY_PLACEHOLDERS {
+            for upstream in 0..4 {
+                let mut config = valid_config();
+                let target = match upstream {
+                    0 => &mut config.upstreams.groq,
+                    1 => &mut config.upstreams.openrouter,
+                    2 => &mut config.upstreams.fal,
+                    _ => &mut config.upstreams.tavily,
+                };
+                target.api_key = (*placeholder).to_string();
 
-            let result = validate(&config);
+                let result = validate(&config);
 
-            assert!(result.is_err(), "accepted placeholder: {placeholder}");
+                assert!(
+                    result.is_err(),
+                    "accepted placeholder {placeholder} for upstream {upstream}"
+                );
+            }
         }
-        for placeholder in VENICE_API_KEY_PLACEHOLDERS {
-            let mut config = valid_config();
-            config.upstreams.venice.api_key = (*placeholder).to_string();
+    }
 
-            let result = validate(&config);
+    #[test]
+    fn only_a_real_service_key_counts_as_configured() {
+        let upstream = |api_key: &str| UpstreamConfig {
+            api_key: api_key.to_string(),
+            base_url: "https://api.example".to_string(),
+        };
 
-            assert!(result.is_err(), "accepted placeholder: {placeholder}");
+        assert!(upstream("gsk_real").has_service_key());
+        assert!(!upstream("").has_service_key());
+        assert!(!upstream("   ").has_service_key());
+        for placeholder in UPSTREAM_API_KEY_PLACEHOLDERS {
+            assert!(
+                !upstream(placeholder).has_service_key(),
+                "{placeholder} counted as a service key"
+            );
         }
     }
 
@@ -2662,7 +2664,7 @@ mod tests {
     fn validate_local_dev_skips_os_accounts_requirements() {
         let mut config = AppConfig::default();
         config.local_dev.enabled = true;
-        config.upstreams.venice.api_key = "venice-test".to_string();
+        config.upstreams.groq.api_key = "gsk-test".to_string();
 
         let result = validate(&config);
 
@@ -2683,8 +2685,10 @@ mod tests {
     fn validate_local_dev_allows_missing_provider_keys() {
         let mut config = AppConfig::default();
         config.local_dev.enabled = true;
-        config.upstreams.openai.api_key = String::new();
-        config.upstreams.venice.api_key = "VENICE_API_KEY_REPLACE_ME".to_string();
+        config.upstreams.groq.api_key = String::new();
+        config.upstreams.openrouter.api_key = "OPENROUTER_API_KEY_REPLACE_ME".to_string();
+        config.upstreams.fal.api_key = "FAL_API_KEY_REPLACE_ME".to_string();
+        config.upstreams.tavily.api_key = String::new();
 
         let result = validate(&config);
 

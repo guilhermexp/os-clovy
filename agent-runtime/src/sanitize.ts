@@ -72,7 +72,7 @@ export function runtimeFailureDetails(error: unknown): RuntimeFailureDetails {
     return { message, category: "credits", code: "agent_credits_required", retryable: false };
   }
   if (
-    /provider|upstream|agent_chat|model (?:gateway|route|host)|chat completions|openai|venice|fetch failed|network|econn|timed? out|timeout|\b429\b|\b5\d\d\b/.test(
+    /provider|upstream|agent_chat|model (?:gateway|route|host)|chat completions|openai|openrouter|fetch failed|network|econn|timed? out|timeout|\b429\b|\b5\d\d\b/.test(
       normalized,
     )
   ) {

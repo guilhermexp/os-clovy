@@ -310,38 +310,30 @@ export default defineMessages({
     "lib.suggested.autoQuality": "Quality",
     "lib.suggested.autoBalanced": "Balanced",
     "lib.suggested.glm52":
-      "Default pick: latest GLM flagship with strong reasoning, tool use, structured output, and zero data retention.",
+      "Default pick: GLM 5.2, a text model with reasoning, tool use, structured output, and a 1M-token context window.",
     "lib.suggested.kimiK3":
-      "Newest Kimi flagship: multimodal reasoning, tool use, and a 1M-token context window in anonymous mode.",
+      "Newest Kimi flagship: tool use, image and video input, and a 1M-token context window.",
     "lib.suggested.kimiK26":
-      "Private Kimi option: multimodal reasoning, tool use, and a 256K-token context window with zero data retention.",
+      "Kimi option with image input, tool use, and a 256K-token context window.",
     "lib.suggested.glm51":
-      "Stable GLM alternate: previous GLM flagship with top-tier agentic coding, tool use, and zero data retention.",
-    "lib.suggested.parakeet":
-      "Fast and accurate for everyday dictation and meetings, zero data retention, lowest price tier.",
+      "Previous GLM flagship: a text model with tool use and a 200K-token context window.",
+    "lib.suggested.whisperTurbo":
+      "Default pick: fast multilingual Whisper on Groq, at the lowest price per audio hour.",
     "lib.suggested.whisper":
-      "Best multilingual accuracy at the same low price, with zero data retention.",
-    "lib.suggested.veniceSd35":
-      "Default pick: Venice's Stable Diffusion 3.5 model, a private all-rounder for everyday images.",
-    "lib.suggested.zImageTurbo":
-      "Fastest pick: quick, low-cost generations with zero data retention.",
+      "Highest Whisper accuracy on Groq for error-sensitive multilingual audio, at a higher price.",
+    "lib.suggested.fluxDev": "Default pick: FLUX.1 [dev], balanced quality for everyday images.",
+    "lib.suggested.fluxSchnell": "Fastest pick: quick, low-cost FLUX generations.",
     "lib.suggested.qwenImage":
       "Quality pick: strong text rendering and prompt adherence for detailed images.",
-    "lib.suggested.lustifyV8":
-      "Uncensored pick: the least restricted image model, with zero data retention.",
-    "lib.suggested.wan22": "Default pick: fast 5 second 720p clips, the lowest-cost option.",
-    "lib.suggested.grokImagineVideo":
-      "Photorealistic pick: lifelike clips with audio, zero data retention.",
-    "lib.suggested.ltx2": "Quality pick: higher-detail open-source model with audio.",
+    "lib.suggested.wan22": "Default pick: fast 5 second 720p clips, the lower-cost option.",
+    "lib.suggested.wan30": "Quality pick: clips up to 1080p and 30 seconds, with audio.",
 
     // Image and video model descriptions.
-    "lib.imageModels.veniceSd35": "Venice's default Stable Diffusion 3.5 image model.",
-    "lib.imageModels.flux2Pro": "High-detail FLUX model for photorealistic results.",
+    "lib.imageModels.fluxDev": "Balanced FLUX model for everyday images.",
+    "lib.imageModels.fluxSchnell": "Fastest, lowest-cost FLUX model.",
     "lib.imageModels.qwenImage": "Strong text rendering and prompt adherence.",
-    "lib.imageModels.chroma": "Versatile general-purpose image model.",
     "lib.videoModels.wan22": "Default text-to-video model for fast 5 second 720p clips.",
-    "lib.videoModels.grokImagine": "Photorealistic clips with audio.",
-    "lib.videoModels.ltx2": "Higher-detail open-source model with audio.",
+    "lib.videoModels.wan30": "Text-to-video up to 1080p and 30 seconds, with audio.",
 
     // Home.
     "lib.home.message": "Home message",
@@ -663,39 +655,32 @@ export default defineMessages({
     "lib.suggested.autoQuality": "Qualidade",
     "lib.suggested.autoBalanced": "Equilibrado",
     "lib.suggested.glm52":
-      "Escolha padrão: o carro-chefe mais recente do GLM, com raciocínio forte, uso de ferramentas, saída estruturada e retenção zero de dados.",
+      "Escolha padrão: GLM 5.2, um modelo de texto com raciocínio, uso de ferramentas, saída estruturada e janela de contexto de 1M de tokens.",
     "lib.suggested.kimiK3":
-      "O carro-chefe mais novo do Kimi: raciocínio multimodal, uso de ferramentas e janela de contexto de 1M de tokens no modo anônimo.",
+      "O carro-chefe mais novo do Kimi: uso de ferramentas, entrada de imagem e vídeo e janela de contexto de 1M de tokens.",
     "lib.suggested.kimiK26":
-      "Opção privada do Kimi: raciocínio multimodal, uso de ferramentas e janela de contexto de 256K tokens com retenção zero de dados.",
+      "Opção do Kimi com entrada de imagem, uso de ferramentas e janela de contexto de 256K tokens.",
     "lib.suggested.glm51":
-      "Alternativa estável do GLM: o carro-chefe anterior do GLM, com programação agêntica de ponta, uso de ferramentas e retenção zero de dados.",
-    "lib.suggested.parakeet":
-      "Rápido e preciso para ditados e reuniões do dia a dia, retenção zero de dados, faixa de preço mais baixa.",
+      "O carro-chefe anterior do GLM: um modelo de texto com uso de ferramentas e janela de contexto de 200K tokens.",
+    "lib.suggested.whisperTurbo":
+      "Escolha padrão: Whisper multilíngue e rápido na Groq, com o menor preço por hora de áudio.",
     "lib.suggested.whisper":
-      "A melhor precisão multilíngue pelo mesmo preço baixo, com retenção zero de dados.",
-    "lib.suggested.veniceSd35":
-      "Escolha padrão: o modelo Stable Diffusion 3.5 da Venice, um modelo privado versátil para imagens do dia a dia.",
-    "lib.suggested.zImageTurbo":
-      "Escolha mais rápida: gerações rápidas e de baixo custo com retenção zero de dados.",
+      "A maior precisão do Whisper na Groq para áudio multilíngue sensível a erros, por um preço maior.",
+    "lib.suggested.fluxDev":
+      "Escolha padrão: FLUX.1 [dev], qualidade equilibrada para imagens do dia a dia.",
+    "lib.suggested.fluxSchnell": "Escolha mais rápida: gerações FLUX rápidas e de baixo custo.",
     "lib.suggested.qwenImage":
       "Escolha de qualidade: ótima renderização de texto e fidelidade ao prompt para imagens detalhadas.",
-    "lib.suggested.lustifyV8":
-      "Escolha sem censura: o modelo de imagem menos restrito, com retenção zero de dados.",
     "lib.suggested.wan22":
       "Escolha padrão: clipes rápidos de 5 segundos em 720p, a opção de menor custo.",
-    "lib.suggested.grokImagineVideo":
-      "Escolha fotorrealista: clipes realistas com áudio, retenção zero de dados.",
-    "lib.suggested.ltx2": "Escolha de qualidade: modelo open source mais detalhado, com áudio.",
+    "lib.suggested.wan30": "Escolha de qualidade: clipes de até 1080p e 30 segundos, com áudio.",
 
-    "lib.imageModels.veniceSd35": "O modelo de imagem Stable Diffusion 3.5 padrão da Venice.",
-    "lib.imageModels.flux2Pro": "Modelo FLUX de alto detalhe para resultados fotorrealistas.",
+    "lib.imageModels.fluxDev": "Modelo FLUX equilibrado para imagens do dia a dia.",
+    "lib.imageModels.fluxSchnell": "O modelo FLUX mais rápido e de menor custo.",
     "lib.imageModels.qwenImage": "Ótima renderização de texto e fidelidade ao prompt.",
-    "lib.imageModels.chroma": "Modelo de imagem versátil para uso geral.",
     "lib.videoModels.wan22":
       "Modelo padrão de texto para vídeo para clipes rápidos de 5 segundos em 720p.",
-    "lib.videoModels.grokImagine": "Clipes fotorrealistas com áudio.",
-    "lib.videoModels.ltx2": "Modelo open source mais detalhado, com áudio.",
+    "lib.videoModels.wan30": "Texto para vídeo de até 1080p e 30 segundos, com áudio.",
 
     "lib.home.message": "Mensagem do Início",
     "lib.home.todayAt": "Hoje às {time}",

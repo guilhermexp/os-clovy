@@ -25,26 +25,27 @@ import {
   dictationHotkeyStatus,
   dictationHelperCommand,
   dictationSettings,
-  listVeniceModels,
+  listProviderModels,
   localAudioFileSrc,
   providerModelSettings,
   clovyOpenCommunityPage,
   clovyOpenVerifyPage,
-  clearVeniceApiKey,
+  clearProviderApiKey,
   setDictationLanguage,
   setDictationMicrophone,
   setDictationShortcut,
   setImageSafeMode,
   setLiveTranscription,
   setCostQuality,
-  setVeniceApiKey,
-  setVeniceModel,
+  setProviderApiKey,
+  setProviderModel,
   connectorsApplyRuntime,
   unpackBundledExtension,
 } from "../../lib/tauri";
 import { LANGUAGE_OPTIONS, languageLabel } from "../../lib/dictation-languages";
 import { autostartEnabled, autostartSupported, setAutostartEnabled } from "../../lib/autostart";
 import { replayOnboarding } from "../../lib/onboarding";
+import { errorCode } from "../../lib/errors";
 import type {
   AccountStatus,
   DictationHelperEvent,
@@ -53,12 +54,14 @@ import type {
   DictationSettingsDto,
   DictationShortcutModifiers,
   DictationShortcutSetting,
+  BuiltinProvider,
   FolderDto,
+  ProviderApiKeysConfigured,
+  ProviderModelDto,
   ProviderModelMode,
   ProviderModelSettingsDto,
   RecordingSourceMode,
   RecordingSourceReadinessDto,
-  VeniceModelDto,
 } from "../../lib/tauri";
 import { AccountSettingsSection, BillingSettingsSection } from "../account/AccountSettings";
 import { KeycapShortcut } from "../shortcuts/KeycapShortcut";
@@ -283,20 +286,22 @@ const WINDOWS_DEFAULT_SHORTCUTS: Record<DictationShortcutKind, DictationShortcut
 };
 
 const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
-  transcriptionProvider: "venice",
-  generationProvider: "venice",
-  transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
-  // Mirrors DEFAULT_GENERATION_MODEL in the Rust providers module and the
-  // leading Suggested pick in lib/suggested-models.ts.
-  generationModel: "zai-org-glm-5-2",
-  // Mirrors DEFAULT_COST_QUALITY in the Rust providers module.
+  transcriptionProvider: "groq",
+  generationProvider: "openrouter",
+  transcriptionModel: "whisper-large-v3-turbo",
+  // The factory default text model: DEFAULT_GENERATION_MODEL in the Rust
+  // providers module, mirrored by the leading Suggested pick.
+  generationModel: DEFAULT_GENERATION_SUGGESTION_ID,
   costQuality: 100,
-  remoteGenerationModel: "zai-org-glm-5-2",
-  // Mirrors DEFAULT_IMAGE_MODEL in the Rust providers module.
+  remoteGenerationModel: DEFAULT_GENERATION_SUGGESTION_ID,
   imageModel: DEFAULT_IMAGE_MODEL,
-  // Mirrors DEFAULT_VIDEO_MODEL in the Rust providers module.
   videoModel: DEFAULT_VIDEO_MODEL,
-  veniceApiKeyConfigured: false,
+  providerApiKeysConfigured: {
+    groq: false,
+    openrouter: false,
+    fal: false,
+    tavily: false,
+  },
   localGeneration: {
     baseUrl: "",
     modelId: "",
@@ -453,12 +458,11 @@ export function AppSettings({
   const currentDataPartitionLabel = useCurrentDataPartitionName();
   const showingPartitionModels = currentDataPartitionLabel !== DEFAULT_DATA_PARTITION;
   const [partitionGenerationModel, setPartitionGenerationModel] = useState<string>();
-  const [veniceModels, setVeniceModels] = useState<Record<ProviderModelMode, VeniceModelDto[]>>({
+  const [providerModels, setProviderModels] = useState<
+    Record<ProviderModelMode, ProviderModelDto[]>
+  >({
     transcription: [],
     generation: [],
-    // Image options come from a curated local list, not the fetched catalog;
-    // this stays empty and `imageOptions` supplies the picker. Video follows
-    // the same curated-local pattern while the first fast path is fixed-shape.
     image: [],
     video: [],
   });
@@ -509,11 +513,24 @@ export function AppSettings({
   const costQualitySaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const latestCostQualitySaveRef = useRef(0);
   const confirmedCostQualityRef = useRef(DEFAULT_PROVIDER_MODELS.costQuality);
-  const [veniceApiKeyDraft, setVeniceApiKeyDraft] = useState("");
-  // Saving a Venice key while Auto is the text model would silently keep
-  // billing Clovy credits (Auto never uses the key), so the save surfaces an
-  // explicit billing choice: switch to a Venice model or knowingly keep Auto.
-  const [veniceKeyAutoBillingChoiceOpen, setVeniceKeyAutoBillingChoiceOpen] = useState(false);
+  const [providerApiKeyDrafts, setProviderApiKeyDrafts] = useState<Record<BuiltinProvider, string>>(
+    {
+      groq: "",
+      openrouter: "",
+      fal: "",
+      tavily: "",
+    },
+  );
+  const [providerApiKeyRejectedErrors, setProviderApiKeyRejectedErrors] = useState<
+    Record<BuiltinProvider, string | undefined>
+  >({
+    groq: undefined,
+    openrouter: undefined,
+    fal: undefined,
+    tavily: undefined,
+  });
+  const [openRouterKeyAutoBillingChoiceOpen, setOpenRouterKeyAutoBillingChoiceOpen] =
+    useState(false);
   const [showMoreVoiceOptions, setShowMoreVoiceOptions] = useState(false);
   const [showMoreTextOptions, setShowMoreTextOptions] = useState(false);
   const [showMoreImageOptions, setShowMoreImageOptions] = useState(false);
@@ -707,8 +724,8 @@ export function AppSettings({
         providerSettingsProfileRef.current = currentDataPartitionLabel;
         await requestMicrophones();
         await Promise.all([
-          requestVeniceModels("transcription"),
-          requestVeniceModels("generation"),
+          requestProviderModels("transcription"),
+          requestProviderModels("generation"),
         ]);
       } catch (error) {
         if (!cancelled) setStatus(messageFromError(error));
@@ -865,10 +882,10 @@ export function AppSettings({
     }
   }
 
-  async function requestVeniceModels(mode: ProviderModelMode) {
+  async function requestProviderModels(mode: ProviderModelMode) {
     try {
-      const response = await listVeniceModels(mode);
-      setVeniceModels((models) => ({
+      const response = await listProviderModels(mode);
+      setProviderModels((models) => ({
         ...models,
         [mode]: response.models,
       }));
@@ -1103,12 +1120,12 @@ export function AppSettings({
     }
   }
 
-  // Returns whether the switch persisted, so confirmation flows (the Venice
+  // Returns whether the switch persisted, so confirmation flows (the OpenRouter
   // key billing choice) can stay open instead of closing over a failed save.
-  async function selectVeniceModel(mode: ProviderModelMode, modelId: string): Promise<boolean> {
+  async function selectProviderModel(mode: ProviderModelMode, modelId: string): Promise<boolean> {
     if (showingPartitionModels) return false;
     try {
-      const next = await setVeniceModel(mode, modelId);
+      const next = await setProviderModel(mode, modelId);
       setProviderSettings(next);
       setEffectiveProviderSettings(next);
       dispatchProviderModelSettingsChanged({ mode, modelId });
@@ -1179,41 +1196,48 @@ export function AppSettings({
     // The local option is the endpoint already serving chat; the provider is
     // switched in the Providers section, so picking it changes nothing.
     if (!(mode === "generation" && picked?.provider === "local")) {
-      void selectVeniceModel(mode, modelId);
+      void selectProviderModel(mode, modelId);
     }
     // The Auto toggle switches models mid-flow, so it asks to keep the picker
     // open; a row pick is a final choice and closes it.
     if (!options?.keepOpen) closeModelPicker();
   }
 
-  async function saveVeniceApiKey() {
-    const apiKey = veniceApiKeyDraft.trim();
+  async function saveProviderApiKey(provider: BuiltinProvider) {
+    const apiKey = (providerApiKeyDrafts[provider] || "").trim();
     if (!apiKey) {
-      setStatus(translate("settings.venice.enterKey"));
+      setStatus(translate("settings.providerKeys.enterKey"));
       return;
     }
     try {
-      const next = await setVeniceApiKey(apiKey);
+      const next = await setProviderApiKey(provider, apiKey);
       setProviderSettings(next);
-      setVeniceApiKeyDraft("");
-      setStatus(translate("settings.venice.saved"));
-      // The workspace's model picker shows a billing note while a key is
-      // saved, so let it refresh its provider settings snapshot.
+      setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
+      setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
+      const providerName = translate(`settings.providerKeys.${provider}.name`);
+      setStatus(translate("settings.providerKeys.saved", { provider: providerName }));
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId: next.generationModel });
-      if (next.generationModel === AUTO_MODEL_ID) {
-        setVeniceKeyAutoBillingChoiceOpen(true);
+      if (provider === "openrouter" && next.generationModel === AUTO_MODEL_ID) {
+        setOpenRouterKeyAutoBillingChoiceOpen(true);
       }
     } catch (error) {
-      setStatus(messageFromError(error));
+      const code = errorCode(error);
+      const message = messageFromError(error);
+      if (code === "provider_api_key_rejected") {
+        setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: message }));
+      }
+      setStatus(message);
     }
   }
 
-  async function removeVeniceApiKey() {
+  async function removeProviderApiKey(provider: BuiltinProvider) {
     try {
-      const next = await clearVeniceApiKey();
+      const next = await clearProviderApiKey(provider);
       setProviderSettings(next);
-      setVeniceApiKeyDraft("");
-      setStatus(translate("settings.venice.removed"));
+      setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
+      setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
+      const providerName = translate(`settings.providerKeys.${provider}.name`);
+      setStatus(translate("settings.providerKeys.removed", { provider: providerName }));
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId: next.generationModel });
     } catch (error) {
       setStatus(messageFromError(error));
@@ -1281,14 +1305,14 @@ export function AppSettings({
     ? effectiveProviderSettings
     : providerSettings;
   const transcriptionOptions = modelOptions(
-    veniceModels.transcription,
+    providerModels.transcription,
     displayProviderSettings.transcriptionModel,
   );
   const localModelEnabled = providerSettings.generationProvider === "local";
   const generationCatalog = useMemo(
-    () => withLocalGenerationOption(veniceModels.generation, providerSettings.localGeneration),
+    () => withLocalGenerationOption(providerModels.generation, providerSettings.localGeneration),
     [
-      veniceModels.generation,
+      providerModels.generation,
       providerSettings.localGeneration.baseUrl,
       providerSettings.localGeneration.modelId,
     ],
@@ -1299,19 +1323,19 @@ export function AppSettings({
   // model when clicked.
   const generationOptions = modelOptions(generationCatalog, modelValueForMode("generation"));
   // Where the billing-choice dialog lands when the user opts out of Auto to
-  // use their Venice key: the leading suggested pick, else the first Venice
-  // catalog model, drawn from the same selectable list as the model picker so
-  // the dialog can never persist a model the picker would exclude (the factory
+  // use their OpenRouter key: the leading suggested pick with provider openrouter,
+  // else the first openrouter catalog model, drawn from the same selectable list as the model picker so
+  // the dialog can never persist a model the picker would exclude (the candidate
   // default stays the last resort for an empty catalog).
   const selectableGenerationOptions = generationOptions.filter((option) =>
     modelAvailableForMode("generation", option),
   );
-  const veniceKeySwitchTarget =
+  const openRouterKeySwitchTarget =
     suggestedModelsForMode("generation", selectableGenerationOptions).find(
-      (item) => item.model.id !== AUTO_MODEL_ID,
+      (item) => item.model.provider === "openrouter" && item.model.id !== AUTO_MODEL_ID,
     )?.model ??
     selectableGenerationOptions.find(
-      (option) => option.provider === "venice" && option.id !== AUTO_MODEL_ID,
+      (option) => option.provider === "openrouter" && option.id !== AUTO_MODEL_ID,
     );
   const imageOptions = IMAGE_GENERATION_ENABLED
     ? modelOptions(imageModelCatalog(), displayProviderSettings.imageModel)
@@ -1423,7 +1447,7 @@ export function AppSettings({
     setModelPickerFlyout(null);
     setModelSearch("");
     // Image and video models are curated local lists, not fetched catalogs.
-    if (mode !== "image" && mode !== "video") void requestVeniceModels(mode);
+    if (mode !== "image" && mode !== "video") void requestProviderModels(mode);
   }
 
   function microphonePopoverStyle(): CSSProperties {
@@ -2008,6 +2032,7 @@ export function AppSettings({
                     description={t("settings.models.transcriptionDescription")}
                     value={modelValueForMode("transcription")}
                     options={transcriptionOptions}
+                    providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                     open={pickerMode === "transcription"}
                     summarySuppressed={pickerMode !== undefined}
                     flyout={modelPickerFlyout}
@@ -2097,7 +2122,7 @@ export function AppSettings({
                     value={modelValueForMode("generation")}
                     options={generationOptions}
                     costQuality={providerSettings.costQuality}
-                    veniceApiKeyConfigured={providerSettings.veniceApiKeyConfigured}
+                    providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                     open={pickerMode === "generation"}
                     summarySuppressed={pickerMode !== undefined}
                     flyout={modelPickerFlyout}
@@ -2127,9 +2152,9 @@ export function AppSettings({
                         <span className="settings-row-description">
                           {t("settings.autoPreference.description")}
                         </span>
-                        {providerSettings.veniceApiKeyConfigured ? (
+                        {providerSettings.providerApiKeysConfigured.openrouter ? (
                           <span className="settings-row-description settings-row-substatus">
-                            {t("settings.autoPreference.veniceNote")}
+                            {t("settings.autoPreference.openRouterNote")}
                           </span>
                         ) : null}
                       </div>
@@ -2168,13 +2193,28 @@ export function AppSettings({
                   </button>
                   {showMoreTextOptions ? (
                     <div id="text-more-options-panel" className="settings-more-options-panel">
-                      <VeniceApiKeyRow
-                        configured={providerSettings.veniceApiKeyConfigured}
-                        value={veniceApiKeyDraft}
-                        onValueChange={setVeniceApiKeyDraft}
-                        onSave={() => void saveVeniceApiKey()}
-                        onRemove={() => void removeVeniceApiKey()}
-                      />
+                      <div className="settings-row">
+                        <div className="settings-row-info">
+                          <h3 className="settings-row-title">{t("settings.providerKeys.title")}</h3>
+                          <p className="settings-row-description">
+                            {t("settings.providerKeys.description")}
+                          </p>
+                        </div>
+                      </div>
+                      {(["groq", "openrouter", "fal", "tavily"] as const).map((provider) => (
+                        <ProviderApiKeyRow
+                          key={provider}
+                          provider={provider}
+                          configured={providerSettings.providerApiKeysConfigured[provider]}
+                          rejectedError={providerApiKeyRejectedErrors[provider]}
+                          value={providerApiKeyDrafts[provider]}
+                          onValueChange={(val) =>
+                            setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: val }))
+                          }
+                          onSave={() => void saveProviderApiKey(provider)}
+                          onRemove={() => void removeProviderApiKey(provider)}
+                        />
+                      ))}
                     </div>
                   ) : null}
                 </div>
@@ -2199,25 +2239,27 @@ export function AppSettings({
             />
 
             <ConfirmDialog
-              open={veniceKeyAutoBillingChoiceOpen}
-              onClose={() => setVeniceKeyAutoBillingChoiceOpen(false)}
+              open={openRouterKeyAutoBillingChoiceOpen}
+              onClose={() => setOpenRouterKeyAutoBillingChoiceOpen(false)}
               onConfirm={async () => {
-                const switched = await selectVeniceModel(
+                const switched = await selectProviderModel(
                   "generation",
-                  veniceKeySwitchTarget?.id ?? DEFAULT_GENERATION_SUGGESTION_ID,
+                  openRouterKeySwitchTarget?.id ?? DEFAULT_GENERATION_SUGGESTION_ID,
                 );
                 // Keep the dialog open over a failed save so the choice is
                 // never silently dropped; the status line carries the error.
-                if (!switched) throw new Error("venice_model_switch_failed");
+                if (!switched) throw new Error("openrouter_model_switch_failed");
               }}
-              title={t("settings.venice.autoDialogTitle")}
-              description={t("settings.venice.autoDialogDescription", {
-                model: veniceKeySwitchTarget?.name ?? t("settings.venice.aVeniceModel"),
+              title={t("settings.openRouter.autoDialogTitle")}
+              description={t("settings.openRouter.autoDialogDescription", {
+                model:
+                  openRouterKeySwitchTarget?.name ?? t("settings.openRouter.anOpenRouterModel"),
               })}
-              confirmLabel={t("settings.venice.useModel", {
-                model: veniceKeySwitchTarget?.name ?? t("settings.venice.aVeniceModel"),
+              confirmLabel={t("settings.openRouter.useModel", {
+                model:
+                  openRouterKeySwitchTarget?.name ?? t("settings.openRouter.anOpenRouterModel"),
               })}
-              cancelLabel={t("settings.venice.keepAuto")}
+              cancelLabel={t("settings.openRouter.keepAuto")}
             />
 
             {IMAGE_GENERATION_ENABLED || VIDEO_GENERATION_ENABLED ? (
@@ -2965,7 +3007,7 @@ function ModelRow({
   value,
   options,
   costQuality,
-  veniceApiKeyConfigured,
+  providerApiKeysConfigured,
   open,
   flyout,
   search,
@@ -2985,9 +3027,9 @@ function ModelRow({
   title: string;
   description: string;
   value: string;
-  options: VeniceModelDto[];
+  options: ProviderModelDto[];
   costQuality?: number;
-  veniceApiKeyConfigured?: boolean;
+  providerApiKeysConfigured?: ProviderApiKeysConfigured;
   open: boolean;
   flyout: ModelPickerFlyout;
   search: string;
@@ -3052,7 +3094,7 @@ function ModelRow({
             model={model}
             options={options}
             costQuality={costQuality}
-            veniceApiKeyConfigured={veniceApiKeyConfigured}
+            providerApiKeysConfigured={providerApiKeysConfigured}
             search={search}
             popoverRef={popoverRef}
             searchRef={searchRef}
@@ -3071,7 +3113,7 @@ function ModelRow({
   );
 }
 
-function ModelSummaryHoverDetails({ model }: { model: VeniceModelDto }) {
+function ModelSummaryHoverDetails({ model }: { model: ProviderModelDto }) {
   return (
     <div className="agent-composer-model-detail model-summary-hovercard">
       {/* Read-only summary card: full description in one hover (the card shows
@@ -3081,16 +3123,20 @@ function ModelSummaryHoverDetails({ model }: { model: VeniceModelDto }) {
   );
 }
 
-function VeniceApiKeyRow({
+function ProviderApiKeyRow({
   id,
+  provider,
   configured,
+  rejectedError,
   value,
   onValueChange,
   onSave,
   onRemove,
 }: {
   id?: string;
+  provider: BuiltinProvider;
   configured: boolean;
+  rejectedError?: string;
   value: string;
   onValueChange: (value: string) => void;
   onSave: () => void;
@@ -3098,28 +3144,38 @@ function VeniceApiKeyRow({
 }) {
   const t = useT();
   const canSave = value.trim().length > 0;
+  const title = t(`settings.providerKeys.${provider}.name`);
+  const description = t(`settings.providerKeys.${provider}.description`);
   return (
-    <div id={id} className="settings-row settings-row-venice-key">
+    <div id={id} className="settings-row settings-row-provider-key">
       <div className="settings-row-info">
-        <h3 className="settings-row-title">{t("settings.venice.title")}</h3>
-        <p className="settings-row-description">{t("settings.venice.description")}</p>
+        <h3 className="settings-row-title">{title}</h3>
+        <p className="settings-row-description">{description}</p>
         {configured ? (
           <p className="settings-row-description settings-row-substatus">
-            {t("settings.venice.keySaved")}
+            {t("settings.providerKeys.configured")}
           </p>
-        ) : null}
+        ) : rejectedError ? (
+          <p className="settings-row-description settings-row-error" role="alert">
+            {rejectedError}
+          </p>
+        ) : (
+          <p className="settings-row-description settings-row-muted">
+            {t("settings.providerKeys.missing")}
+          </p>
+        )}
       </div>
       <div className="settings-row-control settings-secret-control">
         <label className="settings-field settings-secret-field">
-          <span>{t("settings.venice.apiKey")}</span>
+          <span>{t("settings.providerKeys.apiKey")}</span>
           <input
             type="password"
             className="dialog-input"
             value={value}
             autoComplete="off"
             spellCheck={false}
-            placeholder={configured ? t("settings.venice.savedHidden") : t("settings.venice.title")}
-            aria-label={t("settings.venice.title")}
+            placeholder={configured ? t("settings.providerKeys.savedHidden") : title}
+            aria-label={`${title} ${t("settings.providerKeys.apiKey")}`}
             onChange={(event) => onValueChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && canSave) onSave();

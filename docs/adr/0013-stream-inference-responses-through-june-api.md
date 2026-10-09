@@ -113,3 +113,12 @@ charges after the stream ends.
   (audio calls are chunk-bounded, image budgets fit); if one starts timing
   out, extend it with the same opt-in SSE envelope rather than a timeout
   bump.
+
+## Addendum - 2026-10-08 (upstream is OpenRouter)
+
+Venice is retired as the text upstream (OpenSpec change
+`replace-venice-with-groq-openrouter-fal-tavily`); `/v1/chat/completions` and
+`/v1/notes/generate` stream from OpenRouter's `/api/v1/chat/completions`. The
+client contract of this ADR is unchanged: opt-in `stream: true`, SSE
+passthrough for chat, the `event: result` / `event: error` envelope for notes,
+and settlement from the usage frame.

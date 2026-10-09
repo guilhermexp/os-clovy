@@ -6,14 +6,13 @@ use crate::{
     validation,
 };
 use axum::{Json, extract::State, http::HeaderMap};
-use clovy_domain::GeneratedImage;
+use clovy_domain::{GeneratedImage, UpstreamProvider};
 use clovy_services::{ImageEditParams, ImageGenerateParams};
 use serde::{Deserialize, Serialize};
 
-/// Bounds for an explicit `width`/`height`. We only reject values above Venice's
-/// max here; the per-model *minimum* is enforced by Venice itself (pixel models
-/// typically floor at 64-256 px), where a too-small value returns a 400 that
-/// surfaces as `image_generation_rejected`. Client validation defers to Venice's
+/// Bounds for an explicit `width`/`height`. We only reject values above the
+/// max here; per-model minimums are enforced upstream, where a too-small value returns a 400 that
+/// surfaces as `image_generation_rejected`. Client validation defers to the
 /// per-model floor rather than guessing one.
 const MIN_IMAGE_DIMENSION: u32 = 1;
 const MAX_IMAGE_DIMENSION: u32 = 1280;
@@ -32,7 +31,7 @@ pub struct ImageGenerateRequest {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
-    /// Venice `safe_mode`. Absent (old clients) leaves it unset so Venice applies
+    /// Optional `safe_mode`. Absent leaves it unset so upstream applies
     /// its default; present forces it on/off per the on-device setting.
     #[serde(default)]
     pub safe_mode: Option<bool>,
@@ -79,18 +78,19 @@ impl From<GeneratedImage> for ImageGenerateResponse {
     }
 }
 
-/// Generates an image from a text prompt via Venice. Without a user Venice key,
+/// Generates an image from a text prompt via fal. Without a user fal key,
 /// the service holds a wallet estimate, generates, then charges the model's
-/// flat per-image price (see `ImageService`). A user Venice key skips Clovy
+/// flat per-image price (see `ImageService`). A user fal key skips Clovy
 /// credit metering. An unpriced model is rejected `model_not_priced`; an
-/// out-of-credits user without BYOK gets 402 before Venice is called.
+/// out-of-credits user without BYOK gets 402 before fal is called.
 pub(crate) async fn generate(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(request): Json<ImageGenerateRequest>,
 ) -> Result<Json<ApiResponse<ImageGenerateResponse>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Fal)?;
+    state.ensure_provider_configured(UpstreamProvider::Fal, &provider_credentials)?;
 
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -125,18 +125,19 @@ pub(crate) async fn generate(
     Ok(Json(ApiResponse::ok(output.image.into())))
 }
 
-/// Edits an existing image via Venice. Metered like generation: the
+/// Edits an existing image via fal. Metered like generation: the
 /// service holds an estimate, edits, then charges the edit model's flat price
-/// (a separate catalog). A user Venice key skips Clovy credit metering. An
+/// (a separate catalog). A user fal key skips Clovy credit metering. An
 /// unpriced model is rejected `model_not_priced`; an out-of-credits user
-/// without BYOK gets 402 before Venice is called.
+/// without BYOK gets 402 before fal is called.
 pub(crate) async fn edit(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(request): Json<ImageEditRequest>,
 ) -> Result<Json<ApiResponse<ImageGenerateResponse>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Fal)?;
+    state.ensure_provider_configured(UpstreamProvider::Fal, &provider_credentials)?;
 
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {

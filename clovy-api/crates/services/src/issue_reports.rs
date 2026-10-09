@@ -115,7 +115,7 @@ impl IssueReportService {
             body: issue_report_diagnosis_body(report),
             model: model.clone(),
             provider_credentials: ProviderCredentials::default(),
-            inference_privacy: clovy_domain::InferencePrivacy::Private,
+            price_cap: None,
             unmetered: false,
         };
         match timeout(
@@ -286,8 +286,8 @@ mod tests {
     use clovy_config::IssueReportsConfig;
     use clovy_domain::{
         AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream, DomainError,
-        IssueReport, IssueReportAttachment, IssueReportDelivery, IssueReportSink, TokenUsage,
-        UpstreamRouteMetadata, UserId,
+        IssueReport, IssueReportAttachment, IssueReportDelivery, IssueReportSink,
+        ProviderCredentials, TokenUsage, UpstreamRouteMetadata, UserId,
     };
     use pretty_assertions::assert_eq;
     use rstest::rstest;
@@ -321,7 +321,11 @@ mod tests {
         );
         let requests = completer.requests();
         assert_eq!(requests[0].model.0, "diagnosis-model");
-        assert_eq!(requests[0].provider_credentials.venice_api_key, None);
+        assert_eq!(
+            requests[0].provider_credentials,
+            ProviderCredentials::default()
+        );
+        assert_eq!(requests[0].price_cap, None);
     }
 
     #[tokio::test]

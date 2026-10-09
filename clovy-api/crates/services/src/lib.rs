@@ -66,11 +66,11 @@ mod tests {
     use clovy_domain::{
         AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream,
         AgentChatStreamOutcome, AudioDurationProbe, Authorization, AuthorizeRequest, ChargeRequest,
-        CleanedText, Cleaner, CleanupRequest, Credits, DomainError, GeneratedNote,
+        CleanedText, Cleaner, CleanupKind, CleanupRequest, Credits, DomainError, GeneratedNote,
         GenerationRequest, Generator, ModelId, OsAccountsClient, ProviderCredentials, Receipt,
-        TokenUsage, Transcriber, Transcript, TranscriptionRequest, UpstreamRouteMetadata, UserId,
+        TokenUsage, Transcriber, Transcript, TranscriptionRequest, UpstreamProvider,
+        UpstreamRouteMetadata, UserId,
     };
-    use pretty_assertions::assert_eq;
     use std::{
         collections::BTreeMap,
         sync::{
@@ -124,7 +124,6 @@ mod tests {
                 existing_generated_note: None,
                 model_id: ModelId("text-model".to_string()),
                 provider_credentials: ProviderCredentials::default(),
-                cost_quality: None,
             })
             .await
             .expect("generate succeeds with happy path");
@@ -153,10 +152,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn note_generate_user_venice_key_skips_wallet_metering_for_venice_model() {
+    async fn text_byok_openrouter_skips_wallet() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = NoteGenerateService::new(NoteGenerateServiceDeps {
-            pricing: Arc::new(PricingTable::new(venice_models([(
+            pricing: Arc::new(PricingTable::new(models([(
                 "text-model",
                 PriceUnit::Tokens,
                 2,
@@ -168,28 +167,28 @@ mod tests {
             flat_estimate_credits: 8200,
         });
         let mut params = note_generate_params();
-        params.provider_credentials = user_venice_credentials();
+        params.provider_credentials = user_openrouter_credentials();
 
         let output = service
             .generate(params)
             .await
-            .expect("generate succeeds with user Venice key");
+            .expect("generate succeeds with user OpenRouter key");
 
         assert_eq!(output.receipt.credits_charged.0, 0);
         assert_eq!(os_accounts.events(), Vec::new());
     }
 
     #[tokio::test]
-    async fn note_generate_user_venice_key_still_meters_non_venice_model() {
+    async fn groq_key_on_text_model_still_meters() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = note_generate_service(os_accounts.clone());
         let mut params = note_generate_params();
-        params.provider_credentials = user_venice_credentials();
+        params.provider_credentials = user_groq_credentials();
 
         let output = service
             .generate(params)
             .await
-            .expect("generate succeeds with non-Venice model");
+            .expect("generate succeeds with Groq key on text model");
 
         assert_eq!(output.receipt.credits_charged.0, 30);
         assert!(matches!(
@@ -268,6 +267,7 @@ mod tests {
                 style: "plain".to_string(),
                 model_id: ModelId("text-model".to_string()),
                 provider_credentials: ProviderCredentials::default(),
+                kind: CleanupKind::Dictation,
             })
             .await
             .expect("cleanup succeeds with happy path");
@@ -280,10 +280,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dictate_user_venice_key_skips_wallet_metering() {
+    async fn dictate_user_keys_skip_wallet_metering() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = DictateService::new(DictateServiceDeps {
-            pricing: Arc::new(PricingTable::new(venice_models([
+            pricing: Arc::new(PricingTable::new(models([
                 ("audio-model", PriceUnit::Seconds, 2, ModelType::Asr),
                 ("text-model", PriceUnit::Tokens, 1, ModelType::Text),
             ]))),
@@ -306,10 +306,10 @@ mod tests {
                 context: None,
                 language: None,
                 model_id: ModelId("audio-model".to_string()),
-                provider_credentials: user_venice_credentials(),
+                provider_credentials: user_groq_credentials(),
             })
             .await
-            .expect("dictate transcription succeeds with user Venice key");
+            .expect("dictate transcription succeeds with user Groq key");
         let cleanup = service
             .cleanup(DictateCleanupParams {
                 user_id: UserId("usr_123".to_string()),
@@ -320,16 +320,16 @@ mod tests {
                 app_context: None,
                 style: "plain".to_string(),
                 model_id: ModelId("text-model".to_string()),
-                provider_credentials: user_venice_credentials(),
+                provider_credentials: user_openrouter_credentials(),
+                kind: CleanupKind::Dictation,
             })
             .await
-            .expect("dictate cleanup succeeds with user Venice key");
+            .expect("dictate cleanup succeeds with user OpenRouter key");
 
         assert_eq!(transcribe.receipt.credits_charged.0, 0);
         assert_eq!(cleanup.receipt.credits_charged.0, 0);
         assert_eq!(os_accounts.events(), Vec::new());
     }
-
     #[tokio::test]
     async fn dictate_transcribe_forwards_context_to_transcriber() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
@@ -547,6 +547,7 @@ mod tests {
                 style: "plain".to_string(),
                 model_id: ModelId("audio-model".to_string()),
                 provider_credentials: ProviderCredentials::default(),
+                kind: CleanupKind::Dictation,
             })
             .await;
 
@@ -582,7 +583,6 @@ mod tests {
             existing_generated_note: None,
             model_id: ModelId("text-model".to_string()),
             provider_credentials: ProviderCredentials::default(),
-            cost_quality: None,
         }
     }
 
@@ -1085,11 +1085,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn note_transcribe_user_venice_key_skips_wallet_metering_for_preview_and_final() {
+    async fn note_transcribe_user_groq_key_skips_wallet_metering_for_preview_and_final() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let transcriber = Arc::new(RecordingTranscriber::default());
         let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
-            pricing: Arc::new(PricingTable::new(venice_models([(
+            pricing: Arc::new(PricingTable::new(models([(
                 "audio-model",
                 PriceUnit::Seconds,
                 2,
@@ -1115,15 +1115,57 @@ mod tests {
                     model_id: ModelId("audio-model".to_string()),
                     preview,
                     preview_opted_in: false,
-                    provider_credentials: user_venice_credentials(),
+                    provider_credentials: user_groq_credentials(),
                 })
                 .await
-                .expect("transcription succeeds with user Venice key");
+                .expect("transcription succeeds with user Groq key");
             assert_eq!(output.receipt.credits_charged.0, 0);
         }
 
         assert_eq!(transcriber.call_count(), 2);
         assert_eq!(os_accounts.events(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn openrouter_key_on_asr_model_still_meters() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let transcriber = Arc::new(RecordingTranscriber::default());
+        let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "audio-model",
+                PriceUnit::Seconds,
+                2,
+                ModelType::Asr,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            transcriber: transcriber.clone(),
+            duration_probe: Arc::new(FixedDurationProbe),
+            hold_ttl_seconds: 60,
+            flat_estimate_credits: 1024,
+            preview_max_audio_seconds: 30,
+        });
+
+        let output = service
+            .transcribe(NoteTranscribeParams {
+                user_id: UserId("usr_123".to_string()),
+                note_id: "note_1".to_string(),
+                audio: vec![1, 2, 3],
+                filename: "recording.wav".to_string(),
+                context: None,
+                language: None,
+                model_id: ModelId("audio-model".to_string()),
+                preview: false,
+                preview_opted_in: false,
+                provider_credentials: user_openrouter_credentials(),
+            })
+            .await
+            .expect("transcription succeeds");
+
+        assert_eq!(output.receipt.credits_charged.0, 4);
+        assert!(matches!(
+            os_accounts.events().first(),
+            Some(RecordedCall::Authorize { action, .. }) if action == "note_transcribe"
+        ));
     }
 
     #[tokio::test]
@@ -1527,10 +1569,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_chat_user_venice_key_skips_wallet_metering_for_venice_model() {
+    async fn agent_chat_user_openrouter_key_skips_wallet_metering() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = AgentChatService::new(AgentChatServiceDeps {
-            pricing: Arc::new(PricingTable::new(venice_models([(
+            pricing: Arc::new(PricingTable::new(models([(
                 "text-model",
                 PriceUnit::Tokens,
                 1,
@@ -1550,10 +1592,10 @@ mod tests {
                     "model": "text-model",
                     "messages": [{ "role": "user", "content": "hello" }],
                 }),
-                provider_credentials: user_venice_credentials(),
+                provider_credentials: user_openrouter_credentials(),
             })
             .await
-            .expect("agent chat succeeds with user Venice key");
+            .expect("agent chat succeeds with user OpenRouter key");
 
         assert_eq!(output.receipt.credits_charged.0, 0);
         assert_eq!(os_accounts.events(), Vec::new());
@@ -1727,10 +1769,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_chat_stream_user_venice_key_skips_wallet_metering() {
+    async fn agent_chat_stream_user_openrouter_key_skips_wallet_metering() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = AgentChatService::new(AgentChatServiceDeps {
-            pricing: Arc::new(PricingTable::new(venice_models([(
+            pricing: Arc::new(PricingTable::new(models([(
                 "text-model",
                 PriceUnit::Tokens,
                 1,
@@ -1744,14 +1786,56 @@ mod tests {
 
         let _output = service
             .complete_stream(AgentChatParams {
-                provider_credentials: user_venice_credentials(),
+                provider_credentials: user_openrouter_credentials(),
                 ..agent_chat_params()
             })
             .await
-            .expect("stream starts with user Venice key");
+            .expect("stream starts with user OpenRouter key");
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(os_accounts.events(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn metered_text_request_carries_price_cap_and_byok_carries_none() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let generator = Arc::new(RecordingGenerator::default());
+        let table = Arc::new(PricingTable::new(models([(
+            "text-model",
+            PriceUnit::Tokens,
+            2,
+            ModelType::Text,
+        )])));
+        let expected_cap = table.price_cap("text-model").expect("price cap exists");
+        let service = NoteGenerateService::new(NoteGenerateServiceDeps {
+            pricing: table.clone(),
+            os_accounts: os_accounts.clone(),
+            generator: generator.clone(),
+            hold_ttl_seconds: 300,
+            flat_estimate_credits: 8200,
+        });
+
+        // 1. Clovy-metered request: carries price_cap equal to table rate, unmetered is false.
+        let mut metered_params = note_generate_params();
+        metered_params.provider_credentials = ProviderCredentials::default();
+        let _ = service
+            .generate(metered_params)
+            .await
+            .expect("metered generate succeeds");
+        let metered_req = generator.last_request().expect("metered request recorded");
+        assert_eq!(metered_req.price_cap, Some(expected_cap));
+        assert!(!metered_req.unmetered);
+
+        // 2. User-funded request: carries None price_cap, unmetered is true.
+        let mut byok_params = note_generate_params();
+        byok_params.provider_credentials = user_openrouter_credentials();
+        let _ = service
+            .generate(byok_params)
+            .await
+            .expect("byok generate succeeds");
+        let byok_req = generator.last_request().expect("byok request recorded");
+        assert_eq!(byok_req.price_cap, None);
+        assert!(byok_req.unmetered);
     }
 
     #[tokio::test]
@@ -1820,7 +1904,10 @@ mod tests {
                             .then_some(credits_per_unit.saturating_mul(1_000_000)),
                         output_credits_per_million_tokens: (unit == PriceUnit::Tokens)
                             .then_some(credits_per_unit.saturating_mul(1_000_000)),
-                        provider: ModelProvider::Openai,
+                        provider: match model_type {
+                            ModelType::Asr => ModelProvider::Groq,
+                            ModelType::Text => ModelProvider::Openrouter,
+                        },
                         model_type,
                         display_name: id.to_string(),
                         description: None,
@@ -1835,20 +1922,15 @@ mod tests {
             .collect()
     }
 
-    fn venice_models<const N: usize>(
-        values: [(&str, PriceUnit, u64, ModelType); N],
-    ) -> BTreeMap<String, ModelPriceConfig> {
-        let mut models = models(values);
-        for model in models.values_mut() {
-            model.provider = ModelProvider::Venice;
-        }
-        models
+    fn user_openrouter_credentials() -> ProviderCredentials {
+        ProviderCredentials::for_provider(
+            UpstreamProvider::Openrouter,
+            "sk-or-user-test".to_string(),
+        )
     }
 
-    fn user_venice_credentials() -> ProviderCredentials {
-        ProviderCredentials {
-            venice_api_key: Some("vc_user_key".to_string()),
-        }
+    fn user_groq_credentials() -> ProviderCredentials {
+        ProviderCredentials::for_provider(UpstreamProvider::Groq, "gsk_user_test".to_string())
     }
 
     fn agent_chat_params() -> AgentChatParams {
@@ -1964,11 +2046,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingGenerator {
         last_system_prompt: Mutex<Option<String>>,
+        last_request: Mutex<Option<GenerationRequest>>,
     }
 
     impl RecordingGenerator {
         fn last_system_prompt(&self) -> Option<String> {
             self.last_system_prompt
+                .lock()
+                .ok()
+                .and_then(|value| value.clone())
+        }
+
+        fn last_request(&self) -> Option<GenerationRequest> {
+            self.last_request
                 .lock()
                 .ok()
                 .and_then(|value| value.clone())
@@ -1979,7 +2069,10 @@ mod tests {
     impl Generator for RecordingGenerator {
         async fn generate(&self, request: GenerationRequest) -> Result<GeneratedNote, DomainError> {
             if let Ok(mut last_system_prompt) = self.last_system_prompt.lock() {
-                *last_system_prompt = Some(request.system_prompt);
+                *last_system_prompt = Some(request.system_prompt.clone());
+            }
+            if let Ok(mut last_request) = self.last_request.lock() {
+                *last_request = Some(request);
             }
             Ok(GeneratedNote {
                 content: "Generated note".to_string(),

@@ -23,9 +23,10 @@ import { messageFromError } from "../../lib/errors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import {
   dictationHelperCommand,
-  listVeniceModels,
+  listProviderModels,
   providerModelSettings,
-  type VeniceModelDto,
+  type ProviderApiKeysConfigured,
+  type ProviderModelDto,
 } from "../../lib/tauri";
 import { MarkdownContent } from "../agent/MarkdownContent";
 import { AgentAttachmentTile } from "../agent/composer/AgentAttachmentTile";
@@ -239,8 +240,14 @@ export function NoteChatPanel({
   // Model picking shares the regular agent catalog. The runtime receives the
   // selected model with each run, so the panel can change it without a legacy
   // transport-side configuration step.
-  const [models, setModels] = useState<VeniceModelDto[]>([]);
-  const [veniceApiKeyConfigured, setVeniceApiKeyConfigured] = useState(false);
+  const [models, setModels] = useState<ProviderModelDto[]>([]);
+  const [providerApiKeysConfigured, setProviderApiKeysConfigured] =
+    useState<ProviderApiKeysConfigured>({
+      groq: false,
+      openrouter: false,
+      fal: false,
+      tavily: false,
+    });
   const [modelOpen, setModelOpen] = useState(false);
   const [modelFlyout, setModelFlyout] = useState<ComposerModelFlyout>(null);
   const [modelSearch, setModelSearch] = useState("");
@@ -252,7 +259,7 @@ export function NoteChatPanel({
   // to a linked companion while this panel is already open.
   useEffect(() => {
     let stale = false;
-    void listVeniceModels("generation")
+    void listProviderModels("generation")
       .then((catalog) => {
         if (stale) return;
         setModels(catalog.models);
@@ -260,9 +267,11 @@ export function NoteChatPanel({
       .catch(() => undefined);
     void providerModelSettings()
       .then((response) =>
-        setVeniceApiKeyConfigured(response.effectiveSettings.veniceApiKeyConfigured),
+        setProviderApiKeysConfigured(response.effectiveSettings.providerApiKeysConfigured),
       )
-      .catch(() => setVeniceApiKeyConfigured(false));
+      .catch(() =>
+        setProviderApiKeysConfigured({ groq: false, openrouter: false, fal: false, tavily: false }),
+      );
     return () => {
       stale = true;
     };
@@ -271,7 +280,7 @@ export function NoteChatPanel({
   const textFundingContext: TextFundingModelContext = {
     activeModelId: activeModelId || undefined,
     activeModel: model,
-    veniceApiKeyConfigured,
+    providerApiKeysConfigured,
   };
   const textActionsDisabledReason = shouldBlockTextOnFunding(
     Boolean(creditActionsDisabledReason),
@@ -513,7 +522,7 @@ export function NoteChatPanel({
           {textActionsDisabledReason
             ? (renderFundingNotice?.({
                 ...textFundingContext,
-                onSelectVeniceModel: () => {
+                onSelectOpenRouterModel: () => {
                   setModelFlyout(null);
                   setModelSearch("");
                   setModelOpen(true);
@@ -624,6 +633,7 @@ export function NoteChatPanel({
               searchRef={modelSearchRef}
               onFlyoutChange={setModelFlyout}
               onSearchChange={setModelSearch}
+              providerApiKeysConfigured={providerApiKeysConfigured}
               onSelect={selectModel}
             />
           ) : null}

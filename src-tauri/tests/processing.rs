@@ -89,7 +89,7 @@ fn manual_notes_for_generation_uses_preface_when_generated_note_was_appended_bel
 async fn generation_rejects_empty_transcript() {
     let err = clovy_lib::clovy_api::generate_note_from_transcript(
         clovy_lib::clovy_api::GenerationRequest {
-            provider: "venice".to_string(),
+            provider: "openrouter".to_string(),
             operation_id: None,
             title: "Empty".to_string(),
             existing_generated_note: None,

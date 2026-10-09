@@ -27,6 +27,10 @@ dotenvy = "0.15"
 figment = { version = "0.10", features = ["env", "toml"] }
 futures-util = "0.3"
 hound = "3.5"
+# Image edit geometry (fal edit adapter): reads the source header and EXIF
+# orientation, and pads elongated sources onto an aspect-preserving canvas.
+# Decoders only for the formats the desktop sends; same version as src-tauri.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 jsonwebtoken = "9"
 sha2 = "0.11"
 # Share store (JUN-308): the first persistent state in clovy-api. rustls only —
@@ -48,8 +52,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 # Pure-Rust, offline trigram language detector used to fill in the transcript
-# language server-side (Venice ASR never returns one). No network or model
-# downloads, so it is safe to run inside the TEE.
+# language server-side (Groq's `json` transcription response carries none). No
+# network or model downloads, so it is safe to run inside the TEE.
 whatlang = "0.18"
 zeroize = { version = "1", features = ["derive"] }
 

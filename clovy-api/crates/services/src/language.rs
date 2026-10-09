@@ -1,8 +1,8 @@
 //! Best-effort language detection for transcripts.
 //!
-//! Venice ASR only ever returns `{"text"}` (no detected language), so the
-//! `language` on a [`Transcript`] comes back `None` for every dictation. Rather
-//! than leave the field empty, we detect the language from the transcribed text
+//! When an ASR provider returns only `{"text"}` (no detected language), the
+//! `language` on a [`Transcript`] comes back `None` for dictation. Rather than
+//! leave the field empty, we detect the language from the transcribed text
 //! server-side with `whatlang` — a small, offline, pure-Rust trigram detector
 //! that needs no network or model downloads (safe inside the TEE).
 //!

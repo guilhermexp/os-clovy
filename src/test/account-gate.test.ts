@@ -164,18 +164,18 @@ describe("shouldBlockOnFunding", () => {
 });
 
 describe("shouldBlockTextOnFunding", () => {
-  const veniceModel = {
-    id: "zai-org-glm-5-2",
-    provider: "venice",
+  const openRouterModel = {
+    id: "z-ai/glm-5.2",
+    provider: "openrouter",
     capabilities: ["supportsFunctionCalling"],
   };
 
-  it("allows an exact concrete Venice catalog model when a Venice key is configured", () => {
+  it("allows an exact concrete OpenRouter catalog model when an OpenRouter key is configured", () => {
     expect(
       shouldBlockTextOnFunding(true, {
-        activeModelId: veniceModel.id,
-        activeModel: veniceModel,
-        veniceApiKeyConfigured: true,
+        activeModelId: openRouterModel.id,
+        activeModel: openRouterModel,
+        providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
       }),
     ).toBe(false);
   });
@@ -186,37 +186,37 @@ describe("shouldBlockTextOnFunding", () => {
         activeModelId: "open-software/auto",
         activeModel: {
           id: "open-software/auto",
-          provider: "venice",
+          provider: "openrouter",
           capabilities: ["supportsFunctionCalling"],
         },
-        veniceApiKeyConfigured: true,
+        providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
       }),
     ).toBe(true);
   });
 
-  it("fails closed without a key or an exact matching Venice catalog entry", () => {
+  it("fails closed without a key or an exact matching OpenRouter catalog entry", () => {
     expect(
       shouldBlockTextOnFunding(true, {
-        activeModelId: veniceModel.id,
-        activeModel: veniceModel,
-        veniceApiKeyConfigured: false,
+        activeModelId: openRouterModel.id,
+        activeModel: openRouterModel,
+        providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       }),
     ).toBe(true);
     expect(
       shouldBlockTextOnFunding(true, {
-        activeModelId: "venice/looks-valid-but-is-unknown",
-        veniceApiKeyConfigured: true,
+        activeModelId: "openrouter/looks-valid-but-is-unknown",
+        providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
       }),
     ).toBe(true);
     expect(
       shouldBlockTextOnFunding(true, {
-        activeModelId: veniceModel.id,
+        activeModelId: openRouterModel.id,
         activeModel: {
           id: "another-model",
-          provider: "venice",
+          provider: "openrouter",
           capabilities: ["supportsFunctionCalling"],
         },
-        veniceApiKeyConfigured: true,
+        providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
       }),
     ).toBe(true);
     expect(
@@ -227,18 +227,18 @@ describe("shouldBlockTextOnFunding", () => {
           provider: "phala",
           capabilities: ["supportsFunctionCalling"],
         },
-        veniceApiKeyConfigured: true,
+        providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
       }),
     ).toBe(true);
     expect(
       shouldBlockTextOnFunding(true, {
-        activeModelId: "venice-without-tools",
+        activeModelId: "openrouter-without-tools",
         activeModel: {
-          id: "venice-without-tools",
-          provider: "venice",
+          id: "openrouter-without-tools",
+          provider: "openrouter",
           capabilities: [],
         },
-        veniceApiKeyConfigured: true,
+        providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
       }),
     ).toBe(true);
   });
@@ -247,7 +247,7 @@ describe("shouldBlockTextOnFunding", () => {
     expect(
       shouldBlockTextOnFunding(false, {
         activeModelId: "unknown",
-        veniceApiKeyConfigured: false,
+        providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       }),
     ).toBe(false);
   });

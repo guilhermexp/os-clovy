@@ -6,13 +6,13 @@ use crate::{
     validation,
 };
 use axum::{Json, extract::State, http::HeaderMap};
-use clovy_domain::{WebFetchResult, WebSearchProvider, WebSearchResults};
+use clovy_domain::{UpstreamProvider, WebFetchResult, WebSearchResults};
 use clovy_services::{WebFetchParams, WebSearchParams};
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::{Host, Url};
 
-/// Venice clamps `limit` to its own bounds; we mirror them so an out-of-range
+/// Tavily clamps `limit` to its own bounds; we mirror them so an out-of-range
 /// value from the agent is normalized rather than rejected.
 const MIN_SEARCH_LIMIT: u32 = 1;
 const MAX_SEARCH_LIMIT: u32 = 20;
@@ -23,9 +23,6 @@ pub struct WebSearchRequest {
     pub query: String,
     #[serde(default)]
     pub limit: Option<u32>,
-    /// `brave` (default) or `google`; omitted means brave.
-    #[serde(default)]
-    pub provider: Option<WebSearchProvider>,
     /// Stable per-call id the client reuses across retries. It scopes the
     /// metering idempotency key so a genuine repeat search is charged while a
     /// dropped-response retry is not double-charged.
@@ -49,7 +46,8 @@ pub(crate) async fn search(
     Json(request): Json<WebSearchRequest>,
 ) -> Result<Json<ApiResponse<WebSearchResults>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Tavily)?;
+    state.ensure_provider_configured(UpstreamProvider::Tavily, &provider_credentials)?;
     let request_id = require_request_id(&request.request_id)?;
     let query = request.query.trim().to_string();
     if query.is_empty() {
@@ -66,7 +64,6 @@ pub(crate) async fn search(
             request_id,
             query,
             limit,
-            provider: request.provider.unwrap_or_default(),
             provider_credentials,
         })
         .await?;
@@ -79,7 +76,8 @@ pub(crate) async fn fetch(
     Json(request): Json<WebFetchRequest>,
 ) -> Result<Json<ApiResponse<WebFetchResult>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Tavily)?;
+    state.ensure_provider_configured(UpstreamProvider::Tavily, &provider_credentials)?;
     let request_id = require_request_id(&request.request_id)?;
     let url = request.url.trim().to_string();
     if url.is_empty() {
@@ -484,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_every_resolved_domain_ip_to_be_public() {
+    fn requires_every_resolved_domain_ip_to_be_public() -> Result<(), Box<dyn std::error::Error>> {
         assert!(resolved_ips_are_public(&[IpAddr::V4(Ipv4Addr::new(
             93, 184, 216, 34
         ))]));
@@ -492,11 +490,12 @@ mod tests {
             192, 0, 0, 8
         ))]));
         assert!(!resolved_ips_are_public(&[IpAddr::V6(
-            "64:ff9b:1::a9fe:a9fe".parse::<Ipv6Addr>().unwrap()
+            "64:ff9b:1::a9fe:a9fe".parse::<Ipv6Addr>()?
         )]));
         assert!(!resolved_ips_are_public(&[
             IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ]));
+        Ok(())
     }
 }

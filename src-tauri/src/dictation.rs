@@ -5,10 +5,10 @@ use crate::clovy_api::{
     TranscriptionProviderResult,
 };
 use crate::domain::{
-    processing::{build_dictionary_context, merge_transcription_context},
+    processing::{build_transcription_dictionary, TranscriptionDictionary},
     types::{AppError, ListDictationHistoryResponse},
 };
-use crate::providers::{configured_transcription_provider, OPENAI_PROVIDER, VENICE_PROVIDER};
+use crate::providers::{configured_transcription_provider, PROVIDER_GROQ};
 use chrono::Utc;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
@@ -28,7 +28,6 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
 };
 
-const DICTATION_TRANSCRIPTION_CONTEXT: &str = "Transcribe this as clean hands-free dictation for direct insertion into the active app. Preserve the speaker's intended words, language, and meaning. Remove filler sounds and accidental false starts when they are not meaningful, especially um, uh, ah, er, and a... stutters. Do not remove intentional articles such as a or an when they are grammatically needed. Convert spoken punctuation and formatting into text punctuation, including comma, period, question mark, exclamation point, colon, semicolon, dash, newline, and new paragraph. Convert quote/unquote, open quote/close quote, and start quote/end quote into actual quotation marks around the quoted words. Output only the dictated text.";
 /// Cleanup regenerates the whole transcript through the LLM, so its latency
 /// grows with dictation length. A flat budget silently degraded long
 /// dictations: the call timed out, cleanup was skipped, and the raw ASR text
@@ -5316,18 +5315,14 @@ async fn transcribe_recording_ready_inner(
     let current_settings = current_dictation_settings(app).unwrap_or_default();
     let style = current_settings.style;
     let language = current_settings.language;
-    let Some(dictionary_context) =
-        run_dictation_take_step(take, dictionary_context_for_app(app)).await
+    let Some(dictionary) =
+        run_dictation_take_step(take, transcription_dictionary_for_app(app)).await
     else {
         remove_cancelled_dictation_audio(&audio_path, None);
         return;
     };
     let session_id = dictation_session_id();
     let utterance_id = uuid::Uuid::new_v4().to_string();
-    let transcription_context = merge_transcription_context(
-        dictionary_context.as_deref(),
-        Some(dictation_transcription_context(style).as_str()),
-    );
     let transcription_audio = match prepare_dictation_audio(&recording.audio_path, &utterance_id) {
         Ok(path) => path,
         Err(error) => {
@@ -5349,7 +5344,11 @@ async fn transcribe_recording_ready_inner(
         take,
         dictate_transcribe(DictateTranscribeRequest {
             audio_path: transcription_audio.clone(),
-            context: transcription_context,
+            // Whisper's prompt only steers spelling: it gets the short dictionary
+            // hint, and cleanup below gets the full dictionary.
+            context: dictionary
+                .as_ref()
+                .and_then(|dictionary| dictionary.asr_hint.clone()),
             language,
             session_id: session_id.clone(),
             utterance_id: utterance_id.clone(),
@@ -5375,7 +5374,7 @@ async fn transcribe_recording_ready_inner(
             app,
             &provider,
             result,
-            dictionary_context,
+            dictionary.map(|dictionary| dictionary.context),
             app_context,
             style,
             session_id,
@@ -5605,20 +5604,13 @@ fn dictation_session_id() -> String {
 }
 
 fn dictation_transcription_provider(provider: String) -> Result<String, AppError> {
-    if provider != OPENAI_PROVIDER && provider != VENICE_PROVIDER {
+    if provider != PROVIDER_GROQ {
         return Err(AppError::new(
             "dictation_provider_not_configured",
-            "Dictation requires an OpenAI or Venice transcription model through Clovy's model service.",
+            "Dictation requires a Groq transcription model through Clovy's model service.",
         ));
     }
     Ok(provider)
-}
-
-fn dictation_transcription_context(style: DictationStyle) -> String {
-    format!(
-        "{DICTATION_TRANSCRIPTION_CONTEXT}\n\n{}",
-        style.instruction()
-    )
 }
 
 fn is_email_app_bundle(bundle_id: &str) -> bool {
@@ -5649,10 +5641,10 @@ fn frontmost_bundle_id() -> Option<String> {
     Some(bundle_id.to_string())
 }
 
-async fn dictionary_context_for_app(app: &AppHandle) -> Option<String> {
+async fn transcription_dictionary_for_app(app: &AppHandle) -> Option<TranscriptionDictionary> {
     let repos = crate::commands::repositories(app).await.ok()?;
     let entries = repos.list_dictionary_entries().await.ok()?;
-    build_dictionary_context(&entries)
+    build_transcription_dictionary(&entries)
 }
 
 async fn maybe_cleanup_dictation_result(
@@ -8303,7 +8295,7 @@ mod tests {
     fn untagged_listening_start_promotes_the_pending_coordinator_take() {
         let event = serde_json::json!({
             "type": "listening_started",
-            "payload": { "recognitionMode": "venice_recording" }
+            "payload": { "microphone": "Built-in Microphone", "escapeCancelAvailable": true }
         });
         let mut controller = ShortcutActivationController::default();
         controller.prepare_helper_start("take-pending");
@@ -9609,7 +9601,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Paste this transcript.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9635,7 +9627,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Here's the API key to Poncho.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9661,7 +9653,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "User performed a very long dictation session. Instead of producing a full transcription, the app emitted an error.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9683,7 +9675,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Ums and uhs.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9706,7 +9698,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Um, uh.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(DICTATION_AUDIO_ACTIVITY_THRESHOLD),
             DictationStyle::Standard,
@@ -9740,7 +9732,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Um, uh, Send this, please.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9905,7 +9897,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Hey, Clovy, summarize the open document.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9982,7 +9974,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
                 language: None,
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -10003,7 +9995,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
                 language: None,
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(DICTATION_AUDIO_ACTIVITY_THRESHOLD),
             DictationStyle::Standard,
@@ -10619,7 +10611,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Oh, yeah.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
@@ -10647,7 +10639,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Hey Clovy delete this note.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
@@ -10676,7 +10668,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "User report summary: the user said hello.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
@@ -10707,7 +10699,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
                 language: None,
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
@@ -10890,31 +10882,12 @@ mod tests {
     }
 
     #[test]
-    fn dictation_accepts_openai_provider() {
+    fn dictation_accepts_groq_provider() {
         assert_eq!(
-            dictation_transcription_provider(crate::providers::OPENAI_PROVIDER.to_string())
-                .expect("openai should be accepted"),
-            crate::providers::OPENAI_PROVIDER
+            dictation_transcription_provider(crate::providers::PROVIDER_GROQ.to_string())
+                .expect("groq should be accepted"),
+            crate::providers::PROVIDER_GROQ
         );
-    }
-
-    #[test]
-    fn dictation_context_guides_clean_hands_free_typing() {
-        let context = dictation_transcription_context(DictationStyle::Standard);
-
-        assert!(context.contains("hands-free dictation"));
-        assert!(context.contains("Remove filler sounds"));
-        assert!(context.contains("quote/unquote"));
-        assert!(context.contains("actual quotation marks"));
-        assert!(context.contains("Do not remove intentional articles"));
-    }
-
-    #[test]
-    fn dictation_context_includes_selected_style() {
-        let context = dictation_transcription_context(DictationStyle::CasualLowercase);
-
-        assert!(context.contains("Writing style: casual lowercase"));
-        assert!(context.contains("Use lowercase"));
     }
 
     #[test]
@@ -11300,7 +11273,7 @@ mod tests {
             "type": "error",
             "payload": {
                 "code": "transcription_empty",
-                "message": "OpenAI did not return any transcript text."
+                "message": "Groq did not return any transcript text."
             }
         });
 

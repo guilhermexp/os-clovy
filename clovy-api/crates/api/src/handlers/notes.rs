@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
-use clovy_domain::{ModelId, ModelKind, ProviderCredentials};
+use clovy_domain::{ModelId, ModelKind, ProviderCredentials, UpstreamProvider};
 use clovy_services::{
     NoteGenerateOutput, NoteGenerateParams, NoteTranscribeOutput, NoteTranscribeParams,
     PricingError, PricingTable,
@@ -30,7 +30,7 @@ pub(crate) async fn transcribe(
     multipart: Multipart,
 ) -> Result<Json<ApiResponse<TranscribeResponse>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Groq)?;
     let limits = state.limits();
     let mut form = MultipartFields::collect(multipart, limits.max_audio_bytes).await?;
     let audio = form.required_audio()?;
@@ -38,12 +38,7 @@ pub(crate) async fn transcribe(
     let requested_model_id = form.required_text("model")?;
     validation::validate_text_len("model", &requested_model_id, validation::MAX_MODEL_CHARS)?;
     let model_id = resolve_priced_asr_model(&state, &requested_model_id)?;
-    let provider_credentials = credentials_for_resolved_model(
-        provider_credentials,
-        &requested_model_id,
-        &model_id,
-        state.pricing().is_venice_model(&model_id),
-    )?;
+    state.ensure_provider_configured(UpstreamProvider::Groq, &provider_credentials)?;
     // Accepted and validated for wire compatibility, but deliberately not
     // carried into the transcription pipeline: the note title is user data
     // an ASR provider has no business seeing.
@@ -100,30 +95,20 @@ pub(crate) async fn generate(
     Json(request): Json<GenerateRequest>,
 ) -> Result<Response, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Openrouter)?;
     request.validate()?;
     let requested_model_id = required(request.model, "model_required")?;
     validation::validate_text_len("model", &requested_model_id, validation::MAX_MODEL_CHARS)?;
-    let model_id = resolve_priced_text_model(&state, &requested_model_id)?;
-    if state.local_dev_enabled() && model_id != AUTO_TEXT_MODEL && model_id != requested_model_id {
-        tracing::warn!(
-            requested_model = %requested_model_id,
-            resolved_model = %model_id,
-            "local dev substituted a concrete text model for unavailable Auto"
-        );
-    }
-    let cost_quality = if model_id == AUTO_TEXT_MODEL {
-        request.cost_quality
-    } else {
-        None
-    };
-    let provider_credentials = credentials_for_resolved_model(
-        provider_credentials,
+    let (model_id, provider_credentials) = resolve_text_model_and_credentials(
+        &state,
         &requested_model_id,
-        &model_id,
-        state.pricing().is_venice_model(&model_id),
+        AutoSelection {
+            cost_quality: request.cost_quality,
+            requirements: None,
+        },
+        provider_credentials,
     )?;
-
+    state.ensure_provider_configured(UpstreamProvider::Openrouter, &provider_credentials)?;
     let stream = request.stream;
     let params = NoteGenerateParams {
         user_id,
@@ -137,7 +122,6 @@ pub(crate) async fn generate(
         existing_generated_note: request.existing_generated_note,
         model_id: ModelId(model_id),
         provider_credentials,
-        cost_quality,
     };
 
     if stream {
@@ -376,108 +360,161 @@ pub(crate) fn required(value: Option<String>, message: &str) -> Result<String, A
 }
 
 pub(crate) const AUTO_TEXT_MODEL: &str = "open-software/auto";
-const DEFAULT_TEXT_MODEL: &str = "zai-org-glm-5-2";
-const DEFAULT_ASR_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v3";
+pub(crate) const DEFAULT_ASR_MODEL: &str = "whisper-large-v3-turbo";
+pub(crate) const TIER_ECONOMY_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b";
+pub(crate) const TIER_BALANCED_MODEL: &str = "moonshotai/kimi-k2.6";
+pub(crate) const TIER_QUALITY_MODEL: &str = "z-ai/glm-5.2";
+pub(crate) const PREFERRED_VISION_TEXT_MODEL: &str = "moonshotai/kimi-k2.6";
 
-/// Older June clients may retain a Venice model that disappeared when the
-/// production catalog moved behind os-api. Preserve those sessions by routing
-/// an unpriced text selection through Auto when available, or through a
-/// concrete priced text model in local environments where Auto is unavailable.
-/// Wrong-kind models still fail.
-pub(crate) fn resolve_priced_text_model(
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AgentModelRequirements {
+    pub(crate) vision: bool,
+    pub(crate) tools: bool,
+}
+
+impl AgentModelRequirements {
+    pub(crate) fn is_empty(self) -> bool {
+        !self.vision && !self.tools
+    }
+}
+
+/// How an Auto request picks its concrete model: the requested quality tier
+/// and, for agent chat, the capabilities the request body needs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct AutoSelection {
+    pub(crate) cost_quality: Option<f64>,
+    pub(crate) requirements: Option<AgentModelRequirements>,
+}
+
+pub(crate) fn model_supports_requirements(
+    model: &clovy_config::ModelPriceConfig,
+    requirements: AgentModelRequirements,
+) -> bool {
+    (!requirements.vision || has_capability(&model.capabilities, "supportsvision"))
+        && (!requirements.tools
+            || has_capability(&model.capabilities, "functioncalling")
+            || has_capability(&model.capabilities, "toolcalling"))
+}
+
+pub(crate) fn has_capability(capabilities: &[String], expected: &str) -> bool {
+    capabilities.iter().any(|capability| {
+        capability
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .map(|character| character.to_ascii_lowercase())
+            .collect::<String>()
+            .contains(expected)
+    })
+}
+
+pub(crate) fn resolve_auto_model(
+    pricing: &PricingTable,
+    cost_quality: Option<f64>,
+    requirements: Option<AgentModelRequirements>,
+) -> Result<String, ApiError> {
+    let tier_model_id = match cost_quality {
+        Some(cq) if cq < 0.34 => TIER_ECONOMY_MODEL,
+        Some(cq) if cq <= 0.66 => TIER_BALANCED_MODEL,
+        _ => TIER_QUALITY_MODEL,
+    };
+
+    let reqs = requirements.unwrap_or_default();
+    if !reqs.is_empty() {
+        if pricing
+            .priced_model(tier_model_id, ModelKind::Text)
+            .is_ok_and(|model| model_supports_requirements(&model, reqs))
+        {
+            return Ok(tier_model_id.to_string());
+        }
+
+        if pricing
+            .priced_model(PREFERRED_VISION_TEXT_MODEL, ModelKind::Text)
+            .is_ok_and(|model| model_supports_requirements(&model, reqs))
+        {
+            return Ok(PREFERRED_VISION_TEXT_MODEL.to_string());
+        }
+
+        if let Some((compatible_id, _)) = pricing.find_priced_model(ModelKind::Text, |id, model| {
+            id != AUTO_TEXT_MODEL && model_supports_requirements(model, reqs)
+        }) {
+            return Ok(compatible_id);
+        }
+
+        return Err(ApiError::unprocessable("model_capability_unavailable"));
+    }
+
+    if pricing
+        .ensure_model_kind(tier_model_id, ModelKind::Text)
+        .is_ok()
+    {
+        return Ok(tier_model_id.to_string());
+    }
+
+    if pricing
+        .ensure_model_kind(TIER_BALANCED_MODEL, ModelKind::Text)
+        .is_ok()
+    {
+        return Ok(TIER_BALANCED_MODEL.to_string());
+    }
+
+    pricing
+        .find_priced_model(ModelKind::Text, |id, _| id != AUTO_TEXT_MODEL)
+        .map(|(model_id, _)| model_id)
+        .ok_or_else(|| ApiError::unprocessable("model_capability_unavailable"))
+}
+
+pub(crate) fn resolve_text_model_and_credentials(
     state: &ApiState,
     requested_model_id: &str,
-) -> Result<String, ApiError> {
-    resolve_priced_text_model_kind(
-        state.pricing(),
-        requested_model_id,
-        state.local_dev_enabled(),
-    )
-}
-
-/// Auto is a Clovy-managed route. Strip BYOK from an explicit Auto selection,
-/// and reject every other non-Venice resolution instead of forwarding the key
-/// across a provider boundary. Callers may preserve a legacy ASR fallback only
-/// when it resolves to another Venice model.
-pub(crate) fn credentials_for_resolved_model(
+    auto: AutoSelection,
     mut credentials: ProviderCredentials,
-    requested_model_id: &str,
-    resolved_model_id: &str,
-    resolved_supports_venice_byok: bool,
-) -> Result<ProviderCredentials, ApiError> {
+) -> Result<(String, ProviderCredentials), ApiError> {
     if requested_model_id == AUTO_TEXT_MODEL {
-        credentials.venice_api_key = None;
-        return Ok(credentials);
+        credentials.clear(UpstreamProvider::Openrouter);
+        let concrete_model =
+            resolve_auto_model(state.pricing(), auto.cost_quality, auto.requirements)?;
+        return Ok((concrete_model, credentials));
     }
-    if credentials.has_venice_api_key()
-        && ((resolved_model_id == AUTO_TEXT_MODEL && requested_model_id != AUTO_TEXT_MODEL)
-            || (resolved_model_id != AUTO_TEXT_MODEL && !resolved_supports_venice_byok))
-    {
-        return Err(ApiError::unprocessable("venice_api_key_model_unavailable"));
-    }
-    if resolved_model_id == AUTO_TEXT_MODEL {
-        credentials.venice_api_key = None;
-    }
-    Ok(credentials)
-}
 
-fn resolve_priced_text_model_kind(
-    pricing: &PricingTable,
-    requested_model_id: &str,
-    allow_concrete_fallback: bool,
-) -> Result<String, ApiError> {
-    match pricing.ensure_model_kind(requested_model_id, ModelKind::Text) {
-        Ok(()) => Ok(requested_model_id.to_string()),
+    match state
+        .pricing()
+        .ensure_model_kind(requested_model_id, ModelKind::Text)
+    {
+        Ok(()) => Ok((requested_model_id.to_string(), credentials)),
         Err(PricingError::NotPriced | PricingError::MissingRate) => {
-            if pricing
-                .ensure_model_kind(AUTO_TEXT_MODEL, ModelKind::Text)
-                .is_ok()
-            {
-                return Ok(AUTO_TEXT_MODEL.to_string());
+            if credentials.has_user_key(UpstreamProvider::Openrouter) {
+                return Err(ApiError::unprocessable(
+                    "openrouter_api_key_model_unavailable",
+                ));
             }
-            if !allow_concrete_fallback {
-                return Err(ApiError::unprocessable("model_not_priced"));
-            }
-            if pricing
-                .ensure_model_kind(DEFAULT_TEXT_MODEL, ModelKind::Text)
-                .is_ok()
-            {
-                return Ok(DEFAULT_TEXT_MODEL.to_string());
-            }
-            pricing
-                .find_priced_model(ModelKind::Text, |_, _| true)
-                .map(|(model_id, _)| model_id)
-                .ok_or_else(|| ApiError::unprocessable("model_not_priced"))
+            let concrete_model =
+                resolve_auto_model(state.pricing(), auto.cost_quality, auto.requirements)?;
+            Ok((concrete_model, credentials))
         }
         Err(PricingError::WrongUnit) => Err(ApiError::unprocessable("model_type_invalid")),
         Err(PricingError::Overflow) => Err(ApiError::unprocessable("price_overflow")),
     }
 }
 
-/// Preserve dictation for clients with a retired ASR selection. Prefer Clovy's
-/// default private transcription model, then any currently priced ASR model.
-/// A text-model selection remains a hard type error.
 pub(crate) fn resolve_priced_asr_model(
     state: &ApiState,
     requested_model_id: &str,
 ) -> Result<String, ApiError> {
-    resolve_priced_asr_model_kind(state.pricing(), requested_model_id)
-}
-
-fn resolve_priced_asr_model_kind(
-    pricing: &PricingTable,
-    requested_model_id: &str,
-) -> Result<String, ApiError> {
-    match pricing.ensure_model_kind(requested_model_id, ModelKind::Asr) {
+    match state
+        .pricing()
+        .ensure_model_kind(requested_model_id, ModelKind::Asr)
+    {
         Ok(()) => Ok(requested_model_id.to_string()),
         Err(PricingError::NotPriced | PricingError::MissingRate) => {
-            if pricing
+            if state
+                .pricing()
                 .ensure_model_kind(DEFAULT_ASR_MODEL, ModelKind::Asr)
                 .is_ok()
             {
                 return Ok(DEFAULT_ASR_MODEL.to_string());
             }
-            pricing
+            state
+                .pricing()
                 .find_priced_model(ModelKind::Asr, |_, _| true)
                 .map(|(model_id, _)| model_id)
                 .ok_or_else(|| ApiError::unprocessable("model_not_priced"))
@@ -494,17 +531,33 @@ fn parse_preview_flag(value: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTO_TEXT_MODEL, DEFAULT_TEXT_MODEL, credentials_for_resolved_model, parse_preview_flag,
-        resolve_priced_asr_model_kind, resolve_priced_text_model_kind,
+        AgentModelRequirements, DEFAULT_ASR_MODEL, TIER_BALANCED_MODEL, TIER_ECONOMY_MODEL,
+        TIER_QUALITY_MODEL, parse_preview_flag, resolve_auto_model,
     };
-    use crate::ApiError;
     use clovy_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
-    use clovy_domain::ProviderCredentials;
     use clovy_services::PricingTable;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, error::Error};
 
     fn pricing_table() -> PricingTable {
         let mut models = BTreeMap::new();
+        models.insert(
+            DEFAULT_ASR_MODEL.to_string(),
+            ModelPriceConfig {
+                unit: PriceUnit::Seconds,
+                credits_per_million_seconds: Some(11_112),
+                input_credits_per_million_tokens: None,
+                output_credits_per_million_tokens: None,
+                provider: ModelProvider::Groq,
+                model_type: ModelType::Asr,
+                display_name: "Whisper Large v3 Turbo".to_string(),
+                description: None,
+                privacy: None,
+                pricing: None,
+                context_tokens: None,
+                traits: Vec::new(),
+                capabilities: Vec::new(),
+            },
+        );
         models.insert(
             "asr-model".to_string(),
             ModelPriceConfig {
@@ -512,7 +565,7 @@ mod tests {
                 credits_per_million_seconds: Some(1),
                 input_credits_per_million_tokens: None,
                 output_credits_per_million_tokens: None,
-                provider: ModelProvider::Openai,
+                provider: ModelProvider::Groq,
                 model_type: ModelType::Asr,
                 display_name: "ASR".to_string(),
                 description: None,
@@ -524,218 +577,104 @@ mod tests {
             },
         );
         models.insert(
-            AUTO_TEXT_MODEL.to_string(),
+            TIER_ECONOMY_MODEL.to_string(),
             ModelPriceConfig {
                 unit: PriceUnit::Tokens,
                 credits_per_million_seconds: None,
-                input_credits_per_million_tokens: Some(1),
-                output_credits_per_million_tokens: Some(1),
-                provider: ModelProvider::Venice,
+                input_credits_per_million_tokens: Some(60),
+                output_credits_per_million_tokens: Some(240),
+                provider: ModelProvider::Openrouter,
                 model_type: ModelType::Text,
-                display_name: "Auto".to_string(),
+                display_name: "Nemotron 3".to_string(),
                 description: None,
                 privacy: None,
                 pricing: None,
                 context_tokens: None,
                 traits: Vec::new(),
-                capabilities: Vec::new(),
+                capabilities: vec!["supportsFunctionCalling".to_string()],
             },
         );
         models.insert(
-            "text-model".to_string(),
+            TIER_BALANCED_MODEL.to_string(),
             ModelPriceConfig {
                 unit: PriceUnit::Tokens,
                 credits_per_million_seconds: None,
-                input_credits_per_million_tokens: Some(1),
-                output_credits_per_million_tokens: Some(1),
-                provider: ModelProvider::Venice,
+                input_credits_per_million_tokens: Some(438),
+                output_credits_per_million_tokens: Some(2_450),
+                provider: ModelProvider::Openrouter,
                 model_type: ModelType::Text,
-                display_name: "Text".to_string(),
+                display_name: "Kimi K2.6".to_string(),
                 description: None,
                 privacy: None,
                 pricing: None,
                 context_tokens: None,
                 traits: Vec::new(),
-                capabilities: Vec::new(),
+                capabilities: vec![
+                    "supportsVision".to_string(),
+                    "supportsFunctionCalling".to_string(),
+                ],
+            },
+        );
+        models.insert(
+            TIER_QUALITY_MODEL.to_string(),
+            ModelPriceConfig {
+                unit: PriceUnit::Tokens,
+                credits_per_million_seconds: None,
+                input_credits_per_million_tokens: Some(30),
+                output_credits_per_million_tokens: Some(10_000),
+                provider: ModelProvider::Openrouter,
+                model_type: ModelType::Text,
+                display_name: "GLM 5.2".to_string(),
+                description: None,
+                privacy: None,
+                pricing: None,
+                context_tokens: None,
+                traits: Vec::new(),
+                capabilities: vec!["supportsFunctionCalling".to_string()],
             },
         );
         PricingTable::new(models)
     }
 
     #[test]
-    fn stale_text_model_falls_back_to_auto() {
-        let resolved =
-            resolve_priced_text_model_kind(&pricing_table(), "retired-venice-model", false)
-                .expect("stale model should remain usable through Auto");
-        assert_eq!(resolved, AUTO_TEXT_MODEL);
+    fn auto_resolves_economy_tier() -> Result<(), Box<dyn Error>> {
+        let pricing = pricing_table();
+        let resolved = resolve_auto_model(&pricing, Some(0.2), None)?;
+        assert_eq!(resolved, TIER_ECONOMY_MODEL);
+        Ok(())
     }
 
     #[test]
-    fn auto_falls_back_to_the_concrete_default_when_auto_is_not_priced() {
-        let mut models = pricing_table()
-            .priced_models(None)
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
-        models.remove(AUTO_TEXT_MODEL);
-        let text_model = models
-            .remove("text-model")
-            .expect("text model should exist");
-        models.insert(DEFAULT_TEXT_MODEL.to_string(), text_model);
-
-        let resolved =
-            resolve_priced_text_model_kind(&PricingTable::new(models), AUTO_TEXT_MODEL, true)
-                .expect("local Auto should resolve to the built-in concrete default");
-
-        assert_eq!(resolved, DEFAULT_TEXT_MODEL);
+    fn auto_resolves_balanced_tier() -> Result<(), Box<dyn Error>> {
+        let pricing = pricing_table();
+        let resolved = resolve_auto_model(&pricing, Some(0.5), None)?;
+        assert_eq!(resolved, TIER_BALANCED_MODEL);
+        Ok(())
     }
 
     #[test]
-    fn non_local_auto_without_auto_pricing_fails_loudly() {
-        let mut models = pricing_table()
-            .priced_models(None)
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
-        models.remove(AUTO_TEXT_MODEL);
-
-        let error =
-            resolve_priced_text_model_kind(&PricingTable::new(models), AUTO_TEXT_MODEL, false)
-                .expect_err("production must not silently substitute a concrete model");
-
-        assert!(matches!(
-            error,
-            ApiError::Unprocessable { message, .. } if message == "model_not_priced"
-        ));
+    fn auto_resolves_quality_tier() -> Result<(), Box<dyn Error>> {
+        let pricing = pricing_table();
+        let resolved_none = resolve_auto_model(&pricing, None, None)?;
+        assert_eq!(resolved_none, TIER_QUALITY_MODEL);
+        let resolved_high = resolve_auto_model(&pricing, Some(0.9), None)?;
+        assert_eq!(resolved_high, TIER_QUALITY_MODEL);
+        Ok(())
     }
 
     #[test]
-    fn unpriced_text_falls_back_to_another_priced_text_model_without_auto_or_default() {
-        let mut models = pricing_table()
-            .priced_models(None)
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
-        models.remove(AUTO_TEXT_MODEL);
-
-        let resolved =
-            resolve_priced_text_model_kind(&PricingTable::new(models), "retired-model", true)
-                .expect("a remaining priced text model should be used");
-
-        assert_eq!(resolved, "text-model");
-    }
-
-    #[test]
-    fn byok_rejects_retired_asr_fallback_to_non_venice_model() {
-        let credentials = ProviderCredentials {
-            venice_api_key: Some("opaque-user-key".to_string()),
-        };
-
-        let error =
-            credentials_for_resolved_model(credentials, "retired-venice-asr", "openai-asr", false)
-                .expect_err("provider-changing BYOK fallback should fail");
-
-        assert!(matches!(
-            error,
-            ApiError::Unprocessable { message, .. }
-                if message == "venice_api_key_model_unavailable"
-        ));
-    }
-
-    #[test]
-    fn byok_rejects_current_non_venice_model() {
-        let credentials = ProviderCredentials {
-            venice_api_key: Some("opaque-user-key".to_string()),
-        };
-
-        let error = credentials_for_resolved_model(
-            credentials,
-            "openai/current-model",
-            "openai/current-model",
-            false,
-        )
-        .expect_err("Venice BYOK must not cross into a non-Venice provider");
-
-        assert!(matches!(
-            error,
-            ApiError::Unprocessable { message, .. }
-                if message == "venice_api_key_model_unavailable"
-        ));
-    }
-
-    #[test]
-    fn explicit_auto_strips_byok() {
-        let credentials = ProviderCredentials {
-            venice_api_key: Some("opaque-user-key".to_string()),
-        };
-
-        let credentials =
-            credentials_for_resolved_model(credentials, AUTO_TEXT_MODEL, AUTO_TEXT_MODEL, false)
-                .expect("explicit Auto remains a Clovy-managed request");
-
-        assert!(!credentials.has_venice_api_key());
-    }
-
-    #[test]
-    fn explicit_auto_strips_byok_after_resolving_to_a_concrete_model() {
-        let credentials = ProviderCredentials {
-            venice_api_key: Some("opaque-user-key".to_string()),
-        };
-
-        let credentials =
-            credentials_for_resolved_model(credentials, AUTO_TEXT_MODEL, DEFAULT_TEXT_MODEL, true)
-                .expect("explicit Auto remains Clovy-managed after a local fallback");
-
-        assert!(!credentials.has_venice_api_key());
-    }
-
-    #[test]
-    fn stale_text_byok_rejects_fallback_to_auto() {
-        let credentials = ProviderCredentials {
-            venice_api_key: Some("opaque-user-key".to_string()),
-        };
-
-        let error = credentials_for_resolved_model(
-            credentials,
-            "venice/retired-model",
-            AUTO_TEXT_MODEL,
-            true,
-        )
-        .expect_err("stale Venice BYOK must not silently switch to Auto billing");
-
-        assert!(matches!(
-            error,
-            ApiError::Unprocessable { message, .. }
-                if message == "venice_api_key_model_unavailable"
-        ));
-    }
-
-    #[test]
-    fn priced_text_model_is_preserved() {
-        let resolved = resolve_priced_text_model_kind(&pricing_table(), "text-model", false)
-            .expect("priced text model should remain explicit");
-        assert_eq!(resolved, "text-model");
-    }
-
-    #[test]
-    fn stale_asr_model_falls_back_to_a_priced_asr_model() {
-        let resolved = resolve_priced_asr_model_kind(&pricing_table(), "retired-asr-model")
-            .expect("stale ASR model should remain usable");
-        assert_eq!(resolved, "asr-model");
-    }
-
-    #[test]
-    fn priced_asr_model_is_preserved() {
-        let resolved = resolve_priced_asr_model_kind(&pricing_table(), "asr-model")
-            .expect("priced ASR model should remain explicit");
-        assert_eq!(resolved, "asr-model");
-    }
-
-    #[test]
-    fn text_model_cannot_fall_back_into_asr() {
-        let error = resolve_priced_asr_model_kind(&pricing_table(), "text-model")
-            .expect_err("text model must not be accepted for transcription");
-        assert!(matches!(
-            error,
-            ApiError::Unprocessable { message, .. } if message == "model_type_invalid"
-        ));
+    fn auto_falls_back_to_vision_model_when_required() -> Result<(), Box<dyn Error>> {
+        let pricing = pricing_table();
+        let resolved = resolve_auto_model(
+            &pricing,
+            Some(0.2),
+            Some(AgentModelRequirements {
+                vision: true,
+                tools: false,
+            }),
+        )?;
+        assert_eq!(resolved, TIER_BALANCED_MODEL);
+        Ok(())
     }
 
     #[test]

@@ -4,8 +4,7 @@ use crate::{
     envelope::ApiResponse,
     error::ApiError,
     handlers::notes::{
-        credentials_for_resolved_model, required, resolve_priced_asr_model,
-        resolve_priced_text_model,
+        AutoSelection, required, resolve_priced_asr_model, resolve_text_model_and_credentials,
     },
     multipart::MultipartFields,
     state::ApiState,
@@ -16,7 +15,7 @@ use axum::{
     extract::{Multipart, State},
     http::HeaderMap,
 };
-use clovy_domain::ModelId;
+use clovy_domain::{CleanupKind, ModelId, UpstreamProvider};
 use clovy_services::{
     DictateCleanupOutput, DictateCleanupParams, DictateTranscribeOutput, DictateTranscribeParams,
 };
@@ -28,7 +27,7 @@ pub(crate) async fn transcribe(
     multipart: Multipart,
 ) -> Result<Json<ApiResponse<DictateTranscribeResponse>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Groq)?;
     let limits = state.limits();
     let mut form = MultipartFields::collect(multipart, limits.max_audio_bytes).await?;
     let audio = form.required_audio()?;
@@ -36,12 +35,7 @@ pub(crate) async fn transcribe(
     let requested_model_id = form.required_text("model")?;
     validation::validate_text_len("model", &requested_model_id, validation::MAX_MODEL_CHARS)?;
     let model_id = resolve_priced_asr_model(&state, &requested_model_id)?;
-    let provider_credentials = credentials_for_resolved_model(
-        provider_credentials,
-        &requested_model_id,
-        &model_id,
-        state.pricing().is_venice_model(&model_id),
-    )?;
+    state.ensure_provider_configured(UpstreamProvider::Groq, &provider_credentials)?;
     let session_id = form.required_text("sessionId")?;
     validation::validate_text_len("session_id", &session_id, validation::MAX_ID_CHARS)?;
     let utterance_id = form.required_text("utteranceId")?;
@@ -86,23 +80,29 @@ pub(crate) async fn cleanup(
     Json(request): Json<DictateCleanupRequest>,
 ) -> Result<Json<ApiResponse<DictateCleanupResponse>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Openrouter)?;
     request.validate()?;
     let requested_model_id = required(request.model, "model_required")?;
     validation::validate_text_len("model", &requested_model_id, validation::MAX_MODEL_CHARS)?;
-    let model_id = resolve_priced_text_model(&state, &requested_model_id)?;
-    let provider_credentials = credentials_for_resolved_model(
-        provider_credentials,
+    let (model_id, provider_credentials) = resolve_text_model_and_credentials(
+        &state,
         &requested_model_id,
-        &model_id,
-        state.pricing().is_venice_model(&model_id),
+        AutoSelection::default(),
+        provider_credentials,
     )?;
+    state.ensure_provider_configured(UpstreamProvider::Openrouter, &provider_credentials)?;
+    let kind = if request.style.trim() == "note_transcript_cleanup" {
+        CleanupKind::NoteTranscript
+    } else {
+        CleanupKind::Dictation
+    };
     let output = state
         .dictate()
         .cleanup(DictateCleanupParams {
             user_id,
             session_id: required(request.session_id, "session_id_required")?,
             utterance_id: required(request.utterance_id, "utterance_id_required")?,
+            kind,
             text: request.text,
             dictionary_context: request.dictionary_context,
             app_context: recognized_app_context(request.app_context.as_deref()),

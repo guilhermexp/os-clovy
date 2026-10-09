@@ -1,10 +1,12 @@
 //! Model-picker state. The Tauri side persists which transcription /
-//! generation models the user selected. Remote provider keys and URLs live in
-//! Clovy API. The user's own providers (named OpenAI-compatible endpoints,
-//! agent CLIs, and the provider chosen per use) are the `llm` registry, also
-//! persisted here; endpoint keys live in the Keychain (`crate::llm::secrets`).
-//! Advanced users may also store their own Venice API key locally; responses
-//! only expose whether one is present, never the key itself.
+//! generation / image / video models the user selected. Clovy API holds the
+//! service keys and URLs of the providers it routes to: Groq for transcription,
+//! OpenRouter for remote text, fal for images and video, and Tavily for the web.
+//! The user's own providers (named OpenAI-compatible endpoints, agent CLIs, and
+//! the provider chosen per use) are the `llm` registry, also persisted here.
+//! Keys never live in `provider-settings.json`: endpoint keys and a user's own
+//! Groq / OpenRouter / fal / Tavily keys live in the Keychain store
+//! (`crate::llm::secrets`), and settings only record that one is saved.
 
 use crate::domain::types::AppError;
 use crate::llm::{
@@ -17,48 +19,175 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{LazyLock, Mutex, OnceLock},
     time::Duration,
 };
 use tauri::{AppHandle, Manager, State};
 
-pub const PROVIDER_OPENAI: &str = "openai";
-pub const PROVIDER_VENICE: &str = "venice";
+pub const PROVIDER_GROQ: &str = "groq";
+pub const PROVIDER_OPENROUTER: &str = "openrouter";
 pub const PROVIDER_LOCAL: &str = "local";
-pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v3";
-pub const DEFAULT_GENERATION_MODEL: &str = "zai-org-glm-5-2";
+/// Groq Whisper default: multilingual and the lowest price per audio hour.
+pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "whisper-large-v3-turbo";
+/// The Groq Whisper models Clovy offers for dictation and notes (Groq
+/// speech-to-text docs). A persisted transcription model outside this set,
+/// such as an id saved before the Groq cutover, loads as the default so the
+/// next recording never carries an id Clovy API cannot price.
+pub const KNOWN_TRANSCRIPTION_MODELS: &[&str] = &[DEFAULT_TRANSCRIPTION_MODEL, "whisper-large-v3"];
+pub const DEFAULT_GENERATION_MODEL: &str = "z-ai/glm-5.2";
 pub const AUTO_GENERATION_MODEL: &str = "open-software/auto";
-const LOCAL_AUTO_VISION_FALLBACK_MODEL: &str = "kimi-k2-6";
-pub const DEFAULT_COST_QUALITY: u8 = 100;
-pub const DEFAULT_IMAGE_MODEL: &str = "venice-sd35";
-pub const DEFAULT_VIDEO_MODEL: &str = "wan-2.2-a14b-text-to-video";
-/// Currently curated text-to-video model ids (mirrors `VIDEO_MODELS` in
-/// `src/lib/video-models.ts` and the clovy-api `video_pricing` allowlist). A
-/// persisted `video_model` outside this set — for example the delisted Seedance
-/// default that older installs saved before it was pulled from Venice — is
-/// migrated to `DEFAULT_VIDEO_MODEL` on load so generation keeps working after
-/// an update. Keep in sync when the curated list changes.
-pub const KNOWN_VIDEO_MODELS: &[&str] = &[
-    DEFAULT_VIDEO_MODEL,
-    "grok-imagine-text-to-video-private",
-    "ltx-2-19b-full-text-to-video",
+const LOCAL_AUTO_VISION_FALLBACK_MODEL: &str = "moonshotai/kimi-k2.6";
+/// Text ids saved before the OpenRouter cutover whose same model Clovy API now
+/// serves through OpenRouter. Settings migrate through this table once (see
+/// `remote_models_migrated`); any other pre-cutover id moves to the default.
+const LEGACY_TEXT_MODEL_EQUIVALENTS: &[(&str, &str)] = &[
+    ("zai-org-glm-5-2", "z-ai/glm-5.2"),
+    ("zai-org-glm-5-1", "z-ai/glm-5.1"),
+    ("zai-org-glm-5", "z-ai/glm-5"),
+    ("kimi-k2-6", "moonshotai/kimi-k2.6"),
+    ("kimi-k3", "moonshotai/kimi-k3"),
+    (
+        "nvidia-nemotron-3-nano-30b-a3b",
+        "nvidia/nemotron-3-nano-30b-a3b",
+    ),
 ];
+pub const DEFAULT_COST_QUALITY: u8 = 100;
+/// fal FLUX.1 [dev]: the default image model.
+pub const DEFAULT_IMAGE_MODEL: &str = "fal-ai/flux/dev";
+/// Curated fal image-generation endpoint ids (mirrors `IMAGE_MODELS` in
+/// `src/lib/image-models.ts` and the clovy-api `image_pricing` allowlist). A
+/// persisted `image_model` outside this set, such as an id saved before the fal
+/// cutover, loads as `DEFAULT_IMAGE_MODEL`. Keep in sync when the list changes.
+pub const KNOWN_IMAGE_MODELS: &[&str] = &[
+    DEFAULT_IMAGE_MODEL,
+    "fal-ai/flux/schnell",
+    "fal-ai/qwen-image",
+];
+/// fal Wan 2.2 A14B text-to-video: the default video model.
+pub const DEFAULT_VIDEO_MODEL: &str = "fal-ai/wan/v2.2-a14b/text-to-video";
+/// Curated fal text-to-video endpoint ids (mirrors `VIDEO_MODELS` in
+/// `src/lib/video-models.ts` and the clovy-api `video_pricing` allowlist). A
+/// persisted `video_model` outside this set, such as a delisted model or an id
+/// saved before the fal cutover, loads as `DEFAULT_VIDEO_MODEL` so generation
+/// keeps working after an update. Keep in sync when the curated list changes.
+pub const KNOWN_VIDEO_MODELS: &[&str] = &[DEFAULT_VIDEO_MODEL, "alibaba/wan-3.0/text-to-video"];
+/// The fast path's 5s / 720p / 16:9 shape is accepted by every curated video
+/// model (clovy-api's fal adapter validates per-model ranges before charging).
 pub const DEFAULT_VIDEO_DURATION: &str = "5s";
 pub const DEFAULT_VIDEO_RESOLUTION: &str = "720p";
-/// Some models (for example wan-2.2-a14b) reject a queue request that omits
-/// `aspect_ratio`, so the fast path injects a default when the caller names none.
 pub const DEFAULT_VIDEO_ASPECT_RATIO: &str = "16:9";
-const VENICE_API_BASE_URL: &str = "https://api.venice.ai/api/v1";
-const VENICE_API_KEY_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_VENICE_API_KEY_CHARS: usize = 4_096;
-
-// Kept exported under the legacy names so existing callers compile until they
-// migrate to the names above.
-pub use PROVIDER_OPENAI as OPENAI_PROVIDER;
-pub use PROVIDER_VENICE as VENICE_PROVIDER;
+const PROVIDER_API_KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PROVIDER_API_KEY_CHARS: usize = 4_096;
 
 static MODEL_SETTINGS: OnceLock<Mutex<ProviderModelSettings>> = OnceLock::new();
-static VENICE_VERIFY_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static PROVIDER_KEY_CHECK_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(PROVIDER_API_KEY_CHECK_TIMEOUT)
+        .user_agent(concat!("clovy/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+/// A provider Clovy API calls on the user's behalf, one per capability: Groq
+/// transcribes, OpenRouter serves remote text, fal generates images and video,
+/// and Tavily searches and reads the web. The user may save their own key for
+/// each; it is forwarded only with requests for that provider's capability.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BuiltinProvider {
+    Groq,
+    OpenRouter,
+    Fal,
+    Tavily,
+}
+
+impl BuiltinProvider {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Groq => "groq",
+            Self::OpenRouter => "openrouter",
+            Self::Fal => "fal",
+            Self::Tavily => "tavily",
+        }
+    }
+
+    /// Keychain account of the user's key. Endpoint accounts are `ep-<uuid>`
+    /// or `local`, so the `builtin:` prefix never collides with one.
+    pub fn secret_account(self) -> &'static str {
+        match self {
+            Self::Groq => "builtin:groq",
+            Self::OpenRouter => "builtin:openrouter",
+            Self::Fal => "builtin:fal",
+            Self::Tavily => "builtin:tavily",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Groq => "Groq",
+            Self::OpenRouter => "OpenRouter",
+            Self::Fal => "fal",
+            Self::Tavily => "Tavily",
+        }
+    }
+
+    /// A documented endpoint that needs a valid key and runs no inference, so
+    /// saving a key costs nothing: Groq lists models, OpenRouter describes the
+    /// current key, fal prices the default image endpoint, and Tavily reports
+    /// the key's usage.
+    fn key_check_url(self) -> String {
+        match self {
+            Self::Groq => "https://api.groq.com/openai/v1/models".to_string(),
+            Self::OpenRouter => "https://openrouter.ai/api/v1/key".to_string(),
+            Self::Fal => {
+                format!("https://api.fal.ai/v1/models/pricing?endpoint_id={DEFAULT_IMAGE_MODEL}")
+            }
+            Self::Tavily => "https://api.tavily.com/usage".to_string(),
+        }
+    }
+
+    /// fal authenticates with `Key <key>`; the others take a bearer token.
+    fn authorize(self, request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+        match self {
+            Self::Fal => request.header(reqwest::header::AUTHORIZATION, format!("Key {api_key}")),
+            Self::Groq | Self::OpenRouter | Self::Tavily => request.bearer_auth(api_key),
+        }
+    }
+}
+
+/// Which providers have a user key saved in the Keychain store. Never the keys
+/// themselves; a saved key passed the provider's check when it was saved, and
+/// a later rejection surfaces on the request that uses it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProviderApiKeysConfigured {
+    pub groq: bool,
+    pub openrouter: bool,
+    pub fal: bool,
+    pub tavily: bool,
+}
+
+impl ProviderApiKeysConfigured {
+    pub fn get(&self, provider: BuiltinProvider) -> bool {
+        match provider {
+            BuiltinProvider::Groq => self.groq,
+            BuiltinProvider::OpenRouter => self.openrouter,
+            BuiltinProvider::Fal => self.fal,
+            BuiltinProvider::Tavily => self.tavily,
+        }
+    }
+
+    fn set(&mut self, provider: BuiltinProvider, configured: bool) {
+        let slot = match provider {
+            BuiltinProvider::Groq => &mut self.groq,
+            BuiltinProvider::OpenRouter => &mut self.openrouter,
+            BuiltinProvider::Fal => &mut self.fal,
+            BuiltinProvider::Tavily => &mut self.tavily,
+        };
+        *slot = configured;
+    }
+}
 
 pub struct ProviderSettingsState {
     path: PathBuf,
@@ -86,8 +215,15 @@ pub struct ProviderModelSettings {
     pub image_model: String,
     #[serde(default = "default_video_model")]
     pub video_model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub venice_api_key: Option<String>,
+    /// Which providers have a user key in the Keychain store (never the keys).
+    #[serde(default)]
+    pub provider_api_keys_configured: ProviderApiKeysConfigured,
+    /// False on files saved before the Groq / OpenRouter / fal cutover: their
+    /// text model ids are migrated once on load (see `migrate_legacy_text_model`)
+    /// and the file is rewritten, which also drops the retired plaintext
+    /// `veniceApiKey` field without copying it anywhere.
+    #[serde(default)]
+    pub remote_models_migrated: bool,
     /// The pre-registry single endpoint. Only read to migrate it into
     /// `llm_endpoints`; kept on disk solely while the Keychain refuses its key.
     #[serde(default, skip_serializing_if = "LocalGenerationSettings::is_empty")]
@@ -103,10 +239,10 @@ pub struct ProviderModelSettings {
     pub llm_cli_levels: BTreeMap<CliKind, StructuredOutputLevel>,
     #[serde(default)]
     pub llm_registry_migrated: bool,
-    /// When true, Venice `safe_mode` blurs adult content on generated/edited
-    /// images. Clovy defaults it ON; the user opts out via Settings or the
-    /// generation-time consent dialog. Defaulted so settings files predating
-    /// this field still deserialize to the current default.
+    /// When true, image generation and editing ask the image provider to
+    /// filter adult content. Clovy defaults it ON; the user opts out via
+    /// Settings or the generation-time consent dialog. Defaulted so settings
+    /// files predating this field still deserialize to the current default.
     #[serde(default = "default_image_safe_mode")]
     pub image_safe_mode: bool,
     /// When true, the user chose "don't ask again" on the safe-mode consent
@@ -178,7 +314,7 @@ pub struct ProfileModelOverrides {
 }
 
 /// The client-facing view of provider settings. API keys are never
-/// serialized back, only whether a Venice key is configured.
+/// serialized back, only which providers have a saved user key.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelSettingsDto {
@@ -190,7 +326,7 @@ pub struct ProviderModelSettingsDto {
     pub remote_generation_model: String,
     pub image_model: String,
     pub video_model: String,
-    pub venice_api_key_configured: bool,
+    pub provider_api_keys_configured: ProviderApiKeysConfigured,
     pub local_generation: ChatEndpointDto,
     pub image_safe_mode: bool,
     pub image_safe_mode_prompt_dismissed: bool,
@@ -208,10 +344,7 @@ impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
             remote_generation_model: settings.remote_generation_model.clone(),
             image_model: settings.image_model.clone(),
             video_model: settings.video_model.clone(),
-            venice_api_key_configured: settings
-                .venice_api_key
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
+            provider_api_keys_configured: settings.provider_api_keys_configured,
             local_generation: chat_endpoint_dto(settings),
             image_safe_mode: settings.image_safe_mode,
             image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
@@ -279,7 +412,7 @@ impl From<ProfileModelOverridesDto> for ProfileModelOverrides {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetVeniceModelRequest {
+pub struct SetProviderModelRequest {
     pub mode: ModelMode,
     pub model_id: String,
 }
@@ -312,28 +445,35 @@ pub struct LocalEndpointProbe {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct VeniceModelsRequest {
+pub struct ProviderModelsRequest {
     pub mode: ModelMode,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetVeniceApiKeyRequest {
+pub struct SetProviderApiKeyRequest {
+    pub provider: BuiltinProvider,
     pub api_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearProviderApiKeyRequest {
+    pub provider: BuiltinProvider,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct VeniceModelsResponse {
+pub struct ProviderModelsResponse {
     pub mode: ModelMode,
     pub model_type: String,
     pub selected_model: String,
-    pub models: Vec<VeniceModelDto>,
+    pub models: Vec<ProviderModelDto>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct VeniceModelDto {
+pub struct ProviderModelDto {
     pub provider: String,
     pub id: String,
     pub name: String,
@@ -356,9 +496,17 @@ pub struct VeniceModelDto {
     pub input_credits_per_million_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_credits_per_million_tokens: Option<u64>,
+    /// False when Clovy holds no service key for the row's provider: the model
+    /// is usable only with the user's own key for that provider.
+    #[serde(default = "model_service_available_by_default")]
+    pub service_available: bool,
 }
 
-impl From<crate::clovy_api::ModelDto> for VeniceModelDto {
+fn model_service_available_by_default() -> bool {
+    true
+}
+
+impl From<crate::clovy_api::ModelDto> for ProviderModelDto {
     fn from(value: crate::clovy_api::ModelDto) -> Self {
         let pricing = pricing_with_display(value.pricing, &value.price_description);
         Self {
@@ -377,6 +525,7 @@ impl From<crate::clovy_api::ModelDto> for VeniceModelDto {
             credits_per_million_seconds: value.credits_per_million_seconds,
             input_credits_per_million_tokens: value.input_credits_per_million_tokens,
             output_credits_per_million_tokens: value.output_credits_per_million_tokens,
+            service_available: value.service_available,
         }
     }
 }
@@ -476,13 +625,48 @@ pub fn video_model() -> String {
     effective_current_settings().video_model
 }
 
-pub fn venice_api_key() -> Option<String> {
-    current_settings().venice_api_key
+/// The user's saved key for `provider`, or `None` when they saved none and the
+/// request runs on Clovy's service key. The Keychain store is read only when
+/// settings record a saved key, never at startup. A recorded key the store
+/// cannot return is an error rather than a silent switch to Clovy credits.
+pub fn provider_api_key(provider: BuiltinProvider) -> Result<Option<String>, AppError> {
+    saved_provider_api_key(&current_settings(), crate::llm::secrets::store(), provider)
 }
 
-/// Whether Venice safe mode is on for image generation/editing. The default is
-/// `true`, so Clovy asks Venice to blur adult content unless the user opts out
-/// via Settings or the generation-time consent dialog.
+fn saved_provider_api_key(
+    settings: &ProviderModelSettings,
+    store: &dyn crate::llm::secrets::SecretStore,
+    provider: BuiltinProvider,
+) -> Result<Option<String>, AppError> {
+    if !settings.provider_api_keys_configured.get(provider) {
+        return Ok(None);
+    }
+    match store.get(provider.secret_account()) {
+        Ok(Some(api_key)) => match normalize_api_key(&api_key) {
+            Some(api_key) => Ok(Some(api_key)),
+            None => Err(provider_api_key_unavailable(provider)),
+        },
+        Ok(None) => Err(provider_api_key_unavailable(provider)),
+        Err(error) => {
+            tracing::warn!(provider = provider.id(), %error, "saved provider key unavailable");
+            Err(provider_api_key_unavailable(provider))
+        }
+    }
+}
+
+fn provider_api_key_unavailable(provider: BuiltinProvider) -> AppError {
+    AppError::new(
+        "provider_api_key_unavailable",
+        format!(
+            "Clovy could not read your saved {} key. Open Settings and save it again.",
+            provider.display_name()
+        ),
+    )
+}
+
+/// Whether image generation/editing asks the provider to filter adult content.
+/// The default is `true` unless the user opts out via Settings or the
+/// generation-time consent dialog.
 pub fn image_safe_mode() -> bool {
     current_settings().image_safe_mode
 }
@@ -623,22 +807,6 @@ fn capabilities_include(capabilities: &[String], expected: &str) -> bool {
     })
 }
 
-// Legacy name kept for callers we haven't migrated yet.
-pub fn venice_generation_model() -> String {
-    generation_model()
-}
-
-pub fn transcription_provider_for_model(model: &str) -> &'static str {
-    if matches!(
-        model.trim(),
-        "gpt-4o-mini-transcribe" | "gpt-4o-transcribe" | "whisper-1"
-    ) {
-        PROVIDER_OPENAI
-    } else {
-        PROVIDER_VENICE
-    }
-}
-
 #[tauri::command]
 pub fn provider_model_settings(
     state: State<'_, ProviderSettingsState>,
@@ -717,31 +885,53 @@ fn delete_profile_model_overrides_impl(
 }
 
 #[tauri::command]
-pub fn set_venice_model(
+pub fn set_provider_model(
     state: State<'_, ProviderSettingsState>,
-    request: SetVeniceModelRequest,
+    request: SetProviderModelRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let model_id = request.model_id.trim();
+    set_provider_model_impl(&state, request)
+}
+
+/// The mode picks the provider: transcription is Groq, text is OpenRouter
+/// (through Clovy API), image and video are fal. Transcription, image, and
+/// video ids must be curated (Clovy API prices only those); text ids come from
+/// the live OpenRouter catalog.
+fn set_provider_model_impl(
+    state: &ProviderSettingsState,
+    request: SetProviderModelRequest,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    let model_id = request.model_id.trim().to_string();
     if model_id.is_empty() {
         return Err(AppError::new("provider_model_required", "Select a model."));
     }
-    update_settings(&state, |settings| match request.mode {
+    let curated = match request.mode {
+        ModelMode::Transcription => Some(KNOWN_TRANSCRIPTION_MODELS),
+        ModelMode::Image => Some(KNOWN_IMAGE_MODELS),
+        ModelMode::Video => Some(KNOWN_VIDEO_MODELS),
+        ModelMode::Generation => None,
+    };
+    if curated.is_some_and(|known| !known.contains(&model_id.as_str())) {
+        return Err(AppError::new(
+            "provider_model_unavailable",
+            "This model is not available. Choose another model.",
+        ));
+    }
+    update_settings(state, |settings| match request.mode {
         ModelMode::Transcription => {
-            settings.transcription_provider =
-                transcription_provider_for_model(model_id).to_string();
-            settings.transcription_model = model_id.to_string();
+            settings.transcription_provider = PROVIDER_GROQ.to_string();
+            settings.transcription_model = model_id;
         }
         ModelMode::Generation => {
             // Picking a Clovy model in the text-model picker moves chat back
             // to Clovy API; `normalize` mirrors it into the legacy fields.
             settings.llm_usage.chat = ProviderRef::Clovy;
-            settings.generation_provider = PROVIDER_VENICE.to_string();
-            settings.generation_model = model_id.to_string();
-            settings.remote_generation_model = model_id.to_string();
+            settings.generation_provider = PROVIDER_OPENROUTER.to_string();
+            settings.generation_model = model_id.clone();
+            settings.remote_generation_model = model_id;
             crate::llm::registry::normalize(settings);
         }
-        ModelMode::Image => settings.image_model = model_id.to_string(),
-        ModelMode::Video => settings.video_model = model_id.to_string(),
+        ModelMode::Image => settings.image_model = model_id,
+        ModelMode::Video => settings.video_model = model_id,
     })
 }
 
@@ -1074,31 +1264,71 @@ fn video_generation_disabled_error() -> AppError {
     )
 }
 
+/// Saves the user's own key for one provider. The key is checked against the
+/// provider's free documented endpoint first (see
+/// [`BuiltinProvider::key_check_url`]); only an accepted key reaches the
+/// Keychain store, and settings record just that one is saved.
 #[tauri::command]
-pub async fn set_venice_api_key(
+pub async fn set_provider_api_key(
     state: State<'_, ProviderSettingsState>,
-    request: SetVeniceApiKeyRequest,
+    request: SetProviderApiKeyRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let api_key = normalize_api_key(&request.api_key).ok_or_else(|| {
-        AppError::new(
-            "venice_api_key_required",
-            "Enter a Venice API key before saving.",
-        )
-    })?;
-    validate_venice_api_key_format(&api_key)?;
-    verify_venice_api_key(&api_key).await?;
-    update_settings(&state, |settings| {
-        settings.venice_api_key = Some(api_key);
-    })
+    let check_url = request.provider.key_check_url();
+    set_provider_api_key_impl(&state, crate::llm::secrets::store(), request, &check_url).await
 }
 
 #[tauri::command]
-pub fn clear_venice_api_key(
+pub fn clear_provider_api_key(
     state: State<'_, ProviderSettingsState>,
+    request: ClearProviderApiKeyRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings(&state, |settings| {
-        settings.venice_api_key = None;
+    clear_provider_api_key_impl(&state, crate::llm::secrets::store(), request.provider)
+}
+
+/// Validates, checks against `check_url`, and only then writes the key and
+/// records it; a rejected or unchecked key changes nothing.
+async fn set_provider_api_key_impl(
+    state: &ProviderSettingsState,
+    store: &dyn crate::llm::secrets::SecretStore,
+    request: SetProviderApiKeyRequest,
+    check_url: &str,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    let provider = request.provider;
+    let api_key = validate_provider_api_key(provider, &request.api_key)?;
+    verify_provider_api_key(provider, &api_key, check_url).await?;
+    // The key is written before it is recorded, so a Keychain failure leaves
+    // the saved state untouched.
+    update_settings_result(state, |settings| {
+        store
+            .set(provider.secret_account(), &api_key)
+            .map_err(|_| provider_api_key_store_failed(provider))?;
+        settings.provider_api_keys_configured.set(provider, true);
+        Ok(())
     })
+}
+
+fn clear_provider_api_key_impl(
+    state: &ProviderSettingsState,
+    store: &dyn crate::llm::secrets::SecretStore,
+    provider: BuiltinProvider,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    update_settings_result(state, |settings| {
+        store
+            .delete(provider.secret_account())
+            .map_err(|_| provider_api_key_store_failed(provider))?;
+        settings.provider_api_keys_configured.set(provider, false);
+        Ok(())
+    })
+}
+
+fn provider_api_key_store_failed(provider: BuiltinProvider) -> AppError {
+    AppError::new(
+        "provider_api_key_store_failed",
+        format!(
+            "Clovy could not update your {} key in the Keychain. Try again.",
+            provider.display_name()
+        ),
+    )
 }
 
 /// Lists the models an OpenAI-compatible endpoint advertises, so the settings
@@ -1179,18 +1409,19 @@ fn parse_local_models_response(body: &[u8]) -> Result<LocalEndpointProbe, AppErr
 }
 
 #[tauri::command]
-pub async fn list_venice_models(
+pub async fn list_provider_models(
     state: State<'_, ProviderSettingsState>,
-    request: VeniceModelsRequest,
-) -> Result<VeniceModelsResponse, AppError> {
+    request: ProviderModelsRequest,
+) -> Result<ProviderModelsResponse, AppError> {
     let model_type = request.mode.api_type();
     let selected_model = selected_model_for_mode(&state, request.mode)?;
-    // Image models aren't part of the priced catalog the backend serves (image
-    // billing is deferred); the picker uses a curated frontend list instead.
-    // Short-circuit so a direct caller never gets unrelated text/asr models
-    // back, and we skip a pointless catalog round-trip.
-    if request.mode == ModelMode::Image {
-        return Ok(VeniceModelsResponse {
+    // Image and video models are not in the text/ASR catalog Clovy API serves
+    // (`GET /v1/models` accepts only `asr` and `text`); the pickers use the
+    // curated frontend lists mirrored by KNOWN_IMAGE_MODELS/KNOWN_VIDEO_MODELS.
+    // Short-circuit so a direct caller never gets unrelated rows back, and we
+    // skip a catalog round-trip the API would reject.
+    if matches!(request.mode, ModelMode::Image | ModelMode::Video) {
+        return Ok(ProviderModelsResponse {
             mode: request.mode,
             model_type: model_type.to_string(),
             selected_model,
@@ -1200,7 +1431,7 @@ pub async fn list_venice_models(
     let mut models = crate::clovy_api::list_models(model_type)
         .await?
         .into_iter()
-        .map(VeniceModelDto::from)
+        .map(ProviderModelDto::from)
         .collect::<Vec<_>>();
     models.sort_by(|left, right| {
         left.name
@@ -1208,7 +1439,7 @@ pub async fn list_venice_models(
             .cmp(&right.name.to_ascii_lowercase())
             .then_with(|| left.id.cmp(&right.id))
     });
-    Ok(VeniceModelsResponse {
+    Ok(ProviderModelsResponse {
         mode: request.mode,
         model_type: model_type.to_string(),
         selected_model,
@@ -1226,9 +1457,10 @@ pub fn setup(app: &mut tauri::App) {
         settings: Mutex::new(settings.clone()),
     };
     if migrated_now {
-        // Rewrite the file so the migrated endpoint key no longer sits in it.
+        // Rewrite the file so a migrated endpoint key, the pre-cutover model
+        // ids, and the retired plaintext Venice key no longer sit in it.
         if let Err(error) = save_settings(&state, &settings) {
-            tracing::warn!(code = %error.code, "could not persist the migrated provider registry");
+            tracing::warn!(code = %error.code, "could not persist the migrated provider settings");
         }
     }
     app.manage(state);
@@ -1293,15 +1525,16 @@ pub(crate) fn settings_from_json_for_tests(
 
 fn default_settings() -> ProviderModelSettings {
     ProviderModelSettings {
-        transcription_provider: PROVIDER_VENICE.to_string(),
-        generation_provider: PROVIDER_VENICE.to_string(),
+        transcription_provider: PROVIDER_GROQ.to_string(),
+        generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
         generation_model: default_generation_model_for_release(),
         cost_quality: DEFAULT_COST_QUALITY,
         remote_generation_model: default_generation_model_for_release(),
         image_model: DEFAULT_IMAGE_MODEL.to_string(),
         video_model: DEFAULT_VIDEO_MODEL.to_string(),
-        venice_api_key: None,
+        provider_api_keys_configured: ProviderApiKeysConfigured::default(),
+        remote_models_migrated: true,
         local_generation: LocalGenerationSettings::default(),
         llm_endpoints: Vec::new(),
         llm_usage: LlmUsageSelection::default(),
@@ -1320,11 +1553,11 @@ fn default_live_transcription() -> bool {
 }
 
 fn default_transcription_provider() -> String {
-    PROVIDER_VENICE.to_string()
+    PROVIDER_GROQ.to_string()
 }
 
 fn default_generation_provider() -> String {
-    PROVIDER_VENICE.to_string()
+    PROVIDER_OPENROUTER.to_string()
 }
 
 fn default_transcription_model() -> String {
@@ -1372,8 +1605,8 @@ fn provider_settings_path_from_config_dir(directory: PathBuf) -> PathBuf {
     directory.join("provider-settings.json")
 }
 
-/// Loads the saved settings; the flag is true when the legacy endpoint was
-/// migrated during this load and the file should be rewritten.
+/// Loads the saved settings; the flag is true when this load migrated the
+/// legacy endpoint or pre-cutover model ids and the file should be rewritten.
 fn load_settings_from_disk(app: &AppHandle) -> (ProviderModelSettings, bool) {
     provider_settings_path(app)
         .and_then(|path| fs::read_to_string(path).ok())
@@ -1387,8 +1620,9 @@ fn settings_from_json(
 ) -> Option<(ProviderModelSettings, bool)> {
     let parsed = serde_json::from_str::<ProviderModelSettings>(raw).ok()?;
     let was_migrated = parsed.llm_registry_migrated;
+    let remote_models_migrated = parsed.remote_models_migrated;
     let migrated = crate::llm::registry::migrate_legacy_local_generation(parsed, store);
-    let migrated_now = migrated.llm_registry_migrated != was_migrated;
+    let migrated_now = migrated.llm_registry_migrated != was_migrated || !remote_models_migrated;
     Some((
         sanitize_settings(migrated, &default_settings()),
         migrated_now,
@@ -1399,12 +1633,26 @@ fn sanitize_settings(
     settings: ProviderModelSettings,
     defaults: &ProviderModelSettings,
 ) -> ProviderModelSettings {
-    let transcription_model =
-        non_empty_or(settings.transcription_model, &defaults.transcription_model);
-    let mut remote_generation_model = non_empty_or(
+    // Text ids are migrated once (the OpenRouter catalog is live, so there is
+    // no fixed allowlist); transcription, image, and video ids are checked
+    // against their curated sets on every load.
+    let migrate_text = !settings.remote_models_migrated;
+    let migrate = |model: String| {
+        if migrate_text {
+            migrate_legacy_text_model(model)
+        } else {
+            model
+        }
+    };
+    let transcription_model = curated_or_default(
+        settings.transcription_model,
+        KNOWN_TRANSCRIPTION_MODELS,
+        &defaults.transcription_model,
+    );
+    let mut remote_generation_model = migrate(non_empty_or(
         settings.remote_generation_model,
         &defaults.remote_generation_model,
-    );
+    ));
     let local_generation = sanitize_local_generation(settings.local_generation);
     // Chat on an endpoint is restored from `llm_usage` by `normalize` below;
     // here a persisted local provider only must not leak its stale local
@@ -1412,9 +1660,12 @@ fn sanitize_settings(
     let generation_model = if settings.generation_provider == PROVIDER_LOCAL {
         remote_generation_model.clone()
     } else {
-        // Venice, legacy, or missing provider: honor the saved generation model
-        // and back-fill remote_generation_model from it.
-        let configured = non_empty_or(settings.generation_model, &remote_generation_model);
+        // Remote or missing provider: honor the saved generation model and
+        // back-fill remote_generation_model from it.
+        let configured = match normalize_optional_model_field(Some(settings.generation_model)) {
+            Some(model) => migrate(model),
+            None => remote_generation_model.clone(),
+        };
         remote_generation_model = configured.clone();
         configured
     };
@@ -1435,15 +1686,24 @@ fn sanitize_settings(
     };
 
     let mut sanitized = ProviderModelSettings {
-        transcription_provider: transcription_provider_for_model(&transcription_model).to_string(),
-        generation_provider: PROVIDER_VENICE.to_string(),
+        transcription_provider: PROVIDER_GROQ.to_string(),
+        generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model,
         generation_model,
         cost_quality: settings.cost_quality.min(100),
         remote_generation_model,
-        image_model: non_empty_or(settings.image_model, &defaults.image_model),
-        video_model: sanitize_video_model(settings.video_model, &defaults.video_model),
-        venice_api_key: normalize_api_key_option(settings.venice_api_key),
+        image_model: curated_or_default(
+            settings.image_model,
+            KNOWN_IMAGE_MODELS,
+            &defaults.image_model,
+        ),
+        video_model: curated_or_default(
+            settings.video_model,
+            KNOWN_VIDEO_MODELS,
+            &defaults.video_model,
+        ),
+        provider_api_keys_configured: settings.provider_api_keys_configured,
+        remote_models_migrated: true,
         local_generation,
         llm_endpoints,
         llm_usage: settings.llm_usage,
@@ -1467,42 +1727,78 @@ fn sanitize_profile_overrides(
         .filter_map(|(profile, overrides)| {
             let profile = validate_profile_override_name(&profile).ok()?.to_string();
             let overrides = ProfileModelOverrides {
+                // Groq is the only transcription provider, so a recorded
+                // provider override names it.
                 transcription_provider: normalize_optional_model_field(
                     overrides.transcription_provider,
+                )
+                .map(|_| PROVIDER_GROQ.to_string()),
+                transcription_model: curated_override(
+                    overrides.transcription_model,
+                    KNOWN_TRANSCRIPTION_MODELS,
+                    DEFAULT_TRANSCRIPTION_MODEL,
                 ),
-                transcription_model: normalize_optional_model_field(overrides.transcription_model),
-                image_model: normalize_optional_model_field(overrides.image_model),
-                video_model: normalize_optional_model_field(overrides.video_model),
+                image_model: curated_override(
+                    overrides.image_model,
+                    KNOWN_IMAGE_MODELS,
+                    DEFAULT_IMAGE_MODEL,
+                ),
+                video_model: curated_override(
+                    overrides.video_model,
+                    KNOWN_VIDEO_MODELS,
+                    DEFAULT_VIDEO_MODEL,
+                ),
             };
             (!profile_overrides_empty(&overrides)).then_some((profile, overrides))
         })
         .collect()
 }
 
-/// Migrates a persisted video model that is no longer curated (for example the
-/// delisted Seedance default older installs saved) to the current default, so an
-/// updated install never carries a stale id that Clovy API rejects as
-/// `model_not_priced`. A recognized selection is kept; empty falls back to the
-/// default like the other model fields.
-fn sanitize_video_model(persisted: String, default: &str) -> String {
+/// Keeps a curated model id and loads anything else as the default, so an
+/// updated install never carries an id Clovy API rejects as
+/// `model_not_priced` (a delisted video model, or an id saved before the
+/// Groq / fal cutover). Empty falls back to the default like the other model
+/// fields.
+fn curated_or_default(persisted: String, curated: &[&str], default: &str) -> String {
     let candidate = non_empty_or(persisted, default);
-    if KNOWN_VIDEO_MODELS.contains(&candidate.as_str()) {
+    if curated.contains(&candidate.as_str()) {
         candidate
     } else {
         default.to_string()
     }
 }
 
-fn normalize_api_key_option(value: Option<String>) -> Option<String> {
-    value.and_then(|value| normalize_api_key_for_save(&value))
+/// [`curated_or_default`] for a profile override; an absent override stays
+/// absent so the profile keeps following the global choice.
+fn curated_override(value: Option<String>, curated: &[&str], default: &str) -> Option<String> {
+    normalize_optional_model_field(value).map(|model| curated_or_default(model, curated, default))
 }
 
-fn normalize_api_key_for_save(value: &str) -> Option<String> {
-    let value = normalize_api_key(value)?;
-    if value.chars().count() > MAX_VENICE_API_KEY_CHARS || value.chars().any(char::is_control) {
-        None
+/// The id Clovy API serves today for a text model id saved before the
+/// OpenRouter cutover (`kimi-k2-6` → `moonshotai/kimi-k2.6`); any other id,
+/// Auto included, is returned unchanged. Agent sessions and stored runs keep
+/// the id they recorded, so the remote boundary resolves it here instead of
+/// relying on a server-side alias.
+pub fn current_text_model_id(model: &str) -> &str {
+    let model = model.trim();
+    LEGACY_TEXT_MODEL_EQUIVALENTS
+        .iter()
+        .find(|(legacy, _)| *legacy == model)
+        .map_or(model, |&(_, current)| current)
+}
+
+/// Maps a text model id from a settings file saved before the OpenRouter
+/// cutover: Auto stays Auto, a model Clovy API now serves through OpenRouter
+/// keeps being that model, and any other pre-cutover id moves to the default.
+fn migrate_legacy_text_model(model: String) -> String {
+    if model == AUTO_GENERATION_MODEL {
+        return model;
+    }
+    let current = current_text_model_id(&model);
+    if current == model.trim() {
+        DEFAULT_GENERATION_MODEL.to_string()
     } else {
-        Some(value)
+        current.to_string()
     }
 }
 
@@ -1515,56 +1811,62 @@ fn normalize_api_key(value: &str) -> Option<String> {
     }
 }
 
-fn validate_venice_api_key_format(value: &str) -> Result<(), AppError> {
-    if value.chars().count() > MAX_VENICE_API_KEY_CHARS
-        || value.chars().any(|character| character.is_control())
+/// Keys are opaque: any non-empty value without control characters and within
+/// the size cap is sent to the provider's check.
+fn validate_provider_api_key(provider: BuiltinProvider, value: &str) -> Result<String, AppError> {
+    let name = provider.display_name();
+    let api_key = normalize_api_key(value).ok_or_else(|| {
+        AppError::new(
+            "provider_api_key_required",
+            format!("Enter your {name} API key before saving."),
+        )
+    })?;
+    if api_key.chars().count() > MAX_PROVIDER_API_KEY_CHARS || api_key.chars().any(char::is_control)
     {
         return Err(AppError::new(
-            "venice_api_key_invalid",
-            "Enter a valid Venice API key.",
+            "provider_api_key_invalid",
+            format!("Enter a valid {name} API key."),
         ));
     }
-    Ok(())
+    Ok(api_key)
 }
 
-async fn verify_venice_api_key(api_key: &str) -> Result<(), AppError> {
-    let url = format!("{VENICE_API_BASE_URL}/models");
-    let response = venice_verify_http_client()
-        .get(&url)
-        .query(&[("type", "text")])
-        .bearer_auth(api_key)
+/// Asks `url` (the provider's key check) whether it accepts `api_key`. 401/403
+/// is a rejection; anything else that is not a success is reported as a failed
+/// check, never as a valid key.
+async fn verify_provider_api_key(
+    provider: BuiltinProvider,
+    api_key: &str,
+    url: &str,
+) -> Result<(), AppError> {
+    let name = provider.display_name();
+    let response = provider
+        .authorize(PROVIDER_KEY_CHECK_HTTP_CLIENT.get(url), api_key)
         .send()
         .await
         .map_err(|_| {
             AppError::new(
-                "venice_api_key_verification_failed",
-                "Could not verify the Venice API key. Check your connection and try again.",
+                "provider_api_key_verification_failed",
+                format!("Could not check the {name} API key. Check your connection and try again."),
             )
         })?;
-    match response.status() {
-        reqwest::StatusCode::OK => Ok(()),
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(AppError::new(
-            "venice_api_key_rejected",
-            "Venice rejected this API key. Check the key and try again.",
-        )),
-        _ => Err(AppError::new(
-            "venice_api_key_verification_failed",
-            "Could not verify the Venice API key. Try again later.",
-        )),
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
     }
-}
-
-fn venice_verify_http_client() -> &'static reqwest::Client {
-    VENICE_VERIFY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(VENICE_API_KEY_VERIFY_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent("clovy/0.1")
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Err(AppError::new(
+            "provider_api_key_rejected",
+            format!("{name} rejected this API key. Check the key and try again."),
+        ));
+    }
+    Err(AppError::new(
+        "provider_api_key_verification_failed",
+        format!("Could not check the {name} API key. Try again later."),
+    ))
 }
 
 fn non_empty_or(value: String, fallback: &str) -> String {
@@ -1825,6 +2127,7 @@ impl ModelMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::secrets::SecretStore;
 
     #[test]
     fn provider_settings_path_derives_from_the_isolated_config_dir() {
@@ -2163,11 +2466,11 @@ mod tests {
     }
 
     #[test]
-    fn venice_models_response_serializes_canonical_mode() {
-        let response = VeniceModelsResponse {
+    fn provider_models_response_serializes_canonical_mode() {
+        let response = ProviderModelsResponse {
             mode: ModelMode::Transcription,
             model_type: "asr".to_string(),
-            selected_model: "nvidia/parakeet-tdt-0.6b-v3".to_string(),
+            selected_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
             models: Vec::new(),
         };
 
@@ -2177,52 +2480,404 @@ mod tests {
         );
     }
 
+    /// A file written by a pre-cutover build, shaped like a real profile:
+    /// Venice transcription, text, and media, a plaintext Venice key, Claude CLI
+    /// for chat and activity, Clovy for notes and cleanup, an endpoint whose key
+    /// is in the Keychain, a measured CLI level, and a profile override.
+    const LEGACY_VENICE_SETTINGS: &str = r#"{
+      "transcriptionProvider": "venice",
+      "generationProvider": "venice",
+      "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
+      "generationModel": "zai-org-glm-5-2",
+      "remoteGenerationModel": "zai-org-glm-5-2",
+      "costQuality": 40,
+      "imageModel": "venice-sd35",
+      "videoModel": "wan-2.2-a14b-text-to-video",
+      "veniceApiKey": "legacy-venice-secret",
+      "llmRegistryMigrated": true,
+      "llmEndpoints": [{
+        "id": "ep-lan", "name": "LAN", "baseUrl": "http://192.168.1.5:11434/v1",
+        "modelId": "llama3.1:8b", "hasApiKey": true
+      }],
+      "llmUsage": {
+        "chat": { "kind": "cli", "id": "claude" },
+        "notes": { "kind": "clovy" },
+        "dictationCleanup": { "kind": "clovy" },
+        "activity": { "kind": "cli", "id": "claude" }
+      },
+      "llmCliLevels": { "claude": "json_schema" },
+      "imageSafeMode": false,
+      "imageSafeModeSetByUser": true,
+      "liveTranscription": false,
+      "profileOverrides": {
+        "work": {
+          "transcriptionProvider": "openai",
+          "transcriptionModel": "gpt-4o-transcribe",
+          "imageModel": "lustify-v8"
+        }
+      }
+    }"#;
+
     #[test]
-    fn provider_settings_deserialize_legacy_shape() {
-        let settings = serde_json::from_value::<ProviderModelSettings>(serde_json::json!({
-            "transcriptionProvider": "venice",
-            "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
-            "generationModel": "custom-remote-model"
-        }))
+    fn legacy_settings_migrate_to_the_new_providers_and_keep_every_other_choice() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let (migrated, migrated_now) = settings_from_json(LEGACY_VENICE_SETTINGS, &store).unwrap();
+
+        assert!(migrated_now, "a pre-cutover file must be rewritten");
+        assert_eq!(migrated.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(migrated.transcription_model, DEFAULT_TRANSCRIPTION_MODEL);
+        assert_eq!(migrated.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(migrated.generation_model, "z-ai/glm-5.2");
+        assert_eq!(migrated.remote_generation_model, "z-ai/glm-5.2");
+        assert_eq!(migrated.image_model, DEFAULT_IMAGE_MODEL);
+        assert_eq!(migrated.video_model, DEFAULT_VIDEO_MODEL);
+        assert_eq!(
+            migrated.provider_api_keys_configured,
+            ProviderApiKeysConfigured::default(),
+            "a Venice key never becomes a key for another provider"
+        );
+
+        // Everything that is not a Venice selection survives untouched.
+        assert_eq!(migrated.cost_quality, 40);
+        assert_eq!(
+            migrated.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(
+            migrated.llm_usage.activity,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(migrated.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(migrated.llm_usage.dictation_cleanup, ProviderRef::Clovy);
+        assert_eq!(migrated.llm_endpoints.len(), 1);
+        assert_eq!(migrated.llm_endpoints[0].id, "ep-lan");
+        assert!(migrated.llm_endpoints[0].has_api_key);
+        assert_eq!(
+            migrated.llm_cli_levels.get(&CliKind::Claude),
+            Some(&StructuredOutputLevel::JsonSchema)
+        );
+        assert!(!migrated.image_safe_mode);
+        assert!(migrated.image_safe_mode_set_by_user);
+        assert!(!migrated.live_transcription);
+        let work = migrated
+            .profile_overrides
+            .get("work")
+            .expect("override kept");
+        assert_eq!(work.transcription_provider.as_deref(), Some(PROVIDER_GROQ));
+        assert_eq!(
+            work.transcription_model.as_deref(),
+            Some(DEFAULT_TRANSCRIPTION_MODEL)
+        );
+        assert_eq!(work.image_model.as_deref(), Some(DEFAULT_IMAGE_MODEL));
+        assert_eq!(work.video_model, None);
+
+        // No secret moved into the Keychain store, and the rewritten file no
+        // longer carries the plaintext Venice key.
+        for provider in [
+            BuiltinProvider::Groq,
+            BuiltinProvider::OpenRouter,
+            BuiltinProvider::Fal,
+            BuiltinProvider::Tavily,
+        ] {
+            assert_eq!(store.get(provider.secret_account()).unwrap(), None);
+        }
+        let rewritten = serde_json::to_string_pretty(&migrated).unwrap();
+        assert!(!rewritten.contains("veniceApiKey"));
+        assert!(!rewritten.contains("legacy-venice-secret"));
+
+        // Restart: the rewritten file loads to the same settings and is not
+        // migrated again.
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, migrated);
+    }
+
+    #[test]
+    fn legacy_text_models_keep_auto_and_same_model_equivalents() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        for (legacy, expected) in [
+            (AUTO_GENERATION_MODEL, AUTO_GENERATION_MODEL),
+            ("kimi-k2-6", "moonshotai/kimi-k2.6"),
+            ("venice-uncensored", DEFAULT_GENERATION_MODEL),
+        ] {
+            let raw = serde_json::json!({
+                "generationProvider": "venice",
+                "generationModel": legacy,
+                "remoteGenerationModel": legacy
+            })
+            .to_string();
+            let (migrated, _) = settings_from_json(&raw, &store).unwrap();
+            assert_eq!(migrated.generation_model, expected, "{legacy}");
+            assert_eq!(migrated.remote_generation_model, expected, "{legacy}");
+        }
+    }
+
+    #[test]
+    fn migrated_settings_keep_the_chosen_models_on_every_load() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "transcriptionProvider": PROVIDER_GROQ,
+            "transcriptionModel": "whisper-large-v3",
+            "generationProvider": PROVIDER_OPENROUTER,
+            "generationModel": "moonshotai/kimi-k3",
+            "remoteGenerationModel": "moonshotai/kimi-k3",
+            "providerApiKeysConfigured": { "groq": true },
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true
+        })
+        .to_string();
+
+        let (loaded, migrated_now) = settings_from_json(&raw, &store).unwrap();
+
+        assert!(!migrated_now);
+        assert_eq!(loaded.transcription_model, "whisper-large-v3");
+        assert_eq!(loaded.generation_model, "moonshotai/kimi-k3");
+        assert_eq!(loaded.remote_generation_model, "moonshotai/kimi-k3");
+        assert!(loaded.provider_api_keys_configured.groq);
+        assert!(!loaded.provider_api_keys_configured.openrouter);
+    }
+
+    #[test]
+    fn set_provider_model_accepts_curated_ids_and_rejects_others() {
+        let state = test_state();
+
+        let error = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: "nvidia/parakeet-tdt-0.6b-v3".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "provider_model_unavailable");
+        assert_eq!(
+            state.settings.lock().unwrap().transcription_model,
+            DEFAULT_TRANSCRIPTION_MODEL
+        );
+
+        let updated = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: " whisper-large-v3 ".to_string(),
+            },
+        )
         .unwrap();
-        let sanitized = sanitize_settings(settings, &default_settings());
+        assert_eq!(updated.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(updated.transcription_model, "whisper-large-v3");
 
-        assert_eq!(sanitized.generation_provider, PROVIDER_VENICE);
-        assert_eq!(sanitized.generation_model, "custom-remote-model");
-        assert_eq!(sanitized.remote_generation_model, "custom-remote-model");
+        let updated = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Generation,
+                model_id: "moonshotai/kimi-k3".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(updated.generation_model, "moonshotai/kimi-k3");
+        assert_eq!(updated.remote_generation_model, "moonshotai/kimi-k3");
     }
 
     #[test]
-    fn venice_api_key_format_treats_credentials_as_opaque() {
-        assert!(validate_venice_api_key_format("VENICE_INFERENCE_KEY_valid").is_ok());
-        assert!(validate_venice_api_key_format("VENICE_ADMIN_KEY_valid").is_ok());
-        assert!(validate_venice_api_key_format("legacy-or-future-key-format").is_ok());
+    fn provider_api_key_format_treats_credentials_as_opaque() {
+        for key in [
+            "gsk_example",
+            "sk-or-v1-example",
+            "legacy-or-future-key-format",
+        ] {
+            assert_eq!(
+                validate_provider_api_key(BuiltinProvider::Groq, &format!("  {key}  ")).unwrap(),
+                key
+            );
+        }
         assert_eq!(
-            validate_venice_api_key_format("invalid\tkey")
+            validate_provider_api_key(BuiltinProvider::Fal, "   ")
                 .unwrap_err()
                 .code,
-            "venice_api_key_invalid"
+            "provider_api_key_required"
         );
         assert_eq!(
-            validate_venice_api_key_format(&"x".repeat(MAX_VENICE_API_KEY_CHARS + 1))
+            validate_provider_api_key(BuiltinProvider::Tavily, "invalid\tkey")
                 .unwrap_err()
                 .code,
-            "venice_api_key_invalid"
+            "provider_api_key_invalid"
+        );
+        assert_eq!(
+            validate_provider_api_key(
+                BuiltinProvider::OpenRouter,
+                &"x".repeat(MAX_PROVIDER_API_KEY_CHARS + 1)
+            )
+            .unwrap_err()
+            .code,
+            "provider_api_key_invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_api_key_save_checks_the_provider_and_stores_only_that_key() {
+        use crate::llm::endpoint::test_server;
+        let server = test_server::start(std::sync::Arc::new(|_: &serde_json::Value| {
+            (200, serde_json::json!({ "data": [] }))
+        }))
+        .await;
+        let state = test_state();
+        let store = crate::llm::secrets::MemorySecretStore::default();
+
+        set_provider_api_key_impl(
+            &state,
+            &store,
+            SetProviderApiKeyRequest {
+                provider: BuiltinProvider::OpenRouter,
+                api_key: " sk-or-user-key ".to_string(),
+            },
+            &format!("{}/key", server.base_url),
+        )
+        .await
+        .unwrap();
+        let dto = set_provider_api_key_impl(
+            &state,
+            &store,
+            SetProviderApiKeyRequest {
+                provider: BuiltinProvider::Fal,
+                api_key: "fal-user-key".to_string(),
+            },
+            &format!("{}/models/pricing", server.base_url),
+        )
+        .await
+        .unwrap();
+
+        // Each provider's own auth scheme reached its check.
+        assert_eq!(
+            server.authorizations.lock().unwrap().as_slice(),
+            [
+                Some("Bearer sk-or-user-key".to_string()),
+                Some("Key fal-user-key".to_string()),
+            ]
+        );
+        assert_eq!(
+            dto.provider_api_keys_configured,
+            ProviderApiKeysConfigured {
+                openrouter: true,
+                fal: true,
+                ..ProviderApiKeysConfigured::default()
+            }
+        );
+        assert_eq!(
+            store.get("builtin:openrouter").unwrap().as_deref(),
+            Some("sk-or-user-key")
+        );
+        assert_eq!(
+            store.get("builtin:fal").unwrap().as_deref(),
+            Some("fal-user-key")
+        );
+        assert_eq!(store.get("builtin:groq").unwrap(), None);
+        assert_eq!(store.get("builtin:tavily").unwrap(), None);
+
+        // The settings file records only that keys exist.
+        let on_disk = fs::read_to_string(&state.path).unwrap();
+        assert!(!on_disk.contains("sk-or-user-key"));
+        assert!(!on_disk.contains("fal-user-key"));
+        let reloaded: ProviderModelSettings = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(
+            reloaded.provider_api_keys_configured,
+            dto.provider_api_keys_configured
+        );
+        let settings = state.settings.lock().unwrap().clone();
+        assert_eq!(
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Fal).unwrap(),
+            Some("fal-user-key".to_string())
+        );
+        assert_eq!(
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Tavily).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_api_key_rejected_or_unchecked_changes_nothing() {
+        use crate::llm::endpoint::test_server;
+        for (status, expected) in [
+            (401, "provider_api_key_rejected"),
+            (403, "provider_api_key_rejected"),
+            (500, "provider_api_key_verification_failed"),
+        ] {
+            let server = test_server::start(std::sync::Arc::new(move |_: &serde_json::Value| {
+                (status, serde_json::json!({ "error": "no" }))
+            }))
+            .await;
+            let state = test_state();
+            let store = crate::llm::secrets::MemorySecretStore::default();
+
+            let error = set_provider_api_key_impl(
+                &state,
+                &store,
+                SetProviderApiKeyRequest {
+                    provider: BuiltinProvider::Groq,
+                    api_key: "gsk-bad".to_string(),
+                },
+                &format!("{}/models", server.base_url),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.code, expected, "status {status}");
+            assert!(!error.message.contains("gsk-bad"));
+            assert_eq!(store.get("builtin:groq").unwrap(), None);
+            assert!(
+                !state
+                    .settings
+                    .lock()
+                    .unwrap()
+                    .provider_api_keys_configured
+                    .groq
+            );
+            assert!(!state.path.exists(), "nothing is saved on a failed check");
+        }
+    }
+
+    #[test]
+    fn provider_api_key_clear_removes_only_that_provider() {
+        let state = test_state();
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        store.set("builtin:groq", "gsk-user").unwrap();
+        store.set("builtin:tavily", "tvly-user").unwrap();
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.provider_api_keys_configured.groq = true;
+            settings.provider_api_keys_configured.tavily = true;
+        }
+
+        let dto = clear_provider_api_key_impl(&state, &store, BuiltinProvider::Groq).unwrap();
+
+        assert!(!dto.provider_api_keys_configured.groq);
+        assert!(dto.provider_api_keys_configured.tavily);
+        assert_eq!(store.get("builtin:groq").unwrap(), None);
+        assert_eq!(
+            store.get("builtin:tavily").unwrap().as_deref(),
+            Some("tvly-user")
         );
     }
 
     #[test]
-    fn sanitize_settings_preserves_legacy_venice_api_key_for_actionable_error() {
-        let settings = ProviderModelSettings {
-            venice_api_key: Some("not-a-venice-inference-key".to_string()),
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-
+    fn recorded_provider_key_missing_from_the_store_is_an_error_not_clovy_credits() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let mut settings = default_settings();
+        // A key left in the store without a record is never sent.
+        store.set("builtin:groq", "gsk-orphan").unwrap();
         assert_eq!(
-            sanitized.venice_api_key.as_deref(),
-            Some("not-a-venice-inference-key")
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Groq).unwrap(),
+            None
         );
+
+        settings.provider_api_keys_configured.openrouter = true;
+        let error =
+            saved_provider_api_key(&settings, &store, BuiltinProvider::OpenRouter).unwrap_err();
+        assert_eq!(error.code, "provider_api_key_unavailable");
     }
 
     #[test]
@@ -2238,17 +2893,33 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_settings_keeps_a_curated_video_model() {
-        // A non-default curated id must survive load unchanged — otherwise the
+    fn sanitize_settings_keeps_every_curated_model() {
+        // A curated non-default id must survive load unchanged; otherwise an
         // allowlist would silently collapse every pick to the default.
-        let curated = "grok-imagine-text-to-video-private";
-        assert!(KNOWN_VIDEO_MODELS.contains(&curated));
-        let settings = ProviderModelSettings {
-            video_model: curated.to_string(),
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-        assert_eq!(sanitized.video_model, curated);
+        for &model in KNOWN_TRANSCRIPTION_MODELS {
+            let settings = ProviderModelSettings {
+                transcription_model: model.to_string(),
+                ..default_settings()
+            };
+            let sanitized = sanitize_settings(settings, &default_settings());
+            assert_eq!(sanitized.transcription_model, model);
+        }
+        for &model in KNOWN_IMAGE_MODELS {
+            let settings = ProviderModelSettings {
+                image_model: model.to_string(),
+                ..default_settings()
+            };
+            let sanitized = sanitize_settings(settings, &default_settings());
+            assert_eq!(sanitized.image_model, model);
+        }
+        for &model in KNOWN_VIDEO_MODELS {
+            let settings = ProviderModelSettings {
+                video_model: model.to_string(),
+                ..default_settings()
+            };
+            let sanitized = sanitize_settings(settings, &default_settings());
+            assert_eq!(sanitized.video_model, model);
+        }
     }
 
     #[test]
@@ -2299,11 +2970,12 @@ mod tests {
             "generationProvider": "local",
             "generationModel": "llama3.1:8b",
             "remoteGenerationModel": "remote-model",
+            "remoteModelsMigrated": true,
             "localGeneration": { "baseUrl": "not a url", "modelId": "llama3.1:8b" }
         }"#;
         let store = crate::llm::secrets::MemorySecretStore::default();
         let sanitized = settings_from_json_for_tests(raw, &store).unwrap();
-        assert_eq!(sanitized.generation_provider, PROVIDER_VENICE);
+        assert_eq!(sanitized.generation_provider, PROVIDER_OPENROUTER);
         assert!(sanitized.llm_endpoints.is_empty());
         assert_eq!(sanitized.generation_model, "remote-model");
         assert_eq!(sanitized.remote_generation_model, "remote-model");
@@ -2312,9 +2984,10 @@ mod tests {
     #[test]
     fn llm_lan_endpoint_selected_for_chat_activates_the_local_route() {
         let raw = r#"{
-            "generationProvider": "venice",
+            "generationProvider": "openrouter",
             "generationModel": "remote-model",
             "remoteGenerationModel": "remote-model",
+            "remoteModelsMigrated": true,
             "llmRegistryMigrated": true,
             "llmEndpoints": [{
                 "id": "lan", "name": "LAN", "baseUrl": "http://192.168.1.5:11434/v1/",
@@ -2391,28 +3064,28 @@ mod tests {
     #[test]
     fn profile_overrides_resolve_fallbacks_and_partial_overrides() {
         let mut settings = default_settings();
-        settings.transcription_provider = PROVIDER_VENICE.to_string();
+        settings.transcription_provider = PROVIDER_GROQ.to_string();
         settings.transcription_model = "global-asr".to_string();
         settings.image_model = "global-image".to_string();
         settings.video_model = "global-video".to_string();
         settings.profile_overrides.insert(
             "writing".to_string(),
             ProfileModelOverrides {
-                transcription_provider: Some(PROVIDER_OPENAI.to_string()),
-                transcription_model: Some("gpt-4o-transcribe".to_string()),
+                transcription_provider: Some(PROVIDER_GROQ.to_string()),
+                transcription_model: Some("whisper-large-v3".to_string()),
                 image_model: None,
                 video_model: Some("profile-video".to_string()),
             },
         );
 
         let effective = effective_settings_for_profile(&settings, "writing");
-        assert_eq!(effective.transcription_provider, PROVIDER_OPENAI);
-        assert_eq!(effective.transcription_model, "gpt-4o-transcribe");
+        assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(effective.transcription_model, "whisper-large-v3");
         assert_eq!(effective.image_model, "global-image");
         assert_eq!(effective.video_model, "profile-video");
 
         let effective = effective_settings_for_profile(&settings, "unknown");
-        assert_eq!(effective.transcription_provider, PROVIDER_VENICE);
+        assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
         assert_eq!(effective.transcription_model, "global-asr");
         assert_eq!(effective.image_model, "global-image");
         assert_eq!(effective.video_model, "global-video");
@@ -2428,7 +3101,7 @@ mod tests {
         settings.profile_overrides.insert(
             "default".to_string(),
             ProfileModelOverrides {
-                transcription_provider: Some(PROVIDER_OPENAI.to_string()),
+                transcription_provider: Some(PROVIDER_GROQ.to_string()),
                 transcription_model: Some("profile-asr".to_string()),
                 image_model: Some("profile-image".to_string()),
                 video_model: Some("profile-video".to_string()),
@@ -2436,7 +3109,7 @@ mod tests {
         );
 
         let effective = effective_settings_for_profile(&settings, "default");
-        assert_eq!(effective.transcription_provider, PROVIDER_VENICE);
+        assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
         assert_eq!(effective.transcription_model, "global-asr");
         assert_eq!(effective.image_model, DEFAULT_IMAGE_MODEL);
     }
@@ -2449,8 +3122,8 @@ mod tests {
             &state,
             "research",
             ProfileModelOverridesDto {
-                transcription_provider: Some(format!(" {PROVIDER_OPENAI} ")),
-                transcription_model: Some(" gpt-4o-transcribe ".to_string()),
+                transcription_provider: Some(format!(" {PROVIDER_GROQ} ")),
+                transcription_model: Some(" whisper-large-v3 ".to_string()),
                 image_model: Some(" profile-image ".to_string()),
                 video_model: Some(" profile-video ".to_string()),
             },
@@ -2464,14 +3137,14 @@ mod tests {
                 .profile_overrides
                 .get("research")
                 .and_then(|overrides| overrides.transcription_provider.as_deref()),
-            Some(PROVIDER_OPENAI)
+            Some(PROVIDER_GROQ)
         );
         assert_eq!(
             saved
                 .profile_overrides
                 .get("research")
                 .and_then(|overrides| overrides.transcription_model.as_deref()),
-            Some("gpt-4o-transcribe")
+            Some("whisper-large-v3")
         );
         assert_eq!(
             saved
@@ -2486,7 +3159,7 @@ mod tests {
             "research",
             ProfileModelOverridesDto {
                 transcription_provider: None,
-                transcription_model: Some("whisper-1".to_string()),
+                transcription_model: Some(DEFAULT_TRANSCRIPTION_MODEL.to_string()),
                 image_model: None,
                 video_model: None,
             },
@@ -2510,7 +3183,7 @@ mod tests {
                 .profile_overrides
                 .get("research")
                 .and_then(|overrides| overrides.transcription_model.as_deref()),
-            Some("whisper-1")
+            Some(DEFAULT_TRANSCRIPTION_MODEL)
         );
 
         delete_profile_model_overrides_impl(&state, "research").unwrap();
@@ -2535,7 +3208,7 @@ mod tests {
             &state,
             "default",
             ProfileModelOverridesDto {
-                transcription_provider: Some(PROVIDER_OPENAI.to_string()),
+                transcription_provider: Some(PROVIDER_GROQ.to_string()),
                 transcription_model: None,
                 image_model: None,
                 video_model: None,
@@ -2660,8 +3333,8 @@ mod tests {
 
     #[test]
     fn api_model_conversion_prefers_retail_price_description_display() {
-        let model = VeniceModelDto::from(crate::clovy_api::ModelDto {
-            provider: "openai".to_string(),
+        let model = ProviderModelDto::from(crate::clovy_api::ModelDto {
+            provider: PROVIDER_GROQ.to_string(),
             id: "asr-model".to_string(),
             name: "ASR model".to_string(),
             model_type: "asr".to_string(),
@@ -2676,6 +3349,7 @@ mod tests {
             credits_per_million_seconds: Some(60_000),
             input_credits_per_million_tokens: None,
             output_credits_per_million_tokens: None,
+            service_available: true,
         });
 
         assert_eq!(

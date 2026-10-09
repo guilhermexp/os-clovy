@@ -4,16 +4,16 @@ use crate::{
         log_settled, release_hold, zero_receipt,
     },
     error::ServiceError,
-    metering::{log_skipped_user_venice_key, uses_user_venice_key},
+    metering::log_skipped_user_key,
     util::sha256_hex,
 };
 use clovy_domain::{
-    ActionSlug, Credits, OsAccountsClient, ProviderCredentials, Receipt, UserId, WebFetchRequest,
-    WebFetchResult, WebFetcher, WebSearchProvider, WebSearchRequest, WebSearchResults, WebSearcher,
+    ActionSlug, Credits, OsAccountsClient, ProviderCredentials, Receipt, UpstreamProvider, UserId,
+    WebFetchRequest, WebFetchResult, WebFetcher, WebSearchRequest, WebSearchResults, WebSearcher,
 };
 use std::sync::Arc;
 
-/// Metered access to Venice's web search and single-URL scrape tools. Both
+/// Metered access to web search and single-URL scrape tools. Both
 /// calls are flat-priced ($0.01/request upstream), so the authorize estimate
 /// and the settled charge are the same configured credit amount rather than a
 /// usage-derived figure. A failed or rejected upstream call returns the error
@@ -51,17 +51,24 @@ impl WebAugmentService {
 
     pub async fn search(&self, params: WebSearchParams) -> Result<WebSearchOutput, ServiceError> {
         let estimate = Credits(self.search_credits);
-        if uses_user_venice_key(&params.provider_credentials) {
+        if params
+            .provider_credentials
+            .has_user_key(UpstreamProvider::Tavily)
+        {
             let results = self
                 .searcher
                 .search(WebSearchRequest {
                     query: params.query.clone(),
                     limit: params.limit,
-                    provider: params.provider,
                     provider_credentials: params.provider_credentials.clone(),
                 })
                 .await?;
-            log_skipped_user_venice_key(ActionSlug::WebSearch, &params.user_id, "web");
+            log_skipped_user_key(
+                ActionSlug::WebSearch,
+                &params.user_id,
+                "web",
+                UpstreamProvider::Tavily,
+            );
             return Ok(WebSearchOutput {
                 results,
                 receipt: zero_receipt(),
@@ -80,7 +87,6 @@ impl WebAugmentService {
             .search(WebSearchRequest {
                 query: params.query.clone(),
                 limit: params.limit,
-                provider: params.provider,
                 provider_credentials: params.provider_credentials.clone(),
             })
             .await
@@ -104,9 +110,9 @@ impl WebAugmentService {
             // The client-supplied request_id scopes idempotency to one logical
             // call: a dropped-response retry reuses it (no double charge),
             // while a genuine repeat search uses a fresh id and is charged. The
-            // full request shape (query + limit + provider) is hashed in too,
-            // so reusing an id with a different shape still settles as a new
-            // charge rather than replaying the prior one.
+            // full request shape (query + limit) is hashed in too, so reusing an
+            // id with a different shape still settles as a new charge rather than
+            // replaying the prior one.
             idempotency_key: format!(
                 "web_search:{}:{}:{}",
                 params.user_id.0,
@@ -121,7 +127,10 @@ impl WebAugmentService {
 
     pub async fn fetch(&self, params: WebFetchParams) -> Result<WebFetchOutput, ServiceError> {
         let estimate = Credits(self.fetch_credits);
-        if uses_user_venice_key(&params.provider_credentials) {
+        if params
+            .provider_credentials
+            .has_user_key(UpstreamProvider::Tavily)
+        {
             let result = self
                 .fetcher
                 .fetch(WebFetchRequest {
@@ -129,7 +138,12 @@ impl WebAugmentService {
                     provider_credentials: params.provider_credentials.clone(),
                 })
                 .await?;
-            log_skipped_user_venice_key(ActionSlug::WebFetch, &params.user_id, "web");
+            log_skipped_user_key(
+                ActionSlug::WebFetch,
+                &params.user_id,
+                "web",
+                UpstreamProvider::Tavily,
+            );
             return Ok(WebFetchOutput {
                 result,
                 receipt: zero_receipt(),
@@ -187,10 +201,8 @@ pub struct WebSearchParams {
     pub request_id: String,
     pub query: String,
     pub limit: Option<u32>,
-    pub provider: WebSearchProvider,
     pub provider_credentials: ProviderCredentials,
 }
-
 #[derive(Clone, Debug)]
 pub struct WebSearchOutput {
     pub results: WebSearchResults,
@@ -201,14 +213,9 @@ pub struct WebSearchOutput {
 /// the idempotency key. `serde_json` sorts object keys, so the encoding is
 /// deterministic across calls.
 fn search_shape(params: &WebSearchParams) -> String {
-    let provider = match params.provider {
-        WebSearchProvider::Brave => "brave",
-        WebSearchProvider::Google => "google",
-    };
     serde_json::json!({
         "query": params.query,
         "limit": params.limit,
-        "provider": provider,
     })
     .to_string()
 }
@@ -234,8 +241,8 @@ mod tests {
     use async_trait::async_trait;
     use clovy_domain::{
         Authorization, AuthorizeRequest, ChargeRequest, DomainError, OsAccountsClient,
-        ProviderCredentials, Receipt, UserId, WebFetchRequest, WebFetchResult, WebFetcher,
-        WebSearchProvider, WebSearchRequest, WebSearchResults, WebSearcher,
+        ProviderCredentials, Receipt, UpstreamProvider, UserId, WebFetchRequest, WebFetchResult,
+        WebFetcher, WebSearchRequest, WebSearchResults, WebSearcher,
     };
     use pretty_assertions::assert_eq;
     use std::sync::{Arc, Mutex};
@@ -311,7 +318,7 @@ mod tests {
         ) -> Result<WebSearchResults, DomainError> {
             Ok(WebSearchResults {
                 query: "q".to_string(),
-                provider: "brave".to_string(),
+                provider: "tavily".to_string(),
                 results: Vec::new(),
             })
         }
@@ -337,7 +344,7 @@ mod tests {
                 url: "https://example.com".to_string(),
                 content: "# Page".to_string(),
                 format: "markdown".to_string(),
-                provider: "venice".to_string(),
+                provider: "tavily".to_string(),
             })
         }
     }
@@ -365,7 +372,6 @@ mod tests {
                 request_id: "req_1".to_string(),
                 query: "rust async".to_string(),
                 limit: Some(5),
-                provider: WebSearchProvider::Brave,
                 provider_credentials: ProviderCredentials::default(),
             })
             .await
@@ -400,7 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_user_venice_key_skips_wallet_metering() {
+    async fn search_user_tavily_key_skips_wallet_metering() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let output = service(os_accounts.clone(), Arc::new(FixedFetcher))
             .search(WebSearchParams {
@@ -408,13 +414,13 @@ mod tests {
                 request_id: "req_1".to_string(),
                 query: "rust async".to_string(),
                 limit: Some(5),
-                provider: WebSearchProvider::Brave,
-                provider_credentials: ProviderCredentials {
-                    venice_api_key: Some("vc_user_key".to_string()),
-                },
+                provider_credentials: ProviderCredentials::for_provider(
+                    UpstreamProvider::Tavily,
+                    "tvly_user_key".to_string(),
+                ),
             })
             .await
-            .expect("search succeeds with user Venice key");
+            .expect("search succeeds with user Tavily key");
 
         assert_eq!(output.receipt.credits_charged.0, 0);
         assert_eq!(os_accounts.events(), Vec::new());
@@ -427,14 +433,13 @@ mod tests {
         // new charge instead of replaying the prior (differently shaped) one.
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let service = service(os_accounts.clone(), Arc::new(FixedFetcher));
-        for provider in [WebSearchProvider::Brave, WebSearchProvider::Google] {
+        for limit in [Some(5), Some(10)] {
             service
                 .search(WebSearchParams {
                     user_id: UserId("usr_1".to_string()),
                     request_id: "req_1".to_string(),
                     query: "rust async".to_string(),
-                    limit: Some(5),
-                    provider,
+                    limit,
                     provider_credentials: ProviderCredentials::default(),
                 })
                 .await
@@ -469,7 +474,6 @@ mod tests {
                     request_id: request_id.to_string(),
                     query: "rust async".to_string(),
                     limit: Some(5),
-                    provider: WebSearchProvider::Brave,
                     provider_credentials: ProviderCredentials::default(),
                 })
                 .await
@@ -527,21 +531,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_user_venice_key_skips_wallet_metering() {
+    async fn fetch_user_tavily_key_skips_wallet_metering() {
         let os_accounts = Arc::new(RecordingOsAccounts::new(true));
         let output = service(os_accounts.clone(), Arc::new(FixedFetcher))
             .fetch(WebFetchParams {
                 user_id: UserId("usr_1".to_string()),
                 request_id: "req_1".to_string(),
                 url: "https://example.com".to_string(),
-                provider_credentials: ProviderCredentials {
-                    venice_api_key: Some("vc_user_key".to_string()),
-                },
+                provider_credentials: ProviderCredentials::for_provider(
+                    UpstreamProvider::Tavily,
+                    "tvly_user_key".to_string(),
+                ),
             })
             .await
-            .expect("fetch succeeds with user Venice key");
+            .expect("fetch succeeds with user Tavily key");
 
         assert_eq!(output.receipt.credits_charged.0, 0);
         assert_eq!(os_accounts.events(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn non_tavily_key_still_meters_search() {
+        let os_accounts = Arc::new(RecordingOsAccounts::new(true));
+        let output = service(os_accounts.clone(), Arc::new(FixedFetcher))
+            .search(WebSearchParams {
+                user_id: UserId("usr_1".to_string()),
+                request_id: "req_1".to_string(),
+                query: "rust async".to_string(),
+                limit: Some(5),
+                provider_credentials: ProviderCredentials::for_provider(
+                    UpstreamProvider::Openrouter,
+                    "or_key".to_string(),
+                ),
+            })
+            .await
+            .expect("search succeeds");
+
+        assert_eq!(output.receipt.credits_charged.0, 20);
+        assert_eq!(
+            os_accounts.events()[0],
+            Call::Authorize {
+                action: "web_search".to_string(),
+                estimate: 20,
+            }
+        );
     }
 }

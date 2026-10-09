@@ -35,7 +35,7 @@ import {
   LIVE_TRANSCRIPT_EVENT,
   listSessionPartitions,
   listAgentSessions,
-  listVeniceModels,
+  listProviderModels,
   openPrivacySettings,
   osAccountsLogout,
   recoverRecording,
@@ -1144,7 +1144,7 @@ export function App() {
     const publishModelChange = (event: Event) => {
       const detail = (event as CustomEvent<AgentSessionModelChangedDetail>).detail;
       if (!detail?.sessionId || !detail.storedModel) return;
-      void Promise.all([listVeniceModels("generation"), providerModelSettings()])
+      void Promise.all([listProviderModels("generation"), providerModelSettings()])
         .then(async ([catalog, settings]) => {
           const session = await companionSessionInActivePartition(detail.sessionId);
           if (!session) return;
@@ -1242,17 +1242,25 @@ export function App() {
             return;
           }
           case "modelsList": {
-            const catalog = await listVeniceModels("generation");
+            const [catalog, settings] = await Promise.all([
+              listProviderModels("generation"),
+              providerModelSettings(),
+            ]);
             await companionCompleteFrontendRequest(payload.operationId, {
               type: "models",
-              data: { models: companionModelOptions(catalog.models) },
+              data: {
+                models: companionModelOptions(
+                  catalog.models,
+                  settings.settings.providerApiKeysConfigured,
+                ),
+              },
             });
             return;
           }
           case "sessionModelGet": {
             const { storedSessionId } = payload.intent.data;
             const [catalog, settings] = await Promise.all([
-              listVeniceModels("generation"),
+              listProviderModels("generation"),
               providerModelSettings(),
             ]);
             const session = (await companionScopedSessions()).find(
@@ -1283,10 +1291,13 @@ export function App() {
           case "sessionModelSet": {
             const { storedSessionId, modelId } = payload.intent.data;
             const [catalog, settings] = await Promise.all([
-              listVeniceModels("generation"),
+              listProviderModels("generation"),
               providerModelSettings(),
             ]);
-            const allowedModels = companionModelOptions(catalog.models);
+            const allowedModels = companionModelOptions(
+              catalog.models,
+              settings.settings.providerApiKeysConfigured,
+            );
             if (!allowedModels.some((model) => model.id === modelId)) {
               await companionCompleteFrontendRequest(payload.operationId, {
                 type: "error",

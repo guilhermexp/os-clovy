@@ -45,8 +45,10 @@ A match proves the running enclave is the published code. The tag→digest hop
 trusts the registry hasn't re-pushed the tag (sha tags are immutable by
 convention; close the gap by also committing the digest to a git release record,
 or by reaching the digest-pinned target above). This chain proves the **code
-only** — not the upstream model providers (audio still leaves the TEE to
-OpenAI/Venice). Keep those claims separate.
+only** — not the upstream model providers. Audio goes to Groq; remote text,
+media, and web go to OpenRouter, fal, and Tavily respectively. Backend
+attestation does not attest their execution or establish TEE/zero-retention
+guarantees for them. Keep those claims separate.
 
 ## Constraint: dstack can't verify digest refs (we deploy by tag)
 

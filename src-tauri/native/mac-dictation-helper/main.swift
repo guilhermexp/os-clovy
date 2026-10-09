@@ -2271,7 +2271,6 @@ final class DictationController {
             activeTakeID = takeID
             let escapeCancelAvailable = DictationEscapeCancelMonitor.shared.start()
             emitJSON("listening_started", [
-                "recognitionMode": "venice_recording",
                 "microphone": microphone,
                 "escapeCancelAvailable": escapeCancelAvailable,
                 "takeId": takeID,

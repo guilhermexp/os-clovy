@@ -26,7 +26,7 @@ Main atualiza checkboxes somente após confrontar a prova. Gates/build/Cargo sã
 
 - [ ] 4.1 Corrigir o comparador OCR que admite ciclos com tolerância pairwise, mantendo ordem de leitura top-to-bottom/left-to-right sem suppress/catch; obter RED de ordem de leitura e GREEN de permutations/linhas ancoradas, atualizar doc comment e recipe de comprovação da captura contínua.
 - [ ] 4.2 Main confrontar fontes/reports/review, executar busca exaustiva qualificada de dependências Venice e refresh do Graft; verificar cada cenário sem usar ausência de string como teste permanente ou apagar história.
-- [ ] 4.3 Integrar o escopo completo em main, capturar gate/build/verify-cli-worker final no mesmo fingerprint e validar ambas as changes OpenSpec e Test stamps; preservar falhas históricas e não declarar PASS-UNPROVEN como aceite.
+- [ ] 4.3 Integrar o escopo completo em main, capturar gate/build/verify-cli-worker final no mesmo fingerprint e validar as três changes OpenSpec e Test stamps; preservar falhas históricas e não declarar PASS-UNPROVEN como aceite.
 - [ ] 4.4 Restaurar preparo dev/certificado/ids estáveis após produção/gate e abrir dev normal para o dono; observar janela, helper, grants, continuidade da captura/MCP, restart/rebuild/HMR e skills em perfil vazio sem fixture no perfil normal.
 
 ## 5. Prova externa completa e aceite

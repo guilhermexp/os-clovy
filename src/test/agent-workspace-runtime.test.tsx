@@ -158,7 +158,7 @@ describe("AgentWorkspace runtime wiring", () => {
           },
         ]);
       }
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -190,7 +190,14 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "provider_model_settings") {
         return Promise.resolve({
           settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         });
       }
       if (command === "set_cost_quality") {
@@ -598,7 +605,7 @@ describe("AgentWorkspace runtime wiring", () => {
   it("reserves the fixed composer before Home has a persisted session", async () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "list_agent_sessions") return Promise.resolve([]);
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -627,7 +634,7 @@ describe("AgentWorkspace runtime wiring", () => {
     const pendingSession = new Promise<AgentSessionDto>(() => {});
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "list_agent_sessions") return Promise.resolve([]);
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -1162,7 +1169,7 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "get_agent_session") return homeSession;
       if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
       if (command === "list_agent_skills") return [];
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return {
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -1173,7 +1180,14 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "provider_model_settings") {
         return {
           settings: { costQuality: 20 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         };
       }
       if (command === "create_agent_session") return focusedSession;
@@ -1241,7 +1255,7 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "get_agent_session") return homeSession;
       if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
       if (command === "list_agent_skills") return [];
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return {
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -1252,7 +1266,14 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "provider_model_settings") {
         return {
           settings: { costQuality: 20 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         };
       }
       if (command === "clovy_home_chat") {
@@ -1345,7 +1366,7 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "list_agent_sessions") return [];
       if (command === "get_agent_session") throw new Error("Session not found");
       if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return {
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -1378,7 +1399,7 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "list_agent_sessions") return [homeSession];
       if (command === "get_agent_session") return homeSession;
       if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return { mode: "generation", selectedModel: "fast", modelType: "text", models: [] };
       }
       if (command === "clovy_home_chat") return pendingHome;
@@ -1479,7 +1500,7 @@ describe("AgentWorkspace runtime wiring", () => {
     const user = userEvent.setup();
     const defaultInvoke = mocks.invoke.getMockImplementation();
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "fast",
@@ -1494,16 +1515,16 @@ describe("AgentWorkspace runtime wiring", () => {
               capabilities: ["tool-calling"],
             },
             {
-              provider: "venice",
-              id: "kimi-k3",
+              provider: "openrouter",
+              id: "moonshotai/kimi-k3",
               name: "Kimi K3",
               modelType: "text",
               traits: [],
               capabilities: ["tool-calling"],
             },
             {
-              provider: "venice",
-              id: "zai-org-glm-5-2",
+              provider: "openrouter",
+              id: "z-ai/glm-5.2",
               name: "GLM 5.2",
               modelType: "text",
               traits: [],
@@ -1522,10 +1543,8 @@ describe("AgentWorkspace runtime wiring", () => {
     const suggested = screen.getByRole("listbox", { name: "Suggested text models" });
     const autoOption = within(suggested).getByRole("option", { name: /Auto/ });
     expect(autoOption).toBeVisible();
-    expect(autoOption.querySelector('.model-row-privacy[data-mode="private"]')).toHaveAttribute(
-      "aria-label",
-      expect.stringMatching(/^Private mode:/),
-    );
+    // Auto routes through OpenRouter models, so it makes no retention claim.
+    expect(autoOption.querySelector(".model-row-privacy")).toBeNull();
     expect(within(suggested).queryByText("GLM 5.2")).not.toBeInTheDocument();
     expect(within(suggested).queryByText("Kimi K3")).not.toBeInTheDocument();
 
@@ -1611,7 +1630,14 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "provider_model_settings") {
         return Promise.resolve({
           settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         });
       }
       return defaultInvoke?.(command, args);
@@ -1749,7 +1775,9 @@ describe("AgentWorkspace runtime wiring", () => {
     await act(async () => {
       resolveSettings?.({
         settings: { costQuality: 100 },
-        effectiveSettings: { veniceApiKeyConfigured: false },
+        effectiveSettings: {
+          providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
+        },
       });
       await pendingSettings;
     });
@@ -2763,7 +2791,7 @@ describe("AgentWorkspace runtime wiring", () => {
     });
     const defaultInvoke = mocks.invoke.getMockImplementation();
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_venice_models") return pendingCatalog;
+      if (command === "list_provider_models") return pendingCatalog;
       return defaultInvoke?.(command, args);
     });
 
@@ -2947,13 +2975,20 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "list_agent_artifacts" || command === "list_agent_skills") {
         return Promise.resolve([]);
       }
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({ mode: "generation", models: [] });
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
           settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         });
       }
       if (command === "cancel_agent_run") {
@@ -3020,7 +3055,7 @@ describe("AgentWorkspace runtime wiring", () => {
       }
       if (command === "list_agent_artifacts") return Promise.resolve([]);
       if (command === "list_agent_skills") return Promise.resolve([]);
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({ mode: "generation", models: [] });
       }
       if (command === "retry_agent_run") {
@@ -3405,7 +3440,7 @@ describe("AgentWorkspace runtime wiring", () => {
       expect.stringContaining("Effort: High"),
     );
     expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "set_venice_model"),
+      mocks.invoke.mock.calls.filter(([command]) => command === "set_provider_model"),
     ).toHaveLength(1);
 
     rerender(<AgentWorkspace initialSession={session} />);
@@ -3481,23 +3516,23 @@ describe("AgentWorkspace runtime wiring", () => {
     );
   });
 
-  it("keeps explicit Venice BYOK text available when Clovy credits are unavailable", async () => {
+  it("keeps explicit OpenRouter BYOK text available when Clovy credits are unavailable", async () => {
     const user = userEvent.setup();
-    const veniceSession = { ...session, model: "venice-text" };
+    const openrouterSession = { ...session, model: "openrouter-text" };
     const defaultInvoke = mocks.invoke.getMockImplementation();
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([veniceSession]);
-      if (command === "get_agent_session") return Promise.resolve(veniceSession);
-      if (command === "list_venice_models") {
+      if (command === "list_agent_sessions") return Promise.resolve([openrouterSession]);
+      if (command === "get_agent_session") return Promise.resolve(openrouterSession);
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
-          selectedModel: "venice-text",
+          selectedModel: "openrouter-text",
           modelType: "text",
           models: [
             {
-              provider: "venice",
-              id: "venice-text",
-              name: "Venice text",
+              provider: "openrouter",
+              id: "openrouter-text",
+              name: "OpenRouter text",
               modelType: "text",
               traits: [],
               capabilities: ["tool-calling"],
@@ -3510,7 +3545,9 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "provider_model_settings") {
         return Promise.resolve({
           settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: true },
+          effectiveSettings: {
+            providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
+          },
         });
       }
       return defaultInvoke?.(command, args);
@@ -3518,19 +3555,19 @@ describe("AgentWorkspace runtime wiring", () => {
 
     render(
       <AgentWorkspace
-        initialSession={veniceSession}
+        initialSession={openrouterSession}
         creditActionsDisabledReason="Add credits to continue"
       />,
     );
     await screen.findByText("Earlier answer");
     const composer = screen.getByRole("textbox", { name: "Message Clovy" });
     await waitFor(() => expect(composer).toBeEnabled());
-    await user.type(composer, "Use my Venice key");
+    await user.type(composer, "Use my OpenRouter key");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({ model: "venice-text" }),
+        request: expect.objectContaining({ model: "openrouter-text" }),
       }),
     );
   });

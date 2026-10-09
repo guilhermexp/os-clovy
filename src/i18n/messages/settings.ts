@@ -69,8 +69,8 @@ export default defineMessages({
     "settings.autoPreference.title": "Auto preference",
     "settings.autoPreference.description":
       "Choose how Clovy balances model quality and usage cost.",
-    "settings.autoPreference.veniceNote":
-      "Auto does not use your Venice API key for notes or chat. Choose a Venice model above to use your key for notes and new chats.",
+    "settings.autoPreference.openRouterNote":
+      "Auto does not use your OpenRouter key for notes or chat. Choose an OpenRouter model above to use your key for notes and new chats.",
     "settings.autoPreference.updated": "Automatic model preference updated.",
 
     "settings.shortcuts.blurb":
@@ -192,29 +192,39 @@ export default defineMessages({
 
     "settings.safeMode.title": "Safe mode",
     "settings.safeMode.descriptionWithVideo":
-      "Blur adult content in generated and edited images, and hold back video prompts that request it (videos cannot be blurred). On by default; your image and video work stays private either way.",
+      "Ask the image provider to filter adult content in generated and edited images, and hold back video prompts that request it. On by default. Turning it off lifts the filter only where the provider allows it.",
     "settings.safeMode.description":
-      "Blur adult content in generated and edited images. On by default; your image work stays private either way.",
-    "settings.safeMode.aria": "Blur adult content in images",
-    "settings.safeMode.on": "Safe mode on: adult content is blurred.",
-    "settings.safeMode.off": "Safe mode off: images are not filtered.",
+      "Ask the image provider to filter adult content in generated and edited images. On by default. Turning it off lifts the filter only where the provider allows it.",
+    "settings.safeMode.aria": "Filter adult content in images",
+    "settings.safeMode.on": "Safe mode on: adult content is filtered.",
+    "settings.safeMode.off":
+      "Safe mode off: the filter is lifted only where the provider allows it.",
 
-    "settings.venice.title": "Venice API key",
-    "settings.venice.description":
-      "Use your own key for Venice models so Clovy credits are not used. Stored locally and sent only for Venice requests. For least privilege, use an inference-only key.",
-    "settings.venice.keySaved": "Key saved.",
-    "settings.venice.apiKey": "API key",
-    "settings.venice.savedHidden": "Saved key hidden",
-    "settings.venice.enterKey": "Enter a Venice API key before saving.",
-    "settings.venice.saved": "Venice API key saved.",
-    "settings.venice.removed": "Venice API key removed.",
-    "settings.venice.autoDialogTitle": "Auto does not use your Venice API key",
-    "settings.venice.autoDialogDescription":
+    "settings.providerKeys.title": "Provider API keys",
+    "settings.providerKeys.description":
+      "Use your own key for a provider so its requests do not use Clovy credits. Keys stay in your Keychain and travel only with that provider's requests through Clovy API, which does not store them. Clovy Auto never uses your keys.",
+    "settings.providerKeys.apiKey": "API key",
+    "settings.providerKeys.configured": "Configured",
+    "settings.providerKeys.missing": "Not configured",
+    "settings.providerKeys.savedHidden": "Saved key hidden",
+    "settings.providerKeys.enterKey": "Enter an API key before saving.",
+    "settings.providerKeys.saved": "{provider} API key saved.",
+    "settings.providerKeys.removed": "{provider} API key removed.",
+    "settings.providerKeys.groq.name": "Groq",
+    "settings.providerKeys.groq.description": "Transcription for dictation and notes",
+    "settings.providerKeys.openrouter.name": "OpenRouter",
+    "settings.providerKeys.openrouter.description":
+      "Text models for chat, notes, and cleanup. Never used by Auto.",
+    "settings.providerKeys.fal.name": "fal",
+    "settings.providerKeys.fal.description": "Images and video",
+    "settings.providerKeys.tavily.name": "Tavily",
+    "settings.providerKeys.tavily.description": "Web search",
+    "settings.openRouter.autoDialogTitle": "Auto does not use your OpenRouter key",
+    "settings.openRouter.autoDialogDescription":
       "Notes and chat are billed to Clovy credits while Auto is selected. Switch to {model} to use your key for notes and new chats.",
-    "settings.venice.aVeniceModel": "a Venice model",
-    "settings.venice.useModel": "Use {model}",
-    "settings.venice.keepAuto": "Keep Auto",
-
+    "settings.openRouter.anOpenRouterModel": "an OpenRouter model",
+    "settings.openRouter.useModel": "Use {model}",
+    "settings.openRouter.keepAuto": "Keep Auto",
     "settings.about.blurb": "Version, release channel, and other details about this copy of Clovy.",
     "settings.about.releaseVersion": "Release version",
     "settings.about.commit": "Commit",
@@ -424,8 +434,8 @@ export default defineMessages({
     "settings.autoPreference.title": "Preferência do Auto",
     "settings.autoPreference.description":
       "Escolha como o Clovy equilibra a qualidade do modelo e o custo de uso.",
-    "settings.autoPreference.veniceNote":
-      "O Auto não usa sua chave de API da Venice para notas ou conversas. Escolha um modelo da Venice acima para usar sua chave em notas e novas conversas.",
+    "settings.autoPreference.openRouterNote":
+      "O Auto não usa sua chave da OpenRouter para notas ou conversas. Escolha um modelo da OpenRouter acima para usar sua chave em notas e novas conversas.",
     "settings.autoPreference.updated": "Preferência do modelo automático atualizada.",
 
     "settings.shortcuts.blurb":
@@ -552,29 +562,39 @@ export default defineMessages({
 
     "settings.safeMode.title": "Modo seguro",
     "settings.safeMode.descriptionWithVideo":
-      "Desfoca conteúdo adulto em imagens geradas e editadas e retém prompts de vídeo que peçam esse conteúdo (vídeos não podem ser desfocados). Ativado por padrão; seu trabalho com imagens e vídeos continua privado de qualquer forma.",
+      "Pede ao provedor de imagens que filtre conteúdo adulto em imagens geradas e editadas e retém prompts de vídeo que peçam esse conteúdo. Ativado por padrão. Ao desativar, o filtro só é removido onde o provedor permite.",
     "settings.safeMode.description":
-      "Desfoca conteúdo adulto em imagens geradas e editadas. Ativado por padrão; seu trabalho com imagens continua privado de qualquer forma.",
-    "settings.safeMode.aria": "Desfocar conteúdo adulto em imagens",
-    "settings.safeMode.on": "Modo seguro ativado: conteúdo adulto fica desfocado.",
-    "settings.safeMode.off": "Modo seguro desativado: as imagens não são filtradas.",
+      "Pede ao provedor de imagens que filtre conteúdo adulto em imagens geradas e editadas. Ativado por padrão. Ao desativar, o filtro só é removido onde o provedor permite.",
+    "settings.safeMode.aria": "Filtrar conteúdo adulto em imagens",
+    "settings.safeMode.on": "Modo seguro ativado: conteúdo adulto é filtrado.",
+    "settings.safeMode.off":
+      "Modo seguro desativado: o filtro só é removido onde o provedor permite.",
 
-    "settings.venice.title": "Chave de API da Venice",
-    "settings.venice.description":
-      "Use sua própria chave nos modelos da Venice para não gastar créditos do Clovy. Ela fica salva localmente e só é enviada em solicitações à Venice. Para o menor privilégio, use uma chave só de inferência.",
-    "settings.venice.keySaved": "Chave salva.",
-    "settings.venice.apiKey": "Chave de API",
-    "settings.venice.savedHidden": "Chave salva oculta",
-    "settings.venice.enterKey": "Informe uma chave de API da Venice antes de salvar.",
-    "settings.venice.saved": "Chave de API da Venice salva.",
-    "settings.venice.removed": "Chave de API da Venice removida.",
-    "settings.venice.autoDialogTitle": "O Auto não usa sua chave de API da Venice",
-    "settings.venice.autoDialogDescription":
+    "settings.providerKeys.title": "Chaves de API de provedores",
+    "settings.providerKeys.description":
+      "Use sua própria chave de um provedor para que as solicitações dele não usem créditos do Clovy. As chaves ficam nas Chaves do seu Mac e só seguem com as solicitações desse provedor pela API do Clovy, que não as armazena. O Auto do Clovy nunca usa suas chaves.",
+    "settings.providerKeys.apiKey": "Chave de API",
+    "settings.providerKeys.configured": "Configurada",
+    "settings.providerKeys.missing": "Não configurada",
+    "settings.providerKeys.savedHidden": "Chave salva oculta",
+    "settings.providerKeys.enterKey": "Informe uma chave de API antes de salvar.",
+    "settings.providerKeys.saved": "Chave de API de {provider} salva.",
+    "settings.providerKeys.removed": "Chave de API de {provider} removida.",
+    "settings.providerKeys.groq.name": "Groq",
+    "settings.providerKeys.groq.description": "Transcrição para ditado e notas",
+    "settings.providerKeys.openrouter.name": "OpenRouter",
+    "settings.providerKeys.openrouter.description":
+      "Modelos de texto para conversas, notas e limpeza. Nunca usado pelo Auto.",
+    "settings.providerKeys.fal.name": "fal",
+    "settings.providerKeys.fal.description": "Imagens e vídeo",
+    "settings.providerKeys.tavily.name": "Tavily",
+    "settings.providerKeys.tavily.description": "Busca na web",
+    "settings.openRouter.autoDialogTitle": "O Auto não usa sua chave da OpenRouter",
+    "settings.openRouter.autoDialogDescription":
       "Notas e conversas são cobradas em créditos do Clovy enquanto o Auto estiver selecionado. Mude para {model} para usar sua chave em notas e novas conversas.",
-    "settings.venice.aVeniceModel": "um modelo da Venice",
-    "settings.venice.useModel": "Usar {model}",
-    "settings.venice.keepAuto": "Manter o Auto",
-
+    "settings.openRouter.anOpenRouterModel": "um modelo da OpenRouter",
+    "settings.openRouter.useModel": "Usar {model}",
+    "settings.openRouter.keepAuto": "Manter o Auto",
     "settings.about.blurb": "Versão, canal de lançamento e outros detalhes desta cópia do Clovy.",
     "settings.about.releaseVersion": "Versão",
     "settings.about.commit": "Commit",

@@ -14,13 +14,23 @@ import {
 import type { RefObject } from "react";
 import { createPortal } from "react-dom";
 import { type MessageKey, type TFunction, useT } from "../../i18n";
-import { modelAvailableForMode, modelIsPrivate, modelPrivacyBadge } from "../../lib/model-privacy";
+import {
+  BUILTIN_PROVIDER_NAME_KEYS,
+  modelAvailableForMode,
+  modelIsPrivate,
+  modelMissingProviderKey,
+  modelPrivacyBadge,
+} from "../../lib/model-privacy";
 import { modelMatchesQuery } from "../../lib/model-search";
 import {
   DEFAULT_GENERATION_SUGGESTION_ID,
   suggestedModelsForMode,
 } from "../../lib/suggested-models";
-import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
+import type {
+  ProviderApiKeysConfigured,
+  ProviderModelDto,
+  ProviderModelMode,
+} from "../../lib/tauri";
 import {
   thinkingOptionForLevel,
   THINKING_LEVELS,
@@ -134,7 +144,7 @@ export function ModelPickerPopover({
   ariaLabel: ariaLabelProp,
   suggestedListLabel: suggestedListLabelProp,
   allModelsLabel: allModelsLabelProp,
-  veniceApiKeyConfigured = false,
+  providerApiKeysConfigured,
   catalogLoaded,
   suggestedModelIds,
   rootSearchRef,
@@ -151,8 +161,8 @@ export function ModelPickerPopover({
 }: {
   mode: ProviderModelMode;
   flyout: ModelPickerFlyout;
-  model?: VeniceModelDto;
-  options: VeniceModelDto[];
+  model?: ProviderModelDto;
+  options: ProviderModelDto[];
   costQuality?: number;
   search: string;
   popoverRef: RefObject<HTMLDivElement>;
@@ -162,11 +172,12 @@ export function ModelPickerPopover({
   ariaLabel?: string;
   suggestedListLabel?: string;
   allModelsLabel?: string;
-  /** With a Venice API key saved, the pinned Auto section carries a billing
-   * note: Auto is a Clovy-managed route, so it meters Clovy credits and never
-   * uses the key. The note keeps that visible at the moment Auto could be
-   * switched on (JUN-329). */
-  veniceApiKeyConfigured?: boolean;
+  /** Which providers have the user's own key saved. With it, rows Clovy cannot
+   * serve without that key (`serviceAvailable: false`) stay out of the lists
+   * and a note says which key to add. With an OpenRouter key saved, the pinned
+   * Auto section also carries a billing note: Auto is a Clovy-managed route,
+   * so it meters Clovy credits and never uses the key (JUN-329). */
+  providerApiKeysConfigured?: ProviderApiKeysConfigured;
   /** Whether the provider catalog behind `options` has actually loaded.
    * `options` alone cannot say: the host injects a synthetic entry for the
    * current selection, so it is never empty. Hosts that know their raw
@@ -230,7 +241,7 @@ export function ModelPickerPopover({
     side: "left" | "right";
   } | null>(null);
   const [catalogHover, setCatalogHover] = useState<{
-    model: VeniceModelDto;
+    model: ProviderModelDto;
     rowRect: HoverBridgeRect;
     top: number;
     x: number;
@@ -411,12 +422,29 @@ export function ModelPickerPopover({
       options.filter(
         (option) =>
           modelAvailableForMode(mode, option) &&
+          !(
+            providerApiKeysConfigured && modelMissingProviderKey(option, providerApiKeysConfigured)
+          ) &&
           // With the Auto section shown, the toggle is the router's one home;
           // keep the catalog's Auto entry out of the lists so it doesn't
           // double up as a row.
           !(onCostQualityChange && showAutoToggle && option.id === AUTO_MODEL_ID),
       ),
-    [mode, onCostQualityChange, options, showAutoToggle],
+    [mode, onCostQualityChange, options, providerApiKeysConfigured, showAutoToggle],
+  );
+  const missingProviderKeys = useMemo(
+    () =>
+      providerApiKeysConfigured
+        ? [
+            ...new Set(
+              options.flatMap((option) => {
+                const provider = modelMissingProviderKey(option, providerApiKeysConfigured);
+                return provider ? [provider] : [];
+              }),
+            ),
+          ]
+        : [],
+    [options, providerApiKeysConfigured],
   );
   const suggested = useMemo(() => {
     if (!suggestedModelIds) return suggestedModelsForMode(mode, selectable);
@@ -568,7 +596,7 @@ export function ModelPickerPopover({
   filteredOptionsRef.current = filteredOptions;
 
   const showCatalogHover = useCallback(
-    (option: VeniceModelDto, row: HTMLElement) => {
+    (option: ProviderModelDto, row: HTMLElement) => {
       cancelCatalogClose();
       const panel = flyoutRef.current ?? popoverRef.current;
       if (!panel) return;
@@ -883,7 +911,7 @@ export function ModelPickerPopover({
                       aria-label={t("settingsPanels.picker.autoAria")}
                     />
                   </div>
-                  {veniceApiKeyConfigured ? (
+                  {providerApiKeysConfigured?.openrouter ? (
                     <p className="agent-composer-model-auto-note">
                       {t("settingsPanels.picker.autoBillingNote")}
                     </p>
@@ -1093,6 +1121,13 @@ export function ModelPickerPopover({
                * controls: with search leading the panel, a top "Suggested" would
                * read as a caption for Auto and Effort. */}
               <p className="agent-composer-model-title">{title}</p>
+              {missingProviderKeys.map((provider) => (
+                <p key={provider} className="agent-composer-model-auto-note">
+                  {t("settingsPanels.picker.providerKeyNeeded", {
+                    provider: t(BUILTIN_PROVIDER_NAME_KEYS[provider]),
+                  })}
+                </p>
+              ))}
               <div
                 className="agent-composer-model-menu"
                 role="listbox"
@@ -1272,7 +1307,7 @@ export function ModelPickerCardContent({
   withDescription,
   animateChange = false,
 }: {
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   withDescription?: boolean;
   animateChange?: boolean;
 }) {
@@ -1336,11 +1371,11 @@ function ModelPickerOption({
   onSelect,
   onHover,
 }: {
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   selected: boolean;
   active?: boolean;
   onSelect: (modelId: string, costQuality?: number) => void;
-  onHover: (model: VeniceModelDto, row: HTMLElement, immediate: boolean) => void;
+  onHover: (model: ProviderModelDto, row: HTMLElement, immediate: boolean) => void;
 }) {
   return (
     <button
@@ -1363,7 +1398,7 @@ function ModelPickerOption({
   );
 }
 
-function ModelPickerOptionText({ model }: { model: VeniceModelDto }) {
+function ModelPickerOptionText({ model }: { model: ProviderModelDto }) {
   return (
     <>
       <span

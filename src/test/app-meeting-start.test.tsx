@@ -200,15 +200,7 @@ vi.mock("../lib/tauri", () => ({
   providerModelSettings: vi.fn(async () => ({
     settings: { generationModel: "" },
   })),
-  setVeniceApiKey: vi.fn(async () => ({
-    generationModel: "",
-    veniceApiKeyConfigured: true,
-  })),
-  clearVeniceApiKey: vi.fn(async () => ({
-    generationModel: "",
-    veniceApiKeyConfigured: false,
-  })),
-  listVeniceModels: vi.fn(async () => ({
+  listProviderModels: vi.fn(async () => ({
     mode: "generation",
     modelType: "text",
     selectedModel: "",

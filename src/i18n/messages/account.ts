@@ -84,12 +84,12 @@ export default defineMessages({
     "account.funding.starterBody": "Your starter credits are used up. Upgrade to keep using Clovy.",
     "account.funding.starterWaiting": "Waiting for your upgrade",
     "account.funding.starterReopen": "Reopen checkout",
-    "account.funding.autoVenice":
-      "Auto can route beyond Venice, so it uses Clovy credits. Your Venice API key applies only when you select a Venice model.",
+    "account.funding.autoOpenRouter":
+      "Auto is billed to Clovy credits and does not use your OpenRouter key. Select an OpenRouter model to continue with your key.",
     "account.funding.closedStripe": "I closed the Stripe page",
     "account.funding.checking": "Checking...",
     "account.funding.checkAgain": "Check again",
-    "account.funding.selectVenice": "Select a Venice model",
+    "account.funding.selectOpenRouter": "Select an OpenRouter model",
     "account.funding.goMax": "Or go Max",
     "account.funding.paymentAttention": "Payment needs attention",
     "account.funding.outOfCredits": "Out of credits",
@@ -190,12 +190,12 @@ export default defineMessages({
       "Seus créditos iniciais acabaram. Faça upgrade para continuar usando o Clovy.",
     "account.funding.starterWaiting": "Aguardando seu upgrade",
     "account.funding.starterReopen": "Reabrir checkout",
-    "account.funding.autoVenice":
-      "O Auto pode usar modelos além da Venice, então consome créditos do Clovy. Sua chave de API da Venice só vale quando você seleciona um modelo Venice.",
+    "account.funding.autoOpenRouter":
+      "O Auto é cobrado dos créditos do Clovy e não usa sua chave da OpenRouter. Selecione um modelo da OpenRouter para continuar com sua chave.",
     "account.funding.closedStripe": "Fechei a página do Stripe",
     "account.funding.checking": "Verificando...",
     "account.funding.checkAgain": "Verificar de novo",
-    "account.funding.selectVenice": "Selecionar um modelo Venice",
+    "account.funding.selectOpenRouter": "Selecionar um modelo OpenRouter",
     "account.funding.goMax": "Ou vá de Max",
     "account.funding.paymentAttention": "O pagamento precisa de atenção",
     "account.funding.outOfCredits": "Sem créditos",

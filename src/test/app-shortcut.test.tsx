@@ -27,8 +27,8 @@ import type {
   NoteDto,
   RecordingSessionDto,
   RecordingSourceReadinessDto,
-  VeniceModelDto,
-  VeniceModelsResponse,
+  ProviderModelDto,
+  ProviderModelsResponse,
 } from "../lib/tauri";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
@@ -125,7 +125,7 @@ const mocks = vi.hoisted(() => ({
   listAgentSessions: vi.fn(),
   listSessionFolders: vi.fn(),
   listSessionPartitions: vi.fn(),
-  listVeniceModels: vi.fn(),
+  listProviderModels: vi.fn(),
   localVideoFileSrc: vi.fn((path: string) => `asset://${path}`),
   p3aSettings: vi.fn(),
   playRecordingSound: vi.fn(),
@@ -286,18 +286,10 @@ vi.mock("../lib/tauri", () => ({
   p3aSettings: mocks.p3aSettings,
   providerModelSettings: mocks.providerModelSettings,
   setP3aEnabled: mocks.setP3aEnabled,
-  listVeniceModels: mocks.listVeniceModels,
+  listProviderModels: mocks.listProviderModels,
   localVideoFileSrc: mocks.localVideoFileSrc,
   videoGenerate: mocks.videoGenerate,
   videoStatus: mocks.videoStatus,
-  setVeniceApiKey: vi.fn(async () => ({
-    generationModel: "",
-    veniceApiKeyConfigured: true,
-  })),
-  clearVeniceApiKey: vi.fn(async () => ({
-    generationModel: "",
-    veniceApiKeyConfigured: false,
-  })),
   suggestAgentSessionTitle: mocks.suggestAgentSessionTitle,
 }));
 
@@ -332,14 +324,13 @@ function agentSession(id: string, title: string): AgentSessionDto {
   };
 }
 
-function generationModel(id: string, overrides: Partial<VeniceModelDto> = {}): VeniceModelDto {
+function generationModel(id: string, overrides: Partial<ProviderModelDto> = {}): ProviderModelDto {
   return {
-    provider: "venice",
+    provider: "openrouter",
     id,
     name: id,
     modelType: "text",
-    privacy: "private",
-    traits: ["private"],
+    traits: [],
     capabilities: ["supportsFunctionCalling"],
     priceUnit: "tokens",
     priceDescription: "",
@@ -518,14 +509,18 @@ describe("App shortcuts", () => {
     mocks.listAgentSessions.mockResolvedValue([]);
     mocks.listSessionFolders.mockResolvedValue([]);
     mocks.listSessionPartitions.mockResolvedValue([]);
-    mocks.listVeniceModels.mockResolvedValue({
+    mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
       modelType: "text",
       selectedModel: "",
       models: [],
     });
     mocks.providerModelSettings.mockResolvedValue({
-      settings: { generationModel: "", costQuality: 100 },
+      settings: {
+        generationModel: "",
+        costQuality: 100,
+        providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
+      },
     });
     mocks.p3aSettings.mockResolvedValue({
       settings: {
@@ -645,14 +640,16 @@ describe("App shortcuts", () => {
   });
 
   it("returns only Auto and the live curated desktop models with canonical labels", async () => {
-    mocks.listVeniceModels.mockResolvedValue({
+    mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
       modelType: "text",
-      selectedModel: "zai-org-glm-5-2",
+      selectedModel: "z-ai/glm-5.2",
       models: [
-        generationModel("kimi-k2-6", { name: "Kimi K2.6" }),
+        generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" }),
         generationModel("uncurated", { name: "Uncurated" }),
-        generationModel("zai-org-glm-5-2", { name: "GLM 5.2" }),
+        generationModel("z-ai/glm-5.2", { name: "GLM 5.2" }),
+        // Curated, but it needs the user's own key, which is not saved.
+        generationModel("moonshotai/kimi-k3", { name: "Kimi K3", serviceAvailable: false }),
       ],
     });
     render(<App />);
@@ -678,13 +675,11 @@ describe("App shortcuts", () => {
               routing: "automatic",
             }),
             expect.objectContaining({
-              id: "zai-org-glm-5-2",
+              id: "z-ai/glm-5.2",
               name: "GLM 5.2",
-              privacy: "private",
-              privacyLabel: "Private mode",
             }),
             expect.objectContaining({
-              id: "kimi-k2-6",
+              id: "moonshotai/kimi-k2.6",
               name: "Kimi K2.6",
               priceLabel: "$0.85 input / $4.66 output per 1M tokens",
             }),
@@ -698,17 +693,17 @@ describe("App shortcuts", () => {
     const session = {
       ...agentSession("session-model", "Model session"),
       status: "running" as const,
-      model: "zai-org-glm-5-2",
+      model: "z-ai/glm-5.2",
     };
     mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listVeniceModels.mockResolvedValue({
+    mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
       modelType: "text",
-      selectedModel: "zai-org-glm-5-2",
-      models: [generationModel("kimi-k2-6", { name: "Kimi K2.6" })],
+      selectedModel: "z-ai/glm-5.2",
+      models: [generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" })],
     });
     mocks.providerModelSettings.mockResolvedValue({
-      settings: { generationModel: "zai-org-glm-5-2", costQuality: 100 },
+      settings: { generationModel: "z-ai/glm-5.2", costQuality: 100 },
     });
     window.localStorage.setItem(
       "clovy.agent.sessionModels",
@@ -743,7 +738,7 @@ describe("App shortcuts", () => {
           operationId: "operation-model-set",
           intent: {
             type: "sessionModelSet",
-            data: { storedSessionId: session.id, modelId: "kimi-k2-6" },
+            data: { storedSessionId: session.id, modelId: "moonshotai/kimi-k2.6" },
           },
         },
       });
@@ -753,13 +748,13 @@ describe("App shortcuts", () => {
         type: "sessionModel",
         data: {
           storedSessionId: session.id,
-          modelId: "kimi-k2-6",
+          modelId: "moonshotai/kimi-k2.6",
           modelName: "Kimi K2.6",
         },
       }),
     );
     expect(JSON.parse(window.localStorage.getItem("clovy.agent.sessionModels") ?? "{}")).toEqual({
-      [session.id]: "kimi-k2-6",
+      [session.id]: "moonshotai/kimi-k2.6",
     });
     expect(mocks.startAgentRun).not.toHaveBeenCalled();
     expect(mocks.cancelAgentRun).not.toHaveBeenCalled();
@@ -768,19 +763,19 @@ describe("App shortcuts", () => {
   it("publishes a model event when the desktop stages a session choice", async () => {
     const session = agentSession("session-desktop-model", "Desktop model session");
     mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listVeniceModels.mockResolvedValue({
+    mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
       modelType: "text",
-      selectedModel: "zai-org-glm-5-2",
-      models: [generationModel("kimi-k2-6", { name: "Kimi K2.6" })],
+      selectedModel: "z-ai/glm-5.2",
+      models: [generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" })],
     });
     mocks.providerModelSettings.mockResolvedValue({
-      settings: { generationModel: "zai-org-glm-5-2", costQuality: 100 },
+      settings: { generationModel: "z-ai/glm-5.2", costQuality: 100 },
     });
     render(<App />);
 
     await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => rememberSessionModel(session.id, "kimi-k2-6"));
+    act(() => rememberSessionModel(session.id, "moonshotai/kimi-k2.6"));
 
     await waitFor(() =>
       expect(mocks.companionPublishAgentEvent).toHaveBeenCalledWith({
@@ -788,7 +783,7 @@ describe("App shortcuts", () => {
         data: {
           selection: {
             storedSessionId: session.id,
-            modelId: "kimi-k2-6",
+            modelId: "moonshotai/kimi-k2.6",
             modelName: "Kimi K2.6",
           },
         },
@@ -809,12 +804,12 @@ describe("App shortcuts", () => {
 
     await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
     mocks.companionPublishAgentEvent.mockClear();
-    mocks.listVeniceModels.mockClear();
-    const catalog = deferred<VeniceModelsResponse>();
-    mocks.listVeniceModels.mockReturnValueOnce(catalog.promise);
+    mocks.listProviderModels.mockClear();
+    const catalog = deferred<ProviderModelsResponse>();
+    mocks.listProviderModels.mockReturnValueOnce(catalog.promise);
 
     await act(async () => {
-      rememberSessionModel(partitionASession.id, "kimi-k2-6");
+      rememberSessionModel(partitionASession.id, "moonshotai/kimi-k2.6");
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -823,8 +818,8 @@ describe("App shortcuts", () => {
       catalog.resolve({
         mode: "generation",
         modelType: "text",
-        selectedModel: "zai-org-glm-5-2",
-        models: [generationModel("kimi-k2-6", { name: "Kimi K2.6" })],
+        selectedModel: "z-ai/glm-5.2",
+        models: [generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" })],
       });
       await catalog.promise;
       await Promise.resolve();
@@ -837,11 +832,11 @@ describe("App shortcuts", () => {
   it("rejects uncurated companion model writes", async () => {
     const session = agentSession("session-model-rejected", "Rejected model session");
     mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listVeniceModels.mockResolvedValue({
+    mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
       modelType: "text",
-      selectedModel: "zai-org-glm-5-2",
-      models: [generationModel("kimi-k2-6")],
+      selectedModel: "z-ai/glm-5.2",
+      models: [generationModel("moonshotai/kimi-k2.6")],
     });
     render(<App />);
 

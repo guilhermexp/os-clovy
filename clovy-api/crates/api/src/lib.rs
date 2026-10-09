@@ -51,6 +51,7 @@ pub use handlers::web::{WebFetchRequest, WebSearchRequest};
 pub use share_rate_limit::ShareRateLimiter;
 pub use state::{
     ApiLimits, ApiState, ApiStateParams, AttestationInfo, CompanionPushConfig, ShareViewerInfo,
+    UpstreamServiceKeys,
 };
 
 /// Real shipped app version, sent by the desktop client on every request.

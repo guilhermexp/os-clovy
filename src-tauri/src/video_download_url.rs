@@ -49,7 +49,7 @@ pub fn video_download_client_builder(
         return Err("video download URL host did not resolve".to_string());
     }
 
-    // Venice pre-signed video URLs are direct GETs. Redirects fail closed, so
+    // Provider video download URLs are direct GETs. Redirects fail closed, so
     // no hop can bypass the validation and address pinning above. If a provider
     // later needs CDN redirects, validate, resolve, and pin every hop before
     // following it.

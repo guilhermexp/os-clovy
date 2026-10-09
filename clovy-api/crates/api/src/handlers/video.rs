@@ -11,23 +11,23 @@ use axum::{
     http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
-use clovy_domain::GeneratedVideo;
+use clovy_domain::{GeneratedVideo, UpstreamProvider};
 use clovy_services::{JobId, VideoAnimateParams, VideoGenerateParams, VideoStatusOutput};
 use serde::{Deserialize, Serialize};
 
 const VIDEO_MIME_FALLBACK: &str = "video/mp4";
 
-/// A text-to-video request. `duration` is Venice's string enum; per-model valid
-/// combinations of `duration`/`resolution`/`aspectRatio`/`audio` are enforced by
-/// Venice, surfaced as a bad request.
+/// A text-to-video request. Per-model valid combinations of
+/// `duration`/`resolution`/`aspectRatio`/`audio` are enforced upstream,
+/// surfaced as a bad request.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoGenerateRequest {
     pub prompt: String,
     pub model: String,
-    /// Optional client-generated id for deduping a retried video create to one
-    /// Venice queue. New clients send a fresh id per logical call and reuse it
-    /// only when retrying a dropped response.
+    /// Optional client-generated id for deduping a retried video create.
+    /// New clients send a fresh id per logical call and reuse it only when retrying
+    /// a dropped response.
     #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default)]
@@ -99,17 +99,18 @@ pub enum VideoStatusResponse {
     },
 }
 
-/// Text-to-video: authorize a hold, quote, queue the Venice job, and return a
+/// Text-to-video: authorize a hold, quote, queue the fal job, and return a
 /// `jobId`. The client polls `GET /v1/video/status/:jobId`; the charge settles
 /// once on the completing poll (see `VideoService`). An unpriced model is
-/// rejected `model_not_priced`. Video is always Clovy-metered in the first cut.
+/// rejected `model_not_priced`.
 pub(crate) async fn generate(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(request): Json<VideoGenerateRequest>,
 ) -> Result<Json<ApiResponse<VideoJobResponse>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Fal)?;
+    state.ensure_provider_configured(UpstreamProvider::Fal, &provider_credentials)?;
 
     let prompt = required_prompt(&request.prompt)?;
     let model = required_model(&request.model)?;
@@ -149,7 +150,8 @@ pub(crate) async fn animate(
     Json(request): Json<VideoAnimateRequest>,
 ) -> Result<Json<ApiResponse<VideoJobResponse>>, ApiError> {
     let user_id = authenticated_user(&state, &headers).await?;
-    let provider_credentials = provider_credentials(&headers)?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Fal)?;
+    state.ensure_provider_configured(UpstreamProvider::Fal, &provider_credentials)?;
 
     let prompt = required_prompt(&request.prompt)?;
     let image = request.image.trim().to_string();
@@ -215,7 +217,11 @@ pub(crate) async fn status(
     }
     validation::validate_text_len("job_id", &job_id, validation::MAX_ID_CHARS)?;
 
-    let output = state.video().status(user_id, JobId(job_id)).await?;
+    let provider_credentials = provider_credentials(&headers, UpstreamProvider::Fal)?;
+    let output = state
+        .video()
+        .status(user_id, JobId(job_id), provider_credentials)
+        .await?;
     Ok(match output {
         VideoStatusOutput::Processing {
             average_execution_ms,

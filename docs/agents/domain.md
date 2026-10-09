@@ -26,7 +26,7 @@ This is a **single-context** repo: one glossary covers the React frontend
 | Live transcript preview | 0002 (ephemeral, never source of truth) |
 | Audio capture, sources, turns | 0004 (out-of-process system audio helper), 0005 (one WAV per source) |
 | Agent harness, runtime protocol, sandboxing, sessions | 0038 (Clovy-owned OpenAI Agents SDK harness), 0039 (Routines and MCP) |
-| Model picker, capabilities, pricing | 0007 (capabilities from live Venice catalog, never `traits`) |
+| Model picker, capabilities, pricing | 0007 (provider catalog, never `traits`; read the 2026-10-08 OpenRouter addendum) |
 | Image generation / editing | 0008 (`/image` fast path + LLM tools) |
 | Clovy companion trust, native UI, pairing, relay, and mutation recovery | 0041-0048 (read the supersession chain through 0048) |
 

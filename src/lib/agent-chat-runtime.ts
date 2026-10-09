@@ -20,7 +20,6 @@ export type AgentChatToolPart = {
   name: string;
   text: string;
   status: "running" | "complete" | "failed";
-  media?: "image" | "video";
 };
 export type AgentApprovalChoice = "once" | "session" | "always" | "deny";
 export type AgentChatApprovalPart = {

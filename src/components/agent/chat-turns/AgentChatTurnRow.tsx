@@ -144,38 +144,20 @@ export function AgentChatTurnRow({
   const toolParts = turn.parts.filter(
     (part): part is Extract<AgentChatPart, { type: "tool" }> => part.type === "tool",
   );
-  // A running generation tool holds space with the same placeholder the /image
-  // fast path uses, so the result doesn't pop in from nothing when the tool
-  // completes and its real image/video part takes over the slot.
-  const runningMediaTools = toolParts.filter(
-    (part): part is Extract<AgentChatPart, { type: "tool" }> & { media: "image" | "video" } =>
-      part.status === "running" && part.media !== undefined,
-  );
-  const hasGeneratedImage = turn.parts.some((part) => part.type === "image");
-  const hasGeneratedVideo = turn.parts.some((part) => part.type === "video");
-  // The media canvas owns successful generation from start through result.
-  // Keeping the generic tool row alongside it would show two activity states,
-  // then make that row pop back in above the finished media. Failed media tools
-  // and unrelated tools still render normally.
-  const visibleToolParts = toolParts.filter((part) => {
-    if (!part.media || part.status === "failed") return true;
-    if (part.status === "running") return false;
-    return part.media === "image" ? !hasGeneratedImage : !hasGeneratedVideo;
-  });
-  const visibleToolPartSet = new Set(visibleToolParts);
-  const visibleToolStacks = new Map<string, typeof visibleToolParts>();
-  let visibleToolStack: typeof visibleToolParts | undefined;
+  // Adjacent tool rows render as one stack, keyed by the stack's first row.
+  const toolStacks = new Map<string, typeof toolParts>();
+  let toolStack: typeof toolParts | undefined;
   for (const part of turn.parts) {
-    if (part.type !== "tool" || !visibleToolPartSet.has(part)) {
-      visibleToolStack = undefined;
+    if (part.type !== "tool") {
+      toolStack = undefined;
       continue;
     }
-    if (visibleToolStack) {
-      visibleToolStack.push(part);
+    if (toolStack) {
+      toolStack.push(part);
       continue;
     }
-    visibleToolStack = [part];
-    visibleToolStacks.set(part.id, visibleToolStack);
+    toolStack = [part];
+    toolStacks.set(part.id, toolStack);
   }
   const reasoningGroups = new Map<
     Extract<AgentChatPart, { type: "reasoning" }>,
@@ -204,8 +186,7 @@ export function AgentChatTurnRow({
     reasoningGroups.set(part, reasoningGroup);
   }
   // The disclosure owns internal reasoning only. Tool/action rows stay visible
-  // outside it so users can see what Clovy is doing without expanding Thought;
-  // a running media tool is represented by its canvas instead, just above.
+  // outside it so users can see what Clovy is doing without expanding Thought.
   const thinkingRunning = reasoningParts.some((part) => part.status === "running");
   const runningReasoningGroup = [...reasoningGroups.values()].find((group) =>
     group.parts.some((part) => part.status === "running"),
@@ -503,27 +484,14 @@ export function AgentChatTurnRow({
           hasActionCard ? " agent-assistant-turn-body-action-card" : ""
         }`}
       >
-        {runningMediaTools.map((tool) =>
-          tool.media === "image" ? (
-            <AgentGeneratedImage
-              key={`generating:${tool.id}`}
-              part={{ type: "image", status: "running", prompt: "" }}
-            />
-          ) : (
-            <AgentGeneratedVideo
-              key={`generating:${tool.id}`}
-              part={{ type: "video", status: "running", prompt: "" }}
-            />
-          ),
-        )}
         {turn.parts.map((part, index) =>
           part.type === "reasoning" ? (
             renderReasoningGroup(part)
           ) : part.type === "tool" ? (
-            visibleToolStacks.has(part.id) ? (
+            toolStacks.has(part.id) ? (
               <AgentToolStack
                 key={`${turn.id}:tools:${part.id}`}
-                parts={visibleToolStacks.get(part.id) ?? []}
+                parts={toolStacks.get(part.id) ?? []}
               />
             ) : null
           ) : part.type === "text" ? (

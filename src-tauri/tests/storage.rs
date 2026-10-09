@@ -766,7 +766,7 @@ async fn delete_profile_data_removes_owned_rows_and_cascades_satellites() {
     query(
         "INSERT INTO generation_results
            (id, note_id, transcript_id, provider, prompt_version, status, created_at, updated_at)
-         VALUES ('generation-x', ?, 'transcript-x', 'venice', 'v1', 'succeeded', ?, ?)",
+         VALUES ('generation-x', ?, 'transcript-x', 'openrouter', 'v1', 'succeeded', ?, ?)",
     )
     .bind(&note_x.id)
     .bind(&now)

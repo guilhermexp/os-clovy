@@ -196,10 +196,10 @@ async fn integration_note_generate_returns_enveloped_response() -> Result<(), Bo
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["content"], "Generated note body");
     assert_eq!(body["data"]["titleSuggestion"], "Generated title");
-    assert_eq!(body["data"]["provider"], "fake-generator");
-    assert_eq!(body["data"]["upstreamProvider"], "phala");
-    assert_eq!(body["data"]["privacyLevel"], "no-retention");
-    assert_eq!(body["data"]["upstreamEndpoint"], "venice-private");
+    assert_eq!(body["data"]["provider"], "openrouter");
+    assert_eq!(body["data"]["upstreamProvider"], "openrouter");
+    assert_eq!(body["data"]["privacyLevel"], serde_json::Value::Null);
+    assert_eq!(body["data"]["upstreamEndpoint"], serde_json::Value::Null);
     assert_eq!(body["data"]["promptVersion"], NOTE_GENERATE_PROMPT_VERSION);
     assert_eq!(body["data"]["creditsCharged"], 1);
     Ok(())
@@ -412,22 +412,10 @@ async fn integration_agent_chat_stream_returns_upstream_sse_body() -> Result<(),
             .headers()
             .get("x-os-provider")
             .and_then(|value| value.to_str().ok()),
-        Some("phala")
+        Some("openrouter")
     );
-    assert_eq!(
-        response
-            .headers()
-            .get("x-os-privacy-level")
-            .and_then(|value| value.to_str().ok()),
-        Some("no-retention")
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get("x-os-endpoint")
-            .and_then(|value| value.to_str().ok()),
-        Some("venice-private")
-    );
+    assert_eq!(response.headers().get("x-os-privacy-level"), None);
+    assert_eq!(response.headers().get("x-os-endpoint"), None);
     assert_eq!(
         response
             .headers()
@@ -576,7 +564,7 @@ async fn integration_agent_chat_routes_stale_model_through_auto() -> Result<(), 
     let response = send(json_request(
         "/v1/chat/completions",
         &serde_json::json!({
-            "model": "retired-venice-model",
+            "model": "retired-text-model",
             "messages": [{ "role": "user", "content": "hello" }]
         }),
         Some(AUTHORIZATION),
@@ -590,10 +578,10 @@ async fn integration_agent_chat_routes_stale_model_through_auto() -> Result<(), 
 }
 
 #[tokio::test]
-async fn integration_agent_chat_local_auto_fallback_strips_auto_policy()
+async fn integration_agent_chat_auto_resolves_quality_tier_and_strips_auto_policy()
 -> Result<(), Box<dyn Error>> {
     let completer = Arc::new(RecordingChatCompleter::default());
-    let app = router(test_state_with_local_text_pricing(
+    let app = router(test_state_with_text_pricing_without_auto(
         Arc::new(FakeGenerator),
         completer.clone(),
     ));
@@ -619,46 +607,17 @@ async fn integration_agent_chat_local_auto_fallback_strips_auto_policy()
         .lock()
         .map_err(|_| "chat request mutex poisoned")?;
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].model.0, "zai-org-glm-5-2");
+    assert_eq!(requests[0].model.0, "z-ai/glm-5.2");
     assert!(requests[0].body.get("auto").is_none());
     assert!(!requests[0].body.to_string().contains("cost_quality"));
     Ok(())
 }
 
 #[tokio::test]
-async fn integration_agent_chat_non_local_missing_auto_fails_loudly() -> Result<(), Box<dyn Error>>
-{
-    let app = router(test_state_with_text_pricing_without_auto(
-        false,
-        Arc::new(FakeGenerator),
-        Arc::new(FakeChatCompleter),
-    ));
-    let response = match app
-        .oneshot(json_request(
-            "/v1/chat/completions",
-            &serde_json::json!({
-                "model": "open-software/auto",
-                "messages": [{ "role": "user", "content": "hello" }]
-            }),
-            Some(AUTHORIZATION),
-        )?)
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => match error {},
-    };
-
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = response_json(response).await?;
-    assert_eq!(body["message"], "model_not_priced");
-    Ok(())
-}
-
-#[tokio::test]
-async fn integration_agent_chat_local_auto_image_and_tools_falls_back_to_compatible_model()
+async fn integration_agent_chat_auto_image_and_tools_falls_back_to_compatible_model()
 -> Result<(), Box<dyn Error>> {
     let completer = Arc::new(RecordingChatCompleter::default());
-    let app = router(test_state_with_local_text_pricing(
+    let app = router(test_state_with_text_pricing_without_auto(
         Arc::new(FakeGenerator),
         completer.clone(),
     ));
@@ -700,18 +659,17 @@ async fn integration_agent_chat_local_auto_image_and_tools_falls_back_to_compati
         .lock()
         .map_err(|_| "chat request mutex poisoned")?;
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].model.0, "kimi-k2-6");
+    assert_eq!(requests[0].model.0, "moonshotai/kimi-k2.6");
     assert!(requests[0].body.get("auto").is_none());
     assert!(requests[0].body.get("tools").is_some());
     Ok(())
 }
 
 #[tokio::test]
-async fn integration_agent_chat_local_auto_rejects_when_capabilities_are_unavailable()
+async fn integration_agent_chat_auto_rejects_when_capabilities_are_unavailable()
 -> Result<(), Box<dyn Error>> {
     let app = router(
         test_state_with_text_pricing_without_auto_and_kimi_capabilities(
-            true,
             Arc::new(FakeGenerator),
             Arc::new(FakeChatCompleter),
             vec!["supportsVision".to_string()],
@@ -752,10 +710,9 @@ async fn integration_agent_chat_local_auto_rejects_when_capabilities_are_unavail
 }
 
 #[tokio::test]
-async fn integration_note_generate_local_auto_fallback_omits_cost_quality()
--> Result<(), Box<dyn Error>> {
+async fn integration_note_generate_auto_resolves_quality_tier() -> Result<(), Box<dyn Error>> {
     let generator = Arc::new(RecordingGenerator::default());
-    let app = router(test_state_with_local_text_pricing(
+    let app = router(test_state_with_text_pricing_without_auto(
         generator.clone(),
         Arc::new(FakeChatCompleter),
     ));
@@ -784,65 +741,65 @@ async fn integration_note_generate_local_auto_fallback_omits_cost_quality()
         .lock()
         .map_err(|_| "generation request mutex poisoned")?;
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].model.0, "zai-org-glm-5-2");
-    assert_eq!(requests[0].cost_quality, None);
+    assert_eq!(requests[0].model.0, "z-ai/glm-5.2");
     Ok(())
 }
 
 #[tokio::test]
 async fn integration_agent_chat_rejects_byok_when_stale_model_would_fallback()
 -> Result<(), Box<dyn Error>> {
-    let response = send(json_request_with_venice_api_key(
+    let response = send(json_request_with_openrouter_api_key(
         "/v1/chat/completions",
         &serde_json::json!({
-            "model": "retired-venice-model",
+            "model": "retired-text-model",
             "messages": [{ "role": "user", "content": "hello" }]
         }),
-        "opaque_user_venice_key",
+        "opaque_user_openrouter_key",
     )?)
     .await;
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response_json(response).await?;
-    assert_eq!(body["message"], "venice_api_key_model_unavailable");
+    assert_eq!(body["message"], "openrouter_api_key_model_unavailable");
     Ok(())
 }
 
 #[tokio::test]
 async fn integration_note_generate_rejects_byok_when_stale_model_would_fallback()
 -> Result<(), Box<dyn Error>> {
-    let response = send(json_request_with_venice_api_key(
+    let response = send(json_request_with_openrouter_api_key(
         "/v1/notes/generate",
         &serde_json::json!({
             "noteId": "note-1",
             "promptVersion": "prompt-v1",
             "title": "Planning",
             "transcript": "System: launch is Friday",
-            "model": "retired-venice-model"
+            "model": "retired-text-model"
         }),
-        "opaque_user_venice_key",
+        "opaque_user_openrouter_key",
     )?)
     .await;
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response_json(response).await?;
     assert_eq!(body["success"], false);
-    assert_eq!(body["message"], "venice_api_key_model_unavailable");
+    assert_eq!(body["message"], "openrouter_api_key_model_unavailable");
     Ok(())
 }
 
 #[tokio::test]
-async fn integration_note_generate_forwards_venice_api_key_header() -> Result<(), Box<dyn Error>> {
-    let response = send(json_request_with_venice_api_key(
+async fn integration_note_generate_forwards_openrouter_api_key_header() -> Result<(), Box<dyn Error>>
+{
+    let response = send(json_request_with_openrouter_api_key(
         "/v1/notes/generate",
         &serde_json::json!({
             "noteId": "note-1",
             "promptVersion": "prompt-v1",
             "title": "Planning",
             "transcript": "System: launch is Friday",
-            "model": "venice-text-model"
+            "model": "z-ai/glm-5.2"
         }),
-        "opaque_user_venice_key",
+        "opaque_user_openrouter_key",
     )?)
     .await;
 
@@ -851,46 +808,45 @@ async fn integration_note_generate_forwards_venice_api_key_header() -> Result<()
     assert_eq!(body["success"], true);
     assert_eq!(
         body["data"]["content"],
-        "Generated note body with user Venice key"
+        "Generated note body with user OpenRouter key"
     );
-    assert!(!body.to_string().contains("opaque_user_venice_key"));
+    assert!(!body.to_string().contains("opaque_user_openrouter_key"));
     Ok(())
 }
 
 #[tokio::test]
-async fn integration_note_generate_rejects_byok_for_current_non_venice_model()
--> Result<(), Box<dyn Error>> {
-    let response = send(json_request_with_venice_api_key(
+async fn integration_note_generate_rejects_foreign_provider_header() -> Result<(), Box<dyn Error>> {
+    let response = send(json_request_with_fal_api_key(
         "/v1/notes/generate",
         &serde_json::json!({
             "noteId": "note-1",
             "promptVersion": "prompt-v1",
             "title": "Planning",
             "transcript": "System: launch is Friday",
-            "model": "text-model"
+            "model": "z-ai/glm-5.2"
         }),
-        "opaque_user_venice_key",
+        "opaque_user_fal_key",
     )?)
     .await;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await?;
     assert_eq!(body["success"], false);
-    assert_eq!(body["message"], "venice_api_key_model_unavailable");
+    assert_eq!(body["message"], "fal_api_key_not_accepted");
     Ok(())
 }
 
 #[tokio::test]
-async fn integration_note_generate_rejects_malformed_venice_api_key_header()
+async fn integration_note_generate_rejects_malformed_openrouter_api_key_header()
 -> Result<(), Box<dyn Error>> {
-    let response = send(json_request_with_venice_api_key(
+    let response = send(json_request_with_openrouter_api_key(
         "/v1/notes/generate",
         &serde_json::json!({
             "noteId": "note-1",
             "promptVersion": "prompt-v1",
             "title": "Planning",
             "transcript": "System: launch is Friday",
-            "model": "text-model"
+            "model": "z-ai/glm-5.2"
         }),
         &"x".repeat(4_097),
     )?)
@@ -899,7 +855,7 @@ async fn integration_note_generate_rejects_malformed_venice_api_key_header()
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await?;
     assert_eq!(body["success"], false);
-    assert_eq!(body["message"], "venice_api_key_too_long");
+    assert_eq!(body["message"], "openrouter_api_key_too_long");
     Ok(())
 }
 
@@ -1317,7 +1273,7 @@ async fn integration_note_transcribe_accepts_valid_audio_multipart() -> Result<(
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["text"], "Transcribed audio");
     assert_eq!(body["data"]["language"], "en");
-    assert_eq!(body["data"]["provider"], "fake-transcriber");
+    assert_eq!(body["data"]["provider"], "groq");
     Ok(())
 }
 
@@ -1343,17 +1299,37 @@ async fn integration_note_transcribe_routes_retired_asr_model_through_priced_fal
 }
 
 #[tokio::test]
-async fn integration_note_transcribe_keeps_byok_for_current_venice_model()
--> Result<(), Box<dyn Error>> {
-    let response = send(multipart_request_with_venice_api_key(
+async fn integration_note_transcribe_rejects_a_text_model() -> Result<(), Box<dyn Error>> {
+    // A text model is the wrong kind, not a retired speech model: it is
+    // refused rather than silently swapped for the default speech model.
+    let response = send(multipart_request(
         "/v1/notes/transcribe",
         multipart_body([
-            text_part("model", "nvidia/parakeet-tdt-0.6b-v3"),
+            text_part("model", "z-ai/glm-5.2"),
             text_part("title", "Standup"),
             text_part("noteId", "note-1"),
             file_part("audio", "recording.wav", valid_wav()),
         ]),
-        "opaque_user_venice_key",
+    )?)
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(response).await?;
+    assert_eq!(body["message"], "model_type_invalid");
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_note_transcribe_keeps_byok_for_groq_model() -> Result<(), Box<dyn Error>> {
+    let response = send(multipart_request_with_groq_api_key(
+        "/v1/notes/transcribe",
+        multipart_body([
+            text_part("model", "whisper-large-v3-turbo"),
+            text_part("title", "Standup"),
+            text_part("noteId", "note-1"),
+            file_part("audio", "recording.wav", valid_wav()),
+        ]),
+        "opaque_user_groq_key",
     )?)
     .await;
 
@@ -1365,9 +1341,9 @@ async fn integration_note_transcribe_keeps_byok_for_current_venice_model()
 }
 
 #[tokio::test]
-async fn integration_note_transcribe_rejects_byok_for_current_non_venice_model()
--> Result<(), Box<dyn Error>> {
-    let response = send(multipart_request_with_venice_api_key(
+async fn integration_note_transcribe_rejects_foreign_provider_header() -> Result<(), Box<dyn Error>>
+{
+    let response = send(multipart_request_with_header(
         "/v1/notes/transcribe",
         multipart_body([
             text_part("model", "asr-model"),
@@ -1375,14 +1351,15 @@ async fn integration_note_transcribe_rejects_byok_for_current_non_venice_model()
             text_part("noteId", "note-1"),
             file_part("audio", "recording.wav", valid_wav()),
         ]),
-        "opaque_user_venice_key",
+        "x-openrouter-api-key",
+        "opaque_user_openrouter_key",
     )?)
     .await;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await?;
     assert_eq!(body["success"], false);
-    assert_eq!(body["message"], "venice_api_key_model_unavailable");
+    assert_eq!(body["message"], "openrouter_api_key_not_accepted");
     Ok(())
 }
 
@@ -1428,9 +1405,9 @@ async fn integration_dictate_routes_retired_asr_model_through_priced_fallback()
 }
 
 #[tokio::test]
-async fn integration_dictate_keeps_byok_when_retired_asr_model_falls_back_to_venice()
+async fn integration_dictate_keeps_byok_when_retired_asr_model_falls_back_to_groq()
 -> Result<(), Box<dyn Error>> {
-    let response = send(multipart_request_with_venice_api_key(
+    let response = send(multipart_request_with_groq_api_key(
         "/v1/dictate",
         multipart_body([
             text_part("model", "retired-asr-model"),
@@ -1438,7 +1415,7 @@ async fn integration_dictate_keeps_byok_when_retired_asr_model_falls_back_to_ven
             text_part("utteranceId", "utterance-stale-asr"),
             file_part("audio", "dictation.wav", valid_wav()),
         ]),
-        "opaque_user_venice_key",
+        "opaque_user_groq_key",
     )?)
     .await;
 
@@ -1452,7 +1429,7 @@ async fn integration_dictate_keeps_byok_when_retired_asr_model_falls_back_to_ven
 #[tokio::test]
 async fn integration_dictate_fills_language_when_provider_returns_none()
 -> Result<(), Box<dyn Error>> {
-    // Venice ASR never returns a detected language, so the provider yields
+    // Upstream ASR never returns a detected language, so the provider yields
     // `None` and the service must fill it in from the transcript text (JUN-180).
     let state = test_state_with_sinks_and_transcriber(
         test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
@@ -1537,8 +1514,8 @@ async fn integration_dictate_cleanup_returns_enveloped_response() -> Result<(), 
     let body = response_json(response).await?;
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["text"], "Cleaned dictation");
-    assert_eq!(body["data"]["provider"], "fake-cleaner");
-    assert_eq!(body["data"]["upstreamProvider"], "phala");
+    assert_eq!(body["data"]["provider"], "openrouter");
+    assert_eq!(body["data"]["upstreamProvider"], "openrouter");
     assert_eq!(body["data"]["creditsCharged"], 0);
     Ok(())
 }
@@ -1555,9 +1532,31 @@ async fn integration_web_search_returns_enveloped_results() -> Result<(), Box<dy
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await?;
     assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["provider"], "brave");
+    assert_eq!(body["data"]["provider"], "tavily");
     assert_eq!(body["data"]["results"][0]["title"], "Result one");
     assert_eq!(body["data"]["results"][0]["url"], "https://example.com/one");
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_web_search_ignores_a_retired_search_provider_choice()
+-> Result<(), Box<dyn Error>> {
+    // Released clients could pick `brave` or `google`; the choice no longer
+    // exists, and a request that still carries it must search, not fail.
+    for provider in ["brave", "google"] {
+        let response = send(json_request(
+            "/v1/web/search",
+            &serde_json::json!({
+                "query": "rust async",
+                "requestId": "req-1",
+                "provider": provider
+            }),
+            Some(AUTHORIZATION),
+        )?)
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{provider}");
+    }
     Ok(())
 }
 
@@ -1658,7 +1657,7 @@ async fn integration_web_fetch_blocked_site_returns_bad_request() -> Result<(), 
     )?)
     .await;
 
-    // A site Venice refuses to scrape surfaces as a usable 400, not a 502.
+    // A site upstream refuses to scrape surfaces as a usable 400, not a 502.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await?;
     assert_eq!(body["success"], false);
@@ -1705,7 +1704,7 @@ async fn integration_web_fetch_rejects_private_network_url() -> Result<(), Box<d
 async fn integration_image_generate_returns_enveloped_image() -> Result<(), Box<dyn Error>> {
     let response = send(json_request(
         "/v1/image/generate",
-        &serde_json::json!({ "prompt": "a red bicycle", "model": "venice-sd35" }),
+        &serde_json::json!({ "prompt": "a red bicycle", "model": "fal-ai/flux/dev" }),
         Some(AUTHORIZATION),
     )?)
     .await;
@@ -1715,8 +1714,8 @@ async fn integration_image_generate_returns_enveloped_image() -> Result<(), Box<
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["imageBase64"], "aGVsbG8=");
     assert_eq!(body["data"]["mimeType"], "image/png");
-    assert_eq!(body["data"]["model"], "venice-sd35");
-    assert_eq!(body["data"]["provider"], "fake-image");
+    assert_eq!(body["data"]["model"], "fal-ai/flux/dev");
+    assert_eq!(body["data"]["provider"], "fal");
     Ok(())
 }
 
@@ -1724,7 +1723,7 @@ async fn integration_image_generate_returns_enveloped_image() -> Result<(), Box<
 async fn integration_image_generate_requires_auth() -> Result<(), Box<dyn Error>> {
     let response = send(json_request(
         "/v1/image/generate",
-        &serde_json::json!({ "prompt": "a red bicycle", "model": "venice-sd35" }),
+        &serde_json::json!({ "prompt": "a red bicycle", "model": "fal-ai/flux/dev" }),
         None,
     )?)
     .await;
@@ -1740,7 +1739,7 @@ async fn integration_image_generate_requires_auth() -> Result<(), Box<dyn Error>
 async fn integration_image_generate_rejects_blank_prompt() -> Result<(), Box<dyn Error>> {
     let response = send(json_request(
         "/v1/image/generate",
-        &serde_json::json!({ "prompt": "   ", "model": "venice-sd35" }),
+        &serde_json::json!({ "prompt": "   ", "model": "fal-ai/flux/dev" }),
         Some(AUTHORIZATION),
     )?)
     .await;
@@ -1756,7 +1755,7 @@ async fn integration_image_generate_rejects_blank_prompt() -> Result<(), Box<dyn
 async fn integration_image_generate_maps_upstream_failure_to_502() -> Result<(), Box<dyn Error>> {
     let response = send(json_request(
         "/v1/image/generate",
-        &serde_json::json!({ "prompt": "boom", "model": "venice-sd35" }),
+        &serde_json::json!({ "prompt": "boom", "model": "fal-ai/flux/dev" }),
         Some(AUTHORIZATION),
     )?)
     .await;
@@ -1769,20 +1768,21 @@ async fn integration_image_generate_maps_upstream_failure_to_502() -> Result<(),
 }
 
 #[tokio::test]
-async fn integration_image_generate_rejects_unpriced_model() -> Result<(), Box<dyn Error>> {
-    // A model with no configured image price is rejected at the metering
-    // boundary (before Venice is called) rather than generating for free.
+async fn integration_image_generate_serves_retired_model_with_default() -> Result<(), Box<dyn Error>>
+{
+    // A shipped client keeps sending a model id that is no longer served; the
+    // default image model serves it instead of failing the request (ADR 0021).
     let response = send(json_request(
         "/v1/image/generate",
-        &serde_json::json!({ "prompt": "a red bicycle", "model": "unpriced-image-model" }),
+        &serde_json::json!({ "prompt": "a red bicycle", "model": "retired-image-model" }),
         Some(AUTHORIZATION),
     )?)
     .await;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await?;
-    assert_eq!(body["success"], false);
-    assert_eq!(body["message"], "model_not_priced");
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["model"], "fal-ai/flux/dev");
     Ok(())
 }
 
@@ -1802,7 +1802,7 @@ async fn integration_image_edit_returns_enveloped_image() -> Result<(), Box<dyn 
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["imageBase64"], "ZWRpdGVk");
     assert_eq!(body["data"]["mimeType"], "image/png");
-    assert_eq!(body["data"]["model"], "firered-image-edit");
+    assert_eq!(body["data"]["model"], "fal-ai/flux-2/edit");
     Ok(())
 }
 
@@ -1843,10 +1843,10 @@ async fn integration_image_edit_accepts_body_at_configured_limit() -> Result<(),
     let body = image_edit_body_with_len(DEFAULT_MAX_IMAGE_EDIT_BYTES)?;
     let router = router(test_state());
     let response = match router
-        .oneshot(raw_json_request_with_venice_api_key(
+        .oneshot(raw_json_request_with_fal_api_key(
             "/v1/image/edit",
             body,
-            "VENICE_INFERENCE_KEY_user",
+            "fal_key",
         )?)
         .await
     {
@@ -1869,10 +1869,10 @@ async fn integration_image_edit_rejects_body_over_configured_limit() -> Result<(
     );
     let router = router(test_state());
     let response = match router
-        .oneshot(raw_json_request_with_venice_api_key(
+        .oneshot(raw_json_request_with_fal_api_key(
             "/v1/image/edit",
             body,
-            "VENICE_INFERENCE_KEY_user",
+            "fal_key",
         )?)
         .await
     {
@@ -1890,7 +1890,7 @@ async fn integration_video_generate_returns_job_id() -> Result<(), Box<dyn Error
         "/v1/video/generate",
         &serde_json::json!({
             "prompt": "a robot dancing",
-            "model": "wan-2.2-a14b-text-to-video",
+            "model": "fal-ai/wan/v2.2-a14b/text-to-video",
             "duration": "5s",
         }),
         Some(AUTHORIZATION),
@@ -1915,7 +1915,7 @@ async fn integration_video_generate_rejects_blank_duration() -> Result<(), Box<d
         "/v1/video/generate",
         &serde_json::json!({
             "prompt": "a robot dancing",
-            "model": "wan-2.2-a14b-text-to-video",
+            "model": "fal-ai/wan/v2.2-a14b/text-to-video",
         }),
         Some(AUTHORIZATION),
     )?)
@@ -1928,21 +1928,28 @@ async fn integration_video_generate_rejects_blank_duration() -> Result<(), Box<d
 }
 
 #[tokio::test]
-async fn integration_video_generate_rejects_unpriced_model() -> Result<(), Box<dyn Error>> {
+async fn integration_video_generate_serves_retired_model_with_default() -> Result<(), Box<dyn Error>>
+{
+    // A retired model id is queued on the default text-to-video model (ADR 0021).
     let response = send(json_request(
         "/v1/video/generate",
         &serde_json::json!({
             "prompt": "a robot dancing",
-            "model": "unpriced-video-model",
+            "model": "retired-video-model",
             "duration": "5s",
         }),
         Some(AUTHORIZATION),
     )?)
     .await;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await?;
-    assert_eq!(body["message"], "model_not_priced");
+    assert!(
+        body["data"]["jobId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "expected a non-empty jobId, got {body}"
+    );
     Ok(())
 }
 
@@ -1957,7 +1964,7 @@ async fn integration_video_status_reports_processing_json() -> Result<(), Box<dy
             "/v1/video/generate",
             &serde_json::json!({
                 "prompt": "a robot dancing",
-                "model": "wan-2.2-a14b-text-to-video",
+                "model": "fal-ai/wan/v2.2-a14b/text-to-video",
                 "duration": "5s",
             }),
             Some(AUTHORIZATION),
@@ -2017,10 +2024,10 @@ async fn integration_video_animate_rejects_body_over_configured_limit() -> Resul
     );
     let router = router(test_state());
     let response = match router
-        .oneshot(raw_json_request_with_venice_api_key(
+        .oneshot(raw_json_request_with_fal_api_key(
             "/v1/video/animate",
             body,
-            "VENICE_INFERENCE_KEY_user",
+            "fal_key",
         )?)
         .await
     {
@@ -2100,39 +2107,75 @@ fn note_generate_request(stream: bool) -> serde_json::Value {
     request
 }
 
-fn json_request_with_venice_api_key(
+fn json_request_with_header(
     uri: &str,
     value: &serde_json::Value,
-    venice_api_key: &str,
+    header_name: &'static str,
+    key: &str,
 ) -> Result<Request<Body>, axum::http::Error> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::AUTHORIZATION, AUTHORIZATION)
-        .header("x-venice-api-key", venice_api_key)
+        .header(header_name, key)
         .body(Body::from(value.to_string()))
 }
 
-fn raw_json_request_with_venice_api_key(
+fn json_request_with_openrouter_api_key(
+    uri: &str,
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    json_request_with_header(uri, value, "x-openrouter-api-key", key)
+}
+
+fn json_request_with_groq_api_key(
+    uri: &str,
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    json_request_with_header(uri, value, "x-groq-api-key", key)
+}
+
+fn json_request_with_fal_api_key(
+    uri: &str,
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    json_request_with_header(uri, value, "x-fal-api-key", key)
+}
+
+fn json_request_with_tavily_api_key(
+    uri: &str,
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    json_request_with_header(uri, value, "x-tavily-api-key", key)
+}
+
+fn json_request_with_venice_api_key(
+    uri: &str,
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    json_request_with_header(uri, value, "x-venice-api-key", key)
+}
+
+fn raw_json_request_with_fal_api_key(
     uri: &str,
     body: String,
-    venice_api_key: &str,
+    key: &str,
 ) -> Result<Request<Body>, axum::http::Error> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::AUTHORIZATION, AUTHORIZATION)
-        .header("x-venice-api-key", venice_api_key)
+        .header("x-fal-api-key", key)
         .body(Body::from(body))
 }
 
-/// Raw string body plus the standard bearer, with NO `x-venice-api-key` header.
-/// `text-model` is an OpenAI-provider model in test pricing, so a Venice BYOK
-/// header would trip `venice_api_key_model_unavailable` (422) before the body
-/// ever streams; the plain bearer routes to the mocked upstream so the only
-/// thing that can produce a 413 is the route body-limit layer (JUN-336).
 fn raw_json_request_with_auth(uri: &str, body: String) -> Result<Request<Body>, axum::http::Error> {
     Request::builder()
         .method(Method::POST)
@@ -2230,10 +2273,11 @@ fn image_edit_body_with_len(total_len: usize) -> Result<String, Box<dyn Error>> 
     Err("could not construct image edit body at requested length".into())
 }
 
-fn multipart_request_with_venice_api_key(
+fn multipart_request_with_header(
     uri: &str,
     body: Vec<u8>,
-    venice_api_key: &str,
+    header_name: &'static str,
+    key: &str,
 ) -> Result<Request<Body>, axum::http::Error> {
     Request::builder()
         .method(Method::POST)
@@ -2243,8 +2287,16 @@ fn multipart_request_with_venice_api_key(
             format!("multipart/form-data; boundary={}", boundary()),
         )
         .header(header::AUTHORIZATION, AUTHORIZATION)
-        .header("x-venice-api-key", venice_api_key)
+        .header(header_name, key)
         .body(Body::from(body))
+}
+
+fn multipart_request_with_groq_api_key(
+    uri: &str,
+    body: Vec<u8>,
+    key: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    multipart_request_with_header(uri, body, "x-groq-api-key", key)
 }
 
 struct FailingIssueReportSink;
@@ -2419,4 +2471,576 @@ impl AgentChatCompleter for RecordingChatCompleter {
             .push(request.clone());
         FakeChatCompleter.complete_stream(request).await
     }
+}
+
+#[tokio::test]
+async fn integration_routes_reject_foreign_provider_headers() -> Result<(), Box<dyn Error>> {
+    // 1. Groq route (transcribe): rejects OpenRouter header
+    let resp = send(multipart_request_with_header(
+        "/v1/notes/transcribe",
+        multipart_body([
+            text_part("model", "whisper-large-v3-turbo"),
+            text_part("title", "Test"),
+            text_part("noteId", "n1"),
+            file_part("audio", "audio.wav", valid_wav()),
+        ]),
+        "x-openrouter-api-key",
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "openrouter_api_key_not_accepted").await?;
+
+    // 2. OpenRouter route (chat completions): rejects fal header
+    let resp = send(json_request_with_fal_api_key(
+        "/v1/chat/completions",
+        &serde_json::json!({
+            "model": "z-ai/glm-5.2",
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "fal_api_key_not_accepted").await?;
+
+    // 3. OpenRouter route (dictate cleanup): rejects fal header
+    let resp = send(json_request_with_fal_api_key(
+        "/v1/dictate/cleanup",
+        &serde_json::json!({
+            "sessionId": "s-1",
+            "utteranceId": "u-1",
+            "text": "Hello world",
+            "style": "standard",
+            "model": "text-model"
+        }),
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "fal_api_key_not_accepted").await?;
+
+    // 4. fal route (image generate): rejects Groq header
+    let resp = send(json_request_with_groq_api_key(
+        "/v1/image/generate",
+        &serde_json::json!({
+            "prompt": "a test fox",
+            "model": "fal-ai/flux/dev"
+        }),
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "groq_api_key_not_accepted").await?;
+
+    // 5. fal route (video generate): rejects Tavily header
+    let resp = send(json_request_with_tavily_api_key(
+        "/v1/video/generate",
+        &serde_json::json!({
+            "prompt": "a test video",
+            "model": "fal-ai/wan/v2.2-a14b/text-to-video"
+        }),
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "tavily_api_key_not_accepted").await?;
+
+    // 6. fal route (video status): rejects Groq header
+    let resp = send(get_request_with_header(
+        "/v1/video/status/job-1",
+        Some(AUTHORIZATION),
+        "x-groq-api-key",
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "groq_api_key_not_accepted").await?;
+
+    // 7. Tavily route (web search): rejects fal header
+    let resp = send(json_request_with_fal_api_key(
+        "/v1/web/search",
+        &serde_json::json!({
+            "query": "hello world",
+            "requestId": "req-search"
+        }),
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "fal_api_key_not_accepted").await?;
+
+    // 8. Tavily route (web fetch): rejects OpenRouter header
+    let resp = send(json_request_with_openrouter_api_key(
+        "/v1/web/fetch",
+        &serde_json::json!({
+            "url": "https://example.com",
+            "requestId": "req-fetch"
+        }),
+        "foreign_key",
+    )?)
+    .await;
+    assert_bad_request(resp, "openrouter_api_key_not_accepted").await?;
+
+    Ok(())
+}
+
+/// A 400 whose envelope `message` is `message`.
+async fn assert_bad_request(
+    resp: axum::response::Response,
+    message: &str,
+) -> Result<(), Box<dyn Error>> {
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], message);
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_routes_reject_retired_venice_api_key() -> Result<(), Box<dyn Error>> {
+    let resp = send(json_request_with_venice_api_key(
+        "/v1/chat/completions",
+        &serde_json::json!({
+            "model": "z-ai/glm-5.2",
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+        "user_venice_key",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "venice_api_key_not_accepted");
+
+    let resp = send(json_request_with_venice_api_key(
+        "/v1/web/search",
+        &serde_json::json!({
+            "query": "hello world",
+            "requestId": "req-search"
+        }),
+        "user_venice_key",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "venice_api_key_not_accepted");
+
+    let resp = send(json_request_with_venice_api_key(
+        "/v1/image/generate",
+        &serde_json::json!({
+            "prompt": "a test fox",
+            "model": "fal-ai/flux/dev"
+        }),
+        "user_venice_key",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "venice_api_key_not_accepted");
+
+    let resp = send(get_request_with_header(
+        "/v1/video/status/job-1",
+        Some(AUTHORIZATION),
+        "x-venice-api-key",
+        "user_venice_key",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "venice_api_key_not_accepted");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_missing_service_key_requires_byok() -> Result<(), Box<dyn Error>> {
+    let mut deps = default_test_state_deps();
+    deps.upstream_service_keys = UpstreamServiceKeys::default();
+    let app = router(test_state_from_deps(deps));
+
+    // OpenRouter route without key -> 422 openrouter_not_configured
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "z-ai/glm-5.2",
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "openrouter_not_configured");
+
+    // OpenRouter route with BYOK key -> 200 OK
+    let resp = send_on(
+        app.clone(),
+        json_request_with_openrouter_api_key(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "z-ai/glm-5.2",
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+            "sk-or-user-secret",
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // fal route without key -> 422 fal_not_configured
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/image/generate",
+            &serde_json::json!({
+                "prompt": "a test fox",
+                "model": "fal-ai/flux/dev"
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "fal_not_configured");
+
+    // fal route with BYOK key -> 200 OK
+    let resp = send_on(
+        app.clone(),
+        json_request_with_fal_api_key(
+            "/v1/image/generate",
+            &serde_json::json!({
+                "prompt": "a test fox",
+                "model": "fal-ai/flux/dev"
+            }),
+            "fal-user-secret",
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Tavily route without key -> 422 tavily_not_configured
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/web/search",
+            &serde_json::json!({
+                "query": "test query",
+                "requestId": "req-unconfigured"
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "tavily_not_configured");
+
+    // Tavily route with BYOK key -> 200 OK
+    let resp = send_on(
+        app.clone(),
+        json_request_with_tavily_api_key(
+            "/v1/web/search",
+            &serde_json::json!({
+                "query": "test query",
+                "requestId": "req-unconfigured-byok"
+            }),
+            "tvly-user-secret",
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_agent_chat_auto_tier_resolution() -> Result<(), Box<dyn Error>> {
+    let completer = Arc::new(RecordingChatCompleter::default());
+    let mut deps = default_test_state_deps();
+    deps.chat_completer = completer.clone();
+    let app = router(test_state_from_deps(deps));
+
+    // 1. Economy tier (< 0.34) -> nvidia/nemotron-3-nano-30b-a3b
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "auto": { "cost_quality": 0.2 },
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let requests = completer.requests.lock().map_err(|_| "poisoned lock")?;
+        let last = requests.last().ok_or("no requests")?;
+        assert_eq!(last.model.0, "nvidia/nemotron-3-nano-30b-a3b");
+        assert!(last.body.get("auto").is_none());
+    }
+
+    // 2. Balanced tier (<= 0.66) -> moonshotai/kimi-k2.6
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "auto": { "cost_quality": 0.5 },
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let requests = completer.requests.lock().map_err(|_| "poisoned lock")?;
+        let last = requests.last().ok_or("no requests")?;
+        assert_eq!(last.model.0, "moonshotai/kimi-k2.6");
+        assert!(last.body.get("auto").is_none());
+    }
+
+    // 3. Quality tier (> 0.66 or absent) -> z-ai/glm-5.2
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "auto": { "cost_quality": 0.9 },
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let requests = completer.requests.lock().map_err(|_| "poisoned lock")?;
+        let last = requests.last().ok_or("no requests")?;
+        assert_eq!(last.model.0, "z-ai/glm-5.2");
+        assert!(last.body.get("auto").is_none());
+    }
+
+    // 4. Vision fallback: economy tier requested, but message contains image_url -> moonshotai/kimi-k2.6
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "auto": { "cost_quality": 0.2 },
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": { "url": "https://example.com/test.png" }
+                    }]
+                }]
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let requests = completer.requests.lock().map_err(|_| "poisoned lock")?;
+        let last = requests.last().ok_or("no requests")?;
+        assert_eq!(last.model.0, "moonshotai/kimi-k2.6");
+        assert!(last.body.get("auto").is_none());
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_agent_chat_explicit_auto_runs_clovy_funded_without_the_user_key()
+-> Result<(), Box<dyn Error>> {
+    // Auto is Clovy's choice of model, so Clovy funds it: a user's OpenRouter
+    // key sent with an explicit Auto request never reaches the provider.
+    let completer = Arc::new(RecordingChatCompleter::default());
+    let mut deps = default_test_state_deps();
+    deps.chat_completer = completer.clone();
+    let response = send_on(
+        router(test_state_from_deps(deps)),
+        json_request_with_openrouter_api_key(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "messages": [{ "role": "user", "content": "hi" }]
+            }),
+            "opaque_user_openrouter_key",
+        )?,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = completer.requests.lock().map_err(|_| "poisoned lock")?;
+    let request = requests.last().ok_or("no requests")?;
+    assert!(
+        !request
+            .provider_credentials
+            .has_user_key(clovy_domain::UpstreamProvider::Openrouter)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_unpriced_text_with_openrouter_key_is_unavailable() -> Result<(), Box<dyn Error>>
+{
+    let resp = send(json_request_with_openrouter_api_key(
+        "/v1/chat/completions",
+        &serde_json::json!({
+            "model": "unpriced-custom-text-model",
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+        "sk-or-user-secret",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "openrouter_api_key_model_unavailable");
+
+    let resp = send(json_request_with_openrouter_api_key(
+        "/v1/notes/generate",
+        &serde_json::json!({
+            "noteId": "n-1",
+            "promptVersion": "v1",
+            "title": "Title",
+            "transcript": "Hello world",
+            "model": "unpriced-custom-text-model"
+        }),
+        "sk-or-user-secret",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "openrouter_api_key_model_unavailable");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_video_status_rejects_foreign_and_retired_keys() -> Result<(), Box<dyn Error>> {
+    let resp = send(get_request_with_header(
+        "/v1/video/status/job-test-1",
+        Some(AUTHORIZATION),
+        "x-groq-api-key",
+        "groq-key",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "groq_api_key_not_accepted");
+
+    let resp = send(get_request_with_header(
+        "/v1/video/status/job-test-1",
+        Some(AUTHORIZATION),
+        "x-venice-api-key",
+        "venice-key",
+    )?)
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await?;
+    assert_eq!(body["message"], "venice_api_key_not_accepted");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_models_list_exposes_service_available_and_provider()
+-> Result<(), Box<dyn Error>> {
+    // 1. All service keys configured:
+    let resp = send(get_request("/v1/models")?).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await?;
+    let data = body["data"].as_array().ok_or("expected array")?;
+    assert!(!data.is_empty());
+    for item in data {
+        assert_eq!(item["serviceAvailable"], true);
+        let provider = item["provider"]
+            .as_str()
+            .ok_or("expected provider string")?;
+        assert!(provider == "groq" || provider == "openrouter");
+    }
+
+    // 2. OpenRouter service key missing:
+    let mut deps = default_test_state_deps();
+    deps.upstream_service_keys = UpstreamServiceKeys::for_providers([
+        clovy_domain::UpstreamProvider::Groq,
+        clovy_domain::UpstreamProvider::Fal,
+        clovy_domain::UpstreamProvider::Tavily,
+    ]);
+    let app = router(test_state_from_deps(deps));
+    let resp = send_on(app, get_request("/v1/models")?).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await?;
+    let data = body["data"].as_array().ok_or("expected array")?;
+    for item in data {
+        let provider = item["provider"]
+            .as_str()
+            .ok_or("expected provider string")?;
+        if provider == "openrouter" {
+            assert_eq!(item["serviceAvailable"], false);
+        } else if provider == "groq" {
+            assert_eq!(item["serviceAvailable"], true);
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_dictate_cleanup_maps_style_to_cleanup_kind() -> Result<(), Box<dyn Error>> {
+    let cleaner = Arc::new(FakeCleaner::default());
+    let state = test_state_with_cleaner(cleaner.clone());
+    let app = router(state);
+
+    // 1. note_transcript_cleanup -> NoteTranscript
+    let resp = send_on(
+        app.clone(),
+        json_request(
+            "/v1/dictate/cleanup",
+            &serde_json::json!({
+                "sessionId": "s-1",
+                "utteranceId": "u-1",
+                "text": "Hello world",
+                "style": "note_transcript_cleanup",
+                "model": "text-model"
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let requests = cleaner.requests.lock().map_err(|_| "poisoned lock")?;
+        let last = requests.last().ok_or("no requests recorded")?;
+        assert_eq!(last.kind, clovy_domain::CleanupKind::NoteTranscript);
+    }
+
+    // 2. normal style -> Dictation
+    let resp = send_on(
+        app,
+        json_request(
+            "/v1/dictate/cleanup",
+            &serde_json::json!({
+                "sessionId": "s-2",
+                "utteranceId": "u-2",
+                "text": "Hello world",
+                "style": "email",
+                "model": "text-model"
+            }),
+            Some(AUTHORIZATION),
+        )?,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let requests = cleaner.requests.lock().map_err(|_| "poisoned lock")?;
+        let last = requests.last().ok_or("no requests recorded")?;
+        assert_eq!(last.kind, clovy_domain::CleanupKind::Dictation);
+    }
+
+    Ok(())
 }

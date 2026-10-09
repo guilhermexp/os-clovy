@@ -10,16 +10,16 @@ shell commands, and other important information, read
 
 ## Project
 
-Clovy is a private-by-architecture **Tauri desktop app** for meeting notes: it
-records a meeting or dictation, transcribes the audio, turns the transcript
-into a structured note, and hosts an AI agent you can chat with over your
-notes. The frontend is **React** (`src/`), the native shell is **Rust**
-(`src-tauri/`), and a confidential **Rust backend, Clovy API** (`clovy-api/`),
-proxies all upstream AI and runs metered billing. Identity and credits come
-from **OS Accounts**; the agent harness is a Clovy-owned TypeScript service
-built on the **OpenAI Agents SDK**; AI models are served through Clovy's model
-routing. Clovy API runs
-inside a TEE (Phala) so prompt data is not readable by its own infra.
+Clovy is a local-first **Tauri desktop app** for meeting notes: it records a
+meeting or dictation, transcribes audio, turns transcripts into structured
+notes, and hosts an AI agent over the user's notes. The frontend is **React**
+(`src/`), the native shell is **Rust** (`src-tauri/`), and the **Rust backend,
+Clovy API** (`clovy-api/`), routes remote inference and metered billing.
+Current upstreams are **Groq** for audio, **OpenRouter** for remote text,
+**fal** for media, and **Tavily** for web. Own text engines (CLI and endpoints)
+remain separate. Identity and credits come from **OS Accounts**; the local
+agent harness uses the **OpenAI Agents SDK**. Attested hosting of Clovy API
+does not attest these upstreams or imply TEE/ZDR for their inference.
 
 > Read **[CONTEXT.md](CONTEXT.md)** before naming anything, and
 > **[docs/index.md](docs/index.md)** to find the doc for the area you touch.
@@ -268,15 +268,19 @@ build scripts in `pnpm-workspace.yaml` — live in
   remove an alias without satisfying the retirement gates in
   [ADR-0055](docs/adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
 - **Service-managed upstream provider keys live only in Clovy API, never in the desktop binary.**
-  The app calls Clovy API over `/v1/*`; Clovy API holds the Venice/OpenAI service
-  keys and the OS Accounts App API key. A user's explicit Venice BYOK credential
-  is the exception: Clovy stores it locally and forwards it only on eligible
-  Venice requests.
+  Keys for Groq, OpenRouter, fal and Tavily, and the OS Accounts App API key,
+  belong to Clovy API. Explicit user BYOK credentials stay in the local
+  credential store and are forwarded through Clovy API only for their matching
+  eligible provider route; they are not credentials for another vendor.
 - **Clovy API must stay backward-compatible — no breaking changes.** Clovy ships
   and auto-updates in production, so installs in the wild keep calling older
   `/v1/*` contracts. Never remove or repurpose an existing endpoint, request
   field, or response shape; add new optional fields or new endpoints instead. A
   breaking API change strands every app version that has not updated yet.
+  The local-only retired-provider credential rejection is an acknowledged
+  exception documented in the dated [ADR-0021 addendum](docs/adr/0021-june-api-v1-compatibility-policy.md).
+  It is not authority to publish a breaking production update: publication and
+  support for older clients require a separate owner decision.
 - **Clovy presents as Clovy.** The local harness is an implementation detail;
   product instructions assert Clovy's identity.
 - **Identity and credits are OS Accounts'.** Clovy is an on-device client of OS
@@ -363,6 +367,28 @@ Functional proof (Reality) for desktop features:
 
 UI-only checks may use the browser shim from `.agents/skills/browser-test-tauri-fe`;
 that proves rendering, not the native flow.
+
+For **dev-permission persistence**, use the signed dev launcher from
+[development.md](docs/development.md) and ADR-0060 with a run-owned
+`CLOVY_DEV_APP_IDENTIFIER` and the authorized stable signing identity. The
+ad-hoc debug snapshot above is not proof that grants survive the normal
+launcher, restart or rebuild. Observe the actual window and permission state,
+then restart/rebuild that same identity; do not reset TCC or grant privileges
+by editing OS databases.
+
+For the **provider cutover**, exercise the actual desktop against the updated
+local Clovy API, not a deployed old backend. In an isolated copied profile,
+check migration without changing CLI/endpoints/history, configured/missing
+key states, remote model availability and actionable errors. Native dictation
+and notes require voice/audio actions; chat, note generation and cleanup require
+the selected text engine. Media proof includes generated/edited images,
+non-square/oriented/extreme-ratio inputs, video generation and image animation
+through valid final assets; a recoverable BYOK poll must resume the same job
+without another submit. Search and extraction require real normalized results.
+Provider calls needing credentials or paid usage remain unproven until the
+owner supplies the configuration and authorizes the bounded actions. Local
+contract tests, public catalog reads and free key checks do not prove those
+end-to-end capabilities or an account's actual price.
 
 ### Build
 

@@ -1,5 +1,5 @@
 use clovy_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
-use clovy_domain::{Credits, InferencePrivacy, ModelKind, TokenUsage};
+use clovy_domain::{Credits, ModelKind, TokenPriceCap, TokenUsage, UpstreamProvider};
 use std::{
     collections::BTreeMap,
     sync::{RwLock, RwLockReadGuard},
@@ -73,18 +73,28 @@ impl PricingTable {
         self.read_models().contains_key(model_id)
     }
 
-    pub fn is_venice_model(&self, model_id: &str) -> bool {
+    pub fn upstream_provider(&self, model_id: &str) -> Option<UpstreamProvider> {
         self.read_models()
             .get(model_id)
-            .is_some_and(|model| model.provider == ModelProvider::Venice)
+            .map(|model| match model.provider {
+                ModelProvider::Groq => UpstreamProvider::Groq,
+                ModelProvider::Openrouter => UpstreamProvider::Openrouter,
+            })
     }
 
-    pub fn inference_privacy(&self, model_id: &str) -> InferencePrivacy {
-        self.read_models()
-            .get(model_id)
-            .and_then(|model| model.privacy.as_deref())
-            .filter(|privacy| privacy.eq_ignore_ascii_case("anonymized"))
-            .map_or(InferencePrivacy::Private, |_| InferencePrivacy::Anonymized)
+    #[allow(clippy::cast_precision_loss)]
+    pub fn price_cap(&self, model_id: &str) -> Option<TokenPriceCap> {
+        let models = self.read_models();
+        let model = models.get(model_id)?;
+        if model.model_type != ModelType::Text || model.unit != PriceUnit::Tokens {
+            return None;
+        }
+        let input_credits = model.input_credits_per_million_tokens?;
+        let output_credits = model.output_credits_per_million_tokens?;
+        Some(TokenPriceCap {
+            prompt_usd_per_million: input_credits as f64 / 1000.0,
+            completion_usd_per_million: output_credits as f64 / 1000.0,
+        })
     }
 
     pub fn ensure_model_kind(&self, model_id: &str, kind: ModelKind) -> Result<(), PricingError> {
@@ -199,7 +209,7 @@ pub enum PricingError {
 mod tests {
     use super::{PricingError, PricingTable};
     use clovy_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
-    use clovy_domain::{InferencePrivacy, ModelKind, TokenUsage};
+    use clovy_domain::{ModelKind, TokenPriceCap, TokenUsage, UpstreamProvider};
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
 
@@ -219,7 +229,10 @@ mod tests {
                             .then_some(input_rate),
                         output_credits_per_million_tokens: (unit == PriceUnit::Tokens)
                             .then_some(output_rate),
-                        provider: ModelProvider::Openai,
+                        provider: match model_type {
+                            ModelType::Asr => ModelProvider::Groq,
+                            ModelType::Text => ModelProvider::Openrouter,
+                        },
                         model_type,
                         display_name: id.to_string(),
                         description: None,
@@ -262,30 +275,40 @@ mod tests {
     }
 
     #[test]
-    fn derives_inference_privacy_and_fails_closed() {
-        let mut configured = models([(
-            "anonymized-text",
-            PriceUnit::Tokens,
-            70,
-            300,
-            ModelType::Text,
-        )]);
-        configured
-            .get_mut("anonymized-text")
-            .expect("model exists")
-            .privacy = Some("Anonymized".to_string());
-        let table = PricingTable::new(configured);
+    fn identifies_upstream_providers_from_pricing_metadata() {
+        let table = PricingTable::new(models([
+            ("groq-asr", PriceUnit::Seconds, 1, 0, ModelType::Asr),
+            ("openrouter-text", PriceUnit::Tokens, 1, 1, ModelType::Text),
+        ]));
 
         assert_eq!(
-            table.inference_privacy("anonymized-text"),
-            InferencePrivacy::Anonymized
+            table.upstream_provider("groq-asr"),
+            Some(UpstreamProvider::Groq)
         );
         assert_eq!(
-            table.inference_privacy("missing-model"),
-            InferencePrivacy::Private
+            table.upstream_provider("openrouter-text"),
+            Some(UpstreamProvider::Openrouter)
         );
+        assert_eq!(table.upstream_provider("missing"), None);
     }
 
+    #[test]
+    fn computes_price_cap_for_text_models() {
+        let table = PricingTable::new(models([
+            ("priced-asr", PriceUnit::Seconds, 250_000, 0, ModelType::Asr),
+            ("priced-text", PriceUnit::Tokens, 60, 240, ModelType::Text),
+        ]));
+
+        assert_eq!(
+            table.price_cap("priced-text"),
+            Some(TokenPriceCap {
+                prompt_usd_per_million: 0.06,
+                completion_usd_per_million: 0.24,
+            })
+        );
+        assert_eq!(table.price_cap("priced-asr"), None);
+        assert_eq!(table.price_cap("missing"), None);
+    }
     #[test]
     fn rejects_unknown_models() {
         let table = PricingTable::new(BTreeMap::new());
@@ -385,23 +408,6 @@ mod tests {
         )]));
         assert!(table.has_model("known"));
         assert!(!table.has_model("unknown"));
-    }
-
-    #[test]
-    fn identifies_venice_models_from_pricing_metadata() {
-        let mut models = models([
-            ("openai-asr", PriceUnit::Seconds, 1, 0, ModelType::Asr),
-            ("venice-text", PriceUnit::Tokens, 1, 1, ModelType::Text),
-        ]);
-        models
-            .get_mut("venice-text")
-            .expect("model exists")
-            .provider = ModelProvider::Venice;
-        let table = PricingTable::new(models);
-
-        assert!(!table.is_venice_model("openai-asr"));
-        assert!(table.is_venice_model("venice-text"));
-        assert!(!table.is_venice_model("missing"));
     }
 
     #[test]

@@ -1,6 +1,11 @@
-import { t } from "../i18n/translate";
+import { type MessageKey, t } from "../i18n/translate";
 import { AUTO_MODEL_ID } from "./agent-model-selection";
-import type { ProviderModelMode, VeniceModelDto } from "./tauri";
+import type {
+  BuiltinProvider,
+  ProviderApiKeysConfigured,
+  ProviderModelDto,
+  ProviderModelMode,
+} from "./tauri";
 
 export type ModelPrivacyMode = "e2ee" | "private" | "anonymous";
 
@@ -41,17 +46,17 @@ export const PRIVATE_MODEL_DESCRIPTION =
 export const ANONYMOUS_MODEL_DESCRIPTION =
   "The model provider may retain prompts, though they're anonymized. Your identity is stripped before anything leaves Clovy. For sensitive content, pick a Private or E2EE model.";
 
-type ModelPrivacySignals = Pick<VeniceModelDto, "privacy" | "traits"> &
-  Partial<Pick<VeniceModelDto, "capabilities">>;
+type ModelPrivacySignals = Pick<ProviderModelDto, "privacy" | "traits"> &
+  Partial<Pick<ProviderModelDto, "capabilities">>;
 
 /** The agent drives everything through tool calls, so a text model without
  * function calling bricks Clovy — prompts run but no file, shell, or memory
- * tool ever executes. Venice's E2EE models are the common case: encrypted
- * inference can't expose tools. The capability name comes from Venice's
- * catalog (`supportsFunctionCalling`); match defensively on the normalized
- * name so a rename to snake_case or "tool calling" keeps working. */
+ * tool ever executes. The capability name comes from Clovy API's catalog
+ * (`supportsFunctionCalling`, derived from the provider's supported
+ * parameters); match defensively on the normalized name so a rename to
+ * snake_case or "tool calling" keeps working. */
 export function modelSupportsTools(
-  model: Partial<Pick<VeniceModelDto, "capabilities" | "provider">>,
+  model: Partial<Pick<ProviderModelDto, "capabilities" | "provider">>,
 ) {
   // A bring-your-own local endpoint can't be probed for function-calling
   // support from the catalog, and hard-blocking it would make the feature
@@ -67,7 +72,7 @@ export function modelSupportsTools(
 
 export function modelAvailableForMode(
   mode: ProviderModelMode,
-  model: Partial<Pick<VeniceModelDto, "id" | "capabilities" | "provider">>,
+  model: Partial<Pick<ProviderModelDto, "id" | "capabilities" | "provider">>,
 ) {
   // Auto is Clovy's first-party router, not a concrete provider model. Its
   // catalog row therefore does not need to duplicate every capability of the
@@ -79,17 +84,38 @@ export function modelAvailableForMode(
   return true;
 }
 
+const BUILTIN_PROVIDERS: readonly BuiltinProvider[] = ["groq", "openrouter", "fal", "tavily"];
+
+/** Interface-language display name of each provider a user can save a key for. */
+export const BUILTIN_PROVIDER_NAME_KEYS: Record<BuiltinProvider, MessageKey> = {
+  groq: "settings.providerKeys.groq.name",
+  openrouter: "settings.providerKeys.openrouter.name",
+  fal: "settings.providerKeys.fal.name",
+  tavily: "settings.providerKeys.tavily.name",
+};
+
+/** The provider whose own key a catalog row needs before it can run: Clovy
+ * holds no service key for it (`serviceAvailable: false`) and the user saved
+ * none. `undefined` when the row is usable as is. */
+export function modelMissingProviderKey(
+  model: Pick<ProviderModelDto, "provider" | "serviceAvailable">,
+  keys: ProviderApiKeysConfigured,
+): BuiltinProvider | undefined {
+  if (model.serviceAvailable !== false) return undefined;
+  const provider = BUILTIN_PROVIDERS.find((candidate) => candidate === model.provider);
+  return provider && !keys[provider] ? provider : undefined;
+}
+
 /** Whether the model can read image input (vision). Mirrors
  * `modelSupportsTools`: key off the authoritative capability flag on
- * `capabilities` only, never `traits`. Venice's backend emits a capability
- * string only when its boolean is true (`collect_capability_names` in
- * clovy-api), so `capabilities` reliably lists genuine vision support. `traits`
- * is descriptive/marketing text (e.g. "multimodal") that conflates image
- * OUTPUT with image INPUT — matching it would let the image-attach fallback
- * switch to a model that can't actually read the image. The capability name
- * comes from Venice's catalog (`supportsVision`); match defensively on the
- * normalized name so a rename to snake_case keeps working. */
-export function modelSupportsImageInput(model: Partial<Pick<VeniceModelDto, "capabilities">>) {
+ * `capabilities` only, never `traits`. Clovy API lists a capability only when
+ * the provider catalog reports it (image input for `supportsVision`), so
+ * `capabilities` reliably lists genuine vision support. `traits` is
+ * descriptive text that conflates image OUTPUT with image INPUT — matching it
+ * would let the image-attach fallback switch to a model that can't actually
+ * read the image. Match defensively on the normalized name so a rename to
+ * snake_case keeps working. */
+export function modelSupportsImageInput(model: Partial<Pick<ProviderModelDto, "capabilities">>) {
   return (model.capabilities ?? []).some((capability) => {
     const normalized = capability.toLowerCase().replace(/[^a-z]/g, "");
     return normalized.includes("supportsvision");

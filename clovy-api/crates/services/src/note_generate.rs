@@ -4,7 +4,7 @@ use crate::{
         log_settled, release_hold, zero_receipt,
     },
     error::ServiceError,
-    metering::{log_skipped_user_venice_key, uses_user_venice_key_for_model},
+    metering::{log_skipped_user_key_for_model, uses_user_key_for_model},
     pricing::PricingTable,
     prompts,
 };
@@ -49,8 +49,7 @@ impl NoteGenerateService {
     ) -> Result<NoteGenerateOutput, ServiceError> {
         self.pricing
             .ensure_model_kind(&params.model_id.0, ModelKind::Text)?;
-        let inference_privacy = self.pricing.inference_privacy(&params.model_id.0);
-        if uses_user_venice_key_for_model(
+        if uses_user_key_for_model(
             &self.pricing,
             &params.model_id.0,
             &params.provider_credentials,
@@ -66,13 +65,13 @@ impl NoteGenerateService {
                     existing_generated_note: params.existing_generated_note,
                     model: params.model_id.clone(),
                     system_prompt: prompts::NOTE_GENERATE.to_string(),
-                    cost_quality: params.cost_quality,
                     provider_credentials: params.provider_credentials.clone(),
-                    inference_privacy,
+                    price_cap: None,
                     unmetered: true,
                 })
                 .await?;
-            log_skipped_user_venice_key(
+            log_skipped_user_key_for_model(
+                &self.pricing,
                 ActionSlug::NoteGenerate,
                 &params.user_id,
                 &params.model_id.0,
@@ -99,9 +98,8 @@ impl NoteGenerateService {
                 existing_generated_note: params.existing_generated_note,
                 model: params.model_id.clone(),
                 system_prompt: prompts::NOTE_GENERATE.to_string(),
-                cost_quality: params.cost_quality,
                 provider_credentials: params.provider_credentials.clone(),
-                inference_privacy,
+                price_cap: self.pricing.price_cap(&params.model_id.0),
                 unmetered: false,
             })
             .await
@@ -162,7 +160,6 @@ pub struct NoteGenerateParams {
     pub language: Option<String>,
     pub existing_generated_note: Option<String>,
     pub model_id: ModelId,
-    pub cost_quality: Option<f64>,
     pub provider_credentials: ProviderCredentials,
 }
 
