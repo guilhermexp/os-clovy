@@ -681,7 +681,7 @@ struct EditInput<'a> {
 mod tests {
     use super::{Base64Bytes, FalImageEditor, PADDING, content_rect, output_size};
     use crate::{
-        fal_image::{FalQueue, ImageSize},
+        fal_image::{FalQueue, ImageSize, queue_server},
         http,
     };
     use base64::Engine as _;
@@ -702,8 +702,8 @@ mod tests {
     };
 
     const SUBMIT: &str = "/fal-ai/flux-2/edit";
-    const STATUS: &str = "/fal-ai/flux-2/edit/requests/req-1/status";
-    const RESULT: &str = "/fal-ai/flux-2/edit/requests/req-1";
+    const STATUS: &str = "/fal-ai/flux-2/requests/req-1/status";
+    const RESULT: &str = "/fal-ai/flux-2/requests/req-1";
     const SOURCE_COLOR: Rgba<u8> = Rgba([10, 200, 30, 255]);
     /// The borders of [`framed`] and its center, each unlike the others.
     const TOP: Rgb<u8> = Rgb([230, 30, 30]);
@@ -888,7 +888,7 @@ mod tests {
         height: u32,
         format: ImageFormat,
     ) -> (DynamicImage, ImageSize, GeneratedImage) {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         let size = output_size(width, height);
         mount_queue(&server, size, &png(size.width, size.height, EDITED)).await;
         let source = encode(framed(width, height), format);
@@ -1060,7 +1060,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_elongated_source_is_padded_then_cropped_back_to_its_proportion() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         let size = output_size(1000, 200);
         mount_queue(
             &server,
@@ -1090,7 +1090,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_exif_rotated_photo_is_sent_and_returned_upright() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         // Stored 1600x1200, over the pixel budget; upright it is 1200x1600.
         let size = output_size(1200, 1600);
         mount_queue(&server, size, &png(size.width, size.height, EDITED)).await;
@@ -1119,7 +1119,7 @@ mod tests {
     async fn a_result_at_another_size_is_not_returned_as_the_edit() {
         // One source per path: sent as received, reduced, drawn on a canvas.
         for (width, height) in [(160, 90), (1600, 1200), (1000, 200)] {
-            let server = MockServer::start().await;
+            let server = queue_server().await;
             mount_queue(
                 &server,
                 output_size(width, height),

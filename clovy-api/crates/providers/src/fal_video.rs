@@ -549,7 +549,10 @@ fn retrieve_error(error: FalError) -> DomainError {
 #[cfg(test)]
 mod tests {
     use super::FalVideoProvider;
-    use crate::{fal_image::FalQueue, http};
+    use crate::{
+        fal_image::{FalQueue, queue_server},
+        http,
+    };
     use clovy_config::UpstreamConfig;
     use clovy_domain::{
         DomainError, ModelId, ProviderCredentials, VideoAnimationRequest, VideoGenerationRequest,
@@ -565,8 +568,8 @@ mod tests {
 
     const WAN22_T2V: &str = "fal-ai/wan/v2.2-a14b/text-to-video";
     const WAN30_I2V: &str = "alibaba/wan-3.0/image-to-video";
-    const STATUS: &str = "/fal-ai/wan/v2.2-a14b/text-to-video/requests/req-1/status";
-    const RESULT: &str = "/fal-ai/wan/v2.2-a14b/text-to-video/requests/req-1";
+    const STATUS: &str = "/fal-ai/wan/requests/req-1/status";
+    const RESULT: &str = "/fal-ai/wan/requests/req-1";
     const MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isomiso2";
 
     fn provider(server: &MockServer, max_response_bytes: u64) -> FalVideoProvider {
@@ -821,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_queued_run_reports_processing() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         Mock::given(method("GET"))
             .and(path(STATUS))
             .respond_with(
@@ -847,7 +850,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_completed_run_returns_the_downloaded_video() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         mount_completed(
             &server,
             json!({ "status": "COMPLETED", "metrics": { "inference_time": 42.0 } }),
@@ -897,7 +900,7 @@ mod tests {
             ),
         ];
         for (result, expected) in cases {
-            let server = MockServer::start().await;
+            let server = queue_server().await;
             mount_completed(
                 &server,
                 json!({ "status": "COMPLETED", "error": "Run failed", "error_type": "runner_server_error" }),
@@ -916,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn a_completion_without_a_usable_video_fails() {
         for case in ["foreign host", "no video", "not a video"] {
-            let server = MockServer::start().await;
+            let server = queue_server().await;
             let output = match case {
                 "foreign host" => json!({ "video": { "url": "https://example.com/out.mp4" } }),
                 "no video" => json!({ "seed": 7 }),
@@ -944,7 +947,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_oversized_video_is_refused() {
-        let declared = MockServer::start().await;
+        let declared = queue_server().await;
         mount_completed(
             &declared,
             json!({ "status": "COMPLETED" }),
@@ -959,7 +962,7 @@ mod tests {
             .expect(0)
             .mount(&declared)
             .await;
-        let streamed = MockServer::start().await;
+        let streamed = queue_server().await;
         mount_completed(
             &streamed,
             json!({ "status": "COMPLETED" }),
@@ -987,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_request_is_expired_media() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         Mock::given(method("GET"))
             .and(path(STATUS))
             .respond_with(
@@ -1018,7 +1021,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_byok_job_is_queued_and_polled_with_the_users_key_only() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         Mock::given(method("POST"))
             .and(path("/fal-ai/wan/v2.2-a14b/text-to-video"))
             .and(header("authorization", "Key user_fal_key"))
@@ -1062,7 +1065,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_byok_poll_never_falls_back_to_clovys_account() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         Mock::given(method("GET"))
             .and(path(STATUS))
             .respond_with(ResponseTemplate::new(401).set_body_json(json!({ "detail": "bad key" })))
@@ -1088,7 +1091,7 @@ mod tests {
     #[tokio::test]
     async fn a_byok_request_fal_will_not_show_is_not_treated_as_expired() {
         for status in [404, 410] {
-            let server = MockServer::start().await;
+            let server = queue_server().await;
             Mock::given(method("GET"))
                 .and(path(STATUS))
                 .and(header("authorization", "Key other_account_key"))
@@ -1108,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_byok_video_gone_from_the_cdn_is_expired_media() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         mount_completed(
             &server,
             json!({ "status": "COMPLETED" }),

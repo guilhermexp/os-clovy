@@ -3,15 +3,17 @@
 //!
 //! Every fal model runs behind one queue protocol
 //! (<https://fal.ai/docs/documentation/model-apis/inference/queue>):
-//! `POST {base}/{endpoint}` submits a job and returns its `request_id`,
-//! `GET {base}/{endpoint}/requests/{id}/status` reports `IN_QUEUE`,
-//! `IN_PROGRESS` or `COMPLETED` (with `error`/`error_type` when the run
-//! failed), and `GET {base}/{endpoint}/requests/{id}` returns the model output,
-//! or the model's error body with its HTTP status. The endpoint id is the queue
-//! path (checked against each model's queue `OpenAPI` document). Each model has
-//! its own input and output schema, so every adapter keeps a curated table of
-//! the endpoints it maps faithfully and rejects any other model id before
-//! calling fal: a request never chooses an arbitrary queue path.
+//! `POST {base}/{endpoint}` submits a job and returns its `request_id`. The
+//! run is then read under its app, `{owner}/{alias}`, without the endpoint's
+//! subpath, as fal's own client does; the queue answers 405 to a read under
+//! the full endpoint. `GET {base}/{app}/requests/{id}/status` reports
+//! `IN_QUEUE`, `IN_PROGRESS` or `COMPLETED` (with `error`/`error_type` when the
+//! run failed), and `GET {base}/{app}/requests/{id}` returns the model output,
+//! or the model's error body with its HTTP status. The endpoint id is the
+//! submit path (checked against each model's queue `OpenAPI` document). Each
+//! model has its own input and output schema, so every adapter keeps a curated
+//! table of the endpoints it maps faithfully and rejects any other model id
+//! before calling fal: a request never chooses an arbitrary queue path.
 //!
 //! Generation runs the whole queue lifecycle inside one leg budget, the bound
 //! the image hold arithmetic assumes (config `lib.rs`). fal returns the image
@@ -472,15 +474,28 @@ pub(crate) struct QueuedRequest<'a> {
 }
 
 impl QueuedRequest<'_> {
+    /// The app a run is read back under: the endpoint without its subpath,
+    /// `{owner}/{alias}` (`fal-ai/wan/v2.2-a14b/text-to-video` is read at
+    /// `fal-ai/wan`). fal's client also keeps a leading `workflows/` or
+    /// `comfy/` namespace; no curated endpoint has one.
+    fn app(&self) -> &'static str {
+        let endpoint = self.endpoint;
+        endpoint
+            .match_indices('/')
+            .nth(1)
+            .map_or(endpoint, |(app_end, _)| &endpoint[..app_end])
+    }
+
     fn status_url(&self, base_url: &str) -> String {
         format!(
             "{base_url}/{}/requests/{}/status",
-            self.endpoint, self.request_id
+            self.app(),
+            self.request_id
         )
     }
 
     fn result_url(&self, base_url: &str) -> String {
-        format!("{base_url}/{}/requests/{}", self.endpoint, self.request_id)
+        format!("{base_url}/{}/requests/{}", self.app(), self.request_id)
     }
 }
 
@@ -909,9 +924,29 @@ pub(crate) struct FalFile {
     pub(crate) file_size: Option<u64>,
 }
 
+/// A stand-in for fal's queue host. Like the real queue, it answers 405 to a
+/// read addressed under an endpoint's subpath (`{owner}/{alias}/{path}/requests/...`);
+/// tests mount the routes they exercise on top.
+#[cfg(test)]
+pub(crate) async fn queue_server() -> wiremock::MockServer {
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(|request: &Request| {
+            let path = request.url.path();
+            path.find("/requests/")
+                .is_some_and(|app_end| path[..app_end].matches('/').count() > 2)
+        })
+        .respond_with(ResponseTemplate::new(405))
+        .mount(&server)
+        .await;
+    server
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FalImageGenerator, FalQueue, is_fal_cdn_url};
+    use super::{FalImageGenerator, FalQueue, is_fal_cdn_url, queue_server};
     use crate::http;
     use base64::Engine as _;
     use clovy_config::UpstreamConfig;
@@ -927,8 +962,8 @@ mod tests {
     };
 
     const SUBMIT: &str = "/fal-ai/flux/dev";
-    const STATUS: &str = "/fal-ai/flux/dev/requests/req-1/status";
-    const RESULT: &str = "/fal-ai/flux/dev/requests/req-1";
+    const STATUS: &str = "/fal-ai/flux/requests/req-1/status";
+    const RESULT: &str = "/fal-ai/flux/requests/req-1";
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\nimage-bytes";
 
     fn generator(server: &MockServer, leg_budget: Duration) -> FalImageGenerator {
@@ -985,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn generates_through_the_queue_and_returns_the_inline_image() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         Mock::given(method("POST"))
             .and(path(SUBMIT))
             .and(header("authorization", "Key service_key"))
@@ -1043,7 +1078,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_user_key_runs_the_whole_job() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         for (verb, route) in [("POST", SUBMIT), ("GET", STATUS), ("GET", RESULT)] {
             let body = match route {
                 SUBMIT => json!({ "request_id": "req-1" }),
@@ -1073,7 +1108,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_flagged_output_is_a_content_rejection_not_a_black_image() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         mount_queue(
             &server,
             json!({ "images": [{ "url": data_uri(PNG) }], "has_nsfw_concepts": [true] }),
@@ -1095,7 +1130,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_run_flagged_by_the_content_checker_is_a_content_rejection() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         Mock::given(method("POST"))
             .and(path(SUBMIT))
             .respond_with(
@@ -1196,7 +1231,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cdn_image_is_downloaded_without_credentials() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         mount_queue(
             &server,
             json!({ "images": [{ "url": format!("{}/media/out.png", server.uri()) }] }),
@@ -1227,7 +1262,7 @@ mod tests {
             json!({ "images": [{ "url": data_uri(b"<html>not an image</html>") }] }),
             json!({ "images": [] }),
         ] {
-            let server = MockServer::start().await;
+            let server = queue_server().await;
             mount_queue(&server, output).await;
 
             let error = generator(&server, Duration::from_secs(5))
@@ -1299,7 +1334,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_leg_budget_bounds_a_run_that_never_finishes() {
-        let server = MockServer::start().await;
+        let server = queue_server().await;
         Mock::given(method("POST"))
             .and(path(SUBMIT))
             .respond_with(
@@ -1430,7 +1465,7 @@ mod tests {
     async fn a_redirected_status_poll_is_never_followed() {
         for status in [307, 308] {
             let elsewhere = MockServer::start().await;
-            let server = MockServer::start().await;
+            let server = queue_server().await;
             Mock::given(method("POST"))
                 .and(path(SUBMIT))
                 .respond_with(
