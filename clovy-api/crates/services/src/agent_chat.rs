@@ -277,9 +277,9 @@ fn spawn_stream_settlement(params: StreamSettlement) {
 }
 
 async fn settle_stream_charge(params: StreamSettlement) {
-    // Failed (or a dead pump) charges nothing — the buffered path errors
-    // before its charge line on the same transport failure, and the hold
-    // expires on its own. Only a DELIVERED body may bill: at metered usage
+    // Failed (protocol/transport/no response, or a dead pump) charges nothing;
+    // actively release its hold. Partial output followed by a provider error
+    // follows transport-failure policy too. Only a successful body may bill: at metered usage
     // when the frame arrived, at the flat estimate when it did not.
     let credits = match params.outcome.await {
         Ok(AgentChatStreamOutcome::Usage(usage)) => {
@@ -311,7 +311,7 @@ async fn settle_stream_charge(params: StreamSettlement) {
                 user_id = %params.user_id.0,
                 action = ActionSlug::AgentChat.as_str(),
                 model = %params.model_id.0,
-                "agent chat stream failed mid-transport; releasing hold"
+                "agent chat stream failed; releasing hold"
             );
             release_hold(ReleaseHoldParams {
                 os_accounts: params.os_accounts.as_ref(),

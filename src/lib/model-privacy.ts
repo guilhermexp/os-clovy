@@ -96,7 +96,8 @@ export const BUILTIN_PROVIDER_NAME_KEYS: Record<BuiltinProvider, MessageKey> = {
 
 /** The provider whose own key a catalog row needs before it can run: Clovy
  * holds no service key for it (`serviceAvailable: false`) and the user saved
- * none. `undefined` when the row is usable as is. */
+ * none. `undefined` means no known missing key; media callers also check
+ * `modelProviderAvailabilityUnknown`. */
 export function modelMissingProviderKey(
   model: Pick<ProviderModelDto, "provider" | "serviceAvailable">,
   keys: ProviderApiKeysConfigured,
@@ -104,6 +105,15 @@ export function modelMissingProviderKey(
   if (model.serviceAvailable !== false) return undefined;
   const provider = BUILTIN_PROVIDERS.find((candidate) => candidate === model.provider);
   return provider && !keys[provider] ? provider : undefined;
+}
+
+/** Unknown fal service funding must not be presented as available. A saved
+ * fal key makes service funding irrelevant, including while offline. */
+export function modelProviderAvailabilityUnknown(
+  model: Pick<ProviderModelDto, "provider" | "serviceAvailable">,
+  keys?: ProviderApiKeysConfigured,
+): boolean {
+  return model.provider === "fal" && model.serviceAvailable == null && !keys?.fal;
 }
 
 /** Whether the model can read image input (vision). Mirrors

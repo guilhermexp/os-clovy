@@ -73,6 +73,13 @@ pub struct ImageService {
 }
 
 impl ImageService {
+    /// Generation models actually priced by this service (excludes edit/animation).
+    pub fn priced_models(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.pricing
+            .iter()
+            .map(|(id, price)| (id.as_str(), price.credits))
+    }
+
     pub fn new(deps: ImageServiceDeps) -> Self {
         Self {
             os_accounts: deps.os_accounts,

@@ -130,7 +130,7 @@ import {
   setExperimentalFlags,
   useExperimentalFlags,
 } from "../../lib/experimental-flags";
-import { DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "../../lib/video-models";
+import { DEFAULT_VIDEO_MODEL, videoModelCatalog } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { AgentMcpServersSection } from "./AgentMcpServersSection";
 import { ConnectorsSection } from "./ConnectorsSection";
@@ -726,6 +726,8 @@ export function AppSettings({
         await Promise.all([
           requestProviderModels("transcription"),
           requestProviderModels("generation"),
+          requestProviderModels("image"),
+          requestProviderModels("video"),
         ]);
       } catch (error) {
         if (!cancelled) setStatus(messageFromError(error));
@@ -882,14 +884,23 @@ export function AppSettings({
     }
   }
 
+  const providerCatalogRequests = useRef<Record<ProviderModelMode, number>>({
+    transcription: 0,
+    generation: 0,
+    image: 0,
+    video: 0,
+  });
+
   async function requestProviderModels(mode: ProviderModelMode) {
+    const request = ++providerCatalogRequests.current[mode];
     try {
       const response = await listProviderModels(mode);
-      setProviderModels((models) => ({
-        ...models,
-        [mode]: response.models,
-      }));
+      if (request !== providerCatalogRequests.current[mode]) return;
+      setProviderModels((models) => ({ ...models, [mode]: response.models }));
     } catch (error) {
+      if (request !== providerCatalogRequests.current[mode]) return;
+      // A stale successful fetch must not assert funding after a failed refresh.
+      setProviderModels((models) => ({ ...models, [mode]: [] }));
       setStatus(messageFromError(error));
     }
   }
@@ -1212,6 +1223,8 @@ export function AppSettings({
     try {
       const next = await setProviderApiKey(provider, apiKey);
       setProviderSettings(next);
+      void requestProviderModels("image");
+      void requestProviderModels("video");
       setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
       setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
       const providerName = translate(`settings.providerKeys.${provider}.name`);
@@ -1234,6 +1247,8 @@ export function AppSettings({
     try {
       const next = await clearProviderApiKey(provider);
       setProviderSettings(next);
+      void requestProviderModels("image");
+      void requestProviderModels("video");
       setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
       setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
       const providerName = translate(`settings.providerKeys.${provider}.name`);
@@ -1338,10 +1353,10 @@ export function AppSettings({
       (option) => option.provider === "openrouter" && option.id !== AUTO_MODEL_ID,
     );
   const imageOptions = IMAGE_GENERATION_ENABLED
-    ? modelOptions(imageModelCatalog(), displayProviderSettings.imageModel)
+    ? modelOptions(imageModelCatalog(providerModels.image), displayProviderSettings.imageModel)
     : [];
   const videoOptions = VIDEO_GENERATION_ENABLED
-    ? modelOptions(VIDEO_MODELS, displayProviderSettings.videoModel)
+    ? modelOptions(videoModelCatalog(providerModels.video), displayProviderSettings.videoModel)
     : [];
 
   useEffect(() => {
@@ -1447,7 +1462,7 @@ export function AppSettings({
     setModelPickerFlyout(null);
     setModelSearch("");
     // Image and video models are curated local lists, not fetched catalogs.
-    if (mode !== "image" && mode !== "video") void requestProviderModels(mode);
+    void requestProviderModels(mode);
   }
 
   function microphonePopoverStyle(): CSSProperties {
@@ -2289,6 +2304,7 @@ export function AppSettings({
                         description={t("settings.models.imageDescription")}
                         value={modelValueForMode("image")}
                         options={imageOptions}
+                        providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                         open={pickerMode === "image"}
                         summarySuppressed={pickerMode !== undefined}
                         flyout={modelPickerFlyout}
@@ -2313,6 +2329,7 @@ export function AppSettings({
                         description={t("settings.models.videoDescription")}
                         value={modelValueForMode("video")}
                         options={videoOptions}
+                        providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                         open={pickerMode === "video"}
                         summarySuppressed={pickerMode !== undefined}
                         flyout={modelPickerFlyout}

@@ -278,7 +278,7 @@ All routes prefixed with `/v1/`. All non-public responses wrapped in
 | `POST` | `/v1/generate` | `note_generate` | JSON `{title, transcript, manualNotes?, language?, existingGeneratedNote?, model?}` | Charge based on actual `prompt_tokens + completion_tokens` from upstream `usage`. |
 | `POST` | `/v1/dictate` | `dictate_transcribe` | multipart audio + `{model}` | Latency-sensitive; same shape as `/v1/transcribe` but separate action slug for OS Accounts analytics. |
 | `POST` | `/v1/dictate/cleanup` | `dictate_cleanup` | JSON `{text, dictionaryContext?, style, model}` | Dictation cleanup; `style = "note_transcript_cleanup"` runs note-transcript correction over the full `dictionaryContext` instead. |
-| `GET` | `/v1/models?type=asr\|text` | *(unmetered)* | — | Groq ASR and OpenRouter text models with a configured credit price, whether or not Clovy holds that provider's service key (`serviceAvailable`). Settings UI's source of truth. |
+| `GET` | `/v1/models?type=asr\|text\|image\|video` | *(unmetered)* | — | Configured Groq ASR and OpenRouter text rows; explicit image/video filters list priced fal generation endpoints with `serviceAvailable`. Omitting type keeps the original text/ASR list. No service credentials are exposed. |
 | `GET` | `/livez` | *(unmetered)* | — | Health for Railway. |
 
 **Provider keys.** A user's own key rides as `x-<provider>-api-key`

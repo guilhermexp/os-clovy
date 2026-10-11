@@ -19,6 +19,7 @@ import {
   modelAvailableForMode,
   modelIsPrivate,
   modelMissingProviderKey,
+  modelProviderAvailabilityUnknown,
   modelPrivacyBadge,
 } from "../../lib/model-privacy";
 import { modelMatchesQuery } from "../../lib/model-search";
@@ -422,6 +423,7 @@ export function ModelPickerPopover({
       options.filter(
         (option) =>
           modelAvailableForMode(mode, option) &&
+          !modelProviderAvailabilityUnknown(option, providerApiKeysConfigured) &&
           !(
             providerApiKeysConfigured && modelMissingProviderKey(option, providerApiKeysConfigured)
           ) &&
@@ -445,6 +447,9 @@ export function ModelPickerPopover({
           ]
         : [],
     [options, providerApiKeysConfigured],
+  );
+  const availabilityUnknown = options.some((option) =>
+    modelProviderAvailabilityUnknown(option, providerApiKeysConfigured),
   );
   const suggested = useMemo(() => {
     if (!suggestedModelIds) return suggestedModelsForMode(mode, selectable);
@@ -1121,6 +1126,11 @@ export function ModelPickerPopover({
                * controls: with search leading the panel, a top "Suggested" would
                * read as a caption for Auto and Effort. */}
               <p className="agent-composer-model-title">{title}</p>
+              {availabilityUnknown ? (
+                <p className="agent-composer-model-auto-note" role="status">
+                  {t("settingsPanels.picker.providerAvailabilityUnknown")}
+                </p>
+              ) : null}
               {missingProviderKeys.map((provider) => (
                 <p key={provider} className="agent-composer-model-auto-note">
                   {t("settingsPanels.picker.providerKeyNeeded", {
@@ -1177,7 +1187,7 @@ export function ModelPickerPopover({
                       <ModelRowPrivacyBadge model={option} />
                     </button>
                   ))
-                ) : (
+                ) : missingProviderKeys.length || availabilityUnknown ? null : (
                   <p className="agent-composer-model-empty">
                     {t("settingsPanels.picker.loadingSuggested")}
                   </p>

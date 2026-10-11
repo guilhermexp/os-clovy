@@ -108,6 +108,13 @@ pub struct VideoService {
 }
 
 impl VideoService {
+    /// Generation models actually priced by this service (excludes edit/animation).
+    pub fn priced_models(&self) -> impl Iterator<Item = (&str, u32)> {
+        self.pricing
+            .iter()
+            .map(|(id, price)| (id.as_str(), price.markup_millis))
+    }
+
     pub fn new(deps: VideoServiceDeps) -> Self {
         Self {
             os_accounts: deps.os_accounts,

@@ -38,6 +38,41 @@ pub(crate) async fn list_models(
     State(state): State<ApiState>,
     Query(query): Query<ModelsQuery>,
 ) -> Result<Json<ApiResponse<Vec<ModelDto>>>, ApiError> {
+    // Media has flat/quote pricing, separate from the token/audio table.
+    // Explicit new filters leave unfiltered and text/asr clients unchanged.
+    if let Some(kind @ ("image" | "video")) = query.model_type.as_deref() {
+        let available = state.service_key_configured(clovy_domain::UpstreamProvider::Fal);
+        let models = if kind == "image" {
+            state
+                .image()
+                .priced_models()
+                .map(|(id, credits)| {
+                    media_dto(
+                        id,
+                        kind,
+                        available,
+                        "image",
+                        format!("{} per image", format_credits_as_usd(credits)),
+                    )
+                })
+                .collect()
+        } else {
+            state
+                .video()
+                .priced_models()
+                .map(|(id, markup_millis)| {
+                    media_dto(
+                        id,
+                        kind,
+                        available,
+                        "video",
+                        format!("{}x provider quote", f64::from(markup_millis) / 1000.0),
+                    )
+                })
+                .collect()
+        };
+        return Ok(Json(ApiResponse::ok(models)));
+    }
     let kind = query
         .model_type
         .as_deref()
@@ -50,6 +85,27 @@ pub(crate) async fn list_models(
         .map(|(id, model)| to_dto(&id, &model, &state))
         .collect();
     Ok(Json(ApiResponse::ok(models)))
+}
+
+fn media_dto(id: &str, kind: &str, available: bool, unit: &str, price: String) -> ModelDto {
+    ModelDto {
+        provider: "fal".to_string(),
+        id: id.to_string(),
+        name: id.to_string(),
+        model_type: kind.to_string(),
+        description: None,
+        privacy: None,
+        pricing: None,
+        context_tokens: None,
+        traits: Vec::new(),
+        capabilities: Vec::new(),
+        price_unit: unit.to_string(),
+        price_description: price,
+        credits_per_million_seconds: None,
+        input_credits_per_million_tokens: None,
+        output_credits_per_million_tokens: None,
+        service_available: available,
+    }
 }
 
 fn parse_model_kind(value: &str) -> Result<ModelKind, ApiError> {

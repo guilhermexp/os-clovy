@@ -742,6 +742,9 @@ fn image_from_data_uri(uri: &str) -> Result<ImageAsset, FalError> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(payload)
         .map_err(|_| FalError::MediaUnavailable)?;
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(FalError::TooLarge);
+    }
     let mime_type = sniff_image(&bytes).ok_or(FalError::MediaUnavailable)?;
     Ok(ImageAsset { bytes, mime_type })
 }
@@ -1489,3 +1492,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "fal_image_regressions.rs"]
+mod regressions;

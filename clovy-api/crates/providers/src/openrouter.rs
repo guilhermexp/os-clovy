@@ -780,12 +780,7 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
                         heartbeat.reset();
                     }
                     Ok(None) => {
-                        let outcome = match usage_from_chat_body(&accumulated, &pump.content_type) {
-                            Ok(usage) => AgentChatStreamOutcome::Usage(usage),
-                            // Delivered body, missing meter reading — the
-                            // service settles this at the flat estimate.
-                            Err(_) => AgentChatStreamOutcome::CompletedWithoutUsage,
-                        };
+                        let outcome = stream_body_state(&accumulated, &pump.content_type).outcome();
                         let _ = pump.outcome_tx.send(outcome);
                         return;
                     }
@@ -798,7 +793,8 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
                         // upstream fault — or a cut before any byte arrived —
                         // charges nothing, matching the buffered path which
                         // errors before its charge line.
-                        let deliberate_cut = error.is_timeout() && !accumulated.is_empty();
+                        let body_state = stream_body_state(&accumulated, &pump.content_type);
+                        let deliberate_cut = error.is_timeout() && body_state.delivered && !body_state.failed;
                         tracing::error!(
                             %error,
                             url = %pump.url,
@@ -947,14 +943,10 @@ struct ChatCompletionUsage {
     completion_tokens: u64,
 }
 
-/// A tool parameter schema node that carries BOTH a `type` and an `allOf`
-/// (valid JSON Schema draft-07 — Todoist's MCP server emits it for its date
-/// fields) has been rejected by upstream request normalizers with "Conflict in
-/// schema definitions for key 'type'", which turns EVERY chat request into a
-/// 400 while such a server is connected. Providers behind `OpenRouter` differ in
-/// JSON Schema support, so the rewrite stays. The `allOf` branches only
-/// restate the declared type plus regex refinements, so folding them where a
-/// sibling `type` exists loses nothing the model needs for tool calling.
+/// Some upstream normalizers reject `type` beside `allOf`. Fold compatible
+/// tool-schema containers while preserving the established parent precedence
+/// for competing scalar constraints. This is model guidance, not a general
+/// JSON Schema intersection algorithm; see `strip_conflicting_all_of`.
 fn sanitize_tool_schemas(body: &mut serde_json::Map<String, serde_json::Value>) {
     let Some(tools) = body
         .get_mut("tools")
@@ -972,31 +964,28 @@ fn sanitize_tool_schemas(body: &mut serde_json::Map<String, serde_json::Value>) 
     }
 }
 
-/// Recursively resolves `allOf` on any schema node that also declares `type`
-/// (the combination such normalizers reject). Instead of dropping the branch
-/// outright, its keys are FOLDED into the parent (parent wins on conflict), so
-/// constraints a branch legitimately contributes — `required`, nested
-/// `properties`, a `pattern` the parent lacks — survive the rewrite. True
-/// `allOf` AND-semantics cannot be fully expressed after folding (two
-/// competing `pattern`s keep only the parent's), which is acceptable for tool
-/// calling: the schemas guide the model, they are not the validator. Nodes
-/// using `allOf` without a sibling `type` are left untouched.
+/// Normalize typed object branches, merging properties recursively and taking
+/// the ordered union of required names. Parent constraints win actual key
+/// conflicts; otherwise the first branch wins. Competing patterns/ranges and
+/// incompatible types are not intersected. Boolean/non-object branches and
+/// allOf without a sibling type remain intact rather than being discarded.
 fn strip_conflicting_all_of(node: &mut serde_json::Value) {
     match node {
         serde_json::Value::Object(map) => {
-            if map.contains_key("type")
-                && let Some(serde_json::Value::Array(branches)) = map.remove("allOf")
-            {
-                for branch in branches {
-                    if let serde_json::Value::Object(branch_map) = branch {
-                        for (key, value) in branch_map {
-                            map.entry(key).or_insert(value);
-                        }
-                    }
-                }
-            }
             for value in map.values_mut() {
                 strip_conflicting_all_of(value);
+            }
+            let foldable = map.contains_key("type")
+                && map
+                    .get("allOf")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|branches| branches.iter().all(serde_json::Value::is_object));
+            if foldable && let Some(serde_json::Value::Array(branches)) = map.remove("allOf") {
+                for branch in branches {
+                    if let serde_json::Value::Object(branch) = branch {
+                        merge_schema_constraints(map, branch);
+                    }
+                }
             }
         }
         serde_json::Value::Array(items) => {
@@ -1005,6 +994,41 @@ fn strip_conflicting_all_of(node: &mut serde_json::Value) {
             }
         }
         _ => {}
+    }
+}
+
+fn merge_schema_constraints(
+    parent: &mut serde_json::Map<String, serde_json::Value>,
+    branch: serde_json::Map<String, serde_json::Value>,
+) {
+    use serde_json::Value;
+    for (key, value) in branch {
+        match (parent.get_mut(&key), value) {
+            (Some(Value::Object(existing)), Value::Object(properties)) if key == "properties" => {
+                for (name, schema) in properties {
+                    match (existing.get_mut(&name), schema) {
+                        (Some(Value::Object(existing_schema)), Value::Object(branch_schema)) => {
+                            merge_schema_constraints(existing_schema, branch_schema);
+                        }
+                        (None, schema) => {
+                            existing.insert(name, schema);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (Some(Value::Array(required)), Value::Array(names)) if key == "required" => {
+                for name in names {
+                    if !required.contains(&name) {
+                        required.push(name);
+                    }
+                }
+            }
+            (None, value) => {
+                parent.insert(key, value);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1049,25 +1073,111 @@ fn usage_from_chat_body(body: &[u8], content_type: &str) -> Result<TokenUsage, D
         .ok_or(DomainError::UpstreamProvider)
 }
 
-fn usage_from_sse(body: &[u8]) -> Result<TokenUsage, DomainError> {
-    let text = std::str::from_utf8(body).map_err(|_| DomainError::UpstreamProvider)?;
-    let mut usage = None;
-    for line in text.lines() {
-        let Some(data) = line.trim().strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data == "[DONE]" || data.is_empty() {
-            continue;
+#[derive(Default)]
+struct StreamBodyState {
+    usage: Option<TokenUsage>,
+    delivered: bool,
+    failed: bool,
+}
+
+impl StreamBodyState {
+    fn observe(&mut self, value: &serde_json::Value) {
+        if value.get("error").is_some_and(|error| !error.is_null()) {
+            self.failed = true;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-            continue;
-        };
-        if let Some(parsed) = value.get("usage").and_then(token_usage_from_value) {
-            usage = Some(parsed);
+        if let Some(usage) = value.get("usage").and_then(token_usage_from_value) {
+            self.usage = Some(usage);
+        }
+        for choice in value
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if choice
+                .get("finish_reason")
+                .and_then(serde_json::Value::as_str)
+                == Some("error")
+            {
+                self.failed = true;
+            }
+            let output = choice.get("delta").or_else(|| choice.get("message"));
+            if let Some(output) = output {
+                self.delivered |= [
+                    "content",
+                    "refusal",
+                    "reasoning",
+                    "reasoning_content",
+                    "tool_calls",
+                    "function_call",
+                    "audio",
+                ]
+                .iter()
+                .any(|key| {
+                    output.get(key).is_some_and(|value| match value {
+                        serde_json::Value::String(text) => !text.is_empty(),
+                        serde_json::Value::Array(items) => !items.is_empty(),
+                        serde_json::Value::Object(fields) => !fields.is_empty(),
+                        _ => false,
+                    })
+                });
+            }
         }
     }
-    usage.ok_or(DomainError::UpstreamProvider)
+
+    fn outcome(self) -> AgentChatStreamOutcome {
+        // Protocol errors obey the same no-charge policy as transport faults,
+        // including partial output. An error frame is never a success meter.
+        if self.failed {
+            AgentChatStreamOutcome::Failed
+        } else if let Some(usage) = self.usage {
+            AgentChatStreamOutcome::Usage(usage)
+        } else if self.delivered {
+            AgentChatStreamOutcome::CompletedWithoutUsage
+        } else {
+            AgentChatStreamOutcome::Failed
+        }
+    }
+}
+
+fn stream_body_state(body: &[u8], content_type: &str) -> StreamBodyState {
+    let mut state = StreamBodyState::default();
+    if !content_type.contains("text/event-stream") {
+        if let Ok(value) = serde_json::from_slice(body) {
+            state.observe(&value);
+        }
+        return state;
+    }
+    // Parse complete SSE events, not transport chunks or individual data
+    // lines. CRLF/CR, comments, named events and multi-line data are legal.
+    let text = String::from_utf8_lossy(body)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut data = String::new();
+    for line in text.split_terminator('\n') {
+        if line.is_empty() {
+            if !data.trim().is_empty() && data.trim() != "[DONE]" {
+                match serde_json::from_str(&data) {
+                    Ok(value) => state.observe(&value),
+                    Err(_) => state.failed = true,
+                }
+            }
+            data.clear();
+        } else if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.strip_prefix(' ').unwrap_or(value));
+        }
+    }
+    state
+}
+
+fn usage_from_sse(body: &[u8]) -> Result<TokenUsage, DomainError> {
+    match stream_body_state(body, "text/event-stream").outcome() {
+        AgentChatStreamOutcome::Usage(usage) => Ok(usage),
+        _ => Err(DomainError::UpstreamProvider),
+    }
 }
 
 fn token_usage_from_value(value: &serde_json::Value) -> Option<TokenUsage> {
@@ -2019,7 +2129,10 @@ mod tests {
         let (base_url, _server) = stream_stub(
             200,
             "text/event-stream",
-            vec![(b"data: {\"choices\":[]}\n\n".to_vec(), Duration::ZERO)],
+            vec![(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n".to_vec(),
+                Duration::ZERO,
+            )],
         )
         .await?;
         let agent = test_agent(&base_url);
@@ -2264,7 +2377,10 @@ mod tests {
             200,
             "text/event-stream",
             vec![
-                (b"data: {\"choices\":[]}\n\n".to_vec(), Duration::ZERO),
+                (
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n".to_vec(),
+                    Duration::ZERO,
+                ),
                 (b"data: [DONE]\n\n".to_vec(), Duration::from_secs(5)),
             ],
         )
@@ -2332,7 +2448,10 @@ mod tests {
             200,
             "text/event-stream",
             vec![
-                (b"data: {\"choices\":[]}\n\n".to_vec(), Duration::ZERO),
+                (
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n".to_vec(),
+                    Duration::ZERO,
+                ),
                 (b"data: [DONE]\n\n".to_vec(), Duration::from_secs(5)),
             ],
         )
@@ -2347,6 +2466,70 @@ mod tests {
 
         assert_eq!(outcome, AgentChatStreamOutcome::CompletedWithoutUsage);
         Ok(())
+    }
+
+    #[test]
+    fn f1_protocol_frames_distinguish_response_from_framing_and_errors() {
+        for body in [
+            "data: {\"error\":{\"code\":429}}\n\n",
+            "event: message\r\ndata: {\r\ndata: \"error\":{\"code\":\"server_error\"}}\r\n\r\n",
+            ": heartbeat\n\ndata: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"unfinished event\"}}]}\n",
+        ] {
+            assert_eq!(
+                super::stream_body_state(body.as_bytes(), "text/event-stream").outcome(),
+                AgentChatStreamOutcome::Failed
+            );
+        }
+        for body in [
+            "data: {\n: ignored\ndata: \"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"read_note\"}}]}}]}\r\r",
+        ] {
+            assert_eq!(
+                super::stream_body_state(body.as_bytes(), "text/event-stream").outcome(),
+                AgentChatStreamOutcome::CompletedWithoutUsage
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn f1_timeout_after_only_framing_or_provider_error_releases_hold()
+    -> Result<(), Box<dyn Error>> {
+        for body in [
+            b": processing\n\n".to_vec(),
+            b"data: {\"error\":{\"code\":503}}\n\n".to_vec(),
+        ] {
+            let (url, server) = stream_stub(
+                200,
+                "text/event-stream",
+                vec![(body, Duration::ZERO), (Vec::new(), Duration::from_secs(5))],
+            )
+            .await?;
+            let stream = short_timeout_agent(&url)
+                .complete_stream(stream_request())
+                .await?;
+            assert_eq!(stream.outcome.await?, AgentChatStreamOutcome::Failed);
+            server.abort();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn f4_parent_wins_only_competing_keys_and_unsupported_branches_survive() {
+        let mut schema = json!({"type":"object","properties":{"a":{"type":"string","pattern":"parent"}},"allOf":[{"properties":{"a":{"pattern":"branch","minLength":2},"b":{"type":"string"}}}]});
+        super::strip_conflicting_all_of(&mut schema);
+        assert_eq!(schema["properties"]["a"]["pattern"], "parent");
+        assert_eq!(schema["properties"]["a"]["minLength"], 2);
+        assert_eq!(schema["properties"]["b"]["type"], "string");
+        for mut schema in [
+            json!({"allOf":[{"type":"string"}]}),
+            json!({"type":"object","allOf":[false]}),
+        ] {
+            let original = schema.clone();
+            super::strip_conflicting_all_of(&mut schema);
+            assert_eq!(schema, original);
+        }
     }
 
     #[test]
@@ -2902,3 +3085,7 @@ Microphone: Quote.";
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "openrouter_regressions.rs"]
+mod regressions;

@@ -121,7 +121,7 @@ pub struct AgentChatStream {
 }
 
 /// How a streamed agent chat body ended. Settlement branches on this: a
-/// transport failure must charge nothing (matching the buffered path, which
+/// protocol or transport failure must charge nothing (matching the buffered path, which
 /// errors before its charge line on the same failure), while a body that
 /// completed but carried no usage frame settles at the flat estimate —
 /// content WAS delivered, only the meter reading is missing.

@@ -376,6 +376,8 @@ export default defineMessages({
       "Auto is billed to Clovy credits and does not use your OpenRouter key.",
     "settingsPanels.picker.providerKeyNeeded":
       "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
+    "settingsPanels.picker.providerAvailabilityUnknown":
+      "Clovy could not confirm media availability. Reopen this picker to retry, or add your fal API key in Settings, under More options.",
     "settingsPanels.picker.autoPreference": "Auto preference",
     "settingsPanels.picker.thinkingLevel": "Thinking level",
     "settingsPanels.picker.loadingSuggested": "Loading suggested models.",
@@ -903,6 +905,8 @@ export default defineMessages({
       "O Auto é cobrado em créditos do Clovy e não usa sua chave da OpenRouter.",
     "settingsPanels.picker.providerKeyNeeded":
       "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
+    "settingsPanels.picker.providerAvailabilityUnknown":
+      "O Clovy não conseguiu confirmar a disponibilidade de mídia. Reabra este seletor para tentar de novo ou adicione sua chave de API da fal em Configurações, em Mais opções.",
     "settingsPanels.picker.autoPreference": "Preferência do Auto",
     "settingsPanels.picker.thinkingLevel": "Nível de raciocínio",
     "settingsPanels.picker.loadingSuggested": "Carregando modelos sugeridos.",

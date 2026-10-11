@@ -518,8 +518,8 @@ export type ProviderModelDto = {
   inputCreditsPerMillionTokens?: number;
   outputCreditsPerMillionTokens?: number;
   /** False when Clovy holds no service key for the row's provider: the model is
-   * usable only with the user's own key for that provider. Absent means
-   * available (older Clovy API builds do not send it). */
+   * usable only with the user's own key for that provider. Absent means unknown
+   * for media; text/ASR retain their legacy handling for older API builds. */
   serviceAvailable?: boolean;
 };
 

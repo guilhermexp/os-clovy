@@ -1,4 +1,5 @@
 import { type MessageKey, t } from "../i18n/translate";
+import { mediaModelCatalog } from "./media-models";
 import type { ProviderModelDto } from "./tauri";
 
 // Clovy's default video model. Mirrors DEFAULT_VIDEO_MODEL in the Rust providers
@@ -27,8 +28,7 @@ function videoModel({ descriptionKey, ...model }: VideoModelDefinition): Provide
 }
 
 // Curated fal text-to-video endpoints for the settings picker. Video models are
-// not part of the text/ASR catalog Clovy API serves, so the picker uses this
-// local snapshot instead of fetching (same pattern as IMAGE_MODELS). Two hard
+// described locally; funding availability comes from Clovy API at render time. Two hard
 // constraints govern any entry; a model that breaks them fails at generation
 // time, not here:
 //   1. It must be priced in clovy-api's `video_pricing` map (ADR 0015): that map
@@ -53,3 +53,7 @@ export const VIDEO_MODELS: ProviderModelDto[] = [
     descriptionKey: "lib.videoModels.wan30",
   }),
 ];
+
+export function videoModelCatalog(remote: ProviderModelDto[] = []): ProviderModelDto[] {
+  return mediaModelCatalog(VIDEO_MODELS, remote);
+}

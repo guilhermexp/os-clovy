@@ -3044,3 +3044,37 @@ async fn integration_dictate_cleanup_maps_style_to_cleanup_kind() -> Result<(), 
 
     Ok(())
 }
+
+#[tokio::test]
+async fn f3_media_catalog_reports_actual_service_availability() -> Result<(), Box<dyn Error>> {
+    for configured in [false, true] {
+        let mut deps = default_test_state_deps();
+        deps.upstream_service_keys = UpstreamServiceKeys::for_providers(if configured {
+            vec![clovy_domain::UpstreamProvider::Fal]
+        } else {
+            vec![]
+        });
+        let app = router(test_state_from_deps(deps));
+        for kind in ["image", "video"] {
+            let response = send_on(
+                app.clone(),
+                get_request(&format!("/v1/models?type={kind}"))?,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "media catalog must be additive"
+            );
+            let body = response_json(response).await?;
+            let rows = body["data"].as_array().ok_or("models array")?;
+            assert!(!rows.is_empty());
+            for row in rows {
+                assert_eq!(row["provider"], "fal");
+                assert_eq!(row["modelType"], kind);
+                assert_eq!(row["serviceAvailable"], configured);
+            }
+        }
+    }
+    Ok(())
+}

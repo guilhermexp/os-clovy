@@ -277,13 +277,9 @@ pub struct ModelDto {
     pub output_credits_per_million_tokens: Option<u64>,
     /// Whether Clovy holds the service key for the row's provider. When false
     /// the model works only with the user's own key for that provider.
-    /// Absent (older Clovy API) means available.
-    #[serde(default = "service_available_by_default")]
-    pub service_available: bool,
-}
-
-fn service_available_by_default() -> bool {
-    true
+    /// Absent (older Clovy API) is unknown; never infer media availability.
+    #[serde(default)]
+    pub service_available: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

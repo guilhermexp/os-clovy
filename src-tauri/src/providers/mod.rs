@@ -498,12 +498,8 @@ pub struct ProviderModelDto {
     pub output_credits_per_million_tokens: Option<u64>,
     /// False when Clovy holds no service key for the row's provider: the model
     /// is usable only with the user's own key for that provider.
-    #[serde(default = "model_service_available_by_default")]
-    pub service_available: bool,
-}
-
-fn model_service_available_by_default() -> bool {
-    true
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_available: Option<bool>,
 }
 
 impl From<crate::clovy_api::ModelDto> for ProviderModelDto {
@@ -1296,15 +1292,7 @@ async fn set_provider_api_key_impl(
     let provider = request.provider;
     let api_key = validate_provider_api_key(provider, &request.api_key)?;
     verify_provider_api_key(provider, &api_key, check_url).await?;
-    // The key is written before it is recorded, so a Keychain failure leaves
-    // the saved state untouched.
-    update_settings_result(state, |settings| {
-        store
-            .set(provider.secret_account(), &api_key)
-            .map_err(|_| provider_api_key_store_failed(provider))?;
-        settings.provider_api_keys_configured.set(provider, true);
-        Ok(())
-    })
+    update_provider_credential(state, store, provider, Some(&api_key))
 }
 
 fn clear_provider_api_key_impl(
@@ -1312,13 +1300,53 @@ fn clear_provider_api_key_impl(
     store: &dyn crate::llm::secrets::SecretStore,
     provider: BuiltinProvider,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings_result(state, |settings| {
-        store
-            .delete(provider.secret_account())
-            .map_err(|_| provider_api_key_store_failed(provider))?;
-        settings.provider_api_keys_configured.set(provider, false);
-        Ok(())
-    })
+    update_provider_credential(state, store, provider, None)
+}
+
+/// Serialize secret changes with settings writes and publication. Neither
+/// settings view changes until the atomic file replacement succeeds. A failed
+/// persistence restores the previous secret (also restoring its store cache).
+fn update_provider_credential(
+    state: &ProviderSettingsState,
+    store: &dyn crate::llm::secrets::SecretStore,
+    provider: BuiltinProvider,
+    next_key: Option<&str>,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
+    let mut published = settings_store()
+        .lock()
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
+    let account = provider.secret_account();
+    let prior_key = store
+        .get(account)
+        .map_err(|_| provider_api_key_store_failed(provider))?;
+    let mut candidate = settings.clone();
+    candidate
+        .provider_api_keys_configured
+        .set(provider, next_key.is_some());
+    let write_secret = |key: Option<&str>| match key {
+        Some(key) => store.set(account, key),
+        None => store.delete(account),
+    };
+    write_secret(next_key).map_err(|_| provider_api_key_store_failed(provider))?;
+    if let Err(error) = save_settings(state, &candidate) {
+        if write_secret(prior_key.as_deref()).is_err() {
+            // Never hide a failed compensation or expose the store's error
+            // text (which could include a credential). Both settings views
+            // and the old file remain intact; the user must restore the key.
+            return Err(AppError::new(
+                "provider_api_key_rollback_failed",
+                format!("Settings could not be saved and your previous {} key could not be restored. Save that key again before retrying.", provider.display_name()),
+            ));
+        }
+        return Err(error);
+    }
+    *settings = candidate.clone();
+    *published = candidate;
+    Ok(ProviderModelSettingsDto::from(&*settings))
 }
 
 fn provider_api_key_store_failed(provider: BuiltinProvider) -> AppError {
@@ -1413,21 +1441,15 @@ pub async fn list_provider_models(
     state: State<'_, ProviderSettingsState>,
     request: ProviderModelsRequest,
 ) -> Result<ProviderModelsResponse, AppError> {
+    list_provider_models_impl(&state, request).await
+}
+
+async fn list_provider_models_impl(
+    state: &ProviderSettingsState,
+    request: ProviderModelsRequest,
+) -> Result<ProviderModelsResponse, AppError> {
     let model_type = request.mode.api_type();
-    let selected_model = selected_model_for_mode(&state, request.mode)?;
-    // Image and video models are not in the text/ASR catalog Clovy API serves
-    // (`GET /v1/models` accepts only `asr` and `text`); the pickers use the
-    // curated frontend lists mirrored by KNOWN_IMAGE_MODELS/KNOWN_VIDEO_MODELS.
-    // Short-circuit so a direct caller never gets unrelated rows back, and we
-    // skip a catalog round-trip the API would reject.
-    if matches!(request.mode, ModelMode::Image | ModelMode::Video) {
-        return Ok(ProviderModelsResponse {
-            mode: request.mode,
-            model_type: model_type.to_string(),
-            selected_model,
-            models: Vec::new(),
-        });
-    }
+    let selected_model = selected_model_for_mode(state, request.mode)?;
     let mut models = crate::clovy_api::list_models(model_type)
         .await?
         .into_iter()
@@ -1960,21 +1982,13 @@ fn update_settings(
     })
 }
 
-/// Like [`update_settings`] but lets the closure reject the change. The closure
-/// must perform every fallible check before mutating `settings`, so an early
-/// error leaves the persisted state untouched (nothing is saved on `Err`).
+/// Apply a candidate atomically; errors never mutate the managed or published
+/// view. Secret operations need `update_provider_credential` for compensation.
 fn update_settings_result(
     state: &ProviderSettingsState,
     update: impl FnOnce(&mut ProviderModelSettings) -> Result<(), AppError>,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let mut settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
-    update(&mut settings)?;
-    save_settings(state, &settings)?;
-    replace_current_settings(settings.clone());
-    Ok(ProviderModelSettingsDto::from(&*settings))
+    update_llm_registry(state, update).map(|settings| ProviderModelSettingsDto::from(&settings))
 }
 
 /// Applies a registry change atomically: the closure works on a copy, and
@@ -2015,8 +2029,26 @@ fn save_settings(
     }
     let serialized = serde_json::to_string_pretty(settings)
         .map_err(|error| AppError::new("provider_settings_save_failed", error.to_string()))?;
-    fs::write(&state.path, serialized)
-        .map_err(|error| AppError::new("provider_settings_save_failed", error.to_string()))
+    // A failed write must not truncate the saved settings. Stage on the same
+    // filesystem, then atomically replace; tempfile cleans up on any error.
+    use std::io::Write;
+    let parent = state.path.parent().ok_or_else(|| {
+        AppError::new(
+            "provider_settings_save_failed",
+            "Settings directory is missing.",
+        )
+    })?;
+    let save_error =
+        |error: std::io::Error| AppError::new("provider_settings_save_failed", error.to_string());
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(save_error)?;
+    temporary
+        .write_all(serialized.as_bytes())
+        .map_err(save_error)?;
+    temporary.as_file().sync_all().map_err(save_error)?;
+    temporary
+        .persist(&state.path)
+        .map_err(|error| save_error(error.error))?;
+    Ok(())
 }
 
 fn sanitize_local_generation(settings: LocalGenerationSettings) -> LocalGenerationSettings {
@@ -3349,7 +3381,7 @@ mod tests {
             credits_per_million_seconds: Some(60_000),
             input_credits_per_million_tokens: None,
             output_credits_per_million_tokens: None,
-            service_available: true,
+            service_available: Some(true),
         });
 
         assert_eq!(
@@ -3402,3 +3434,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod transaction_regressions;

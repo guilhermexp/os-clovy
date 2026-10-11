@@ -127,6 +127,34 @@ and requests without the user's key fail with `<provider>_not_configured`.
 Model pickers and the companion's model list leave out or flag such rows until
 the key is saved; a missing key is a setting, not a macOS permission.
 
+`GET /v1/models?type=image|video` lists the generation endpoints actually in
+`image_pricing` / `video_pricing`, with the same DTO fields and the configured
+fal service-key flag. The unfiltered, text and ASR responses are unchanged;
+edit and animation endpoints keep their existing separate pricing. The native
+`list_provider_models` command fetches all four modes. Media pickers retain
+curated IDs, names, translations and defaults, merging only availability by
+provider/type/ID. Missing rows/fields or a failed refresh mean **unknown**, with
+a retry/add-key notice, not a false claim that the service is configured or
+unconfigured. A saved fal key enables these rows independently of service
+funding. Opening a picker refreshes it; saving/removing a key updates both
+media pickers immediately and refreshes their catalogs. Generation/edit/video
+actions still enforce funding at the API boundary and use the existing key
+recovery flow; discovery does not authorize inference or change Auto funding.
+An updated Clovy API deployment is required for this additive media discovery;
+older APIs produce the explicit unknown state.
+
+Provider-key changes hold the settings and published-view locks across the
+secret operation and persistence. Settings are prepared on a candidate and
+written via a temporary file in the same directory followed by atomic replace.
+Only success publishes the new flags. If persistence fails, the previous secret
+is restored through `SecretStore` (including its cache) before returning the
+save error. If restoration also fails, the distinct
+`provider_api_key_rollback_failed` error asks the user to save the previous key
+again; it never masks that failure as a missing-key flag correction. These
+semantics cover all four builtin routes and also avoid mutating ordinary
+settings when a candidate is rejected or cannot be persisted.
+
+
 Settings saved before the Groq / OpenRouter / fal cutover are migrated on
 load: transcription becomes Groq Whisper, remote text moves to the same model
 on OpenRouter when Clovy serves it (otherwise the default), and media models
@@ -151,3 +179,22 @@ corrected on the dictation cleanup selection (Clovy API, an endpoint, or a
 CLI) with style `note_transcript_cleanup`, which selects the note correction
 instructions, and receives the whole dictionary plus the earlier turns of the
 same source. Dictation sends the whole dictionary to its cleanup pass.
+
+
+### Tool schemas and inline image limits
+
+For tool guidance, typed `allOf` object branches merge `properties` recursively
+and union `required` names in order without duplicates. Nonconflicting scalar
+constraints survive; only actual competing keys use parent precedence (then
+first-branch precedence). This is a constrained normalization for upstream
+normalizers, not arbitrary JSON Schema intersection: incompatible types,
+competing patterns/ranges and constraints such as `additionalProperties` are
+not mathematically combined. Boolean/non-object branches and `allOf` without
+a sibling type remain present. The runtime remains responsible for validating
+tool calls against its original contract.
+
+fal inline image results enforce the same 50 MiB **decoded-byte** cap as CDN
+results, in addition to the encoded-length guard. MIME comes from magic bytes,
+not the data-URI declaration. A decoded over-limit result maps to
+`image_too_large`; malformed base64/unsupported magic retain their existing
+media-unavailable mapping.
