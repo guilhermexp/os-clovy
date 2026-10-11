@@ -51,7 +51,6 @@ pub(crate) async fn list_models(
                         id,
                         kind,
                         available,
-                        "image",
                         format!("{} per image", format_credits_as_usd(credits)),
                     )
                 })
@@ -65,7 +64,6 @@ pub(crate) async fn list_models(
                         id,
                         kind,
                         available,
-                        "video",
                         format!("{}x provider quote", f64::from(markup_millis) / 1000.0),
                     )
                 })
@@ -87,7 +85,7 @@ pub(crate) async fn list_models(
     Ok(Json(ApiResponse::ok(models)))
 }
 
-fn media_dto(id: &str, kind: &str, available: bool, unit: &str, price: String) -> ModelDto {
+fn media_dto(id: &str, kind: &str, available: bool, price: String) -> ModelDto {
     ModelDto {
         provider: "fal".to_string(),
         id: id.to_string(),
@@ -99,7 +97,7 @@ fn media_dto(id: &str, kind: &str, available: bool, unit: &str, price: String) -
         context_tokens: None,
         traits: Vec::new(),
         capabilities: Vec::new(),
-        price_unit: unit.to_string(),
+        price_unit: kind.to_string(),
         price_description: price,
         credits_per_million_seconds: None,
         input_credits_per_million_tokens: None,

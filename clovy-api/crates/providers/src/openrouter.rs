@@ -787,10 +787,10 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
                     Err(error) => {
                         // Two distinct billing cases hide in this arm. Our own
                         // client timeout cutting a stream that had already
-                        // delivered bytes is a deliberate cap (the metered
+                        // delivered response content is a deliberate cap (the metered
                         // window keeps settlement inside the hold TTL), so it
                         // settles like a delivered-but-unmetered body. An
-                        // upstream fault — or a cut before any byte arrived —
+                        // upstream fault — or a cut before response content arrived —
                         // charges nothing, matching the buffered path which
                         // errors before its charge line.
                         let body_state = stream_body_state(&accumulated, &pump.content_type);
