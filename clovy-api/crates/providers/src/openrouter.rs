@@ -986,6 +986,12 @@ fn strip_conflicting_all_of(node: &mut serde_json::Value) {
                         merge_schema_constraints(map, branch);
                     }
                 }
+                // An untyped branch can contribute allOf beside an existing
+                // type, including within merged properties. Normalize only
+                // after all siblings merge, preserving their precedence.
+                // Each repeated pass consumes a foldable allOf container;
+                // unsupported branches still stop at the same guard above.
+                strip_conflicting_all_of(node);
             }
         }
         serde_json::Value::Array(items) => {
@@ -2530,6 +2536,47 @@ mod tests {
             super::strip_conflicting_all_of(&mut schema);
             assert_eq!(schema, original);
         }
+    }
+
+    #[test]
+    fn f4_merged_schemas_are_normalized_in_prepared_requests() -> Result<(), Box<dyn Error>> {
+        let cases = [
+            (
+                json!({"type":"object","properties":{"x":{"type":"string"}},"allOf":[{"properties":{"x":{"allOf":[{"minLength":2}]}}}]}),
+                json!({"type":"object","properties":{"x":{"type":"string","minLength":2}}}),
+            ),
+            (
+                json!({"type":"object","properties":{"x":{"type":"string","minLength":5}},"allOf":[{"properties":{"x":{"allOf":[{"minLength":2,"pattern":"^[a-z]+$"}]}}}]}),
+                json!({"type":"object","properties":{"x":{"type":"string","minLength":5,"pattern":"^[a-z]+$"}}}),
+            ),
+            (
+                json!({"type":"object","properties":{"x":{"type":"object","properties":{"y":{"type":"string"}}}},"allOf":[{"properties":{"x":{"allOf":[{"properties":{"y":{"allOf":[{"minLength":2}]}},"required":["y"]}]}}}]}),
+                json!({"type":"object","properties":{"x":{"type":"object","properties":{"y":{"type":"string","minLength":2}},"required":["y"]}}}),
+            ),
+            (
+                json!({"type":"object","properties":{"x":{"type":"string"}},"allOf":[{"properties":{"x":{"allOf":[false,{"minLength":2}]}}}]}),
+                json!({"type":"object","properties":{"x":{"type":"string","allOf":[false,{"minLength":2}]}}}),
+            ),
+            (
+                json!({"type":"object","properties":{"x":{}},"allOf":[{"properties":{"x":{"allOf":[{"minLength":2}]}}}]}),
+                json!({"type":"object","properties":{"x":{"allOf":[{"minLength":2}]}}}),
+            ),
+            (
+                json!({"type":"string","allOf":[{"allOf":[{"minLength":2}]}]}),
+                json!({"type":"string","minLength":2}),
+            ),
+        ];
+        for (parameters, expected) in cases {
+            for stream in [false, true] {
+                let prepared = prepare_agent_chat_body(
+                    json!({"messages":[],"stream":stream,"tools":[{"type":"function","function":{"name":"fixture","parameters":parameters}}]}),
+                    &clovy_domain::ModelId("fixture-model".to_string()),
+                    None,
+                )?;
+                assert_eq!(prepared["tools"][0]["function"]["parameters"], expected);
+            }
+        }
+        Ok(())
     }
 
     #[test]

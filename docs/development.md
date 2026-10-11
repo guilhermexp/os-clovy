@@ -5,6 +5,14 @@ Configuration details (every env var, pricing, custom models, connected mode)
 live in [configuration.md](configuration.md); when the two disagree, the env
 example files win.
 
+## Checks in nested worktrees
+
+Biome excludes the checkout's own `.tmp` with the root-relative `!!.tmp`
+pattern. Keep this exclusion relative to the project root: `!!**/.tmp` also
+prunes a checkout located under an ancestor `.tmp/worktrees`, causing
+`pnpm check` to process zero files. The local temporary evidence directory
+remains excluded while the source files are checked normally.
+
 ## Quick start
 
 Clone the repo, copy both env examples, add the service keys for the providers

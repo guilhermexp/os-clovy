@@ -10,7 +10,7 @@
       "*.mjs",
       "!**/*.min.js",
       "!**/dist",
-      "!!**/.tmp"
+      "!!.tmp"
     ],
     "ignoreUnknown": true
   },

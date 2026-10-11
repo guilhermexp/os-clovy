@@ -190,8 +190,11 @@ first-branch precedence). This is a constrained normalization for upstream
 normalizers, not arbitrary JSON Schema intersection: incompatible types,
 competing patterns/ranges and constraints such as `additionalProperties` are
 not mathematically combined. Boolean/non-object branches and `allOf` without
-a sibling type remain present. The runtime remains responsible for validating
-tool calls against its original contract.
+a sibling type remain present. After branches merge, the resulting schema is
+normalized again: an untyped branch refinement can now sit beside a type
+inherited from the parent, including inside nested properties. This second
+pass keeps the same precedence and unsupported-branch rules. The runtime
+remains responsible for validating tool calls against its original contract.
 
 fal inline image results enforce the same 50 MiB **decoded-byte** cap as CDN
 results, in addition to the encoded-length guard. MIME comes from magic bytes,
