@@ -243,6 +243,38 @@ describe("HUD windows in pt-BR", () => {
     expect(document.querySelector("#hud-target")).toHaveAttribute("hidden");
   });
 
+  it("still hydrates the active target after an unrelated helper event", async () => {
+    let resolveLatest: (value: string) => void = () => {};
+    mocks.invoke.mockImplementation((command: string) =>
+      command === "latest_dictation_event"
+        ? new Promise<string>((resolve) => {
+            resolveLatest = resolve;
+          })
+        : Promise.resolve(),
+    );
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await mocks.listeners.get("dictation-event")?.({
+      payload: { type: "microphone_selected", payload: { name: "Microphone" } },
+    });
+    resolveLatest(
+      JSON.stringify({
+        type: "listening_started",
+        payload: {
+          takeId: "active",
+          target: { app: "Terminal", bundleIdentifier: "com.apple.Terminal", processIdentifier: 2 },
+        },
+      }),
+    );
+    await flush();
+    expect(document.querySelector("#hud")).toHaveAttribute("data-state", "listening");
+    expect(document.querySelector("#hud-target")).toHaveAttribute(
+      "title",
+      "Destino do ditado: Terminal",
+    );
+  });
+
   it("pluralizes the agent HUD pill and re-renders on a language change", async () => {
     loadPage("agent-hud.html");
     await import("../agent-hud");

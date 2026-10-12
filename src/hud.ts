@@ -1692,11 +1692,12 @@ meetingDismissButton?.addEventListener("click", (event) => {
 
 lifecycle.trackUnlisten(
   listen("dictation-event", async (event) => {
-    const type = parseEvent(event.payload)?.type;
-    if (type && type !== "audio_level" && type !== "focus_target") {
-      receivedLiveDictationEvent = true;
-    }
-    await handleDictationEventPayload(event.payload);
+    const previousTransition = hudTransitionId;
+    const handling = handleDictationEventPayload(event.payload);
+    // Only an applied lifecycle transition supersedes the startup snapshot.
+    // Diagnostics, configuration and rejected stale events must not discard it.
+    if (hudTransitionId !== previousTransition) receivedLiveDictationEvent = true;
+    await handling;
   }),
 );
 
