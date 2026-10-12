@@ -596,6 +596,13 @@ function setCancelHover(isHovered: boolean) {
 // explicitly advertise a global Escape monitor before the HUD teaches it.
 let escapeCancelAvailable = !HAS_TAURI_BRIDGE;
 let activeDictationTakeId: string | undefined;
+// Take IDs are never reused. Keep terminal identities for this webview's
+// lifetime so queued outcomes cannot revive a cancelled/completed indicator.
+const retiredDictationTakeIds = new Set<string>();
+function retireDictationTake() {
+  if (activeDictationTakeId) retiredDictationTakeIds.add(activeDictationTakeId);
+  activeDictationTakeId = undefined;
+}
 let receivedLiveDictationEvent = false;
 
 function dictationTakeId(event: DictationHudEvent) {
@@ -949,6 +956,7 @@ function startLongDictationNotice() {
 
 async function hideHud() {
   if (lifecycle.signal.aborted) return;
+  retireDictationTake();
   targetActive = false;
   targetGeneration += 1;
   const requestId = ++hideRequestId;
@@ -1153,6 +1161,7 @@ async function handleDictationEventPayload(payload: unknown) {
     return;
   }
   const eventTakeId = dictationTakeId(dictationEvent);
+  if (eventTakeId && retiredDictationTakeIds.has(eventTakeId)) return;
   if (
     activeDictationTakeId &&
     eventTakeId &&
@@ -1172,6 +1181,7 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "listening_started") {
+    if (eventTakeId !== activeDictationTakeId) retireDictationTake();
     resetTarget();
     targetActive = true;
     if (targetNode) targetNode.hidden = false;
@@ -1271,19 +1281,19 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "helper_unavailable" || dictationEvent.type === "shutdown_ack") {
-    activeDictationTakeId = undefined;
+    retireDictationTake();
     void hideHud();
     return;
   }
 
   if (dictationEvent.type === "paste_completed") {
-    activeDictationTakeId = undefined;
+    retireDictationTake();
     void hideHud();
     return;
   }
 
   if (dictationEvent.type === "recording_discarded") {
-    activeDictationTakeId = undefined;
+    retireDictationTake();
     // A grazed push-to-talk key or a signed-out session: the recording was
     // dropped without transcription, so the listening HUD just goes away.
     void hideHud();
@@ -1333,6 +1343,7 @@ async function handleDictationEventPayload(payload: unknown) {
       return;
     }
     targetPinned = true;
+    retireDictationTake();
     // Native error messages arrive already worded; only the fallback is ours.
     const message = String(dictationEvent.payload?.message ?? "").trim();
     const transition = setHud("error", message || (() => t("hud.status.dictationFailed")));

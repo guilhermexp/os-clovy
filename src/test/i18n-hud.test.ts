@@ -215,6 +215,34 @@ describe("HUD windows in pt-BR", () => {
     );
   });
 
+  it("does not revive a cancelled target when finalizing arrives after the HUD has hidden", async () => {
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    const emit = (type: string) =>
+      mocks.listeners.get("dictation-event")?.({
+        payload: {
+          type,
+          payload: {
+            takeId: "cancelled",
+            target: {
+              app: "Terminal",
+              bundleIdentifier: "com.apple.Terminal",
+              processIdentifier: 2,
+            },
+          },
+        },
+      });
+    await emit("listening_started");
+    await emit("recording_discarded");
+    await vi.waitFor(() =>
+      expect(document.querySelector("#hud")).toHaveAttribute("data-state", "idle"),
+    );
+    await emit("finalizing_transcript");
+    expect(document.querySelector("#hud")).toHaveAttribute("data-state", "idle");
+    expect(document.querySelector("#hud-target")).toHaveAttribute("hidden");
+  });
+
   it("pluralizes the agent HUD pill and re-renders on a language change", async () => {
     loadPage("agent-hud.html");
     await import("../agent-hud");
