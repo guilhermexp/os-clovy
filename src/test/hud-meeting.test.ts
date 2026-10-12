@@ -625,17 +625,20 @@ describe("meeting detection HUD", () => {
     // A measurable pill takes the CSS collapse: inline width tweens from the
     // listening size to the square while the native frame holds still, then
     // one snap resize fits the frame to the settled square.
-    vi.spyOn(hud, "getBoundingClientRect").mockReturnValue({
-      width: 124,
-      height: 32,
-      top: 0,
-      left: 0,
-      right: 124,
-      bottom: 32,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
+    vi.spyOn(hud, "getBoundingClientRect").mockImplementation(
+      () =>
+        ({
+          width: hud.dataset.state === "listening" ? 124 : 32,
+          height: 32,
+          top: 0,
+          left: 0,
+          right: hud.dataset.state === "listening" ? 124 : 32,
+          bottom: 32,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
 
     const finalizing = emit("dictation-event", {
       type: "finalizing_transcript",
@@ -1243,17 +1246,20 @@ describe("meeting detection HUD", () => {
     await loadHud();
     await emit("dictation-event", { type: "listening_started" });
     const hud = hudElement();
-    vi.spyOn(hud, "getBoundingClientRect").mockReturnValue({
-      width: 124,
-      height: 32,
-      top: 0,
-      left: 0,
-      right: 124,
-      bottom: 32,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
+    vi.spyOn(hud, "getBoundingClientRect").mockImplementation(
+      () =>
+        ({
+          width: hud.dataset.state === "listening" ? 124 : 32,
+          height: 32,
+          top: 0,
+          left: 0,
+          right: hud.dataset.state === "listening" ? 124 : 32,
+          bottom: 32,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
     mocks.invoke.mockClear();
     mocks.hide.mockClear();
 

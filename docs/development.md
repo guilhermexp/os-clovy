@@ -348,6 +348,74 @@ Useful validation docs:
 - [specs/002-system-audio-source-mode/quickstart.md](../specs/002-system-audio-source-mode/quickstart.md)
 - [specs/003-conversation-turns/quickstart.md](../specs/003-conversation-turns/quickstart.md)
 
+## Dictation destination HUD verification
+
+The native path is `src-tauri/native/mac-dictation-helper/main.swift`
+(`FocusTargetController` and `DictationController`) →
+`src-tauri/src/dictation.rs` (take correlation and `latest_hud_snapshot`) →
+`src/hud.ts` / `hud.html` / `src/styles/hud.css`. The existing
+`src-tauri/src/activity/app_icon.rs` command resolves local PNG icons, through
+`activityAppIcon` in `src/lib/activity-timeline.ts`; custom app commands use
+the existing Tauri command registration, so no new window capability is
+required. `focus_target` is visual metadata, not a workflow start or finish.
+The replay snapshot retains a listening lifecycle across meter/focus updates
+and carries the pinned target forward through processing. No per-level icon
+lookup or PNG logging is added. See [ADR-0014](adr/0014-pinned-dictation-paste-target.md).
+
+`src/test/hud-target.test.ts` tests the actual HUD markup and consumer across
+candidate changes, stop, paste, error, cancellation, delayed icons and legacy
+fallback. `i18n-hud.test.ts` covers labels and late-subscriber hydration;
+`dictation.rs` tests snapshot reduction. Browser smoke with a controlled Tauri
+bridge proves rendering and control requests only, not Swift focus, Fn,
+permissions or paste. Keep screenshots and the bridge script in the run's
+ignored evidence folder; never ship the shim.
+
+Native proof belongs to the operator of an isolated debug identity. Build,
+but do not launch, with the official Node 24 PATH and a run-owned identifier:
+
+```sh
+PATH="$HOME/.local/share/node-official/node24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  pnpm tauri:build -- --debug --bundles app \
+  --config src-tauri/tauri.macos.conf.json \
+  --config '{"identifier":"co.opensoftware.june.targetproof20261012","bundle":{"createUpdaterArtifacts":false}}'
+```
+
+This compiles a separate data identity; editing Info.plist is insufficient.
+The release build receipt is packaging evidence, not the binary to open for
+native proof. Follow AGENTS → Verification: evidence-owned copy of the bundle,
+normal HOME, isolated copied profile excluding live MCP sockets, and `lsof`
+confirmation of that exact process's database paths before interactions. The
+worker does not copy the owner's profile or open any native app. The operator
+must stop if protected-folder, microphone, Accessibility or Keychain access is
+missing; only the owner decides those prompts. Never alter TCC or Keychains.
+
+Use two run-owned scratch text destinations and a third app for focus drift:
+
+1. With existing permissions and without stopping the owner's dev processes,
+   start Fn dictation in A. Observe A's real icon/name on the first useful HUD
+   frame; switch to B while listening and observe B. Record helper events with
+   the same takeId, without audio, transcript or credential content in evidence.
+2. Release Fn or click Stop in B, then focus C. Observe the correlated
+   `finalizing_transcript.target` for B, and B beside the processing spinner.
+   If a local provider stub is used to avoid remote inference, label it as
+   such; it must return synthetic text through the real transcription path,
+   never emit helper/HUD events or paste commands as a substitute for proof.
+   Without an authorized configured route, full processing/paste remains
+   unproven. Do not change provider settings in the owner's profile.
+3. If authorized transcription is available, verify only B receives the text,
+   and `paste_target` and the visible indicator agree. Close B after stop in a
+   separate take: observe B on the error, clipboard recovery, and no paste in C.
+4. Cancel with Esc and the HUD cancel button in separate takes. Start a new
+   take in A immediately; verify no B icon or delayed delivery reappears.
+   Check drag, Stop, Esc hint, EN/pt-BR tooltip and accessible destination name.
+5. Capture the real HUD and read back the isolated take outcome using the
+   app's own supported export/read path. Check run-owned autostart cleanup by
+   exact ProgramArguments, and stop only this run's processes. Preserve the
+   evidence report's explicit limits (native, liveGroq, Keychain, deployment).
+
+A fresh debug identity may be blocked on permissions; that is a recorded
+blocker, not permission to use release data or synthesize native success.
+
 ## Releases
 
 Production desktop releases are cut from GitHub Actions. macOS produces signed

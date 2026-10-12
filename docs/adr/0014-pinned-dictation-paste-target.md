@@ -160,3 +160,27 @@ a still-focused composer re-arms after terminal outcomes. Toggle start versus
 stop decisions follow helper-confirmed listening state, so only actual starts
 can consume a registration. Direct delivery remains insertion-only and never
 auto-submits the composer.
+
+## Destination indicator addendum (2026-10-12)
+
+The macOS dictation HUD now presents the helper's current candidate while
+listening and the pinned app during processing, paste and any visible error
+for that take. This does not pin at start or transfer destination authority
+to the renderer: the exact `NSRunningApplication` is still pinned before
+recorder teardown. A closed pinned app keeps its displayed identity, but
+paste still fails to clipboard recovery instead of selecting a replacement.
+
+The additive `payload.target` contains `app`, `bundleIdentifier` and
+`processIdentifier`, or explicit `null` when unavailable. `listening_started`
+carries the initial candidate; take-correlated `focus_target` updates it only
+while capturing. `finalizing_transcript` publishes the stop-time pin, and
+`paste_target` carries the same identity. Metadata never commands activation.
+
+The HUD resolves icons through the existing local `activity_app_icon` command
+and its bundle-id cache. Bundle identity is sufficient for icon presentation;
+it never replaces the helper's exact process instance for paste. Missing
+metadata or icons use the central-icons window fallback, with the known name
+when available or an unidentified-destination description otherwise. Icon
+resolution cannot delay capture, cancel or paste. The indicator remains
+separate from the waveform/spinner and ignores late resolutions from older
+targets or takes. Older helpers and Windows retain the fallback path.

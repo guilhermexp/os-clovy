@@ -379,9 +379,17 @@ export type DictationMicrophoneDeviceDto = {
   name: string;
 };
 
+/** Presentation metadata only; the native helper owns the exact paste instance. */
+export type DictationTarget = {
+  app: string;
+  bundleIdentifier: string;
+  processIdentifier: number;
+};
+
 export type DictationHelperEvent = {
   type: string;
   payload?: {
+    target?: DictationTarget | null;
     devices?: DictationMicrophoneDeviceDto[];
     defaultDevice?: DictationMicrophoneDeviceDto;
     selectedID?: string;

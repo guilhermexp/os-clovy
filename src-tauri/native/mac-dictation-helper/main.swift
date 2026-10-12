@@ -1206,7 +1206,14 @@ final class FocusTargetController {
         }
     }
 
+    func refreshCandidate() {
+        if let app = NSWorkspace.shared.frontmostApplication {
+            rememberIfExternal(app)
+        }
+    }
+
     func pinCurrentTarget() {
+        refreshCandidate()
         pinnedTarget = lastExternalApp
     }
 
@@ -1221,11 +1228,18 @@ final class FocusTargetController {
         return app
     }
 
-    func targetDescription() -> String {
-        guard let app = lastExternalApp, !app.isTerminated else {
-            return "unknown"
+    /// Presentation only. Paste retains the exact NSRunningApplication, not
+    /// a lookup by these metadata. Keep the pinned identity even if it quits.
+    func targetMetadata(pinned: Bool = false) -> Any {
+        guard let app = pinned ? pinnedTarget : lastExternalApp,
+              pinned || !app.isTerminated else {
+            return NSNull()
         }
-        return app.localizedName ?? app.bundleIdentifier ?? "\(app.processIdentifier)"
+        return [
+            "app": app.localizedName ?? app.bundleIdentifier ?? "\(app.processIdentifier)",
+            "bundleIdentifier": app.bundleIdentifier ?? "",
+            "processIdentifier": Int(app.processIdentifier),
+        ] as [String: Any]
     }
 
     func pasteTargetDescription() -> String {
@@ -1269,7 +1283,7 @@ final class FocusTargetController {
             return
         }
         lastExternalApp = app
-        emit("focus_target", ["app": targetDescription()])
+        dictation.emitCandidateTarget()
     }
 }
 
@@ -1811,6 +1825,14 @@ final class DictationController {
         isListening || isFinalizing || startPending
     }
 
+    func emitCandidateTarget() {
+        guard isListening, recordingPurpose == .dictation, let activeTakeID else { return }
+        emitJSON("focus_target", [
+            "takeId": activeTakeID,
+            "target": FocusTargetController.shared.targetMetadata(),
+        ])
+    }
+
     func emitDiagnostics() {
         emit("dictation_diagnostics", [
             "bundleIdentifier": helperBundleIdentifier(),
@@ -2269,10 +2291,12 @@ final class DictationController {
         } else {
             let takeID = activeTakeID ?? UUID().uuidString.lowercased()
             activeTakeID = takeID
+            FocusTargetController.shared.refreshCandidate()
             let escapeCancelAvailable = DictationEscapeCancelMonitor.shared.start()
             emitJSON("listening_started", [
                 "microphone": microphone,
                 "escapeCancelAvailable": escapeCancelAvailable,
+                "target": FocusTargetController.shared.targetMetadata(),
                 "takeId": takeID,
             ])
         }
@@ -2296,11 +2320,11 @@ final class DictationController {
         micTestStopWorkItem = nil
         stopMetering()
         if purpose == .dictation {
-            if let activeTakeID {
-                emit("finalizing_transcript", ["takeId": activeTakeID])
-            } else {
-                emit("finalizing_transcript")
-            }
+            var payload: [String: Any] = [
+                "target": FocusTargetController.shared.targetMetadata(pinned: true),
+            ]
+            if let activeTakeID { payload["takeId"] = activeTakeID }
+            emitJSON("finalizing_transcript", payload)
         }
 
         if let selectedDeviceRecorder {
@@ -2590,10 +2614,13 @@ enum PasteboardInserter {
         }
 
         let targetActivated = target.isActive ? true : target.activate(options: [])
-        emit("paste_target", takePayload([
+        var targetPayload: [String: Any] = [
             "app": FocusTargetController.shared.pasteTargetDescription(),
             "activated": boolStatus(targetActivated),
-        ], takeID: takeID))
+            "target": FocusTargetController.shared.targetMetadata(pinned: true),
+        ]
+        if let takeID { targetPayload["takeId"] = takeID }
+        emitJSON("paste_target", targetPayload)
 
         waitForActivation(
             of: target,

@@ -3155,6 +3155,7 @@ fn helper_event_serializes_with_commands(event_type: Option<&str>) -> bool {
         event_type,
         Some(
             "listening_started"
+                | "focus_target"
                 | "audio_level"
                 | "recording_ready"
                 | "recording_discarded"
@@ -3191,6 +3192,7 @@ fn untagged_take_event_disposition(
             event_type,
             Some(
                 "audio_level"
+                    | "focus_target"
                     | "finalizing_transcript"
                     | "final_transcript"
                     | "paste_target"
@@ -4861,7 +4863,7 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .flatten();
     note_helper_take_protocol(app, event.as_ref());
 
-    if event_type == Some("audio_level")
+    if matches!(event_type, Some("audio_level" | "focus_target"))
         && event
             .as_ref()
             .is_some_and(|event| !helper_audio_level_matches_active_take(app, event))
@@ -7241,13 +7243,67 @@ fn update_hud_window(app: &AppHandle, event_type: Option<&str>, event: Option<&s
 fn update_latest_event(app: &AppHandle, event_type: Option<&str>, line: Option<String>) {
     if let Some(state) = app.try_state::<LastDictationEvent>() {
         if let Ok(mut event) = state.event.lock() {
-            match dictation_event_visibility(event_type) {
-                DictationEventVisibility::Show => *event = line,
-                DictationEventVisibility::Hide => *event = None,
-                DictationEventVisibility::Ignore => {}
+            *event = latest_hud_snapshot(event.as_deref(), event_type, line.as_deref());
+        }
+    }
+}
+
+/// Retain a replayable lifecycle snapshot, not a lone meter/focus update.
+/// This lets a late HUD subscriber start with the current take's destination.
+fn latest_hud_snapshot(
+    previous: Option<&str>,
+    event_type: Option<&str>,
+    line: Option<&str>,
+) -> Option<String> {
+    if dictation_event_visibility(event_type) == DictationEventVisibility::Hide {
+        return None;
+    }
+    let prior = previous.and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    let incoming = line.and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    if matches!(event_type, Some("audio_level" | "focus_target")) {
+        let (Some(mut prior), Some(incoming)) = (prior, incoming) else {
+            return previous.map(str::to_owned);
+        };
+        if prior["type"] == "listening_started"
+            && dictation_take_id_from_event(&prior) == dictation_take_id_from_event(&incoming)
+        {
+            if let Some(target) = incoming["payload"].get("target") {
+                if let Some(payload) = prior
+                    .get_mut("payload")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    payload.insert("target".to_string(), target.clone());
+                }
+            }
+        }
+        return Some(prior.to_string());
+    }
+    if dictation_event_visibility(event_type) != DictationEventVisibility::Show {
+        return previous.map(str::to_owned);
+    }
+    let Some(mut incoming) = incoming else {
+        return line.map(str::to_owned);
+    };
+    if event_type != Some("listening_started") {
+        if let Some(prior) = prior {
+            if dictation_take_id_from_event(&prior) == dictation_take_id_from_event(&incoming)
+                && incoming["payload"].get("target").is_none()
+            {
+                if let Some(target) = prior["payload"].get("target") {
+                    if incoming.get("payload").is_none() {
+                        incoming["payload"] = serde_json::json!({});
+                    }
+                    if let Some(payload) = incoming
+                        .get_mut("payload")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        payload.insert("target".to_string(), target.clone());
+                    }
+                }
             }
         }
     }
+    Some(incoming.to_string())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -10012,6 +10068,72 @@ mod tests {
             .expect("observed audio level");
         assert!((observed - 0.04).abs() < 0.001);
         assert!(!is_silent_transcription_error(&event));
+    }
+
+    #[test]
+    fn hud_snapshot_replays_candidate_and_pinned_target_without_audio_restarting_it() {
+        let a = serde_json::json!({"app": "Finder", "bundleIdentifier": "com.apple.finder", "processIdentifier": 1});
+        let b = serde_json::json!({"app": "Terminal", "bundleIdentifier": "com.apple.Terminal", "processIdentifier": 2});
+        let event = |kind: &str, target: serde_json::Value| {
+            serde_json::json!({"type": kind, "payload": {"takeId": "take-1", "target": target}})
+                .to_string()
+        };
+        let listening = event("listening_started", a);
+        let focus = event("focus_target", b.clone());
+        let current =
+            latest_hud_snapshot(Some(&listening), Some("focus_target"), Some(&focus)).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert_eq!(snapshot["type"], "listening_started");
+        assert_eq!(snapshot["payload"]["target"], b);
+        let finalizing = event("finalizing_transcript", b.clone());
+        let current = latest_hud_snapshot(
+            Some(&current),
+            Some("finalizing_transcript"),
+            Some(&finalizing),
+        )
+        .unwrap();
+        let audio = serde_json::json!({"type": "audio_level", "payload": {"takeId": "take-1", "level": "0.2"}}).to_string();
+        let current =
+            latest_hud_snapshot(Some(&current), Some("audio_level"), Some(&audio)).unwrap();
+        let transcript =
+            serde_json::json!({"type": "final_transcript", "payload": {"takeId": "take-1"}})
+                .to_string();
+        let current =
+            latest_hud_snapshot(Some(&current), Some("final_transcript"), Some(&transcript))
+                .unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert_eq!(snapshot["type"], "final_transcript");
+        assert_eq!(snapshot["payload"]["target"], b);
+        assert!(latest_hud_snapshot(Some(&current), Some("recording_discarded"), None).is_none());
+        let next =
+            serde_json::json!({"type": "listening_started", "payload": {"takeId": "take-2"}})
+                .to_string();
+        let current =
+            latest_hud_snapshot(Some(&current), Some("listening_started"), Some(&next)).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert!(snapshot["payload"].get("target").is_none());
+    }
+
+    #[test]
+    fn hud_focus_snapshot_never_changes_another_take_or_processing_destination() {
+        let prior = serde_json::json!({"type": "listening_started", "payload": {"takeId": "new", "target": null}}).to_string();
+        let stale = serde_json::json!({"type": "focus_target", "payload": {"takeId": "old", "target": {"app": "stale"}}}).to_string();
+        let current =
+            latest_hud_snapshot(Some(&prior), Some("focus_target"), Some(&stale)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&current).unwrap()["payload"]["target"],
+            serde_json::Value::Null
+        );
+        let prior = prior.replace("listening_started", "finalizing_transcript");
+        let focus = stale.replace("old", "new");
+        let current =
+            latest_hud_snapshot(Some(&prior), Some("focus_target"), Some(&focus)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&current).unwrap()["payload"]["target"],
+            serde_json::Value::Null
+        );
+        assert!(helper_event_serializes_with_commands(Some("focus_target")));
+        assert_eq!(indicator_action_for_event(Some("focus_target")), None);
     }
 
     #[test]

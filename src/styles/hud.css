@@ -108,9 +108,39 @@ body {
   transition: opacity 100ms var(--ease-out);
 }
 
-.hud.is-morphing > * {
+.hud.is-morphing > :not(.hud-target) {
   opacity: 0;
   transition-duration: 60ms;
+}
+
+/* Destination stays independent of the waveform, spinner and morph fade. */
+.hud-target {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-hud);
+  padding-right: var(--sp-2);
+  margin-right: var(--sp-1);
+  border-right: var(--border-width) solid var(--hud-border);
+  color: var(--muted-foreground);
+}
+
+.hud-target img,
+.hud-target-fallback {
+  width: var(--sp-6);
+  height: var(--sp-6);
+  object-fit: contain;
+}
+
+.hud-target-fallback {
+  display: grid;
+  place-items: center;
+}
+
+.hud-target[hidden],
+.hud-target [hidden] {
+  display: none;
 }
 
 /* Audio visualisation -------------------------------------------------- */
@@ -221,9 +251,7 @@ body {
 
 /* Processing spinner ---------------------------------------------------- */
 
-/* After stop the pill collapses to just Clovy's dot mark ticking over while
- * dictation transcription runs; the box matches the compact HUD controls so
- * the collapsed pill is a tidy control-lg square. */
+/* After stop the dot mark runs beside the persistent destination icon. */
 .hud-spinner {
   display: none;
   place-items: center;
@@ -673,9 +701,8 @@ body {
   padding: 4px var(--sp-2);
 }
 
-/* Processing: everything collapses down to the Clovy dot spinner. The pill
- * becomes a 32px square, centered where the wide pill's middle was (the
- * native resize is center-anchored). */
+/* Processing keeps the destination beside the Clovy dot spinner.
+ * Native resize remains center-anchored and measures both slots. */
 .hud[data-state="transcribing"],
 .hud[data-state="pasting"],
 .hud[data-state="exiting"][data-exit-state="transcribing"],

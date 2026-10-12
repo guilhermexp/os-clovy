@@ -107,6 +107,114 @@ describe("HUD windows in pt-BR", () => {
     expect(document.querySelector("#hud-status")).toHaveTextContent("Pasting into Notes");
   });
 
+  it("translates the persistent destination name and unknown fallback", async () => {
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await mocks.listeners.get("dictation-event")?.({
+      payload: {
+        type: "listening_started",
+        payload: {
+          takeId: "locale-1",
+          target: {
+            app: "Finder",
+            bundleIdentifier: "com.apple.finder",
+            processIdentifier: 1,
+          },
+        },
+      },
+    });
+    expect(document.querySelector("#hud-target")).toHaveAttribute(
+      "title",
+      "Destino do ditado: Finder",
+    );
+    await switchLocale("en");
+    expect(document.querySelector("#hud-target")).toHaveAttribute(
+      "aria-label",
+      "Dictation destination: Finder",
+    );
+    await mocks.listeners.get("dictation-event")?.({
+      payload: { type: "listening_started", payload: { takeId: "locale-2" } },
+    });
+    await switchLocale("pt-BR");
+    expect(document.querySelector("#hud-target")).toHaveAttribute(
+      "aria-label",
+      "Destino do ditado não identificado",
+    );
+  });
+
+  it("hydrates a processing destination from the native snapshot", async () => {
+    mocks.invoke.mockImplementation((command: string) =>
+      Promise.resolve(
+        command === "latest_dictation_event"
+          ? JSON.stringify({
+              type: "finalizing_transcript",
+              payload: {
+                takeId: "replay",
+                target: {
+                  app: "Terminal",
+                  bundleIdentifier: "com.apple.Terminal",
+                  processIdentifier: 2,
+                },
+              },
+            })
+          : undefined,
+      ),
+    );
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    expect(document.querySelector("#hud")).toHaveAttribute("data-state", "transcribing");
+    expect(document.querySelector("#hud-target")).toHaveAttribute(
+      "title",
+      "Destino do ditado: Terminal",
+    );
+    await mocks.listeners.get("dictation-event")?.({
+      payload: { type: "focus_target", payload: { takeId: "replay", target: { app: "Other" } } },
+    });
+    expect(document.querySelector("#hud-target")).toHaveAttribute(
+      "title",
+      "Destino do ditado: Terminal",
+    );
+  });
+
+  it("does not replay an older snapshot over a live take", async () => {
+    let resolveLatest: (value: string) => void = () => {};
+    mocks.invoke.mockImplementation((command: string) =>
+      command === "latest_dictation_event"
+        ? new Promise<string>((resolve) => {
+            resolveLatest = resolve;
+          })
+        : Promise.resolve(),
+    );
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await mocks.listeners.get("dictation-event")?.({
+      payload: {
+        type: "listening_started",
+        payload: {
+          takeId: "new",
+          target: { app: "Terminal", bundleIdentifier: "com.apple.Terminal", processIdentifier: 2 },
+        },
+      },
+    });
+    resolveLatest(
+      JSON.stringify({
+        type: "listening_started",
+        payload: {
+          takeId: "old",
+          target: { app: "Finder", bundleIdentifier: "com.apple.finder", processIdentifier: 1 },
+        },
+      }),
+    );
+    await flush();
+    expect(document.querySelector("#hud-target")).toHaveAttribute(
+      "title",
+      "Destino do ditado: Terminal",
+    );
+  });
+
   it("pluralizes the agent HUD pill and re-renders on a language change", async () => {
     loadPage("agent-hud.html");
     await import("../agent-hud");
