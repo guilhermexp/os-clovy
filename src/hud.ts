@@ -1196,9 +1196,16 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "focus_target") {
-    // Focus is a visual update only. A tagged take never accepts an untagged
-    // candidate; stop-button animation alone does not pin the destination.
-    if (!targetActive || targetPinned || (activeDictationTakeId && !eventTakeId)) return;
+    // Candidate updates belong only to listening. A late subscriber may be
+    // pasting before it receives authoritative destination metadata.
+    if (
+      !targetActive ||
+      targetPinned ||
+      hud?.dataset.state !== "listening" ||
+      (activeDictationTakeId && !eventTakeId)
+    ) {
+      return;
+    }
     updateTarget(dictationEvent.payload?.target);
     return;
   }
@@ -1258,8 +1265,8 @@ async function handleDictationEventPayload(payload: unknown) {
     if (targetNode) targetNode.hidden = false;
     if (!targetPinned && Object.hasOwn(dictationEvent.payload ?? {}, "target")) {
       updateTarget(dictationEvent.payload?.target);
+      targetPinned = true;
     }
-    targetPinned = true;
     const transition = setHud("pasting", () => t("hud.status.pasting"));
     await showHud(showOptionsForTransition(transition));
     return;

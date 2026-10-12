@@ -30,6 +30,11 @@ O HUD SHALL apresentar fallback genérico honesto quando destino ou ícone estiv
 - **THEN** não há imagem quebrada nem destino inventado, e cancelamento continua disponível
 - Test: src/test/hud-target.test.ts; smoke de navegador com bridge controlada
 
+#### Scenario: Assinatura tardia durante colagem
+- **WHEN** o HUD recebe final_transcript sem target antes do snapshot inicial e depois paste_target com B
+- **THEN** o indicador hidrata B sem aceitar foco C durante processamento ou colagem, preservando um destino já fixado
+- Test: src/test/hud-target-hydration.test.ts
+
 #### Scenario: Destino fecha após pin
 - **WHEN** o app fixado fecha antes da colagem
 - **THEN** o indicador mantém a identidade fixada no erro e o texto nunca é redirecionado a outro app

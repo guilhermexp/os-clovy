@@ -362,9 +362,17 @@ The replay snapshot retains a listening lifecycle across meter/focus updates
 and carries the pinned target forward through processing. No per-level icon
 lookup or PNG logging is added. See [ADR-0014](adr/0014-pinned-dictation-paste-target.md).
 
+A live `final_transcript` without `target` may supersede the startup snapshot.
+In that case `paste_target` can still hydrate the authoritative destination.
+Focus updates are accepted only during listening, so this hydration window
+cannot replace the destination with an unrelated foreground app. An explicit
+target (including null) or a previously pinned destination stays authoritative.
+
 `src/test/hud-target.test.ts` tests the actual HUD markup and consumer across
 candidate changes, stop, paste, error, cancellation, delayed icons and legacy
 fallback. `i18n-hud.test.ts` covers labels and late-subscriber hydration;
+`hud-target-hydration.test.ts` covers a missed stop snapshot followed by live
+transcript/paste events without changing the original RED witness;
 `dictation.rs` tests snapshot reduction. Browser smoke with a controlled Tauri
 bridge proves rendering and control requests only, not Swift focus, Fn,
 permissions or paste. Keep screenshots and the bridge script in the run's
@@ -389,9 +397,19 @@ worker does not copy the owner's profile or open any native app. The operator
 must stop if protected-folder, microphone, Accessibility or Keychain access is
 missing; only the owner decides those prompts. Never alter TCC or Keychains.
 
+A separate bundle/data identity does not isolate global Fn listeners. The
+owner's dev helper and the proof helper can react to the same key. Before Fn
+proof, the operator must isolate shortcut activation using supported controls,
+or temporarily suspend only the dev instance started by Main for this proof.
+Record which exact process/listener was suspended and its restoration; do not
+stop an unrelated owner's instance or assume the proof bundle owns Fn. Restore
+the prior activation/dev state after the run. The worker neither suspends dev
+processes nor exercises Fn. If activation cannot be isolated within this
+authority, record the native Fn proof as blocked.
+
 Use two run-owned scratch text destinations and a third app for focus drift:
 
-1. With existing permissions and without stopping the owner's dev processes,
+1. With existing permissions and shortcut activation isolated as above,
    start Fn dictation in A. Observe A's real icon/name on the first useful HUD
    frame; switch to B while listening and observe B. Record helper events with
    the same takeId, without audio, transcript or credential content in evidence.
