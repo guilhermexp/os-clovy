@@ -414,7 +414,12 @@ struct P3aIngestWire {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/charge_server.rs"]
+mod charge_server;
+
+#[cfg(test)]
 mod tests {
+    use super::charge_server::start_charge_server_with_responses;
     use super::{OsAccountsHttpClient, OsAccountsP3aSink};
     use crate::http;
     use clovy_domain::{
@@ -423,10 +428,6 @@ mod tests {
     };
     use pretty_assertions::assert_eq;
     use serde_json::json;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
-    };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, header, method, path},
@@ -750,54 +751,5 @@ mod tests {
             receipt.map(|value| (value.credits_charged.0, value.idempotent_replay)),
             Ok((12, true))
         );
-    }
-
-    async fn start_charge_server_with_responses<const N: usize>(responses: [Vec<u8>; N]) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test server");
-        let addr = listener.local_addr().expect("read local address");
-        tokio::spawn(async move {
-            for response in responses {
-                let (mut stream, _) = listener.accept().await.expect("accept request");
-                read_request(&mut stream).await;
-                stream.write_all(&response).await.expect("write response");
-                stream.shutdown().await.expect("close response");
-            }
-        });
-        format!("http://{addr}")
-    }
-
-    /// Reads one whole request, headers and `Content-Length` body. Closing a
-    /// socket with unread request bytes makes the kernel answer with a reset,
-    /// which can discard the scripted response before the client reads it.
-    async fn read_request(stream: &mut TcpStream) {
-        let mut request = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        loop {
-            let read = stream.read(&mut buffer).await.expect("read request");
-            if read == 0 {
-                return;
-            }
-            request.extend_from_slice(&buffer[..read]);
-            let Some(headers_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
-            else {
-                continue;
-            };
-            let body_len = String::from_utf8_lossy(&request[..headers_end])
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    if name.eq_ignore_ascii_case("content-length") {
-                        value.trim().parse::<usize>().ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            if request.len() >= headers_end + 4 + body_len {
-                return;
-            }
-        }
     }
 }
