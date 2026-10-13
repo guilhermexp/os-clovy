@@ -424,16 +424,29 @@ async fn chat_engine_two_turns_resume_the_cli_conversation_for_every_cli() {
 
 #[tokio::test]
 async fn chat_engine_cancel_stops_the_cli_process_group_without_orphans() {
+    struct PartialAnswerSink<'a> {
+        inner: &'a TestSink,
+        received: tokio::sync::Notify,
+    }
+    impl FrameSink for PartialAnswerSink<'_> {
+        async fn publish(&self, frame: RpcFrame) {
+            let partial_answer = frame.method.as_deref() == Some("message.delta");
+            self.inner.publish(frame).await;
+            if partial_answer {
+                self.received.notify_one();
+            }
+        }
+    }
     let kind = CliKind::Claude;
     let harness = Harness::new(kind).await;
     let program = harness.fake_cli(
         kind,
         r#"
-echo '{"type":"system","subtype":"init","session_id":"claude-conv-1"}'
-echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working"}}}'
 sleep 300 &
 echo $! > "$LOG/helper.pid"
 echo $$ > "$LOG/cli.pid"
+echo '{"type":"system","subtype":"init","session_id":"claude-conv-1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working"}}}'
 sleep 300
 "#,
     );
@@ -442,23 +455,35 @@ sleep 300
         repository: harness.repository.clone(),
         emitted: StdMutex::new(Vec::new()),
     };
+    let observed = PartialAnswerSink {
+        inner: &sink,
+        received: tokio::sync::Notify::new(),
+    };
     let (cancel, receiver) = watch::channel(false);
     let context = harness.context(kind, &program, &run_id, "Long task", None);
     let pid_file = harness.log.path().join("cli.pid");
     let helper_file = harness.log.path().join("helper.pid");
     let canceller = async {
-        for _ in 0..200 {
-            if pid_file.exists() && helper_file.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        // PID files prove child progress, not that the parent received text.
+        // Keep the previous five-second readiness budget; always cancel so a
+        // missing delta still cleans up the CLI and its helper before failing.
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            observed.received.notified(),
+        )
+        .await
+        .is_ok();
         cancel.send(true).unwrap();
+        received
     };
     let started = std::time::Instant::now();
-    tokio::join!(
-        execute_turn(&harness.repository, &sink, context, receiver),
+    let (_, received_partial) = tokio::join!(
+        execute_turn(&harness.repository, &observed, context, receiver),
         canceller
+    );
+    assert!(
+        received_partial,
+        "the parent received the partial answer before cancel"
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
 
@@ -486,12 +511,25 @@ sleep 300
         emitted.last().map(|(method, _)| method.as_str()),
         Some("run.cancelled")
     );
-    assert_eq!(
-        harness.repository.get_run(&run_id).await.unwrap().status,
-        "cancelled"
-    );
+    let run = harness.repository.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, "cancelled");
     // The partial answer stays in the session.
     let transcript = harness.transcript().await;
+    println!(
+        "CANCEL_OBSERVATION={}",
+        json!({
+            "received_partial_before_cancel": received_partial,
+            "cli_pid": read_pid(&pid_file),
+            "helper_pid": read_pid(&helper_file),
+            // SAFETY: signal 0 only checks these run-owned process ids.
+            "cli_alive_after_cancel": unsafe { libc::kill(read_pid(&pid_file), 0) } == 0,
+            "helper_alive_after_cancel": unsafe { libc::kill(read_pid(&helper_file), 0) } == 0,
+            "elapsed_ms": started.elapsed().as_millis(),
+            "status": run.status,
+            "events": emitted,
+            "transcript": transcript,
+        })
+    );
     assert!(transcript.contains(&("assistant_message".to_string(), "Working".to_string())));
 }
 
