@@ -178,6 +178,85 @@ describe("Today grid of workstreams", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("adapts to the scroller's usable height and preserves selection through resize", async () => {
+    const callbacks = new Map<Element, Set<() => void>>();
+    class ViewportObserver {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        const listeners = callbacks.get(element) ?? new Set<() => void>();
+        listeners.add(() => this.callback([], this));
+        callbacks.set(element, listeners);
+      }
+      unobserve(element: Element) {
+        callbacks.delete(element);
+      }
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", ViewportObserver);
+    const first = {
+      ...overlapping,
+      title: "Sequential first",
+      hours: [
+        {
+          ...overlapping.hours[0],
+          hour: hourKey(9, yesterday),
+          periods: [{ startedAt: iso(9, 0, yesterday), endedAt: iso(9, 10, yesterday) }],
+        },
+      ],
+    };
+    const second = {
+      ...overlapping,
+      id: 4,
+      title: "Sequential second",
+      hours: [
+        {
+          ...overlapping.hours[0],
+          hour: hourKey(9, yesterday),
+          periods: [{ startedAt: iso(9, 30, yesterday), endedAt: iso(9, 40, yesterday) }],
+        },
+      ],
+    };
+    serve({ [dayKey(yesterday)]: [first, second] });
+    render(<ActivityTimelineView />);
+    fireEvent.click(screen.getByRole("button", { name: "Previous day" }));
+    const firstButton = await card("Sequential first");
+    const secondButton = await card("Sequential second");
+    const scroller = firstButton.closest(".day-grid-scroller");
+    if (!scroller) throw new Error("Calendar scroller missing");
+    let height = 180;
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, get: () => height });
+    act(() =>
+      callbacks.get(scroller)?.forEach((callback) => {
+        callback();
+      }),
+    );
+    const smallHeight = Number.parseFloat(firstButton.style.height);
+    fireEvent.click(firstButton);
+    expect(screen.getByRole("region", { name: "Workstream details" })).toBeInTheDocument();
+    height = 600;
+    act(() =>
+      callbacks.get(scroller)?.forEach((callback) => {
+        callback();
+      }),
+    );
+    expect(Number.parseFloat(firstButton.style.height)).toBeGreaterThan(smallHeight);
+    expect(firstButton.style.left).toBe(secondButton.style.left);
+    expect(
+      Number.parseFloat(firstButton.style.top) + Number.parseFloat(firstButton.style.height),
+    ).toBeLessThan(Number.parseFloat(secondButton.style.top));
+    expect(firstButton).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("region", { name: "Workstream details" })).toBeInTheDocument();
+    const stableHeight = firstButton.style.height;
+    act(() => {
+      for (let index = 0; index < 10; index++)
+        callbacks.get(scroller)?.forEach((callback) => {
+          callback();
+        });
+    });
+    expect(firstButton.style.height).toBe(stableHeight);
   });
 
   it("groups a resumed workstream into one card with its sittings and active time, not its span", async () => {

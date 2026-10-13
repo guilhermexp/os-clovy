@@ -204,10 +204,38 @@ The timeline shows the day's workstreams by default ("Workstreams" /
   repeated hour's whole two-hour window) and the card is labeled "By hour"
   with whole-hour times: a legacy hour without periods, or the minutes of an
   hour that no session was named for (`minutes - locatedMinutes`). Workstreams
-  whose cards overlap share the width in lanes. Hours without work collapse
-  into one short step; inside hours with work the scale is linear in real
-  time, so 23- and 25-hour DST days keep real durations. Today shows a now
-  line.
+  whose drawn rectangles conflict (including the minimum title height and
+  `--sp-2` separation) share the width in lanes. Scale is resolved before lanes:
+  sequential workstreams reuse a lane when their actual rectangles fit.
+  Hours without work collapse into one 36 px step; inside hours with work the
+  scale is linear in real time, so 23- and 25-hour DST days keep real durations.
+  Today shows a now line.
+
+  The scroller's usable content height determines the active-hour scale,
+  bounded to 1 to 9 px per real minute. Short days grow within that limit;
+  long days scroll instead of shrinking below the readable floor. An unknown
+  viewport starts at the same floor. `use-calendar-viewport.ts` observes the
+  scroller independently of the canvas, subtracts its padding and resolves
+  the compact minimum from `--control-xs` (22 px) or a whole title line at the
+  current text size, whichever is larger. Repeated equal measurements do not
+  change state; resizing preserves the selection and scroll position.
+
+  Card content follows its actual container size and text zoom: a compact
+  card shows one ellipsized title; at 3.5 em of inner height it also shows a
+  complete metadata line (active time first, then approximation/range/sittings
+  as width permits); at 6 em it reveals as many whole note lines as fit.
+  Long lines ellipsize horizontally. The complete title, active time, range
+  and approximation remain in the accessible name, and clicking or using
+  Enter/Space opens the existing details. These presentation thresholds do
+  not change active minutes, sittings, pauses, or hour-only precision.
+
+  Presentation regressions: `day-calendar-adaptive.test.tsx` holds the
+  immutable RED/GREEN witness; `day-timeline-grid.test.tsx` also exercises
+  viewport resize with a selection, in addition to the existing navigation,
+  fallback, sittings and legacy cases. Browser proof uses synthetic IPC and
+  the real frontend at 1280 x 900 and 800 x 560, in English and pt-BR with
+  text zoom, and compares the unchanged overview/details against the baseline.
+  This proves presentation only, not native capture or inference.
 - **Side panel**: without a selection, the day overview (focused, idle, away,
   categories, top apps with their real icons). Selecting a card (click or
   keyboard) keeps the grid, highlights the card, and shows its active time,

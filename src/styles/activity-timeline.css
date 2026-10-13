@@ -1437,7 +1437,6 @@
 .day-grid-total {
   font-size: var(--fs-xs);
   color: var(--muted-foreground);
-  font-variant-numeric: tabular-nums;
 }
 
 .day-grid-scroller {
@@ -1445,6 +1444,7 @@
   min-height: 0;
   overflow-y: auto;
   padding: var(--sp-3) var(--sp-6) var(--sp-10);
+  font-size: var(--fs-md);
 }
 
 .day-grid-body {
@@ -1473,7 +1473,6 @@
   background: var(--background);
   font-size: var(--fs-2xs);
   color: var(--muted-foreground);
-  font-variant-numeric: tabular-nums;
 }
 
 .day-grid-lanes {
@@ -1510,9 +1509,10 @@
   --day-grid-note-line: calc(var(--fs-xs) * 1.45);
   position: absolute;
   display: flex;
-  gap: var(--sp-3);
   box-sizing: border-box;
-  padding: var(--sp-2) var(--sp-4) var(--sp-2) var(--sp-2);
+  container: day-card / size;
+  font-size: var(--fs-md);
+  padding: 0;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
   background: color-mix(in oklch, var(--brand) 7%, var(--card));
@@ -1550,11 +1550,12 @@
 
 /* The sittings, marked along the card's left edge at their real times. */
 .day-grid-card-rail {
-  position: relative;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sp-2);
   width: var(--sp-1);
-  flex-shrink: 0;
-  align-self: stretch;
-  margin: calc(var(--sp-2) * -1) 0;
+  pointer-events: none;
 }
 
 .day-grid-sitting {
@@ -1580,7 +1581,11 @@
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+  justify-content: center;
   gap: var(--sp-px);
+  box-sizing: border-box;
+  margin-left: var(--sp-4);
+  padding-right: var(--sp-4);
   overflow: hidden;
 }
 
@@ -1597,7 +1602,7 @@
 /* One line: items that do not fit beside the active time wrap out of view
    whole (the card's label and the details keep them). */
 .day-grid-card-meta {
-  display: flex;
+  display: none;
   flex-shrink: 0;
   flex-wrap: wrap;
   align-items: center;
@@ -1607,7 +1612,6 @@
   font-size: var(--fs-2xs);
   line-height: var(--day-grid-meta-line);
   color: var(--muted-foreground);
-  font-variant-numeric: tabular-nums;
 }
 
 .day-grid-card-active {
@@ -1625,6 +1629,7 @@
 }
 
 .day-grid-card-notes {
+  display: none;
   flex: 1 1 0;
   min-height: 0;
   margin-top: var(--sp-1);
@@ -1649,6 +1654,34 @@
 
 .day-grid-card-note::before {
   content: "· ";
+}
+
+/* Container units follow the card's actual width/height and text zoom.
+   Reveal full line boxes only; hidden information remains in its accessible
+   name and in the existing selection panel. */
+.day-grid-card-meta > span {
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@container day-card (height >= 3.5em) {
+  .day-grid-card-body {
+    justify-content: flex-start;
+    padding-top: var(--sp-2);
+    padding-bottom: var(--sp-2);
+  }
+
+  .day-grid-card-meta {
+    display: flex;
+  }
+}
+
+@container day-card (height >= 6em) {
+  .day-grid-card-notes {
+    display: block;
+  }
 }
 
 /* Selected workstream in the side panel */

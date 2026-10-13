@@ -27,6 +27,7 @@ import { TimelineSessionList } from "./TimelineSessionList";
 import { TimelineStats } from "./TimelineStats";
 import { formatDayHeader } from "./timeline-utils";
 import { useDayIntelligence } from "./use-day-intelligence";
+import { useCalendarViewport } from "./use-calendar-viewport";
 import { WorkstreamDetail } from "./WorkstreamDetail";
 import { WorkstreamGrid } from "./WorkstreamGrid";
 
@@ -141,14 +142,26 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
   const intelligence = useDayIntelligence(day);
   const workstreams = intelligence.data?.workstreams;
   const gridNowMs = isToday ? nowMs : null;
+  const calendarViewport = useCalendarViewport();
   const layout = useMemo(
     () =>
       layoutDayGrid(workstreams ?? [], {
         dayStartMs,
         dayEndMs,
         nowMs: gridNowMs,
+        viewportHeight: calendarViewport.viewportHeight,
+        minCardHeight: calendarViewport.minCardHeight,
+        cardGap: calendarViewport.cardGap,
       }),
-    [workstreams, dayStartMs, dayEndMs, gridNowMs],
+    [
+      workstreams,
+      dayStartMs,
+      dayEndMs,
+      gridNowMs,
+      calendarViewport.viewportHeight,
+      calendarViewport.minCardHeight,
+      calendarViewport.cardGap,
+    ],
   );
   const selectedCard =
     selection?.kind === "workstream"
@@ -381,6 +394,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
                   ) : null
                 ) : layout.cards.length > 0 ? (
                   <WorkstreamGrid
+                    viewportRef={calendarViewport.ref}
                     layout={layout}
                     nowMs={gridNowMs}
                     selectedId={selectedCard ? selectedCard.workstream.id : null}

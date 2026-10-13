@@ -55,12 +55,11 @@ export type DayGridLayout = {
   toPx: (ms: number) => number;
 };
 
-/** Pixels per real minute inside an hour with work (90 px per hour). */
-const PX_PER_MIN = 1.5;
+/** Readable floor for long days; bounded growth for short days. */
+const MIN_PX_PER_MIN = 1;
+const MAX_PX_PER_MIN = 9;
 /** Height of a run of consecutive hours without any work. */
 const IDLE_RUN_PX = 36;
-/** The smallest card, so its title and times stay readable. */
-export const MIN_CARD_PX = 52;
 /** Measured periods closer than this read as one sitting (second rounding). */
 const SITTING_JOIN_MS = 60_000;
 /** Small enough to land on every local hour, including +x:30/+x:45 zones. */
@@ -155,6 +154,7 @@ function buildScale(
   hours: LocalHour[],
   dayEndMs: number,
   busy: { startMs: number; endMs: number }[],
+  viewportHeight: number,
 ): { buckets: Bucket[]; height: number } {
   const first = Math.min(...busy.map((range) => range.startMs));
   const last = Math.max(...busy.map((range) => range.endMs));
@@ -169,14 +169,30 @@ function buildScale(
       previous.endMs = endMs;
       return;
     }
-    const height = active ? ((endMs - hour.ms) / 60_000) * PX_PER_MIN : IDLE_RUN_PX;
+    const height = active ? (endMs - hour.ms) / 60_000 : IDLE_RUN_PX;
     buckets.push({ startMs: hour.ms, endMs, active, top, height });
     top += height;
   });
+  const activeMinutes = buckets.reduce(
+    (sum, bucket) => sum + (bucket.active ? bucket.height : 0),
+    0,
+  );
+  const idleHeight = buckets.reduce((sum, bucket) => sum + (bucket.active ? 0 : bucket.height), 0);
+  const available = Number.isFinite(viewportHeight) ? Math.max(0, viewportHeight) : 0;
+  const pxPerMin = Math.min(
+    MAX_PX_PER_MIN,
+    Math.max(MIN_PX_PER_MIN, (available - idleHeight) / activeMinutes),
+  );
+  top = 0;
+  for (const bucket of buckets) {
+    bucket.top = top;
+    if (bucket.active) bucket.height *= pxPerMin;
+    top += bucket.height;
+  }
   return { buckets, height: top };
 }
 
-function assignLanes(cards: GridCard[]) {
+function assignLanes(cards: GridCard[], gap: number) {
   const sorted = [...cards].sort((a, b) => a.top - b.top || b.height - a.height);
   const laneEnds: number[] = [];
   let cluster: GridCard[] = [];
@@ -191,17 +207,27 @@ function assignLanes(cards: GridCard[]) {
     if (card.top >= clusterEnd) closeCluster();
     let lane = laneEnds.findIndex((end) => end <= card.top);
     if (lane < 0) lane = laneEnds.length;
-    laneEnds[lane] = card.top + card.height;
+    laneEnds[lane] = card.top + card.height + gap;
     card.lane = lane;
     cluster.push(card);
-    clusterEnd = Math.max(clusterEnd, card.top + card.height);
+    clusterEnd = Math.max(clusterEnd, card.top + card.height + gap);
   }
   closeCluster();
 }
 
 export function layoutDayGrid(
   workstreams: WorkstreamDto[],
-  options: { dayStartMs: number; dayEndMs: number; nowMs?: number | null; timeZone?: string },
+  options: {
+    dayStartMs: number;
+    dayEndMs: number;
+    nowMs?: number | null;
+    timeZone?: string;
+    /** Scroller content box, independent of the canvas being laid out. */
+    viewportHeight?: number;
+    /** Resolved --control-xs / title line box and --sp-2 from the interface. */
+    minCardHeight?: number;
+    cardGap?: number;
+  },
 ): DayGridLayout {
   const { dayStartMs, dayEndMs, nowMs, timeZone } = options;
   const hours = localHours(dayStartMs, dayEndMs, timeZone);
@@ -219,7 +245,7 @@ export function layoutDayGrid(
     nowMs != null && nowMs > dayStartMs && nowMs < dayEndMs
       ? [...busy, { startMs: nowMs, endMs: nowMs + 1 }]
       : busy;
-  const { buckets, height } = buildScale(hours, dayEndMs, withNow);
+  const { buckets, height } = buildScale(hours, dayEndMs, withNow, options.viewportHeight ?? 0);
   const toPx = (ms: number) => {
     const bucket =
       buckets.find((candidate) => ms >= candidate.startMs && ms < candidate.endMs) ??
@@ -243,10 +269,10 @@ export function layoutDayGrid(
       lane: 0,
       laneCount: 1,
       top,
-      height: Math.max(toPx(endMs) - top, MIN_CARD_PX),
+      height: Math.max(toPx(endMs) - top, options.minCardHeight ?? 22),
     };
   });
-  assignLanes(cards);
+  assignLanes(cards, options.cardGap ?? 6);
   const ticks: GridTick[] = buckets.map((bucket) => ({
     ms: bucket.startMs,
     label: hours.find((hour) => hour.ms === bucket.startMs)?.label ?? "",

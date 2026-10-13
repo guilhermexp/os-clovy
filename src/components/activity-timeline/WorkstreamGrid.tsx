@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { type InterfaceLocale, useLocale, useT } from "../../i18n";
+import { useScrollFade } from "../../lib/use-scroll-fade";
 import type { DayGridLayout } from "./day-grid-layout";
 import { formatDuration, formatTime } from "./timeline-utils";
 
@@ -9,6 +10,7 @@ type WorkstreamGridProps = {
   nowMs: number | null;
   selectedId: number | null;
   onSelect: (id: number) => void;
+  viewportRef?: (element: HTMLDivElement | null) => void;
 };
 
 /** "2 PM" / "14h": an hour known only by its whole local hour. */
@@ -44,17 +46,35 @@ export function spanLabels(
  * sittings, and the active time printed on it comes from the data, not from
  * the card's height. Overlapping workstreams share the width in lanes.
  */
-export function WorkstreamGrid({ layout, nowMs, selectedId, onSelect }: WorkstreamGridProps) {
+export function WorkstreamGrid({
+  layout,
+  nowMs,
+  selectedId,
+  onSelect,
+  viewportRef,
+}: WorkstreamGridProps) {
   const t = useT();
   const locale = useLocale();
-  const scrollerRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const setScroller = useCallback(
+    (element: HTMLDivElement | null) => {
+      scrollerRef.current = element;
+      viewportRef?.(element);
+    },
+    [viewportRef],
+  );
+  const fade = useScrollFade(scrollerRef);
   const activeMs = layout.cards.reduce((total, card) => total + card.activeMs, 0);
   const firstCardTop = layout.cards[0]?.top ?? 0;
+  const firstCardStart = layout.cards[0]?.startMs;
+  const openedStart = useRef<number | undefined>();
 
   // Opening a day starts at its first workstream, not at the top of the axis.
   useEffect(() => {
+    if (openedStart.current === firstCardStart) return;
+    openedStart.current = firstCardStart;
     scrollerRef.current?.scrollTo?.({ top: Math.max(0, firstCardTop - 24) });
-  }, [firstCardTop]);
+  }, [firstCardStart, firstCardTop]);
 
   return (
     <section
@@ -70,7 +90,7 @@ export function WorkstreamGrid({ layout, nowMs, selectedId, onSelect }: Workstre
           {t("activity.grid.active", { duration: formatDuration(activeMs, locale) })}
         </span>
       </header>
-      <div className="day-grid-scroller" ref={scrollerRef}>
+      <div className="day-grid-scroller scroll-fade-mask" ref={setScroller} {...fade.props}>
         <div className="day-grid-body" style={{ height: layout.height }}>
           <div className="day-grid-axis" aria-hidden="true">
             {layout.ticks.map((tick) => (
