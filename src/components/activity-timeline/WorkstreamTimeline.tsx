@@ -65,7 +65,8 @@ export function spanLabels(
 
 /**
  * The day's workstreams as a column of cards on a rail of real local hours.
- * A card spans its first to last sitting, colored bars on its left edge mark
+ * A workstream has one card per stretch of work between long pauses; a card
+ * spans its first to last sitting there, colored bars on its left edge mark
  * each sitting, and what it shows grows with its drawn height (title, then
  * the active time and range, then what was done). The active time printed on
  * it comes from the data, never from its height. Overlapping workstreams
@@ -91,7 +92,9 @@ export function WorkstreamTimeline({
     [viewportRef],
   );
   const fade = useScrollFade(scrollerRef);
-  const activeMs = layout.cards.reduce((total, card) => total + card.activeMs, 0);
+  // The header counts workstreams, not cards: a workstream split by long
+  // pauses is still one, and its minutes are counted once.
+  const activeMs = layout.workstreams.reduce((total, span) => total + span.activeMs, 0);
   const firstCardTop = layout.cards[0]?.top ?? 0;
   const firstCardStart = layout.cards[0]?.startMs;
   const openedStart = useRef<number | undefined>();
@@ -117,7 +120,7 @@ export function WorkstreamTimeline({
     >
       <header className="ws-timeline-header">
         <h3 className="ws-timeline-title">
-          {t("activity.grid.count", { count: layout.cards.length })}
+          {t("activity.grid.count", { count: layout.workstreams.length })}
         </h3>
         <span className="ws-timeline-total">
           {t("activity.grid.active", { duration: formatDuration(activeMs, locale) })}
@@ -158,7 +161,7 @@ export function WorkstreamTimeline({
             ) : null}
             {layout.cards.map((card) => (
               <WorkstreamCard
-                key={card.workstream.id}
+                key={card.key}
                 card={card}
                 selected={card.workstream.id === selectedId}
                 textScale={textScale}
@@ -192,7 +195,7 @@ function WorkstreamCard({
     !card.approximate && card.sittings > 1
       ? t("activity.grid.sittings", { count: card.sittings })
       : null;
-  const notes = workstream.hours.filter((hour) => hour.note);
+  const { notes } = card;
   const headerRef = useRef<HTMLSpanElement | null>(null);
   const headerHeight = useHeaderHeight(headerRef, density === "notes");
   const { shown, more } = visibleNotes(
@@ -267,9 +270,14 @@ function WorkstreamCard({
           {density === "notes" && shown > 0 ? (
             <>
               <span className="ws-timeline-card-notes">
-                {notes.slice(0, shown).map((hour) => (
-                  <span key={hour.hour} className="ws-timeline-card-note" data-testid="card-note">
-                    {hour.note}
+                {notes.slice(0, shown).map((note, index) => (
+                  <span
+                    // biome-ignore lint/suspicious/noArrayIndexKey: notes are plain text in hour order, not entities.
+                    key={index}
+                    className="ws-timeline-card-note"
+                    data-testid="card-note"
+                  >
+                    {note}
                   </span>
                 ))}
               </span>

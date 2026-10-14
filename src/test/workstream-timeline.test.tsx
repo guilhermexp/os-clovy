@@ -419,7 +419,9 @@ describe("Workstream sitting bars (S8)", () => {
             ["09:00", "09:01"],
             ["09:20", "09:21"],
             ["09:40", "09:41"],
-            ["10:30", "10:31"],
+            // 39 minutes after the last sitting: within one card (pauses over
+            // 45 minutes start a new card).
+            ["10:20", "10:21"],
           ],
         },
         {
@@ -441,7 +443,7 @@ describe("Workstream sitting bars (S8)", () => {
       [40, 4],
     ]);
     const height = box("Dots").height;
-    expect(height).toBe(91);
+    expect(height).toBe(81);
     // The last sitting ends past the inset area: its bar stays inside the card.
     for (const [top, size] of dots) expect(top + size).toBeLessThanOrEqual(height - 2);
     expect(bars("Short resumed")).toEqual([

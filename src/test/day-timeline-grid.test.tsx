@@ -167,7 +167,9 @@ function serve(workstreamsByDay: Record<string, WorkstreamDto[]>, provider?: "re
   });
 }
 
-const card = (title: string) => screen.findByRole("button", { name: new RegExp(title) });
+// A workstream resumed after a long pause has one card per stretch: this is its first.
+const card = async (title: string) =>
+  (await screen.findAllByRole("button", { name: new RegExp(title) }))[0];
 
 describe("Today grid of workstreams", () => {
   beforeEach(() => {
@@ -260,18 +262,25 @@ describe("Today grid of workstreams", () => {
     expect(firstButton.style.height).toBe(stableHeight);
   });
 
-  it("groups a resumed workstream into one card with its sittings and active time, not its span", async () => {
+  it("splits a workstream resumed after a long pause into one card per stretch", async () => {
     render(<ActivityTimelineView />);
-    const grid = await card("Timeline grid refactor");
+    await card("Timeline grid refactor");
 
-    expect(screen.getAllByRole("button", { name: /Timeline grid refactor/ })).toHaveLength(1);
-    expect(within(grid).getAllByTestId("workstream-sitting")).toHaveLength(2);
-    expect(within(grid).getByText("· 2 sittings")).toBeInTheDocument();
-    // 38 active minutes, while the card spans 9:00 to 11:20.
-    expect(within(grid).getByText(formatDuration(38 * 60_000, "en"))).toBeInTheDocument();
-    expect(
-      within(grid).getByText(`${formatTime(iso(9, 0))} - ${formatTime(iso(11, 20))}`),
-    ).toBeInTheDocument();
+    // 9:00 to 9:30, then 11:00 to 11:20: the 90-minute pause starts a new card.
+    const [morning, later] = screen.getAllByRole("button", { name: /Timeline grid refactor/ });
+    expect(screen.getAllByRole("button", { name: /Timeline grid refactor/ })).toHaveLength(2);
+    expect(within(morning).getAllByTestId("workstream-sitting")).toHaveLength(1);
+    expect(within(later).getAllByTestId("workstream-sitting")).toHaveLength(1);
+    // Each card carries the active minutes of its own hours (24 + 14 = 38)
+    // and its own range, whatever its drawn density.
+    expect(morning.getAttribute("aria-label")).toBe(
+      `Timeline grid refactor, ${formatDuration(24 * 60_000, "en")} active, ${formatTime(iso(9, 0))} - ${formatTime(iso(9, 30))}`,
+    );
+    expect(later.getAttribute("aria-label")).toBe(
+      `Timeline grid refactor, ${formatDuration(14 * 60_000, "en")} active, ${formatTime(iso(11, 0))} - ${formatTime(iso(11, 20))}`,
+    );
+    // The header still counts workstreams, once each.
+    expect(screen.getByText("3 workstreams")).toBeInTheDocument();
   });
 
   it("puts overlapping workstreams side by side so both stay selectable", async () => {

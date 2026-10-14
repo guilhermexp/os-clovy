@@ -1,8 +1,12 @@
 import type { WorkstreamDto } from "../../lib/day-intelligence";
 
 /**
- * Pure layout of the Today → Timeline → Workstreams column: one card per
- * workstream on a vertical axis of the day's real local hours.
+ * Pure layout of the Today → Timeline → Workstreams column: workstreams as
+ * cards on a vertical axis of the day's real local hours.
+ *
+ * - A workstream is one card per stretch of work: a pause longer than
+ *   `CARD_SPLIT_GAP_MS` starts a new card of the same workstream at its real
+ *   time; shorter pauses stay gaps between the sitting bars of one card.
  *
  * - The window runs from 20 minutes before the first sitting to 20 minutes
  *   after the last one (and to now, today), at least 150 minutes centered on
@@ -39,7 +43,8 @@ export type TimelineBar = { top: number; height: number; approximate: boolean };
 /** What a card shows at its drawn height (spec section 5). */
 export type CardDensity = "pill" | "title" | "meta" | "notes";
 
-export type TimelineCard = {
+/** A stretch of a workstream's day, or the whole of it. */
+export type TimelineSpan = {
   workstream: WorkstreamDto;
   /** Ascending by start; session bounds already joined. */
   segments: TimelineSegment[];
@@ -49,8 +54,18 @@ export type TimelineCard = {
   approximate: boolean;
   /** Separate session stretches (resumptions), not counting hour-only parts. */
   sittings: number;
-  /** Active time from the data, independent of the card's span. */
+  /** Active time from the data, independent of the span. */
   activeMs: number;
+};
+
+/** One card: a stretch of a workstream between pauses longer than the split gap. */
+export type TimelineCard = TimelineSpan & {
+  /** Unique per card: the workstream id and the stretch's index. */
+  key: string;
+  /** Index of the stretch within its workstream's day. */
+  part: number;
+  /** Notes of the hours whose work falls in this stretch, in hour order. */
+  notes: string[];
   lane: number;
   laneCount: number;
   top: number;
@@ -63,6 +78,8 @@ export type TimelineCard = {
 export type TimelineHour = { ms: number; hour: number; top: number; current: boolean };
 
 export type WorkstreamTimelineLayout = {
+  /** Each workstream whole, in card order: what the header and details show. */
+  workstreams: TimelineSpan[];
   cards: TimelineCard[];
   hours: TimelineHour[];
   height: number;
@@ -77,6 +94,11 @@ const WINDOW_PAD_MS = 20 * MINUTE_MS;
 const MIN_WINDOW_MS = 150 * MINUTE_MS;
 const BASE_PX_PER_MIN = 1;
 const MAX_PX_PER_MIN = 9;
+/**
+ * A pause longer than this between a workstream's sittings starts a new card
+ * of the same workstream; shorter pauses stay inside one card.
+ */
+export const CARD_SPLIT_GAP_MS = 45 * MINUTE_MS;
 /** Measured periods closer than this read as one sitting (second rounding). */
 const SITTING_JOIN_MS = MINUTE_MS;
 /** Small enough to land on every local hour, including +x:30/+x:45 zones. */
@@ -139,31 +161,45 @@ function hourWindow(
   return { startMs: hours[index].ms, endMs: next?.ms ?? dayEndMs };
 }
 
-function cardSegments(
+/** Where one hour report's work sits: its measured periods and its by-hour part. */
+type HourPlacement = {
+  located: { startMs: number; endMs: number }[];
+  byHour: TimelineSegment | null;
+  /** The hour's own local window, for an hour with no position of its own. */
+  window: { startMs: number; endMs: number } | null;
+};
+
+function hourPlacements(
   workstream: WorkstreamDto,
   hours: LocalHour[],
   dayStartMs: number,
   dayEndMs: number,
-): TimelineSegment[] {
-  const located: { startMs: number; endMs: number }[] = [];
-  const byHour: TimelineSegment[] = [];
-  for (const hour of workstream.hours) {
+): HourPlacement[] {
+  return workstream.hours.map((hour) => {
     const unlocatedMinutes = hour.periods ? hour.minutes - hour.locatedMinutes : hour.minutes;
+    const located: HourPlacement["located"] = [];
     for (const period of hour.periods ?? []) {
       const startMs = Math.max(Date.parse(period.startedAt), dayStartMs);
       const endMs = Math.min(Date.parse(period.endedAt), dayEndMs);
       if (endMs > startMs) located.push({ startMs, endMs });
     }
-    if (hour.periods && unlocatedMinutes <= 0) continue;
-    const span = hourWindow(hours, hour.hour, dayEndMs);
-    if (!span) continue;
-    byHour.push({
-      ...span,
-      kind: hour.periods ? "unlocated" : "hour",
-      approximate: true,
-      minutes: unlocatedMinutes,
-    });
-  }
+    const window = hourWindow(hours, hour.hour, dayEndMs);
+    const byHour: TimelineSegment | null =
+      window && !(hour.periods && unlocatedMinutes <= 0)
+        ? {
+            ...window,
+            kind: hour.periods ? "unlocated" : "hour",
+            approximate: true,
+            minutes: unlocatedMinutes,
+          }
+        : null;
+    return { located, byHour, window };
+  });
+}
+
+/** A workstream's segments: located periods joined into sittings, plus by-hour parts. */
+function joinSegments(placements: HourPlacement[]): TimelineSegment[] {
+  const located = placements.flatMap((placement) => placement.located);
   located.sort((a, b) => a.startMs - b.startMs);
   const sessions: TimelineSegment[] = [];
   for (const period of located) {
@@ -174,7 +210,86 @@ function cardSegments(
       sessions.push({ ...period, kind: "session", approximate: false, minutes: null });
     }
   }
+  const byHour = placements.flatMap((placement) => (placement.byHour ? [placement.byHour] : []));
   return [...sessions, ...byHour].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+}
+
+/** Splits ascending segments where the pause since the work so far exceeds the gap. */
+function splitByPause(segments: TimelineSegment[]): TimelineSegment[][] {
+  const stretches: TimelineSegment[][] = [];
+  let reachedMs = Number.NEGATIVE_INFINITY;
+  for (const segment of segments) {
+    if (segment.startMs - reachedMs > CARD_SPLIT_GAP_MS) stretches.push([]);
+    stretches[stretches.length - 1].push(segment);
+    reachedMs = Math.max(reachedMs, segment.endMs);
+  }
+  return stretches;
+}
+
+/**
+ * The stretch an hour report belongs to: where most of its placed time
+ * falls (its periods and by-hour part, or else its local window), the first
+ * stretch when it has no position at all. Its minutes and note go there whole.
+ */
+function stretchOfHour(placement: HourPlacement, stretches: TimelineSpan[]): number {
+  const placed = [...placement.located, ...(placement.byHour ? [placement.byHour] : [])];
+  const own = placed.length > 0 ? placed : placement.window ? [placement.window] : [];
+  let best = 0;
+  let bestOverlap = 0;
+  stretches.forEach((stretch, index) => {
+    const overlap = own.reduce(
+      (sum, range) =>
+        sum +
+        Math.max(
+          0,
+          Math.min(stretch.endMs, range.endMs) - Math.max(stretch.startMs, range.startMs),
+        ),
+      0,
+    );
+    if (overlap > bestOverlap) {
+      best = index;
+      bestOverlap = overlap;
+    }
+  });
+  return best;
+}
+
+function spanOf(
+  workstream: WorkstreamDto,
+  segments: TimelineSegment[],
+  activeMs: number,
+): TimelineSpan {
+  return {
+    workstream,
+    segments,
+    startMs: segments[0].startMs,
+    endMs: Math.max(...segments.map((segment) => segment.endMs)),
+    approximate: segments.some((segment) => segment.approximate),
+    sittings: segments.filter((segment) => !segment.approximate).length,
+    activeMs,
+  };
+}
+
+/** A workstream whole, and its stretches with the minutes and notes of their hours. */
+function placeWorkstream(
+  workstream: WorkstreamDto,
+  hours: LocalHour[],
+  dayStartMs: number,
+  dayEndMs: number,
+): { whole: TimelineSpan; stretches: (TimelineSpan & { notes: string[] })[] } | null {
+  const placements = hourPlacements(workstream, hours, dayStartMs, dayEndMs);
+  const segments = joinSegments(placements);
+  if (segments.length === 0) return null;
+  const stretches = splitByPause(segments).map((part) => ({
+    ...spanOf(workstream, part, 0),
+    notes: [] as string[],
+  }));
+  workstream.hours.forEach((hour, index) => {
+    const stretch = stretches[stretchOfHour(placements[index], stretches)];
+    stretch.activeMs += hour.minutes * MINUTE_MS;
+    if (hour.note) stretch.notes.push(hour.note);
+  });
+  return { whole: spanOf(workstream, segments, workstream.minutes * MINUTE_MS), stretches };
 }
 
 /** The visible stretch of the day, before any scale is applied. */
@@ -341,16 +456,21 @@ export function layoutWorkstreamTimeline(
       ? options.nowMs
       : null;
   const hours = localHours(dayStartMs, dayEndMs, timeZone);
-  const placed = workstreams
-    .map((workstream) => ({
-      workstream,
-      segments: cardSegments(workstream, hours, dayStartMs, dayEndMs),
-    }))
-    .filter((entry) => entry.segments.length > 0);
+  const placed = workstreams.flatMap((workstream) => {
+    const entry = placeWorkstream(workstream, hours, dayStartMs, dayEndMs);
+    return entry ? [entry] : [];
+  });
   if (placed.length === 0) {
-    return { cards: [], hours: [], height: 0, pxPerMin: BASE_PX_PER_MIN, toPx: () => 0 };
+    return {
+      workstreams: [],
+      cards: [],
+      hours: [],
+      height: 0,
+      pxPerMin: BASE_PX_PER_MIN,
+      toPx: () => 0,
+    };
   }
-  const busySegments = placed.flatMap((entry) => entry.segments);
+  const busySegments = placed.flatMap((entry) => entry.whole.segments);
   const busy = (startMs: number, endMs: number) =>
     busySegments.some((segment) => segment.startMs < endMs && segment.endMs > startMs);
   const window = timeWindow(
@@ -383,29 +503,25 @@ export function layoutWorkstreamTimeline(
     return Math.round(piece.top + fraction * piece.height);
   };
 
-  const cards = placed.map(({ workstream, segments }): PlacedCard => {
-    const startMs = segments[0].startMs;
-    const endMs = Math.max(...segments.map((segment) => segment.endMs));
-    const cardTop = toPx(startMs);
-    const realHeight = toPx(endMs) - cardTop;
-    const cardHeight = Math.max(realHeight, minHeight);
-    return {
-      workstream,
-      segments,
-      startMs,
-      endMs,
-      approximate: segments.some((segment) => segment.approximate),
-      sittings: segments.filter((segment) => !segment.approximate).length,
-      activeMs: workstream.minutes * MINUTE_MS,
-      lane: 0,
-      laneCount: 1,
-      top: cardTop,
-      height: cardHeight,
-      realHeight,
-      bars: barsFor(segments, cardTop, cardHeight, toPx),
-      density: densityFor(cardHeight, textScale),
-    };
-  });
+  const cards = placed.flatMap(({ stretches }) =>
+    stretches.map((stretch, part): PlacedCard => {
+      const cardTop = toPx(stretch.startMs);
+      const realHeight = toPx(stretch.endMs) - cardTop;
+      const cardHeight = Math.max(realHeight, minHeight);
+      return {
+        ...stretch,
+        key: `${stretch.workstream.id}-${part}`,
+        part,
+        lane: 0,
+        laneCount: 1,
+        top: cardTop,
+        height: cardHeight,
+        realHeight,
+        bars: barsFor(stretch.segments, cardTop, cardHeight, toPx),
+        density: densityFor(cardHeight, textScale),
+      };
+    }),
+  );
   assignLanes(cards, minHeight, gap);
 
   // Labels: every hour with work and the hour right after one (where the work
@@ -422,8 +538,19 @@ export function layoutWorkstreamTimeline(
     marks.push({ ms: hour.ms, hour: hour.hour, top: toPx(hour.ms), current });
   });
 
-  cards.sort((a, b) => a.startMs - b.startMs || a.workstream.id - b.workstream.id);
+  cards.sort(
+    (a, b) => a.startMs - b.startMs || a.workstream.id - b.workstream.id || a.part - b.part,
+  );
+  const firstCard = new Map<number, number>();
+  cards.forEach((card, index) => {
+    if (!firstCard.has(card.workstream.id)) firstCard.set(card.workstream.id, index);
+  });
   return {
+    workstreams: placed
+      .map((entry) => entry.whole)
+      .sort(
+        (a, b) => (firstCard.get(a.workstream.id) ?? 0) - (firstCard.get(b.workstream.id) ?? 0),
+      ),
     cards: cards.map(({ realHeight: _realHeight, ...card }) => card),
     hours: marks,
     height: Math.max(height, ...cards.map((card) => card.top + card.height)),

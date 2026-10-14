@@ -195,8 +195,18 @@ The timeline shows the day's workstreams by default ("Workstreams" /
 "Sessions" switch):
 
 - **Timeline** (`WorkstreamTimeline.tsx`, layout in
-  `workstream-timeline-layout.ts`): a column of cards, one per workstream, on
-  a rail of the day's real local hours, in one brand color.
+  `workstream-timeline-layout.ts`): a column of cards on a rail of the day's
+  real local hours, in one brand color.
+  - **One card per stretch.** A workstream gathers work from the whole day,
+    so its sittings are split where the pause between the end of one and the
+    start of the next exceeds 45 minutes (`CARD_SPLIT_GAP_MS`): the work
+    after it starts a new card of the same workstream at its real time.
+    Pauses up to 45 minutes stay gaps between the bars of one card. Hour-only
+    parts follow the same rule by their hour window. Each card shows the
+    workstream's title; its active time is the minutes of the hours whose
+    work falls in it (an hour goes whole to the stretch holding most of its
+    placed time), and its range, "N sittings" and notes count that stretch
+    only. The header counts workstreams and their active minutes once.
   - **Sittings and honesty.** A card spans its first to last sitting.
     Sittings are the bounds of the measured sessions its hours' work was
     located in (`periods`,
@@ -237,14 +247,18 @@ The timeline shows the day's workstreams by default ("Workstreams" /
     header (17 px per slot after 8 px), with "+N more" when some do not,
     which the notes give way to so it is never clipped. Width does not
     change density.
-  - **Interaction.** Hover lifts the card 1 px; selecting a card dims the
-    others to 0.38 and opens its details; clicking it again, clicking the
+  - **Interaction.** Hover lifts the card 1 px; selecting any card selects
+    its whole workstream: all of its cards stay highlighted, the others dim
+    to 0.38, and the details show the whole day of the workstream; clicking it again, clicking the
     empty column, or Escape clears the selection.
 
   Regressions: `workstream-timeline.test.tsx` drives the view through the
   spec's measured scenarios (scale, labels, columns, short cards, density,
   bars, selection) and holds the RED/GREEN witness;
-  `workstream-timeline-layout.test.ts` covers DST, hour-only work, the scale
+  `workstream-timeline-split.test.tsx` covers the 45-minute split, per-card
+  minutes and notes, whole-workstream selection and a 12-workstream day
+  spread from 10:35 to 23:54; `workstream-timeline-now.test.tsx` the short
+  window today; `workstream-timeline-layout.test.ts` covers DST, hour-only work, the scale
   limits, today and the note slots; `day-timeline-grid.test.tsx` covers
   navigation, fallback, sittings, legacy and the side panel.
 - **Side panel**: without a selection, the day overview (focused, idle, away,

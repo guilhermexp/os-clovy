@@ -2,11 +2,11 @@ import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { Fragment } from "react";
 import { useLocale, useT } from "../../i18n";
 import { formatDuration } from "./timeline-utils";
-import type { TimelineCard } from "./workstream-timeline-layout";
+import type { TimelineSpan } from "./workstream-timeline-layout";
 import { spanLabels } from "./WorkstreamTimeline";
 
 type WorkstreamDetailProps = {
-  card: TimelineCard;
+  card: TimelineSpan;
   onBack: () => void;
 };
 

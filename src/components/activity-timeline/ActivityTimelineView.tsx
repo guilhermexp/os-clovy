@@ -165,9 +165,10 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
       canvas.textScale,
     ],
   );
+  // A selection is the whole workstream, whichever of its cards was clicked.
   const selectedCard =
     selection?.kind === "workstream"
-      ? layout.cards.find((card) => card.workstream.id === selection.id)
+      ? layout.workstreams.find((span) => span.workstream.id === selection.id)
       : undefined;
 
   // Escape returns the side panel to the day overview.
