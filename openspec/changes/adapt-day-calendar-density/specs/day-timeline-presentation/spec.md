@@ -41,9 +41,16 @@ A distribuição em colunas SHALL considerar a escala adaptada, a altura mínima
 - Test: integration — testemunha RED/GREEN de geometria e cartões renderizados.
 
 #### Scenario: Sobreposição real e retomadas
-- **WHEN** duas frentes têm intervalos sobrepostos ou uma frente reaparece em períodos separados
-- **THEN** conflitos visuais são distribuídos em colunas e a frente retomada continua em um cartão, com segmentos e duração ativa independentes de seu intervalo total
+- **WHEN** duas frentes têm intervalos sobrepostos ou uma frente reaparece em períodos separados por pausas de até 45 minutos
+- **THEN** conflitos visuais são distribuídos em colunas e a frente retomada continua em um cartão, com os períodos como barras separadas por vãos e duração ativa independente de seu intervalo total
 - Test: integration — regressão de sobreposição, pausa e retomada no calendário.
+
+#### Scenario: Frente retomada depois de uma pausa longa
+- **WHEN** o intervalo entre o fim de um período medido de uma frente e o início do próximo passa de 45 minutos
+- **THEN** o trabalho seguinte começa um novo cartão da mesma frente, no horário real; cada cartão mostra o título da frente, o intervalo e os períodos do seu trecho e os minutos ativos medidos nesse trecho (os minutos localizados de uma hora vão para os trechos dos seus períodos, em proporção a eles), e a soma dos cartões é o total da frente
+- **AND** os minutos de uma hora que nenhum período localizou ficam no cartão da parte aproximada dessa hora, com barra tracejada e selo "Por hora"
+- **AND** selecionar qualquer cartão seleciona a frente inteira (todos os seus cartões em destaque e o detalhe da frente no painel lateral), e o cabeçalho continua contando frentes e minutos uma vez só
+- Test: integration — `workstream-timeline-split.test.tsx` e `workstream-timeline-minutes.test.tsx`, com captura do dia de 12 frentes espalhadas.
 
 ### Requirement: Preservação das superfícies fora do calendário
 A mudança MUST preservar o painel lateral, o agrupamento e a geração das frentes, os dados, os provedores, a busca, a navegação e o estado de dias sem frentes. Dados legados MUST continuar marcados como aproximados, sem inventar precisão temporal.

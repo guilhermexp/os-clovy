@@ -203,10 +203,20 @@ The timeline shows the day's workstreams by default ("Workstreams" /
     after it starts a new card of the same workstream at its real time.
     Pauses up to 45 minutes stay gaps between the bars of one card. Hour-only
     parts follow the same rule by their hour window. Each card shows the
-    workstream's title; its active time is the minutes of the hours whose
-    work falls in it (an hour goes whole to the stretch holding most of its
-    placed time), and its range, "N sittings" and notes count that stretch
-    only. The header counts workstreams and their active minutes once.
+    workstream's title, and its range and "N sittings" count that stretch
+    only. Its active time comes from the data, split per stretch so the
+    cards always add up to the workstream's total:
+    - an hour's located minutes go to the stretches its measured periods
+      fall in, in proportion to those periods, in whole minutes (largest
+      remainder), even when one hour has periods on both sides of a pause;
+    - the minutes no period located (`minutes - locatedMinutes`, or a whole
+      legacy hour) go to the stretch holding that hour's by-hour part, which
+      is drawn approximate (dashed bar, "By hour"). That part is one segment
+      of the cut, so it never straddles two cards and these minutes are
+      never split.
+
+    An hour's note goes to the stretch with most of its time. The header
+    counts workstreams and their active minutes once.
   - **Sittings and honesty.** A card spans its first to last sitting.
     Sittings are the bounds of the measured sessions its hours' work was
     located in (`periods`,
@@ -257,7 +267,9 @@ The timeline shows the day's workstreams by default ("Workstreams" /
   bars, selection) and holds the RED/GREEN witness;
   `workstream-timeline-split.test.tsx` covers the 45-minute split, per-card
   minutes and notes, whole-workstream selection and a 12-workstream day
-  spread from 10:35 to 23:54; `workstream-timeline-now.test.tsx` the short
+  spread from 10:35 to 23:54; `workstream-timeline-minutes.test.tsx` the
+  active minutes per card (a pause inside one hour, unlocated minutes in a
+  by-hour stretch, whole minutes adding up); `workstream-timeline-now.test.tsx` the short
   window today; `workstream-timeline-layout.test.ts` covers DST, hour-only work, the scale
   limits, today and the note slots; `day-timeline-grid.test.tsx` covers
   navigation, fallback, sittings, legacy and the side panel.

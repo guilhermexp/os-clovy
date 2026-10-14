@@ -6,7 +6,9 @@ import type { WorkstreamDto } from "../../lib/day-intelligence";
  *
  * - A workstream is one card per stretch of work: a pause longer than
  *   `CARD_SPLIT_GAP_MS` starts a new card of the same workstream at its real
- *   time; shorter pauses stay gaps between the sitting bars of one card.
+ *   time; shorter pauses stay gaps between the sitting bars of one card. A
+ *   card's active minutes are the located minutes of the periods inside it
+ *   plus the unlocated minutes of the by-hour parts it holds.
  *
  * - The window runs from 20 minutes before the first sitting to 20 minutes
  *   after the last one (and to now, today), at least 150 minutes centered on
@@ -226,10 +228,20 @@ function splitByPause(segments: TimelineSegment[]): TimelineSegment[][] {
   return stretches;
 }
 
+/** Time of `ranges` that falls inside a stretch. */
+function overlapWith(stretch: TimelineSpan, ranges: { startMs: number; endMs: number }[]): number {
+  return ranges.reduce(
+    (sum, range) =>
+      sum +
+      Math.max(0, Math.min(stretch.endMs, range.endMs) - Math.max(stretch.startMs, range.startMs)),
+    0,
+  );
+}
+
 /**
- * The stretch an hour report belongs to: where most of its placed time
- * falls (its periods and by-hour part, or else its local window), the first
- * stretch when it has no position at all. Its minutes and note go there whole.
+ * The stretch with most of an hour report's placed time (its periods and
+ * by-hour part, or else its local window); the first one when it has none.
+ * The hour's note goes there.
  */
 function stretchOfHour(placement: HourPlacement, stretches: TimelineSpan[]): number {
   const placed = [...placement.located, ...(placement.byHour ? [placement.byHour] : [])];
@@ -237,21 +249,63 @@ function stretchOfHour(placement: HourPlacement, stretches: TimelineSpan[]): num
   let best = 0;
   let bestOverlap = 0;
   stretches.forEach((stretch, index) => {
-    const overlap = own.reduce(
-      (sum, range) =>
-        sum +
-        Math.max(
-          0,
-          Math.min(stretch.endMs, range.endMs) - Math.max(stretch.startMs, range.startMs),
-        ),
-      0,
-    );
+    const overlap = overlapWith(stretch, own);
     if (overlap > bestOverlap) {
       best = index;
       bestOverlap = overlap;
     }
   });
   return best;
+}
+
+/**
+ * Whole minutes split by weight, largest remainder first, so the shares
+ * always add up to `minutes`.
+ */
+function shareMinutes(minutes: number, weights: number[]): number[] {
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const exact = weights.map((weight) => (minutes * weight) / total);
+  const shares = exact.map(Math.floor);
+  let left = minutes - shares.reduce((sum, share) => sum + share, 0);
+  const order = exact
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (const { index } of order) {
+    if (left <= 0) break;
+    shares[index] += 1;
+    left -= 1;
+  }
+  return shares;
+}
+
+/**
+ * Active minutes an hour report adds to each stretch. Its located minutes go
+ * to the stretches its measured periods fall in, in proportion to them; the
+ * minutes no period located go to the stretch holding its by-hour part, which
+ * is one segment of the cut, so that stretch is the one drawn approximate.
+ */
+function hourMinutesByStretch(
+  hour: WorkstreamDto["hours"][number],
+  placement: HourPlacement,
+  stretches: TimelineSpan[],
+): number[] {
+  const added = stretches.map(() => 0);
+  const located = hour.periods ? hour.locatedMinutes : 0;
+  const weights = stretches.map((stretch) => overlapWith(stretch, placement.located));
+  if (located !== 0 && weights.some((weight) => weight > 0)) {
+    shareMinutes(located, weights).forEach((share, index) => {
+      added[index] += share;
+    });
+  } else {
+    added[stretchOfHour(placement, stretches)] += located;
+  }
+  const unlocated = hour.minutes - located;
+  if (unlocated !== 0) {
+    const byHour = placement.byHour;
+    const home = byHour ? stretches.findIndex((stretch) => overlapWith(stretch, [byHour]) > 0) : -1;
+    added[home >= 0 ? home : stretchOfHour(placement, stretches)] += unlocated;
+  }
+  return added;
 }
 
 function spanOf(
@@ -285,9 +339,10 @@ function placeWorkstream(
     notes: [] as string[],
   }));
   workstream.hours.forEach((hour, index) => {
-    const stretch = stretches[stretchOfHour(placements[index], stretches)];
-    stretch.activeMs += hour.minutes * MINUTE_MS;
-    if (hour.note) stretch.notes.push(hour.note);
+    hourMinutesByStretch(hour, placements[index], stretches).forEach((minutes, part) => {
+      stretches[part].activeMs += minutes * MINUTE_MS;
+    });
+    if (hour.note) stretches[stretchOfHour(placements[index], stretches)].notes.push(hour.note);
   });
   return { whole: spanOf(workstream, segments, workstream.minutes * MINUTE_MS), stretches };
 }
