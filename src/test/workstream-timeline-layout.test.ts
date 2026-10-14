@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { layoutDayGrid } from "../components/activity-timeline/day-grid-layout";
+import {
+  densityFor,
+  layoutWorkstreamTimeline,
+  visibleNotes,
+} from "../components/activity-timeline/workstream-timeline-layout";
 import type { WorkstreamDto } from "../lib/day-intelligence";
 
-// Pure layout of the "Today" grid, pinned to a DST zone. New York local days,
+// Pure layout of the workstream timeline, pinned to a DST zone. New York local days,
 // given as their UTC instants (local midnight to next local midnight).
-describe("Day grid layout", () => {
+describe("Workstream timeline layout", () => {
   const ZONE = "America/New_York";
 
   it("places overlapping workstreams in separate lanes and separate ones in the same lane", () => {
@@ -29,7 +33,7 @@ describe("Day grid layout", () => {
         },
       ],
     });
-    const layout = layoutDayGrid(
+    const layout = layoutWorkstreamTimeline(
       [ws(1, "13:00", "13:40"), ws(2, "13:20", "13:50"), ws(3, "16:00", "16:30")],
       {
         dayStartMs: start,
@@ -70,7 +74,7 @@ describe("Day grid layout", () => {
       minutes: 20,
       hours: [{ hour: "2026-03-08T03", minutes: 20, note: "", periods: null, locatedMinutes: 0 }],
     };
-    const layout = layoutDayGrid([precise, old], {
+    const layout = layoutWorkstreamTimeline([precise, old], {
       dayStartMs: start,
       dayEndMs: end,
       timeZone: ZONE,
@@ -89,7 +93,8 @@ describe("Day grid layout", () => {
       layout.toPx(Date.parse("2026-03-08T08:00:00Z")) -
         layout.toPx(Date.parse("2026-03-08T07:00:00Z")),
     );
-    expect(layout.ticks.map((tick) => tick.label)).not.toContain("02:00");
+    // The rail labels real local hours only: 1 AM, then 3 AM, never 2 AM.
+    expect(layout.hours.map((hour) => hour.hour)).toEqual([1, 3, 4]);
   });
 
   it("keeps an hour's work that no session located known by hour instead of treating it as located", () => {
@@ -110,7 +115,7 @@ describe("Day grid layout", () => {
         },
       ],
     };
-    const [card] = layoutDayGrid([partial], {
+    const [card] = layoutWorkstreamTimeline([partial], {
       dayStartMs: start,
       dayEndMs: end,
       timeZone: ZONE,
@@ -136,9 +141,86 @@ describe("Day grid layout", () => {
       minutes: 50,
       hours: [{ hour: "2026-11-01T01", minutes: 50, note: "", periods: null, locatedMinutes: 0 }],
     };
-    const [card] = layoutDayGrid([old], { dayStartMs: start, dayEndMs: end, timeZone: ZONE }).cards;
+    const [card] = layoutWorkstreamTimeline([old], {
+      dayStartMs: start,
+      dayEndMs: end,
+      timeZone: ZONE,
+    }).cards;
     expect(card.segments).toHaveLength(1);
     expect(card.startMs).toBe(Date.parse("2026-11-01T05:00:00Z"));
     expect(card.endMs).toBe(Date.parse("2026-11-01T07:00:00Z"));
+  });
+
+  describe("scale (spec S1)", () => {
+    const start = Date.parse("2026-06-15T04:00:00Z");
+    const end = Date.parse("2026-06-16T04:00:00Z");
+    const one = (from: string, to: string): WorkstreamDto => ({
+      id: 1,
+      title: "One",
+      summary: "",
+      minutes: 60,
+      hours: [
+        {
+          hour: "2026-06-15T10",
+          minutes: 60,
+          note: "",
+          periods: [{ startedAt: `2026-06-15T${from}:00Z`, endedAt: `2026-06-15T${to}:00Z` }],
+          locatedMinutes: 60,
+        },
+      ],
+    });
+    const layout = (work: WorkstreamDto, canvasHeight: number, nowMs?: number) =>
+      layoutWorkstreamTimeline([work], {
+        dayStartMs: start,
+        dayEndMs: end,
+        timeZone: ZONE,
+        canvasHeight,
+        nowMs,
+      });
+
+    it.each([
+      [403, 121, 161],
+      [703, 211, 281],
+      [903, 271, 361],
+      [1303, 391, 521],
+    ])("fills a %i px canvas with a 150-minute window centered on one hour", (height, top, size) => {
+      // 10:00 to 11:00 local (14:00 to 15:00 UTC).
+      const result = layout(one("14:00", "15:00"), height);
+      expect(result.height).toBe(height);
+      expect(result.cards[0]).toMatchObject({ top, height: size, density: "notes" });
+    });
+
+    it("caps growth at 9 px per minute", () => {
+      const result = layout(one("14:00", "14:10"), 1303);
+      expect(result.pxPerMin).toBe(9);
+      expect(result.height).toBe(1260);
+      expect(result.cards[0]).toMatchObject({ top: 540, height: 90 });
+    });
+
+    it("extends the window to now today and marks the current hour", () => {
+      // Work 9:00 to 9:30 local; now is 15:10 local.
+      const result = layout(one("13:00", "13:30"), 303, Date.parse("2026-06-15T19:10:00Z"));
+      expect(result.toPx(Date.parse("2026-06-15T19:10:00Z"))).toBe(result.height);
+      const current = result.hours.filter((hour) => hour.current);
+      expect(current.map((hour) => hour.hour)).toEqual([15]);
+      expect(result.hours.at(-1)?.hour).toBe(15);
+    });
+  });
+
+  it("thresholds and note slots follow the text size and the measured header", () => {
+    expect([45, 46, 61, 62, 103, 104].map((height) => densityFor(height))).toEqual([
+      "pill",
+      "title",
+      "title",
+      "meta",
+      "meta",
+      "notes",
+    ]);
+    expect(densityFor(104, 1.2)).toBe("meta");
+    // Six notes under a two-line title (55 px header), spec S7f.
+    expect(visibleNotes(6, 104, 55)).toEqual({ shown: 1, more: 5 });
+    expect(visibleNotes(6, 152, 55)).toEqual({ shown: 4, more: 2 });
+    // A wrapped meta line can leave no slot: then neither notes nor a count.
+    expect(visibleNotes(6, 104, 90)).toEqual({ shown: 0, more: 0 });
   });
 });

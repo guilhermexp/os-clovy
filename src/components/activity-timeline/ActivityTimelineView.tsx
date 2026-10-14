@@ -19,7 +19,6 @@ import {
   takePendingTodayOpen,
 } from "../../lib/day-intelligence";
 import { DaySummaryPanel } from "./DaySummaryPanel";
-import { layoutDayGrid } from "./day-grid-layout";
 import { TimelineDayStrip } from "./TimelineDayStrip";
 import { TimelineSearch } from "./TimelineSearch";
 import { TimelineSessionDetail } from "./TimelineSessionDetail";
@@ -27,9 +26,10 @@ import { TimelineSessionList } from "./TimelineSessionList";
 import { TimelineStats } from "./TimelineStats";
 import { formatDayHeader } from "./timeline-utils";
 import { useDayIntelligence } from "./use-day-intelligence";
-import { useCalendarViewport } from "./use-calendar-viewport";
+import { useTimelineCanvas } from "./use-timeline-canvas";
 import { WorkstreamDetail } from "./WorkstreamDetail";
-import { WorkstreamGrid } from "./WorkstreamGrid";
+import { layoutWorkstreamTimeline } from "./workstream-timeline-layout";
+import { WorkstreamTimeline } from "./WorkstreamTimeline";
 
 export type ActivityTimelineViewProps = {
   onNavigateToSettings?: (tab?: "activity" | "models") => void;
@@ -142,25 +142,27 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
   const intelligence = useDayIntelligence(day);
   const workstreams = intelligence.data?.workstreams;
   const gridNowMs = isToday ? nowMs : null;
-  const calendarViewport = useCalendarViewport();
+  const canvas = useTimelineCanvas();
   const layout = useMemo(
     () =>
-      layoutDayGrid(workstreams ?? [], {
+      layoutWorkstreamTimeline(workstreams ?? [], {
         dayStartMs,
         dayEndMs,
         nowMs: gridNowMs,
-        viewportHeight: calendarViewport.viewportHeight,
-        minCardHeight: calendarViewport.minCardHeight,
-        cardGap: calendarViewport.cardGap,
+        canvasHeight: canvas.canvasHeight,
+        minCardHeight: canvas.minCardHeight,
+        cardGap: canvas.cardGap,
+        textScale: canvas.textScale,
       }),
     [
       workstreams,
       dayStartMs,
       dayEndMs,
       gridNowMs,
-      calendarViewport.viewportHeight,
-      calendarViewport.minCardHeight,
-      calendarViewport.cardGap,
+      canvas.canvasHeight,
+      canvas.minCardHeight,
+      canvas.cardGap,
+      canvas.textScale,
     ],
   );
   const selectedCard =
@@ -393,9 +395,11 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
                     </>
                   ) : null
                 ) : layout.cards.length > 0 ? (
-                  <WorkstreamGrid
-                    viewportRef={calendarViewport.ref}
+                  <WorkstreamTimeline
+                    viewportRef={canvas.ref}
                     layout={layout}
+                    textScale={canvas.textScale}
+                    onClearSelection={() => setSelection(null)}
                     nowMs={gridNowMs}
                     selectedId={selectedCard ? selectedCard.workstream.id : null}
                     onSelect={(id) =>

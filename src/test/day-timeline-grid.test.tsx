@@ -178,6 +178,7 @@ describe("Today grid of workstreams", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -224,7 +225,7 @@ describe("Today grid of workstreams", () => {
     fireEvent.click(screen.getByRole("button", { name: "Previous day" }));
     const firstButton = await card("Sequential first");
     const secondButton = await card("Sequential second");
-    const scroller = firstButton.closest(".day-grid-scroller");
+    const scroller = firstButton.closest(".ws-timeline-scroller");
     if (!scroller) throw new Error("Calendar scroller missing");
     let height = 180;
     Object.defineProperty(scroller, "clientHeight", { configurable: true, get: () => height });
@@ -265,7 +266,7 @@ describe("Today grid of workstreams", () => {
 
     expect(screen.getAllByRole("button", { name: /Timeline grid refactor/ })).toHaveLength(1);
     expect(within(grid).getAllByTestId("workstream-sitting")).toHaveLength(2);
-    expect(within(grid).getByText("2 sittings")).toBeInTheDocument();
+    expect(within(grid).getByText("· 2 sittings")).toBeInTheDocument();
     // 38 active minutes, while the card spans 9:00 to 11:20.
     expect(within(grid).getByText(formatDuration(38 * 60_000, "en"))).toBeInTheDocument();
     expect(
@@ -278,7 +279,8 @@ describe("Today grid of workstreams", () => {
     const first = await card("Timeline grid refactor");
     const second = await card("Release review");
 
-    expect(first.style.left).not.toBe(second.style.left);
+    expect(first.dataset.lanes).toBe("2");
+    expect(first.dataset.lane).not.toBe(second.dataset.lane);
     fireEvent.click(second);
     expect(
       within(screen.getByRole("region", { name: "Workstream details" })).getByRole("heading", {
@@ -291,7 +293,10 @@ describe("Today grid of workstreams", () => {
     render(<ActivityTimelineView />);
     const inbox = await card("Inbox triage");
 
-    expect(within(inbox).getByText("By hour")).toBeInTheDocument();
+    // Too short for the meta line: the dashed bar and its name say "by hour".
+    expect(inbox.getAttribute("aria-label")).toContain("By hour");
+    expect(inbox.querySelector("[data-approximate]")).not.toBeNull();
+    expect(within(inbox).queryAllByTestId("workstream-sitting")).toHaveLength(0);
     expect(within(inbox).queryByText(/sitting/)).not.toBeInTheDocument();
     expect(inbox.textContent).not.toContain(formatTime(iso(14, 0)));
   });
@@ -316,6 +321,8 @@ describe("Today grid of workstreams", () => {
         },
       ],
     });
+    // A tall canvas grows the lone card enough for its meta line and badge.
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(903);
     render(<ActivityTimelineView />);
     const partial = await card("Partly located work");
     expect(within(partial).getByText("By hour")).toBeInTheDocument();

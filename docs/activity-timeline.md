@@ -21,11 +21,11 @@ Terms are in [CONTEXT.md](../CONTEXT.md#activity-capture).
 | `src-tauri/src/activity/timeline/agent_tools.rs` | `search_activity`, `get_activity_timeline` |
 | `src-tauri/src/activity/timeline/debug_import.rs` | Development-only fixture import (`CLOVY_ACTIVITY_DEBUG_IMPORT`) |
 | `src-tauri/src/activity/app_icon.rs` | `activity_app_icon`: an installed app's icon by bundle id (Launch Services, 64x64 PNG, per-id cache) |
-| `src/components/activity-timeline/`, `src/lib/activity-timeline.ts` | The "Today" view and its typed bindings; the workstream grid is `WorkstreamGrid.tsx` / `WorkstreamDetail.tsx` with its pure layout in `day-grid-layout.ts` |
+| `src/components/activity-timeline/`, `src/lib/activity-timeline.ts` | The "Today" view and its typed bindings; the workstream timeline is `WorkstreamTimeline.tsx` / `WorkstreamDetail.tsx` with its pure layout in `workstream-timeline-layout.ts` |
 
 Tests: `cargo test --manifest-path src-tauri/Cargo.toml activity` (timeline
 tests are under `activity::timeline::`) and
-`pnpm exec vitest run --configLoader=runner src/test/activity-timeline src/test/day-timeline-grid src/test/day-grid-layout`.
+`pnpm exec vitest run --configLoader=runner src/test/activity-timeline src/test/day-timeline-grid src/test/workstream-timeline`.
 
 ## ETL
 
@@ -194,51 +194,59 @@ second row; labels never break a line and only the search field shrinks
 The timeline shows the day's workstreams by default ("Workstreams" /
 "Sessions" switch):
 
-- **Grid** (`WorkstreamGrid.tsx`, layout in `day-grid-layout.ts`): a vertical
-  axis of the day's real local hours with one card per workstream, from its
-  first to its last sitting. Sittings are the bounds of the measured sessions
-  its hours' work was located in (`periods`,
-  [day-intelligence.md](day-intelligence.md#schema-migration-4-day_intelligence)),
-  joined when under a minute apart and marked on the card's edge. They say
-  where the work happened, not how long it took (one session can hold several
-  workstreams), so no sitting is shown with a duration; the card prints the
-  workstream's active minutes, which never come from its height or span. Work
-  known only by hour is drawn as its whole local hour (on a fall-back day the
-  repeated hour's whole two-hour window) and the card is labeled "By hour"
-  with whole-hour times: a legacy hour without periods, or the minutes of an
-  hour that no session was named for (`minutes - locatedMinutes`). Workstreams
-  whose drawn rectangles conflict (including the minimum title height and
-  `--sp-2` separation) share the width in lanes. Scale is resolved before lanes:
-  sequential workstreams reuse a lane when their actual rectangles fit.
-  Hours without work collapse into one 36 px step; inside hours with work the
-  scale is linear in real time, so 23- and 25-hour DST days keep real durations.
-  Today shows a now line.
+- **Timeline** (`WorkstreamTimeline.tsx`, layout in
+  `workstream-timeline-layout.ts`): a column of cards, one per workstream, on
+  a rail of the day's real local hours, in one brand color.
+  - **Sittings and honesty.** A card spans its first to last sitting.
+    Sittings are the bounds of the measured sessions its hours' work was
+    located in (`periods`,
+    [day-intelligence.md](day-intelligence.md#schema-migration-4-day_intelligence)),
+    joined when under a minute apart. They say where the work happened, not
+    how long it took (one session can hold several workstreams), so the card
+    prints the workstream's active minutes, never derived from its height or
+    span. Each sitting is a solid 4 px bar on the card's left edge at its real
+    time (inset 10 px from the card's ends, or a quarter of a short card;
+    at least 4 px tall; always inside the card). Work known only by hour (a
+    legacy hour without periods, or `minutes - locatedMinutes`) spans its
+    whole local hour (on a fall-back day the repeated hour's two-hour window),
+    draws a dashed bar, adds the "By hour" badge to the meta line, uses
+    whole-hour times and does not count as a sitting.
+  - **Window and scale.** From 20 minutes before the first sitting to 20
+    minutes after the last (and to now, today), at least 150 minutes centered
+    on the work. An hour with any work is drawn whole; a run of hours without
+    work takes at most the height of one hour. The base is 1 px per minute; a
+    shorter day grows by one factor for active and idle hours alike, up to 9
+    px per minute, until it fills the scroller's usable height
+    (`use-timeline-canvas.ts` observes the scroller, never the canvas). Longer
+    days scroll. Positions are whole pixels; DST days keep 23 or 25 hours.
+  - **Rail.** Labels ("9 AM" / "9h") only for hours with work and the hour
+    right after one; today none after the current hour, which shows a solid
+    brand dot and a brand label, plus the now line. Geometry from the
+    canvas's left edge: labels end at 46 px, the spine and dots center on 54
+    px, hour lines and cards start at 74 px.
+  - **Columns.** Cards linked by overlap, even indirectly, share the width by
+    the group's widest column count; a card takes the leftmost column free at
+    its start. Back-to-back work stays in one column, touching. A card is at
+    least 22 px (`--control-xs` or one title line); a card stretched to that
+    minimum also keeps `--sp-2` below it, so two short cards stack only when
+    their starts are 28 px apart at the current scale.
+  - **Card by drawn height** (thresholds grow with the text-size
+    preference): under 46 px a one-line pill; from 46 px a dot and up to two
+    title lines; from 62 px the meta line (active time, range, "· N
+    sittings" from 2); from 104 px the notes that fit below the measured
+    header (17 px per slot after 8 px), with "+N more" when some do not,
+    which the notes give way to so it is never clipped. Width does not
+    change density.
+  - **Interaction.** Hover lifts the card 1 px; selecting a card dims the
+    others to 0.38 and opens its details; clicking it again, clicking the
+    empty column, or Escape clears the selection.
 
-  The scroller's usable content height determines the active-hour scale,
-  bounded to 1 to 9 px per real minute. Short days grow within that limit;
-  long days scroll instead of shrinking below the readable floor. An unknown
-  viewport starts at the same floor. `use-calendar-viewport.ts` observes the
-  scroller independently of the canvas, subtracts its padding and resolves
-  the compact minimum from `--control-xs` (22 px) or a whole title line at the
-  current text size, whichever is larger. Repeated equal measurements do not
-  change state; resizing preserves the selection and scroll position.
-
-  Card content follows its actual container size and text zoom: a compact
-  card shows one ellipsized title; at 3.5 em of inner height it also shows a
-  complete metadata line (active time first, then approximation/range/sittings
-  as width permits); at 6 em it reveals as many whole note lines as fit.
-  Long lines ellipsize horizontally. The complete title, active time, range
-  and approximation remain in the accessible name, and clicking or using
-  Enter/Space opens the existing details. These presentation thresholds do
-  not change active minutes, sittings, pauses, or hour-only precision.
-
-  Presentation regressions: `day-calendar-adaptive.test.tsx` holds the
-  immutable RED/GREEN witness; `day-timeline-grid.test.tsx` also exercises
-  viewport resize with a selection, in addition to the existing navigation,
-  fallback, sittings and legacy cases. Browser proof uses synthetic IPC and
-  the real frontend at 1280 x 900 and 800 x 560, in English and pt-BR with
-  text zoom, and compares the unchanged overview/details against the baseline.
-  This proves presentation only, not native capture or inference.
+  Regressions: `workstream-timeline.test.tsx` drives the view through the
+  spec's measured scenarios (scale, labels, columns, short cards, density,
+  bars, selection) and holds the RED/GREEN witness;
+  `workstream-timeline-layout.test.ts` covers DST, hour-only work, the scale
+  limits, today and the note slots; `day-timeline-grid.test.tsx` covers
+  navigation, fallback, sittings, legacy and the side panel.
 - **Side panel**: without a selection, the day overview (focused, idle, away,
   categories, top apps with their real icons). Selecting a card (click or
   keyboard) keeps the grid, highlights the card, and shows its active time,

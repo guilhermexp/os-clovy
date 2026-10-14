@@ -1481,23 +1481,35 @@
   flex-shrink: 0;
 }
 
-/* Day grid: workstreams on a vertical axis of local hours */
-.day-grid {
+/* Workstream timeline: one card per workstream on a rail of local hours.
+   Rail geometry, from the canvas's left edge: labels end at 46 px, the 2 px
+   spine and the hour dots center on 54 px, hour lines and cards start 20 px
+   later; cards stop 6 px before the right edge. */
+.ws-timeline {
+  --ws-rail-label: calc(var(--sp-12) + var(--sp-2));
+  --ws-rail-center: calc(var(--sp-12) + var(--sp-5) + var(--sp-px));
+  --ws-cards-left: calc(var(--ws-rail-center) + var(--sp-7));
+  --ws-hour-dot: calc(var(--sp-3) + var(--border-width));
+  --ws-halo: calc(var(--sp-px) + var(--border-width));
+  --ws-lane-gap: calc(var(--sp-1) + var(--border-width));
+  --ws-card-dot: calc(var(--sp-2) + var(--border-width));
+  --ws-title-line: calc(var(--fs-md) * 1.3);
+  --ws-text-indent: calc(var(--ws-card-dot) + var(--sp-3));
   display: flex;
   flex: 1;
   min-height: 0;
   flex-direction: column;
 }
 
-.day-grid-header {
+.ws-timeline-header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-6) var(--sp-2);
+  padding: var(--sp-3) var(--sp-8) var(--sp-2);
 }
 
-.day-grid-title {
+.ws-timeline-title {
   margin: 0;
   font-family: var(--font-serif);
   font-size: var(--fs-xl);
@@ -1505,64 +1517,103 @@
   color: var(--foreground);
 }
 
-.day-grid-total {
+.ws-timeline-total {
   font-size: var(--fs-xs);
   color: var(--muted-foreground);
+  white-space: nowrap;
 }
 
-.day-grid-scroller {
+.ws-timeline-scroller {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-3) var(--sp-6) var(--sp-10);
+  padding: var(--sp-4) var(--sp-8) var(--sp-8);
   font-size: var(--fs-md);
 }
 
-.day-grid-body {
+.ws-timeline-canvas {
   position: relative;
-  display: flex;
 }
 
-.day-grid-axis {
+.ws-timeline-spine {
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--ws-rail-center) - var(--border-width));
+  width: var(--sp-px);
+  background: color-mix(in oklch, var(--border) 45%, transparent);
   pointer-events: none;
 }
 
-.day-grid-tick {
+.ws-timeline-hour {
   position: absolute;
   left: 0;
   right: 0;
-  border-top: 1px dashed var(--border-subtle);
+  height: 0;
+  pointer-events: none;
 }
 
-.day-grid-tick-label {
+.ws-timeline-hour-label {
   position: absolute;
-  top: calc(var(--fs-2xs) * -0.7);
   left: 0;
-  padding-right: var(--sp-1);
-  background: var(--background);
+  width: var(--ws-rail-label);
+  transform: translateY(-50%);
+  text-align: right;
   font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  line-height: 1.2;
   color: var(--muted-foreground);
+  white-space: nowrap;
 }
 
-.day-grid-lanes {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  margin-left: var(--sp-12);
+.ws-timeline-hour-dot {
+  position: absolute;
+  left: calc(var(--ws-rail-center) - var(--ws-hour-dot) / 2);
+  top: calc(var(--ws-hour-dot) / -2);
+  box-sizing: border-box;
+  width: var(--ws-hour-dot);
+  height: var(--ws-hour-dot);
+  border: var(--sp-px) solid color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+  border-radius: var(--r-pill);
+  background: var(--background);
+  box-shadow: 0 0 0 var(--ws-halo) var(--background);
 }
 
-.day-grid-now {
+.ws-timeline-hour-line {
+  position: absolute;
+  left: var(--ws-cards-left);
+  right: 0;
+  border-top: var(--line-width) solid color-mix(in oklch, var(--border) 50%, transparent);
+}
+
+/* Today's current hour: a solid brand dot on the rail. */
+.ws-timeline-hour[data-current] .ws-timeline-hour-label {
+  color: var(--brand);
+}
+
+.ws-timeline-hour[data-current] .ws-timeline-hour-dot {
+  border-color: var(--brand);
+  background: var(--brand);
+}
+
+.ws-timeline-cards {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--ws-cards-left);
+  right: var(--sp-2);
+}
+
+.ws-timeline-now {
   position: absolute;
   left: 0;
   right: 0;
-  z-index: 2;
+  z-index: 3;
   border-top: 1px solid var(--record);
   pointer-events: none;
 }
 
-.day-grid-now::before {
+.ws-timeline-now::before {
   content: "";
   position: absolute;
   top: calc(var(--sp-1) * -0.75);
@@ -1573,124 +1624,183 @@
   background: var(--record);
 }
 
-.day-grid-card {
-  /* Line boxes of the card's text: a short card shows whole lines only. */
-  --day-grid-title-line: calc(var(--fs-md) * 1.25);
-  --day-grid-meta-line: calc(var(--fs-2xs) * 1.5);
-  --day-grid-note-line: calc(var(--fs-xs) * 1.45);
+/* Column i of n starts at i/n (plus the gap after the first) and is 1/n wide
+   minus the gaps. */
+.ws-timeline-card {
+  --ws-after-first: min(var(--lane), 1);
   position: absolute;
-  display: flex;
+  left: calc(var(--lane) * 100% / var(--lanes) + var(--ws-after-first) * var(--ws-lane-gap));
+  width: calc(100% / var(--lanes) - var(--sp-px) - var(--ws-after-first) * var(--ws-lane-gap));
   box-sizing: border-box;
-  container: day-card / size;
-  font-size: var(--fs-md);
-  padding: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-md);
-  background: color-mix(in oklch, var(--brand) 7%, var(--card));
-  background-clip: padding-box;
+  margin: 0;
+  padding: calc(var(--sp-3) + var(--border-width)) var(--sp-5)
+    calc(var(--sp-3) + var(--border-width)) var(--sp-7);
+  border: var(--border-width) solid color-mix(in oklch, var(--brand) 24%, transparent);
+  border-radius: var(--r-xl);
+  background: linear-gradient(
+    color-mix(in oklch, var(--brand) 13%, var(--card)),
+    color-mix(in oklch, var(--brand) 6%, var(--card))
+  );
+  box-shadow: var(--shadow-sm);
   color: var(--foreground);
+  font: inherit;
   text-align: left;
   overflow: hidden;
   cursor: pointer;
   outline-offset: 1px;
   transition:
-    opacity var(--t-fast) var(--ease-out),
-    background var(--t-fast) var(--ease-out),
-    box-shadow var(--t-fast) var(--ease-out);
+    transform var(--t-med) var(--ease-out),
+    filter var(--t-med) var(--ease-out),
+    opacity var(--t-med) var(--ease-out),
+    box-shadow var(--t-med) var(--ease-out),
+    border-color var(--t-med) var(--ease-out);
 }
 
-.day-grid-card:hover {
-  background: color-mix(in oklch, var(--brand) 12%, var(--card));
+.ws-timeline-card:hover {
+  transform: translateY(calc(var(--border-width) * -1));
+  filter: brightness(1.02);
 }
 
-.day-grid-card:focus-visible {
+.ws-timeline-card:focus-visible {
   outline: var(--focus-outline-width) solid var(--ring-focus);
 }
 
-.day-grid-card[aria-pressed="true"] {
-  z-index: 1;
-  background: color-mix(in oklch, var(--brand) 16%, var(--card));
-  box-shadow:
-    inset 0 0 0 1px color-mix(in oklch, var(--brand) 60%, transparent),
-    var(--shadow-md);
+.ws-timeline-card[aria-pressed="true"] {
+  z-index: 2;
+  border-color: color-mix(in oklch, var(--brand) 55%, transparent);
+  background: linear-gradient(
+    color-mix(in oklch, var(--brand) 20%, var(--card)),
+    color-mix(in oklch, var(--brand) 12%, var(--card))
+  );
+  box-shadow: 0 var(--sp-4) calc(var(--sp-8) + var(--sp-2)) calc(var(--sp-4) * -1)
+    color-mix(in oklch, var(--brand) 55%, transparent);
 }
 
-.day-grid[data-has-selection] .day-grid-card:not([aria-pressed="true"]) {
-  opacity: 0.45;
+.ws-timeline[data-has-selection] .ws-timeline-card:not([aria-pressed="true"]) {
+  opacity: 0.38;
 }
 
-/* The sittings, marked along the card's left edge at their real times. */
-.day-grid-card-rail {
+@media (prefers-reduced-motion: reduce) {
+  .ws-timeline-card {
+    transition: none;
+  }
+
+  .ws-timeline-card:hover {
+    transform: none;
+  }
+}
+
+/* One bar per sitting on the card's left edge, at its real time. */
+.ws-timeline-card-rail {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--sp-2);
+  left: calc(var(--sp-3) - var(--border-width));
   width: var(--sp-1);
   pointer-events: none;
 }
 
-.day-grid-sitting {
+.ws-timeline-sitting {
   position: absolute;
   left: 0;
-  width: 3px;
+  width: 100%;
   border-radius: var(--r-pill);
   background: var(--brand);
+  opacity: 0.9;
 }
 
-.day-grid-sitting[data-approximate] {
+/* Known only by hour: dashed, never a measured sitting. */
+.ws-timeline-sitting[data-approximate] {
+  border-radius: 0;
   background: repeating-linear-gradient(
     to bottom,
-    var(--muted-foreground) 0 var(--sp-1),
+    var(--brand) 0 var(--sp-1),
     transparent var(--sp-1) var(--sp-3)
   );
 }
 
-/* Title, then one meta line, then as many whole note lines as fit. */
-.day-grid-card-body {
+.ws-timeline-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  line-height: var(--ws-title-line);
+  overflow-wrap: anywhere;
+}
+
+/* Under 46 px: the title alone on one line, centered. */
+.ws-timeline-card[data-density="pill"] {
   display: flex;
+  align-items: center;
+}
+
+.ws-timeline-card[data-density="pill"] .ws-timeline-card-title {
+  display: block;
   flex: 1;
   min-width: 0;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
+
+.ws-timeline-card-body {
+  display: flex;
+  height: 100%;
   min-height: 0;
   flex-direction: column;
-  justify-content: center;
-  gap: var(--sp-px);
-  box-sizing: border-box;
-  margin-left: var(--sp-4);
-  padding-right: var(--sp-4);
-  overflow: hidden;
 }
 
-.day-grid-card-title {
-  flex-shrink: 0;
-  font-size: var(--fs-md);
-  line-height: var(--day-grid-title-line);
-  font-weight: var(--fw-medium);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.ws-timeline-card-header {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--sp-2);
 }
 
-/* One line: items that do not fit beside the active time wrap out of view
-   whole (the card's label and the details keep them). */
-.day-grid-card-meta {
-  display: none;
-  flex-shrink: 0;
+.ws-timeline-card-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.ws-timeline-card-dot {
+  flex: none;
+  width: var(--ws-card-dot);
+  height: var(--ws-card-dot);
+  margin-top: calc((var(--ws-title-line) - var(--ws-card-dot)) / 2);
+  border-radius: var(--r-pill);
+  background: var(--brand);
+}
+
+.ws-timeline-card-meta {
+  display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   column-gap: var(--sp-3);
-  height: var(--day-grid-meta-line);
-  overflow: hidden;
+  row-gap: var(--sp-1);
+  margin-left: var(--ws-text-indent);
   font-size: var(--fs-2xs);
-  line-height: var(--day-grid-meta-line);
+  line-height: 1.3;
   color: var(--muted-foreground);
 }
 
-.day-grid-card-active {
+.ws-timeline-card-active {
   color: var(--brand);
   font-weight: var(--fw-medium);
 }
 
-.day-grid-card-badge {
+.ws-timeline-card-range {
+  font-weight: var(--fw-medium);
+}
+
+.ws-timeline-card-sittings {
+  opacity: 0.85;
+}
+
+.ws-timeline-badge {
   padding: 0 var(--sp-1);
   /* An inset ring, not a border, so the badge stays inside its line box. */
   box-shadow: inset 0 0 0 1px var(--border-subtle);
@@ -1699,60 +1809,46 @@
   color: var(--muted-foreground);
 }
 
-.day-grid-card-notes {
-  display: none;
-  flex: 1 1 0;
+/* What was done: the notes that fit, then a count of the rest that the card
+   never clips (the notes give way first). */
+.ws-timeline-card-notes {
+  display: flex;
+  flex: 0 1 auto;
   min-height: 0;
-  margin-top: var(--sp-1);
-}
-
-.day-grid-card-note-lines {
-  display: block;
-  height: round(down, 100%, var(--day-grid-note-line));
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  margin-left: var(--ws-text-indent);
   overflow: hidden;
 }
 
-.day-grid-card-note {
-  display: block;
-  height: var(--day-grid-note-line);
+.ws-timeline-card-note {
+  position: relative;
+  flex: none;
+  padding-left: var(--sp-5);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-size: var(--fs-xs);
-  line-height: var(--day-grid-note-line);
+  line-height: 1.5;
   color: var(--muted-foreground);
-}
-
-.day-grid-card-note::before {
-  content: "· ";
-}
-
-/* Container units follow the card's actual width/height and text zoom.
-   Reveal full line boxes only; hidden information remains in its accessible
-   name and in the existing selection panel. */
-.day-grid-card-meta > span {
-  white-space: nowrap;
-  max-width: 100%;
-  overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-@container day-card (height >= 3.5em) {
-  .day-grid-card-body {
-    justify-content: flex-start;
-    padding-top: var(--sp-2);
-    padding-bottom: var(--sp-2);
-  }
-
-  .day-grid-card-meta {
-    display: flex;
-  }
+.ws-timeline-card-note::before {
+  content: "·";
+  position: absolute;
+  left: 0;
+  color: var(--brand);
 }
 
-@container day-card (height >= 6em) {
-  .day-grid-card-notes {
-    display: block;
-  }
+.ws-timeline-card-more {
+  flex: none;
+  margin-top: var(--sp-1);
+  margin-left: calc(var(--ws-text-indent) + var(--sp-5));
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  line-height: 1.3;
+  color: var(--muted-foreground);
 }
 
 /* Selected workstream in the side panel */

@@ -1,12 +1,12 @@
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { Fragment } from "react";
 import { useLocale, useT } from "../../i18n";
-import type { GridCard } from "./day-grid-layout";
 import { formatDuration } from "./timeline-utils";
-import { spanLabels } from "./WorkstreamGrid";
+import type { TimelineCard } from "./workstream-timeline-layout";
+import { spanLabels } from "./WorkstreamTimeline";
 
 type WorkstreamDetailProps = {
-  card: GridCard;
+  card: TimelineCard;
   onBack: () => void;
 };
 
@@ -79,7 +79,7 @@ export function WorkstreamDetail({ card, onBack }: WorkstreamDetailProps) {
                           { duration: formatDuration((segment.minutes ?? 0) * 60_000, locale) },
                         )}
                       </span>
-                      <span className="day-grid-card-badge" title={t("activity.grid.byHourHint")}>
+                      <span className="ws-timeline-badge" title={t("activity.grid.byHourHint")}>
                         {t("activity.grid.byHour")}
                       </span>
                     </>

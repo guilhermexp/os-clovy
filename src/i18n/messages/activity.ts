@@ -189,6 +189,7 @@ export default defineMessages({
     "activity.grid.count": { one: "{count} workstream", other: "{count} workstreams" },
     "activity.grid.active": "{duration} active",
     "activity.grid.sittings": { one: "{count} sitting", other: "{count} sittings" },
+    "activity.grid.moreNotes": "+{count} more",
     "activity.grid.byHour": "By hour",
     "activity.grid.byHourHint":
       "Part of this work is known only by its hour: no session was tied to it, so there is no exact time.",
@@ -402,6 +403,7 @@ export default defineMessages({
     },
     "activity.grid.active": "{duration} ativos",
     "activity.grid.sittings": { one: "{count} período", other: "{count} períodos" },
+    "activity.grid.moreNotes": "+{count} mais",
     "activity.grid.byHour": "Por hora",
     "activity.grid.byHourHint":
       "Parte deste trabalho é conhecida só pela hora: nenhuma sessão foi associada a ela, então não há horário exato.",
