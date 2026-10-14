@@ -186,7 +186,10 @@ these two tools under the same names plus four more over the same query API
 First-level sidebar view (hidden where capture is unsupported). Day navigation,
 search with a period filter whose results open the day at that session, and
 two sections: this timeline and the "Day summary"
-([day-intelligence.md](day-intelligence.md)).
+([day-intelligence.md](day-intelligence.md)). On a narrow window the header's groups (day
+navigation, section tabs, search with its period filter) wrap whole onto a
+second row; labels never break a line and only the search field shrinks
+(to 140 px).
 
 The timeline shows the day's workstreams by default ("Workstreams" /
 "Sessions" switch):

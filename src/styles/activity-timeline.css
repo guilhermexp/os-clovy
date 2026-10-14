@@ -10,15 +10,17 @@
   overflow: hidden;
 }
 
-/* Header */
+/* Header: day navigation, then the section tabs and the search. On a narrow
+   window the groups wrap whole onto further rows (left-aligned under the day
+   navigation) and only the search field shrinks; no label breaks a line. */
 .timeline-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   padding: var(--sp-3) var(--sp-5);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--card);
-  gap: var(--sp-4);
+  gap: var(--sp-3);
   flex-shrink: 0;
 }
 
@@ -26,6 +28,21 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  min-width: 0;
+  margin-right: auto;
+}
+
+/* The tabs and the search wrap as separate groups of the header. */
+.timeline-header-actions {
+  display: contents;
+}
+
+.timeline-header :is(button, h2) {
+  white-space: nowrap;
+}
+
+.timeline-header button {
+  flex-shrink: 0;
 }
 
 .timeline-nav-arrow-btn {
@@ -53,6 +70,9 @@
 
 .timeline-day-title {
   margin: 0 var(--sp-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: var(--fs-md);
   font-weight: var(--fw-medium);
   color: var(--foreground);
@@ -77,25 +97,24 @@
   background: var(--accent);
 }
 
-.timeline-header-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-}
-
 /* Search bar */
 .timeline-search-bar {
   position: relative;
   display: flex;
+  flex: 0 1 auto;
   align-items: center;
   gap: var(--sp-2);
+  min-width: 0;
 }
 
+/* The one part of the header that gives way on a narrow window. */
 .timeline-search-input-wrapper {
   position: relative;
   display: flex;
   align-items: center;
   width: 240px;
+  flex: 0 1 240px;
+  min-width: 140px;
 }
 
 .timeline-search-icon {
@@ -139,6 +158,7 @@
 
 .timeline-search-periods {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: var(--sp-px);
   background: var(--surface-subtle);
