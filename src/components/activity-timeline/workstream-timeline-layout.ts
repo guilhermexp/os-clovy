@@ -191,6 +191,8 @@ function timeWindow(
     const middle = (firstMs + lastMs) / 2;
     startMs = Math.floor((middle - MIN_WINDOW_MS / 2) / MINUTE_MS) * MINUTE_MS;
     endMs = Math.ceil((middle + MIN_WINDOW_MS / 2) / MINUTE_MS) * MINUTE_MS;
+    // Centered on the work alone it could end before now, today.
+    if (nowMs !== null) endMs = Math.max(endMs, nowMs);
   }
   if (startMs < dayStartMs) {
     endMs += dayStartMs - startMs;
