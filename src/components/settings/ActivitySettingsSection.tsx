@@ -39,6 +39,7 @@ export function ActivitySettingsSection() {
   const [debugExporting, setDebugExporting] = useState(false);
 
   useEffect(() => {
+    let active = true;
     let unlisten: (() => void) | undefined;
     void activityStatus()
       .then(setStatus)
@@ -47,7 +48,8 @@ export function ActivitySettingsSection() {
     void onActivityState((next) => {
       setStatus(next);
     }).then((cleanup) => {
-      unlisten = cleanup;
+      if (active) unlisten = cleanup;
+      else cleanup();
     });
 
     const handleFocus = () => {
@@ -58,6 +60,7 @@ export function ActivitySettingsSection() {
     window.addEventListener("focus", handleFocus);
 
     return () => {
+      active = false;
       unlisten?.();
       window.removeEventListener("focus", handleFocus);
     };

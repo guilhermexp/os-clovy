@@ -6,6 +6,7 @@ import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
 } from "../components/agent/AgentWorkspace";
+import { AGENT_SESSIONS_HYDRATED_EVENT } from "../lib/agent-events";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { NotesList, type NotesListHandle } from "../components/notes-list/NotesList";
 import { Sidebar } from "../components/sidebar/Sidebar";
@@ -14,13 +15,14 @@ import type { FolderDto, NoteListItemDto } from "../lib/tauri";
 const agentMocks = vi.hoisted(() => ({
   deleteAgentSession: vi.fn(),
   listAgentSessions: vi.fn(),
+  listSessionPartitions: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
   deleteAgentSession: agentMocks.deleteAgentSession,
   listAgentSessions: agentMocks.listAgentSessions,
-  listSessionPartitions: vi.fn(async () => []),
+  listSessionPartitions: agentMocks.listSessionPartitions,
 }));
 
 const now = "2026-05-19T10:00:00Z";
@@ -54,6 +56,7 @@ describe("folders UI", () => {
     );
     window.localStorage.removeItem("clovy:pinned-agent-session-ids");
     agentMocks.listAgentSessions.mockResolvedValue([]);
+    agentMocks.listSessionPartitions.mockResolvedValue([]);
     agentMocks.deleteAgentSession.mockResolvedValue(undefined);
   });
 
@@ -66,9 +69,6 @@ describe("folders UI", () => {
         activeView="notes"
         onChangeView={onChangeView}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={() => onChangeView("agent")}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={vi.fn()}
@@ -98,9 +98,6 @@ describe("folders UI", () => {
         activeView="notes"
         onChangeView={onChangeView}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={vi.fn()}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={onSelectAgentSession}
@@ -144,9 +141,6 @@ describe("folders UI", () => {
         activeView="home"
         onChangeView={onChangeView}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={vi.fn()}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={vi.fn()}
@@ -165,9 +159,6 @@ describe("folders UI", () => {
         activeView="agent"
         onChangeView={onChangeView}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={vi.fn()}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={vi.fn()}
@@ -210,9 +201,6 @@ describe("folders UI", () => {
         activeView="notes"
         onChangeView={vi.fn()}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={vi.fn()}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={vi.fn()}
@@ -340,9 +328,6 @@ describe("folders UI", () => {
             activeView="notes"
             onChangeView={vi.fn()}
             onSelectNote={vi.fn()}
-            onDeleteNote={vi.fn()}
-            onOpenMoveDialog={vi.fn()}
-            onRemoveNoteFromFolder={vi.fn()}
             onNewAgentSession={vi.fn()}
             onRenameAgentSession={vi.fn()}
             onSelectAgentSession={vi.fn()}
@@ -468,9 +453,6 @@ describe("folders UI", () => {
             collapsed
             onChangeView={vi.fn()}
             onSelectNote={vi.fn()}
-            onDeleteNote={vi.fn()}
-            onOpenMoveDialog={vi.fn()}
-            onRemoveNoteFromFolder={vi.fn()}
             onNewAgentSession={vi.fn()}
             onRenameAgentSession={vi.fn()}
             onSelectAgentSession={vi.fn()}
@@ -492,58 +474,87 @@ describe("folders UI", () => {
     }
   });
 
-  it("retries initial agent session hydration when the runtime is still starting", async () => {
-    vi.useFakeTimers();
-    try {
-      agentMocks.listAgentSessions
-        .mockRejectedValueOnce({
-          code: "agent_runtime_not_running",
-          message: "Agent runtime is not running.",
-        })
-        .mockResolvedValueOnce([
-          {
-            id: "session-1",
-            title: "Existing session",
-            preview: "Previous work",
-            last_active: "2026-06-04T19:00:00Z",
-          },
-        ]);
+  it("shows the startup session list App hydrated", async () => {
+    render(
+      <Sidebar
+        notes={notes}
+        activeView="notes"
+        onChangeView={vi.fn()}
+        onSelectNote={vi.fn()}
+        onNewAgentSession={vi.fn()}
+        onRenameAgentSession={vi.fn()}
+        onSelectAgentSession={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("No sessions yet")).toBeInTheDocument();
 
-      render(
-        <Sidebar
-          notes={notes}
-          activeView="notes"
-          onChangeView={vi.fn()}
-          onSelectNote={vi.fn()}
-          onDeleteNote={vi.fn()}
-          onOpenMoveDialog={vi.fn()}
-          onRemoveNoteFromFolder={vi.fn()}
-          onNewAgentSession={vi.fn()}
-          onRenameAgentSession={vi.fn()}
-          onSelectAgentSession={vi.fn()}
-        />,
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_SESSIONS_HYDRATED_EVENT, {
+          detail: {
+            sessions: [
+              {
+                id: "session-1",
+                title: "Existing session",
+                preview: "Previous work",
+                last_active: "2026-06-04T19:00:00Z",
+              },
+            ],
+            partitions: {},
+          },
+        }),
+      );
+    });
+
+    expect(screen.getByText("Existing session")).toBeInTheDocument();
+    // The sidebar no longer reads the list itself at startup.
+    expect(agentMocks.listAgentSessions).not.toHaveBeenCalled();
+  });
+
+  it("keeps the newest session list when an older broadcast resolves last", async () => {
+    const reads: ((value: []) => void)[] = [];
+    agentMocks.listSessionPartitions.mockImplementation(
+      () => new Promise<[]>((resolve) => reads.push(resolve)),
+    );
+    render(
+      <Sidebar
+        notes={notes}
+        activeView="agent"
+        onChangeView={vi.fn()}
+        onSelectNote={vi.fn()}
+        onNewAgentSession={vi.fn()}
+        onRenameAgentSession={vi.fn()}
+        onSelectAgentSession={vi.fn()}
+      />,
+    );
+    const broadcast = (title: string) =>
+      window.dispatchEvent(
+        new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
+          detail: {
+            sessions: [
+              { id: "session-1", title, preview: "", last_active: "2026-06-04T19:00:00Z" },
+            ],
+            workingSessionIds: [],
+          },
+        }),
       );
 
-      await act(async () => {
-        await Promise.resolve();
-      });
-      expect(agentMocks.listAgentSessions).toHaveBeenCalledTimes(1);
-      expect(screen.getByText("No sessions yet")).toBeInTheDocument();
+    act(() => {
+      broadcast("Older title");
+      broadcast("Newer title");
+    });
+    expect(reads).toHaveLength(2);
+    await act(async () => {
+      reads[1]([]);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      reads[0]([]);
+      await Promise.resolve();
+    });
 
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      await act(async () => {
-        await vi.runOnlyPendingTimersAsync();
-        await Promise.resolve();
-      });
-
-      expect(agentMocks.listAgentSessions).toHaveBeenCalledTimes(2);
-      expect(screen.getByText("Existing session")).toBeInTheDocument();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(screen.getByText("Newer title")).toBeInTheDocument();
+    expect(screen.queryByText("Older title")).toBeNull();
   });
 
   it("marks agent sessions that need input", async () => {
@@ -553,9 +564,6 @@ describe("folders UI", () => {
         activeView="agent"
         onChangeView={vi.fn()}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={vi.fn()}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={vi.fn()}
@@ -594,9 +602,6 @@ describe("folders UI", () => {
         activeView="agent"
         onChangeView={vi.fn()}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={vi.fn()}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={vi.fn()}
@@ -637,9 +642,6 @@ describe("folders UI", () => {
         activeView="agent"
         onChangeView={vi.fn()}
         onSelectNote={vi.fn()}
-        onDeleteNote={vi.fn()}
-        onOpenMoveDialog={vi.fn()}
-        onRemoveNoteFromFolder={vi.fn()}
         onNewAgentSession={vi.fn()}
         onRenameAgentSession={vi.fn()}
         onSelectAgentSession={vi.fn()}

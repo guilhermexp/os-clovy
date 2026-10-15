@@ -493,10 +493,7 @@ export function AppSettings({
     ...INITIAL_EXPERIMENTAL_UNLOCK_CLICK_STATE,
   });
   const experimentalUnlockingRef = useRef(false);
-  const runtimeFlagBaselineCandidateRef = useRef<boolean | null>(null);
-  const runtimeFlagStatusLoadedRef = useRef(false);
   const [runtimeBrowserUseBaseline, setRuntimeBrowserUseBaseline] = useState<boolean | null>(null);
-  const [agentRuntimeRunning, setAgentRuntimeRunning] = useState(false);
   const [experimentalOperation, setExperimentalOperation] = useState<
     "flags" | "restart" | "unpack"
   >();
@@ -543,7 +540,6 @@ export function AppSettings({
   const [micTestState, setMicTestState] = useState<MicTestState>("idle");
   const [micTestLevel, setMicTestLevel] = useState(0);
   const [micTestStartedAt, setMicTestStartedAt] = useState<number>();
-  const [micTestElapsedMs, setMicTestElapsedMs] = useState(0);
   const [micTestSampleSrc, setMicTestSampleSrc] = useState<string>();
 
   const [micTestError, setMicTestError] = useState<string>();
@@ -563,7 +559,6 @@ export function AppSettings({
     experimentalFlags.companionPairingEnabled,
   ).filter((tab) => !(account.localDev && tab.id === "billing"));
   const capabilities = useDictationCapabilities();
-  const macLikePlatform = capabilities.platform === "macos";
   const systemAudioSupportedPlatform = capabilities.systemAudio || isSystemAudioSupportedPlatform();
   const defaultShortcuts =
     capabilities.platform === "windows"
@@ -577,26 +572,11 @@ export function AppSettings({
       ? t("settings.shortcuts.modifierRequiredWindows")
       : t("settings.shortcuts.modifierRequiredMac");
 
+  // The browser-use flag the running agent started with: changing it away
+  // from this needs a restart.
   useEffect(() => {
-    if (!experimentalFlags.loaded || runtimeFlagStatusLoadedRef.current) return;
-    runtimeFlagBaselineCandidateRef.current ??= experimentalFlags.browserUseEnabled;
-    let cancelled = false;
-    const baseline = runtimeFlagBaselineCandidateRef.current;
-    Promise.resolve()
-      .then(() => {
-        if (cancelled) return;
-        runtimeFlagStatusLoadedRef.current = true;
-        setAgentRuntimeRunning(true);
-        setRuntimeBrowserUseBaseline(baseline);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        runtimeFlagStatusLoadedRef.current = true;
-        setRuntimeBrowserUseBaseline(baseline);
-      });
-    return () => {
-      cancelled = true;
-    };
+    if (!experimentalFlags.loaded) return;
+    setRuntimeBrowserUseBaseline((current) => current ?? experimentalFlags.browserUseEnabled);
   }, [experimentalFlags.loaded, experimentalFlags.browserUseEnabled]);
   const setActiveTab = (tab: SettingsTab) => {
     if (controlled) {
@@ -917,7 +897,6 @@ export function AppSettings({
       setMicTestSampleSrc(undefined);
       setMicTestLevel(0);
       setMicTestStartedAt(Date.now());
-      setMicTestElapsedMs(0);
       setMicTestPlaying(false);
       return;
     }
@@ -934,7 +913,6 @@ export function AppSettings({
       }
       setMicTestState("ready");
       setMicTestStartedAt(undefined);
-      setMicTestElapsedMs(0);
       setMicTestLevel(numericPayload(helperEvent.payload?.observedAudioLevel));
       setMicTestError(undefined);
       setMicTestPlaying(false);
@@ -1094,7 +1072,6 @@ export function AppSettings({
     setMicTestSampleSrc(undefined);
     setMicTestLevel(0);
     setMicTestStartedAt(Date.now());
-    setMicTestElapsedMs(0);
     setMicTestPlaying(false);
     try {
       await dictationHelperCommand({
@@ -1119,7 +1096,6 @@ export function AppSettings({
     setMicTestState("idle");
     setMicTestLevel(0);
     setMicTestStartedAt(undefined);
-    setMicTestElapsedMs(0);
     setMicTestSampleSrc(undefined);
     setMicTestError(undefined);
     setMicTestPlaying(false);
@@ -1406,14 +1382,6 @@ export function AppSettings({
     if (languageOpen) updateLanguagePopoverPlacement();
   }, [languageOpen, selectedLanguageIndex]);
 
-  useEffect(() => {
-    if (micTestState !== "recording" || !micTestStartedAt) return;
-    const interval = window.setInterval(() => {
-      setMicTestElapsedMs(Date.now() - micTestStartedAt);
-    }, 100);
-    return () => window.clearInterval(interval);
-  }, [micTestState, micTestStartedAt]);
-
   function updateMicrophonePopoverPlacement() {
     setMicPopoverPlacement(
       selectPopoverPlacement(micWrapRef.current, microphoneOptions.length, selectedMicrophoneIndex),
@@ -1530,7 +1498,6 @@ export function AppSettings({
     try {
       await connectorsApplyRuntime();
       setRuntimeBrowserUseBaseline(experimentalFlags.browserUseEnabled);
-      setAgentRuntimeRunning(true);
     } catch (error) {
       setExperimentalError(messageFromError(error));
     } finally {
@@ -1551,7 +1518,6 @@ export function AppSettings({
   }
 
   const experimentalRestartNeeded =
-    agentRuntimeRunning &&
     runtimeBrowserUseBaseline !== null &&
     runtimeBrowserUseBaseline !== experimentalFlags.browserUseEnabled;
 
@@ -1970,7 +1936,7 @@ export function AppSettings({
                   <MicTestControl
                     state={micTestState}
                     level={micTestLevel}
-                    elapsedMs={micTestElapsedMs}
+                    startedAt={micTestStartedAt}
                     sampleSrc={micTestSampleSrc}
                     error={micTestError}
                     playing={micTestPlaying}
@@ -3301,10 +3267,6 @@ function shortcutsMatch(first: DictationShortcutSetting, second: DictationShortc
     first.modifiers.shift === second.modifiers.shift &&
     first.modifiers.function === second.modifiers.function
   );
-}
-
-function stringPayloadValue(value: unknown) {
-  return typeof value === "string" ? value : undefined;
 }
 
 function messageFromError(error: unknown) {

@@ -36,7 +36,6 @@ import { IconZap } from "central-icons/IconZap";
 import { IconCalendarClock } from "central-icons/IconCalendarClock";
 import { activityStatus } from "../../lib/activity-capture";
 import {
-  type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
   type ReactNode,
@@ -56,13 +55,13 @@ import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
+  AGENT_SESSIONS_HYDRATED_EVENT,
   AGENT_SESSION_RENAMED_EVENT,
-  emitAgentSessionsChanged,
   type AgentSessionRenamedDetail,
   type AgentSessionsChangedDetail,
+  type AgentSessionsHydratedDetail,
 } from "../../lib/agent-events";
 import { errorCode, messageFromError } from "../../lib/errors";
-import { LEGACY_NOTE_DND_MIME, NOTE_DND_MIME } from "../../lib/dnd";
 import { useDismiss } from "../../lib/use-dismiss";
 import { attachScrollThumbFade } from "../../lib/scroll-thumb-fade";
 import { useScrollFade } from "../../lib/use-scroll-fade";
@@ -77,7 +76,6 @@ import type {
 } from "../../lib/tauri";
 import {
   deleteAgentSession,
-  listAgentSessions,
   listSessionPartitions,
   osAccountsReferralSummary,
 } from "../../lib/tauri";
@@ -107,6 +105,7 @@ import {
   formatCalendarDate,
   getStoredDateFormat,
   normalizeDateFormatPreference,
+  recentAge,
   type DateFormatChangedDetail,
   type DateFormatPreference,
 } from "../../lib/date-format";
@@ -159,9 +158,6 @@ type SidebarProps = {
   onSignOut?: () => void;
   onReportIssue?: (category: ReportCategory) => void;
   onSelectNote: (noteId: string) => void;
-  onDeleteNote: (noteId: string) => void;
-  onOpenMoveDialog: (noteId: string) => void;
-  onRemoveNoteFromFolder: (noteId: string, folderId: string) => void;
   onNewAgentSession: () => void;
   /** Whether the persistent Home conversation is available on this platform. */
   homeEnabled?: boolean;
@@ -180,7 +176,6 @@ type SidebarProps = {
   onToggleSessionCompleted?: (sessionId: string, completed: boolean) => void;
   onOpenSessionMoveDialog?: (sessionId: string) => void;
   onRemoveSessionFromFolder?: (sessionId: string, folderId: string) => void;
-  recoverableNoteIds?: ReadonlySet<string>;
   recordingStatus?: RecordingStatusDto | null;
   recordingTitle?: string;
   onOpenRecording?: () => void;
@@ -188,9 +183,7 @@ type SidebarProps = {
   footerAccessory?: ReactNode;
 };
 
-type MenuState =
-  | { kind: "note"; noteId: string; anchor: HTMLElement }
-  | { kind: "agent-session"; sessionId: string; anchor: HTMLElement };
+type MenuState = { kind: "agent-session"; sessionId: string; anchor: HTMLElement };
 
 type CommandPromptItem = {
   id: string;
@@ -209,7 +202,6 @@ type CommandPromptGroup = {
 const AGENT_SIDEBAR_SESSION_FETCH_LIMIT = 100;
 const AGENT_SIDEBAR_SESSION_LIMIT = 12;
 const PINNED_AGENT_SESSION_IDS_STORAGE_KEY = "clovy:pinned-agent-session-ids";
-const AGENT_SIDEBAR_SESSION_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000, 16000, 32000];
 const SIDEBAR_DEV_STATES_EVENT = "clovy:sidebar:dev-states";
 const SIDEBAR_DEV_SESSION_IDS = {
   selected: "sidebar-state-selected",
@@ -352,9 +344,6 @@ export function Sidebar({
   onSignOut,
   onReportIssue,
   onSelectNote,
-  onDeleteNote,
-  onOpenMoveDialog,
-  onRemoveNoteFromFolder,
   onNewAgentSession,
   homeEnabled = true,
   homeStoredSessionId,
@@ -365,7 +354,6 @@ export function Sidebar({
   onToggleSessionCompleted,
   onOpenSessionMoveDialog,
   onRemoveSessionFromFolder,
-  recoverableNoteIds,
   recordingStatus,
   recordingTitle,
   onOpenRecording,
@@ -452,6 +440,7 @@ export function Sidebar({
   // front of the user (those never go unread).
   const workingAgentSessionIdsRef = useRef<Set<string>>(new Set());
   const openAgentSessionIdRef = useRef<string | undefined>(undefined);
+  const sessionsChangedRequestRef = useRef(0);
   const sidebarDevStateSnapshotRef = useRef<SidebarDevStateSnapshot | null>(null);
 
   // formatSessionTime reads the clock at render time, so re-render once a
@@ -488,14 +477,6 @@ export function Sidebar({
       return next;
     });
   }, [activeView, selectedAgentSessionId]);
-  const filteredNotes = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return notes;
-    return notes.filter((note) =>
-      `${note.title} ${note.preview}`.toLowerCase().includes(normalized),
-    );
-  }, [notes, query]);
-
   const filteredAgentSessions = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return agentSessions;
@@ -992,45 +973,17 @@ export function Sidebar({
     return () => window.cancelAnimationFrame(frame);
   }, [commandPromptOpen]);
 
+  // App loads the session list once at startup and hands it over here; a
+  // sessions-changed broadcast that arrived first wins.
   useEffect(() => {
-    let cancelled = false;
-    let retryTimeout: number | undefined;
-
-    function loadAgentSessions(attempt: number) {
-      Promise.resolve()
-        .then(() => Promise.all([listAgentSessions(), fetchSessionPartitionMap()]))
-        .then(([sessions, partitions]) => {
-          if (!cancelled) {
-            if (partitions) setSessionPartitions(partitions);
-            setAgentSessions((current) => (current.length > 0 ? current : sessions));
-            if (sessions.length > 0) {
-              emitAgentSessionsChanged({
-                sessions,
-                workingSessionIds: [],
-                waitingSessionIds: [],
-              });
-            }
-          }
-        })
-        .catch(() => {
-          if (cancelled) return;
-          const retryDelay = AGENT_SIDEBAR_SESSION_RETRY_DELAYS_MS[attempt];
-          if (retryDelay != null) {
-            retryTimeout = window.setTimeout(() => loadAgentSessions(attempt + 1), retryDelay);
-            return;
-          }
-          setAgentSessions((current) => (current.length > 0 ? current : []));
-        });
+    function handleSessionsHydrated(event: Event) {
+      const detail = (event as CustomEvent<AgentSessionsHydratedDetail>).detail;
+      if (!detail) return;
+      setSessionPartitions(detail.partitions);
+      setAgentSessions((current) => (current.length > 0 ? current : detail.sessions));
     }
-
-    loadAgentSessions(0);
-
-    return () => {
-      cancelled = true;
-      if (retryTimeout != null) {
-        window.clearTimeout(retryTimeout);
-      }
-    };
+    window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
+    return () => window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
   }, []);
 
   useEffect(() => {
@@ -1040,7 +993,11 @@ export function Sidebar({
       // Refresh the session-to-partition map before applying the list so a session
       // just stamped to a named partition does not flash out of the filtered
       // list; a failed refresh keeps the last-known map.
+      // Only the latest broadcast applies its list: an older one whose map
+      // read resolves last must not overwrite it.
+      const request = ++sessionsChangedRequestRef.current;
       void fetchSessionPartitionMap().then((partitions) => {
+        if (request !== sessionsChangedRequestRef.current) return;
         if (partitions) setSessionPartitions(partitions);
         setAgentSessions(detail.sessions.slice(0, AGENT_SIDEBAR_SESSION_FETCH_LIMIT));
       });
@@ -1096,21 +1053,6 @@ export function Sidebar({
       window.removeEventListener(AGENT_SESSION_RENAMED_EVENT, handleSessionRenamed);
     };
   }, []);
-
-  // Right-aligns the popover with the overflow button. The menu measures and
-  // flips itself above this anchor when there is not enough viewport below.
-  // Clicking the same button again toggles it closed.
-  function openMenuForNote(noteId: string, anchor: HTMLElement) {
-    if (menu?.kind === "note" && menu.noteId === noteId) {
-      setMenu(null);
-      return;
-    }
-    setMenu({
-      kind: "note",
-      noteId,
-      anchor,
-    });
-  }
 
   function openMenuForAgentSession(sessionId: string, anchor: HTMLElement) {
     if (menu?.kind === "agent-session" && menu.sessionId === sessionId) {
@@ -1485,17 +1427,6 @@ export function Sidebar({
         onCopy={() => void copyReferralLink()}
       />
 
-      {menu?.kind === "note" ? (
-        <NoteContextMenu
-          noteId={menu.noteId}
-          anchor={menu.anchor}
-          notes={notes}
-          onOpenMoveDialog={onOpenMoveDialog}
-          onRemoveNoteFromFolder={onRemoveNoteFromFolder}
-          onDeleteNote={onDeleteNote}
-          onClose={() => setMenu(null)}
-        />
-      ) : null}
       {menu?.kind === "agent-session" && menuAgentSession ? (
         <AgentSessionContextMenu
           pinned={pinnedAgentSessionIds.has(menuAgentSession.id)}
@@ -1593,102 +1524,6 @@ function SidebarRecordingIndicator({
       <span className="sidebar-recording-dot" aria-hidden />
       <Waveform level={meterLevel} sessionId={status.sessionId} active={recording} />
     </button>
-  );
-}
-
-function NoteRow({
-  note,
-  selected,
-  recoverable,
-  onSelect,
-  onOpenMenu,
-}: {
-  note: NoteListItemDto;
-  selected: boolean;
-  recoverable: boolean;
-  onSelect: () => void;
-  onOpenMenu: (anchor: HTMLElement) => void;
-}) {
-  const t = useT();
-  const title = note.title.trim() || t("shell.sidebar.newNote");
-  const menuRef = useRef<HTMLButtonElement>(null);
-  const [dragging, setDragging] = useState(false);
-
-  function handleDragStart(event: DragEvent<HTMLElement>) {
-    event.dataTransfer.effectAllowed = "link";
-    event.dataTransfer.setData(NOTE_DND_MIME, note.id);
-    event.dataTransfer.setData(LEGACY_NOTE_DND_MIME, note.id);
-    event.dataTransfer.setData("text/plain", note.id);
-
-    const node = event.currentTarget;
-    const clone = node.cloneNode(true) as HTMLElement;
-    clone.classList.add("note-row-drag-image");
-    clone.removeAttribute("data-selected");
-    clone.removeAttribute("data-dragging");
-    clone.style.width = `${node.offsetWidth}px`;
-    document.body.appendChild(clone);
-    event.dataTransfer.setDragImage(clone, 16, 16);
-    window.setTimeout(() => clone.remove(), 0);
-
-    setDragging(true);
-  }
-
-  return (
-    <article
-      className="note-row"
-      data-selected={selected}
-      data-recoverable={recoverable || undefined}
-      data-dragging={dragging || undefined}
-      draggable
-      onDragStart={handleDragStart}
-      onDragEnd={() => setDragging(false)}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (menuRef.current) onOpenMenu(menuRef.current);
-      }}
-    >
-      <div
-        className="note-row-main"
-        role="button"
-        tabIndex={0}
-        onClick={onSelect}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onSelect();
-          }
-        }}
-      >
-        <span className="note-row-icon">
-          <IconNoteText size={15} />
-        </span>
-        <span className="note-row-title">
-          <span className="note-row-title-text">{title}</span>
-          {recoverable ? (
-            <span
-              className="note-row-recovery-dot"
-              aria-label={t("shell.sidebar.interruptedRecording")}
-              title={t("shell.sidebar.interruptedRecording")}
-            />
-          ) : null}
-        </span>
-      </div>
-      <button
-        ref={menuRef}
-        type="button"
-        className="note-row-menu"
-        aria-label={t("shell.sidebar.actionsFor", { title })}
-        draggable={false}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onOpenMenu(event.currentTarget);
-        }}
-      >
-        <IconDotGrid1x3Vertical size={14} />
-      </button>
-    </article>
   );
 }
 
@@ -2473,82 +2308,19 @@ function AgentSessionContextMenu({
 // Compact trailing timestamp for agent session rows: "now", "5m", "3h", "2d"
 // while recent, then "May 2". sessionTimestamp falls back to the epoch when a
 // session has no dates at all, which we render as nothing rather than 1970.
+const SESSION_AGE_KEYS = {
+  now: "shell.time.now",
+  minutes: "shell.time.minutes",
+  hours: "shell.time.hours",
+  days: "shell.time.days",
+} as const;
+
 function formatSessionTime(iso: string, dateFormat: DateFormatPreference, t: TFunction): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime()) || date.getTime() === 0) return "";
-  const diffMs = Date.now() - date.getTime();
-  if (diffMs < 60_000) return t("shell.time.now");
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 60) return t("shell.time.minutes", { count: minutes });
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return t("shell.time.hours", { count: hours });
-  const days = Math.floor(hours / 24);
-  if (days < 7) return t("shell.time.days", { count: days });
+  const age = recentAge(date);
+  if (age) return t(SESSION_AGE_KEYS[age.unit], { count: age.count });
   return formatCalendarDate(date, dateFormat, intlLocale());
-}
-
-function NoteContextMenu({
-  noteId,
-  anchor,
-  notes,
-  onOpenMoveDialog,
-  onRemoveNoteFromFolder,
-  onDeleteNote,
-  onClose,
-}: {
-  noteId: string;
-  anchor: HTMLElement;
-  notes: NoteListItemDto[];
-  onOpenMoveDialog: (noteId: string) => void;
-  onRemoveNoteFromFolder: (noteId: string, folderId: string) => void;
-  onDeleteNote: (noteId: string) => void;
-  onClose: () => void;
-}) {
-  const t = useT();
-  const note = notes.find((item) => item.id === noteId);
-  const currentFolderId = note?.folderIds[0];
-  const hasFolder = Boolean(currentFolderId);
-  return (
-    <SidebarContextMenu anchor={anchor} onClose={onClose}>
-      <button
-        type="button"
-        role="menuitem"
-        onClick={() => {
-          onOpenMoveDialog(noteId);
-          onClose();
-        }}
-      >
-        {hasFolder ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
-        {hasFolder ? t("shell.menu.changeProject") : t("shell.menu.addToProject")}
-      </button>
-      {hasFolder && currentFolderId ? (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => {
-            onRemoveNoteFromFolder(noteId, currentFolderId);
-            onClose();
-          }}
-        >
-          <IconFolderDelete size={14} />
-          {t("shell.menu.removeFromProject")}
-        </button>
-      ) : null}
-      <div className="context-menu-separator" role="separator" />
-      <button
-        type="button"
-        role="menuitem"
-        className="destructive"
-        onClick={() => {
-          onDeleteNote(noteId);
-          onClose();
-        }}
-      >
-        <IconTrashCan size={14} />
-        {t("shell.menu.deleteNote")}
-      </button>
-    </SidebarContextMenu>
-  );
 }
 
 function SidebarContextMenu({
@@ -2654,15 +2426,4 @@ function SidebarContextMenu({
     </div>,
     document.body,
   );
-}
-
-function relativeDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString(intlLocale(), {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
 }

@@ -30,6 +30,7 @@ import {
   useState,
 } from "react";
 import { formatDate as formatIntlDate, t as translate, useT, useTRich } from "../../i18n";
+import { formatListTimestamp, recentAge } from "../../lib/date-format";
 import { LEGACY_NOTE_DND_MIME, NOTE_DND_MIME } from "../../lib/dnd";
 import { useDismiss } from "../../lib/use-dismiss";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
@@ -1413,24 +1414,19 @@ function FolderEmptyState({
 
 /* Formatting helpers ----------------------------------------------- */
 
+const RELATIVE_AGE_KEYS = {
+  now: "notes.projects.relative.justNow",
+  minutes: "notes.projects.relative.minutes",
+  hours: "notes.projects.relative.hours",
+  days: "notes.projects.relative.days",
+} as const;
+
 function formatRelative(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const diff = Date.now() - then;
-  const minute = 60_000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (diff < minute) return translate("notes.projects.relative.justNow");
-  if (diff < hour) {
-    return translate("notes.projects.relative.minutes", { count: Math.floor(diff / minute) });
-  }
-  if (diff < day) {
-    return translate("notes.projects.relative.hours", { count: Math.floor(diff / hour) });
-  }
-  if (diff < 7 * day) {
-    return translate("notes.projects.relative.days", { count: Math.floor(diff / day) });
-  }
-  return formatIntlDate(new Date(iso), {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const age = recentAge(date);
+  if (age) return translate(RELATIVE_AGE_KEYS[age.unit], { count: age.count });
+  return formatIntlDate(date, {
     month: "short",
     day: "numeric",
   });
@@ -1454,23 +1450,5 @@ function formatDate(iso: string): string {
 function formatNoteTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  const now = new Date();
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (sameDay) {
-    return formatIntlDate(date, {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-  const diffDays = Math.floor((now.getTime() - date.getTime()) / (24 * 60 * 60 * 1000));
-  if (diffDays < 7) {
-    return formatIntlDate(date, { weekday: "short" });
-  }
-  return formatIntlDate(date, {
-    month: "short",
-    day: "numeric",
-  });
+  return formatListTimestamp(date);
 }

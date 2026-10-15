@@ -259,10 +259,6 @@ export function heroGreeting(index: number): string {
   return t(HERO_GREETING_KEYS[index % HERO_GREETING_KEYS.length]);
 }
 
-export function advanceHeroGreeting(): string {
-  return heroGreeting(advanceHeroGreetingIndex());
-}
-
 // Three per hand so the row never wraps — a row-count jump mid-rotation would
 // shove the footnote around every cycle.
 export const HERO_SHORTCUT_COUNT = 3;
@@ -270,18 +266,6 @@ export const HERO_SHORTCUT_COUNT = 3;
 // the deck advances (300ms fade + 2 × 90ms stagger, see .agent-hero-chip).
 export const HERO_ROTATE_MS = 8000;
 export const HERO_CHIP_SWAP_MS = 500;
-
-// Fisher–Yates with the swap target mirrored (j = i − rand) so a rand() of 0
-// is the identity permutation: tests that mock Math.random get the curated
-// leading window, real sessions get a fresh shuffle every visit.
-export function shuffleAgentShortcuts(): AgentShortcut[] {
-  const pool = [...AGENT_SHORTCUTS];
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = i - Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
-  }
-  return pool;
-}
 
 export {
   AGENT_DELETE_SESSION_EVENT,

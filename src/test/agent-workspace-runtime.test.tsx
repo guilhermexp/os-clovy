@@ -32,7 +32,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openDialog }));
 import { AgentWorkspace } from "../components/agent/AgentWorkspace";
 import { markAgentNewSessionPending } from "../components/agent/session-persistence";
 import { agentComposerClearance } from "../components/agent/composer/layout";
-import { AGENT_DELETE_SESSION_EVENT, AGENT_NEW_SESSION_EVENT } from "../lib/agent-events";
+import {
+  AGENT_DELETE_SESSION_EVENT,
+  AGENT_NEW_SESSION_EVENT,
+  AGENT_SESSION_STATUS_EVENT,
+} from "../lib/agent-events";
 import {
   resetCurrentDataPartitionForTests,
   setCurrentDataPartitionName,
@@ -3570,5 +3574,107 @@ describe("AgentWorkspace runtime wiring", () => {
         request: expect.objectContaining({ model: "openrouter-text" }),
       }),
     );
+  });
+
+  describe("streamed tokens", () => {
+    const event = (sessionId: string, sequence: number, payload: Partial<AgentRuntimeEvent>) =>
+      ({
+        protocolVersion: 1,
+        eventId: `event-${sessionId}-${sequence}`,
+        sessionId,
+        runId: `run-${sessionId}`,
+        sequence,
+        ...payload,
+      }) as AgentRuntimeEvent;
+    const stream = (sessionId: string, deltas: number) => {
+      const events: AgentRuntimeEvent[] = [
+        event(sessionId, 0, {
+          method: "run.started",
+          data: { startedAt: "2026-07-22T12:01:00Z", model: "fast" },
+        }),
+      ];
+      for (let index = 1; index <= deltas; index++) {
+        events.push(
+          event(sessionId, index, {
+            method: "message.delta",
+            data: {
+              itemId: `item-${sessionId}`,
+              role: "assistant",
+              delta: "token ",
+              createdAt: "2026-07-22T12:01:00Z",
+            },
+          }),
+        );
+      }
+      return events;
+    };
+    const listCalls = () =>
+      mocks.invoke.mock.calls.filter(([command]) => command === "list_agent_sessions").length;
+
+    it("rereads the list for a background session only when its status moves", async () => {
+      render(<AgentWorkspace initialSession={session} />);
+      expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
+      await waitFor(() => expect(listCalls()).toBeGreaterThan(0));
+      const before = listCalls();
+
+      await act(async () => {
+        for (const payload of stream("session-background", 20))
+          mocks.runtimeListener?.({ payload });
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(listCalls()).toBe(before + 1));
+      await act(async () => {
+        mocks.runtimeListener?.({
+          payload: event("session-background", 21, {
+            method: "run.completed",
+            data: { completedAt: "2026-07-22T12:02:00Z" },
+          }),
+        });
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(listCalls()).toBe(before + 2));
+    });
+
+    it("shows a failed reread after the open session's run ends", async () => {
+      render(<AgentWorkspace initialSession={session} />);
+      expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
+      const fallback = mocks.invoke.getMockImplementation();
+      mocks.invoke.mockImplementation((command: string, args?: unknown) =>
+        command === "list_agent_items"
+          ? Promise.reject(new Error("Agent store is locked"))
+          : fallback?.(command, args),
+      );
+
+      act(() => {
+        mocks.runtimeListener?.({
+          payload: event(session.id, 1, {
+            method: "run.completed",
+            data: { completedAt: "2026-07-22T12:02:00Z" },
+          }),
+        });
+      });
+
+      expect(await screen.findByText(/Agent store is locked/)).toBeInTheDocument();
+    });
+
+    it("announces the open session's running status once per run", async () => {
+      const statuses: string[] = [];
+      const onStatus = (statusEvent: Event) =>
+        statuses.push((statusEvent as CustomEvent<{ status: string }>).detail.status);
+      window.addEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
+      try {
+        render(<AgentWorkspace initialSession={session} />);
+        expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
+
+        act(() => {
+          for (const payload of stream(session.id, 20)) mocks.runtimeListener?.({ payload });
+        });
+
+        expect(statuses).toEqual(["running"]);
+      } finally {
+        window.removeEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
+      }
+    });
   });
 });

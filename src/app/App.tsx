@@ -51,16 +51,17 @@ import {
   providerModelSettings,
   type LiveTranscriptEventDto,
   type MeetingEndStatus,
+  type NoteDto,
 } from "../lib/tauri";
 import { preloadRecordingSounds } from "../lib/recording-sounds";
 import { preloadAgentSounds } from "../lib/agent-sounds";
 import {
-  AGENT_GALLERY_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSION_RENAMED_EVENT,
+  AGENT_SESSIONS_HYDRATED_EVENT,
   emitAgentSessionsChanged,
-  type AgentGalleryDetail,
   type AgentSessionRenamedDetail,
+  type AgentSessionsHydratedDetail,
 } from "../lib/agent-events";
 import { selectSessionProjectContext } from "../lib/agent-project-context";
 import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
@@ -152,7 +153,7 @@ export { isAccessibilityBlocked, isMicrophoneRecordingBlocked } from "./app-help
 import {
   ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS,
   AGENT_MENU_BAR_SESSION_LIMIT,
-  AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS,
+  AGENT_SESSION_STARTUP_RETRY_DELAYS_MS,
   CHECK_FOR_UPDATES_EVENT,
   recoveryFundingDisabledReason,
   SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
@@ -628,6 +629,7 @@ export function App() {
   const selectedNoteId = selectedNote?.id;
   const visibleEditorNoteId = activeView === "meetings" ? selectedNoteId : undefined;
   const previousVisibleEditorNoteIdRef = useRef<string | undefined>(undefined);
+  const latestNoteRequestRef = useRef(0);
   useEffect(() => {
     const previousNoteId = previousVisibleEditorNoteIdRef.current;
     previousVisibleEditorNoteIdRef.current = visibleEditorNoteId;
@@ -744,7 +746,6 @@ export function App() {
     }
     return map;
   }, [state.activeRecoveries]);
-  const recoverableNoteIds = useMemo(() => new Set(recoveriesByNote.keys()), [recoveriesByNote]);
   const selectedRecovery = selectedNote ? recoveriesByNote.get(selectedNote.id) : undefined;
   const noteDetailScrollerActive = activeView === "meetings" && !!selectedNote;
   const detailScrollerActive = activeView === "folders" && !!state.selectedFolderId;
@@ -1462,7 +1463,10 @@ export function App() {
     let cancelled = false;
     let retryTimeout: number | undefined;
 
-    function loadAgentMenuBarSessions(attempt: number) {
+    // The one startup load of the session list: the menu bar, the sidebar
+    // (through AGENT_SESSIONS_HYDRATED_EVENT) and the Agent HUD window all
+    // start from it.
+    function loadStartupAgentSessions(attempt: number) {
       // Defer host access so partial test hosts and transient startup failures
       // enter the normal retry path instead of escaping the effect synchronously.
       Promise.resolve()
@@ -1470,16 +1474,24 @@ export function App() {
         .then(([sessions, partitions]) => {
           if (cancelled) return;
           commitAgentSessions(sessions, partitions);
+          window.dispatchEvent(
+            new CustomEvent<AgentSessionsHydratedDetail>(AGENT_SESSIONS_HYDRATED_EVENT, {
+              detail: { sessions, partitions },
+            }),
+          );
+          if (sessions.length > 0) {
+            emitAgentSessionsChanged({ sessions, workingSessionIds: [], waitingSessionIds: [] });
+          }
         })
         .catch(() => {
           if (cancelled) return;
-          const retryDelay = AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS[attempt];
+          const retryDelay = AGENT_SESSION_STARTUP_RETRY_DELAYS_MS[attempt];
           if (retryDelay == null) return;
-          retryTimeout = window.setTimeout(() => loadAgentMenuBarSessions(attempt + 1), retryDelay);
+          retryTimeout = window.setTimeout(() => loadStartupAgentSessions(attempt + 1), retryDelay);
         });
     }
 
-    loadAgentMenuBarSessions(0);
+    loadStartupAgentSessions(0);
 
     return () => {
       cancelled = true;
@@ -1570,18 +1582,6 @@ export function App() {
     setActiveView,
     setAgentOrigin,
   });
-
-  // Dev-tools response gallery (window.__agentGallery): showing it jumps to the
-  // Agent view so the command works no matter which view is active.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const onGallery = (event: Event) => {
-      const detail = (event as CustomEvent<AgentGalleryDetail>).detail;
-      if (detail?.show) setActiveView("agent");
-    };
-    window.addEventListener(AGENT_GALLERY_EVENT, onGallery);
-    return () => window.removeEventListener(AGENT_GALLERY_EVENT, onGallery);
-  }, []);
 
   useDictationEvents({
     dictationWorkflowActiveRef,
@@ -2041,7 +2041,6 @@ export function App() {
     handleRemoveSessionFromFolder,
     handleReportIssue,
     handleOpenNoteChatInAgent,
-    handleAskClovyAboutNote,
     handleStartBundleChat,
     handleNewAgentSessionInProject,
   } = createAppDomainActions({
@@ -2094,9 +2093,23 @@ export function App() {
     setAgentOrigin(undefined);
   }
 
-  async function handleSelectNote(noteId: string) {
+  // Opening a note overlaps with the next open (fast clicks): only the newest
+  // open's note is shown, and only its failure is reported.
+  async function openLatestNote(noteId: string): Promise<NoteDto | undefined> {
+    const request = ++latestNoteRequestRef.current;
     try {
       const note = await getNote(noteId);
+      return request === latestNoteRequestRef.current ? note : undefined;
+    } catch (err) {
+      if (request === latestNoteRequestRef.current) throw err;
+      return undefined;
+    }
+  }
+
+  async function handleSelectNote(noteId: string) {
+    try {
+      const note = await openLatestNote(noteId);
+      if (!note) return;
       dispatch({ type: "noteLoaded", note });
       setOriginFolderId(undefined);
       setOriginAllNotes(false);
@@ -2110,7 +2123,8 @@ export function App() {
   // the note opens with a "Back to All notes" breadcrumb up top.
   async function handleSelectNoteFromAllNotes(noteId: string) {
     try {
-      const note = await getNote(noteId);
+      const note = await openLatestNote(noteId);
+      if (!note) return;
       dispatch({ type: "noteLoaded", note });
       setOriginFolderId(undefined);
       setOriginAllNotes(true);
@@ -2621,7 +2635,6 @@ export function App() {
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    recoverableNoteIds,
     referralNudgeMoment,
     referralNudgeSourceRef,
     refreshFundingAccount,

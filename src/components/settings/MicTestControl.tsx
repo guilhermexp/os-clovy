@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type TFunction, useT } from "../../i18n";
 
 export type MicTestState = "idle" | "recording" | "ready" | "error";
@@ -6,7 +6,8 @@ export type MicTestState = "idle" | "recording" | "ready" | "error";
 type MicTestControlProps = {
   state: MicTestState;
   level: number;
-  elapsedMs: number;
+  /** When the recording started; the elapsed clock ticks here, not in its parent. */
+  startedAt?: number;
   sampleSrc?: string;
   error?: string;
   playing: boolean;
@@ -17,10 +18,34 @@ type MicTestControlProps = {
   onPlayingChange: (playing: boolean) => void;
 };
 
+/** The recording clock, re-rendered on its own 10 times a second. */
+function MicTestTime({
+  startedAt,
+  durationSeconds,
+}: {
+  startedAt?: number;
+  durationSeconds: number;
+}) {
+  const [elapsedMs, setElapsedMs] = useState(0);
+  useEffect(() => {
+    setElapsedMs(0);
+    if (!startedAt) return;
+    const interval = window.setInterval(() => {
+      setElapsedMs(Date.now() - startedAt);
+    }, 100);
+    return () => window.clearInterval(interval);
+  }, [startedAt]);
+  return (
+    <span className="settings-mic-test-time">
+      {formatMicTestTime(elapsedMs, durationSeconds)} / {formatMicTestDuration(durationSeconds)}
+    </span>
+  );
+}
+
 export function MicTestControl({
   state,
   level,
-  elapsedMs,
+  startedAt,
   sampleSrc,
   error,
   playing,
@@ -54,10 +79,7 @@ export function MicTestControl({
                 }}
               />
             </div>
-            <span className="settings-mic-test-time">
-              {formatMicTestTime(elapsedMs, durationSeconds)} /{" "}
-              {formatMicTestDuration(durationSeconds)}
-            </span>
+            <MicTestTime startedAt={startedAt} durationSeconds={durationSeconds} />
           </>
         ) : null}
         {sampleSrc && state === "ready" ? (

@@ -1,4 +1,5 @@
 import type { WorkstreamDto } from "../../lib/day-intelligence";
+import { type LocalHour, localHourStarts } from "./timeline-utils";
 
 /**
  * Pure layout of the Today → Timeline → Workstreams column: workstreams as
@@ -103,8 +104,6 @@ const MAX_PX_PER_MIN = 9;
 export const CARD_SPLIT_GAP_MS = 45 * MINUTE_MS;
 /** Measured periods closer than this read as one sitting (second rounding). */
 const SITTING_JOIN_MS = MINUTE_MS;
-/** Small enough to land on every local hour, including +x:30/+x:45 zones. */
-const SCAN_STEP_MS = 15 * MINUTE_MS;
 /** Card border, so bars stay inside the padding box. */
 const CARD_BORDER_PX = 1;
 const BAR_INSET_PX = 10;
@@ -117,39 +116,6 @@ const NOTES_GAP_PX = 8;
 const NOTE_SLOT_PX = 17;
 /** Header height (title and meta, one title line) before it is measured. */
 export const ESTIMATED_HEADER_PX = 38;
-
-type LocalHour = { ms: number; hour: number; key: string };
-
-/**
- * Every real local hour start in `[dayStartMs, dayEndMs)`: 23, 24, or 25 of
- * them. `key` is the hour's local "YYYY-MM-DDTHH", the same key the hour
- * reports use; on a fall-back day the repeated hour has two starts with one
- * key, and that key's window runs through both.
- */
-function localHours(dayStartMs: number, dayEndMs: number, timeZone?: string): LocalHour[] {
-  const format = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
-  const hours: LocalHour[] = [];
-  for (let ms = dayStartMs; ms < dayEndMs; ms += SCAN_STEP_MS) {
-    const fields: Record<string, string> = {};
-    for (const part of format.formatToParts(new Date(ms))) fields[part.type] = part.value;
-    if (Number(fields.minute) !== 0) continue;
-    const hour = fields.hour.padStart(2, "0");
-    hours.push({
-      ms,
-      hour: Number(hour),
-      key: `${fields.year}-${fields.month}-${fields.day}T${hour}`,
-    });
-  }
-  return hours;
-}
 
 /** The local window of an hour report key: first start to the next other key. */
 function hourWindow(
@@ -510,7 +476,7 @@ export function layoutWorkstreamTimeline(
     options.nowMs != null && options.nowMs > dayStartMs && options.nowMs < dayEndMs
       ? options.nowMs
       : null;
-  const hours = localHours(dayStartMs, dayEndMs, timeZone);
+  const hours = localHourStarts(dayStartMs, dayEndMs, timeZone);
   const placed = workstreams.flatMap((workstream) => {
     const entry = placeWorkstream(workstream, hours, dayStartMs, dayEndMs);
     return entry ? [entry] : [];

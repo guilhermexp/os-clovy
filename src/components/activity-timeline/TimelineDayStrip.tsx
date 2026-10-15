@@ -45,6 +45,8 @@ export function TimelineDayStrip({
     [dayStartMs, dayDurationMs],
   );
 
+  const ticks = useMemo(() => hourTicks(dayStartMs, dayEndMs), [dayStartMs, dayEndMs]);
+
   const nowFraction = isToday && nowMs >= dayStartMs && nowMs <= dayEndMs ? xForTime(nowMs) : null;
 
   return (
@@ -56,7 +58,7 @@ export function TimelineDayStrip({
       <div className="timeline-strip-container">
         {/* Hour markers along the 24-hour scale */}
         <div className="timeline-time-ruler" aria-hidden="true">
-          {hourTicks(dayStartMs, dayEndMs).map((tick) => (
+          {ticks.map((tick) => (
             <div
               key={tick.ms}
               className="timeline-ruler-tick"

@@ -66,7 +66,12 @@ import {
   type ProviderModelDto,
 } from "../../lib/tauri";
 import { shouldBlockTextOnFunding } from "../../lib/account-gate";
-import { dispatchAgentSessionStatus, dispatchAgentSessionsChanged } from "../../lib/agent-events";
+import {
+  type AgentSessionStatusDetail,
+  type AgentSessionStatusKind,
+  dispatchAgentSessionStatus,
+  dispatchAgentSessionsChanged,
+} from "../../lib/agent-events";
 import { messageFromError } from "../../lib/errors";
 import { useExperimentalFlags } from "../../lib/experimental-flags";
 import {
@@ -618,6 +623,9 @@ export function AgentWorkspace({
   const [composerClearance, setComposerClearance] = useState(0);
   const [submittedScrollRevision, setSubmittedScrollRevision] = useState(0);
   const selectedIdRef = useRef(selectedId);
+  // The last status this workspace announced per session, so a run's stream
+  // of deltas announces "running" once instead of on every token.
+  const announcedStatusRef = useRef(new Map<string, AgentSessionStatusKind>());
   selectedIdRef.current = selectedId;
   const projectContextRef = useRef(projectContext);
   projectContextRef.current = projectContext;
@@ -804,6 +812,11 @@ export function AgentWorkspace({
     publishSessions(next);
     return next;
   }, [publishSessions]);
+
+  const announceSessionStatus = useCallback((detail: AgentSessionStatusDetail) => {
+    if (detail.sessionId) announcedStatusRef.current.set(detail.sessionId, detail.status);
+    dispatchAgentSessionStatus(detail);
+  }, []);
 
   const applySessionModel = useCallback((storedModel: string) => {
     const selection = agentModelSelection(storedModel);
@@ -1037,6 +1050,25 @@ export function AgentWorkspace({
         }),
       );
     };
+    const backgroundStatus = new Map<string, AgentSessionStatusKind>();
+    // One list read at a time; status changes during it ask for one more.
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    const refreshSessionsCoalesced = () => {
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      void refreshSessions()
+        .catch(() => undefined)
+        .finally(() => {
+          refreshInFlight = false;
+          if (!refreshQueued || disposed) return;
+          refreshQueued = false;
+          refreshSessionsCoalesced();
+        });
+    };
     void listen<AgentRuntimeEvent>(AGENT_RUNTIME_EVENT, ({ payload }) => {
       if (payload.method === "steering.consumed") {
         attemptedQueuedMessageIdsRef.current.delete(payload.data.messageId);
@@ -1086,27 +1118,35 @@ export function AgentWorkspace({
           terminal ? payload.runId : undefined,
         );
       }
+      const status: AgentSessionStatusKind =
+        payload.method === "interruption.requested"
+          ? "waitingForUser"
+          : payload.method === "run.completed"
+            ? "completed"
+            : payload.method === "run.cancelled"
+              ? "cancelled"
+              : payload.method === "run.failed"
+                ? "failed"
+                : "running";
       if (payload.sessionId !== selectedIdRef.current) {
-        void refreshSessions().catch(() => undefined);
+        // A background session's row only changes with its status: reread
+        // the list when the status moves, not on every streamed token.
+        if (backgroundStatus.get(payload.sessionId) !== status) {
+          backgroundStatus.set(payload.sessionId, status);
+          refreshSessionsCoalesced();
+        }
         return;
       }
+      backgroundStatus.delete(payload.sessionId);
       setProjection((current) => applyAgentRuntimeEvent(current, payload));
-      dispatchAgentSessionStatus({
-        sessionId: payload.sessionId,
-        status:
-          payload.method === "interruption.requested"
-            ? "waitingForUser"
-            : payload.method === "run.completed"
-              ? "completed"
-              : payload.method === "run.cancelled"
-                ? "cancelled"
-                : payload.method === "run.failed"
-                  ? "failed"
-                  : "running",
-      });
+      if (announcedStatusRef.current.get(payload.sessionId) !== status) {
+        announceSessionStatus({ sessionId: payload.sessionId, status });
+      }
       if (terminal) {
         setSubmitting(false);
-        void Promise.all([hydrate(payload.sessionId), refreshSessions()]);
+        void Promise.all([hydrate(payload.sessionId), refreshSessions()]).catch((cause) =>
+          setError(messageFromError(cause)),
+        );
       }
     }).then((dispose) => {
       if (disposed) dispose();
@@ -1116,7 +1156,13 @@ export function AgentWorkspace({
       disposed = true;
       unlisten?.();
     };
-  }, [companionPairingEnabled, hydrate, refreshSessions, updateQueuedFollowUps]);
+  }, [
+    announceSessionStatus,
+    companionPairingEnabled,
+    hydrate,
+    refreshSessions,
+    updateQueuedFollowUps,
+  ]);
 
   useEffect(() => {
     if (!companionPairingEnabled) return;
@@ -1652,7 +1698,7 @@ export function AgentWorkspace({
         submissionOwnerRef.current = undefined;
         setSubmitting(false);
       }
-      dispatchAgentSessionStatus({
+      announceSessionStatus({
         sessionId: activeSession.id,
         title: activeSession.title,
         status: "starting",
@@ -2189,7 +2235,7 @@ export function AgentWorkspace({
     try {
       const run = await agentRuntimeBindings.retryRun(failedItem.runId);
       setProjection((current) => ({ ...current, run }));
-      dispatchAgentSessionStatus({
+      announceSessionStatus({
         sessionId: failedItem.sessionId,
         title: selectedSession?.title,
         status: "starting",

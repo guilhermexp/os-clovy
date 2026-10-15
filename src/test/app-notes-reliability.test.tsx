@@ -478,6 +478,29 @@ describe("notes recording reliability", () => {
     );
   }
 
+  it("keeps the last clicked note open when an earlier open resolves later", async () => {
+    render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
+    let resolveSecond: ((value: NoteDto) => void) | undefined;
+    mocks.getNote.mockImplementation((noteId: string) =>
+      noteId === "note-2"
+        ? new Promise<NoteDto>((resolve) => {
+            resolveSecond = resolve;
+          })
+        : Promise.resolve(first),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /^Second note/ }));
+    await userEvent.click(screen.getByRole("button", { name: /^First note/ }));
+    await act(async () => {
+      resolveSecond?.(second);
+    });
+
+    expect(screen.getAllByText("First note").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Second note/)).toBeNull();
+  });
+
   it("swaps notes when the data partition switches", async () => {
     render(<App />);
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));

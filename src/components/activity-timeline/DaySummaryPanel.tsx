@@ -1,20 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconSparkle } from "central-icons/IconSparkle";
 import { type MessageKey, useLocale, useT } from "../../i18n";
 import {
-  type DayIntelligenceDto,
   type DayPanelsDto,
-  dayIntelligence,
   formatStandup,
   generateDaySummary,
   type HourReportDto,
-  onDayIntelligenceUpdated,
   type WorkstreamDto,
 } from "../../lib/day-intelligence";
-import { onActivityTimelineUpdated } from "../../lib/activity-timeline";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
 import {
@@ -23,6 +19,7 @@ import {
   formatDuration,
   formatTime,
 } from "./timeline-utils";
+import { useDayIntelligence } from "./use-day-intelligence";
 
 export type DaySummaryPanelProps = {
   /** Local day, "YYYY-MM-DD". */
@@ -63,58 +60,20 @@ function providerName(provider: string): string {
 export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelProps) {
   const t = useT();
   const locale = useLocale();
-  const [data, setData] = useState<DayIntelligenceDto | null>(null);
+  const { data, error: loadError, reload, replace } = useDayIntelligence(day);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const fade = useScrollFade(scrollerRef);
-  // Reads overlap (events, day changes): a read is shown only if no later
-  // read was shown already. A finished generation is the newest state of its
-  // day, so it supersedes reads in flight. Responses for another day drop.
-  const requests = useRef({ day, next: 0, shown: 0 });
+  const dayRef = useRef(day);
+  dayRef.current = day;
 
-  const load = useCallback(async () => {
-    const current = requests.current;
-    const request = ++current.next;
-    const settled = () => {
-      if (current.day !== day || request <= current.shown) return false;
-      current.shown = request;
-      return true;
-    };
-    try {
-      const loaded = await dayIntelligence(day);
-      if (settled()) {
-        setData(loaded);
-        setLoadError(null);
-      }
-    } catch (failure) {
-      if (settled()) setLoadError(errorMessage(failure));
-    }
-  }, [day]);
-
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a generation's notices belong to its day
   useEffect(() => {
-    requests.current.day = day;
-    requests.current.shown = requests.current.next;
-    setData(null);
     setError(null);
-    setLoadError(null);
     setCopied(false);
-    void load();
-    const cleanups: (() => void)[] = [];
-    let active = true;
-    void onDayIntelligenceUpdated((payload) => {
-      if (payload.day === day) void load();
-    }).then((unlisten) => (active ? cleanups.push(unlisten) : unlisten()));
-    void onActivityTimelineUpdated(() => void load()).then((unlisten) =>
-      active ? cleanups.push(unlisten) : unlisten(),
-    );
-    return () => {
-      active = false;
-      for (const cleanup of cleanups) cleanup();
-    };
-  }, [day, load]);
+  }, [day]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-measure when the content changes
   useEffect(() => {
@@ -122,19 +81,12 @@ export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelPr
   }, [data, fade.update]);
 
   async function handleGenerate() {
-    const current = requests.current;
-    const settled = () => {
-      if (current.day !== day) return false;
-      current.shown = current.next;
-      return true;
-    };
     setGenerating(true);
     setError(null);
     try {
-      const generated = await generateDaySummary(day);
-      if (settled()) setData(generated);
+      replace(await generateDaySummary(day));
     } catch (generateError) {
-      if (current.day === day) {
+      if (dayRef.current === day) {
         const key = GENERATE_ERROR_KEYS[errorCode(generateError) ?? ""];
         setError(
           key ? t(key) : t("dayIntelligence.error", { message: errorMessage(generateError) }),
@@ -166,11 +118,7 @@ export function DaySummaryPanel({ day, onNavigateToSettings }: DaySummaryPanelPr
             <p className="day-summary-error" role="alert">
               {t("dayIntelligence.loadError", { message: loadError })}
             </p>
-            <button
-              type="button"
-              className="btn btn-secondary day-summary-button"
-              onClick={() => void load()}
-            >
+            <button type="button" className="btn btn-secondary day-summary-button" onClick={reload}>
               <IconArrowRotateClockwise size={14} aria-hidden="true" />
               {t("common.retry")}
             </button>

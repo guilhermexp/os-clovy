@@ -94,20 +94,46 @@ export function formatDayHeader(date: Date, locale: InterfaceLocale = "en"): str
   }).format(date);
 }
 
-/**
- * Checks whether two Date objects refer to the same calendar day in the local timezone.
- */
-export function isSameDay(d1: Date, d2: Date): boolean {
-  return (
-    d1.getFullYear() === d2.getFullYear() &&
-    d1.getMonth() === d2.getMonth() &&
-    d1.getDate() === d2.getDate()
-  );
-}
-
 const TICK_EVERY_HOURS = 3;
 /** Small enough to land on every local hour, including +x:30/+x:45 zones. */
-const TICK_SCAN_STEP_MS = 15 * 60_000;
+const HOUR_SCAN_STEP_MS = 15 * 60_000;
+
+export type LocalHour = { ms: number; hour: number; key: string };
+
+/**
+ * Every real local hour start in `[dayStartMs, dayEndMs)`: 23, 24, or 25 of
+ * them. `key` is the hour's local "YYYY-MM-DDTHH", the same key the hour
+ * reports use; on a fall-back day the repeated hour has two starts with one
+ * key. `timeZone` defaults to the system zone (tests pin one).
+ */
+export function localHourStarts(
+  dayStartMs: number,
+  dayEndMs: number,
+  timeZone?: string,
+): LocalHour[] {
+  const format = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const hours: LocalHour[] = [];
+  for (let ms = dayStartMs; ms < dayEndMs; ms += HOUR_SCAN_STEP_MS) {
+    const fields: Record<string, string> = {};
+    for (const part of format.formatToParts(new Date(ms))) fields[part.type] = part.value;
+    if (Number(fields.minute) !== 0) continue;
+    const hour = fields.hour.padStart(2, "0");
+    hours.push({
+      ms,
+      hour: Number(hour),
+      key: `${fields.year}-${fields.month}-${fields.day}T${hour}`,
+    });
+  }
+  return hours;
+}
 
 /**
  * Ruler ticks at real local clock hours (every 3 h) of the day
@@ -120,21 +146,10 @@ export function hourTicks(
   dayEndMs: number,
   timeZone?: string,
 ): { ms: number; label: string }[] {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
   const ticks: { ms: number; label: string }[] = [];
-  for (let ms = dayStartMs; ms < dayEndMs; ms += TICK_SCAN_STEP_MS) {
-    const fields = parts.formatToParts(new Date(ms));
-    const hour = Number(fields.find((part) => part.type === "hour")?.value);
-    const minute = Number(fields.find((part) => part.type === "minute")?.value);
+  for (const { ms, hour } of localHourStarts(dayStartMs, dayEndMs, timeZone)) {
     const label = `${hour.toString().padStart(2, "0")}:00`;
-    if (minute !== 0 || hour % TICK_EVERY_HOURS !== 0 || ticks.some((t) => t.label === label)) {
-      continue;
-    }
+    if (hour % TICK_EVERY_HOURS !== 0 || ticks.some((t) => t.label === label)) continue;
     ticks.push({ ms, label });
   }
   ticks.push({ ms: dayEndMs, label: "24:00" });

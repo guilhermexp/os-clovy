@@ -621,10 +621,6 @@ function firstFrameVideoSource(src: string) {
 // even across remounts.
 const generatedVideoPosterCache = new Map<string, Promise<string | undefined>>();
 
-export function resetGeneratedVideoPosterCacheForTest() {
-  generatedVideoPosterCache.clear();
-}
-
 function capturedGeneratedVideoPoster(src: string): Promise<string | undefined> {
   const cached = generatedVideoPosterCache.get(src);
   if (cached) return cached;

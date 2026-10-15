@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { onActivityTimelineUpdated } from "../../lib/activity-timeline";
 import {
   type DayIntelligenceDto,
@@ -11,6 +11,13 @@ export type DayIntelligenceState = {
   data: DayIntelligenceDto | null;
   loaded: boolean;
   error: string | null;
+  /** Reads the day again. */
+  reload: () => void;
+  /**
+   * Shows `data` (a finished generation, the newest state of the day it was
+   * started for) over reads still in flight. Dropped once the view left that day.
+   */
+  replace: (data: DayIntelligenceDto) => void;
 };
 
 /**
@@ -19,25 +26,33 @@ export type DayIntelligenceState = {
  * activity. A read for a day the view has left is dropped.
  */
 export function useDayIntelligence(day: string): DayIntelligenceState {
-  const [state, setState] = useState<{ day: string } & DayIntelligenceState>({
+  const [state, setState] = useState<{
+    day: string;
+    data: DayIntelligenceDto | null;
+    loaded: boolean;
+    error: string | null;
+  }>({
     day,
     data: null,
     loaded: false,
     error: null,
   });
+  const latest = useRef(0);
+  const currentDay = useRef(day);
+  currentDay.current = day;
+  const loadCurrent = useRef<() => void>(() => {});
 
   useEffect(() => {
     let active = true;
-    let latest = 0;
     const load = async () => {
-      const request = ++latest;
+      const request = ++latest.current;
       try {
         const data = await dayIntelligence(day);
-        if (active && request === latest) {
+        if (active && request === latest.current) {
           setState({ day, data: data ?? null, loaded: true, error: null });
         }
       } catch (failure) {
-        if (active && request === latest) {
+        if (active && request === latest.current) {
           const message =
             failure && typeof failure === "object" && "message" in failure
               ? String(failure.message)
@@ -51,6 +66,7 @@ export function useDayIntelligence(day: string): DayIntelligenceState {
         }
       }
     };
+    loadCurrent.current = () => void load();
     void load();
     const cleanups: (() => void)[] = [];
     void onDayIntelligenceUpdated((payload) => {
@@ -65,7 +81,17 @@ export function useDayIntelligence(day: string): DayIntelligenceState {
     };
   }, [day]);
 
+  const reload = useCallback(() => loadCurrent.current(), []);
+  const replace = useCallback(
+    (data: DayIntelligenceDto) => {
+      if (currentDay.current !== day) return;
+      latest.current++;
+      setState({ day, data, loaded: true, error: null });
+    },
+    [day],
+  );
+
   return state.day === day
-    ? { data: state.data, loaded: state.loaded, error: state.error }
-    : { data: null, loaded: false, error: null };
+    ? { data: state.data, loaded: state.loaded, error: state.error, reload, replace }
+    : { data: null, loaded: false, error: null, reload, replace };
 }

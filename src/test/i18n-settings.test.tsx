@@ -53,7 +53,6 @@ function renderMicTest() {
     <MicTestControl
       state="idle"
       level={0}
-      elapsedMs={0}
       playing={false}
       durationSeconds={5}
       onStart={() => {}}

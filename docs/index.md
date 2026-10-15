@@ -23,6 +23,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0011](adr/0011-bundled-hermes-skills.md) — selected Hermes skills ship as read-only app resources when the runtime pin cannot move (superseded by ADR-0038)
 - [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); Clovy API generates the team-facing diagnosis
 - [adr/0013](adr/0013-stream-inference-responses-through-june-api.md) — inference responses stream through Clovy API (SSE pass-through + keep-alive heartbeats); charges settle after the stream ends
+- [adr/0013](adr/0013-agent-recorder-tool-via-frontend-event.md) — agent recording control: the recorder tool asks the main webview to start or stop through a frontend event, so capture always runs the visible UI path (shares the 0013 number with the streaming ADR)
 - [adr/0014](adr/0014-pinned-dictation-paste-target.md) — the dictation paste target is pinned when the recording stops, never re-resolved at paste time
 - [adr/0015](adr/0015-video-generation-tools.md) — `/video` fast path + LLM tools, async job + poll; the 2026-10-08 addendum replaces Venice quotes with endpoint-specific fal estimates
 - [adr/0016](adr/0016-private-connectors-local-mode.md) — private connectors (local mode): Keychain-only token custody, app-proxied MCP calls straight to Google, trust modes enforced in the Rust proxy, earned autonomy, event-trigger daemon
@@ -113,6 +114,7 @@ Per-repo config the engineering skills read before acting (see the
 - [companion-development.md](companion-development.md) - local relay, desktop, iPhone, and iPad development workflow
 - [browser-computer-use-prd.md](browser-computer-use-prd.md) — PRD: Browser use + Computer use plugins (JUN-278); extension in the user's browser + routines-only managed browser, phase-2 computer use
 - [release-extension.md](release-extension.md) - Chrome Web Store publisher setup, RC review gate, stable promotion, and recovery runbook
+- [private-sharing-design.md](private-sharing-design.md) — private link sharing (JUN-308): bearer-link product contract, optional passcode, and the end-to-end encrypted snapshot model
 - [computer-use-cua-driver-spike.md](computer-use-cua-driver-spike.md) — spike (JUN-288): run the bundled cua-driver outside the write jail as a broker-owned, separately-signed daemon (recommended on identity/lifecycle grounds; a fully relocated daemon does start in-jail, up to the TCC gate); pinning + installer-never-runs confirmed
 - [plugins/portfolio.md](plugins/portfolio.md) — JUN-309 portfolio: current ChatGPT plugin surface inventory, ranking rubric, Clovy's top 10, shared product contract, sequencing, metrics, and explicit deferrals
   - [Google Workspace](plugins/google-workspace-prd.md) — [implementation plan](plugins/google-workspace-implementation-plan.md)
@@ -170,6 +172,8 @@ Per-repo config the engineering skills read before acting (see the
 - [reproducible-builds.md](reproducible-builds.md) — Clovy API source → TEE trust chain (Phase A shipped)
 - [github-security-readiness.md](github-security-readiness.md) — pre-public repo hardening checklist
 - [computer-use-support.md](computer-use-support.md) - state guide, TCC recovery, signed helper self-test, and macOS release regression response
+- [clovy-link-rollout.md](clovy-link-rollout.md) — isolated rollout of the `june.link` short-link origin, kept off the production Clovy API ingress
+- [local-ci-signoff.md](local-ci-signoff.md) — local commit-status signoff that replaces the slow hosted PR jobs during agent iteration
 
 ## QA
 
@@ -183,6 +187,8 @@ Per-repo config the engineering skills read before acting (see the
 
 - [superpowers/specs/2026-07-15-faster-note-transcription-design.md](superpowers/specs/2026-07-15-faster-note-transcription-design.md) — approved JUN-334 design for reducing note transcription latency
 - [superpowers/plans/2026-07-15-faster-note-transcription.md](superpowers/plans/2026-07-15-faster-note-transcription.md) — executable JUN-334 implementation plan for the approved design
+- [superpowers/specs/2026-07-22-transcription-follow-latest-design.md](superpowers/specs/2026-07-22-transcription-follow-latest-design.md) — approved design for keeping the Transcription tab on the live edge while the reader follows it
+- [superpowers/plans/2026-07-22-transcription-follow-latest.md](superpowers/plans/2026-07-22-transcription-follow-latest.md) — implementation plan for the follow-latest design
 
 ## Feature specs (Spec Kit)
 
