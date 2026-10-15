@@ -42,6 +42,9 @@ export type LlmProvidersDto = {
   endpoints: LlmEndpointDto[];
   usage: LlmUsageSelection;
   cliLevels: Partial<Record<LlmCliId, StructuredOutputLevel>>;
+  /** Chat is on the legacy Clovy agent only because neither Claude Code nor
+   * Codex is installed (absent from older backends). */
+  cliDefaultPending?: boolean;
 };
 
 export type LlmProviderTestResultDto = {

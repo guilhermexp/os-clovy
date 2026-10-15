@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
@@ -7,6 +7,7 @@ import { AGENT_RUN_AUTO_MODEL_PREFIX } from "../lib/agent-model-selection";
 import { loadSessionModels, rememberSessionModel } from "../lib/agent-session-models";
 
 const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
   listProviderModels: vi.fn(),
   providerModelSettings: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../lib/tauri", () => ({
   dictationHelperCommand: vi.fn(),
+  invoke: mocks.invoke,
   listProviderModels: mocks.listProviderModels,
   providerModelSettings: mocks.providerModelSettings,
 }));
@@ -81,5 +83,55 @@ describe("note chat model truthfulness", () => {
     await waitFor(() => expect(mocks.listProviderModels).toHaveBeenCalledOnce());
     expect(setModel).not.toHaveBeenCalled();
     expect(loadSessionModels()["note-session"]).toBe(stagedAuto);
+  });
+
+  it("picks the chat engine and does not hold a CLI chat on Clovy credits", async () => {
+    mocks.invoke.mockImplementation(async (command: string) =>
+      command === "chat_engine_catalog"
+        ? {
+            clis: [
+              {
+                id: "claude",
+                name: "Claude Code",
+                installed: true,
+                reason: null,
+                modelId: "__clovy_cli_engine__:claude",
+                clovyTools: "available",
+              },
+            ],
+            endpoints: [],
+          }
+        : undefined,
+    );
+    const chat: NoteChat = {
+      turns: [],
+      working: false,
+      submissionPending: false,
+      loading: false,
+      error: null,
+      storedSessionId: undefined,
+      model: "__clovy_cli_engine__:claude",
+      setModel: vi.fn(),
+      submit: vi.fn(async () => ({ accepted: true, current: true })),
+      retry: vi.fn(async () => true),
+      stop: vi.fn(),
+    };
+
+    render(
+      <NoteChatPanel
+        note={{ id: "note-1", title: "Planning" }}
+        chat={chat}
+        creditActionsDisabledReason="Add credits to keep using Clovy."
+        onClose={vi.fn()}
+        onOpenInAgent={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Chat engine: Claude Code" }),
+    ).toBeInTheDocument();
+    // The Clovy model picker belongs to the legacy engine only.
+    expect(screen.queryByRole("button", { name: /^Model/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("Add credits to keep using Clovy.")).not.toBeInTheDocument();
   });
 });

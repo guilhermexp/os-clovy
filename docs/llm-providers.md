@@ -141,6 +141,18 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   working, and the move is retried on the next launch. Saving a new key for
   `local` ends a pending migration and drops the legacy key, so the retry can
   never overwrite the new key.
+- **Default chat engine** ([ADR-0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md)).
+  Claude Code, else Codex, is the default chat engine; the Clovy agent is
+  the legacy engine. `providers::ensure_cli_default` runs at launch and
+  before `chat_default_engine` answers: chat on Clovy (the old default, new
+  installs included) moves once to the first of claude, codex on the
+  login-shell PATH (`llm::registry::apply_cli_default`), recorded as
+  `llmCliDefaultApplied`. Any other chat choice is kept and recorded; an
+  explicit chat choice later (`llm_set_usage`, picking a Clovy model) is
+  recorded too and never moved. With neither CLI installed nothing is
+  recorded, the next launch retries, and `llm_providers` reports
+  `cliDefaultPending: true`, which Settings shows under Chat. The chat
+  select lists the CLIs first and "Clovy (legacy agent)" last.
 - **Chat.** Chat on an endpoint is mirrored into the legacy
   `generationProvider = "local"` / `generationModel` fields, so the existing
   agent route, model picker, and capability lookups work unchanged. Agent
@@ -176,13 +188,23 @@ A chat session's **chat engine** is part of its model id
 (`crate::chat_engine`): `__clovy_cli_engine__:<cli>` runs each message on that
 CLI; a tagged endpoint id runs the Clovy agent on that endpoint (Clovy's tools,
 streaming, and live steering, as on Clovy API); anything else is a Clovy model.
+New work starts on the default engine: `chat_default_engine` returns
+`{ modelId, cli, legacyFallback }` (`modelId` is the CLI engine id when chat
+is on a CLI, else `null` and the caller keeps its own default) without the
+network, and the desktop's new sessions, Home task handoffs
+([home-assistant.md](home-assistant.md)), note chat, and sessions started
+from the companion ([companion-architecture.md](companion-architecture.md))
+create their session on it.
 The engine picker writes `__june_local_generation__:<model>@<endpoint id>`
 (both URL-encoded), so two endpoints serving the same model stay distinct and
 the agent proxy uses exactly the chosen endpoint (a removed endpoint is
 refused with `local_model_unavailable`, never replaced by another); the older
 `__june_local_generation__:<model>` still routes by model id. The composer's
-engine picker (`src/components/agent/composer/`) lists Clovy, the registered
-endpoints, and the six CLIs (`chat_engine_catalog`).
+engine picker (`src/components/agent/composer/`, also in the note chat panel)
+lists the six CLIs first (the default one, Claude Code or else Codex, marked
+"Default"), then the registered endpoints, then Clovy under "Legacy"
+(`chat_engine_catalog`). The Clovy model picker shows only on the Clovy
+engine, and Clovy credits only gate the Clovy engine.
 
 One message on a CLI engine is one CLI process in the session workspace:
 
@@ -195,8 +217,8 @@ One message on a CLI engine is one CLI process in the session workspace:
 | cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`; `--resume <id>` | none (project MCP servers need approval inside Cursor) |
 | copilot | `--prompt=<prompt> --output-format json --session-id <id>` | a UUID Clovy chooses on the first turn | `--additional-mcp-config=@<temporary file>` |
 
-- **Permissions.** No flag that skips or pre-grants a CLI's approvals is ever
-  passed (`--dangerously-skip-permissions`, `--yolo`, `--force`,
+- **Permissions.** In a chat turn (`TurnPolicy::Interactive`) no flag that
+  skips or pre-grants a CLI's approvals is ever passed (`--dangerously-skip-permissions`, `--yolo`, `--force`,
   `--dangerously-bypass-approvals-and-sandbox`, `--always-approve`,
   `--allow-all*`, `--approve-mcps`, `--permission-mode`, `--allowedTools`).
   `--trust` (cursor-agent) and `--skip-git-repo-check` (codex) only accept the
@@ -208,6 +230,21 @@ One message on a CLI engine is one CLI process in the session workspace:
   permitted"); agy fails the step with "permission check failed … user denied
   permission"; cursor-agent completes the call as `rejected`; copilot fails
   the tool with a permission error.
+- **Unattended turns** (`TurnPolicy::Unattended`, routines only). Nobody can
+  approve anything, so the tools are confined instead: claude gets
+  `--tools Read,Grep,Glob,WebSearch,WebFetch` (no other built-in exists in
+  the turn), `--allowedTools Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*`,
+  and `--strict-mcp-config` (Clovy's server only); codex gets
+  `sandbox_mode="read-only"` and `approval_policy="never"` (the user's own
+  codex configuration still decides web search and its other MCP servers).
+  `chat_engine::check_policy` refuses an unattended turn on any other CLI
+  (`agent_cli_unattended_unsupported`). No skip or bypass flag is passed here
+  either.
+- **Note references.** A message that references notes (`@note:<id>`, which
+  the note chat panel always puts first) reaches the CLI with a line asking it
+  to read them with Clovy's `get_note` tool
+  (`chat_engine::with_note_reference_context`); the stored user message is
+  unchanged.
 - **Environment.** The login-shell environment, as for one-shot calls (PATH,
   `HOME`, `PI_CODING_AGENT_DIR`, and the user's other profile variables
   unchanged), minus Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`,
@@ -251,15 +288,31 @@ One message on a CLI engine is one CLI process in the session workspace:
   when it has none. Compaction is refused (`agent_compaction_unsupported`):
   the CLI manages its own context.
 
+## Routines on a CLI engine
+
+A routine whose stored model is Auto runs on the chat engine when it is
+Claude Code or Codex (`providers::default_unattended_cli`); the claim
+snapshots `__clovy_cli_engine__:<cli>` as its model. `routines::start_claim`
+writes the session, run, prompt, and claim mapping as for the Clovy agent
+(`persist_claim_run`) and starts the turn with `chat_engine::start_cli_turn`
+under the unattended policy above. The prompt tells the CLI it runs
+unattended and which tools it has. Its events go through the same persistence
+as a chat turn, which projects the routine run's end, status, and error into
+the routine history (`mark_agent_run_terminal`); the CLI's answer is the
+session's assistant message. The routine's toolset choices apply only on the
+Clovy agent: a routine with an explicit model, or with chat on anything else,
+still runs there.
+
 | Command | Args | Returns |
 |---|---|---|
+| `chat_default_engine` | none | `{ modelId: string \| null, cli: string \| null, legacyFallback: boolean }` |
 | `chat_engine_catalog` | none | `{ clis: [{ id, name, installed, reason?, modelId, clovyTools }], endpoints: [{ id, name, modelId, optionId }] }` |
 
 ## Tauri commands
 
 | Command | Args | Returns |
 |---|---|---|
-| `llm_providers` | none | `{ endpoints, usage, cliLevels }` |
+| `llm_providers` | none | `{ endpoints, usage, cliLevels, cliDefaultPending }` |
 | `llm_detect_clis` | none | six `{ id, name, installed, path?, version?, reason?, structuredOutput, toolsDisabled }` |
 | `llm_save_endpoint` | `request: { id?, name, baseUrl, modelId, apiKey?, clearApiKey? }` | registry DTO |
 | `llm_delete_endpoint` | `id` | registry DTO (usages pointing at it reset) |
@@ -285,4 +338,10 @@ Keychain key saved for that endpoint (the key never reaches the webview).
   tool call. `cargo test chat_engine_real -- --ignored --nocapture` runs two
   turns on the installed claude, codex, and pi.
 - `pnpm exec vitest run src/test/llm-providers src/test/chat-engine` covers the
-  settings section and the engine picker.
+  settings section and the engine picker; `src/test/note-chat-default-engine`,
+  `src/test/companion-models`, and the default-engine cases in
+  `src/test/agent-workspace-runtime` and `src/test/app-shortcut` cover the
+  entry points that start on the default engine.
+- `cargo test --locked llm::registry` covers the one-time move to the default
+  CLI; `cargo test --locked routines` covers a routine on a fake claude under
+  the unattended policy, recorded in the routine history.

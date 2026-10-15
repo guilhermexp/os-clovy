@@ -11,8 +11,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 import {
   CLI_ENGINE_MODEL_PREFIX,
   type ChatEngineCatalog,
+  chatDefaultEngine,
   chatEngineCatalog,
   classifyChatEngineModel,
+  defaultChatCliId,
+  defaultChatModelId,
 } from "../lib/chat-engine";
 
 describe("chat-engine helpers", () => {
@@ -116,5 +119,37 @@ describe("chat-engine helpers", () => {
     const result = await chatEngineCatalog();
     expect(mocks.invoke).toHaveBeenCalledWith("chat_engine_catalog");
     expect(result).toEqual(sampleCatalog);
+  });
+
+  it("reads the default chat engine and falls back when chat is not on a CLI", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      modelId: "__clovy_cli_engine__:claude",
+      cli: "claude",
+      legacyFallback: false,
+    });
+    expect(await chatDefaultEngine()).toEqual({
+      modelId: "__clovy_cli_engine__:claude",
+      cli: "claude",
+      legacyFallback: false,
+    });
+    expect(mocks.invoke).toHaveBeenLastCalledWith("chat_default_engine");
+
+    mocks.invoke.mockResolvedValueOnce({ modelId: "__clovy_cli_engine__:codex" });
+    expect(await defaultChatModelId("auto")).toBe("__clovy_cli_engine__:codex");
+    // Chat on the legacy agent (no CLI installed), an older backend, or no
+    // bridge: callers keep their own default.
+    mocks.invoke.mockResolvedValueOnce({ modelId: null, cli: null, legacyFallback: true });
+    expect(await defaultChatModelId("auto")).toBe("auto");
+    mocks.invoke.mockResolvedValueOnce(undefined);
+    expect(await defaultChatModelId("auto")).toBe("auto");
+    mocks.invoke.mockRejectedValueOnce(new Error("unknown command"));
+    expect(await defaultChatModelId("auto")).toBe("auto");
+  });
+
+  it("marks Claude Code as the default CLI, else Codex", () => {
+    const status = (id: string, installed: boolean) => ({ id, installed });
+    expect(defaultChatCliId([status("codex", true), status("claude", true)])).toBe("claude");
+    expect(defaultChatCliId([status("claude", false), status("codex", true)])).toBe("codex");
+    expect(defaultChatCliId([status("pi", true)])).toBe("claude");
   });
 });

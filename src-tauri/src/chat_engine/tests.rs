@@ -114,6 +114,7 @@ impl Harness {
             workspace: self.workspace.path().to_path_buf(),
             input: input.to_string(),
             mcp,
+            policy: cli::TurnPolicy::Interactive,
         }
     }
 
@@ -824,18 +825,152 @@ fn chat_engine_turns_never_pass_permission_bypass_flags() {
     let scratch = tempfile::tempdir().unwrap();
     for kind in CliKind::ALL {
         for conversation in [None, Some("id-1")] {
-            let invocation =
-                cli::turn_invocation(kind, "hello", conversation, Some(&launch), scratch.path());
+            let invocation = cli::turn_invocation(
+                kind,
+                "hello",
+                conversation,
+                Some(&launch),
+                scratch.path(),
+                cli::TurnPolicy::Interactive,
+            );
             for arg in &invocation.args {
                 assert!(!forbidden.contains(&arg.as_str()), "{kind:?} passes {arg}");
             }
         }
     }
     // codex keeps its sandbox to the session workspace.
-    let codex = cli::turn_invocation(CliKind::Codex, "hello", Some("t"), None, scratch.path());
+    let codex = cli::turn_invocation(
+        CliKind::Codex,
+        "hello",
+        Some("t"),
+        None,
+        scratch.path(),
+        cli::TurnPolicy::Interactive,
+    );
     assert!(codex
         .args
         .contains(&"sandbox_mode=\"workspace-write\"".to_string()));
+}
+
+#[test]
+fn chat_engine_unattended_claude_turn_has_only_read_tools_clovy_mcp_and_web() {
+    let launch = McpLaunch {
+        command: PathBuf::from("/bin/clovy-mcp"),
+        args: vec![],
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let invocation = cli::turn_invocation(
+        CliKind::Claude,
+        "hello",
+        None,
+        Some(&launch),
+        scratch.path(),
+        cli::TurnPolicy::Unattended,
+    );
+    let value_after = |flag: &str| {
+        let at = invocation
+            .args
+            .iter()
+            .position(|arg| arg == flag)
+            .unwrap_or_else(|| panic!("{flag} missing: {:?}", invocation.args));
+        invocation.args[at + 1].clone()
+    };
+    // Bash, Edit, Write and every other built-in do not exist in the turn.
+    let tools = value_after("--tools");
+    let tools = tools.split(',').collect::<Vec<_>>();
+    assert_eq!(tools, ["Read", "Grep", "Glob", "WebSearch", "WebFetch"]);
+    let allowed = value_after("--allowedTools");
+    let allowed = allowed.split(',').collect::<Vec<_>>();
+    assert!(allowed.contains(&"mcp__clovy__*"), "{allowed:?}");
+    assert!(
+        !allowed
+            .iter()
+            .any(|tool| ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"].contains(tool)),
+        "{allowed:?}"
+    );
+    // Only Clovy's MCP server, never the user's others.
+    assert!(invocation.args.contains(&"--strict-mcp-config".to_string()));
+    assert!(invocation.args.contains(&"--mcp-config".to_string()));
+    let forbidden = [
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--permission-mode",
+    ];
+    for arg in &invocation.args {
+        assert!(!forbidden.contains(&arg.as_str()), "passes {arg}");
+    }
+    // A chat turn keeps the CLI's own permission settings.
+    let chat = cli::turn_invocation(
+        CliKind::Claude,
+        "hello",
+        None,
+        Some(&launch),
+        scratch.path(),
+        cli::TurnPolicy::Interactive,
+    );
+    for flag in ["--tools", "--allowedTools", "--strict-mcp-config"] {
+        assert!(!chat.args.contains(&flag.to_string()), "chat passes {flag}");
+    }
+}
+
+#[test]
+fn chat_engine_unattended_codex_turn_is_read_only_and_never_waits_for_approval() {
+    let scratch = tempfile::tempdir().unwrap();
+    for conversation in [None, Some("thread-1")] {
+        let invocation = cli::turn_invocation(
+            CliKind::Codex,
+            "hello",
+            conversation,
+            None,
+            scratch.path(),
+            cli::TurnPolicy::Unattended,
+        );
+        assert!(invocation
+            .args
+            .contains(&"sandbox_mode=\"read-only\"".to_string()));
+        assert!(!invocation
+            .args
+            .contains(&"sandbox_mode=\"workspace-write\"".to_string()));
+        assert!(invocation
+            .args
+            .contains(&"approval_policy=\"never\"".to_string()));
+        assert!(!invocation
+            .args
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    }
+}
+
+#[test]
+fn chat_engine_refuses_unattended_turns_on_clis_it_cannot_confine() {
+    for kind in CliKind::ALL {
+        let checked = check_policy(kind, cli::TurnPolicy::Unattended);
+        if matches!(kind, CliKind::Claude | CliKind::Codex) {
+            assert!(checked.is_ok(), "{kind:?}");
+        } else {
+            assert_eq!(
+                checked.unwrap_err().code,
+                "agent_cli_unattended_unsupported",
+                "{kind:?}"
+            );
+        }
+        assert!(check_policy(kind, cli::TurnPolicy::Interactive).is_ok());
+    }
+}
+
+#[test]
+fn chat_engine_tells_the_cli_how_to_read_referenced_notes() {
+    // The note chat panel's first message: its note reference, then the
+    // question.
+    let message =
+        r#"@note:7f3c-a_1 ("Weekly sync") What did we decide? See @note:7f3c-a_1 and @note:b2."#;
+    assert_eq!(note_references(message), ["7f3c-a_1", "b2"]);
+    let input = with_note_reference_context(message);
+    assert!(input.starts_with(message), "{input}");
+    assert!(input.contains("`get_note`"), "{input}");
+    assert!(input.contains("`7f3c-a_1`, `b2`"), "{input}");
+    // A message without note references reaches the CLI unchanged.
+    assert_eq!(with_note_reference_context("hello"), "hello");
+    assert!(note_references("mail me@note:").is_empty());
 }
 
 fn cursor_text(lines: &[&str]) -> (String, Vec<EngineEvent>) {

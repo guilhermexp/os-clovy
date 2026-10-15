@@ -19,6 +19,11 @@ import {
   type AgentChatTurn,
 } from "../../lib/agent-chat-runtime";
 import { shouldBlockTextOnFunding, type TextFundingModelContext } from "../../lib/account-gate";
+import {
+  type ChatEngineCatalog,
+  chatEngineCatalog,
+  classifyChatEngineModel,
+} from "../../lib/chat-engine";
 import { messageFromError } from "../../lib/errors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import {
@@ -30,6 +35,7 @@ import {
 } from "../../lib/tauri";
 import { MarkdownContent } from "../agent/MarkdownContent";
 import { AgentAttachmentTile } from "../agent/composer/AgentAttachmentTile";
+import { ChatEnginePicker } from "../agent/composer/ChatEnginePicker";
 import { ComposerEditor, type ComposerEditorHandle } from "../agent/composer/ComposerEditor";
 import { UpstreamProviderFailureNoticePart } from "../agent/chat-turns/RunNotices";
 import {
@@ -276,14 +282,31 @@ export function NoteChatPanel({
       stale = true;
     };
   }, []);
+  // The panel picks the chat engine (a CLI first, ADR-0062); the Clovy
+  // model picker only shows for the legacy Clovy engine.
+  const [engineCatalog, setEngineCatalog] = useState<ChatEngineCatalog | null>(null);
+  const footerRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    let stale = false;
+    void chatEngineCatalog()
+      .then((catalog) => {
+        if (!stale) setEngineCatalog(catalog);
+      })
+      .catch(() => undefined);
+    return () => {
+      stale = true;
+    };
+  }, []);
+  const activeEngine = classifyChatEngineModel(activeModelId, engineCatalog, models);
   const model = selectedModel(models, activeModelId);
   const textFundingContext: TextFundingModelContext = {
     activeModelId: activeModelId || undefined,
     activeModel: model,
     providerApiKeysConfigured,
   };
+  // A CLI or an endpoint does not spend Clovy credits.
   const textActionsDisabledReason = shouldBlockTextOnFunding(
-    Boolean(creditActionsDisabledReason),
+    activeEngine.kind === "clovy" && Boolean(creditActionsDisabledReason),
     textFundingContext,
   )
     ? creditActionsDisabledReason
@@ -518,7 +541,7 @@ export function NoteChatPanel({
             </div>
           ) : null}
         </div>
-        <footer className="note-chat-composer">
+        <footer ref={footerRef} className="note-chat-composer">
           {textActionsDisabledReason
             ? (renderFundingNotice?.({
                 ...textFundingContext,
@@ -572,16 +595,26 @@ export function NoteChatPanel({
                 <IconPlusMedium size={18} />
               </button>
               <div className="agent-composer-actions">
-                <ComposerModelPicker
-                  open={modelOpen}
-                  model={model}
-                  triggerRef={modelTriggerRef}
-                  onToggleOpen={() => {
-                    setModelFlyout(null);
-                    setModelSearch("");
-                    setModelOpen((open) => !open);
-                  }}
+                <ChatEnginePicker
+                  model={activeModelId}
+                  setModel={selectModel}
+                  catalog={engineCatalog}
+                  anchorRef={footerRef}
+                  clovyModels={models}
+                  showNotice={false}
                 />
+                {activeEngine.kind === "clovy" ? (
+                  <ComposerModelPicker
+                    open={modelOpen}
+                    model={model}
+                    triggerRef={modelTriggerRef}
+                    onToggleOpen={() => {
+                      setModelFlyout(null);
+                      setModelSearch("");
+                      setModelOpen((open) => !open);
+                    }}
+                  />
+                ) : null}
                 <button
                   type="button"
                   className="agent-composer-mic"
@@ -623,7 +656,7 @@ export function NoteChatPanel({
               </div>
             </div>
           </div>
-          {modelOpen ? (
+          {modelOpen && activeEngine.kind === "clovy" ? (
             <ComposerModelPopover
               flyout={modelFlyout}
               model={model}

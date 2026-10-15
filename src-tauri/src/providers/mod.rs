@@ -237,6 +237,10 @@ pub struct ProviderModelSettings {
     pub llm_cli_levels: BTreeMap<CliKind, StructuredOutputLevel>,
     #[serde(default)]
     pub llm_registry_migrated: bool,
+    /// Chat was moved to the default CLI engine once, or the user chose a
+    /// chat engine (`crate::llm::registry::apply_cli_default`).
+    #[serde(default)]
+    pub llm_cli_default_applied: bool,
     /// When true, image generation and editing ask the image provider to
     /// filter adult content. Clovy defaults it ON; the user opts out via
     /// Settings or the generation-time consent dialog. Defaulted so settings
@@ -901,6 +905,7 @@ fn set_provider_model_impl(
             // Picking a Clovy model in the text-model picker moves chat back
             // to Clovy API; `normalize` mirrors it into the legacy fields.
             settings.llm_usage.chat = ProviderRef::Clovy;
+            settings.llm_cli_default_applied = true;
             settings.generation_provider = PROVIDER_OPENROUTER.to_string();
             settings.generation_model = model_id.clone();
             settings.remote_generation_model = model_id;
@@ -1466,6 +1471,59 @@ pub fn setup(app: &mut tauri::App) {
         }
     }
     app.manage(state);
+    let handle = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        ensure_cli_default(&handle.state::<ProviderSettingsState>()).await;
+    });
+}
+
+/// Moves chat to the default CLI engine once (ADR-0062,
+/// `crate::llm::registry::apply_cli_default`). Runs at launch and before the
+/// default chat engine is read, so a session created right after launch
+/// already gets it. Nothing is written when nothing changes.
+pub async fn ensure_cli_default(state: &ProviderSettingsState) {
+    let Ok(snapshot) = settings_snapshot(state) else {
+        return;
+    };
+    if snapshot.llm_cli_default_applied {
+        return;
+    }
+    let env = crate::llm::shell_env::login_env().await;
+    let installed = |kind: CliKind| env.which(kind.id()).is_some();
+    let mut candidate = snapshot.clone();
+    crate::llm::registry::apply_cli_default(&mut candidate, installed);
+    if candidate == snapshot {
+        tracing::info!(
+            "chat stays on the legacy Clovy agent: neither Claude Code nor Codex is installed"
+        );
+        return;
+    }
+    let mut moved = None;
+    match update_llm_registry(state, |settings| {
+        moved = crate::llm::registry::apply_cli_default(settings, installed);
+        Ok(())
+    }) {
+        Ok(_) => match moved {
+            Some(kind) => {
+                tracing::info!(cli = kind.id(), "chat moved to the default CLI engine")
+            }
+            None => tracing::info!("chat engine already chosen; default CLI migration recorded"),
+        },
+        Err(error) => {
+            tracing::warn!(code = %error.code, "could not record the default CLI chat engine")
+        }
+    }
+}
+
+/// The CLI new unattended work (routines) runs on: the chat engine when it
+/// is one of the default CLIs (Claude Code or Codex), else none.
+pub fn default_unattended_cli() -> Option<CliKind> {
+    match current_settings().llm_usage.chat {
+        ProviderRef::Cli { id } if crate::llm::registry::DEFAULT_CHAT_CLIS.contains(&id) => {
+            Some(id)
+        }
+        _ => None,
+    }
 }
 
 pub fn load_local_env() {
@@ -1542,6 +1600,7 @@ fn default_settings() -> ProviderModelSettings {
         llm_usage: LlmUsageSelection::default(),
         llm_cli_levels: BTreeMap::new(),
         llm_registry_migrated: true,
+        llm_cli_default_applied: false,
         image_safe_mode: true,
         image_safe_mode_prompt_dismissed: false,
         image_safe_mode_set_by_user: false,
@@ -1711,6 +1770,7 @@ fn sanitize_settings(
         llm_usage: settings.llm_usage,
         llm_cli_levels: settings.llm_cli_levels,
         llm_registry_migrated: settings.llm_registry_migrated,
+        llm_cli_default_applied: settings.llm_cli_default_applied,
         image_safe_mode,
         image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
         image_safe_mode_set_by_user: settings.image_safe_mode_set_by_user,
@@ -3412,6 +3472,89 @@ mod tests {
             server.authorizations.lock().unwrap().as_slice(),
             [Some("Bearer sk-saved-key".to_string())]
         );
+    }
+
+    /// Restores the process-wide settings and login environment on drop.
+    struct RestoreGlobals;
+
+    impl Drop for RestoreGlobals {
+        fn drop(&mut self) {
+            replace_current_settings(default_settings());
+            crate::llm::shell_env::set_login_env_for_tests(None);
+        }
+    }
+
+    fn login_path_with(clis: &[&str]) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        for cli in clis {
+            let path = bin.path().join(cli);
+            fs::write(&path, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        crate::llm::shell_env::set_login_env_for_tests(Some(
+            crate::llm::shell_env::LoginEnv::from_vars(BTreeMap::from([(
+                "PATH".to_string(),
+                bin.path().display().to_string(),
+            )])),
+        ));
+        bin
+    }
+
+    #[tokio::test]
+    async fn launch_moves_chat_to_the_installed_default_cli_and_saves_it() {
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = RestoreGlobals;
+        let _bin = login_path_with(&["codex"]);
+        let state = test_state();
+
+        ensure_cli_default(&state).await;
+
+        let settings = settings_snapshot(&state).unwrap();
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert!(settings.llm_cli_default_applied);
+        let saved: ProviderModelSettings =
+            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
+        assert_eq!(
+            saved.llm_usage.chat,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert!(saved.llm_cli_default_applied);
+        // New chat work and the generation picker start on it.
+        assert_eq!(
+            crate::chat_engine::default_engine_of(&settings)
+                .model_id
+                .as_deref(),
+            Some("__clovy_cli_engine__:codex")
+        );
+        assert_eq!(
+            selected_model_for_mode(&state, ModelMode::Generation).unwrap(),
+            "__clovy_cli_engine__:codex"
+        );
+        let _ = fs::remove_dir_all(state.path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn launch_without_claude_or_codex_keeps_the_legacy_agent_and_warns() {
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = RestoreGlobals;
+        let _bin = login_path_with(&["pi"]);
+        let state = test_state();
+
+        ensure_cli_default(&state).await;
+
+        let settings = settings_snapshot(&state).unwrap();
+        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+        assert!(!settings.llm_cli_default_applied);
+        // Nothing changed, so nothing was written.
+        assert!(!state.path.exists());
+        let engine = crate::chat_engine::default_engine_of(&settings);
+        assert_eq!(engine.model_id, None);
+        assert!(engine.legacy_fallback);
+        assert!(crate::llm::registry::LlmProvidersDto::from(&settings).cli_default_pending);
     }
 }
 

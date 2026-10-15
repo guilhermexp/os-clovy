@@ -100,6 +100,14 @@ through the **Clovy MCP server**). Stored as the session's model id
 _Avoid_: backend, runtime (that is the agent harness process), provider
 (unqualified).
 
+**Default chat engine**:
+The chat engine new work starts on: Claude Code, else Codex, when one is
+installed; otherwise the **legacy Clovy agent** (the agent harness as a chat
+engine, kept until its tools reach the Clovy MCP server). Routines run on it
+as an **unattended turn** (read-only tools, Clovy's MCP tools, and the web).
+See [ADR-0062](docs/adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md).
+_Avoid_: native agent (say the legacy Clovy agent or the agent harness).
+
 **Structured-output level**:
 How strongly a provider can be held to a JSON schema: `none`, `prompt`,
 `json_object`, `json_schema`, `strict`. Measured by the provider's connection

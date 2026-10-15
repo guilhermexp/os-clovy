@@ -1,5 +1,11 @@
 import { t } from "../i18n/translate";
 import { agentModelSelection, agentRunModelId, AUTO_MODEL_ID } from "./agent-model-selection";
+import {
+  CLI_ENGINE_MODEL_PREFIX,
+  type ChatEngineCliStatus,
+  chatEngineCatalog,
+  defaultChatCliId,
+} from "./chat-engine";
 import { modelAvailableForMode, modelMissingProviderKey, modelPrivacyBadge } from "./model-privacy";
 import { pricingLabel } from "./model-pricing";
 import { suggestedModelsForMode } from "./suggested-models";
@@ -20,12 +26,15 @@ const AUTO_MODEL: CompanionModelOption = {
   routing: "automatic",
 };
 
-/** Auto plus the curated generation models that can run right now. A row that
- * needs the user's own provider key is left out until that key is saved: the
- * companion cannot save keys, so it could only fail. */
+/** The installed agent CLIs first (the default one, Claude Code or else
+ * Codex, at the top; ADR-0062), then the legacy Clovy agent: Auto plus the
+ * curated generation models that can run right now. A row that needs the
+ * user's own provider key is left out until that key is saved: the companion
+ * cannot save keys, so it could only fail. */
 export function companionModelOptions(
   models: ProviderModelDto[],
   providerKeys: ProviderApiKeysConfigured,
+  clis: ReadonlyArray<ChatEngineCliStatus> = [],
 ): CompanionModelOption[] {
   const available = models.filter(
     (model) =>
@@ -58,7 +67,41 @@ export function companionModelOptions(
       ];
     },
   );
-  return [AUTO_MODEL, ...curated];
+  return [...companionEngineOptions(clis), AUTO_MODEL, ...curated];
+}
+
+/** The agent CLIs the phone can pick; none when the catalog cannot be read,
+ * so the legacy models stay available. */
+export async function companionEngineClis(): Promise<ChatEngineCliStatus[]> {
+  try {
+    return (await chatEngineCatalog()).clis;
+  } catch {
+    return [];
+  }
+}
+
+function companionEngineOptions(clis: ReadonlyArray<ChatEngineCliStatus>): CompanionModelOption[] {
+  const defaultId = defaultChatCliId(clis);
+  return clis
+    .filter((cli) => cli.installed && cli.modelId.startsWith(CLI_ENGINE_MODEL_PREFIX))
+    .sort((left, right) => Number(right.id === defaultId) - Number(left.id === defaultId))
+    .map((cli) => ({
+      id: cli.modelId,
+      name: boundedText(cli.name, 256),
+      provider: "",
+      description: boundedText(
+        t(
+          cli.id === defaultId
+            ? "lib.companion.cliEngineDefaultDescription"
+            : "lib.companion.cliEngineDescription",
+          { name: cli.name },
+        ),
+        512,
+      ),
+      // The wire only knows automatic and remote routing; a CLI engine is a
+      // fixed choice, not automatic routing.
+      routing: "remote" as const,
+    }));
 }
 
 export function companionSessionModelSelection(
@@ -66,7 +109,13 @@ export function companionSessionModelSelection(
   storedModel: string,
   models: ProviderModelDto[],
   defaultCostQuality: number,
+  clis: ReadonlyArray<ChatEngineCliStatus> = [],
 ): CompanionSessionModelSelection {
+  if (storedModel.startsWith(CLI_ENGINE_MODEL_PREFIX)) {
+    const cliId = storedModel.slice(CLI_ENGINE_MODEL_PREFIX.length);
+    const name = clis.find((cli) => cli.modelId === storedModel)?.name.trim() || cliId;
+    return { storedSessionId, modelId: storedModel, modelName: boundedText(name, 256) };
+  }
   const decoded = agentModelSelection(storedModel);
   const modelId =
     decoded.modelId === "auto" || !decoded.modelId.trim() ? AUTO_MODEL_ID : decoded.modelId;

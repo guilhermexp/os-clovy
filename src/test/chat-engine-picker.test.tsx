@@ -96,6 +96,48 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
     expect(screen.getByRole("menuitemradio", { name: /Pi/ })).toBeInTheDocument();
   });
 
+  it("lists the CLIs first with Claude Code as the default and Clovy last as legacy", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatEnginePicker
+        model="__clovy_cli_engine__:claude"
+        setModel={vi.fn()}
+        catalog={sampleCatalog}
+        showNotice={false}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
+    const rows = screen.getAllByRole("menuitemradio");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "Claude CodeDefault",
+      "Codex",
+      "PiNot found in PATH",
+      "Local Ollama",
+      "ClovyBuilt-in agent, kept while its tools move to the CLIs",
+    ]);
+    expect(screen.getByText("Legacy")).toBeInTheDocument();
+  });
+
+  it("marks Codex as the default when Claude Code is not installed", async () => {
+    const user = userEvent.setup();
+    const catalog: ChatEngineCatalog = {
+      ...sampleCatalog,
+      clis: sampleCatalog.clis.map((cli) =>
+        cli.id === "claude" ? { ...cli, installed: false, reason: "Not found in PATH" } : cli,
+      ),
+    };
+    render(
+      <ChatEnginePicker model="auto" setModel={vi.fn()} catalog={catalog} showNotice={false} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
+    expect(screen.getByRole("menuitemradio", { name: /^Codex/ })).toHaveTextContent("Default");
+    expect(screen.getByRole("menuitemradio", { name: /^Claude Code/ })).not.toHaveTextContent(
+      "Default",
+    );
+  });
+
   it("disables a not-installed CLI with its reason", async () => {
     const user = userEvent.setup();
     const setModel = vi.fn();

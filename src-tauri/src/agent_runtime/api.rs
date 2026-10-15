@@ -887,7 +887,10 @@ async fn start_cli_run(
                 run_id: start.run_id.to_string(),
                 kind: start.kind,
                 workspace: PathBuf::from(start.workspace),
-                input: message_with_attachment_context(start.prompt, start.attachments),
+                input: crate::chat_engine::with_note_reference_context(
+                    &message_with_attachment_context(start.prompt, start.attachments),
+                ),
+                policy: crate::chat_engine::cli::TurnPolicy::Interactive,
             },
             ticket,
         )

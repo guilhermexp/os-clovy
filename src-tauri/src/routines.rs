@@ -166,14 +166,23 @@ fn validate_state(state: &str) -> Result<(), AppError> {
     }
 }
 
-fn resolve_routine_model(stored_model: &str, selected_model: &str) -> String {
+fn resolve_routine_model(
+    stored_model: &str,
+    selected_model: &str,
+    default_cli: Option<crate::llm::cli::CliKind>,
+) -> String {
     let stored_model = stored_model.trim();
     if stored_model.is_empty()
         || stored_model == "auto"
         || stored_model == crate::providers::AUTO_GENERATION_MODEL
     {
-        // A Routine's stored Auto value resolves against the saved remote
-        // selection so unattended work stays on Clovy's metered model route.
+        // A Routine's stored Auto value runs on the default CLI engine when
+        // chat is on one (ADR-0062), under the unattended tool policy.
+        if let Some(kind) = default_cli {
+            return crate::chat_engine::engine_model_id(kind);
+        }
+        // Otherwise it resolves against the saved remote selection so
+        // unattended work stays on Clovy's metered model route.
         // `open-software/auto` is itself supported; the proxy adds its
         // cost-quality preference before calling the model API.
         let selected_model = selected_model.trim();
@@ -435,7 +444,11 @@ async fn claim_with_connector_guard(
     let run_id = Uuid::new_v4().to_string();
     let timestamp = crate::db::repositories::timestamp();
     let stored_model: String = routine.get("model");
-    let model = resolve_routine_model(&stored_model, &crate::providers::remote_generation_model());
+    let model = resolve_routine_model(
+        &stored_model,
+        &crate::providers::remote_generation_model(),
+        crate::providers::default_unattended_cli(),
+    );
     let safety_mode = AgentSafetyMode::from(routine.get::<String, _>("safety_mode").as_str());
     let metadata = serde_json::from_str::<Value>(&routine.get::<String, _>("metadata_json"))
         .unwrap_or_else(|_| json!({}));
@@ -752,16 +765,32 @@ pub async fn start_claim(
         .map_err(|error| AppError::new("routine_workspace_failed", error.to_string()))?;
     let timestamp = crate::db::repositories::timestamp();
     let mut created_agent_run_id = None;
+    let cli = crate::chat_engine::cli_for_model(&claim.model);
     let started = async {
-        query("INSERT INTO agent_sessions (id, title, status, model, safety_mode, workspace_path, source, created_at, updated_at) VALUES (?, ?, 'idle', ?, ?, ?, 'routine', ?, ?)")
-            .bind(&session_id).bind(&claim.routine_name).bind(&claim.model).bind(claim.safety_mode.as_db()).bind(workspace.to_string_lossy().as_ref()).bind(&timestamp).bind(&timestamp).execute(pool).await.map_err(app_error)?;
-        let run = repository
-            .create_run(&session_id, &claim.model, Some("medium"))
-            .await
-            .map_err(app_error)?;
-        created_agent_run_id = Some(run.id.clone());
-        repository.append_item(&session_id, Some(&run.id), 0, &AgentItemPayload::UserMessage(MessagePayload { role: "user".into(), content: claim.prompt.clone(), attachments: vec![] }), Some(&format!("routine:{}", claim.routine_run_id))).await.map_err(app_error)?;
-        attach_run_mapping(pool, &claim.routine_run_id, &claim.token, &session_id, &run.id, &timestamp).await?;
+        let run_id = persist_claim_run(
+            pool,
+            &repository,
+            &claim,
+            &session_id,
+            &workspace,
+            &timestamp,
+            &mut created_agent_run_id,
+        )
+        .await?;
+        if let Some(kind) = cli {
+            start_cli_claim(
+                app,
+                &repository,
+                &claim,
+                kind,
+                &session_id,
+                &run_id,
+                &workspace,
+            )
+            .await?;
+            return Ok::<_, AppError>(run_id);
+        }
+        let run = repository.get_run(&run_id).await.map_err(app_error)?;
         host.ensure_started(app, repository.clone()).await?;
         let workspace = workspace.to_string_lossy();
         let request = UnattendedRunRequest {
@@ -781,9 +810,11 @@ pub async fn start_claim(
             )
             .await
             .map_err(app_error)?;
-        host.request("run.start", &session_id, &run.id, params).await?;
+        host.request("run.start", &session_id, &run.id, params)
+            .await?;
         Ok::<_, AppError>(run.id)
-    }.await;
+    }
+    .await;
     if let Err(error) = started {
         if let Some(run_id) = created_agent_run_id.as_deref() {
             if let Err(persist_error) = repository
@@ -859,6 +890,97 @@ pub async fn trigger_from_connector(
         Some(claim) => start_claim(app, &host, &pool, claim).await.map(|_| true),
         None => Ok(false),
     }
+}
+
+/// The routine's session, its agent run, the routine prompt as the user
+/// message, and the claim mapping: the same for both engines. The run id is
+/// written to `created` as soon as the run exists, so a later failure can
+/// terminalize it.
+async fn persist_claim_run(
+    pool: &SqlitePool,
+    repository: &AgentRepository,
+    claim: &Claim,
+    session_id: &str,
+    workspace: &std::path::Path,
+    timestamp: &str,
+    created: &mut Option<String>,
+) -> Result<String, AppError> {
+    query("INSERT INTO agent_sessions (id, title, status, model, safety_mode, workspace_path, source, created_at, updated_at) VALUES (?, ?, 'idle', ?, ?, ?, 'routine', ?, ?)")
+        .bind(session_id).bind(&claim.routine_name).bind(&claim.model).bind(claim.safety_mode.as_db()).bind(workspace.to_string_lossy().as_ref()).bind(timestamp).bind(timestamp).execute(pool).await.map_err(app_error)?;
+    let run = repository
+        .create_run(session_id, &claim.model, Some("medium"))
+        .await
+        .map_err(app_error)?;
+    *created = Some(run.id.clone());
+    repository
+        .append_item(
+            session_id,
+            Some(&run.id),
+            0,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: claim.prompt.clone(),
+                attachments: vec![],
+            }),
+            Some(&format!("routine:{}", claim.routine_run_id)),
+        )
+        .await
+        .map_err(app_error)?;
+    attach_run_mapping(
+        pool,
+        &claim.routine_run_id,
+        &claim.token,
+        session_id,
+        &run.id,
+        timestamp,
+    )
+    .await?;
+    Ok(run.id)
+}
+
+/// What a routine's CLI turn receives: the routine prompt, framed so the CLI
+/// knows nobody is there and which tools it has.
+fn routine_cli_prompt(claim: &Claim) -> String {
+    format!(
+        "This is the Clovy routine \"{name}\", running unattended: nobody can answer questions or approve actions. You can read files, search and fetch the web, and use the Clovy MCP tools; you cannot run commands or change files. Do the task and give the result as your final answer.\n\n{prompt}",
+        name = claim.routine_name,
+        prompt = crate::chat_engine::with_note_reference_context(&claim.prompt),
+    )
+}
+
+/// Runs a claimed routine on a CLI engine through the chat engine path
+/// (`crate::chat_engine::start_cli_turn`) under the unattended policy. Its
+/// events are persisted like a chat turn's, which projects the routine run's
+/// end (`mark_agent_run_terminal`).
+async fn start_cli_claim(
+    app: &AppHandle,
+    repository: &AgentRepository,
+    claim: &Claim,
+    kind: crate::llm::cli::CliKind,
+    session_id: &str,
+    run_id: &str,
+    workspace: &std::path::Path,
+) -> Result<(), AppError> {
+    let engines = app.state::<crate::chat_engine::ChatEngineHost>();
+    let ticket = engines.register(run_id)?;
+    let started = crate::chat_engine::start_cli_turn(
+        app,
+        repository.clone(),
+        crate::chat_engine::CliTurnRequest {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            kind,
+            workspace: workspace.to_path_buf(),
+            input: routine_cli_prompt(claim),
+            policy: crate::chat_engine::cli::TurnPolicy::Unattended,
+        },
+        ticket,
+    )
+    .await;
+    if started.is_err() {
+        engines.release(run_id);
+    }
+    started
 }
 
 /// Attach a created agent session/run to the already-durable claim. Keeping
@@ -1782,16 +1904,16 @@ mod tests {
     fn automatic_routine_model_resolves_to_the_selected_remote_model() {
         for stored_model in ["", "auto", crate::providers::AUTO_GENERATION_MODEL] {
             assert_eq!(
-                resolve_routine_model(stored_model, "kimi-k2-6"),
+                resolve_routine_model(stored_model, "kimi-k2-6", None),
                 "kimi-k2-6"
             );
         }
         assert_eq!(
-            resolve_routine_model("explicit-model", "kimi-k2-6"),
+            resolve_routine_model("explicit-model", "kimi-k2-6", None),
             "explicit-model"
         );
         assert_eq!(
-            resolve_routine_model("auto", crate::providers::AUTO_GENERATION_MODEL),
+            resolve_routine_model("auto", crate::providers::AUTO_GENERATION_MODEL, None),
             crate::providers::AUTO_GENERATION_MODEL
         );
     }
@@ -2854,5 +2976,176 @@ mod tests {
             "interrupted"
         );
         assert!(get(&pool, "routine-1").await.unwrap().next_run_at.is_some());
+    }
+
+    #[test]
+    fn automatic_routine_model_runs_on_the_default_cli_engine() {
+        for stored_model in ["", "auto", crate::providers::AUTO_GENERATION_MODEL] {
+            assert_eq!(
+                resolve_routine_model(
+                    stored_model,
+                    "kimi-k2-6",
+                    Some(crate::llm::cli::CliKind::Claude)
+                ),
+                "__clovy_cli_engine__:claude"
+            );
+        }
+        // A model the routine names stays its model.
+        assert_eq!(
+            resolve_routine_model(
+                "explicit-model",
+                "kimi-k2-6",
+                Some(crate::llm::cli::CliKind::Codex)
+            ),
+            "explicit-model"
+        );
+    }
+
+    #[tokio::test]
+    async fn routines_follow_the_chat_engine_only_onto_claude_code_or_codex() {
+        use crate::llm::{cli::CliKind, registry::ProviderRef};
+        let _guard = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let mut settings = crate::providers::default_settings_for_tests();
+        for (chat, expected) in [
+            (
+                ProviderRef::Cli {
+                    id: CliKind::Claude,
+                },
+                Some(CliKind::Claude),
+            ),
+            (
+                ProviderRef::Cli { id: CliKind::Codex },
+                Some(CliKind::Codex),
+            ),
+            // Clovy cannot confine pi's tools for unattended work.
+            (ProviderRef::Cli { id: CliKind::Pi }, None),
+            (ProviderRef::Clovy, None),
+        ] {
+            settings.llm_usage.chat = chat;
+            crate::providers::replace_current_settings_for_tests(settings.clone());
+            assert_eq!(crate::providers::default_unattended_cli(), expected);
+        }
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
+    }
+
+    /// Persists like the app does (routine projection included).
+    struct RoutineSink {
+        repository: AgentRepository,
+    }
+
+    impl crate::chat_engine::FrameSink for RoutineSink {
+        async fn publish(&self, frame: crate::agent_runtime::protocol::RpcFrame) {
+            crate::agent_runtime::host::persist_runtime_event(&self.repository, &frame)
+                .await
+                .expect("event persists");
+        }
+    }
+
+    #[tokio::test]
+    async fn routine_on_a_cli_engine_runs_unattended_and_records_its_result() {
+        use crate::chat_engine::cli::TurnPolicy;
+        use crate::llm::cli::CliKind;
+        use std::os::unix::fs::PermissionsExt;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrations::run_migrations(&pool).await.unwrap();
+        let mut request = create_request("every 1h");
+        request.model = crate::chat_engine::engine_model_id(CliKind::Claude);
+        create(&pool, request).await.unwrap();
+        let claimed = claim(&pool, "routine-1", "manual", false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.model, "__clovy_cli_engine__:claude");
+
+        let repository = AgentRepository::new(pool.clone());
+        let workspace = tempfile::tempdir().unwrap();
+        let session_id = Uuid::new_v4().to_string();
+        let mut created = None;
+        let run_id = persist_claim_run(
+            &pool,
+            &repository,
+            &claimed,
+            &session_id,
+            workspace.path(),
+            &crate::db::repositories::timestamp(),
+            &mut created,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.as_deref(), Some(run_id.as_str()));
+
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("args");
+        let program = bin.path().join("claude");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{log}'\ncat > '{log}.stdin'\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-1\"}}'\necho '{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"Three notes mention the launch.\"}}]}}}}'\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Three notes mention the launch.\"}}'\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let context = crate::chat_engine::turn::TurnContext {
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            kind: CliKind::Claude,
+            program,
+            env: std::collections::BTreeMap::from([(
+                "PATH".to_string(),
+                "/usr/bin:/bin".to_string(),
+            )]),
+            workspace: workspace.path().to_path_buf(),
+            input: routine_cli_prompt(&claimed),
+            mcp: None,
+            policy: TurnPolicy::Unattended,
+        };
+        let sink = RoutineSink {
+            repository: repository.clone(),
+        };
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        crate::chat_engine::turn::execute_turn(&repository, &sink, context, receiver).await;
+
+        let args = std::fs::read_to_string(&log).unwrap();
+        assert!(args.lines().any(|line| line == "--tools"), "{args}");
+        assert!(
+            args.lines().any(|line| line == "--strict-mcp-config"),
+            "{args}"
+        );
+        let stdin = std::fs::read_to_string(format!("{}.stdin", log.display())).unwrap();
+        assert!(stdin.contains("running unattended"), "{stdin}");
+        assert!(stdin.ends_with("Summarize notes"), "{stdin}");
+
+        // The routine history records the CLI's result like a Clovy run's.
+        let runs = list_runs(&pool, Some("routine-1")).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "completed");
+        assert_eq!(runs[0].agent_run_id.as_deref(), Some(run_id.as_str()));
+        let answer = repository
+            .items(&session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|item| match item.payload {
+                AgentItemPayload::AssistantMessage(message) => Some(message.content),
+                _ => None,
+            });
+        assert_eq!(answer.as_deref(), Some("Three notes mention the launch."));
+        let routine = query("SELECT last_status, claim_token FROM routines WHERE id = 'routine-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(routine.get::<Option<String>, _>("claim_token"), None);
+        assert_eq!(
+            routine.get::<Option<String>, _>("last_status").as_deref(),
+            Some("ok")
+        );
     }
 }

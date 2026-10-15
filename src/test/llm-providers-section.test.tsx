@@ -291,6 +291,52 @@ describe("LlmProvidersSection", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("lists the agent CLIs first for chat and the Clovy agent last, as legacy", async () => {
+    render(<LlmProvidersSection />);
+    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
+
+    const chatSelect = screen.getByRole("combobox", { name: "Chat" }) as HTMLSelectElement;
+    const values = Array.from(chatSelect.options).map((option) => option.value);
+    expect(values.slice(0, 6)).toEqual([
+      "cli:claude",
+      "cli:codex",
+      "cli:pi",
+      "cli:agy",
+      "cli:cursor-agent",
+      "cli:copilot",
+    ]);
+    expect(values.at(-1)).toBe("clovy");
+    expect(chatSelect.options[chatSelect.options.length - 1]).toHaveTextContent(
+      "Clovy (legacy agent)",
+    );
+    // Notes keep Clovy API first: it is not the agent.
+    const notesSelect = screen.getByRole("combobox", { name: "Notes" }) as HTMLSelectElement;
+    expect(notesSelect.options[0]).toHaveValue("clovy");
+    expect(notesSelect.options[0]).toHaveTextContent(/^Clovy$/);
+  });
+
+  it("says why chat is on the legacy agent when no default CLI is installed", async () => {
+    mocks.llmProviders.mockResolvedValue({ ...sampleProviders, cliDefaultPending: true });
+    render(<LlmProvidersSection />);
+
+    expect(
+      await screen.findByText(
+        "Claude Code and Codex aren't installed, so chat uses the legacy Clovy agent. Install one and restart Clovy to make it the default.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("says nothing about the legacy agent once chat is on the default CLI", async () => {
+    mocks.llmProviders.mockResolvedValue({
+      ...sampleProviders,
+      usage: { ...sampleProviders.usage, chat: { kind: "cli", id: "claude" } },
+      cliDefaultPending: false,
+    });
+    render(<LlmProvidersSection />);
+    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
+    expect(screen.queryByText(/legacy Clovy agent/)).not.toBeInTheDocument();
+  });
+
   it("re-reads the registry when the text model changes elsewhere", async () => {
     mocks.llmProviders.mockResolvedValueOnce({
       ...sampleProviders,

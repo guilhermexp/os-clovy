@@ -72,6 +72,7 @@ import {
   queueCompanionFrontendRequest,
 } from "../lib/companion-frontend-router";
 import {
+  companionEngineClis,
   companionModelOptions,
   companionSessionModelSelection,
   companionStoredModelId,
@@ -1146,8 +1147,12 @@ export function App() {
     const publishModelChange = (event: Event) => {
       const detail = (event as CustomEvent<AgentSessionModelChangedDetail>).detail;
       if (!detail?.sessionId || !detail.storedModel) return;
-      void Promise.all([listProviderModels("generation"), providerModelSettings()])
-        .then(async ([catalog, settings]) => {
+      void Promise.all([
+        listProviderModels("generation"),
+        providerModelSettings(),
+        companionEngineClis(),
+      ])
+        .then(async ([catalog, settings, engines]) => {
           const session = await companionSessionInActivePartition(detail.sessionId);
           if (!session) return;
           const currentStoredModel = loadSessionModels()[session.id] ?? session.model;
@@ -1160,6 +1165,7 @@ export function App() {
                 currentStoredModel,
                 catalog.models,
                 settings.settings.costQuality,
+                engines,
               ),
             },
           });
@@ -1244,9 +1250,10 @@ export function App() {
             return;
           }
           case "modelsList": {
-            const [catalog, settings] = await Promise.all([
+            const [catalog, settings, engines] = await Promise.all([
               listProviderModels("generation"),
               providerModelSettings(),
+              companionEngineClis(),
             ]);
             await companionCompleteFrontendRequest(payload.operationId, {
               type: "models",
@@ -1254,6 +1261,7 @@ export function App() {
                 models: companionModelOptions(
                   catalog.models,
                   settings.settings.providerApiKeysConfigured,
+                  engines,
                 ),
               },
             });
@@ -1261,9 +1269,10 @@ export function App() {
           }
           case "sessionModelGet": {
             const { storedSessionId } = payload.intent.data;
-            const [catalog, settings] = await Promise.all([
+            const [catalog, settings, engines] = await Promise.all([
               listProviderModels("generation"),
               providerModelSettings(),
+              companionEngineClis(),
             ]);
             const session = (await companionScopedSessions()).find(
               (candidate) => candidate.id === storedSessionId,
@@ -1286,19 +1295,22 @@ export function App() {
                 loadSessionModels()[session.id] ?? session.model,
                 catalog.models,
                 settings.settings.costQuality,
+                engines,
               ),
             });
             return;
           }
           case "sessionModelSet": {
             const { storedSessionId, modelId } = payload.intent.data;
-            const [catalog, settings] = await Promise.all([
+            const [catalog, settings, engines] = await Promise.all([
               listProviderModels("generation"),
               providerModelSettings(),
+              companionEngineClis(),
             ]);
             const allowedModels = companionModelOptions(
               catalog.models,
               settings.settings.providerApiKeysConfigured,
+              engines,
             );
             if (!allowedModels.some((model) => model.id === modelId)) {
               await companionCompleteFrontendRequest(payload.operationId, {
@@ -1334,6 +1346,7 @@ export function App() {
                 storedModel,
                 catalog.models,
                 settings.settings.costQuality,
+                engines,
               ),
             });
             return;

@@ -12,6 +12,12 @@ These are not the tools of the Clovy MCP server for external clients
 `get_note`. The in-loop `get_note` mirrors that name and its paging idea on
 purpose.
 
+Sessions and routines on a CLI engine, the default since
+[ADR-0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md),
+use the MCP server's tools instead; a message that references a note asks the
+CLI to read it with that server's `get_note`
+([llm-providers.md](llm-providers.md#cli-chat-engine)).
+
 | Tool | Arguments | Returns |
 |---|---|---|
 | `search_june` | `query` | Up to 20 notes (`id`, `title`, `updatedAt`, and excerpts of `note` and `transcript`) and up to 20 dictations (`id`, excerpt of `text`, `language`, `createdAt`) of the active profile that contain `query` (case-insensitive for ASCII). Each excerpt is at most 4,000 characters around the first match, marked with `...` where clipped. |

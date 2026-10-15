@@ -22,7 +22,14 @@ contract or an ADR.
 - A concrete task may become a focused agent session without navigating away
   from Home. The focused session uses the normal new-session model, reasoning,
   and Runtime mode defaults, starts in the background, and appears in the
-  sidebar. Home's implicit speed-first route never leaks into task work.
+  sidebar. Home's implicit speed-first route never leaks into task work. The
+  new-session model is the default chat engine: Claude Code, else Codex
+  ([ADR-0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md),
+  `chat_default_engine`), so the handoff runs on that CLI; with neither
+  installed it stays on the legacy Clovy agent. The triage itself
+  (`june_home_chat`) stays on Clovy API: it only decides between a short reply
+  and a handoff, and keeping it keeps Home's streamed replies and inline
+  handoffs as they are.
 - A task handoff is shown inline in Home. Selecting it opens the focused
   session with the normal agent-session UI.
 - Home keeps lightweight suggestion nudges above the composer. They prefill the

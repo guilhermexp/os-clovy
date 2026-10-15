@@ -84,3 +84,53 @@ export function selectedChatEndpoint(
   }
   return endpoints.find((endpoint) => endpoint.modelId === engine.modelId);
 }
+
+/** The CLIs that are the default chat engine, in order of preference
+ * (ADR-0062): Claude Code, else Codex. */
+export const DEFAULT_CHAT_CLI_IDS = ["claude", "codex"] as const;
+
+export type ChatDefaultEngine = {
+  /** The session model id of the CLI chat runs on; null when chat is on the
+   * legacy Clovy agent or an endpoint (callers keep their own default). */
+  modelId: string | null;
+  cli: string | null;
+  /** Chat is on the legacy Clovy agent only because neither Claude Code nor
+   * Codex is installed. */
+  legacyFallback: boolean;
+};
+
+/** The engine new chat work starts on: sessions, note chat, Home handoffs,
+ * and companion sessions. Needs no network. */
+export async function chatDefaultEngine(): Promise<ChatDefaultEngine> {
+  const engine = await invoke<Partial<ChatDefaultEngine> | null | undefined>("chat_default_engine");
+  const modelId =
+    typeof engine?.modelId === "string" && engine.modelId.startsWith(CLI_ENGINE_MODEL_PREFIX)
+      ? engine.modelId
+      : null;
+  return {
+    modelId,
+    cli: modelId ? modelId.slice(CLI_ENGINE_MODEL_PREFIX.length) : null,
+    legacyFallback: engine?.legacyFallback === true,
+  };
+}
+
+/** The model id new chat work starts on: the default CLI engine when chat is
+ * on one, else `fallback` (also when the engine cannot be read). */
+export async function defaultChatModelId(fallback: string): Promise<string> {
+  try {
+    return (await chatDefaultEngine()).modelId ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** The CLI the engine picker marks as the default: Claude Code when it is
+ * installed, else Codex when it is, else Claude Code. */
+export function defaultChatCliId(
+  clis: ReadonlyArray<Pick<ChatEngineCliStatus, "id" | "installed">>,
+): string {
+  return (
+    DEFAULT_CHAT_CLI_IDS.find((id) => clis.some((cli) => cli.id === id && cli.installed)) ??
+    DEFAULT_CHAT_CLI_IDS[0]
+  );
+}

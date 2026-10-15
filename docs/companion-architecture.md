@@ -78,11 +78,17 @@ start a recording, read arbitrary filesystem contents, or use provider keys. A
 linked device can list bounded metadata only inside roots the signed-in Mac user
 explicitly grants, and a selected file reaches Clovy only through the normal
 agent attachment path. The companion cannot download Mac file contents. It can
-select only Auto or a model in the bounded recommended set currently available
-from the desktop's live catalog. A model change made during a run is staged for
+select an agent CLI installed on the Mac (listed first, the default one, Claude
+Code or else Codex, on top), or, on the legacy Clovy agent, Auto or a model in
+the bounded recommended set currently available from the desktop's live
+catalog. A session the phone starts is created on the default chat engine
+([ADR-0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md));
+CLI options travel with `routing: "remote"`, the wire's only fixed-choice
+value. A model change made during a run is staged for
 the next run and cannot alter the in-flight provider request. When the desktop's
 default-off remote-approval setting is enabled, a linked companion may approve
-one exact, expiring Computer use interruption under ADR-0053; it receives no
+one exact, expiring Computer use interruption under ADR-0053 (only sessions on
+the legacy Clovy agent have Computer use); it receives no
 standing grant and cannot widen the Rust desktop policy. Desktop offers that
 path only to an authenticated live peer whose Noise handshake advertises
 `computerUseApprove`, binds the interruption id to its tool-call id and exact
