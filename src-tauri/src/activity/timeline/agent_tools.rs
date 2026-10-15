@@ -4,7 +4,7 @@
 //! and answer through the same filtered queries as the "Today" view, so
 //! exclusions and retention apply to the agent too.
 
-use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde_json::{json, Value};
 
 use super::db::{TimelineGapDto, TimelineSessionDto};
@@ -12,6 +12,7 @@ use super::stats::TimelineStatsDto;
 use super::{search_view, timeline_view};
 use crate::activity::settings::ActivitySettings;
 use crate::activity::store::ActivityStore;
+use crate::day_intelligence::schedule::{self, LocalZone, SystemZone};
 use crate::domain::types::AppError;
 
 pub const SEARCH_ACTIVITY: &str = "search_activity";
@@ -89,12 +90,24 @@ pub(crate) fn minutes(ms: i64) -> f64 {
     (ms as f64 / 60_000.0 * 10.0).round() / 10.0
 }
 
-pub(crate) fn local_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
-    let today = now.with_timezone(&Local).date_naive();
-    Local
-        .from_local_datetime(&today.and_time(NaiveTime::MIN))
-        .earliest()
-        .map_or(now - Duration::hours(24), |at| at.with_timezone(&Utc))
+pub(crate) fn local_at(at: DateTime<Utc>) -> String {
+    at.with_timezone(&Local).to_rfc3339()
+}
+
+/// The `from` / `to` arguments of a period: local midnight today (in `zone`)
+/// and now by default; `to` must be after `from`.
+pub(crate) fn range(
+    arguments: &Value,
+    zone: &dyn LocalZone,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), AppError> {
+    let from =
+        time_argument(arguments, "from")?.unwrap_or_else(|| schedule::local_midnight(zone, now, 0));
+    let to = time_argument(arguments, "to")?.unwrap_or(now);
+    if to <= from {
+        return Err(invalid("`to` must be after `from`"));
+    }
+    Ok((from, to))
 }
 
 pub(crate) fn session_json(session: &TimelineSessionDto) -> Value {
@@ -155,18 +168,14 @@ async fn get_timeline(
     arguments: &Value,
     now: DateTime<Utc>,
 ) -> Result<Value, AppError> {
-    let from = time_argument(arguments, "from")?.unwrap_or_else(|| local_midnight(now));
-    let to = time_argument(arguments, "to")?.unwrap_or(now);
-    if to <= from {
-        return Err(invalid("`to` must be after `from`"));
-    }
+    let (from, to) = range(arguments, &SystemZone, now)?;
     let view = timeline_view(store, settings, from, to, now)
         .await
         .map_err(|error| AppError::new("activity_timeline_failed", error.to_string()))?;
     let truncated = view.sessions.len() > MAX_SESSIONS || view.gaps.len() > MAX_GAPS;
     Ok(json!({
-        "from": from.with_timezone(&Local).to_rfc3339(),
-        "to": to.with_timezone(&Local).to_rfc3339(),
+        "from": local_at(from),
+        "to": local_at(to),
         "sessions": view.sessions.iter().take(MAX_SESSIONS).map(session_json).collect::<Vec<_>>(),
         "gaps": view.gaps.iter().take(MAX_GAPS).map(gap_json).collect::<Vec<_>>(),
         "totalSessions": view.sessions.len(),
@@ -219,6 +228,7 @@ mod tests {
     use crate::activity::key::MemoryKeyStore;
     use crate::activity::store::{NewFrame, TextSource, ACTIVITY_DB_FILE};
     use crate::activity::timeline::etl::run_pass;
+    use chrono::{Duration, TimeZone};
 
     fn at(hour: u32, minute: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 1, hour, minute, 0).unwrap()
@@ -269,6 +279,30 @@ mod tests {
         }
         run_pass(&store, at(9, 8), &[]).await.unwrap();
         (dir, store)
+    }
+
+    /// Santiago skips midnight on 2026-09-06: a period without `from` starts
+    /// at 01:00 that day, not 24 hours before now.
+    #[test]
+    fn a_default_period_starts_at_the_first_minute_of_a_day_without_midnight() {
+        use crate::day_intelligence::schedule::NamedZone;
+        use chrono_tz::America::Santiago;
+        let now = Santiago
+            .with_ymd_and_hms(2026, 9, 6, 15, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let (from, to) = range(&json!({}), &NamedZone(Santiago), now).unwrap();
+        assert_eq!(
+            from,
+            Santiago.with_ymd_and_hms(2026, 9, 6, 1, 0, 0).unwrap()
+        );
+        assert_eq!(to, now);
+        assert!(range(
+            &json!({ "to": "2026-09-06T00:00:00Z" }),
+            &NamedZone(Santiago),
+            now
+        )
+        .is_err());
     }
 
     #[test]

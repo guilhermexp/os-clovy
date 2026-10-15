@@ -23,12 +23,13 @@ pub mod summarize;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Days, Local, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Notify;
 
 use crate::activity::engine::ActivityShared;
+use crate::day_intelligence::schedule::{self, LocalZone, SystemZone};
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use sources::SourceRoots;
@@ -245,18 +246,8 @@ pub fn setup(app: &mut tauri::App) {
 }
 
 /// Local midnight `BACKFILL_DAYS - 1` days before `now`.
-pub fn window_start(now: DateTime<Local>) -> DateTime<Utc> {
-    let day = now
-        .date_naive()
-        .checked_sub_days(Days::new(BACKFILL_DAYS - 1))
-        .unwrap_or(now.date_naive());
-    Local
-        .from_local_datetime(&day.and_time(NaiveTime::MIN))
-        .earliest()
-        .map_or_else(
-            || now.with_timezone(&Utc),
-            |start| start.with_timezone(&Utc),
-        )
+pub fn window_start(zone: &dyn LocalZone, now: DateTime<Utc>) -> DateTime<Utc> {
+    schedule::local_midnight(zone, now, BACKFILL_DAYS - 1)
 }
 
 async fn run(
@@ -276,7 +267,7 @@ async fn run(
                 None => wait = STORE_RETRY,
                 Some(store) => {
                     let now = Utc::now();
-                    let window = window_start(Local::now());
+                    let window = window_start(&SystemZone, now);
                     let mut changed = false;
                     match scanner
                         .scan(&store, &settings.coding_agents, now, window)
@@ -337,15 +328,29 @@ async fn run(
 mod tests {
     use super::*;
 
+    use crate::day_intelligence::schedule::NamedZone;
+    use chrono::TimeZone;
+    use chrono_tz::America::{Santiago, Sao_Paulo};
+
     #[test]
     fn window_starts_at_local_midnight_of_yesterday() {
-        let now = Local.with_ymd_and_hms(2026, 10, 4, 15, 30, 0).unwrap();
-        let start = window_start(now).with_timezone(&Local);
+        let now = Sao_Paulo.with_ymd_and_hms(2026, 10, 4, 15, 30, 0).unwrap();
+        let start = window_start(&NamedZone(Sao_Paulo), now.with_timezone(&Utc));
         assert_eq!(
-            start.naive_local(),
-            chrono::NaiveDate::from_ymd_opt(2026, 10, 3)
-                .unwrap()
-                .and_time(NaiveTime::MIN)
+            start,
+            Sao_Paulo.with_ymd_and_hms(2026, 10, 3, 0, 0, 0).unwrap()
+        );
+    }
+
+    /// Santiago skips midnight on 2026-09-06: the window starting that day
+    /// starts at 01:00, not at "now".
+    #[test]
+    fn a_skipped_midnight_starts_the_window_at_the_first_minute_that_exists() {
+        let now = Santiago.with_ymd_and_hms(2026, 9, 7, 15, 0, 0).unwrap();
+        let start = window_start(&NamedZone(Santiago), now.with_timezone(&Utc));
+        assert_eq!(
+            start,
+            Santiago.with_ymd_and_hms(2026, 9, 6, 1, 0, 0).unwrap()
         );
     }
 

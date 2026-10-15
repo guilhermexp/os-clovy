@@ -13,12 +13,12 @@ use sqlx_sqlite::SqlitePool;
 use crate::activity::settings::ActivitySettings;
 use crate::activity::store::ActivityStore;
 use crate::activity::timeline::agent_tools::{
-    self, gap_json, local, local_midnight, minutes, session_json, stats_json, time_argument,
+    self, gap_json, local, local_at, minutes, range, session_json, stats_json,
 };
-use crate::activity::timeline::context::ContextKind;
 use crate::activity::timeline::{
-    db, retention_floor, session_excluded, stats, timeline_view, TimelineView,
+    retention_floor, stats, timeline_view, visible_session_detail, TimelineView,
 };
+use crate::day_intelligence::schedule::SystemZone;
 use crate::db::repositories::{
     dictation_history_cutoff_timestamp, Repositories, DICTATION_HISTORY_RETENTION_DAYS,
 };
@@ -574,7 +574,7 @@ async fn activity_tool(
     }
     match name {
         GET_ACTIVITY_STATS => {
-            let (from, to) = range(arguments, now)?;
+            let (from, to) = range(arguments, &SystemZone, now)?;
             let view = view(store, settings, from, to, now).await?;
             let mut value = stats_json(&view.stats);
             value["from"] = json!(local_at(from));
@@ -591,22 +591,6 @@ async fn activity_tool(
             format!("Unknown activity tool `{name}`."),
         )),
     }
-}
-
-fn range(
-    arguments: &Value,
-    now: DateTime<Utc>,
-) -> Result<(DateTime<Utc>, DateTime<Utc>), AppError> {
-    let from = time_argument(arguments, "from")?.unwrap_or_else(|| local_midnight(now));
-    let to = time_argument(arguments, "to")?.unwrap_or(now);
-    if to <= from {
-        return Err(invalid("`to` must be after `from`"));
-    }
-    Ok((from, to))
-}
-
-fn local_at(at: DateTime<Utc>) -> String {
-    at.with_timezone(&Local).to_rfc3339()
 }
 
 async fn view(
@@ -650,7 +634,7 @@ async fn app_usage(
     arguments: &Value,
     now: DateTime<Utc>,
 ) -> Result<Value, AppError> {
-    let (from, to) = range(arguments, now)?;
+    let (from, to) = range(arguments, &SystemZone, now)?;
     let limit = bounded(arguments, "limit", DEFAULT_APP_USAGE, 1, MAX_APP_USAGE) as usize;
     let view = view(store, settings, from, to, now).await?;
     let mut apps: Vec<(String, i64, u32)> = Vec::new();
@@ -698,35 +682,13 @@ async fn session_detail(
             "This session is not in the activity history.",
         )
     };
-    let detail = db::session_detail(store, id)
+    let detail = visible_session_detail(store, settings, id, now)
         .await
         .map_err(|error| AppError::new("activity_session_failed", error.to_string()))?
         .ok_or_else(missing)?;
-    let session = &detail.session;
-    let domain = (session.context_kind == Some(ContextKind::Domain))
-        .then_some(session.context.as_deref())
-        .flatten();
-    let expired = crate::activity::store::parse_time(&session.ended_at)
-        .map_or(true, |ended| ended < retention_floor(settings, now));
-    if expired
-        || session_excluded(
-            &session.app_name,
-            session.bundle_id.as_deref(),
-            domain,
-            None,
-            settings,
-        )
-    {
-        return Err(missing());
-    }
     let windows: Vec<Value> = detail
         .windows
         .iter()
-        .filter(|window| {
-            !window.browser_url.as_deref().is_some_and(|url| {
-                session_excluded(&session.app_name, None, None, Some(url), settings)
-            })
-        })
         .map(|window| {
             json!({
                 "windowTitle": window.window_title,
@@ -737,17 +699,10 @@ async fn session_detail(
             })
         })
         .collect();
-    // The excerpt can come from any window of the session; drop it when an
-    // excluded URL was among them.
-    let text_excerpt = if windows.len() == detail.windows.len() {
-        detail.text_excerpt.clone()
-    } else {
-        None
-    };
     Ok(json!({
-        "session": session_json(session),
+        "session": session_json(&detail.session),
         "windows": windows,
-        "textExcerpt": text_excerpt,
+        "textExcerpt": detail.text_excerpt,
     }))
 }
 
@@ -759,7 +714,7 @@ async fn coding_agent_sessions(
     arguments: &Value,
     now: DateTime<Utc>,
 ) -> Result<Value, AppError> {
-    let (from, to) = range(arguments, now)?;
+    let (from, to) = range(arguments, &SystemZone, now)?;
     let limit = bounded(
         arguments,
         "limit",

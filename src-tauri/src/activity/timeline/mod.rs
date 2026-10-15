@@ -33,7 +33,7 @@ use super::engine::ActivityShared;
 use super::filter::{app_is_ignored, url_matches_domains};
 use super::schedule::{CaptureState, StoreStatus};
 use super::settings::ActivitySettings;
-use super::store::{timestamp, ActivityStore, StoreError, TIMELINE_CONSUMER};
+use super::store::{parse_time, timestamp, ActivityStore, StoreError, TIMELINE_CONSUMER};
 use super::{ActivityRuntime, ActivityState};
 use crate::domain::types::AppError;
 use context::ContextKind;
@@ -137,6 +137,50 @@ pub(crate) fn session_excluded(
 
 pub(crate) fn retention_floor(settings: &ActivitySettings, now: DateTime<Utc>) -> DateTime<Utc> {
     now - Duration::days(i64::from(settings.retention_days))
+}
+
+/// A session's detail as the "Today" view, the agent, and the MCP server may
+/// show it: `None` when it is gone, ended before the retention period, or
+/// excluded (app or domain). Windows on excluded URLs are dropped, and the
+/// text excerpt with them, since it can come from any window of the session.
+pub(crate) async fn visible_session_detail(
+    store: &ActivityStore,
+    settings: &ActivitySettings,
+    id: i64,
+    now: DateTime<Utc>,
+) -> Result<Option<TimelineSessionDetailDto>, StoreError> {
+    let Some(mut detail) = db::session_detail(store, id).await? else {
+        return Ok(None);
+    };
+    let session = &detail.session;
+    let domain = (session.context_kind == Some(ContextKind::Domain))
+        .then_some(session.context.as_deref())
+        .flatten();
+    let expired =
+        parse_time(&session.ended_at).map_or(true, |ended| ended < retention_floor(settings, now));
+    if expired
+        || session_excluded(
+            &session.app_name,
+            session.bundle_id.as_deref(),
+            domain,
+            None,
+            settings,
+        )
+    {
+        return Ok(None);
+    }
+    let app_name = session.app_name.clone();
+    let shown = detail.windows.len();
+    detail.windows.retain(|window| {
+        !window
+            .browser_url
+            .as_deref()
+            .is_some_and(|url| session_excluded(&app_name, None, None, Some(url), settings))
+    });
+    if detail.windows.len() != shown {
+        detail.text_excerpt = None;
+    }
+    Ok(Some(detail))
 }
 
 pub async fn timeline_view(
@@ -255,7 +299,7 @@ pub async fn search_view(
 }
 
 fn parse_request_time(value: &str, field: &str) -> Result<DateTime<Utc>, AppError> {
-    crate::activity::store::parse_time(value).ok_or_else(|| {
+    parse_time(value).ok_or_else(|| {
         AppError::new(
             "activity_timeline_invalid_range",
             format!("`{field}` must be an RFC 3339 timestamp"),
@@ -328,12 +372,12 @@ async fn meeting_intervals(app: &AppHandle, since: DateTime<Utc>) -> Vec<Interva
     rows.iter()
         .filter_map(|row| {
             use sqlx::row::Row;
-            let start = crate::activity::store::parse_time(row.try_get::<&str, _>(0).ok()?)?;
+            let start = parse_time(row.try_get::<&str, _>(0).ok()?)?;
             let end = row
                 .try_get::<Option<&str>, _>(1)
                 .ok()
                 .flatten()
-                .and_then(crate::activity::store::parse_time)
+                .and_then(parse_time)
                 .unwrap_or(now);
             (end >= since).then_some((start, end))
         })
@@ -358,7 +402,7 @@ async fn meeting_window_start(
         .frames_after(cursor.last_frame_id, 1)
         .await?
         .first()
-        .and_then(|frame| crate::activity::store::parse_time(&frame.captured_at));
+        .and_then(|frame| parse_time(&frame.captured_at));
     Ok([open_started, first_unprocessed]
         .into_iter()
         .flatten()
@@ -506,25 +550,10 @@ pub async fn activity_timeline_session(
     let StoreAccess::Open(store) = store_access(runtime).await else {
         return Err(missing());
     };
-    let detail = db::session_detail(&store, request.id)
+    visible_session_detail(&store, &runtime.shared.settings(), request.id, Utc::now())
         .await
         .map_err(|error| AppError::new("activity_session_failed", error.to_string()))?
-        .ok_or_else(missing)?;
-    let settings = runtime.shared.settings();
-    let session = &detail.session;
-    let domain = (session.context_kind == Some(ContextKind::Domain))
-        .then_some(session.context.as_deref())
-        .flatten();
-    if session_excluded(
-        &session.app_name,
-        session.bundle_id.as_deref(),
-        domain,
-        None,
-        &settings,
-    ) {
-        return Err(missing());
-    }
-    Ok(detail)
+        .ok_or_else(missing)
 }
 
 #[tauri::command]
@@ -695,6 +724,80 @@ mod view_tests {
             enabled: true,
             ..ActivitySettings::default()
         }
+    }
+
+    /// The one detail path (the "Today" view's command and the MCP server):
+    /// past retention or excluded it is gone, and a window on an excluded
+    /// URL takes the text excerpt with it.
+    #[tokio::test]
+    async fn session_detail_applies_retention_and_url_exclusions() {
+        let (_dir, store) = open_store().await;
+        for second in 0..5 {
+            frame(
+                &store,
+                at(9, 0, second * 2),
+                "Notion",
+                "Plan",
+                None,
+                "roadmap draft",
+            )
+            .await;
+        }
+        for second in 5..10 {
+            let url = Some("https://bank.example/statement");
+            frame(
+                &store,
+                at(9, 0, second * 2),
+                "Notion",
+                "Bank",
+                url,
+                "balance 42",
+            )
+            .await;
+        }
+        etl::run_pass(&store, at(9, 1, 0), &[]).await.unwrap();
+        let id = timeline_view(&store, &settings(), at(0, 0, 0), at(23, 0, 0), at(9, 1, 0))
+            .await
+            .unwrap()
+            .sessions[0]
+            .id;
+        let now = at(9, 1, 0);
+        let shown = visible_session_detail(&store, &settings(), id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.windows.len(), 2);
+        assert!(shown.text_excerpt.is_some());
+
+        let excluding = ActivitySettings {
+            ignored_domains: vec!["bank.example".into()],
+            ..settings()
+        };
+        let filtered = visible_session_detail(&store, &excluding, id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let titles: Vec<_> = filtered
+            .windows
+            .iter()
+            .map(|window| window.window_title.as_deref())
+            .collect();
+        assert_eq!(titles, vec![Some("Plan")]);
+        assert_eq!(filtered.text_excerpt, None);
+
+        let ignoring_app = ActivitySettings {
+            ignored_apps: vec!["Notion".into()],
+            ..settings()
+        };
+        assert!(visible_session_detail(&store, &ignoring_app, id, now)
+            .await
+            .unwrap()
+            .is_none());
+        let later = now + Duration::days(i64::from(settings().retention_days) + 1);
+        assert!(visible_session_detail(&store, &settings(), id, later)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
