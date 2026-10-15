@@ -13,8 +13,11 @@ use clovy_lib::activity::key::{ActivityKeyStore, KeyStoreError};
 use clovy_lib::activity::settings::ActivitySettings;
 use clovy_lib::activity::store::{ActivityStore, NewFrame, TextSource, ACTIVITY_DB_FILE};
 use clovy_lib::activity::timeline::etl::run_pass;
+use clovy_lib::agent_runtime::domain::AgentSafetyMode;
 use clovy_lib::db::repositories::Repositories;
-use clovy_lib::mcp_server::tools::{ActivityAccess, McpData};
+use clovy_lib::llm::cli::CliKind;
+use clovy_lib::mcp_server::tools::{ActivityAccess, McpData, ToolCtx};
+use clovy_lib::mcp_server::turns::{TurnBinding, TurnRegistry};
 use clovy_lib::mcp_server::{channel, protocol, stdio};
 use serde_json::{json, Value};
 use sqlx::query::query;
@@ -175,10 +178,20 @@ impl Client {
     /// Spawns with `env` added; the production-data opt-in is always
     /// cleared first so the host environment cannot change the outcome.
     async fn spawn_with_env(dir: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Self {
+        Self::spawn_with(dir, &[], env).await
+    }
+
+    /// `clovy-mcp --dir <dir> --turn <token>`, as a Clovy CLI turn spawns it.
+    async fn spawn_for_turn(dir: &Path, token: &str) -> Self {
+        Self::spawn_with(dir, &["--turn", token], &[]).await
+    }
+
+    async fn spawn_with(dir: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_clovy-mcp"));
         command
             .arg("--dir")
             .arg(dir)
+            .args(args)
             .env_remove("OS_CLOVY_USE_PROD_DATA_DIR")
             .env_remove("OS_JUNE_USE_PROD_DATA_DIR")
             .envs(env.iter().copied())
@@ -469,5 +482,97 @@ async fn mcp_server_debug_binary_refuses_the_installed_app_data() {
         .await
         .is_ok());
     allowed.close().await;
+    listener.stop();
+}
+
+/// The app side with turn bindings, as the app serves CLI turns.
+fn turn_handler(notes: SqlitePool) -> channel::TurnHandler {
+    Arc::new(move |message: Value, binding: Option<Arc<TurnBinding>>| {
+        let data = McpData {
+            notes: notes.clone(),
+            profile: "default".into(),
+            memory_enabled: true,
+            activity: ActivityAccess::Off,
+            now: at(9, 8),
+        };
+        Box::pin(async move {
+            let ctx = ToolCtx {
+                data: &data,
+                app: None,
+                binding: binding.as_deref(),
+            };
+            protocol::handle_in(&ctx, &message).await
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_server_binary_binds_a_turn_until_it_is_revoked() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let turns = TurnRegistry::default();
+    let listener =
+        channel::Listener::start_with_turns(&dir, turn_handler(notes_pool().await), turns.clone())
+            .await
+            .unwrap();
+    let token = turns.issue(TurnBinding {
+        session_id: "session-1".into(),
+        run_id: "run-1".into(),
+        cli: CliKind::Codex,
+        safety_mode: AgentSafetyMode::Sandboxed,
+        attended: true,
+        surface: "chat".into(),
+    });
+
+    // A live turn: the compiled relay is accepted and serves the catalog.
+    let mut bound = Client::spawn_for_turn(&dir, &token).await;
+    let listed = bound.request("tools/list", json!({})).await;
+    assert!(listed["result"]["tools"].as_array().is_some(), "{listed}");
+    assert!(bound
+        .call("search_notes", json!({ "query": "zephyr" }))
+        .await
+        .is_ok());
+
+    // The run ends: the open relay and a new one with the same token both
+    // answer that the turn ended, and no tool runs.
+    assert_eq!(turns.revoke_run("run-1"), 1);
+    for _ in 0..50 {
+        if bound
+            .call("search_notes", json!({ "query": "zephyr" }))
+            .await
+            == Err(stdio::TURN_EXPIRED_MESSAGE.to_string())
+        {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+    }
+    assert_eq!(
+        bound
+            .call("search_notes", json!({ "query": "zephyr" }))
+            .await,
+        Err(stdio::TURN_EXPIRED_MESSAGE.to_string())
+    );
+    bound.close().await;
+    let mut reused = Client::spawn_for_turn(&dir, &token).await;
+    assert_eq!(
+        reused
+            .call("search_notes", json!({ "query": "zephyr" }))
+            .await,
+        Err(stdio::TURN_EXPIRED_MESSAGE.to_string())
+    );
+    reused.close().await;
+
+    // An empty `--turn` is a usage error, not an unbound connection.
+    let status = Command::new(env!("CARGO_BIN_EXE_clovy-mcp"))
+        .arg("--dir")
+        .arg(&dir)
+        .arg("--turn")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
     listener.stop();
 }

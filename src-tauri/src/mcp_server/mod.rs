@@ -6,7 +6,8 @@
 //!
 //! Layout: `channel` (Unix socket + installation secret), `stdio` (the
 //! `clovy-mcp` relay binary), `protocol` (MCP JSON-RPC and resources),
-//! `tools` (the read-only tools). The binary never opens a database: it
+//! `tools` (tool groups: the read group for every client, bound-only groups
+//! for CLI turns), `turns` (which CLI turn a connection belongs to). The binary never opens a database: it
 //! relays to this process, which answers with the same queries and filters
 //! the app uses.
 
@@ -19,6 +20,10 @@ pub mod stdio;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod tools;
+#[cfg(all(test, unix))]
+#[path = "turn_tests.rs"]
+mod turn_tests;
+pub mod turns;
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +33,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::domain::types::AppError;
-use tools::{ActivityAccess, McpData};
+use tools::{ActivityAccess, McpData, ToolCtx};
 
 /// The relay binary (`[[bin]]` in Cargo.toml, bundled under
 /// `Resources/native/bin/`).
@@ -48,6 +53,19 @@ pub fn launch(binary: &Path, channel_dir: &Path) -> McpLaunch {
     McpLaunch {
         command: binary.to_path_buf(),
         args: vec!["--dir".into(), channel_dir.display().to_string()],
+    }
+}
+
+impl McpLaunch {
+    /// The same command bound to a CLI turn (`--turn <token>`, a token from
+    /// [`turns::TurnRegistry::issue`]).
+    pub fn for_turn(&self, token: &str) -> McpLaunch {
+        let mut args = self.args.clone();
+        args.extend(["--turn".to_string(), token.to_string()]);
+        McpLaunch {
+            command: self.command.clone(),
+            args,
+        }
     }
 }
 
@@ -156,9 +174,13 @@ pub fn child_process_launch(app: &AppHandle) -> Result<McpLaunch, AppError> {
 }
 
 /// The running listener and the last start error, behind an async lock so
-/// start and stop never interleave.
+/// start and stop never interleave, and the live CLI turns (kept across
+/// restarts of the listener).
 #[derive(Default)]
-pub struct McpServerState(tokio::sync::Mutex<Slot>);
+pub struct McpServerState {
+    slot: tokio::sync::Mutex<Slot>,
+    turns: turns::TurnRegistry,
+}
 
 #[derive(Default)]
 struct Slot {
@@ -168,20 +190,27 @@ struct Slot {
 }
 
 impl McpServerState {
+    /// The live CLI turns: the chat engine issues and revokes their tokens.
+    pub fn turns(&self) -> &turns::TurnRegistry {
+        &self.turns
+    }
+
     /// Starts the listener in the directory `dir` resolves, with `handler`,
     /// when `enabled` and none runs; stops it when not `enabled`. `dir` and
     /// `handler` run only when the listener starts.
     #[cfg(unix)]
-    pub(crate) async fn apply_switch(
+    pub(crate) async fn apply_switch<H>(
         &self,
         enabled: bool,
         dir: impl FnOnce() -> Result<PathBuf, AppError>,
-        handler: impl FnOnce() -> channel::Handler,
-    ) {
-        let mut slot = self.0.lock().await;
+        handler: impl FnOnce() -> H,
+    ) where
+        H: Into<channel::Service>,
+    {
+        let mut slot = self.slot.lock().await;
         if enabled && slot.listener.is_none() {
             let started = match dir() {
-                Ok(dir) => channel::Listener::start(&dir, handler())
+                Ok(dir) => channel::Listener::start_with_turns(&dir, handler(), self.turns.clone())
                     .await
                     .map_err(|error| error.to_string()),
                 Err(error) => Err(error.message),
@@ -207,7 +236,7 @@ impl McpServerState {
 
     /// Whether the listener runs, and the last start error, read together.
     pub(crate) async fn listener_status(&self) -> (bool, Option<String>) {
-        let slot = self.0.lock().await;
+        let slot = self.slot.lock().await;
         #[cfg(unix)]
         let running = slot.listener.is_some();
         #[cfg(not(unix))]
@@ -271,7 +300,7 @@ async fn reconcile(app: &AppHandle) {
     #[cfg(not(unix))]
     {
         let _ = enabled;
-        state.0.lock().await.error = None;
+        state.slot.lock().await.error = None;
     }
 }
 
@@ -304,12 +333,19 @@ pub async fn mcp_server_set_enabled(
 }
 
 #[cfg(unix)]
-fn app_handler(app: AppHandle) -> channel::Handler {
-    std::sync::Arc::new(move |message: Value| {
+fn app_handler(app: AppHandle) -> channel::TurnHandler {
+    std::sync::Arc::new(move |message: Value, binding| {
         let app = app.clone();
         Box::pin(async move {
             match app_data(&app, &message).await {
-                Ok(data) => protocol::handle(&data, &message).await,
+                Ok(data) => {
+                    let ctx = ToolCtx {
+                        data: &data,
+                        app: Some(&app),
+                        binding: binding.as_deref(),
+                    };
+                    protocol::handle_in(&ctx, &message).await
+                }
                 Err(error) => protocol::request_id(&message).map(|id| {
                     protocol::error_response(id, protocol::SERVER_UNAVAILABLE, error.message)
                 }),

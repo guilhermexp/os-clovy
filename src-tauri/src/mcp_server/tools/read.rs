@@ -1,9 +1,10 @@
-//! The Clovy MCP server's tools: read-only views of the current data
-//! partition's notes, dictations, and memories, and (only while capture is
-//! on) of the installation's activity timeline and coding-agent blocks
-//! (activity has no partition, ADR-0059). Names are fixed in the
-//! `clovy-mcp-server` spec of the OpenSpec change `add-activity-intelligence`;
-//! `docs/mcp-server.md` lists them with their arguments and limits.
+//! The read group: read-only views of the current data partition's notes,
+//! dictations, and memories, and (only while capture is on) of the
+//! installation's activity timeline and coding-agent blocks (activity has no
+//! partition, ADR-0059). Offered to every connection, bound to a turn or
+//! not. Names are fixed in the `clovy-mcp-server` spec of the OpenSpec change
+//! `add-activity-intelligence`; `docs/mcp-server.md` lists them with their
+//! arguments and limits.
 
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use serde_json::{json, Value};
@@ -30,6 +31,8 @@ use crate::db::repositories::{
 };
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;
+
+use super::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 
 pub const SEARCH_NOTES: &str = "search_notes";
 pub const GET_NOTE: &str = "get_note";
@@ -77,46 +80,38 @@ const DAY_SUMMARY_NARRATIVE_MAX_CHARS: usize = 20_000;
 /// How far back `get_active_session` looks for the session going on now.
 const ACTIVE_LOOKBACK_HOURS: i64 = 12;
 
-/// What one MCP request may read, resolved by the app per message
-/// (`super::app_data`) or built directly by tests.
-pub struct McpData {
-    /// The main database (`notes.sqlite3`).
-    pub notes: SqlitePool,
-    /// The current data partition: notes, dictations, and memories queries
-    /// are limited to it (activity is not partitioned).
-    pub profile: String,
-    /// Settings, Memory: `list_memories` refuses while memory is off.
-    pub memory_enabled: bool,
-    pub activity: ActivityAccess,
-    pub now: DateTime<Utc>,
-}
-
-pub enum ActivityAccess {
-    /// Capture is off: activity tools are not offered and refuse calls.
-    Off,
-    /// Capture is on; the store was not opened for this message.
-    On,
-    /// Capture is on and the store is open for an activity tool call.
-    Open {
-        store: ActivityStore,
-        settings: ActivitySettings,
-    },
-    /// Capture is on but the history cannot be read right now.
-    Unavailable(AppError),
-}
-
-impl ActivityAccess {
-    pub fn offered(&self) -> bool {
-        !matches!(self, ActivityAccess::Off)
-    }
-}
-
 pub fn is_activity_tool(name: &str) -> bool {
     ACTIVITY_TOOLS.contains(&name)
 }
 
-pub fn is_known_tool(name: &str) -> bool {
+fn is_read_tool(name: &str) -> bool {
     DATA_TOOLS.contains(&name) || is_activity_tool(name)
+}
+
+/// The tools of this file as a [`ToolGroup`].
+pub struct ReadTools;
+
+impl ToolGroup for ReadTools {
+    fn needs_turn(&self) -> bool {
+        false
+    }
+
+    fn owns(&self, name: &str) -> bool {
+        is_read_tool(name)
+    }
+
+    fn descriptors(&self, ctx: &ToolCtx<'_>) -> Vec<Value> {
+        descriptors(&ctx.data.activity)
+    }
+
+    fn call<'a>(
+        &'a self,
+        ctx: &'a ToolCtx<'a>,
+        name: &'a str,
+        arguments: &'a Value,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(call(ctx.data, name, arguments))
+    }
 }
 
 fn read_only(name: &str, description: &str, input_schema: Value) -> Value {
@@ -141,7 +136,7 @@ fn range_schema() -> Value {
 
 /// The `tools/list` catalog: data tools always, activity tools only while
 /// capture is on.
-pub fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
+fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
     let mut tools = vec![
         read_only(
             SEARCH_NOTES,
@@ -292,7 +287,7 @@ pub fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
 }
 
 /// Runs a known tool. Errors become `isError` tool results.
-pub async fn call(data: &McpData, name: &str, arguments: &Value) -> Result<Value, AppError> {
+async fn call(data: &McpData, name: &str, arguments: &Value) -> Result<Value, AppError> {
     match name {
         SEARCH_NOTES => search_notes(data, arguments).await,
         GET_NOTE => get_note(data, arguments).await,

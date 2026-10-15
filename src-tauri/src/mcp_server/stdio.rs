@@ -7,11 +7,11 @@
 //! the same message.
 //!
 //! Usage: `clovy-mcp --dir "<app data dir>/mcp"` (the configuration snippets
-//! in Settings, Agent carry the right directory).
+//! in Settings, Agent carry the right directory). A Clovy CLI chat turn adds
+//! `--turn <token>`: the connection is then bound to that turn
+//! (`super::turns`), and once the turn ends every call answers that it has.
 
-use std::io::BufRead;
-#[cfg(not(unix))]
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -26,6 +26,8 @@ pub const DROPPED_MESSAGE: &str =
     "Clovy closed the connection before answering (the MCP server was turned off or Clovy quit).";
 pub const PRODUCTION_DATA_MESSAGE: &str = "This development build of clovy-mcp does not connect to the installed Clovy's data. Copy the configuration from the development app, or set OS_CLOVY_USE_PROD_DATA_DIR=1 to allow it.";
 pub const TOO_LONG_MESSAGE: &str = "The message is longer than 4 MiB.";
+pub const TURN_EXPIRED_MESSAGE: &str =
+    "This Clovy chat turn has ended, so its Clovy tools no longer answer (turn_expired).";
 
 /// The `--dir` argument.
 pub fn parse_dir(args: &[String]) -> Result<PathBuf, String> {
@@ -42,6 +44,23 @@ pub fn parse_dir(args: &[String]) -> Result<PathBuf, String> {
         }
     }
     Err("usage: clovy-mcp --dir <Clovy data directory>/mcp (copy the configuration from Clovy Settings, Agent)".to_string())
+}
+
+/// The `--turn` argument, when given.
+pub fn parse_turn(args: &[String]) -> Result<Option<String>, String> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let value = match arg.strip_prefix("--turn=") {
+            Some(value) => Some(value.to_string()),
+            None if arg == "--turn" => args.next().cloned(),
+            None => continue,
+        };
+        return value
+            .filter(|token| !token.is_empty())
+            .map(Some)
+            .ok_or_else(|| "--turn needs a token".to_string());
+    }
+    Ok(None)
 }
 
 /// The local answer to `message` while the app is unreachable for `reason`.
@@ -137,19 +156,34 @@ pub fn read_bounded_line(
 /// Entry point for the `clovy-mcp` binary.
 pub fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = match parse_dir(&args) {
-        Ok(dir) => dir,
+    let (dir, turn) = match parse_dir(&args).and_then(|dir| Ok((dir, parse_turn(&args)?))) {
+        Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("clovy-mcp: {message}");
             return 2;
         }
     };
-    relay(&dir, std::io::stdin().lock(), Box::new(std::io::stdout()));
+    relay_turn(
+        &dir,
+        turn.as_deref(),
+        std::io::stdin().lock(),
+        Box::new(std::io::stdout()),
+    );
     0
 }
 
+/// Relays `input` lines until end of input, for no turn.
+pub fn relay(dir: &std::path::Path, input: impl BufRead, output: Box<dyn Write + Send>) {
+    relay_turn(dir, None, input, output);
+}
+
 #[cfg(not(unix))]
-pub fn relay(_dir: &std::path::Path, input: impl BufRead, output: Box<dyn Write + Send>) {
+pub fn relay_turn(
+    _dir: &std::path::Path,
+    _turn: Option<&str>,
+    input: impl BufRead,
+    output: Box<dyn Write + Send>,
+) {
     let mut output = output;
     for line in input.lines().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
@@ -165,7 +199,7 @@ pub fn relay(_dir: &std::path::Path, input: impl BufRead, output: Box<dyn Write 
 }
 
 #[cfg(unix)]
-pub use unix::relay;
+pub use unix::relay_turn;
 
 #[cfg(unix)]
 mod unix {
@@ -209,8 +243,8 @@ mod unix {
     }
 
     impl Connection {
-        fn open(dir: &Path, output: &Output) -> Result<Self, ClientError> {
-            let stream = channel::connect(dir)?;
+        fn open(dir: &Path, turn: Option<&str>, output: &Output) -> Result<Self, ClientError> {
+            let stream = channel::connect_turn(dir, turn)?;
             let reader = stream.try_clone().map_err(ClientError::Other)?;
             let alive = Arc::new(AtomicBool::new(true));
             let pending: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
@@ -286,12 +320,18 @@ mod unix {
             ClientError::NotListening => OFF_MESSAGE.to_string(),
             ClientError::Refused => REFUSED_MESSAGE.to_string(),
             ClientError::Busy => BUSY_MESSAGE.to_string(),
+            ClientError::TurnExpired => TURN_EXPIRED_MESSAGE.to_string(),
             ClientError::Other(error) => format!("Could not reach Clovy: {error}"),
         }
     }
 
-    /// Relays `input` lines until end of input.
-    pub fn relay(dir: &Path, mut input: impl BufRead, output: Box<dyn Write + Send>) {
+    /// Relays `input` lines until end of input, bound to `turn` when given.
+    pub fn relay_turn(
+        dir: &Path,
+        turn: Option<&str>,
+        mut input: impl BufRead,
+        output: Box<dyn Write + Send>,
+    ) {
         let output: Output = Arc::new(Mutex::new(output));
         let refused = production_data_refusal(dir);
         let mut connection: Option<Connection> = None;
@@ -357,7 +397,7 @@ mod unix {
             let mut failure = None;
             for _attempt in 0..2 {
                 if connection.is_none() {
-                    match Connection::open(dir, &output) {
+                    match Connection::open(dir, turn, &output) {
                         Ok(opened) => connection = Some(opened),
                         Err(error) => {
                             failure = Some(reason(&error));
