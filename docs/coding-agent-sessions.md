@@ -38,7 +38,10 @@ the Activity settings are saved:
    Until it is open the loop retries every 3 s; nothing is read meanwhile.
 2. **Scan.** Live blocks whose last record is more than 1 hour old are sealed.
    Then, for each enabled source only, its store entries changed since the
-   start of the window are listed; an entry whose size and mtime (and its
+   start of the window are listed (on a blocking thread; Codex day
+   directories before the window are listed too, because a resumed session
+   keeps writing to the rollout of the day it started); an entry whose size
+   and mtime (and its
    SQLite WAL's) did not change since it was last loaded is skipped; the rest
    are streamed into block builders, Clovy's own CLI conversations are
    dropped, and every block that ended inside the window is upserted.

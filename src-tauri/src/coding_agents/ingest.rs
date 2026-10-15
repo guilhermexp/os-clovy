@@ -65,7 +65,17 @@ impl Scanner {
             if !enabled.is_enabled(source) {
                 continue;
             }
-            for candidate in sources::discover(source, &self.roots, window_start.into()) {
+            // Listing and stat-ing every transcript is blocking file IO.
+            let roots = self.roots.clone();
+            let candidates = tokio::task::spawn_blocking(move || {
+                sources::discover(source, &roots, window_start.into())
+            })
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "coding agents: discovery stopped");
+                Vec::new()
+            });
+            for candidate in candidates {
                 if self.seen.get(&candidate.path) == Some(&candidate.fingerprint) {
                     continue;
                 }

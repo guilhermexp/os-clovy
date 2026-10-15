@@ -171,6 +171,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A resumed session keeps writing to the rollout under the day it
+    /// started: day directories before the window are still listed, and the
+    /// file's mtime decides.
+    #[test]
+    fn a_resumed_session_under_an_old_day_directory_is_discovered() {
+        use std::time::{Duration, SystemTime};
+        let home = tempfile::tempdir().unwrap();
+        let day = home.path().join(".codex/sessions/2026/10/05");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = write_lines(
+            &day,
+            "rollout-old.jsonl",
+            &[json!({"type": "session_meta"})],
+        );
+        let roots = SourceRoots::from_home(home.path());
+        let since = SystemTime::now() - Duration::from_secs(3600);
+        let found = super::super::discover(crate::coding_agents::SourceId::Codex, &roots, since);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].path.ends_with("2026/10/05/rollout-old.jsonl"));
+        assert!(path.exists());
+    }
+
     #[test]
     fn current_format_turns_and_cwd() {
         let dir = tempfile::tempdir().unwrap();
