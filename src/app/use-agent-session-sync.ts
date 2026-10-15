@@ -42,17 +42,21 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
 
   useEffect(() => {
     let cancelled = false;
+    // Only the latest broadcast commits its list: an older one whose map read
+    // resolves last must not overwrite it.
+    let latestRequest = 0;
 
     function handleSessionsChanged(event: Event) {
       const detail = (event as CustomEvent<AgentSessionsChangedDetail>).detail;
       if (!detail) return;
+      const request = ++latestRequest;
       void refreshSessionPartitions()
         .then((partitions) => {
-          if (cancelled) return;
+          if (cancelled || request !== latestRequest) return;
           commitAgentSessions(detail.sessions, partitions);
         })
         .catch(() => {
-          if (cancelled) return;
+          if (cancelled || request !== latestRequest) return;
           commitAgentSessions(detail.sessions);
         });
       if (activeViewRef.current === "agent") {
