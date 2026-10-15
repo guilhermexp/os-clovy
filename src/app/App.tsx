@@ -748,7 +748,6 @@ export function App() {
     }
     return map;
   }, [state.activeRecoveries]);
-  const recoverableNoteIds = useMemo(() => new Set(recoveriesByNote.keys()), [recoveriesByNote]);
   const selectedRecovery = selectedNote ? recoveriesByNote.get(selectedNote.id) : undefined;
   const noteDetailScrollerActive = activeView === "meetings" && !!selectedNote;
   const detailScrollerActive = activeView === "folders" && !!state.selectedFolderId;
@@ -2056,7 +2055,6 @@ export function App() {
     handleRemoveSessionFromFolder,
     handleReportIssue,
     handleOpenNoteChatInAgent,
-    handleAskClovyAboutNote,
     handleStartBundleChat,
     handleNewAgentSessionInProject,
   } = createAppDomainActions({
@@ -2651,7 +2649,6 @@ export function App() {
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    recoverableNoteIds,
     referralNudgeMoment,
     referralNudgeSourceRef,
     refreshFundingAccount,

@@ -10086,15 +10086,6 @@ button.agent-user-attachment:hover {
   color: inherit;
 }
 
-.note-row-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  color: var(--muted-foreground);
-}
-
 .note-row-title {
   display: flex;
   align-items: center;
@@ -10114,20 +10105,6 @@ button.agent-user-attachment:hover {
 
 .note-row[data-selected="true"] .note-row-title {
   font-weight: 400;
-}
-
-.note-row-recovery-dot {
-  flex-shrink: 0;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--r-pill);
-  background: var(--warm-strong);
-}
-
-.sidebar[data-collapsed="true"] .note-row-recovery-dot {
-  position: absolute;
-  top: 4px;
-  right: 4px;
 }
 
 .note-row-menu {

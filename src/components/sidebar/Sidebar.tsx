@@ -36,7 +36,6 @@ import { IconZap } from "central-icons/IconZap";
 import { IconCalendarClock } from "central-icons/IconCalendarClock";
 import { activityStatus } from "../../lib/activity-capture";
 import {
-  type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
   type ReactNode,
@@ -63,7 +62,6 @@ import {
   type AgentSessionsHydratedDetail,
 } from "../../lib/agent-events";
 import { errorCode, messageFromError } from "../../lib/errors";
-import { LEGACY_NOTE_DND_MIME, NOTE_DND_MIME } from "../../lib/dnd";
 import { useDismiss } from "../../lib/use-dismiss";
 import { attachScrollThumbFade } from "../../lib/scroll-thumb-fade";
 import { useScrollFade } from "../../lib/use-scroll-fade";
@@ -159,9 +157,6 @@ type SidebarProps = {
   onSignOut?: () => void;
   onReportIssue?: (category: ReportCategory) => void;
   onSelectNote: (noteId: string) => void;
-  onDeleteNote: (noteId: string) => void;
-  onOpenMoveDialog: (noteId: string) => void;
-  onRemoveNoteFromFolder: (noteId: string, folderId: string) => void;
   onNewAgentSession: () => void;
   /** Whether the persistent Home conversation is available on this platform. */
   homeEnabled?: boolean;
@@ -180,7 +175,6 @@ type SidebarProps = {
   onToggleSessionCompleted?: (sessionId: string, completed: boolean) => void;
   onOpenSessionMoveDialog?: (sessionId: string) => void;
   onRemoveSessionFromFolder?: (sessionId: string, folderId: string) => void;
-  recoverableNoteIds?: ReadonlySet<string>;
   recordingStatus?: RecordingStatusDto | null;
   recordingTitle?: string;
   onOpenRecording?: () => void;
@@ -188,9 +182,7 @@ type SidebarProps = {
   footerAccessory?: ReactNode;
 };
 
-type MenuState =
-  | { kind: "note"; noteId: string; anchor: HTMLElement }
-  | { kind: "agent-session"; sessionId: string; anchor: HTMLElement };
+type MenuState = { kind: "agent-session"; sessionId: string; anchor: HTMLElement };
 
 type CommandPromptItem = {
   id: string;
@@ -351,9 +343,6 @@ export function Sidebar({
   onSignOut,
   onReportIssue,
   onSelectNote,
-  onDeleteNote,
-  onOpenMoveDialog,
-  onRemoveNoteFromFolder,
   onNewAgentSession,
   homeEnabled = true,
   homeStoredSessionId,
@@ -364,7 +353,6 @@ export function Sidebar({
   onToggleSessionCompleted,
   onOpenSessionMoveDialog,
   onRemoveSessionFromFolder,
-  recoverableNoteIds,
   recordingStatus,
   recordingTitle,
   onOpenRecording,
@@ -488,14 +476,6 @@ export function Sidebar({
       return next;
     });
   }, [activeView, selectedAgentSessionId]);
-  const filteredNotes = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return notes;
-    return notes.filter((note) =>
-      `${note.title} ${note.preview}`.toLowerCase().includes(normalized),
-    );
-  }, [notes, query]);
-
   const filteredAgentSessions = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return agentSessions;
@@ -1073,21 +1053,6 @@ export function Sidebar({
     };
   }, []);
 
-  // Right-aligns the popover with the overflow button. The menu measures and
-  // flips itself above this anchor when there is not enough viewport below.
-  // Clicking the same button again toggles it closed.
-  function openMenuForNote(noteId: string, anchor: HTMLElement) {
-    if (menu?.kind === "note" && menu.noteId === noteId) {
-      setMenu(null);
-      return;
-    }
-    setMenu({
-      kind: "note",
-      noteId,
-      anchor,
-    });
-  }
-
   function openMenuForAgentSession(sessionId: string, anchor: HTMLElement) {
     if (menu?.kind === "agent-session" && menu.sessionId === sessionId) {
       setMenu(null);
@@ -1461,17 +1426,6 @@ export function Sidebar({
         onCopy={() => void copyReferralLink()}
       />
 
-      {menu?.kind === "note" ? (
-        <NoteContextMenu
-          noteId={menu.noteId}
-          anchor={menu.anchor}
-          notes={notes}
-          onOpenMoveDialog={onOpenMoveDialog}
-          onRemoveNoteFromFolder={onRemoveNoteFromFolder}
-          onDeleteNote={onDeleteNote}
-          onClose={() => setMenu(null)}
-        />
-      ) : null}
       {menu?.kind === "agent-session" && menuAgentSession ? (
         <AgentSessionContextMenu
           pinned={pinnedAgentSessionIds.has(menuAgentSession.id)}
@@ -1569,102 +1523,6 @@ function SidebarRecordingIndicator({
       <span className="sidebar-recording-dot" aria-hidden />
       <Waveform level={meterLevel} sessionId={status.sessionId} active={recording} />
     </button>
-  );
-}
-
-function NoteRow({
-  note,
-  selected,
-  recoverable,
-  onSelect,
-  onOpenMenu,
-}: {
-  note: NoteListItemDto;
-  selected: boolean;
-  recoverable: boolean;
-  onSelect: () => void;
-  onOpenMenu: (anchor: HTMLElement) => void;
-}) {
-  const t = useT();
-  const title = note.title.trim() || t("shell.sidebar.newNote");
-  const menuRef = useRef<HTMLButtonElement>(null);
-  const [dragging, setDragging] = useState(false);
-
-  function handleDragStart(event: DragEvent<HTMLElement>) {
-    event.dataTransfer.effectAllowed = "link";
-    event.dataTransfer.setData(NOTE_DND_MIME, note.id);
-    event.dataTransfer.setData(LEGACY_NOTE_DND_MIME, note.id);
-    event.dataTransfer.setData("text/plain", note.id);
-
-    const node = event.currentTarget;
-    const clone = node.cloneNode(true) as HTMLElement;
-    clone.classList.add("note-row-drag-image");
-    clone.removeAttribute("data-selected");
-    clone.removeAttribute("data-dragging");
-    clone.style.width = `${node.offsetWidth}px`;
-    document.body.appendChild(clone);
-    event.dataTransfer.setDragImage(clone, 16, 16);
-    window.setTimeout(() => clone.remove(), 0);
-
-    setDragging(true);
-  }
-
-  return (
-    <article
-      className="note-row"
-      data-selected={selected}
-      data-recoverable={recoverable || undefined}
-      data-dragging={dragging || undefined}
-      draggable
-      onDragStart={handleDragStart}
-      onDragEnd={() => setDragging(false)}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (menuRef.current) onOpenMenu(menuRef.current);
-      }}
-    >
-      <div
-        className="note-row-main"
-        role="button"
-        tabIndex={0}
-        onClick={onSelect}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onSelect();
-          }
-        }}
-      >
-        <span className="note-row-icon">
-          <IconNoteText size={15} />
-        </span>
-        <span className="note-row-title">
-          <span className="note-row-title-text">{title}</span>
-          {recoverable ? (
-            <span
-              className="note-row-recovery-dot"
-              aria-label={t("shell.sidebar.interruptedRecording")}
-              title={t("shell.sidebar.interruptedRecording")}
-            />
-          ) : null}
-        </span>
-      </div>
-      <button
-        ref={menuRef}
-        type="button"
-        className="note-row-menu"
-        aria-label={t("shell.sidebar.actionsFor", { title })}
-        draggable={false}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onOpenMenu(event.currentTarget);
-        }}
-      >
-        <IconDotGrid1x3Vertical size={14} />
-      </button>
-    </article>
   );
 }
 
@@ -2463,70 +2321,6 @@ function formatSessionTime(iso: string, dateFormat: DateFormatPreference, t: TFu
   return formatCalendarDate(date, dateFormat, intlLocale());
 }
 
-function NoteContextMenu({
-  noteId,
-  anchor,
-  notes,
-  onOpenMoveDialog,
-  onRemoveNoteFromFolder,
-  onDeleteNote,
-  onClose,
-}: {
-  noteId: string;
-  anchor: HTMLElement;
-  notes: NoteListItemDto[];
-  onOpenMoveDialog: (noteId: string) => void;
-  onRemoveNoteFromFolder: (noteId: string, folderId: string) => void;
-  onDeleteNote: (noteId: string) => void;
-  onClose: () => void;
-}) {
-  const t = useT();
-  const note = notes.find((item) => item.id === noteId);
-  const currentFolderId = note?.folderIds[0];
-  const hasFolder = Boolean(currentFolderId);
-  return (
-    <SidebarContextMenu anchor={anchor} onClose={onClose}>
-      <button
-        type="button"
-        role="menuitem"
-        onClick={() => {
-          onOpenMoveDialog(noteId);
-          onClose();
-        }}
-      >
-        {hasFolder ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
-        {hasFolder ? t("shell.menu.changeProject") : t("shell.menu.addToProject")}
-      </button>
-      {hasFolder && currentFolderId ? (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => {
-            onRemoveNoteFromFolder(noteId, currentFolderId);
-            onClose();
-          }}
-        >
-          <IconFolderDelete size={14} />
-          {t("shell.menu.removeFromProject")}
-        </button>
-      ) : null}
-      <div className="context-menu-separator" role="separator" />
-      <button
-        type="button"
-        role="menuitem"
-        className="destructive"
-        onClick={() => {
-          onDeleteNote(noteId);
-          onClose();
-        }}
-      >
-        <IconTrashCan size={14} />
-        {t("shell.menu.deleteNote")}
-      </button>
-    </SidebarContextMenu>
-  );
-}
-
 function SidebarContextMenu({
   anchor,
   children,
@@ -2630,15 +2424,4 @@ function SidebarContextMenu({
     </div>,
     document.body,
   );
-}
-
-function relativeDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString(intlLocale(), {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
 }

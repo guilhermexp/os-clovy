@@ -103,8 +103,6 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
   const selectedCount = selectedNoteIds.length;
   const hasUnselectedVisibleNotes =
     filteredNotes.length > 0 && visibleSelectedCount < filteredNotes.length;
-  const allVisibleNotesSelected =
-    filteredNotes.length > 0 && visibleSelectedCount === filteredNotes.length;
 
   // Snapshot the last nonzero count so the exiting bar keeps its real label
   // instead of flashing "0 selected".

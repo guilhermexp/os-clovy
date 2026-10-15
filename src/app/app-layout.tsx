@@ -107,7 +107,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    recoverableNoteIds,
     referralNudgeMoment,
     referralNudgeSourceRef,
     refreshFundingAccount,
@@ -242,11 +241,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           }
           void handleSelectNote(noteId);
         }}
-        onDeleteNote={(noteId) => void handleDeleteNote(noteId)}
-        onOpenMoveDialog={(noteId) => setMoveDialogNoteIds([noteId])}
-        onRemoveNoteFromFolder={(noteId, folderId) =>
-          void handleRemoveNoteFromFolder(noteId, folderId)
-        }
         onNewAgentSession={() => {
           pendingSessionProjectRef.current = null;
           setAgentOrigin(undefined);
@@ -270,7 +264,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         onRemoveSessionFromFolder={(sessionId, folderId) =>
           void handleRemoveSessionFromFolder(sessionId, folderId)
         }
-        recoverableNoteIds={recoverableNoteIds}
         recordingStatus={sidebarRecorderStatus}
         recordingTitle={recordingNoteTitle}
         onOpenRecording={() => (pillIsDemo ? undefined : void handleOpenRecordingNote())}

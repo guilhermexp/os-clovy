@@ -108,7 +108,6 @@ export type RenderAppLayoutDependencies = {
   recordingInactivityPrompt: RecordingInactivityPrompt | null;
   recordingInactivitySecondsRemaining: number;
   recordingNoteTitle: string;
-  recoverableNoteIds: Set<string>;
   referralNudgeMoment: ReferralNudgeMoment | null;
   referralNudgeSourceRef: React.MutableRefObject<"trigger" | "demo">;
   refreshFundingAccount: () => Promise<AccountStatus | undefined>;

@@ -247,12 +247,3 @@ export function withFakeRecovery(payload: BootstrapResponse): {
     fakeNote,
   };
 }
-
-export function isAppErrorCode(err: unknown, code: string) {
-  return (
-    !!err &&
-    typeof err === "object" &&
-    "code" in err &&
-    String((err as { code: unknown }).code) === code
-  );
-}

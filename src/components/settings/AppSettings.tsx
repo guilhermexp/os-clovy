@@ -559,7 +559,6 @@ export function AppSettings({
     experimentalFlags.companionPairingEnabled,
   ).filter((tab) => !(account.localDev && tab.id === "billing"));
   const capabilities = useDictationCapabilities();
-  const macLikePlatform = capabilities.platform === "macos";
   const systemAudioSupportedPlatform = capabilities.systemAudio || isSystemAudioSupportedPlatform();
   const defaultShortcuts =
     capabilities.platform === "windows"
@@ -3268,10 +3267,6 @@ function shortcutsMatch(first: DictationShortcutSetting, second: DictationShortc
     first.modifiers.shift === second.modifiers.shift &&
     first.modifiers.function === second.modifiers.function
   );
-}
-
-function stringPayloadValue(value: unknown) {
-  return typeof value === "string" ? value : undefined;
 }
 
 function messageFromError(error: unknown) {
