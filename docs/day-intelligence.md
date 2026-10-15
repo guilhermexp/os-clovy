@@ -205,7 +205,9 @@ Invalid times load the defaults.
 `sources::coding_blocks_between` reads
 `ActivityStore::coding_agent_blocks_between`
 ([coding-agent-sessions.md](coding-agent-sessions.md#rust-api-for-later-slices-crateactivitystoreactivitystore))
-for each hour report and for the day summary and its panels. Each block
+for each hour report and for the day summary and its panels, keeping only
+the sources still turned on in Settings, Activity (like the MCP server's
+`list_coding_agent_sessions`). Each block
 carries the agent's name, project, title, local times, active minutes, and
 its summary once ingestion wrote one, else its first prompt (never the
 transcript). A block counts only inside the window (one ending exactly at

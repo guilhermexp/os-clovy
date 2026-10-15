@@ -184,7 +184,13 @@ pub async fn report_hour(
     let distilled = distill::distill(&texts, &header, deps.embedder).await;
     let blocks = deps
         .sources
-        .coding_blocks(deps.store, window.start, window.end, deps.zone)
+        .coding_blocks(
+            deps.store,
+            &deps.settings.coding_agents,
+            window.start,
+            window.end,
+            deps.zone,
+        )
         .await;
     let meetings = deps
         .sources
@@ -568,7 +574,13 @@ pub async fn generate_summary(
     let meetings = deps.sources.meetings(from, to, deps.zone).await;
     let blocks = deps
         .sources
-        .coding_blocks(deps.store, from, to, deps.zone)
+        .coding_blocks(
+            deps.store,
+            &deps.settings.coding_agents,
+            from,
+            to,
+            deps.zone,
+        )
         .await;
     if reports.is_empty() && meetings.is_empty() && blocks.is_empty() {
         return Ok(None);
@@ -672,7 +684,13 @@ pub async fn day_view(
             context.sources.meetings(from, to, context.zone).await,
             context
                 .sources
-                .coding_blocks(context.store, from, to, context.zone)
+                .coding_blocks(
+                    context.store,
+                    &context.settings.coding_agents,
+                    from,
+                    to,
+                    context.zone,
+                )
                 .await,
         ),
         None => (Vec::new(), Vec::new()),

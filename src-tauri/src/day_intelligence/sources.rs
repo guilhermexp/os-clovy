@@ -10,6 +10,7 @@ use tauri::AppHandle;
 
 use super::schedule::LocalZone;
 use crate::activity::store::{parse_time, ActivityStore};
+use crate::coding_agents::settings::CodingAgentSources;
 use crate::coding_agents::store::CodingAgentBlock;
 use crate::coding_agents::CodingAgentsStatusDto;
 
@@ -114,10 +115,12 @@ pub trait DaySources: Send + Sync {
         zone: &'a dyn LocalZone,
     ) -> BoxFuture<'a, Vec<MeetingNote>>;
 
-    /// Coding-agent blocks overlapping `[from, to)`, oldest first.
+    /// Coding-agent blocks overlapping `[from, to)` from the sources in
+    /// `enabled`, oldest first.
     fn coding_blocks<'a>(
         &'a self,
         store: &'a ActivityStore,
+        enabled: &'a CodingAgentSources,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         zone: &'a dyn LocalZone,
@@ -297,11 +300,12 @@ impl DaySources for AppSources {
     fn coding_blocks<'a>(
         &'a self,
         store: &'a ActivityStore,
+        enabled: &'a CodingAgentSources,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         zone: &'a dyn LocalZone,
     ) -> BoxFuture<'a, Vec<CodingBlock>> {
-        Box::pin(coding_blocks_between(store, from, to, zone))
+        Box::pin(coding_blocks_between(store, enabled, from, to, zone))
     }
 
     fn coding_agents_read_until(&self, until: DateTime<Utc>) -> bool {
@@ -315,15 +319,21 @@ impl DaySources for AppSources {
 }
 
 /// Coding-agent blocks from the activity database
-/// (`ActivityStore::coding_agent_blocks_between`, docs/coding-agent-sessions.md).
+/// (`ActivityStore::coding_agent_blocks_between`, docs/coding-agent-sessions.md)
+/// of the sources still turned on: turning a source off removes its blocks
+/// from reports and summaries, as from the MCP server.
 pub(crate) async fn coding_blocks_between(
     store: &ActivityStore,
+    enabled: &CodingAgentSources,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     zone: &dyn LocalZone,
 ) -> Vec<CodingBlock> {
     match store.coding_agent_blocks_between(from, to).await {
-        Ok(blocks) => blocks_in_window(blocks, from, to, zone),
+        Ok(mut blocks) => {
+            blocks.retain(|block| enabled.is_enabled(block.source));
+            blocks_in_window(blocks, from, to, zone)
+        }
         Err(error) => {
             tracing::warn!(%error, "day intelligence: coding-agent blocks could not be read");
             Vec::new()
@@ -447,6 +457,7 @@ pub(crate) mod tests {
         fn coding_blocks<'a>(
             &'a self,
             _store: &'a ActivityStore,
+            _enabled: &'a CodingAgentSources,
             from: DateTime<Utc>,
             to: DateTime<Utc>,
             _zone: &'a dyn LocalZone,
