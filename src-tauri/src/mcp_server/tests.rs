@@ -1431,7 +1431,7 @@ async fn day_panels_draw_the_day_from_filtered_activity_meetings_and_coding_agen
     assert_eq!(floored["state"], json!("ready"));
     assert_eq!(floored["panels"]["focusedMinutes"], json!(0.0), "{floored}");
     assert_eq!(floored["panels"]["codingAgents"]["blocks"], json!(0));
-    later.now = later.now + Duration::days(2);
+    later.now += Duration::days(2);
     let past = call(&later, "get_day_panels", json!({ "date": day }))
         .await
         .unwrap();
