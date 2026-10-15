@@ -1,6 +1,11 @@
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 import { t } from "../i18n/translate";
 import { dispatchAgentRunSettled } from "./agent-events";
+import {
+  loadQueuedAgentFollowUps,
+  reconcileConsumedAgentFollowUp,
+  type QueuedAgentFollowUps,
+} from "./agent-follow-up-queue";
 import type { AgentRuntimeEvent } from "./agent-runtime-contract";
 
 const AGENT_RUNTIME_EVENT = "clovy://agent-runtime-event";
@@ -17,6 +22,9 @@ type ListenToRuntimeEvents = (
 export type AgentRunSettlementRelayOptions = {
   /** Current title for a stored session id, when the caller knows one. */
   resolveTitle: (sessionId: string) => string | undefined;
+  /** The persisted follow-up queue; the Agent workspace submits a session's
+   * queued follow-up as the next run once the current one completes. */
+  readQueuedFollowUps?: () => QueuedAgentFollowUps;
   listen?: ListenToRuntimeEvents;
 };
 
@@ -25,13 +33,19 @@ export type AgentRunSettlementRelayOptions = {
  * React surface that submitted it, so the Agent HUD and the "ready"
  * notification still hear about runs that finish while the user is elsewhere.
  *
- * Only `run.completed` settles. Failures already travel as a `failed` session
- * status and an explicit Stop stays silent, matching the run monitor this
- * replaces. Streamed frames only track which runs are still active.
+ * Only `run.completed` settles, and only once the session is really idle: a
+ * completed run whose session still holds a queued follow-up (not consumed
+ * as live steering) continues automatically, so the next run's completion
+ * announces instead. Failures already travel as a `failed` session status and
+ * an explicit Stop stays silent, matching the run monitor this replaces.
+ * Streamed frames only track which runs are still active.
  */
 export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOptions) {
   const listen = options.listen ?? (tauriListen as ListenToRuntimeEvents);
+  const readQueuedFollowUps = options.readQueuedFollowUps ?? loadQueuedAgentFollowUps;
   const activeRuns = new Map<string, string>();
+  /** `steering:<messageId>` items each active run consumed, by run id. */
+  const consumedSteering = new Map<string, string[]>();
   const finishedRuns = new Set<string>();
   let disposed = false;
   let unlisten: UnlistenFn | undefined;
@@ -52,11 +66,25 @@ export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOpt
       payload.method === "run.failed";
     if (!terminal) {
       activeRuns.set(payload.runId, payload.sessionId);
+      if (payload.method === "steering.consumed") {
+        consumedSteering.set(payload.runId, [
+          ...(consumedSteering.get(payload.runId) ?? []),
+          `steering:${payload.data.messageId}`,
+        ]);
+      }
       return;
     }
+    const consumed = consumedSteering.get(payload.runId) ?? [];
     activeRuns.delete(payload.runId);
+    consumedSteering.delete(payload.runId);
     rememberFinished(payload.runId);
     if (payload.method !== "run.completed") return;
+    const continuation = reconcileConsumedAgentFollowUp(
+      readQueuedFollowUps(),
+      payload.sessionId,
+      consumed,
+    )[payload.sessionId];
+    if (continuation) return;
     dispatchAgentRunSettled({
       sessionId: payload.sessionId,
       title: options.resolveTitle(payload.sessionId)?.trim() ?? "",
