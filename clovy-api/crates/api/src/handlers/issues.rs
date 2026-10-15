@@ -269,7 +269,7 @@ fn issue_report_error(error: DomainError) -> ApiError {
         // through ServiceError). Exhaustive match so a new DomainError variant
         // forces a deliberate mapping instead of silently collapsing into an
         // upstream provider failure.
-        DomainError::MeteringProvider => ApiError::Metering,
+        DomainError::MeteringProvider | DomainError::ChargeAlreadySettled => ApiError::Metering,
         DomainError::UpstreamProvider
         | DomainError::ModelNotPriced
         | DomainError::InsufficientCredits => ApiError::Upstream,

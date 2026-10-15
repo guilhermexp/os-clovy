@@ -10,8 +10,9 @@ use std::time::Duration;
 const ERR_INSUFFICIENT_CREDITS: i64 = 4301;
 // OS Accounts returns this when an idempotency key was already settled under
 // another action token. Clovy API is stateless, so a client retry reacquires
-// a fresh token for the same logical operation. Treat that as an idempotent
-// replay so an already-charged operation returns its result instead of 502ing.
+// a fresh token for the same logical operation. Surfaced as
+// `ChargeAlreadySettled` so the service releases the fresh token's hold and
+// returns the result as an idempotent replay instead of 502ing.
 const ERR_IDEMPOTENCY_KEY_COLLISION: i64 = 4001;
 const CHARGE_RETRY_ATTEMPTS: u32 = 2;
 const CHARGE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
@@ -260,26 +261,18 @@ impl OsAccountsHttpClient {
             return Err(ChargeError::Domain(DomainError::InsufficientCredits));
         }
         if envelope.error_code == Some(ERR_IDEMPOTENCY_KEY_COLLISION) {
-            // The operation was already charged under this key (e.g. an
+            // The key already settled under another action token (e.g. an
             // earlier request settled before a transient failure, then the
-            // client retried and received a new action token). Treat it as an
-            // idempotent replay: the user already paid, so return success.
-            //
-            // The 4001 reply carries `data: null`, so we cannot recover the
-            // amount actually settled — we report this request's `credits` as
-            // an approximation. Logged at WARN so any discrepancy between this
-            // value and the original settlement is visible to accounting/audit.
+            // client retried and received a new token). Nothing was debited
+            // on this token, so the caller must release it rather than report
+            // the requested credits as charged.
             tracing::warn!(
                 %url,
                 body_bytes = raw.len(),
-                reported_credits = body.credits,
-                "os_accounts: charge replayed - idempotency key already settled; \
-                 credits_charged reflects the requested estimate, not the settled amount"
+                requested_credits = body.credits,
+                "os_accounts: charge key already settled under another grant"
             );
-            return Ok(Receipt {
-                credits_charged: Credits(body.credits),
-                idempotent_replay: true,
-            });
+            return Err(ChargeError::Domain(DomainError::ChargeAlreadySettled));
         }
         tracing::error!(
             %status,
@@ -623,7 +616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn charge_treats_idempotency_collision_as_replay() {
+    async fn charge_surfaces_idempotency_collision_as_already_settled() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/charge"))
@@ -645,12 +638,9 @@ mod tests {
             })
             .await;
 
-        // Already settled under this key → success, surfaced as an idempotent
-        // replay carrying the attempted amount.
-        assert_eq!(
-            receipt.map(|value| (value.credits_charged.0, value.idempotent_replay)),
-            Ok((7, true))
-        );
+        // Already settled under another grant: nothing was debited on this
+        // token, so the collision is surfaced for the caller to release it.
+        assert_eq!(receipt, Err(DomainError::ChargeAlreadySettled));
     }
 
     #[tokio::test]

@@ -656,6 +656,12 @@ pub enum DomainError {
     /// the API boundary and in logs.
     #[error("metering provider failed")]
     MeteringProvider,
+    /// A charge's idempotency key already settled under an earlier grant
+    /// (OS Accounts 4001): the logical operation was paid before, and nothing
+    /// was debited on the grant this charge presented, which stays open until
+    /// it is released.
+    #[error("charge already settled under another grant")]
+    ChargeAlreadySettled,
     #[error("invalid input: {reason}")]
     InvalidInput { reason: String },
 }

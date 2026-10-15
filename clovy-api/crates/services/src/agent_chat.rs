@@ -1,7 +1,7 @@
 use crate::{
     charge_flow::{
-        AuthorizeParams, ChargeParams, ReleaseHoldParams, authorize_or_deny, charge, clamp_to_cap,
-        log_settled, new_charge_operation_id, release_hold, zero_receipt,
+        AuthorizeParams, ChargeParams, ReleaseHoldParams, authorize_and_run, charge, clamp_to_cap,
+        log_settled, metered, new_charge_operation_id, release_hold, zero_receipt,
     },
     error::ServiceError,
     metering::{log_skipped_user_key_for_model, uses_user_key_for_model},
@@ -42,6 +42,16 @@ impl AgentChatService {
         }
     }
 
+    fn authorize_params(&self, user_id: &UserId) -> AuthorizeParams<'_> {
+        AuthorizeParams {
+            os_accounts: self.os_accounts.as_ref(),
+            user_id: user_id.clone(),
+            action: ActionSlug::AgentChat,
+            estimate: Credits(self.flat_estimate_credits),
+            hold_ttl_seconds: self.hold_ttl_seconds,
+        }
+    }
+
     pub async fn complete(&self, params: AgentChatParams) -> Result<AgentChatOutput, ServiceError> {
         self.pricing
             .ensure_model_kind(&params.model_id.0, ModelKind::Text)?;
@@ -71,48 +81,25 @@ impl AgentChatService {
                 receipt: zero_receipt(),
             });
         }
-        let estimate = Credits(self.flat_estimate_credits);
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::AgentChat,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
-        .await?;
         let idempotency_key = idempotency_key(&params.user_id, &params.body);
-        let completion = match self
-            .chat_completer
-            .complete(AgentChatRequest {
-                body: params.body,
-                model: params.model_id.clone(),
-                provider_credentials: params.provider_credentials.clone(),
-                price_cap: self.pricing.price_cap(&params.model_id.0),
-                unmetered: false,
-            })
-            .await
-        {
-            Ok(completion) => completion,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::AgentChat,
-                    action_token: authorization.action_token,
-                })
-                .await;
-                return Err(error.into());
-            }
-        };
-        let actual = self
-            .pricing
-            .price_token_usage(&params.model_id.0, completion.usage)?;
-        let charge_credits = clamp_to_cap(actual, authorization.cap_credits);
-        let receipt = charge(ChargeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            action_token: authorization.action_token,
-            credits: charge_credits,
+        let (completion, receipt) = metered(
+            self.authorize_params(&params.user_id),
             idempotency_key,
-        })
+            || {
+                self.chat_completer.complete(AgentChatRequest {
+                    body: params.body,
+                    model: params.model_id.clone(),
+                    provider_credentials: params.provider_credentials.clone(),
+                    price_cap: self.pricing.price_cap(&params.model_id.0),
+                    unmetered: false,
+                })
+            },
+            |completion: &AgentChatCompletion| {
+                Ok(self
+                    .pricing
+                    .price_token_usage(&params.model_id.0, completion.usage)?)
+            },
+        )
         .await?;
         log_settled(
             ActionSlug::AgentChat,
@@ -164,45 +151,25 @@ impl AgentChatService {
             });
         }
 
-        let estimate = Credits(self.flat_estimate_credits);
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::AgentChat,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
-        .await?;
         let idempotency_key = idempotency_key(&params.user_id, &params.body);
-        let stream = match self
-            .chat_completer
-            .complete_stream(AgentChatRequest {
+        let work = authorize_and_run(self.authorize_params(&params.user_id), || {
+            self.chat_completer.complete_stream(AgentChatRequest {
                 body: params.body,
                 model: params.model_id.clone(),
                 provider_credentials: params.provider_credentials.clone(),
                 price_cap: self.pricing.price_cap(&params.model_id.0),
                 unmetered: false,
             })
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::AgentChat,
-                    action_token: authorization.action_token,
-                })
-                .await;
-                return Err(error.into());
-            }
-        };
+        })
+        .await?;
+        let stream = work.output;
         spawn_stream_settlement(StreamSettlement {
             pricing: self.pricing.clone(),
             os_accounts: self.os_accounts.clone(),
             user_id: params.user_id,
             model_id: params.model_id,
-            action_token: authorization.action_token,
-            cap_credits: authorization.cap_credits,
+            action_token: work.action_token,
+            cap_credits: work.cap_credits,
             flat_estimate_credits: self.flat_estimate_credits,
             idempotency_key,
             outcome: stream.outcome,
@@ -324,6 +291,7 @@ async fn settle_stream_charge(params: StreamSettlement) {
     };
     let receipt = match charge(ChargeParams {
         os_accounts: params.os_accounts.as_ref(),
+        action: ActionSlug::AgentChat,
         action_token: params.action_token,
         credits,
         idempotency_key: params.idempotency_key,

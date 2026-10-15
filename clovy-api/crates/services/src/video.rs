@@ -605,6 +605,7 @@ fn spawn_video_charge_settlement(
     tokio::spawn(async move {
         let result = charge(ChargeParams {
             os_accounts: os_accounts.as_ref(),
+            action,
             action_token: charge_details.action_token,
             credits: charge_details.credits,
             idempotency_key: charge_details.settlement_key,
