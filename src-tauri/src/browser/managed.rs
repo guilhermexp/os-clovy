@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Preserved Clovy-managed browser transport, not exposed in this PR.
-
 //! The managed transport: a headless ephemeral browser session behind the
 //! JUN-291 `june_browser` transport seam (JUN-289, the routines track of ADR
 //! 0017).
@@ -58,16 +56,20 @@ const ACTION_NAVIGATION_START_TIMEOUT: Duration = Duration::from_millis(500);
 /// Snapshots larger than this travel as a file reference instead of inline
 /// text (the contract-wide shape for big payloads, matching the
 /// native-messaging size cap on the attended transport).
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 const SNAPSHOT_INLINE_MAX_BYTES: usize = 200 * 1024;
 
 /// Managed browser processes are intentionally scarce: a runaway routine must
 /// not be able to fork an unbounded Chromium fleet.
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 const MAX_MANAGED_SESSIONS: usize = 2;
 
 /// Managed sessions that have not executed a tool for five minutes are
 /// terminated and their profiles deleted.
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 const MANAGED_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 const MANAGED_SESSION_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Everything a managed session needs from the broker environment.
@@ -255,6 +257,7 @@ impl ManagedSessionResources {
         self.profile.delete();
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn teardown_for_shutdown(&self, deadline: crate::shutdown::ShutdownDeadline) {
         if self.closed.load(Ordering::SeqCst) {
             return;
@@ -277,13 +280,20 @@ impl ManagedSessionResources {
 #[derive(Default)]
 struct StartingManagedSession {
     cancelled: AtomicBool,
+    #[allow(dead_code)]
+    // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     begun: AtomicBool,
+    #[allow(dead_code)]
+    // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     finished: AtomicBool,
+    #[allow(dead_code)]
+    // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     finished_notify: tokio::sync::Notify,
     resources: Mutex<Option<Arc<ManagedSessionResources>>>,
 }
 
 impl StartingManagedSession {
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn begin(&self) -> Result<(), AppError> {
         self.begun.store(true, Ordering::SeqCst);
         if self.is_cancelled() {
@@ -307,6 +317,7 @@ impl StartingManagedSession {
         Ok(())
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn terminate(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         if let Some(resources) = self
@@ -323,6 +334,7 @@ impl StartingManagedSession {
         }
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn terminate_for_shutdown(&self, deadline: crate::shutdown::ShutdownDeadline) {
         self.cancelled.store(true, Ordering::SeqCst);
         match deadline.try_lock(&self.resources) {
@@ -346,12 +358,14 @@ impl StartingManagedSession {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn finish(&self) {
         if !self.finished.swap(true, Ordering::SeqCst) {
             self.finished_notify.notify_waiters();
         }
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     async fn wait_finished(&self) {
         while !self.finished.load(Ordering::SeqCst) {
             let notified = self.finished_notify.notified();
@@ -363,6 +377,7 @@ impl StartingManagedSession {
     }
 }
 
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 struct StartingCompletionGuard(Arc<StartingManagedSession>);
 
 impl Drop for StartingCompletionGuard {
@@ -978,6 +993,7 @@ impl ManagedBrowserSession {
         self.teardown();
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn idle_seconds(&self) -> u64 {
         self.last_used
             .lock()
@@ -985,6 +1001,7 @@ impl ManagedBrowserSession {
             .unwrap_or(0)
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn is_closed(&self) -> bool {
         self.resources.closed.load(Ordering::SeqCst)
     }
@@ -1001,10 +1018,12 @@ pub struct ManagedScreenshot {
 /// JUN-291 transport adapter. It owns managed-session lifecycle while the
 /// broker owns authorization, transport selection, and artifact persistence.
 #[derive(Clone)]
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 pub(crate) struct ManagedBrowserTransport {
     inner: Arc<ManagedTransportInner>,
 }
 
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 struct ManagedTransportInner {
     config: ManagedSessionConfig,
     sessions: Mutex<HashMap<String, Arc<ManagedBrowserSession>>>,
@@ -1013,10 +1032,12 @@ struct ManagedTransportInner {
 }
 
 impl ManagedBrowserTransport {
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn production(artifacts_root: PathBuf) -> Self {
         Self::new(ManagedSessionConfig::production(artifacts_root))
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn new(config: ManagedSessionConfig) -> Self {
         let inner = Arc::new(ManagedTransportInner {
             config,
@@ -1028,6 +1049,7 @@ impl ManagedBrowserTransport {
         Self { inner }
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<ManagedBrowserSession>>> {
         self.inner
             .sessions
@@ -1035,6 +1057,7 @@ impl ManagedBrowserTransport {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn session(&self, session_id: &str) -> Result<Arc<ManagedBrowserSession>, AppError> {
         let mut sessions = self.sessions();
         sessions.retain(|_, session| !session.is_closed());
@@ -1046,6 +1069,7 @@ impl ManagedBrowserTransport {
         })
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn starting(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<StartingManagedSession>>> {
         self.inner
             .starting
@@ -1053,6 +1077,7 @@ impl ManagedBrowserTransport {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn reserve_session(&self, session_id: &str) -> Result<(), AppError> {
         let active = {
             let mut sessions = self.sessions();
@@ -1073,6 +1098,7 @@ impl ManagedBrowserTransport {
         Ok(())
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     async fn start_session(&self, session_id: &str) -> Result<TransportResponse, AppError> {
         let _start = self.inner.start_lock.lock().await;
         let starting = self
@@ -1115,6 +1141,7 @@ impl ManagedBrowserTransport {
         Ok(TransportResponse::data(json!({})))
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn terminate_session(&self, session_id: &str) {
         if let Some(starting) = self.starting().get(session_id).cloned() {
             starting.terminate();
@@ -1124,6 +1151,7 @@ impl ManagedBrowserTransport {
         }
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     fn terminate_session_for_shutdown(
         &self,
         session_id: &str,
@@ -1153,6 +1181,7 @@ impl ManagedBrowserTransport {
         }
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     async fn close_session(&self, session_id: &str) {
         let starting = self.starting().get(session_id).cloned();
         self.terminate_session(session_id);
@@ -1162,6 +1191,7 @@ impl ManagedBrowserTransport {
         }
     }
 
+    #[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
     async fn snapshot_response(
         &self,
         session: &ManagedBrowserSession,
@@ -1297,6 +1327,7 @@ impl Drop for ManagedTransportInner {
     }
 }
 
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 fn spawn_idle_reaper(inner: &Arc<ManagedTransportInner>) {
     let weak = Arc::downgrade(inner);
     tokio::spawn(async move {
@@ -1330,6 +1361,7 @@ fn spawn_idle_reaper(inner: &Arc<ManagedTransportInner>) {
     });
 }
 
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 fn required_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AppError> {
     arguments
         .get(name)
@@ -1338,6 +1370,7 @@ fn required_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, Ap
         .ok_or_else(|| AppError::new("invalid_arguments", format!("{name} is required.")))
 }
 
+#[allow(dead_code)] // Managed browser transport, not wired yet (docs/browser-computer-use-prd.md).
 fn string_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AppError> {
     arguments
         .get(name)

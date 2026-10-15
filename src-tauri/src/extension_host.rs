@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Preserved signed extension transport; agent requests return later.
-
 //! App side of Browser use extension pairing (JUN-287, ADR 0017).
 //!
 //! The Clovy extension talks Chrome native messaging to a small shim binary
@@ -210,6 +208,7 @@ fn persist_descriptor_selection(
 pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+#[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
 
@@ -429,6 +428,8 @@ struct HostShared {
     paired_connection: Option<u64>,
     extension_version: Option<String>,
     protocol_version: Option<u32>,
+    #[allow(dead_code)]
+    // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     next_request_id: u64,
     paired_sender: Option<mpsc::UnboundedSender<Value>>,
     pending: std::collections::HashMap<u64, PendingRequest>,
@@ -442,7 +443,11 @@ struct PendingRequest {
 
 #[derive(Debug)]
 pub(crate) struct ExtensionResponse {
+    #[allow(dead_code)]
+    // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub value: Value,
+    #[allow(dead_code)]
+    // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub artifact_bytes: Option<Vec<u8>>,
 }
 
@@ -537,6 +542,7 @@ impl ExtensionHost {
             == Some(connection_id)
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) async fn request(
         &self,
         tool: &str,

@@ -673,24 +673,6 @@ pub fn live_transcription() -> bool {
     current_settings().live_transcription
 }
 
-/// Context window (tokens) of the configured generation model, looked up in
-/// the backend's model catalog and cached per model id. The agent provider
-/// runtime uses it to size history to the real window and compact proactively,
-/// instead of discovering the limit
-/// by bouncing off the backend's prompt_too_long rejection. Returns `None`
-/// when the catalog is unreachable (offline, signed out) or doesn't report a
-/// window for the model. Callers degrade by omitting the field and relying on
-/// normal provider error mapping.
-pub async fn generation_model_context_tokens() -> Option<i64> {
-    if generation_provider() == PROVIDER_LOCAL {
-        return None;
-    }
-    let model_id = generation_model();
-    clovy_model_runtime_capabilities(&model_id)
-        .await
-        .context_tokens
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClovyModelRuntimeCapabilities {
     pub context_tokens: Option<i64>,

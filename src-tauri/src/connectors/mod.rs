@@ -691,17 +691,6 @@ pub async fn github_access_token(
     refresh_github_access_token_with_freshness_gate(app, account_id, true).await
 }
 
-/// Refresh regardless of cached freshness. Callers use this to retry once
-/// after `github::GithubApiError::Unauthorized` (a token revoked or expired
-/// server side before its local expiry).
-pub async fn force_refresh_github_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-) -> Result<String, AppError> {
-    // Skip the freshness fast path but still serialize on the account lock.
-    refresh_github_access_token_with_freshness_gate(app, account_id, false).await
-}
-
 async fn refresh_github_access_token_with_freshness_gate(
     app: &tauri::AppHandle,
     account_id: &str,
@@ -2214,53 +2203,6 @@ pub fn linear_action_ambiguous_error(action_id: &str) -> AppError {
             "Clovy could not confirm whether Linear applied this change. Check Linear before retrying; action id {action_id}."
         ),
     )
-}
-
-/// Journal a mutation attempt as `pending` before the provider call.
-/// Best-effort by design: on a DB failure this logs a warning and returns -
-/// the journal must never block or fail a mutation the user approved.
-pub async fn journal_action_pending(
-    app: &tauri::AppHandle,
-    action_id: &str,
-    account_id: &str,
-    tool: &str,
-    summary: &str,
-) {
-    let result = match crate::commands::repositories(app).await {
-        Ok(repos) => repos
-            .insert_connector_action(action_id, account_id, tool, summary)
-            .await
-            .map_err(AppError::from),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        tracing::warn!(
-            error_code = %error.code,
-            tool,
-            "journaling pending connector action failed; continuing with the mutation"
-        );
-    }
-}
-
-/// Record a journaled mutation's outcome (`committed` / `ambiguous` /
-/// `failed`). Best-effort like [`journal_action_pending`]: the user-facing
-/// outcome of the mutation is already decided by the time this runs, so a
-/// journal failure is logged, never surfaced.
-pub async fn journal_action_resolved(app: &tauri::AppHandle, action_id: &str, status: &str) {
-    let result = match crate::commands::repositories(app).await {
-        Ok(repos) => repos
-            .resolve_connector_action(action_id, status)
-            .await
-            .map_err(AppError::from),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        tracing::warn!(
-            error_code = %error.code,
-            status,
-            "resolving journaled connector action failed"
-        );
-    }
 }
 
 #[cfg(test)]

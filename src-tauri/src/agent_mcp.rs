@@ -1515,9 +1515,6 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
         }
         Ok(bundle)
     }
-    pub async fn refresh_registry(&self) -> Result<Vec<RuntimeToolDescriptorJson>, AgentMcpError> {
-        self.refresh_registry_for(false).await
-    }
     pub async fn refresh_registry_for(
         &self,
         sandboxed: bool,
