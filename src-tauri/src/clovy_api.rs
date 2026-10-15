@@ -4082,9 +4082,6 @@ fn http_client() -> &'static reqwest::Client {
         crate::http_client::build_client(
             crate::http_client::base_client_builder()
                 .timeout(HTTP_TIMEOUT)
-                // Same as the base user agent; spelled out because the Clovy
-                // API identity guard (technical-identity.test.mjs) pins it here.
-                .user_agent(concat!("clovy/", env!("CARGO_PKG_VERSION")))
                 .default_headers(app_version_headers()),
             "clovy_api",
         )

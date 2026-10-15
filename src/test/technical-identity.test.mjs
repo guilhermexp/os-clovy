@@ -535,6 +535,7 @@ describe("Clovy technical identity", () => {
       meetingDetection,
       obsidian,
       desktopApi,
+      httpClient,
       apiMain,
       apiConfig,
       driverContract,
@@ -547,6 +548,7 @@ describe("Clovy technical identity", () => {
       read("src-tauri/src/meeting_detection.rs"),
       read("src-tauri/src/obsidian.rs"),
       read("src-tauri/src/clovy_api.rs"),
+      read("src-tauri/src/http_client.rs"),
       read("clovy-api/crates/app/src/main.rs"),
       read("clovy-api/crates/config/src/lib.rs"),
       read("src-tauri/cua-driver-contract.json").then(JSON.parse),
@@ -568,8 +570,13 @@ describe("Clovy technical identity", () => {
     expect(obsidian).toContain(".clovy-obsidian-write-probe-");
     expect(obsidian).not.toContain(".june-obsidian-write-probe-");
     expect(desktopApi).toContain("Clovy API returned an invalid response stream error");
-    expect(desktopApi).toContain('user_agent(concat!("clovy/"');
-    expect(desktopApi).not.toContain('user_agent(concat!("os-june/"');
+    // The Clovy API client takes its user agent from the shared HTTP builder.
+    expect(desktopApi).toContain("crate::http_client::base_client_builder()");
+    expect(httpClient).toContain('pub const USER_AGENT: &str = concat!("clovy/"');
+    expect(httpClient).toContain(".user_agent(USER_AGENT)");
+    for (const source of [desktopApi, httpClient]) {
+      expect(source).not.toContain('concat!("os-june/"');
+    }
     expect(apiMain).not.toContain('"june=info,clovy_api=info');
     expect(apiConfig).toContain("viewer@localdev.clovy");
     expect(apiConfig).not.toContain("viewer@localdev.june");
