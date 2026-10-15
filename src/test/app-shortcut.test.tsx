@@ -588,6 +588,14 @@ describe("App shortcuts", () => {
     }
   });
 
+  it("shows the startup session list App loaded in the sidebar", async () => {
+    mocks.listAgentSessions.mockResolvedValue([agentSession("session-start", "Startup session")]);
+
+    render(<App />);
+
+    expect(await screen.findByText("Startup session")).toBeInTheDocument();
+  });
+
   it("serves companion agent reads without opening the agent workspace", async () => {
     const user = userEvent.setup();
     mocks.listAgentSessions.mockResolvedValue([

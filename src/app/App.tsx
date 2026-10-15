@@ -58,9 +58,11 @@ import {
   AGENT_GALLERY_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSION_RENAMED_EVENT,
+  AGENT_SESSIONS_HYDRATED_EVENT,
   emitAgentSessionsChanged,
   type AgentGalleryDetail,
   type AgentSessionRenamedDetail,
+  type AgentSessionsHydratedDetail,
 } from "../lib/agent-events";
 import { selectSessionProjectContext } from "../lib/agent-project-context";
 import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
@@ -152,7 +154,7 @@ export { isAccessibilityBlocked, isMicrophoneRecordingBlocked } from "./app-help
 import {
   ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS,
   AGENT_MENU_BAR_SESSION_LIMIT,
-  AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS,
+  AGENT_SESSION_STARTUP_RETRY_DELAYS_MS,
   CHECK_FOR_UPDATES_EVENT,
   recoveryFundingDisabledReason,
   SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
@@ -1462,7 +1464,10 @@ export function App() {
     let cancelled = false;
     let retryTimeout: number | undefined;
 
-    function loadAgentMenuBarSessions(attempt: number) {
+    // The one startup load of the session list: the menu bar, the sidebar
+    // (through AGENT_SESSIONS_HYDRATED_EVENT) and the Agent HUD window all
+    // start from it.
+    function loadStartupAgentSessions(attempt: number) {
       // Defer host access so partial test hosts and transient startup failures
       // enter the normal retry path instead of escaping the effect synchronously.
       Promise.resolve()
@@ -1470,16 +1475,24 @@ export function App() {
         .then(([sessions, partitions]) => {
           if (cancelled) return;
           commitAgentSessions(sessions, partitions);
+          window.dispatchEvent(
+            new CustomEvent<AgentSessionsHydratedDetail>(AGENT_SESSIONS_HYDRATED_EVENT, {
+              detail: { sessions, partitions },
+            }),
+          );
+          if (sessions.length > 0) {
+            emitAgentSessionsChanged({ sessions, workingSessionIds: [], waitingSessionIds: [] });
+          }
         })
         .catch(() => {
           if (cancelled) return;
-          const retryDelay = AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS[attempt];
+          const retryDelay = AGENT_SESSION_STARTUP_RETRY_DELAYS_MS[attempt];
           if (retryDelay == null) return;
-          retryTimeout = window.setTimeout(() => loadAgentMenuBarSessions(attempt + 1), retryDelay);
+          retryTimeout = window.setTimeout(() => loadStartupAgentSessions(attempt + 1), retryDelay);
         });
     }
 
-    loadAgentMenuBarSessions(0);
+    loadStartupAgentSessions(0);
 
     return () => {
       cancelled = true;

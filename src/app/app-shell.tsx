@@ -26,7 +26,7 @@ export const SIDEBAR_COLLAPSE_WIDTH = 160;
 export const CHECK_FOR_UPDATES_EVENT = "clovy://check-for-updates";
 export const AGENT_MENU_BAR_SESSION_FETCH_LIMIT = 100;
 export const AGENT_MENU_BAR_SESSION_LIMIT = 6;
-export const AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000];
+export const AGENT_SESSION_STARTUP_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000, 16000, 32000];
 // Matches the Routines view's run-history cadence; a routine notification a
 // few seconds late is fine, hammering the bridge is not.
 export const ROUTINE_RUN_NOTIFY_POLL_MS = 15000;

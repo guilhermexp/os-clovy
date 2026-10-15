@@ -56,10 +56,11 @@ import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
+  AGENT_SESSIONS_HYDRATED_EVENT,
   AGENT_SESSION_RENAMED_EVENT,
-  emitAgentSessionsChanged,
   type AgentSessionRenamedDetail,
   type AgentSessionsChangedDetail,
+  type AgentSessionsHydratedDetail,
 } from "../../lib/agent-events";
 import { errorCode, messageFromError } from "../../lib/errors";
 import { LEGACY_NOTE_DND_MIME, NOTE_DND_MIME } from "../../lib/dnd";
@@ -77,7 +78,6 @@ import type {
 } from "../../lib/tauri";
 import {
   deleteAgentSession,
-  listAgentSessions,
   listSessionPartitions,
   osAccountsReferralSummary,
 } from "../../lib/tauri";
@@ -209,7 +209,6 @@ type CommandPromptGroup = {
 const AGENT_SIDEBAR_SESSION_FETCH_LIMIT = 100;
 const AGENT_SIDEBAR_SESSION_LIMIT = 12;
 const PINNED_AGENT_SESSION_IDS_STORAGE_KEY = "clovy:pinned-agent-session-ids";
-const AGENT_SIDEBAR_SESSION_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000, 16000, 32000];
 const SIDEBAR_DEV_STATES_EVENT = "clovy:sidebar:dev-states";
 const SIDEBAR_DEV_SESSION_IDS = {
   selected: "sidebar-state-selected",
@@ -452,6 +451,7 @@ export function Sidebar({
   // front of the user (those never go unread).
   const workingAgentSessionIdsRef = useRef<Set<string>>(new Set());
   const openAgentSessionIdRef = useRef<string | undefined>(undefined);
+  const sessionsChangedRequestRef = useRef(0);
   const sidebarDevStateSnapshotRef = useRef<SidebarDevStateSnapshot | null>(null);
 
   // formatSessionTime reads the clock at render time, so re-render once a
@@ -992,45 +992,17 @@ export function Sidebar({
     return () => window.cancelAnimationFrame(frame);
   }, [commandPromptOpen]);
 
+  // App loads the session list once at startup and hands it over here; a
+  // sessions-changed broadcast that arrived first wins.
   useEffect(() => {
-    let cancelled = false;
-    let retryTimeout: number | undefined;
-
-    function loadAgentSessions(attempt: number) {
-      Promise.resolve()
-        .then(() => Promise.all([listAgentSessions(), fetchSessionPartitionMap()]))
-        .then(([sessions, partitions]) => {
-          if (!cancelled) {
-            if (partitions) setSessionPartitions(partitions);
-            setAgentSessions((current) => (current.length > 0 ? current : sessions));
-            if (sessions.length > 0) {
-              emitAgentSessionsChanged({
-                sessions,
-                workingSessionIds: [],
-                waitingSessionIds: [],
-              });
-            }
-          }
-        })
-        .catch(() => {
-          if (cancelled) return;
-          const retryDelay = AGENT_SIDEBAR_SESSION_RETRY_DELAYS_MS[attempt];
-          if (retryDelay != null) {
-            retryTimeout = window.setTimeout(() => loadAgentSessions(attempt + 1), retryDelay);
-            return;
-          }
-          setAgentSessions((current) => (current.length > 0 ? current : []));
-        });
+    function handleSessionsHydrated(event: Event) {
+      const detail = (event as CustomEvent<AgentSessionsHydratedDetail>).detail;
+      if (!detail) return;
+      setSessionPartitions(detail.partitions);
+      setAgentSessions((current) => (current.length > 0 ? current : detail.sessions));
     }
-
-    loadAgentSessions(0);
-
-    return () => {
-      cancelled = true;
-      if (retryTimeout != null) {
-        window.clearTimeout(retryTimeout);
-      }
-    };
+    window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
+    return () => window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
   }, []);
 
   useEffect(() => {
@@ -1040,7 +1012,11 @@ export function Sidebar({
       // Refresh the session-to-partition map before applying the list so a session
       // just stamped to a named partition does not flash out of the filtered
       // list; a failed refresh keeps the last-known map.
+      // Only the latest broadcast applies its list: an older one whose map
+      // read resolves last must not overwrite it.
+      const request = ++sessionsChangedRequestRef.current;
       void fetchSessionPartitionMap().then((partitions) => {
+        if (request !== sessionsChangedRequestRef.current) return;
         if (partitions) setSessionPartitions(partitions);
         setAgentSessions(detail.sessions.slice(0, AGENT_SIDEBAR_SESSION_FETCH_LIMIT));
       });
