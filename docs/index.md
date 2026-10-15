@@ -72,6 +72,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0059](adr/0059-activity-is-per-installation-not-per-data-partition.md) - activity (timeline and coding-agent blocks) belongs to the installation, not to a data partition; MCP activity tools read it like the "Today" view while notes, dictations, and memories stay in the current partition
 - [adr/0060](adr/0060-development-app-runs-as-a-signed-bundle-that-owns-its-grants.md) - `pnpm tauri:dev` runs a signed `Clovy Dev.app` beside Cargo's output that owns its privacy grants: no TCC resets, one Apple Development identity for the app and its helpers, and a launcher that disclaims the terminal's responsibility
 - [adr/0061](adr/0061-dates-and-numbers-follow-the-interface-language.md) - dates, times, and numbers always format in the interface language (supersedes ADR-0056 decision 4); the date-format preference only picks day/month order; native errors are worded by stable code in the frontend
+- [adr/0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md) - (proposed) CLI chat turns get Clovy's write tools through a turn-bound `clovy-mcp` connection and an in-app approval broker; external clients stay read-only; user MCP servers and Linear reach CLIs through the same gateway
 
 ## Enforceable rules (spec/)
 

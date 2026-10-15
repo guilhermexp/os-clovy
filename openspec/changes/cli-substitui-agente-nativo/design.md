@@ -1,0 +1,144 @@
+# Design
+
+## Context
+
+Estado em `main` @ ba23ae95 (todas as citações relativas à raiz do repositório):
+
+- **Turno CLI.** Um processo por mensagem, argv montado em `turn_invocation` (`src-tauri/src/chat_engine/cli.rs:84-220`). Claude: `-p --output-format stream-json --verbose --include-partial-messages [--resume <id>] --mcp-config <scratch>/clovy-mcp.json` (`cli.rs:95-120`). Codex: `exec [resume] --json --skip-git-repo-check -c sandbox_mode="workspace-write" -c mcp_servers.clovy.command=… -c mcp_servers.clovy.args=… [<id>] -` (`cli.rs:121-150`). Só Claude, Codex e Copilot aceitam MCP (`cli.rs:61-63`). Nenhuma flag que pule ou pré-conceda aprovação é passada (`cli.rs:18-22`, `docs/llm-providers.md` seção "CLI chat engine"); recusas viram `tool.failed` com `needsApproval` (`src-tauri/src/chat_engine/turn.rs:453-474`).
+- **Sem modo de segurança no CLI.** `AgentSafetyMode {Sandboxed, Unrestricted}` (`src-tauri/src/agent_runtime/domain.rs:4-27`) é gravado na sessão (`src-tauri/src/agent_runtime/api.rs:690-697`), mas `CliTurnRequest` (`src-tauri/src/chat_engine/mod.rs:168-175`) e `TurnContext` (`turn.rs:36-47`) não o carregam.
+- **MCP do Clovy.** Relay stdio → socket Unix 0600 com segredo da instalação e checagem de uid (`src-tauri/src/mcp_server/channel.rs:51-67,241-245`; ADR-0058). Handshake `{clovyMcp:1, secret}` sem identidade de sessão (`channel.rs:51-53`). Protocolo sem estado (`src-tauri/src/mcp_server/protocol.rs:1-4`); o app nunca envia requisições ao cliente (`protocol.rs:43-44`). Ferramentas só de leitura (`src-tauri/src/mcp_server/tools.rs:122-129`, despacho em `tools.rs:295-325`). Limites: 8 conexões, 4 requisições em voo por conexão (`channel.rs:30-35`); nenhum timeout por requisição no app nem no relay (`channel.rs:410`, `src-tauri/src/mcp_server/stdio.rs:220-249`). `McpData` não carrega `AppHandle` (`src-tauri/src/mcp_server/mod.rs:316-346`).
+- **Aprovações nativas.** `requiresApproval` vira `needsApproval` do SDK (`agent-runtime/src/sdk-engine.ts:252`); a interrupção é persistida como item `interruption` e a execução vai a `waiting_for_user` (`src-tauri/src/agent_runtime/host.rs:1061-1107`); o frontend recebe `clovy://agent-runtime-event` (`host.rs:25,952`) e responde com `resolve_agent_interruption` (`api.rs:1268-1276`, núcleo `api.rs:1335-1735`). Cartões: `ApprovalPart`, `ClarifyPart` (`src/components/agent/chat-turns/AgentActionCards.tsx:15,337`), `SecretPart` (`src/components/agent/chat-turns/TurnPresentation.tsx:27-90`). Sem timeout no desktop; "session"/"always" não viram concessão persistida (`api.rs:1440-1452`). Companion só aprova `computer_use`, uma vez, com prazo de 60 s após o recibo (`src-tauri/src/companion/mod.rs:714-728,1282-1450`; ADR-0053).
+
+## Goals / Non-Goals
+
+**Goals:** paridade funcional dos turnos Claude Code/Codex com o agente nativo, com o mesmo limite de autoridade (credenciais no app, aprovação humana para escrita, política do host para MCP do usuário); um único broker de aprovação reutilizado por todas as ferramentas de escrita; remoção limpa do nativo depois da paridade comprovada.
+
+**Non-Goals:** fase 1 (padrão de motor, roteamento, rotinas só-leitura; worktree `cli-20261015/cli-routing`); dar ferramentas do Clovy a pi, agy e cursor-agent; editar a configuração global dos CLIs; remover rotas do clovy-api; mudar a ADR-0058 para clientes externos.
+
+## Inventário de paridade
+
+Legenda da coluna "Destino": **CLI** = o Claude Code/Codex já cobre sozinho; **MCP** = ferramenta nova no `clovy-mcp` (nomes fixados no delta `clovy-mcp-server`); **Gateway** = repasse de servidor MCP pelo `clovy-mcp`. "Aprov." = passa pelo broker.
+
+| Capacidade nativa | Onde está hoje | Destino | Aprov. | Observação |
+|---|---|---|---|---|
+| `search_june`, `get_note`, `get_dictation` | `api.rs:2367-2369`; `src-tauri/src/agent_runtime/tools.rs:430-579` | MCP: `search_notes` e `list_dictations` já existem (`mcp_server/tools.rs:160-184`); **novo** `get_dictation` (por id, paginado) e argumento aditivo `contentOffset` em `get_note` | não | Nativo pagina conteúdo e transcrição por bytes (256 KiB, `tools.rs:19,482-534`); MCP corta o conteúdo em 20.000 caracteres (`mcp_server/tools.rs:453-495`). Paridade = paginar conteúdo por caractere, mantendo a retenção de ditados do MCP (`dictation_history_cutoff_timestamp`). |
+| `list_memories`, `save_memory`, `forget_memory` | `api.rs:2370-2372`; `tools.rs:619-694` | MCP: `list_memories` existe; **novos** `save_memory`, `forget_memory` | sim (escrita) | Mesmo gate de memória global e por projeto (`tools.rs:973-1002`). |
+| `generate_image`, `edit_image`, `generate_video` | `api.rs:2373-2375`; `tools.rs:696-798`; clovy-api `/v1/image/*`, `/v1/video/*` (`src-tauri/src/clovy_api.rs:876-964`) | MCP: **novos**, mesmos nomes | não (paridade) | Artefato gravado no workspace da sessão e em `agent_artifacts` (`tools.rs:774-788,1181-1194`): exige vínculo de turno. Vídeo faz polling longo; depende do timeout de ferramenta do CLI (spike S3). |
+| `start_recording`, `stop_recording`, `recording_status` | `api.rs:2377-2379`; `tools.rs:160-189`; `src-tauri/src/agent_recorder.rs:53-100` (ADR-0013) | MCP: **novos**, mesmos nomes | start/stop sim | O broker aprova e depois o `AgentRecorderBroker` existente executa (espera até 420 s, `agent_recorder.rs:12`). |
+| Browser use (14) | `api.rs:2380-2393`; `tools.rs:230-258`; `src-tauri/src/browser_broker.rs:1108-1136` | MCP: **novos**, mesmos 14 nomes | aprovação própria do broker do navegador | Ações consequentes já estacionam na fila do `BrowserBroker` (`browser_broker.rs:1652-1670`, 600 s) com a bandeja existente (`browser_approvals_pending`/`browser_approval_respond`, `browser_broker.rs:1935-1953`); o broker de aprovação não duplica isso. Contexto `Attended` ligado ao turno. |
+| `computer_use` | `api.rs:2414`; `tools.rs:220-226`; `src-tauri/src/computer_use.rs:2601-2610` | MCP: **novo** `computer_use` | sim, a cada chamada | Exige lease de execução assistida (`computer_use.rs:2298-2315,2809-2820`) agora concedido pelo vínculo de turno; permissão por app continua no broker do computer use (`computer_use.rs:3648-3690`). Companion: escopo ADR-0053 (D4). |
+| `get_obsidian_vault` | `api.rs:2376`; `tools.rs:156-159`; `src-tauri/src/obsidian.rs:91-110` | MCP: **novo** `get_obsidian_vault`; leitura dos arquivos pelo próprio CLI | não | Leitura fora do workspace passa pelo prompt de permissão do CLI (Claude → broker; Codex `workspace-write` já lê fora). |
+| `list_skills`, `load_skill` | `api.rs:2404-2405`; `tools.rs:1483-1554,1686-1696` | MCP: **novos**, mesmos nomes | não | Nativo filtra pelo snapshot da execução (`agent_runs.enabled_skills_json`); no MCP filtra pelas habilitações globais (`agent_skill_settings`). Skills do próprio CLI continuam do CLI (D9). |
+| Rotinas CRUD | `api.rs:2406-2411`; `tools.rs:202-214,278-298`; `src-tauri/src/routines.rs:192-368` | MCP: **novos** `list_routines`, `create_routine`, `update_routine`, `pause_routine`, `resume_routine`, `delete_routine` | todas menos `list_routines` | A execução da rotina em CLI é da fase 1 (`routines.rs:741-814` hoje usa `run.start`). |
+| Gmail, Calendar, GitHub | `src-tauri/src/agent_runtime/native_connectors.rs:38-151,229-283,515-586`; tokens em `src-tauri/src/connectors/store.rs:1-23` | MCP: **novos**, mesmos nomes do catálogo nativo, com `accountId` | mutações sim | Tokens nunca saem do app; revalidação de escopo por chamada como hoje (`native_connectors.rs:546-586`). |
+| Notion (MCP hospedado) | `src-tauri/src/connectors/notion.rs:32-67,271-312`; `tools.rs:1416-1481` | MCP: repasse dos nomes externos `notion-*` pelo `clovy-mcp` | ações (`notion-create-pages`, `notion-update-page`) sim | Hoje a ação exige vínculo de aprovação com digest por `run_id/call_id` (`tools.rs:1435-1475`); passa a exigir o id de aprovação do broker. |
+| Linear (MCP hospedado, ADR-0050) | `src-tauri/src/agent_mcp.rs:65-67,1281-1340,1765-1839` | Gateway: `mcp_linear_*` | conforme anotações (`agent_mcp.rs:1313-1314`) | Bearer fica em memória no app (`agent_mcp.rs:1784-1839`). |
+| MCPs do usuário (ADR-0039) | `agent_mcp.rs:35-53,194-228,357-417,1396-1423` | Gateway: `mcp_<servidor>_<tool>` | política do servidor (padrão: sim) | Segredos no Keychain `co.opensoftware.clovy.agent-mcp`; Seatbelt para stdio em sessão `sandboxed` (`agent_mcp.rs:1991-2003,2400-2420`). Alternativa: repasse direto (D2). |
+| `request_clarification` | `api.rs:2412`; `tools.rs:1556,1587-1617` | MCP: **novo** `request_clarification` | broker (tipo clarificação) | A resposta volta como resultado da ferramenta; some o "pool" de respostas por execução. Claude: desabilitar `AskUserQuestion` no `-p` (spike S1). |
+| `request_secret` | `api.rs:2413`; `tools.rs:1560-1585`; consumido só por `run_shell` `secretEnv` (`tools.rs:1330-1359`) | **não portado** (D5) | n/a | Sem consumidor seguro: o shell do CLI não aceita referência opaca e devolver o valor colocaria o segredo no contexto do modelo. |
+| Arquivos (`list/read/write/patch/import/preview/search_files`), `run_shell` | `api.rs:2396-2403`; `tools.rs:1047-1414` | CLI | prompts do próprio CLI (Claude → broker via S1; Codex → sandbox) | `import_file` vira cópia pelo próprio CLI. |
+| `web_search`, `web_fetch` | `api.rs:2394-2395`; `tools.rs:1024-1045` → clovy-api `/v1/web/*` | CLI (`WebSearch`/`WebFetch` do Claude; busca web do Codex, S5) | não | Desktop deixa de chamar `/v1/web/*`; rota fica no servidor (ADR-0021). |
+| Atividade, dia | `src-tauri/src/activity/timeline/agent_tools.rs:29-60` | MCP: já existem (`docs/mcp-server.md` tabela) | não | Sem mudança. |
+| Anexos e visão | `api.rs:2259-2297,2795-2915`; CLI recebe só manifesto de texto (`api.rs:890`) | CLI: Codex `--image <path>` por anexo de imagem; Claude lê a imagem pelo `Read` a partir do manifesto | não | Texto do manifesto deixa de citar "Clovy's file tools" (`api.rs:2900-2915`). |
+| Compactação, steering | `api.rs:257-269,955-978` | CLI gerencia o próprio contexto; steering continua como fila de follow-up | n/a | Já recusados para CLI hoje. |
+
+## Decisions
+
+### 1. Vínculo de turno (contrato compartilhado C1)
+
+- `chat_engine` cria, antes de lançar o CLI, um **token de turno** aleatório (32 bytes, hex) e registra em `TurnRegistry` (novo `src-tauri/src/mcp_server/turns.rs`) o `TurnBinding { token, session_id, run_id, cli, safety_mode, attended, surface, expires_on_run_end }`.
+- O token vai nos argumentos do servidor: `["--dir", "<mcp dir>", "--turn", "<token>"]` no arquivo temporário do Claude (`cli.rs:106-114`) e no `-c mcp_servers.clovy.args=[…]` do Codex (`cli.rs:132-143`). Fica visível em `ps` para o mesmo usuário, que já lê o segredo da instalação (`docs/mcp-server.md`, "Local channel"); o token sozinho não abre o socket e morre com a execução.
+- Handshake aditivo: `{"clovyMcp": 1, "secret": "<hex>", "turn": "<token>"}`. Versão continua 1; relay antigo sem `turn` = conexão não vinculada. Token desconhecido ou expirado → `{"ok": false, "error": "turn_expired"}`, e o relay responde as chamadas com esse motivo.
+- `ChatEngineHost` revoga o token quando a execução termina, falha ou é cancelada (mesmo ponto que `register`/`shutdown`, `src-tauri/src/chat_engine/mod.rs:86-164`). Conexões vinculadas são fechadas na revogação.
+- **Conexão não vinculada (clientes externos, Cursor, `claude mcp add`)**: `tools/list` e `tools/call` iguais aos de hoje (só leitura). Ferramentas de escrita nunca são listadas sem vínculo; chamá-las responde `turn_required`.
+- `McpData` ganha `AppHandle` e `Option<TurnBinding>`; `tools.rs` vira `tools/mod.rs` com registro de **grupos** (`trait ToolGroup { fn descriptors(&ToolCtx) -> Vec<Value>; async fn call(&ToolCtx, name, args) -> Option<Result<Value>> }`), um arquivo por grupo, para fatias paralelas com donos disjuntos.
+
+### 2. Broker de aprovação (contrato compartilhado C2)
+
+Novo módulo `src-tauri/src/approval_broker/` (`mod.rs`, `store.rs`, `commands.rs`), independente do runtime nativo:
+
+1. Uma ferramenta de escrita chama `broker.request(&binding, ApprovalRequest { kind: Approval | Clarification, tool, title, description, preview, target })`.
+2. O broker grava um item `interruption` na sessão (mesmo `AgentItemPayload` que o nativo, id `interruption:{run}:{uuid}`, `engine: "cli"`), põe a execução em `waiting_for_user` e emite `interruption.requested` em `clovy://agent-runtime-event` pelo mesmo `persist_and_emit_event` (`host.rs:888`) que o motor CLI já usa (`chat_engine/mod.rs:60-79`). Os cartões existentes renderizam sem novo componente.
+3. A chamada MCP espera um `oneshot` com timeout (`APPROVAL_TIMEOUT` padrão 10 min; sempre menor que o timeout de ferramenta passado ao CLI, ver §3). O semáforo de 4 requisições por conexão (`channel.rs:304-314`) continua valendo; a espera ocupa uma vaga.
+4. A UI responde com `resolve_agent_interruption` (mesmo comando): quando o item tem `engine: "cli"`, o comando entrega a decisão ao broker em vez de `run.resume`. Escolhas: `once` aprova, `deny` nega; `session`/`always` são tratados como `once` (como hoje, `api.rs:1440-1452`). Clarificação devolve `{answer}`.
+5. Resultado: aprovado → a ferramenta executa e devolve seu resultado; negado → `isError` com `user_denied`; timeout → `approval_timed_out` e item marcado `expired`; execução cancelada ou app encerrando → `run_cancelled`, item `cancelled`. Uma decisão é aceita uma única vez (claim atômico do item, como `api.rs:1161-1230`).
+6. **Sem humano**: binding com `attended = false` (rotinas) nega imediatamente com `unattended_requires_approval`, sem gravar cartão pendente (D6).
+7. **Companion**: o evento de pendência é publicado ao telefone como hoje; só `computer_use` é respondível remotamente, com permissão de uso único e prazo de 60 s (ADR-0053 inalterada; ampliar é D4). As demais aparecem no telefone como "aguardando aprovação no Mac".
+8. **Prompts do próprio Claude Code**: com `--permission-prompt-tool mcp__clovy__approve_action` (spike S1), o Claude envia cada pedido de permissão (Bash, Edit, Write, leitura fora do workspace) à ferramenta `approve_action`, que chama o mesmo broker e devolve `{"behavior":"allow","updatedInput":…}` ou `{"behavior":"deny","message":…}`. `approve_action` só é listada em conexão vinculada a turno Claude e é excluída do uso direto pelo modelo se o spike confirmar que `--disallowedTools` não bloqueia o caminho de permissão.
+9. Na inicialização, interrupções CLI ainda `pending` (app fechado no meio) são marcadas `cancelled` e a execução `cancelled`; o CLI já morreu com o grupo de processos (`docs/llm-providers.md`, "App shutdown").
+
+### 3. Política de permissões (contrato compartilhado C3)
+
+Novo `src-tauri/src/chat_engine/policy.rs` produz flags a partir de `(cli, safety_mode, attended)`; `CliTurnRequest` e `TurnContext` ganham `safety_mode` e `attended`.
+
+| Caso | Claude Code | Codex |
+|---|---|---|
+| Assistido, `sandboxed` (padrão) | `--permission-mode default` (spike S1 confirma o nome; a ajuda lista `manual`), `--permission-prompt-tool mcp__clovy__approve_action`, `--allowedTools mcp__clovy__*` (a autoridade das ferramentas do Clovy é o broker dentro delas; sem prompt duplo), `--disallowedTools AskUserQuestion`; env `MCP_TOOL_TIMEOUT` = 15 min | `-c sandbox_mode="workspace-write"` (como hoje), `-c approval_policy="never"`, `-c mcp_servers.clovy.tool_timeout_sec=900` |
+| Assistido, `unrestricted` | igual, com `--permission-mode acceptEdits` (edições no workspace sem perguntar; shell e o resto continuam no broker) | igual, com `-c sandbox_workspace_write.network_access=true` (rede liberada, escrita ainda restrita ao workspace) |
+| Não assistido (rotinas, fase 1) | política só-leitura da fase 1; com vínculo `attended=false` o broker nega toda escrita | `-s read-only` da fase 1; idem |
+
+Nunca: `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--allow-dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access`, `--approve-for-me`. A regra "nunca `--permission-mode`/`--allowedTools`" de `docs/llm-providers.md` muda para "nunca flags que pulem aprovação; `--allowedTools` só para `mcp__clovy__*`". `--strict-mcp-config` não é passado: os MCPs que o usuário configurou dentro do próprio CLI continuam carregando (D7). Codex não tem prompt-tool em `exec`; suas ações próprias ficam limitadas pelo sandbox e as do Clovy pelo broker.
+
+### 4. Gateway de MCP (Linear e servidores do usuário)
+
+- Um grupo `gateway` no `clovy-mcp` lista, para conexões vinculadas, as ferramentas de `agent_mcp` habilitadas (mesma visibilidade e nomes `mcp_<servidor>_<tool>`, `agent_mcp.rs:1396-1423`) e o Linear gerenciado (`mcp_linear_*`).
+- A chamada usa o caminho existente de `agent_mcp` (descoberta, sessão Streamable HTTP, refresh de token, Seatbelt para stdio em sessão `sandboxed`, limite de saída e timeout). A aprovação do servidor/ferramenta (`requires_approval`, `approval_tools`, anotações) passa pelo broker.
+- Elicitação MCP de servidor do usuário vira clarificação do broker (substitui `tools.rs:374-424`).
+- Motivo de não usar `--mcp-config` direto: exigiria gravar headers, env e tokens OAuth do Keychain num arquivo lido pelo CLI, quebrando ADR-0039 ("never receives connector tokens or MCP credentials") e ADR-0050, e perderia visibilidade, aprovação e Seatbelt. Repasse direto fica como D2.
+
+### 5. Remoção do nativo (fase 4)
+
+**Critério de corte**: fases 0 e 2 concluídas; `make verify` verde; teste de paridade por ferramenta (delta `clovy-mcp-server`) verde para Claude e Codex com CLI falso; smoke nativo isolado (AGENTS.md, "Functional proof") com turno real de Claude e de Codex usando ao menos uma ferramenta de cada grupo de escrita, aprovação e negação; nenhum ponto de entrada do app ainda inicia `run.start` (fase 1 concluída); dono aprova o corte.
+
+**Apagar** (levantamento com linhas no inventário de tarefas 4.x):
+
+- Sidecar: `agent-runtime/`; `pnpm-workspace.yaml:6`; scripts `agent-runtime:*` em `package.json:14-16,28`; `scripts/build-agent-runtime.mjs`, `scripts/benchmark-agent-runtime.mjs`; `src-tauri/AgentRuntimeEntitlements.plist`; bloco de `scripts/tauri-before-dev.mjs:91-96`; prefixo do `beforeBuildCommand` em `src-tauri/tauri.conf.json:8`; recursos em `src-tauri/tauri.macos.conf.json:17-18` e `src-tauri/tauri.windows.conf.json:7-8`; `ensure_agent_runtime_placeholder` em `src-tauri/build.rs:26,337-368`; `.gitignore:33`; blocos em `scripts/build-signed-dmg.sh:166-176,237-255`, `scripts/build-windows.ps1`, `scripts/qualify-windows-build.ps1`, `scripts/verify-windows-artifacts.ps1`; passos de CI em `.github/workflows/promote-desktop.yml:450-512,521-522,568-602`, `rc-desktop-dmg.yml:321-356,364,418-436`, `production-desktop-windows.yml:212-268,284-287,332-333`.
+- Rust: `AgentRuntimeHost` e o loop de RPC/proxy em `host.rs:53-887,1297-1343`; `tools.rs` (ferramentas nativas), `native_connectors.rs`, `secrets.rs`; em `api.rs`: ramos nativos de `start/cancel/retry_agent_run` (`api.rs:736-818,930-951`, cauda de `retry` após `:1039`), `compact_agent_session`, `steer_agent_run` (ou stub `cli_engine`), interrupções do SDK (`api.rs:1116-1268,1335-1735` exceto o caminho CLI do broker), `run_params`/`tool_descriptors`/`resumable_run_config`/`runtime_history` (`api.rs:2243-2526`), skills por execução (`api.rs:1964-2131`, salvo D9), `resolve_companion_computer_use_approval` nativo (`api.rs:1284-1333`); `.manage(AgentRuntimeHost)` em `src-tauri/src/lib.rs:474`; orçamento de shutdown em `src-tauri/src/shutdown.rs:19-32,391,398`; comandos mortos `suggest_agent_session_title`/`explain_agent_approval` (`src-tauri/src/commands.rs:930,1018`) e chamadores; constantes de modelo de agente em `clovy_api.rs:56-63`; `forward_web_request` (`clovy_api.rs:1480-1512`); testes de endpoint→sidecar em `src-tauri/src/chat_engine/tests.rs:960-1128`.
+- Frontend: `ComposerModelPicker` (`src/components/agent/composer/ModelPicker.tsx`) e usos em `AgentWorkspace.tsx`, `AgentSessionBar.tsx`, `NoteChatPanel.tsx`; ramos `clovy`/`endpoint` de `src/lib/chat-engine.ts:45-86`; `thinking-level`, `agent-default-model`, `agent-model-selection` (com edições em quem importa), `upstream-provider-recovery`, `agent-session-modes` (sem importadores); bindings `compactSession`/`steerRun`/skills/`explainAgentApproval` em `src/lib/tauri.ts:90-138,1115-1120`; seção de skills em `AgentSettingsSection.tsx` (salvo D9); chave Tavily em `AppSettings.tsx` (D8); testes listados na tarefa 4.3.
+- Configurações: `llm_usage.chat` deixa de aceitar `clovy`/`endpoint` (migração única para o CLI padrão da fase 1); `set_provider_model(Generation)` deixa de mexer em `llm_usage.chat` (`src-tauri/src/providers/mod.rs:899-907`).
+
+**Manter**: `agent_runtime::{domain, repository, protocol}` e a persistência de eventos (`host.rs:888-1290` parte de persistência, `sanitize_log` usado por `commands.rs:1010`) movidos para um módulo de sessão neutro; `persona.rs` (usado pelo Início, `clovy_api.rs:1936-1946`); `migration.rs` (import Hermes, inerte); comandos de sessão, itens, anexos e artefatos (`api.rs:122-642,1773-1880,2608-2959`); `agent_mcp.rs` (gateway), `browser_broker.rs`, `computer_use.rs`, `agent_recorder.rs`, `routines.rs` (em CLI); `proxy_agent_chat_completions` enquanto Início e segurança de imagem usarem (`clovy_api.rs:1164,2567,2698`); migrações SQL (ADR-0037: nunca apagar arquivos de migração); chave OpenRouter BYOK (notas e limpeza).
+
+**clovy-api**: nada removido. `POST /v1/chat/completions` continua (Início, segurança de imagem, clientes antigos); `/v1/web/*` fica sem chamador desktop novo e só pode ser aposentada pelo processo da ADR-0021 quando a versão suportada mais antiga não chamar mais.
+
+**Histórico**: sessões nativas continuam legíveis (itens e artefatos são agnósticos de motor). Próxima mensagem numa sessão nativa vai para o CLI padrão com o histórico prefixado (`turn.rs:616-657`). `retry_agent_run` de execução nativa mapeia para o CLI padrão. Execuções `waiting_for_user` nativas são encerradas como `cancelled` por migração. Segredos órfãos do serviço `co.opensoftware.clovy.agent-secrets` são apagados uma vez.
+
+**ADRs**: rascunho ADR-0063 nesta change (broker e escrita no MCP). Na fase 4, ADR nova que supera ADR-0038, ADR-0040, ADR-0013, as partes de runtime de ADR-0039 (rotinas e MCP continuam, agora sobre CLI) e reancora ADR-0053 no broker; ADR-0058 recebe adendo apontando para a ADR-0063; `spec/mcp-tool-naming.md` passa a apontar `src-tauri/src/mcp_server/tools/` e o delta `clovy-mcp-server` como dono dos nomes.
+
+## Spikes obrigatórios (fase 0, antes das fatias)
+
+| Id | Pergunta | Se a resposta for "não" |
+|---|---|---|
+| S1 | Claude 2.1.x em `-p` aceita `--permission-prompt-tool mcp__clovy__approve_action` com o formato `{behavior, updatedInput|message}`; qual é o nome do modo padrão (`default` vs `manual`); `--disallowedTools` bloqueia chamada direta sem bloquear o prompt; `AskUserQuestion` pode ser desabilitado | Claude fica como Codex: ações próprias recusadas viram `needsApproval` como hoje; só ferramentas do Clovy passam pelo broker. Registrar no design. |
+| S2 | Codex 0.16x em `exec` pede aprovação para ferramentas MCP (e falha) ou as executa; `approval_policy="never"` muda isso | Se falhar, usar a configuração por servidor que o spike encontrar; nunca bypass. |
+| S3 | Timeout real de ferramenta MCP em Claude (`MCP_TOOL_TIMEOUT`) e Codex (`tool_timeout_sec`) e se um valor de 15 min é aceito | `APPROVAL_TIMEOUT` e o polling de vídeo ficam abaixo do limite medido; vídeo devolve erro claro se não couber. |
+| S4 | Codex `exec --image <path>` com `resume` | Imagens entram só pelo manifesto. |
+| S5 | Busca web do Codex em `exec` (flag ou `-c`) | Codex fica sem busca web; documentar. |
+
+Resultados entram em `design.md` (seção "Resultados dos spikes") antes da fase 2.
+
+## Decisões pendentes do dono (recomendação conservadora)
+
+- **D1 - `unrestricted` nos CLIs.** Recomendo o mapeamento da tabela §3 (Claude `acceptEdits`, Codex rede liberada, escrita sempre restrita ao workspace e shell sempre aprovado). Alternativa mais permissiva (Codex `danger-full-access`) não recomendada.
+- **D2 - Linear/MCPs do usuário.** Recomendo gateway pelo `clovy-mcp` (credenciais ficam no app, política e Seatbelt mantidos). Repasse direto no `--mcp-config` só seria aceitável para servidores stdio sem segredo, e mesmo assim perde aprovação e Seatbelt.
+- **D3 - Motor "endpoint" (modelo OpenAI-compatível como motor de chat).** Ele roda no sidecar (`src-tauri/src/chat_engine/mod.rs:4-6,262-318`). Recomendo removê-lo do chat na fase 4; endpoints continuam para notas, limpeza e atividade.
+- **D4 - Companion.** Recomendo manter o escopo da ADR-0053 (só `computer_use` aprovável pelo telefone, uso único); demais aprovações só no Mac.
+- **D5 - `request_secret`.** Recomendo não portar; segredos ficam na configuração do próprio CLI ou do servidor MCP no Keychain.
+- **D6 - Rotinas com escrita.** Recomendo negar toda escrita não assistida. Pré-autorização por rotina no momento de salvar fica para uma change futura.
+- **D7 - MCPs configurados dentro do CLI.** Recomendo não passar `--strict-mcp-config` (Clovy não decide pelo CLI do usuário); se o usuário também tiver `clovy` registrado com `claude mcp add`, o `--mcp-config` do turno prevalece (verificar em S1).
+- **D8 - Tavily BYOK.** Recomendo esconder a chave Tavily nas Configurações na fase 4 (sem consumidor desktop) e manter o valor salvo inofensivo.
+- **D9 - Skills do Clovy.** Recomendo expor `list_skills`/`load_skill` (baixo custo, sem escrita) e manter a seção de skills; alternativa é aposentá-las.
+
+## Risks / Trade-offs
+
+- [Prompt-tool do Claude é flag pouco documentada] → spike S1 com fallback explícito; nenhuma fatia depende dele além de 2L.
+- [Aprovação longa estoura timeout do CLI] → timeouts configurados por turno e `APPROVAL_TIMEOUT` menor; teste com relógio controlado.
+- [Token de turno visível em `ps`] → mesmo usuário já lê o segredo; token de uso por execução, revogado no fim, inútil sem o segredo.
+- [Prompt injection pedindo escrita] → toda escrita do Clovy passa pelo broker com descrição gerada pelo app (não pelo modelo) e prévia dos argumentos sanitizados (`host.rs:1358-1371`).
+- [4 requisições por conexão com aprovações pendentes] → aceitável (uma aprovação por vez é o caso comum); se o CLI paralelizar mais, as demais esperam no buffer, sem perda.
+- [Fase 1 em paralelo] → esta change não toca arquivos de roteamento; fatias 2L e 4.x rebaseiam sobre a fase 1 integrada.
+- [Número da ADR] → a fase 1 deve registrar a ADR-0062; este rascunho usa 0063. Se a numeração colidir na integração, renumerar o rascunho.
+
+## Migration Plan
+
+Fase 0 (contratos e spikes) → fase 1 (outro worker, em curso) → fase 2 (fatias de paridade em paralelo) → fase 3 (prova de paridade e aceite do dono) → fase 4 (remoção). Rollback até a fase 3: desligar as ferramentas de escrita é remover o vínculo de turno (conexões voltam a ser só leitura); o nativo continua instalado até a fase 4.
