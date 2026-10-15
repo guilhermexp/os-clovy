@@ -60,6 +60,8 @@ pub struct AgentRuntimeHost {
     cancellations: ToolCancellationRegistry,
 }
 
+const MODEL_GATEWAY_ERROR_MAX_CHARS: usize = 1_000;
+
 /// Open model streams by stream id. The map lock is held only to look a
 /// stream up, insert, or remove it; each stream has its own lock for the
 /// network wait, so concurrent streams never queue behind each other.
@@ -764,12 +766,10 @@ async fn cancel_all_model_scopes(
     }
 }
 
-fn model_gateway_error_message(body: &Value) -> &str {
-    body.get("error")
-        .and_then(|error| error.get("message").or(Some(error)))
-        .and_then(Value::as_str)
-        .or_else(|| body.get("message").and_then(Value::as_str))
-        .unwrap_or("Clovy's model routing service rejected the request.")
+fn model_gateway_error_message(body: &Value) -> String {
+    crate::http_client::json_error_message(body, MODEL_GATEWAY_ERROR_MAX_CHARS).unwrap_or_else(
+        || "Clovy's model routing service rejected the request.".to_string(),
+    )
 }
 
 async fn poll_model_stream(streams: &ModelStreams, stream_id: &str) -> Result<Value, AppError> {

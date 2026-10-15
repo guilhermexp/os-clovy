@@ -2612,13 +2612,7 @@ pub async fn clovy_home_chat(
         let detail = match response.collect_body().await {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
                 .ok()
-                .and_then(|value| {
-                    value
-                        .get("message")
-                        .or_else(|| value.pointer("/error/message"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
+                .and_then(|value| crate::http_client::json_error_message(&value, 200))
                 .or_else(|| {
                     let text = String::from_utf8_lossy(&bytes).trim().to_string();
                     (!text.is_empty()).then(|| text.chars().take(200).collect())

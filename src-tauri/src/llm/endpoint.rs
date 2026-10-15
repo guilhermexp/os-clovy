@@ -91,16 +91,8 @@ pub async fn complete(
                 "The endpoint rejected the API key.".to_string(),
             ));
         }
-        let detail = value
-            .pointer("/error/message")
-            .or_else(|| value.get("message"))
-            .and_then(Value::as_str)
-            .map(|message| {
-                format!(
-                    ": {}",
-                    message.chars().take(ERROR_DETAIL_CHARS).collect::<String>()
-                )
-            })
+        let detail = crate::http_client::json_error_message(&value, ERROR_DETAIL_CHARS)
+            .map(|message| format!(": {message}"))
             .unwrap_or_default();
         return Err(LlmError::EndpointFailed(format!(
             "The endpoint returned status {}{detail}",

@@ -673,15 +673,12 @@ fn classify_api_error(status: u16, message: String) -> GithubApiError {
 /// Extract a human-readable error message from a GitHub API error body,
 /// bounded to avoid flooding context.
 async fn error_message_from_response(response: reqwest::Response) -> String {
-    #[derive(Deserialize)]
-    struct GithubErrorWire {
-        #[serde(default)]
-        message: String,
-    }
-    match response.json::<GithubErrorWire>().await {
-        Ok(body) if !body.message.is_empty() => body.message.chars().take(200).collect(),
-        _ => "request failed".to_string(),
-    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| crate::http_client::json_error_message(&body, 200))
+        .unwrap_or_else(|| "request failed".to_string())
 }
 
 // ----- Repositories -----------------------------------------------------------

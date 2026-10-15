@@ -112,19 +112,14 @@ async fn send_request<T: DeserializeOwned>(
     })
 }
 
-/// Extract Google's `error.message` field only; never echo the raw body.
+/// Extract Google's error message only; never echo the raw body.
 fn api_error_message(body: &str) -> String {
-    let message = serde_json::from_str::<serde_json::Value>(body)
+    serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| {
-            value
-                .get("error")?
-                .get("message")?
-                .as_str()
-                .map(str::to_string)
+            crate::http_client::json_error_message(&value, API_ERROR_MESSAGE_MAX_LEN)
         })
-        .unwrap_or_else(|| "request failed".to_string());
-    message.chars().take(API_ERROR_MESSAGE_MAX_LEN).collect()
+        .unwrap_or_else(|| "request failed".to_string())
 }
 
 fn gmail_get(access_token: &str, path: &str, query: &[(&str, String)]) -> reqwest::RequestBuilder {
