@@ -19,6 +19,58 @@ vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: vi.fn(async () => undefined),
 }));
 
+// English formats with the system's regional format (`intlLocale()` returns
+// undefined), so a formatter without a locale follows the machine's LANG and
+// a pt-BR machine reads "Segunda-feira" and "10.000". Pin that default to
+// en-US so every suite formats the same on every machine; an explicit locale
+// (Portuguese) still wins.
+const TEST_DEFAULT_LOCALE = "en-US";
+function withTestDefaultLocale<T extends object>(formatter: T): T {
+  return new Proxy(formatter, {
+    construct: (target, [locales, ...rest]) =>
+      Reflect.construct(target as new (...args: unknown[]) => object, [
+        locales ?? TEST_DEFAULT_LOCALE,
+        ...rest,
+      ]),
+    apply: (target, thisArg, [locales, ...rest]) =>
+      Reflect.apply(target as (...args: unknown[]) => unknown, thisArg, [
+        locales ?? TEST_DEFAULT_LOCALE,
+        ...rest,
+      ]),
+  });
+}
+for (const name of [
+  "DateTimeFormat",
+  "NumberFormat",
+  "RelativeTimeFormat",
+  "PluralRules",
+  "ListFormat",
+] as const) {
+  Object.defineProperty(Intl, name, {
+    configurable: true,
+    writable: true,
+    value: withTestDefaultLocale(Intl[name]),
+  });
+}
+for (const method of ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"] as const) {
+  const native = Date.prototype[method];
+  Date.prototype[method] = function (
+    this: Date,
+    locales?: Intl.LocalesArgument,
+    options?: Intl.DateTimeFormatOptions,
+  ) {
+    return native.call(this, locales ?? TEST_DEFAULT_LOCALE, options);
+  };
+}
+const nativeNumberToLocaleString = Number.prototype.toLocaleString;
+Number.prototype.toLocaleString = function (
+  this: number,
+  locales?: Intl.LocalesArgument,
+  options?: Intl.NumberFormatOptions,
+) {
+  return nativeNumberToLocaleString.call(this, locales ?? TEST_DEFAULT_LOCALE, options);
+};
+
 // jsdom ships no ResizeObserver; the SegmentedControl relies on one.
 if (!("ResizeObserver" in globalThis)) {
   globalThis.ResizeObserver = class {
