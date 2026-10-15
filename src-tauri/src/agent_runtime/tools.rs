@@ -146,6 +146,7 @@ pub async fn dispatch_tool(
     match name {
         "search_june" => search_clovy_notes(context, &arguments).await,
         "get_note" => get_clovy_note(context, &arguments).await,
+        "get_dictation" => get_clovy_dictation(context, &arguments).await,
         "list_memories" => list_memories(context, &arguments).await,
         "save_memory" => save_memory(context, &arguments).await,
         "forget_memory" => forget_memory(context, &arguments).await,
@@ -529,6 +530,51 @@ async fn get_clovy_note_for_profile(
         "transcriptOffset": transcript_offset,
         "transcriptTotalBytes": transcript.len(),
         "nextTranscriptOffset": next_transcript_offset,
+    }))
+}
+
+async fn get_clovy_dictation(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
+    let dictation_id = required_string(arguments, "id")?;
+    let profile = crate::commands::active_profile(&context.app);
+    get_clovy_dictation_for_profile(
+        &context.repository.pool,
+        &profile,
+        dictation_id,
+        byte_offset(arguments, "textOffset")?,
+    )
+    .await
+}
+
+/// One dictation of the active profile, its text paged like `get_note`.
+async fn get_clovy_dictation_for_profile(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    dictation_id: &str,
+    text_offset: usize,
+) -> Result<Value, AppError> {
+    let row = query(
+        "SELECT id, text, language, created_at FROM dictation_history WHERE id = ? AND profile = ?",
+    )
+    .bind(dictation_id)
+    .bind(profile)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        AppError::new(
+            "dictation_not_found",
+            "No dictation with this id in the active profile.",
+        )
+    })?;
+    let text: String = row.get("text");
+    let (page, text_offset, next_text_offset) = text_page(&text, text_offset);
+    Ok(json!({
+        "id": row.get::<String, _>("id"),
+        "language": row.get::<Option<String>, _>("language"),
+        "createdAt": row.get::<String, _>("created_at"),
+        "text": page,
+        "textOffset": text_offset,
+        "textTotalBytes": text.len(),
+        "nextTextOffset": next_text_offset,
     }))
 }
 
@@ -1793,7 +1839,7 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, AppError>
 /// case-insensitive match of `query` (the start of the text when it does not
 /// match), marked with `...` where text was clipped. A search returns up to
 /// 40 rows, so whole notes and transcripts would flood the model's context;
-/// `get_note` reads a whole note.
+/// `get_note` and `get_dictation` read a whole note or dictation.
 fn search_excerpt(text: &str, query: &str) -> String {
     if text.chars().count() <= SEARCH_EXCERPT_CHARS {
         return text.to_string();
@@ -2172,6 +2218,58 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "note_not_found");
+    }
+
+    #[tokio::test]
+    async fn a_dictation_found_by_search_is_read_whole_through_get_dictation() {
+        let pool = search_pool().await;
+        // Multibyte, longer than an excerpt and than one page, match at the end.
+        let text = format!(
+            "a{}needle",
+            "ã".repeat(NOTE_PAGE_BYTES / 2 + SEARCH_EXCERPT_CHARS)
+        );
+        query("INSERT INTO dictation_history (id, text, language, profile, created_at) VALUES ('long', ?, 'pt', 'profile-a', '2026-01-01'), ('other', 'needle', NULL, 'profile-b', '2026-01-01')")
+            .bind(&text)
+            .execute(&pool).await.unwrap();
+
+        let found = search_clovy_notes_for_profile(&pool, "profile-a", "needle")
+            .await
+            .unwrap();
+        assert_eq!(found["dictations"].as_array().unwrap().len(), 1);
+        let dictation_id = found["dictations"][0]["id"].as_str().unwrap();
+        assert!(found["dictations"][0]["text"].as_str().unwrap().len() < text.len());
+
+        let mut read = String::new();
+        let mut offset = 0_usize;
+        let mut pages = 0;
+        loop {
+            let page = get_clovy_dictation_for_profile(&pool, "profile-a", dictation_id, offset)
+                .await
+                .unwrap();
+            assert_eq!(page["textOffset"], offset);
+            assert_eq!(page["language"], "pt");
+            let chunk = page["text"].as_str().unwrap();
+            assert!(chunk.len() <= NOTE_PAGE_BYTES);
+            read.push_str(chunk);
+            pages += 1;
+            match page["nextTextOffset"].as_u64() {
+                Some(next) => offset = next as usize,
+                None => break,
+            }
+        }
+        assert!(pages > 1);
+        assert_eq!(read, text);
+
+        let page = get_clovy_dictation_for_profile(&pool, "profile-a", dictation_id, 2)
+            .await
+            .unwrap();
+        assert_eq!(page["textOffset"], 1);
+        for (profile, id) in [("profile-a", "other"), ("profile-a", "missing")] {
+            let error = get_clovy_dictation_for_profile(&pool, profile, id, 0)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "dictation_not_found");
+        }
     }
 
     #[test]
