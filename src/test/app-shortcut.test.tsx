@@ -2001,6 +2001,9 @@ describe("App shortcuts", () => {
         preview: "Second preview",
         last_active: "2026-06-05T12:00:00Z",
       };
+      // The workspace rebroadcasts the runtime's list; only the newest
+      // broadcast is committed, so the runtime must know both sessions.
+      mocks.listAgentSessions.mockResolvedValue([secondSession, firstSession]);
       act(() => {
         window.dispatchEvent(
           new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
