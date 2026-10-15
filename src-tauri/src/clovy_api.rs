@@ -257,6 +257,18 @@ impl AgentChatCompletionsResponse {
     }
 }
 
+#[cfg(test)]
+impl AgentChatCompletionsResponse {
+    pub(crate) fn from_upstream_for_test(upstream: reqwest::Response) -> Self {
+        Self {
+            status: upstream.status().as_u16(),
+            content_type: String::new(),
+            route: AgentModelRouteMetadata::default(),
+            upstream,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDto {
@@ -2600,13 +2612,7 @@ pub async fn clovy_home_chat(
         let detail = match response.collect_body().await {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
                 .ok()
-                .and_then(|value| {
-                    value
-                        .get("message")
-                        .or_else(|| value.pointer("/error/message"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
+                .and_then(|value| crate::http_client::json_error_message(&value, 200))
                 .or_else(|| {
                     let text = String::from_utf8_lossy(&bytes).trim().to_string();
                     (!text.is_empty()).then(|| text.chars().take(200).collect())
@@ -4073,29 +4079,29 @@ fn body_model_allows_user_key(body: &serde_json::Value) -> bool {
 
 fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(HTTP_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent(concat!("clovy/", env!("CARGO_PKG_VERSION")))
-            .default_headers(app_version_headers())
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http_client::build_client(
+            crate::http_client::base_client_builder()
+                .timeout(HTTP_TIMEOUT)
+                // Same as the base user agent; spelled out because the Clovy
+                // API identity guard (technical-identity.test.mjs) pins it here.
+                .user_agent(concat!("clovy/", env!("CARGO_PKG_VERSION")))
+                .default_headers(app_version_headers()),
+            "clovy_api",
+        )
     })
 }
 
+const AGENT_USER_AGENT: &str = concat!("clovy-agent/", env!("CARGO_PKG_VERSION"));
+
 fn agent_http_client() -> &'static reqwest::Client {
     AGENT_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(AGENT_HTTP_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent(concat!("clovy-agent/", env!("CARGO_PKG_VERSION")))
-            .default_headers(app_version_headers())
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http_client::build_client(
+            crate::http_client::base_client_builder()
+                .timeout(AGENT_HTTP_TIMEOUT)
+                .user_agent(AGENT_USER_AGENT)
+                .default_headers(app_version_headers()),
+            "clovy_api_agent",
+        )
     })
 }
 
@@ -4114,14 +4120,12 @@ pub(crate) fn app_version_headers() -> reqwest::header::HeaderMap {
 /// host the user pointed their local model at.
 fn local_http_client() -> &'static reqwest::Client {
     LOCAL_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(AGENT_HTTP_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent(concat!("clovy-agent/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http_client::build_client(
+            crate::http_client::base_client_builder()
+                .timeout(AGENT_HTTP_TIMEOUT)
+                .user_agent(AGENT_USER_AGENT),
+            "local_inference",
+        )
     })
 }
 

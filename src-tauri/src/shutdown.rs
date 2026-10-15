@@ -40,6 +40,7 @@ const _: () = assert!(
 /// an explicit leaf fallback instead of an untracked retry thread.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ShutdownDeadline {
+    #[allow(dead_code)] // Used by the managed browser transport, not wired yet.
     expires_at: Instant,
 }
 
@@ -50,10 +51,12 @@ impl ShutdownDeadline {
         }
     }
 
+    #[allow(dead_code)] // Used by the managed browser transport, not wired yet.
     fn remaining(self) -> Duration {
         self.expires_at.saturating_duration_since(Instant::now())
     }
 
+    #[allow(dead_code)] // Used by the managed browser transport, not wired yet.
     pub(crate) fn try_lock<'a, T>(self, mutex: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
         try_lock_for(mutex, self.remaining())
     }

@@ -679,7 +679,7 @@ fn preview_transcription_request(
 
 fn preview_chunk_path(session_id: &str, segment_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "os-june-live-preview-{}-{}-{}.wav",
+        "clovy-live-preview-{}-{}-{}.wav",
         session_id,
         segment_id,
         Uuid::new_v4()

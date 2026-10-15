@@ -453,7 +453,7 @@ pub async fn branch_agent_session(
         &mut transaction,
         &session_id,
         &branch.id,
-        &chrono::Utc::now().to_rfc3339(),
+        &crate::db::repositories::timestamp(),
     )
     .await?;
     let items = sqlx::query::query(
@@ -1537,7 +1537,7 @@ async fn resolve_agent_interruption_inner(
         None
     };
     let resolution_nonce = uuid::Uuid::new_v4().to_string();
-    let resolution_time = chrono::Utc::now().to_rfc3339();
+    let resolution_time = crate::db::repositories::timestamp();
     settle_interruption_payload(
         &mut interruption,
         &interruption_kind,
@@ -1648,7 +1648,7 @@ async fn resolve_agent_interruption_inner(
                  WHERE id = ? AND status = 'queued'",
             )
             .bind(run.last_sequence)
-            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(crate::db::repositories::timestamp())
             .bind(&run.id)
             .execute(&mut *transaction)
             .await?
@@ -1677,7 +1677,7 @@ async fn resolve_agent_interruption_inner(
                  SET status = 'waiting_for_user', updated_at = ?
                  WHERE id = ? AND status = 'running'",
             )
-            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(crate::db::repositories::timestamp())
             .bind(&session.id)
             .execute(&mut *transaction)
             .await?
@@ -2364,7 +2364,7 @@ async fn tool_descriptors(
     workspace: &str,
 ) -> Result<Value, AppError> {
     let mut tools = json!([
-        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
+        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations. Returns each match's id with an excerpt around the match.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
         { "name": "list_memories", "description": "Recall durable facts, preferences, and decisions from Clovy's memory store. Pass projectId to include that project's memories.", "parameters": { "type": "object", "properties": { "projectId": { "type": "string" }, "includeGlobal": { "type": "boolean", "default": true }, "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 8 }, "offset": { "type": "integer", "minimum": 0, "default": 0 } }, "required": [], "additionalProperties": false } },
         { "name": "save_memory", "description": "Save a durable fact, preference, or decision in Clovy's memory store. Pass projectId when it belongs to the current project.", "parameters": { "type": "object", "properties": { "content": { "type": "string", "maxLength": 4000 }, "projectId": { "type": "string" } }, "required": ["content"], "additionalProperties": false }, "requiresApproval": true },
         { "name": "forget_memory", "description": "Permanently forget one Clovy memory by id when the user asks Clovy to forget it.", "parameters": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"], "additionalProperties": false }, "requiresApproval": true },
@@ -2858,7 +2858,7 @@ async fn prepare_attachments(
                 .or_else(|| attachment_mime_type(&destination).map(str::to_string)),
             size_bytes: metadata.len() as i64,
             available: true,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: crate::db::repositories::timestamp(),
         });
     }
     Ok(attachments)

@@ -10,4 +10,3 @@ pub mod system_macos;
 pub mod system_windows;
 pub mod turns;
 pub mod validation;
-pub mod waveform;

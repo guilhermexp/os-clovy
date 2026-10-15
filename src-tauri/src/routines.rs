@@ -150,9 +150,6 @@ fn utc_timezone() -> String {
 fn auto_model() -> String {
     "auto".into()
 }
-fn now() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
 
 fn app_error(error: sqlx::Error) -> AppError {
     AppError::new("routine_storage_failed", error.to_string())
@@ -215,7 +212,7 @@ pub async fn create(
     let enabled = request.enabled.unwrap_or(state == "scheduled");
     let safety_mode = request.safety_mode.unwrap_or(AgentSafetyMode::Sandboxed);
     let timezone = nonempty(request.timezone, "UTC");
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     let next_run_at = if enabled && state == "scheduled" {
         next_run_after(schedule, &timezone, Utc::now())?.map(format_time)
     } else {
@@ -316,7 +313,7 @@ pub async fn update(
         .bind(request.name.unwrap_or(current.name).trim()).bind(request.prompt.unwrap_or(current.prompt).trim())
         .bind(&schedule).bind(timezone).bind(request.repeat.unwrap_or(current.repeat))
         .bind(request.deliver.unwrap_or(current.deliver)).bind(request.model.unwrap_or(current.model))
-        .bind(request.safety_mode.unwrap_or(current.safety_mode).as_db()).bind(&state).bind(enabled).bind(now())
+        .bind(request.safety_mode.unwrap_or(current.safety_mode).as_db()).bind(&state).bind(enabled).bind(crate::db::repositories::timestamp())
         .bind(next_run_at).bind(metadata_json(metadata)).bind(tool_catalog_updated)
         .bind(&routine_id)
         .execute(&mut *transaction).await.map_err(app_error)?;
@@ -329,7 +326,7 @@ pub async fn pause(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppEr
     // its claim association until terminal projection records status and
     // repeat progress, then releases the claim transactionally.
     let changed = query("UPDATE routines SET state = 'paused', enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?")
-        .bind(now()).bind(id).execute(pool).await.map_err(app_error)?;
+        .bind(crate::db::repositories::timestamp()).bind(id).execute(pool).await.map_err(app_error)?;
     if changed.rows_affected() == 0 {
         return Err(AppError::new("routine_not_found", "Routine was not found."));
     }
@@ -350,7 +347,7 @@ pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppE
     }
     let next = next_run_after(&current.schedule, &current.timezone, Utc::now())?.map(format_time);
     query("UPDATE routines SET state = 'scheduled', enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?")
-        .bind(next).bind(now()).bind(id).execute(&mut *transaction).await.map_err(app_error)?;
+        .bind(next).bind(crate::db::repositories::timestamp()).bind(id).execute(&mut *transaction).await.map_err(app_error)?;
     transaction.commit().await.map_err(app_error)?;
     get(pool, id).await
 }
@@ -436,7 +433,7 @@ async fn claim_with_connector_guard(
     }
     let token = Uuid::new_v4().to_string();
     let run_id = Uuid::new_v4().to_string();
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     let stored_model: String = routine.get("model");
     let model = resolve_routine_model(&stored_model, &crate::providers::remote_generation_model());
     let safety_mode = AgentSafetyMode::from(routine.get::<String, _>("safety_mode").as_str());
@@ -476,7 +473,7 @@ async fn claim_with_connector_guard(
 /// and allows bounded concurrent dispatch at the app integration layer.
 pub async fn claim_due(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
     let ids: Vec<String> = query("SELECT id FROM routines WHERE state = 'scheduled' AND enabled = 1 AND claim_token IS NULL AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC, id ASC")
-        .bind(now()).fetch_all(pool).await.map_err(app_error)?.into_iter().map(|row| row.get("id")).collect();
+        .bind(crate::db::repositories::timestamp()).fetch_all(pool).await.map_err(app_error)?.into_iter().map(|row| row.get("id")).collect();
     let mut claims = Vec::new();
     for id in ids {
         if let Some(claim) = claim(pool, &id, "schedule", true).await? {
@@ -499,7 +496,7 @@ async fn scheduler_tick(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
 /// remains claimed; an unstarted claim only becomes eligible again after a
 /// bounded lease expiry.
 pub async fn reconcile(pool: &SqlitePool) -> Result<(), AppError> {
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
@@ -590,7 +587,7 @@ pub async fn reconcile_after_restart(pool: &SqlitePool) -> Result<(), AppError> 
         .reconcile_non_routine_runs_after_restart()
         .await
         .map_err(app_error)?;
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     // The agent run is the source of truth at a process boundary. Mirroring
     // the active state first closes either crash window between the two normal
     // persistence writes: a stored waiting run stays resumable, while a stored
@@ -631,7 +628,7 @@ pub async fn mark_agent_run_waiting(pool: &SqlitePool, agent_run_id: &str) -> Re
          SET status = 'waiting_for_user', updated_at = ?
          WHERE agent_run_id = ? AND status = 'running'",
     )
-    .bind(now())
+    .bind(crate::db::repositories::timestamp())
     .bind(agent_run_id)
     .execute(pool)
     .await
@@ -645,7 +642,7 @@ pub async fn mark_agent_run_resumed(pool: &SqlitePool, agent_run_id: &str) -> Re
          SET status = 'running', updated_at = ?
          WHERE agent_run_id = ? AND status = 'waiting_for_user'",
     )
-    .bind(now())
+    .bind(crate::db::repositories::timestamp())
     .bind(agent_run_id)
     .execute(pool)
     .await
@@ -673,7 +670,7 @@ pub async fn mark_agent_run_terminal(
         return Ok(());
     }
 
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     // Project the terminal run and release its routine claim under one write
     // reservation. A concurrent routine edit therefore lands wholly before or
     // after both updates and cannot erase the matching claim between them.
@@ -753,7 +750,7 @@ pub async fn start_claim(
     tokio::fs::create_dir_all(&workspace)
         .await
         .map_err(|error| AppError::new("routine_workspace_failed", error.to_string()))?;
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     let mut created_agent_run_id = None;
     let started = async {
         query("INSERT INTO agent_sessions (id, title, status, model, safety_mode, workspace_path, source, created_at, updated_at) VALUES (?, ?, 'idle', ?, ?, ?, 'routine', ?, ?)")
@@ -804,9 +801,9 @@ pub async fn start_claim(
         }
         let next_run_at = next_run_after_dispatch_failure(&claim, Utc::now());
         let _ = query("UPDATE routine_runs SET status = 'failed', completed_at = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?")
-            .bind(now()).bind(&error.code).bind(&error.message).bind(now()).bind(&claim.routine_run_id).execute(pool).await;
+            .bind(crate::db::repositories::timestamp()).bind(&error.code).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_run_id).execute(pool).await;
         let _ = query("UPDATE routines SET claim_token = NULL, claimed_at = NULL, next_run_at = COALESCE(?, next_run_at), last_run_at = ?, last_status = 'error', last_error = ?, updated_at = ? WHERE id = ? AND claim_token = ?")
-            .bind(next_run_at).bind(now()).bind(&error.message).bind(now()).bind(&claim.routine_id).bind(&claim.token).execute(pool).await;
+            .bind(next_run_at).bind(crate::db::repositories::timestamp()).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_id).bind(&claim.token).execute(pool).await;
         return Err(error);
     }
     list_runs(pool, Some(&claim.routine_id))
@@ -1514,7 +1511,7 @@ pub async fn routine_mcp_server_allowed_for_session(
 
 fn base_unattended_tools() -> Value {
     json!([
-        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
+        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations. Returns each match's id with an excerpt around the match.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
         { "name": "web_search", "description": "Search the public web.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
         { "name": "web_fetch", "description": "Fetch a public web page.", "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false } },
         { "name": "list_files", "description": "List files in the routine workspace.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": [], "additionalProperties": false } },
@@ -1742,7 +1739,7 @@ mod tests {
             &claimed.token,
             session_id,
             agent_run_id,
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -1875,7 +1872,7 @@ mod tests {
             &claimed.token,
             "session-linear",
             "run-linear",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2312,7 +2309,7 @@ mod tests {
             &claim.token,
             "session-1",
             "run-1",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2353,7 +2350,7 @@ mod tests {
             &claimed.token,
             "session-terminal",
             "run-terminal",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2410,7 +2407,7 @@ mod tests {
                 &claimed.token,
                 &session_id,
                 &agent_run_id,
-                &now(),
+                &crate::db::repositories::timestamp(),
             )
             .await
             .unwrap();
@@ -2574,7 +2571,7 @@ mod tests {
             &claimed.token,
             "session-atomic",
             "run-atomic",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2628,7 +2625,7 @@ mod tests {
             &claimed.token,
             "session-retry",
             "run-retry",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2698,7 +2695,7 @@ mod tests {
             &claim.token,
             "session-restart",
             "run-restart",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2737,7 +2734,7 @@ mod tests {
             &claimed_run.token,
             "session-waiting",
             "run-waiting",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2797,7 +2794,7 @@ mod tests {
             &claimed_run.token,
             "session-partial-wait",
             "run-partial-wait",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2836,7 +2833,7 @@ mod tests {
             &claimed_run.token,
             "session-partial-resume",
             "run-partial-resume",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();

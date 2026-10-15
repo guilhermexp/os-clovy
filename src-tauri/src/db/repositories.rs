@@ -1845,14 +1845,6 @@ impl Repositories {
         Ok(folder_from_row(row))
     }
 
-    pub async fn folder_exists(&self, folder_id: &str) -> Result<bool, sqlx::error::Error> {
-        let row = query("SELECT 1 FROM folders WHERE id = ? AND deleted_at IS NULL")
-            .bind(folder_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.is_some())
-    }
-
     pub async fn set_folder_instructions(
         &self,
         folder_id: &str,
@@ -4224,19 +4216,6 @@ impl Repositories {
         Ok(artifact)
     }
 
-    pub async fn latest_audio_artifact_path(
-        &self,
-        note_id: &str,
-    ) -> Result<Option<(String, String)>, sqlx::error::Error> {
-        let row = query(
-            "SELECT id, path FROM audio_artifacts WHERE note_id = ? AND status = 'valid' ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(note_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|row| (row.get("id"), row.get("path"))))
-    }
-
     async fn latest_audio_artifact(
         &self,
         note_id: &str,
@@ -5453,22 +5432,6 @@ impl Repositories {
             last_error: None,
             recorded_silence: false,
         })
-    }
-
-    pub async fn delete_source_turn_transcripts_for_session(
-        &self,
-        session_id: &str,
-        source: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        query(
-            "DELETE FROM transcripts
-             WHERE recording_session_id = ? AND source = ?",
-        )
-        .bind(session_id)
-        .bind(source)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -33,7 +33,6 @@ const DEVICE_CODE_ENDPOINT: &str = "https://github.com/login/device/code";
 const TOKEN_ENDPOINT: &str = "https://github.com/login/oauth/access_token";
 /// GitHub requires a User-Agent header on every API call; mirror the shared
 /// http_client's value.
-const GITHUB_USER_AGENT: &str = "clovy/0.1";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 
 /// For GitHub Apps that do not expire user tokens: store a far-future expiry
@@ -501,7 +500,7 @@ fn github_api_request(
         .bearer_auth(access_token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("User-Agent", crate::http_client::USER_AGENT)
 }
 
 // ----- Identity ---------------------------------------------------------------
@@ -591,7 +590,7 @@ pub async fn revoke(client_id: &str, client_secret: &str, access_token: &str) ->
         .basic_auth(client_id, Some(client_secret))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("User-Agent", crate::http_client::USER_AGENT)
         .json(&serde_json::json!({ "access_token": access_token }))
         .send()
         .await
@@ -674,15 +673,12 @@ fn classify_api_error(status: u16, message: String) -> GithubApiError {
 /// Extract a human-readable error message from a GitHub API error body,
 /// bounded to avoid flooding context.
 async fn error_message_from_response(response: reqwest::Response) -> String {
-    #[derive(Deserialize)]
-    struct GithubErrorWire {
-        #[serde(default)]
-        message: String,
-    }
-    match response.json::<GithubErrorWire>().await {
-        Ok(body) if !body.message.is_empty() => body.message.chars().take(200).collect(),
-        _ => "request failed".to_string(),
-    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| crate::http_client::json_error_message(&body, 200))
+        .unwrap_or_else(|| "request failed".to_string())
 }
 
 // ----- Repositories -----------------------------------------------------------
@@ -1366,71 +1362,6 @@ pub async fn read_file(
         encoding: wire.encoding,
         size: wire.size,
     })
-}
-
-// ----- Code search ------------------------------------------------------------
-
-/// One code search result.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GithubCodeSearchResult {
-    pub repo_full_name: String,
-    pub path: String,
-    pub html_url: String,
-}
-
-#[derive(Deserialize)]
-struct SearchCodeWire {
-    items: Vec<SearchCodeItemWire>,
-}
-
-#[derive(Deserialize)]
-struct SearchCodeItemWire {
-    path: String,
-    html_url: String,
-    repository: SearchCodeRepoWire,
-}
-
-#[derive(Deserialize)]
-struct SearchCodeRepoWire {
-    full_name: String,
-}
-
-/// Search code within repositories accessible via the installation. `per_page`
-/// is capped at 30.
-pub async fn search_code(
-    access_token: &str,
-    query: &str,
-    per_page: Option<u32>,
-) -> Result<Vec<GithubCodeSearchResult>, GithubApiError> {
-    let per_page = per_page.unwrap_or(25).min(30);
-    let url = format!(
-        "https://api.github.com/search/code?q={}&per_page={}",
-        urlencoding::encode(query),
-        per_page,
-    );
-    let response = github_api_request(access_token, reqwest::Method::GET, &url)
-        .send()
-        .await
-        .map_err(|e| GithubApiError::Network(e.to_string()))?;
-    let status = response.status().as_u16();
-    if !response.status().is_success() {
-        let message = error_message_from_response(response).await;
-        return Err(classify_api_error(status, message));
-    }
-    let result: SearchCodeWire = response
-        .json()
-        .await
-        .map_err(|e| GithubApiError::Network(e.to_string()))?;
-    Ok(result
-        .items
-        .into_iter()
-        .map(|item| GithubCodeSearchResult {
-            repo_full_name: item.repository.full_name,
-            path: item.path,
-            html_url: item.html_url,
-        })
-        .collect())
 }
 
 // ----- Write operations -------------------------------------------------------

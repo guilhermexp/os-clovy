@@ -6,7 +6,7 @@
 //! selected-resource scoping is not verified in this preview. See ADR 0033.
 
 use crate::{
-    connectors::{policy::JUNE_NOTION_ACTIONS_SERVER, ConnectorAccountStatus, ConnectorProvider},
+    connectors::{ConnectorAccountStatus, ConnectorProvider},
     domain::types::AppError,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -139,13 +139,14 @@ fn http_client() -> Result<&'static reqwest::Client, AppError> {
             // ambient process proxy variables that could redirect credentials.
             // This means proxy-required networks are intentionally unsupported
             // until Clovy has an explicit trusted-proxy connector setting.
-            reqwest::Client::builder()
-                .no_proxy()
+            crate::http_client::base_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_keepalive(Some(Duration::from_secs(30)))
-                .user_agent("clovy/0.1 notion-hosted-mcp-preview")
+                .user_agent(concat!(
+                    "clovy/",
+                    env!("CARGO_PKG_VERSION"),
+                    " notion-hosted-mcp-preview"
+                ))
                 .build()
                 .map_err(|error| error.to_string())
         })
@@ -223,12 +224,6 @@ pub struct NotionMcpTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotionMcpToolList {
-    pub tools: Vec<NotionMcpTool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -693,32 +688,6 @@ pub async fn list_tools(app: &AppHandle) -> Result<NotionToolInventory, AppError
     })
 }
 
-pub async fn mcp_tool_list(app: &AppHandle) -> Result<NotionMcpToolList, AppError> {
-    filtered_mcp_tool_list(app, tool_allowed_for_agent).await
-}
-
-pub async fn mcp_action_tool_list(app: &AppHandle) -> Result<NotionMcpToolList, AppError> {
-    let mut list = filtered_mcp_tool_list(app, action_tool_allowed_for_agent).await?;
-    for tool in &mut list.tools {
-        apply_action_tool_contract(tool);
-    }
-    Ok(list)
-}
-
-async fn filtered_mcp_tool_list(
-    app: &AppHandle,
-    allowed: fn(&str) -> Option<&'static str>,
-) -> Result<NotionMcpToolList, AppError> {
-    let tools = run_with_fresh_client(app, |client| async move {
-        client.initialize().await?;
-        client.hosted_tools_list().await
-    })
-    .await?;
-    Ok(NotionMcpToolList {
-        tools: filter_allowed_tools(tools, allowed),
-    })
-}
-
 pub async fn call_hosted_tool(
     app: &AppHandle,
     request: NotionHostedToolCallRequest,
@@ -731,52 +700,6 @@ pub async fn call_hosted_tool(
     };
     preflight_read_tool_arguments(tool_name, &request.arguments)?;
     call_hosted_tool_unchecked(app, tool_name, request.arguments).await
-}
-
-pub async fn call_hosted_action_tool(
-    app: &AppHandle,
-    request: NotionHostedToolCallRequest,
-) -> Result<NotionHostedToolCallResult, AppError> {
-    let Some(tool_name) = action_tool_allowed_for_agent(&request.tool_name) else {
-        return Err(AppError::new(
-            "notion_tool_not_allowed",
-            "That Notion hosted MCP action is not enabled in Clovy yet.",
-        ));
-    };
-    preflight_action_arguments(tool_name, &request.arguments)?;
-    let expected_revision = capture_connected_revision(app).await?;
-    let summary = summarize_action(tool_name, &request.arguments);
-    let args_preview = preview_action(tool_name, &request.arguments);
-    let approval = crate::connectors::approvals::ActionRequest {
-        grant_token: None,
-        account_id: notion_account_email(),
-        server: JUNE_NOTION_ACTIONS_SERVER,
-        tool: tool_name,
-        summary,
-        args_preview,
-    };
-    if let crate::connectors::approvals::ActionDecision::Deny(reason) =
-        crate::connectors::approvals::gate_action(app, approval).await
-    {
-        return Err(AppError::new("connector_action_denied", reason));
-    }
-    let timeout = action_request_timeout(request.deadline_unix_ms)?;
-    tokio::time::timeout(
-        timeout,
-        call_hosted_action_for_revision(
-            app,
-            expected_revision,
-            tool_name,
-            request.arguments,
-        ),
-    )
-    .await
-    .map_err(|_| {
-        AppError::new(
-            "notion_mcp_action_timeout",
-            "Notion did not finish the approved action before Clovy's safety timeout. Check Notion before retrying.",
-        )
-    })?
 }
 
 /// Executes a Notion action after the caller has already completed a trusted
@@ -910,13 +833,6 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
         }
         _ => value.clone(),
     }
-}
-
-pub(crate) async fn capture_connected_revision(app: &AppHandle) -> Result<u64, AppError> {
-    load_connected_with_fresh_token(app).await?;
-    let _guard = credential_lifecycle_lock().lock().await;
-    load_connected().await?;
-    Ok(connection_revision())
 }
 
 async fn call_hosted_action_for_revision(

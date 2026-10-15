@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Preserved Clovy browser policy broker; only cleanup is wired initially.
-
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -22,9 +20,9 @@ use crate::{
     extension_host::{ExtensionHost, ExtensionResponse},
 };
 
-pub const BROWSER_APPROVALS_CHANGED_EVENT: &str = "clovy://browser-approvals-changed";
 const BROWSER_APPROVAL_TIMEOUT_MS: u64 = 600_000;
 
+#[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
 fn constant_time_eq(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         return false;
@@ -59,6 +57,7 @@ pub(crate) trait BrowserTransport: Send + Sync {
     /// App-shutdown variant. Managed transports override this to keep mutex
     /// acquisition inside the supervised aggregate deadline; other transports
     /// retain their existing teardown.
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     fn terminate_session_for_shutdown(
         &self,
         session_id: &str,
@@ -146,6 +145,8 @@ impl BrowserTransportPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BrowserBrokerContext {
     Attended,
+    #[allow(dead_code)]
+    // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     Routine(String),
 }
 
@@ -172,6 +173,7 @@ pub(crate) struct TransportResponse {
 }
 
 impl TransportResponse {
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn data(data: Value) -> Self {
         Self {
             data,
@@ -179,6 +181,7 @@ impl TransportResponse {
         }
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn artifact(data: Value, artifact: TransportArtifact) -> Self {
         Self {
             data,
@@ -193,11 +196,13 @@ pub(crate) struct TransportArtifact {
     pub(crate) bytes: Vec<u8>,
 }
 
+#[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
 pub(crate) struct ExtensionBrowserTransport {
     host: ExtensionHost,
 }
 
 impl ExtensionBrowserTransport {
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn new(host: ExtensionHost) -> Self {
         Self { host }
     }
@@ -261,6 +266,8 @@ impl BrowserTransport for ExtensionBrowserTransport {
 
 pub(crate) struct BrowserBroker {
     state: Mutex<BrowserBrokerState>,
+    #[allow(dead_code)]
+    // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     transition_lock: tokio::sync::Mutex<()>,
     action_lock: tokio::sync::Mutex<()>,
 }
@@ -294,6 +301,7 @@ struct BrowserBrokerState {
     routine_entitlement_override: Option<bool>,
 }
 
+#[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
 struct BrowserShutdownPlan {
     transports: HashMap<BrowserTransportKind, Arc<dyn BrowserTransport>>,
     sessions: Vec<(String, BrowserTransportKind)>,
@@ -369,6 +377,7 @@ impl BrowserBroker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn configure_transport(
         &self,
         kind: BrowserTransportKind,
@@ -382,14 +391,17 @@ impl BrowserBroker {
         state.artifact_root = Some(artifact_root);
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn configure_outcome_repository(&self, repositories: Repositories) {
         self.lock().outcome_repository = Some(repositories);
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn set_access_flag_path(&self, path: PathBuf) {
         self.lock().access_flag_path = Some(path);
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn set_approvals_changed_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
         self.lock().approvals_changed = Some(notifier);
     }
@@ -401,6 +413,7 @@ impl BrowserBroker {
         }
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn replace_routine_grants(&self, grants: Vec<RoutineBrowserGrant>) {
         self.lock().routine_grants = grants;
     }
@@ -500,6 +513,7 @@ impl BrowserBroker {
         }
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn routine_grant_for_token(&self, token: &str) -> Option<RoutineBrowserGrant> {
         self.lock()
             .routine_grants
@@ -526,10 +540,12 @@ impl BrowserBroker {
         }
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) async fn lock_transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.transition_lock.lock().await
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) async fn set_enabled(&self, enabled: bool) -> Result<(), AppError> {
         let _action = self.action_lock.lock().await;
         let (transports, sessions, cancelled) = {
@@ -621,6 +637,7 @@ impl BrowserBroker {
         Ok(())
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn transport_policy(&self) -> BrowserTransportPolicy {
         self.lock().transport_policy
     }
@@ -628,6 +645,7 @@ impl BrowserBroker {
     /// Apply the last successfully fetched remote policy. The in-memory gate
     /// closes before transport teardown begins, and only sessions owned by a
     /// newly disabled transport are removed.
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) async fn set_transport_policy(&self, policy: BrowserTransportPolicy) {
         let _action = self.action_lock.lock().await;
         let (transports, sessions, approvals_changed) = {
@@ -685,6 +703,7 @@ impl BrowserBroker {
 
     /// App-exit backstop. Managed transports terminate synchronously so no
     /// in-flight request can keep Chromium or its ephemeral profile alive.
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn terminate_sessions(&self, deadline: crate::shutdown::ShutdownDeadline) {
         let Some(mut state) = deadline.try_lock(&self.state) else {
             tracing::warn!(
@@ -697,6 +716,7 @@ impl BrowserBroker {
         self.finish_session_termination(shutdown, deadline);
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     fn drain_sessions_for_shutdown(state: &mut BrowserBrokerState) -> BrowserShutdownPlan {
         state.transition_blocked = true;
         let approvals_changed = (!state.pending_approvals.is_empty())
@@ -718,6 +738,7 @@ impl BrowserBroker {
         }
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     fn finish_session_termination(
         &self,
         plan: BrowserShutdownPlan,
@@ -742,6 +763,7 @@ impl BrowserBroker {
                 .is_some_and(|path| path.exists())
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn is_enabled_for(&self, context: &BrowserBrokerContext) -> bool {
         let state = self.lock();
         let routine_id = match context {
@@ -751,6 +773,7 @@ impl BrowserBroker {
         context_access_enabled(&state, context.transport_kind(), routine_id)
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn is_transport_enabled_for(&self, context: &BrowserBrokerContext) -> bool {
         self.lock()
             .transport_policy
@@ -762,6 +785,7 @@ impl BrowserBroker {
         self.lock().sessions.len()
     }
 
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn active_session_count_for(&self, context: &BrowserBrokerContext) -> usize {
         let state = self.lock();
         let routine_id = match context {
@@ -1885,11 +1909,13 @@ impl BrowserBroker {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn insert_test_session(&self, id: &str) {
         self.insert_test_session_for(id, BrowserBrokerContext::Attended);
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
     pub(crate) fn insert_test_session_for(&self, id: &str, context: BrowserBrokerContext) {
         let routine_id = match &context {
             BrowserBrokerContext::Attended => None,
@@ -2166,6 +2192,7 @@ fn validate_attended_url(raw: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+#[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
 fn extension_request_error(message: String, response: &Value) -> AppError {
     let code = response
         .get("errorCode")
@@ -2194,6 +2221,7 @@ fn extension_request_error(message: String, response: &Value) -> AppError {
     AppError::new(code, message)
 }
 
+#[allow(dead_code)] // Extension and managed browser transports, not wired yet (docs/browser-computer-use-prd.md).
 fn extension_failure_message(tool: &str, arguments: &Value) -> String {
     let session_id = arguments.get("session_id").and_then(Value::as_str);
     let tab_id = arguments.get("tab_id").and_then(Value::as_i64);

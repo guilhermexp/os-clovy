@@ -1092,7 +1092,7 @@ impl AgentMcpRepository {
     }
     pub async fn create(&self, definition: &McpServerDefinition) -> Result<(), AgentMcpError> {
         definition.validate_custom()?;
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let result = query("INSERT INTO agent_mcp_servers (id, name, enabled, transport, command, args_json, url, secret_ref, metadata_json, tool_visibility_json, safety_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&definition.id).bind(definition.name.trim()).bind(definition.enabled as i64).bind(definition.transport.as_db())
             .bind(&definition.command).bind(json_text(&definition.args)?).bind(&definition.url).bind(&definition.secret_ref)
@@ -1111,7 +1111,7 @@ impl AgentMcpRepository {
         let result = query("UPDATE agent_mcp_servers SET name = ?, enabled = ?, transport = ?, command = ?, args_json = ?, url = ?, secret_ref = ?, metadata_json = ?, tool_visibility_json = ?, safety_json = ?, updated_at = ? WHERE id = ?")
             .bind(definition.name.trim()).bind(definition.enabled as i64).bind(definition.transport.as_db()).bind(&definition.command)
             .bind(json_text(&definition.args)?).bind(&definition.url).bind(&definition.secret_ref).bind(json_text(&definition.metadata)?)
-            .bind(json_text(&definition.tool_visibility)?).bind(json_text(&definition.safety)?).bind(now()).bind(&definition.id)
+            .bind(json_text(&definition.tool_visibility)?).bind(json_text(&definition.safety)?).bind(crate::db::repositories::timestamp()).bind(&definition.id)
             .execute(&self.pool).await;
         match result {
             Ok(result) if result.rows_affected() == 1 => Ok(()),
@@ -1165,9 +1165,6 @@ fn row_definition(row: sqlx_sqlite::SqliteRow) -> Result<McpServerDefinition, Ag
         safety: serde_json::from_str(&row.get::<String, _>("safety_json"))
             .map_err(|_| AgentMcpError::Storage)?,
     })
-}
-fn now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1517,9 +1514,6 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
             retire_server_sessions(&server.id).await;
         }
         Ok(bundle)
-    }
-    pub async fn refresh_registry(&self) -> Result<Vec<RuntimeToolDescriptorJson>, AgentMcpError> {
-        self.refresh_registry_for(false).await
     }
     pub async fn refresh_registry_for(
         &self,

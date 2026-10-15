@@ -52,14 +52,10 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 pub(crate) fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(HTTP_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent("clovy/0.1")
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http_client::build_client(
+            crate::http_client::base_client_builder().timeout(HTTP_TIMEOUT),
+            "connectors",
+        )
     })
 }
 

@@ -15,6 +15,11 @@ use tauri::{AppHandle, Manager};
 use tokio::{io::AsyncReadExt, process::Command, sync::oneshot};
 
 const MAX_TOOL_OUTPUT_BYTES: usize = 1_048_576;
+/// Characters of each note, transcript, or dictation a search returns.
+const SEARCH_EXCERPT_CHARS: usize = 4_000;
+/// How long to keep draining shell pipes after the process group is swept;
+/// only a helper that escaped the group could still hold a pipe open.
+const SHELL_PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 const MAX_SEARCH_FILE_BYTES: u64 = 1_048_576;
 const MAX_SEARCH_SCANNED_BYTES: u64 = 32 * 1_048_576;
 const MAX_SEARCH_FILES: usize = 10_000;
@@ -429,7 +434,13 @@ async fn search_clovy_notes_for_profile(
     profile: &str,
     query_text: &str,
 ) -> Result<Value, AppError> {
-    let pattern = format!("%{}%", query_text.replace('%', "\\%").replace('_', "\\_"));
+    let pattern = format!(
+        "%{}%",
+        query_text
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
     let rows = query(
         "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, '') AS note,
                 COALESCE((SELECT text FROM transcripts t WHERE t.note_id = n.id ORDER BY t.created_at DESC LIMIT 1), '') AS transcript,
@@ -444,15 +455,21 @@ async fn search_clovy_notes_for_profile(
     )
     .bind(profile).bind(&pattern).bind(&pattern).bind(&pattern).bind(&pattern)
     .fetch_all(pool).await?;
-    let notes: Vec<Value> = rows.into_iter().map(|row| json!({
-        "id": row.get::<String, _>("id"), "title": row.get::<String, _>("title"),
-        "note": truncate(row.get::<String, _>("note")), "transcript": truncate(row.get::<String, _>("transcript")),
-        "updatedAt": row.get::<String, _>("updated_at")
-    })).collect();
+    let notes: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<String, _>("id"), "title": row.get::<String, _>("title"),
+                "note": search_excerpt(&row.get::<String, _>("note"), query_text),
+                "transcript": search_excerpt(&row.get::<String, _>("transcript"), query_text),
+                "updatedAt": row.get::<String, _>("updated_at")
+            })
+        })
+        .collect();
     let dictations = query("SELECT id, text, language, created_at FROM dictation_history WHERE profile = ? AND text LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT 20")
         .bind(profile).bind(&pattern).fetch_all(pool).await?;
     let dictations: Vec<Value> = dictations.into_iter().map(|row| json!({
-        "id": row.get::<String, _>("id"), "text": truncate(row.get::<String, _>("text")),
+        "id": row.get::<String, _>("id"), "text": search_excerpt(&row.get::<String, _>("text"), query_text),
         "language": row.get::<Option<String>, _>("language"), "createdAt": row.get::<String, _>("created_at")
     })).collect();
     Ok(json!({ "notes": notes, "dictations": dictations }))
@@ -1016,7 +1033,7 @@ async fn record_artifact(
     sqlx::query::query("INSERT INTO agent_artifacts(id, session_id, run_id, provenance, action, path, original_path, size_bytes, available, created_at) VALUES (?, ?, ?, 'tool', ?, ?, ?, ?, 1, ?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&context.session_id).bind(&context.run_id)
         .bind(action).bind(path.to_string_lossy().as_ref()).bind(original.map(|value| value.to_string_lossy().into_owned()))
-        .bind(metadata.len() as i64).bind(chrono::Utc::now().to_rfc3339()).execute(&context.repository.pool).await?;
+        .bind(metadata.len() as i64).bind(crate::db::repositories::timestamp()).execute(&context.repository.pool).await?;
     Ok(())
 }
 
@@ -1031,7 +1048,7 @@ async fn record_artifact_with_mime(
     sqlx::query::query("INSERT INTO agent_artifacts(id, session_id, run_id, provenance, action, path, original_path, mime_type, size_bytes, available, created_at) VALUES (?, ?, ?, 'tool', ?, ?, ?, ?, ?, 1, ?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&context.session_id).bind(&context.run_id)
         .bind(action).bind(path.to_string_lossy().as_ref()).bind(original.map(|value| value.to_string_lossy().into_owned()))
-        .bind(mime_type).bind(metadata.len() as i64).bind(chrono::Utc::now().to_rfc3339()).execute(&context.repository.pool).await?;
+        .bind(mime_type).bind(metadata.len() as i64).bind(crate::db::repositories::timestamp()).execute(&context.repository.pool).await?;
     Ok(())
 }
 
@@ -1168,11 +1185,7 @@ async fn run_shell(context: &ToolContext, arguments: &Value) -> Result<Value, Ap
         command.arg("-lc").arg(script);
         command
     };
-    command
-        .current_dir(&context.workspace)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    command.current_dir(&context.workspace);
     if let Some(secret_env) = arguments.get("secretEnv").and_then(Value::as_object) {
         for (name, secret_ref) in secret_env {
             if name.is_empty()
@@ -1204,28 +1217,58 @@ async fn run_shell(context: &ToolContext, arguments: &Value) -> Result<Value, Ap
             command.env(name, value);
         }
     }
+    let mut cancelled = context.cancellations.register(&context.run_id).await;
+    run_shell_command(command, cancelled.cancelled()).await
+}
+
+/// Runs a prepared shell command in its own process group. Whatever the
+/// script left in the background is swept with the group once the shell
+/// exits (or on cancellation), and the pipes are drained for a bounded grace
+/// period, so a backgrounded helper that inherited stdout can neither hang
+/// the tool nor outlive it.
+async fn run_shell_command(
+    mut command: Command,
+    cancelled: impl Future<Output = ()>,
+) -> Result<Value, AppError> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().map_err(io_error)?;
-    let mut stdout = child
+    let group = child.id();
+    let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| AppError::new("agent_shell_failed", "Shell stdout was unavailable."))?;
-    let mut stderr = child
+        .ok_or_else(|| AppError::new("agent_shell_failed", "Shell stdout was unavailable."));
+    let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| AppError::new("agent_shell_failed", "Shell stderr was unavailable."))?;
-    let stdout_task = tokio::spawn(async move { read_bounded(&mut stdout).await });
-    let stderr_task = tokio::spawn(async move { read_bounded(&mut stderr).await });
-    let mut cancelled = context.cancellations.register(&context.run_id).await;
-    let status = tokio::select! {
-        status = child.wait() => status.map_err(io_error)?,
-        _ = &mut cancelled.receiver => { let _ = child.kill().await; return Err(AppError::new("agent_tool_cancelled", "Shell command was cancelled.")); }
+        .ok_or_else(|| AppError::new("agent_shell_failed", "Shell stderr was unavailable."));
+    let (stdout, stderr) = match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+        (Err(error), _) | (_, Err(error)) => {
+            crate::process_group::kill_group(group);
+            return Err(error);
+        }
     };
-    let stdout_text = stdout_task
-        .await
-        .map_err(|error| AppError::new("agent_shell_failed", error.to_string()))??;
-    let stderr_text = stderr_task
-        .await
-        .map_err(|error| AppError::new("agent_shell_failed", error.to_string()))??;
+    let stdout = spawn_bounded_reader(stdout);
+    let stderr = spawn_bounded_reader(stderr);
+    let status = tokio::select! {
+        status = child.wait() => status.map_err(io_error),
+        () = cancelled => {
+            crate::process_group::kill_group(group);
+            let _ = child.kill().await;
+            return Err(AppError::new("agent_tool_cancelled", "Shell command was cancelled."));
+        }
+    };
+    // Sweep helpers the script left behind first: one that inherited stdout
+    // would otherwise keep the pipe open and the output would never reach EOF.
+    crate::process_group::kill_group(group);
+    let status = status?;
+    let stdout_text = collect_bounded(stdout).await;
+    let stderr_text = collect_bounded(stderr).await;
     Ok(json!({ "exitCode": status.code(), "stdout": stdout_text, "stderr": stderr_text }))
 }
 
@@ -1577,26 +1620,66 @@ pub(crate) fn sandbox_profile(workspace: &Path) -> String {
     format!("(version 1) (allow default) (deny file-write*) (allow file-write* (subpath \"{escaped}\")) (allow file-write* (subpath \"/private/tmp\"))")
 }
 
-async fn read_bounded(
-    reader: &mut (impl tokio::io::AsyncRead + Unpin),
-) -> Result<String, AppError> {
-    let mut bytes = Vec::with_capacity(MAX_TOOL_OUTPUT_BYTES.min(8 * 1_024));
+#[derive(Default)]
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+type SharedOutput = std::sync::Arc<std::sync::Mutex<BoundedOutput>>;
+
+fn spawn_bounded_reader(
+    mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+) -> (tokio::task::JoinHandle<()>, SharedOutput) {
+    let output = SharedOutput::default();
+    let task = tokio::spawn({
+        let output = output.clone();
+        async move { read_bounded(&mut reader, &output).await }
+    });
+    (task, output)
+}
+
+/// Waits briefly for EOF, then returns whatever was read; bytes already
+/// captured are never discarded.
+async fn collect_bounded(
+    (mut task, output): (tokio::task::JoinHandle<()>, SharedOutput),
+) -> String {
+    if tokio::time::timeout(SHELL_PIPE_DRAIN_GRACE, &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+    }
+    let output = output
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    bounded_text(&output)
+}
+
+/// Reads to EOF (or a read error), keeping at most `MAX_TOOL_OUTPUT_BYTES`.
+async fn read_bounded(reader: &mut (impl tokio::io::AsyncRead + Unpin), output: &SharedOutput) {
     let mut buffer = [0_u8; 8 * 1_024];
-    let mut truncated = false;
     loop {
-        let read = reader.read(&mut buffer).await.map_err(io_error)?;
-        if read == 0 {
-            break;
-        }
-        let remaining = MAX_TOOL_OUTPUT_BYTES.saturating_sub(bytes.len());
+        let read = match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let mut output = output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remaining = MAX_TOOL_OUTPUT_BYTES.saturating_sub(output.bytes.len());
         let retained = remaining.min(read);
-        bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
+        output.bytes.extend_from_slice(&buffer[..retained]);
+        output.truncated |= retained < read;
     }
-    if truncated {
-        bytes.extend_from_slice(b"\n[output truncated]");
+}
+
+fn bounded_text(output: &BoundedOutput) -> String {
+    let mut text = String::from_utf8_lossy(&output.bytes).into_owned();
+    if output.truncated {
+        text.push_str("\n[output truncated]");
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    text
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, AppError> {
@@ -1611,12 +1694,33 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, AppError>
             )
         })
 }
-fn truncate(mut value: String) -> String {
-    if value.len() > MAX_TOOL_OUTPUT_BYTES {
-        value.truncate(MAX_TOOL_OUTPUT_BYTES);
-        value.push_str("\n[output truncated]");
+/// A window of at most `SEARCH_EXCERPT_CHARS` characters around the first
+/// case-insensitive match of `query` (the start of the text when it does not
+/// match), marked with `...` where text was clipped. A search returns up to
+/// 40 rows, so whole notes and transcripts would flood the model's context.
+fn search_excerpt(text: &str, query: &str) -> String {
+    if text.chars().count() <= SEARCH_EXCERPT_CHARS {
+        return text.to_string();
     }
-    value
+    // ASCII lowercasing keeps byte offsets, and matches LIKE's case folding.
+    let match_start = text
+        .to_ascii_lowercase()
+        .find(&query.to_ascii_lowercase())
+        .unwrap_or(0);
+    let chars_before_match = text[..match_start].chars().count();
+    let first_char = chars_before_match.saturating_sub(SEARCH_EXCERPT_CHARS / 4);
+    let mut excerpt: String = text
+        .chars()
+        .skip(first_char)
+        .take(SEARCH_EXCERPT_CHARS)
+        .collect();
+    if first_char + SEARCH_EXCERPT_CHARS < text.chars().count() {
+        excerpt.push_str("...");
+    }
+    if first_char > 0 {
+        excerpt.insert_str(0, "...");
+    }
+    excerpt
 }
 fn io_error(error: std::io::Error) -> AppError {
     AppError::new("agent_tool_io_failed", error.to_string())
@@ -1656,11 +1760,90 @@ mod tests {
         let bytes = vec![b'x'; MAX_TOOL_OUTPUT_BYTES + 4_096];
         let mut input = bytes.as_slice();
 
-        let output = read_bounded(&mut input).await.unwrap();
+        let captured = SharedOutput::default();
+        read_bounded(&mut input, &captured).await;
+        let output = bounded_text(&captured.lock().unwrap());
 
         assert!(input.is_empty());
         assert_eq!(output.matches('x').count(), MAX_TOOL_OUTPUT_BYTES);
         assert!(output.ends_with("\n[output truncated]"));
+    }
+
+    #[cfg(unix)]
+    fn process_is_gone(pid: i32) -> bool {
+        for _ in 0..50 {
+            // SAFETY: signal 0 only checks for existence.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    fn shell(directory: &Path, script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(script).current_dir(directory);
+        command
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_returns_when_a_background_helper_keeps_stdout_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+
+        let result = run_shell_command(
+            shell(
+                directory.path(),
+                "sleep 60 & echo $! > helper.pid; echo done",
+            ),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(result["exitCode"], 0);
+        assert_eq!(result["stdout"].as_str().unwrap().trim(), "done");
+        let helper: i32 = fs::read_to_string(directory.path().join("helper.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(process_is_gone(helper), "helper {helper} survived the tool");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_a_shell_kills_its_background_helpers() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("helper.pid");
+        let watched = pid_file.clone();
+        let cancelled = async move {
+            while !fs::read_to_string(&watched).is_ok_and(|pid| pid.ends_with('\n')) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+
+        let error = run_shell_command(
+            shell(directory.path(), "sleep 60 & echo $! > helper.pid; wait"),
+            cancelled,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, "agent_tool_cancelled");
+        let helper: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            process_is_gone(helper),
+            "helper {helper} survived cancellation"
+        );
     }
 
     #[test]
@@ -1727,18 +1910,7 @@ mod tests {
 
     #[tokio::test]
     async fn clovy_search_is_scoped_to_the_active_profile() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        for statement in [
-            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, generated_content TEXT, edited_content TEXT, profile TEXT NOT NULL, updated_at TEXT NOT NULL)",
-            "CREATE TABLE transcripts (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
-            "CREATE TABLE dictation_history (id TEXT PRIMARY KEY, text TEXT NOT NULL, language TEXT, profile TEXT NOT NULL, created_at TEXT NOT NULL)",
-        ] {
-            query(statement).execute(&pool).await.unwrap();
-        }
+        let pool = search_pool().await;
         query("INSERT INTO notes (id, title, generated_content, profile, updated_at) VALUES ('mine', 'Shared needle', 'mine', 'profile-a', '2026-01-01'), ('theirs', 'Shared needle', 'theirs', 'profile-b', '2026-01-02')")
             .execute(&pool).await.unwrap();
         query("INSERT INTO dictation_history (id, text, profile, created_at) VALUES ('dictation-a', 'needle mine', 'profile-a', '2026-01-01'), ('dictation-b', 'needle theirs', 'profile-b', '2026-01-02')")
@@ -1752,6 +1924,67 @@ mod tests {
         assert_eq!(result["notes"][0]["id"], "mine");
         assert_eq!(result["dictations"].as_array().unwrap().len(), 1);
         assert_eq!(result["dictations"][0]["id"], "dictation-a");
+    }
+
+    async fn search_pool() -> sqlx_sqlite::SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for statement in [
+            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, generated_content TEXT, edited_content TEXT, profile TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE transcripts (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
+            "CREATE TABLE dictation_history (id TEXT PRIMARY KEY, text TEXT NOT NULL, language TEXT, profile TEXT NOT NULL, created_at TEXT NOT NULL)",
+        ] {
+            query(statement).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    #[tokio::test]
+    async fn clovy_search_matches_a_query_ending_in_a_backslash() {
+        let pool = search_pool().await;
+        query("INSERT INTO notes (id, title, generated_content, profile, updated_at) VALUES ('windows', 'Paths', 'Saved under C:\\Users', 'profile-a', '2026-01-01')")
+            .execute(&pool).await.unwrap();
+
+        let result = search_clovy_notes_for_profile(&pool, "profile-a", "C:\\")
+            .await
+            .unwrap();
+
+        assert_eq!(result["notes"].as_array().unwrap().len(), 1);
+        assert_eq!(result["notes"][0]["id"], "windows");
+    }
+
+    #[tokio::test]
+    async fn clovy_search_returns_a_bounded_excerpt_around_the_match_in_multibyte_text() {
+        let pool = search_pool().await;
+        // One leading ASCII byte puts the old 1 MiB byte cut inside an `é`.
+        let note = format!(
+            "a{}needle{}",
+            "é".repeat(MAX_TOOL_OUTPUT_BYTES / 2),
+            "é".repeat(MAX_TOOL_OUTPUT_BYTES / 2)
+        );
+        query("INSERT INTO notes (id, title, generated_content, profile, updated_at) VALUES ('long', 'Long', ?, 'profile-a', '2026-01-01')")
+            .bind(&note)
+            .execute(&pool).await.unwrap();
+        query("INSERT INTO dictation_history (id, text, profile, created_at) VALUES ('dictation', ?, 'profile-a', '2026-01-01')")
+            .bind(&note)
+            .execute(&pool).await.unwrap();
+
+        let result = search_clovy_notes_for_profile(&pool, "profile-a", "NEEDLE")
+            .await
+            .unwrap();
+
+        for excerpt in [
+            &result["notes"][0]["note"],
+            &result["dictations"][0]["text"],
+        ] {
+            let excerpt = excerpt.as_str().unwrap();
+            assert!(excerpt.contains("needle"));
+            assert!(excerpt.starts_with("...") && excerpt.ends_with("..."));
+            assert!(excerpt.chars().count() <= SEARCH_EXCERPT_CHARS + 6);
+        }
     }
 
     #[test]
