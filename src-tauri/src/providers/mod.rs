@@ -81,12 +81,10 @@ const MAX_PROVIDER_API_KEY_CHARS: usize = 4_096;
 
 static MODEL_SETTINGS: OnceLock<Mutex<ProviderModelSettings>> = OnceLock::new();
 static PROVIDER_KEY_CHECK_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .no_proxy()
-        .timeout(PROVIDER_API_KEY_CHECK_TIMEOUT)
-        .user_agent(concat!("clovy/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http_client::build_client(
+        crate::http_client::base_client_builder().timeout(PROVIDER_API_KEY_CHECK_TIMEOUT),
+        "provider_key_check",
+    )
 });
 
 /// A provider Clovy API calls on the user's behalf, one per capability: Groq

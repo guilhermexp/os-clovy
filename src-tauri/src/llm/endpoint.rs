@@ -16,11 +16,10 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const ERROR_DETAIL_CHARS: usize = 200;
 
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .no_proxy()
-        .user_agent("clovy/0.1")
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http_client::build_client(
+        crate::http_client::base_client_builder(),
+        "llm_endpoint",
+    )
 });
 
 /// Even-spacing reservations: the next free slot per endpoint id.

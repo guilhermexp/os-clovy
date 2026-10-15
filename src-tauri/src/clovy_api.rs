@@ -4073,29 +4073,26 @@ fn body_model_allows_user_key(body: &serde_json::Value) -> bool {
 
 fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(HTTP_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent(concat!("clovy/", env!("CARGO_PKG_VERSION")))
-            .default_headers(app_version_headers())
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http_client::build_client(
+            crate::http_client::base_client_builder()
+                .timeout(HTTP_TIMEOUT)
+                .default_headers(app_version_headers()),
+            "clovy_api",
+        )
     })
 }
 
+const AGENT_USER_AGENT: &str = concat!("clovy-agent/", env!("CARGO_PKG_VERSION"));
+
 fn agent_http_client() -> &'static reqwest::Client {
     AGENT_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(AGENT_HTTP_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent(concat!("clovy-agent/", env!("CARGO_PKG_VERSION")))
-            .default_headers(app_version_headers())
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http_client::build_client(
+            crate::http_client::base_client_builder()
+                .timeout(AGENT_HTTP_TIMEOUT)
+                .user_agent(AGENT_USER_AGENT)
+                .default_headers(app_version_headers()),
+            "clovy_api_agent",
+        )
     })
 }
 
@@ -4114,14 +4111,12 @@ pub(crate) fn app_version_headers() -> reqwest::header::HeaderMap {
 /// host the user pointed their local model at.
 fn local_http_client() -> &'static reqwest::Client {
     LOCAL_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(AGENT_HTTP_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent(concat!("clovy-agent/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http_client::build_client(
+            crate::http_client::base_client_builder()
+                .timeout(AGENT_HTTP_TIMEOUT)
+                .user_agent(AGENT_USER_AGENT),
+            "local_inference",
+        )
     })
 }
 

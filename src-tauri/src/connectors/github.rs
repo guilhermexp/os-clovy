@@ -33,7 +33,6 @@ const DEVICE_CODE_ENDPOINT: &str = "https://github.com/login/device/code";
 const TOKEN_ENDPOINT: &str = "https://github.com/login/oauth/access_token";
 /// GitHub requires a User-Agent header on every API call; mirror the shared
 /// http_client's value.
-const GITHUB_USER_AGENT: &str = "clovy/0.1";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 
 /// For GitHub Apps that do not expire user tokens: store a far-future expiry
@@ -501,7 +500,7 @@ fn github_api_request(
         .bearer_auth(access_token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("User-Agent", crate::http_client::USER_AGENT)
 }
 
 // ----- Identity ---------------------------------------------------------------
@@ -591,7 +590,7 @@ pub async fn revoke(client_id: &str, client_secret: &str, access_token: &str) ->
         .basic_auth(client_id, Some(client_secret))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("User-Agent", crate::http_client::USER_AGENT)
         .json(&serde_json::json!({ "access_token": access_token }))
         .send()
         .await

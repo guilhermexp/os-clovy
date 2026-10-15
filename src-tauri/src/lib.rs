@@ -29,6 +29,7 @@ mod env_compat;
 pub mod experimental_settings;
 pub mod extension_host;
 pub mod feature_flags;
+mod http_client;
 mod filesystem;
 pub mod image_safety;
 pub mod interface_locale;
