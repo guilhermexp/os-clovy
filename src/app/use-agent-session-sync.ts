@@ -11,6 +11,14 @@ import { invalidateAgentSessionDraft } from "../lib/agent-session-drafts";
 import { updateMenuBarSessionStatus } from "./app-effects/update-ui";
 import type { UseAgentSessionSyncDependencies } from "./use-agent-session-sync-types";
 
+/** A copy of `next` for state, or the current set when the members match. */
+function nextSessionIds(next: ReadonlySet<string>) {
+  return (current: ReadonlySet<string>) =>
+    current.size === next.size && [...next].every((id) => current.has(id))
+      ? current
+      : new Set(next);
+}
+
 export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencies) {
   const {
     activeViewRef,
@@ -86,8 +94,8 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
       const nextWaitingSessionIds = new Set(detail.waitingSessionIds ?? []);
       agentMenuBarWorkingSessionIdsRef.current = nextWorkingSessionIds;
       agentMenuBarWaitingSessionIdsRef.current = nextWaitingSessionIds;
-      setAgentWorkingSessionIds(new Set(nextWorkingSessionIds));
-      setAgentWaitingSessionIds(new Set(nextWaitingSessionIds));
+      setAgentWorkingSessionIds(nextSessionIds(nextWorkingSessionIds));
+      setAgentWaitingSessionIds(nextSessionIds(nextWaitingSessionIds));
       publishAgentMenuBarState();
     }
 
@@ -100,8 +108,8 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
           working: agentMenuBarWorkingSessionIdsRef.current,
           waiting: agentMenuBarWaitingSessionIdsRef.current,
         });
-        setAgentWorkingSessionIds(new Set(agentMenuBarWorkingSessionIdsRef.current));
-        setAgentWaitingSessionIds(new Set(agentMenuBarWaitingSessionIdsRef.current));
+        setAgentWorkingSessionIds(nextSessionIds(agentMenuBarWorkingSessionIdsRef.current));
+        setAgentWaitingSessionIds(nextSessionIds(agentMenuBarWaitingSessionIdsRef.current));
       }
       publishAgentMenuBarState();
     }
