@@ -51,8 +51,10 @@ describe("AgentSettingsSection", () => {
   it("loads the current native personality into the Agent settings", async () => {
     render(<AgentSettingsSection />);
 
-    expect(await screen.findByRole("heading", { name: "Personality" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /Calm/ })).toBeChecked();
+    expect(screen.getByRole("heading", { name: "Personality" })).toBeInTheDocument();
+    // The heading renders before the native persona resolves; the radios only
+    // exist once it has, so wait for them rather than racing the load.
+    expect(await screen.findByRole("radio", { name: /Calm/ })).toBeChecked();
     expect(screen.getByRole("radio", { name: /Calm/ }).closest("label")).toHaveClass(
       "settings-card",
     );
