@@ -31,8 +31,10 @@ export type AgentChatApprovalPart = {
   description: string;
   allowPermanent: boolean;
   choice?: AgentApprovalChoice;
-  status: "pending" | "resolved" | "expired";
+  status: "pending" | "resolved" | "expired" | "cancelled";
   retiredReason?: string;
+  /** Asked by a CLI turn through the approval broker. */
+  engine?: "cli";
 };
 export type AgentChatClarifyPart = {
   type: "clarify";
@@ -42,7 +44,8 @@ export type AgentChatClarifyPart = {
   question: string;
   choices: string[];
   answer?: string;
-  status: "pending" | "resolved";
+  status: "pending" | "resolved" | "expired" | "cancelled";
+  engine?: "cli";
 };
 export type AgentChatSudoPart = {
   type: "sudo";
@@ -218,6 +221,29 @@ export function companionAgentMessagesFromItems(
       overflow.push(projection);
     }
   }
+  // D4 (ADR-0053 scope): the phone learns that a CLI turn waits for the
+  // user, but only the Mac answers it.
+  const waitingOnMac = items.flatMap((item): CompanionAgentMessageView[] => {
+    if (item.kind !== "interruption") return [];
+    const interruption = item.interruption;
+    if (interruption.engine !== "cli" || interruption.status !== "pending") return [];
+    const text =
+      interruption.kind === "clarification"
+        ? t("lib.companion.cliQuestionWaitingOnMac", { question: interruption.question })
+        : interruption.kind === "approval"
+          ? t("lib.companion.cliApprovalWaitingOnMac", { action: interruption.title })
+          : "";
+    if (!text) return [];
+    return [
+      {
+        id: `waiting-on-mac:${interruption.id}`,
+        role: "assistant",
+        text: boundedCompanionText(text, 2 * 1024),
+        createdAt: interruption.createdAt,
+        streaming: false,
+      },
+    ];
+  });
   const mediaOnlyMessages = overflow.map(
     (projection): CompanionAgentMessageView => ({
       id: `media:${projection.reference.artifactId}`,
@@ -228,7 +254,7 @@ export function companionAgentMessagesFromItems(
       media: [projection.reference],
     }),
   );
-  return [...messages, ...mediaOnlyMessages].sort((left, right) =>
+  return [...messages, ...mediaOnlyMessages, ...waitingOnMac].sort((left, right) =>
     left.createdAt.localeCompare(right.createdAt),
   );
 }

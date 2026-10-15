@@ -2,6 +2,7 @@ import { t } from "../i18n/translate";
 import type { AgentChatPart, AgentChatTurn } from "./agent-chat-runtime";
 import {
   AGENT_RUNTIME_PROTOCOL_VERSION,
+  type AgentInterruptionDto,
   type AgentItemDto,
   type AgentRunDto,
   type AgentRuntimeEvent,
@@ -51,7 +52,12 @@ export function reconcileAgentInterruptionResolution(
         interruption: {
           ...interruption,
           status: "resolved",
-          resolution: resolution.choice,
+          // The approval broker grants nothing beyond this call: a CLI
+          // approval for the session or always is approved once.
+          resolution:
+            interruption.engine === "cli" && resolution.choice !== "deny"
+              ? "once"
+              : resolution.choice,
         },
       };
     }
@@ -154,12 +160,20 @@ export function applyAgentRuntimeEvent(
     throw new Error(`Unsupported agent runtime protocol version: ${event.protocolVersion}`);
   }
   if (projection.processedEventIds.has(event.eventId)) return projection;
-  if (event.sequence <= (projection.lastSequenceByRun[event.runId] ?? -1)) return projection;
+  // The approval broker writes CLI cards while the CLI turn keeps numbering
+  // its own events, so its events carry no place in the run's sequence: they
+  // replace the card by id and never move the run's sequence gate.
+  const brokerEvent = isCliInterruptionEvent(event);
+  if (!brokerEvent && event.sequence <= (projection.lastSequenceByRun[event.runId] ?? -1)) {
+    return projection;
+  }
 
   const next: AgentRuntimeProjection = {
     ...projection,
     items: [...projection.items],
-    lastSequenceByRun: { ...projection.lastSequenceByRun, [event.runId]: event.sequence },
+    lastSequenceByRun: brokerEvent
+      ? projection.lastSequenceByRun
+      : { ...projection.lastSequenceByRun, [event.runId]: event.sequence },
     processedEventIds: new Set(projection.processedEventIds).add(event.eventId),
   };
 
@@ -247,25 +261,39 @@ export function applyAgentRuntimeEvent(
       break;
     }
     case "interruption.requested":
+    case "interruption.updated": {
+      const existing = next.items.find(
+        (item) =>
+          item.kind === "interruption" &&
+          item.runId === event.runId &&
+          item.interruption.id === event.data.interruption.id,
+      );
       next.items = upsertItem(
-        next.items.filter(
-          (item) =>
-            item.kind !== "interruption" ||
-            item.runId !== event.runId ||
-            item.interruption.id !== event.data.interruption.id,
-        ),
+        next.items.filter((item) => item !== existing),
         {
           id: event.data.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
-          sequence: event.sequence,
+          // A card keeps its place in the transcript when it changes.
+          sequence: existing?.sequence ?? event.sequence,
           createdAt: event.data.interruption.createdAt,
           kind: "interruption",
           interruption: event.data.interruption,
         },
       );
-      if (next.run) next.run = { ...next.run, status: "waiting_for_user" };
+      if (next.run && next.run.id === event.runId) {
+        const waiting = next.items.some(
+          (item) =>
+            item.kind === "interruption" &&
+            item.runId === event.runId &&
+            item.interruption.status === "pending",
+        );
+        if (waiting) next.run = { ...next.run, status: "waiting_for_user" };
+        else if (next.run.status === "waiting_for_user")
+          next.run = { ...next.run, status: "running" };
+      }
       break;
+    }
     case "usage.updated":
       if (next.run) next.run = { ...next.run, usage: event.data };
       break;
@@ -609,7 +637,8 @@ function interruptionToPart(
       question: interruption.question,
       choices: interruption.choices,
       answer: interruption.answer,
-      status: interruption.status === "pending" ? "pending" : "resolved",
+      status: clarifyStatus(interruption),
+      ...(interruption.engine === "cli" ? { engine: "cli" as const } : {}),
     };
   }
   if (interruption.kind === "secret") {
@@ -631,7 +660,28 @@ function interruptionToPart(
     allowPermanent: interruption.allowAlways,
     choice: interruption.resolution,
     status: interruption.status,
+    ...(interruption.retiredReason ? { retiredReason: interruption.retiredReason } : {}),
+    ...(interruption.engine === "cli" ? { engine: "cli" as const } : {}),
   };
+}
+
+/** Native questions only resolve; a CLI question can also expire or be
+ * cancelled without an answer. */
+function clarifyStatus(
+  interruption: Extract<AgentInterruptionDto, { kind: "clarification" }>,
+): Extract<AgentChatPart, { type: "clarify" }>["status"] {
+  if (interruption.status === "pending") return "pending";
+  if (interruption.engine === "cli" && interruption.status !== "resolved") {
+    return interruption.status;
+  }
+  return "resolved";
+}
+
+function isCliInterruptionEvent(event: AgentRuntimeEvent) {
+  return (
+    (event.method === "interruption.requested" || event.method === "interruption.updated") &&
+    event.data.interruption.engine === "cli"
+  );
 }
 
 function appendTextDelta(
