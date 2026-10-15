@@ -203,7 +203,7 @@ Invalid times load the defaults.
 ## Coding-agent blocks
 
 `sources::coding_blocks_between` reads
-`ActivityStore::coding_agent_blocks_between`
+`ActivityStore::enabled_coding_agent_blocks_between`
 ([coding-agent-sessions.md](coding-agent-sessions.md#rust-api-for-later-slices-crateactivitystoreactivitystore))
 for each hour report and for the day summary and its panels, keeping only
 the sources still turned on in Settings, Activity (like the MCP server's

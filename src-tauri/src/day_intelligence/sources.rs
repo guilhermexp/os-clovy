@@ -319,7 +319,7 @@ impl DaySources for AppSources {
 }
 
 /// Coding-agent blocks from the activity database
-/// (`ActivityStore::coding_agent_blocks_between`, docs/coding-agent-sessions.md)
+/// (`ActivityStore::enabled_coding_agent_blocks_between`, docs/coding-agent-sessions.md)
 /// of the sources still turned on: turning a source off removes its blocks
 /// from reports and summaries, as from the MCP server.
 pub(crate) async fn coding_blocks_between(
@@ -329,11 +329,11 @@ pub(crate) async fn coding_blocks_between(
     to: DateTime<Utc>,
     zone: &dyn LocalZone,
 ) -> Vec<CodingBlock> {
-    match store.coding_agent_blocks_between(from, to).await {
-        Ok(mut blocks) => {
-            blocks.retain(|block| enabled.is_enabled(block.source));
-            blocks_in_window(blocks, from, to, zone)
-        }
+    match store
+        .enabled_coding_agent_blocks_between(enabled, from, to)
+        .await
+    {
+        Ok(blocks) => blocks_in_window(blocks, from, to, zone),
         Err(error) => {
             tracing::warn!(%error, "day intelligence: coding-agent blocks could not be read");
             Vec::new()

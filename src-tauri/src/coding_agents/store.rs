@@ -9,6 +9,7 @@ use sqlx::query::query;
 use sqlx::row::Row;
 use sqlx_sqlite::SqliteRow;
 
+use super::settings::CodingAgentSources;
 use super::SourceId;
 use crate::activity::store::{timestamp, ActivityStore, StoreError};
 
@@ -206,6 +207,20 @@ impl ActivityStore {
         .fetch_all(self.pool())
         .await?;
         Ok(rows.iter().filter_map(block_row).collect())
+    }
+
+    /// Blocks overlapping `[from, to)` of the sources still turned on in
+    /// `enabled`, oldest first: turning a source off hides its blocks from
+    /// every reader (the app, reports and summaries, the MCP server).
+    pub async fn enabled_coding_agent_blocks_between(
+        &self,
+        enabled: &CodingAgentSources,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<CodingAgentBlock>, StoreError> {
+        let mut blocks = self.coding_agent_blocks_between(from, to).await?;
+        blocks.retain(|block| enabled.is_enabled(block.source));
+        Ok(blocks)
     }
 
     /// Sealed blocks of `sources` that ended at or after `since` (the same

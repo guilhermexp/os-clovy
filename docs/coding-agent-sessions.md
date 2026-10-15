@@ -184,7 +184,8 @@ Appended after the timeline's migration 2 in the activity catalog
 
 | Method | Use |
 |---|---|
-| `coding_agent_blocks_between(from, to)` | Blocks overlapping `[from, to)`, oldest first, as `CodingAgentBlock` (every column except `transcript`). The day summary, hour reports, and MCP tools read this |
+| `coding_agent_blocks_between(from, to)` | Blocks overlapping `[from, to)`, oldest first, as `CodingAgentBlock` (every column except `transcript`), of every source |
+| `enabled_coding_agent_blocks_between(enabled, from, to)` | The same, keeping only the sources turned on in `enabled` (`settings.coding_agents`). The `coding_agents_blocks` command, the day summary, hour reports, and MCP tools read this, so a source turned off disappears from all of them |
 | `upsert_coding_agent_block`, `seal_idle_coding_agent_blocks`, `coding_agent_blocks_to_summarize`, `record_coding_agent_summary`, `record_coding_agent_summary_failure`, `prune_coding_agent_blocks` | Owned by the scan loop |
 
 Get the store from `ActivityState::shared()` → `ActivityShared::store()`.
@@ -199,7 +200,7 @@ of the activity settings (`activity_save_settings`), which also wakes the scan.
 | Command | Request | Returns |
 |---|---|---|
 | `coding_agents_status` | none | `{ supported, sources: [{ id, name, enabled, present }], databaseReady, lastScanAt, lastError }` |
-| `coding_agents_blocks` | `{ request: { from, to } }` (ISO times) | `CodingAgentBlockDto[]` (empty while the database is not open) |
+| `coding_agents_blocks` | `{ request: { from, to } }` (ISO times) | `CodingAgentBlockDto[]` of the sources turned on in Settings, Activity (empty while the database is not open) |
 | `activity_debug_export` | none | adds `codingAgentBlocks` (count); the JSON file has a `codingAgentBlocks` array |
 
 Event: `clovy://coding-agents-updated` (no payload).

@@ -724,10 +724,9 @@ async fn coding_agent_sessions(
     ) as usize;
     let floor = retention_floor(settings, now);
     let mut blocks = store
-        .coding_agent_blocks_between(from.max(floor), to)
+        .enabled_coding_agent_blocks_between(&settings.coding_agents, from.max(floor), to)
         .await
         .map_err(|error| AppError::new("coding_agents_read_failed", error.to_string()))?;
-    blocks.retain(|block| settings.coding_agents.is_enabled(block.source));
     blocks.reverse();
     let total = blocks.len();
     Ok(json!({

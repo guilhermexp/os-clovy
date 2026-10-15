@@ -194,22 +194,32 @@ pub fn coding_agents_status(state: State<'_, CodingAgentsState>) -> CodingAgents
     }
 }
 
-/// Blocks overlapping `[from, to)`, oldest first. Empty while the activity
-/// database is not open.
+/// Blocks overlapping `[from, to)` of the sources still turned on, oldest
+/// first. Empty while the activity database is not open.
 #[tauri::command]
 pub async fn coding_agents_blocks(
     state: State<'_, CodingAgentsState>,
     request: CodingAgentBlocksRequest,
 ) -> Result<Vec<CodingAgentBlock>, AppError> {
-    let Some(store) = state
-        .runtime
-        .as_ref()
-        .and_then(|runtime| runtime.activity.store())
-    else {
+    match state.runtime.as_ref() {
+        Some(runtime) => blocks_of_enabled_sources(&runtime.activity, &request).await,
+        None => Ok(Vec::new()),
+    }
+}
+
+async fn blocks_of_enabled_sources(
+    activity: &ActivityShared,
+    request: &CodingAgentBlocksRequest,
+) -> Result<Vec<CodingAgentBlock>, AppError> {
+    let Some(store) = activity.store() else {
         return Ok(Vec::new());
     };
     store
-        .coding_agent_blocks_between(request.from, request.to)
+        .enabled_coding_agent_blocks_between(
+            &activity.settings().coding_agents,
+            request.from,
+            request.to,
+        )
         .await
         .map_err(|error| AppError::new("coding_agents_read_failed", error.to_string()))
 }
@@ -356,6 +366,66 @@ mod tests {
             start,
             Santiago.with_ymd_and_hms(2026, 9, 6, 1, 0, 0).unwrap()
         );
+    }
+
+    /// The Tauri command shows only the sources still turned on, like the
+    /// MCP server and the day reports.
+    #[tokio::test]
+    async fn blocks_command_hides_sources_turned_off() {
+        use crate::activity::key::MemoryKeyStore;
+        use crate::activity::schedule::StoreStatus;
+        use crate::activity::settings::ActivitySettings;
+        use crate::activity::store::{ActivityStore, ACTIVITY_DB_FILE};
+        use settings::CodingAgentSources;
+        use store::NewBlock;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ActivityStore::open(
+            &dir.path().join(ACTIVITY_DB_FILE),
+            &MemoryKeyStore::default(),
+        )
+        .await
+        .unwrap();
+        let start = Utc.with_ymd_and_hms(2026, 10, 4, 10, 0, 0).unwrap();
+        for source in [SourceId::ClaudeCode, SourceId::Codex] {
+            let block = NewBlock {
+                source,
+                session_id: source.as_str().into(),
+                started_at: start,
+                ended_at: start + chrono::Duration::minutes(30),
+                cwd: None,
+                project: None,
+                title: None,
+                first_prompt: Some("fix it".into()),
+                prompt_count: 1,
+                reply_count: 1,
+                active_seconds: 60,
+                transcript: "user: fix it".into(),
+                sealed: true,
+            };
+            store
+                .upsert_coding_agent_block(&block, start)
+                .await
+                .unwrap();
+        }
+        let activity = ActivityShared::new(ActivitySettings {
+            coding_agents: CodingAgentSources {
+                codex: true,
+                ..CodingAgentSources::default()
+            },
+            ..ActivitySettings::default()
+        });
+        activity.replace_store(Some(store), StoreStatus::Ready);
+
+        let request = CodingAgentBlocksRequest {
+            from: start - chrono::Duration::hours(1),
+            to: start + chrono::Duration::hours(1),
+        };
+        let blocks = blocks_of_enabled_sources(&activity, &request)
+            .await
+            .unwrap();
+        let sources: Vec<SourceId> = blocks.iter().map(|block| block.source).collect();
+        assert_eq!(sources, vec![SourceId::Codex]);
     }
 
     #[test]
