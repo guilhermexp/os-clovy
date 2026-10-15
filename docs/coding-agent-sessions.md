@@ -47,7 +47,8 @@ the Activity settings are saved:
    comes back after 1 s. A block that started before the window and ended
    inside it is summarized like any other.
 4. **Retention**, hourly: blocks that ended before the activity retention
-   period (`retentionDays`, default 30) are deleted.
+   period (`retentionDays`, default 30) are deleted. It runs whenever the
+   activity database is open, also with every source turned off.
 5. When blocks or summaries changed, `clovy://coding-agents-updated` (no
    payload) is emitted.
 

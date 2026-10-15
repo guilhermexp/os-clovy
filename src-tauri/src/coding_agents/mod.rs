@@ -303,18 +303,22 @@ async fn run(
                         }
                         Err(error) => tracing::warn!(%error, "coding agents: summaries failed"),
                     }
-                    if !last_prune.is_some_and(|at| at.elapsed() < PRUNE_EVERY) {
-                        let before =
-                            now - chrono::Duration::days(i64::from(settings.retention_days));
-                        if let Err(error) = store.prune_coding_agent_blocks(before).await {
-                            tracing::warn!(%error, "coding agents: retention failed");
-                        }
-                        last_prune = Some(Instant::now());
-                    }
                     if changed {
                         let _ = app.emit(CODING_AGENTS_UPDATED_EVENT, ());
                     }
                 }
+            }
+        }
+        // Stored transcripts follow the retention period whenever the
+        // database is open, also with every source turned off.
+        if let Some(store) = activity.store() {
+            if !last_prune.is_some_and(|at| at.elapsed() < PRUNE_EVERY) {
+                let before =
+                    Utc::now() - chrono::Duration::days(i64::from(settings.retention_days));
+                if let Err(error) = store.prune_coding_agent_blocks(before).await {
+                    tracing::warn!(%error, "coding agents: retention failed");
+                }
+                last_prune = Some(Instant::now());
             }
         }
         tokio::select! {

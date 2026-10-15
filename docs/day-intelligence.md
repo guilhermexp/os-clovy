@@ -157,7 +157,8 @@ Days are local `YYYY-MM-DD`, hours local `YYYY-MM-DDTHH`; `started_at` /
 | `day_summaries` | `day` (PK), `headline`, `narrative`, `insights_json`, `standup_json` (`{done, in_progress, blockers}`), `hours_covered`, `locale`, `provider`, `trigger` (`scheduled`/`manual`), `generated_at` | Regenerating replaces the row |
 | `day_intelligence_runs` | `key` (PK), `attempts`, `outcome` (`ok`/`failed`/`empty`), `last_error`, `next_attempt_at`, `updated_at` | Scheduler bookkeeping |
 
-Retention follows capture's period: rows of days before it are deleted hourly.
+Retention follows capture's period: rows of days before it are deleted hourly,
+whenever the activity database is open, also while capture is off.
 The debug export adds `dayHourReports`, `dayWorkstreams`, `daySummaries`, and
 `dayIntelligenceRuns` (newest three days).
 

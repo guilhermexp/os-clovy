@@ -242,19 +242,21 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
     };
     let settings = runtime.shared().settings();
     deliver_notices(app, &state, &settings);
-    if !settings.enabled {
-        return;
-    }
     let Some(store) = runtime.shared().store() else {
         return;
     };
     let zone = SystemZone;
     let now = Utc::now();
+    // Reports and summaries follow the retention period whenever the
+    // database is open, also with capture off.
     if last_prune.map_or(true, |at| at.elapsed() >= PRUNE_EVERY) {
         *last_prune = Some(Instant::now());
         if let Err(error) = pipeline::prune(&store, &settings, &zone, now).await {
             tracing::warn!(%error, "day intelligence retention failed");
         }
+    }
+    if !settings.enabled {
+        return;
     }
     // Inactive without an activity provider: nothing is generated or downloaded.
     if provider_state() != ProviderState::Ready {
