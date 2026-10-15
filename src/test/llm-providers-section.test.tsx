@@ -242,7 +242,9 @@ describe("LlmProvidersSection", () => {
     const user = userEvent.setup();
     mocks.llmSetUsage.mockRejectedValue({
       code: "llm_structured_output_insufficient",
-      message: "JSON schema support is required for background activity. Run Test first.",
+      // The native message (src-tauri/src/llm/mod.rs), worded by code in the UI.
+      message:
+        "Activity features need a provider with JSON schema support. Test the provider first, or choose one that supports JSON schema.",
     });
 
     render(<LlmProvidersSection />);
@@ -256,7 +258,7 @@ describe("LlmProvidersSection", () => {
 
     expect(
       await screen.findByText(
-        "JSON schema support is required for background activity. Run Test first.",
+        "Activity features need a provider with JSON schema support. Test the provider first, or choose one that supports JSON schema.",
       ),
     ).toBeInTheDocument();
     // Select keeps the previous value

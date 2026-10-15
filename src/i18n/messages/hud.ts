@@ -55,6 +55,25 @@ export default defineMessages({
       "The shortcut {shortcut} combines Fn with another key, which is no longer supported. Pick a different shortcut in Settings.",
     "hud.error.shortcutRegisterFailed": "Could not register the shortcut {shortcut}.",
     "hud.error.escapeCancelUnavailable": "Could not register Escape to cancel dictation.",
+    "hud.error.cleanupInstruction": "Dictation cleanup returned an instruction response.",
+    "hud.error.cleanupNoText": "Dictation cleanup response did not contain text output.",
+    "hud.error.settingsUnavailable": "Settings lock failed.",
+    "hud.error.settingsSaveFailed": "Could not save dictation settings.",
+    "hud.error.shortcutIncomplete": "Shortcut is incomplete.",
+    "hud.error.shortcutModifierRequired": "Shortcut must include at least one modifier key.",
+    "hud.error.shortcutModifierRequiredWindows":
+      "Shortcut must include at least one modifier key (Ctrl, Alt, Shift, Win).",
+    "hud.error.shortcutKeyRequired": "Shortcut must include a supported non-modifier key.",
+    "hud.error.shortcutDoublePressWindows": "Double-press shortcuts are not supported on Windows.",
+    "hud.error.shortcutFnWindows": "The Fn key is not supported for Windows dictation shortcuts.",
+    "hud.error.shortcutModifierOnlyWindows":
+      "Modifier-only shortcuts are not supported on Windows.",
+    "hud.error.shortcutPlatformUnsupported":
+      "Dictation shortcuts are not supported on this platform.",
+    "hud.error.shortcutDuplicate": "Push-to-talk and toggle dictation shortcuts must be different.",
+    "hud.error.recordingUnsupported": "Dictation recording is not supported on this platform.",
+    "hud.error.helperRestarting": "The dictation helper is restarting.",
+    "hud.error.composerUnavailable": "Dictation could not deliver to this composer. Try again.",
     // Meeting detection prompt
     "hud.meeting.detected": "Meeting detected",
     "hud.meeting.record": "Record",
@@ -137,6 +156,29 @@ export default defineMessages({
       "O atalho {shortcut} combina Fn com outra tecla, o que não é mais suportado. Escolha outro atalho nos Ajustes.",
     "hud.error.shortcutRegisterFailed": "Não foi possível registrar o atalho {shortcut}.",
     "hud.error.escapeCancelUnavailable": "Não foi possível registrar Esc para cancelar o ditado.",
+    "hud.error.cleanupInstruction": "A revisão do ditado devolveu uma instrução em vez do texto.",
+    "hud.error.cleanupNoText": "A revisão do ditado não devolveu texto.",
+    "hud.error.settingsUnavailable": "Não foi possível acessar os ajustes de ditado.",
+    "hud.error.settingsSaveFailed": "Não foi possível salvar os ajustes de ditado.",
+    "hud.error.shortcutIncomplete": "O atalho está incompleto.",
+    "hud.error.shortcutModifierRequired":
+      "O atalho precisa incluir pelo menos uma tecla modificadora.",
+    "hud.error.shortcutModifierRequiredWindows":
+      "O atalho precisa incluir pelo menos uma tecla modificadora (Ctrl, Alt, Shift, Win).",
+    "hud.error.shortcutKeyRequired":
+      "O atalho precisa incluir uma tecla suportada que não seja modificadora.",
+    "hud.error.shortcutDoublePressWindows": "Atalhos de toque duplo não são suportados no Windows.",
+    "hud.error.shortcutFnWindows": "A tecla Fn não é suportada nos atalhos de ditado do Windows.",
+    "hud.error.shortcutModifierOnlyWindows":
+      "Atalhos só com teclas modificadoras não são suportados no Windows.",
+    "hud.error.shortcutPlatformUnsupported":
+      "Atalhos de ditado não são suportados nesta plataforma.",
+    "hud.error.shortcutDuplicate":
+      "Os atalhos de segurar para falar e de ligar o ditado precisam ser diferentes.",
+    "hud.error.recordingUnsupported": "A gravação de ditado não é suportada nesta plataforma.",
+    "hud.error.helperRestarting": "O processo auxiliar de ditado está reiniciando.",
+    "hud.error.composerUnavailable":
+      "O ditado não conseguiu entregar o texto a este campo. Tente de novo.",
     "hud.meeting.detected": "Reunião detectada",
     "hud.meeting.record": "Gravar",
     "hud.meeting.dismiss": "Dispensar aviso de reunião",

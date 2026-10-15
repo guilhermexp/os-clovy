@@ -141,3 +141,69 @@ describe("native error codes", () => {
     );
   });
 });
+
+describe("Clovy API, provider, and own-engine errors", () => {
+  afterEach(() => applyInterfaceLocale("en"));
+
+  it("words Clovy API reasons, provider reasons, and transport errors", () => {
+    applyInterfaceLocale("pt-BR");
+    const failed = (message: string) => messageFromError({ code: "clovy_request_failed", message });
+    expect(failed("server_busy")).toBe(
+      "O serviço está ocupado agora. Aguarde um minuto e tente de novo.",
+    );
+    expect(failed("upstream_provider_failed")).toBe(
+      "O provedor do modelo não conseguiu concluir este pedido. Tente de novo.",
+    );
+    expect(failed("error sending request for url (https://api.example/v1/dictate)")).toBe(
+      "Não foi possível falar com o Clovy.",
+    );
+    expect(failed("brand_new_reason")).toBe(
+      "O Clovy não conseguiu concluir este pedido. Tente de novo.",
+    );
+    expect(
+      messageFromError({
+        code: "insufficient_credits",
+        message: "Your balance is too low. Upgrade to continue.",
+      }),
+    ).toBe("Seu saldo está muito baixo. Faça upgrade para continuar.");
+    expect(
+      messageFromError({
+        code: "groq_api_key_rejected",
+        message: "Groq rejected your saved API key. Open Settings and update it.",
+      }),
+    ).toBe("Groq recusou sua chave de API salva. Abra os Ajustes e atualize a chave.");
+  });
+
+  it("keeps the native detail inside worded own-engine errors", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(
+      messageFromError({ code: "llm_cli_failed", message: "Codex failed: exit status 2" }),
+    ).toBe("Codex falhou: exit status 2");
+    expect(
+      messageFromError({
+        code: "llm_endpoint_failed",
+        message: "The endpoint returned status 500: upstream exploded",
+      }),
+    ).toBe("O endpoint respondeu com o status 500: upstream exploded");
+    // An unmatched variant of a known code keeps the native message.
+    expect(messageFromError({ code: "local_model_invalid", message: "bad url" })).toBe("bad url");
+  });
+
+  it("reads exactly like the native English", () => {
+    applyInterfaceLocale("en");
+    expect(
+      messageFromError({
+        code: "openrouter_usage_limit_exceeded",
+        message: "x",
+      }),
+    ).toBe(
+      "OpenRouter reports that its usage limit was reached. Try again later, or check the plan behind your saved OpenRouter key.",
+    );
+    expect(
+      messageFromError({
+        code: "llm_cli_not_installed",
+        message: "Pi is not installed on this Mac.",
+      }),
+    ).toBe("Pi is not installed on this Mac.");
+  });
+});

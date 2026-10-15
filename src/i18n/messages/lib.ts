@@ -51,6 +51,96 @@ export default defineMessages({
       "Clovy couldn't start current research just now. Your message is still here, so you can try again.",
     "lib.errors.homeChatEmpty": "Clovy returned an empty Home reply.",
     "lib.errors.homeChatInvalid": "Clovy returned a Home reply it couldn't read.",
+    "lib.errors.notSignedIn": "Not signed in.",
+    "lib.errors.insufficientCredits": "Your balance is too low. Upgrade to continue.",
+    "lib.errors.emptyResponse": "Clovy returned no data.",
+    "lib.errors.unreachable": "Couldn't reach Clovy.",
+    "lib.errors.requestFailed": "Clovy couldn't complete this request. Try again.",
+    "lib.errors.streamInvalid": "The processing service returned an invalid response.",
+    "lib.errors.reason.upstreamProviderFailed":
+      "The model provider could not complete this request. Try again.",
+    "lib.errors.reason.transcriptEmpty": "The transcript is empty.",
+    "lib.errors.reason.audioTooLarge": "This audio is too large to process.",
+    "lib.errors.reason.payloadTooLarge": "This request is too large.",
+    "lib.errors.reason.audioFormatUnsupported": "This audio format is not supported.",
+    "lib.errors.reason.audioRequired": "No audio was sent.",
+    "lib.errors.reason.modelCapabilityUnavailable":
+      "The selected model cannot do this. Choose another model.",
+    "lib.errors.reason.modelRequired": "Choose a model first.",
+    "lib.errors.reason.textTooLong": "This text is too long.",
+    "lib.errors.reason.promptRequired": "Enter a message first.",
+    "lib.errors.reason.requestUnreadable":
+      "Clovy sent a request the service could not read. Update Clovy and try again.",
+    "lib.errors.reason.generationFailed": "Generation failed. Try again.",
+    "lib.errors.provider.keyInvalid":
+      "Clovy could not use your saved {name} key. If Clovy just updated, try again later. Otherwise, open Settings and replace the key.",
+    "lib.errors.provider.keyRejected":
+      "{name} rejected your saved API key. Open Settings and update it.",
+    "lib.errors.provider.keyRequired":
+      "This job was started with your {name} account. Save a valid key from that {name} account in Settings to continue it.",
+    "lib.errors.provider.keyNotAccepted":
+      "Clovy sent your {name} key with a request that does not use it. Update Clovy and try again.",
+    "lib.errors.provider.keyNoCredits":
+      "Your {name} key has no credits left. Add credits with {name} or remove the key in Settings.",
+    "lib.errors.provider.keyModelUnavailable":
+      "Your saved {name} key cannot be used with the selected model. Open Settings and choose another model.",
+    "lib.errors.provider.notConfigured":
+      "{name} is not set up on this Clovy service. Add your own {name} API key in Settings to continue.",
+    "lib.errors.provider.modelUnavailable":
+      "{name} could not serve the selected model right now. Choose another model or try again later.",
+    "lib.errors.provider.usageLimit":
+      "{name} reports that its usage limit was reached. Try again later, or check the plan behind your saved {name} key.",
+    "lib.errors.provider.requestInaccessible":
+      "{name} could not find this job with your saved key. Save a valid key from the {name} account that started the job in Settings.",
+    "lib.errors.audioArtifactMissing": "Saved audio is missing and cannot be transcribed.",
+    "lib.errors.transcriptionEmpty": "Transcript is empty, so a note cannot be generated.",
+    "lib.errors.transcriptionAlreadyRunning": "This saved recording is already being transcribed.",
+    "lib.errors.transcriptionSpanAlreadyRunning":
+      "This saved-audio span is already being transcribed.",
+    "lib.errors.noteCleanupTimeout": "Note transcript cleanup timed out.",
+    "lib.errors.homeMessageRequired": "A Home message is required.",
+    "lib.errors.homeMessageTooLarge": "Home messages must be 64,000 characters or less.",
+    "lib.errors.localModelNotConfigured": "Configure a local model endpoint first.",
+    "lib.errors.localModelIdNotConfigured": "Configure a local model endpoint and model ID first.",
+    "lib.errors.localModelInvalid":
+      "The local model selected for this session is invalid. Choose the model again.",
+    "lib.errors.localModelUnavailable":
+      "The local model selected for this session is no longer configured. Reconfigure it or choose another model.",
+    "lib.errors.localModelEmpty": "Local model did not return generated note text.",
+    "lib.errors.cliModelEmpty": "The CLI did not return generated note text.",
+    "lib.errors.localModelStatus": "Local model returned status {status}.",
+    "lib.errors.remoteModelInvalid":
+      "The model selected for this session is invalid. Choose the model again.",
+    "lib.errors.autoModelInvalid": "The model selected by Auto is invalid. Retry the agent run.",
+    "lib.errors.llm.notLocal": "This provider is not one of your own providers.",
+    "lib.errors.llm.cliNotInstalled": "{cli} is not installed on this Mac.",
+    "lib.errors.llm.cliToolsNotDisabled":
+      "{cli} cannot run with its tools turned off, so Clovy does not send it content. Choose Claude Code, Pi, or an endpoint.",
+    "lib.errors.llm.cliFailed": "{cli} failed: {detail}",
+    "lib.errors.llm.endpointNotFound": "This endpoint is no longer configured.",
+    "lib.errors.llm.endpointUnreachable":
+      "Could not reach the endpoint. Check the URL and that the server is running.",
+    "lib.errors.llm.endpointUnreadable": "Could not read the endpoint response.",
+    "lib.errors.llm.endpointKeyRejected": "The endpoint rejected the API key.",
+    "lib.errors.llm.endpointStatus": "The endpoint returned status {status}",
+    "lib.errors.llm.endpointStatusDetail": "The endpoint returned status {status}: {detail}",
+    "lib.errors.llm.endpointNoText": "The endpoint returned no text.",
+    "lib.errors.llm.endpointSchema": "The endpoint did not return JSON matching the schema.",
+    "lib.errors.llm.providerSchema": "The provider did not return JSON matching the schema.",
+    "lib.errors.llm.cliEmpty": "{cli} returned an empty answer.",
+    "lib.errors.llm.cliInvalidJson": "{cli} did not return valid JSON.",
+    "lib.errors.llm.timeout": "The provider did not answer in time.",
+    "lib.errors.llm.structuredOutput":
+      "Activity features need a provider with JSON schema support. Test the provider first, or choose one that supports JSON schema.",
+    "lib.errors.llm.activityProviderMissing":
+      "Activity features need a provider. Choose one in Settings, Models.",
+    "lib.errors.llm.activityNeverClovyApi":
+      "Activity features never use Clovy API. Choose one of your own providers or none.",
+    "lib.errors.llm.chooseProvider": "Choose a provider for this use.",
+    "lib.errors.llm.keychainUnavailable": "Clovy could not reach the system keychain. Try again.",
+    "lib.errors.llm.endpointKeyInvalid": "Enter a valid API key.",
+    "lib.errors.llm.endpointModelRequired": "Enter a model ID.",
+    "lib.errors.llm.endpointNameInvalid": "Enter a name of up to 80 characters.",
     "lib.errors.timedOut": "Operation timed out.",
     "lib.errors.accountStatusTimeout": "Account status took too long. Please try again.",
     "lib.errors.fileDropUnreadable": "Could not read the dropped file.",
@@ -413,6 +503,100 @@ export default defineMessages({
       "O Clovy não conseguiu começar uma pesquisa atual agora. Sua mensagem continua aqui, então você pode tentar de novo.",
     "lib.errors.homeChatEmpty": "O Clovy devolveu uma resposta vazia na Home.",
     "lib.errors.homeChatInvalid": "O Clovy devolveu uma resposta da Home que não conseguiu ler.",
+    "lib.errors.notSignedIn": "Você não entrou na sua conta.",
+    "lib.errors.insufficientCredits": "Seu saldo está muito baixo. Faça upgrade para continuar.",
+    "lib.errors.emptyResponse": "O Clovy não retornou dados.",
+    "lib.errors.unreachable": "Não foi possível falar com o Clovy.",
+    "lib.errors.requestFailed": "O Clovy não conseguiu concluir este pedido. Tente de novo.",
+    "lib.errors.streamInvalid": "O serviço de processamento retornou uma resposta inválida.",
+    "lib.errors.reason.upstreamProviderFailed":
+      "O provedor do modelo não conseguiu concluir este pedido. Tente de novo.",
+    "lib.errors.reason.transcriptEmpty": "A transcrição está vazia.",
+    "lib.errors.reason.audioTooLarge": "Este áudio é grande demais para processar.",
+    "lib.errors.reason.payloadTooLarge": "Este pedido é grande demais.",
+    "lib.errors.reason.audioFormatUnsupported": "Este formato de áudio não é suportado.",
+    "lib.errors.reason.audioRequired": "Nenhum áudio foi enviado.",
+    "lib.errors.reason.modelCapabilityUnavailable":
+      "O modelo selecionado não faz isso. Escolha outro modelo.",
+    "lib.errors.reason.modelRequired": "Escolha um modelo primeiro.",
+    "lib.errors.reason.textTooLong": "Este texto é longo demais.",
+    "lib.errors.reason.promptRequired": "Digite uma mensagem primeiro.",
+    "lib.errors.reason.requestUnreadable":
+      "O Clovy enviou um pedido que o serviço não conseguiu ler. Atualize o Clovy e tente de novo.",
+    "lib.errors.reason.generationFailed": "A geração falhou. Tente de novo.",
+    "lib.errors.provider.keyInvalid":
+      "O Clovy não conseguiu usar sua chave salva do provedor {name}. Se o Clovy acabou de ser atualizado, tente de novo mais tarde. Se não, abra os Ajustes e troque a chave.",
+    "lib.errors.provider.keyRejected":
+      "{name} recusou sua chave de API salva. Abra os Ajustes e atualize a chave.",
+    "lib.errors.provider.keyRequired":
+      "Este trabalho foi iniciado com sua conta do provedor {name}. Salve nos Ajustes uma chave válida dessa conta do provedor {name} para continuar.",
+    "lib.errors.provider.keyNotAccepted":
+      "O Clovy enviou sua chave do provedor {name} num pedido que não a usa. Atualize o Clovy e tente de novo.",
+    "lib.errors.provider.keyNoCredits":
+      "Sua chave do provedor {name} está sem créditos. Adicione créditos no provedor {name} ou remova a chave nos Ajustes.",
+    "lib.errors.provider.keyModelUnavailable":
+      "Sua chave salva do provedor {name} não pode ser usada com o modelo selecionado. Abra os Ajustes e escolha outro modelo.",
+    "lib.errors.provider.notConfigured":
+      "{name} não está configurado neste serviço do Clovy. Adicione sua própria chave de API do provedor {name} nos Ajustes para continuar.",
+    "lib.errors.provider.modelUnavailable":
+      "{name} não conseguiu atender o modelo selecionado agora. Escolha outro modelo ou tente de novo mais tarde.",
+    "lib.errors.provider.usageLimit":
+      "{name} informa que o limite de uso foi atingido. Tente de novo mais tarde ou confira o plano da sua chave salva do provedor {name}.",
+    "lib.errors.provider.requestInaccessible":
+      "{name} não encontrou este trabalho com sua chave salva. Salve nos Ajustes uma chave válida da conta do provedor {name} que iniciou o trabalho.",
+    "lib.errors.audioArtifactMissing":
+      "O áudio salvo não foi encontrado e não pode ser transcrito.",
+    "lib.errors.transcriptionEmpty": "A transcrição está vazia, então não dá para gerar uma nota.",
+    "lib.errors.transcriptionAlreadyRunning": "Esta gravação salva já está sendo transcrita.",
+    "lib.errors.transcriptionSpanAlreadyRunning":
+      "Este trecho de áudio salvo já está sendo transcrito.",
+    "lib.errors.noteCleanupTimeout": "A revisão da transcrição da nota demorou demais.",
+    "lib.errors.homeMessageRequired": "Escreva uma mensagem para a Home.",
+    "lib.errors.homeMessageTooLarge": "As mensagens da Home devem ter no máximo 64.000 caracteres.",
+    "lib.errors.localModelNotConfigured": "Configure primeiro um endpoint de modelo local.",
+    "lib.errors.localModelIdNotConfigured":
+      "Configure primeiro um endpoint e o ID de um modelo local.",
+    "lib.errors.localModelInvalid":
+      "O modelo local escolhido para esta sessão é inválido. Escolha o modelo de novo.",
+    "lib.errors.localModelUnavailable":
+      "O modelo local escolhido para esta sessão não está mais configurado. Configure de novo ou escolha outro modelo.",
+    "lib.errors.localModelEmpty": "O modelo local não devolveu o texto da nota.",
+    "lib.errors.cliModelEmpty": "A CLI não devolveu o texto da nota.",
+    "lib.errors.localModelStatus": "O modelo local respondeu com o status {status}.",
+    "lib.errors.remoteModelInvalid":
+      "O modelo escolhido para esta sessão é inválido. Escolha o modelo de novo.",
+    "lib.errors.autoModelInvalid":
+      "O modelo escolhido pelo Auto é inválido. Rode o agente de novo.",
+    "lib.errors.llm.notLocal": "Este provedor não é um dos seus provedores próprios.",
+    "lib.errors.llm.cliNotInstalled": "{cli} não está instalado neste Mac.",
+    "lib.errors.llm.cliToolsNotDisabled":
+      "{cli} não roda com as ferramentas desligadas, então o Clovy não envia conteúdo para ele. Escolha Claude Code, Pi ou um endpoint.",
+    "lib.errors.llm.cliFailed": "{cli} falhou: {detail}",
+    "lib.errors.llm.endpointNotFound": "Este endpoint não está mais configurado.",
+    "lib.errors.llm.endpointUnreachable":
+      "Não foi possível acessar o endpoint. Confira a URL e se o servidor está rodando.",
+    "lib.errors.llm.endpointUnreadable": "Não foi possível ler a resposta do endpoint.",
+    "lib.errors.llm.endpointKeyRejected": "O endpoint recusou a chave de API.",
+    "lib.errors.llm.endpointStatus": "O endpoint respondeu com o status {status}",
+    "lib.errors.llm.endpointStatusDetail": "O endpoint respondeu com o status {status}: {detail}",
+    "lib.errors.llm.endpointNoText": "O endpoint não devolveu texto.",
+    "lib.errors.llm.endpointSchema": "O endpoint não devolveu JSON no formato esperado.",
+    "lib.errors.llm.providerSchema": "O provedor não devolveu JSON no formato esperado.",
+    "lib.errors.llm.cliEmpty": "{cli} devolveu uma resposta vazia.",
+    "lib.errors.llm.cliInvalidJson": "{cli} não devolveu um JSON válido.",
+    "lib.errors.llm.timeout": "O provedor não respondeu a tempo.",
+    "lib.errors.llm.structuredOutput":
+      "Os recursos de atividade precisam de um provedor com suporte a JSON schema. Teste o provedor primeiro ou escolha um que suporte JSON schema.",
+    "lib.errors.llm.activityProviderMissing":
+      "Os recursos de atividade precisam de um provedor. Escolha um em Ajustes, Modelos.",
+    "lib.errors.llm.activityNeverClovyApi":
+      "Os recursos de atividade nunca usam o Clovy API. Escolha um dos seus provedores ou nenhum.",
+    "lib.errors.llm.chooseProvider": "Escolha um provedor para este uso.",
+    "lib.errors.llm.keychainUnavailable":
+      "O Clovy não conseguiu acessar as chaves do sistema. Tente de novo.",
+    "lib.errors.llm.endpointKeyInvalid": "Digite uma chave de API válida.",
+    "lib.errors.llm.endpointModelRequired": "Digite o ID de um modelo.",
+    "lib.errors.llm.endpointNameInvalid": "Digite um nome com até 80 caracteres.",
     "lib.errors.timedOut": "A operação expirou.",
     "lib.errors.accountStatusTimeout": "O status da conta demorou demais. Tente de novo.",
     "lib.errors.fileDropUnreadable": "Não foi possível ler o arquivo arrastado.",
