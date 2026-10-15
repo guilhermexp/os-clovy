@@ -122,7 +122,7 @@ import {
   ProjectContextSignatureStore,
   stripProjectContext,
 } from "../../lib/agent-project-context";
-import { formatNumber, intlLocale, t as translate, useT } from "../../i18n";
+import { formatNumber, isEnglishLocale, t as translate, useT } from "../../i18n";
 import { AgentChatTurnRow } from "./chat-turns/AgentChatTurnRow";
 import {
   AgentArtifactPanel,
@@ -3208,12 +3208,12 @@ export function AgentWorkspace({
                               {t("agent.usage.contextValue", {
                                 used: formatNumber(contextUsed),
                                 limit: formatNumber(contextLimit),
-                                percent: intlLocale()
-                                  ? formatNumber(contextPercent, {
+                                percent: isEnglishLocale()
+                                  ? contextPercent.toFixed(1)
+                                  : formatNumber(contextPercent, {
                                       minimumFractionDigits: 1,
                                       maximumFractionDigits: 1,
-                                    })
-                                  : contextPercent.toFixed(1),
+                                    }),
                               })}
                             </span>
                           </div>
@@ -3239,14 +3239,14 @@ export function AgentWorkspace({
                               credits: formatNumber(estimatedCredits, {
                                 maximumFractionDigits: estimatedCredits < 1 ? 3 : 1,
                               }),
-                              usd: intlLocale()
-                                ? formatNumber(estimatedCredits / 1_000, {
+                              usd: isEnglishLocale()
+                                ? `$${(estimatedCredits / 1_000).toFixed(4)}`
+                                : formatNumber(estimatedCredits / 1_000, {
                                     style: "currency",
                                     currency: "USD",
                                     minimumFractionDigits: 4,
                                     maximumFractionDigits: 4,
-                                  })
-                                : `$${(estimatedCredits / 1_000).toFixed(4)}`,
+                                  }),
                             })}
                           </span>
                         </div>

@@ -1,4 +1,10 @@
-import type { InterfaceLocale, MessageKey } from "../../i18n";
+import {
+  formatClockTime,
+  getInterfaceLocale,
+  type InterfaceLocale,
+  intlLocale,
+  type MessageKey,
+} from "../../i18n";
 import type {
   ActivityCategory,
   TimelineGapKind,
@@ -51,7 +57,10 @@ export function gapLabelKey(
 /**
  * Formats duration in milliseconds into a concise localized string (e.g. "1h 24m", "45m", "1 h 24 min").
  */
-export function formatDuration(durationMs: number, locale: InterfaceLocale = "en"): string {
+export function formatDuration(
+  durationMs: number,
+  locale: InterfaceLocale = getInterfaceLocale(),
+): string {
   const isPt = locale === "pt-BR";
   if (durationMs <= 0) {
     return isPt ? "0 min" : "0m";
@@ -75,19 +84,21 @@ export function formatDuration(durationMs: number, locale: InterfaceLocale = "en
 /**
  * Formats an ISO timestamp to local clock time (e.g. "09:30" or "9:30 AM").
  */
-export function formatTime(dateStr: string, locale: InterfaceLocale = "en"): string {
-  const date = new Date(dateStr);
-  return new Intl.DateTimeFormat(locale === "pt-BR" ? "pt-BR" : undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
+export function formatTime(
+  dateStr: string,
+  locale: InterfaceLocale = getInterfaceLocale(),
+): string {
+  return formatClockTime(dateStr, locale);
 }
 
 /**
  * Formats a local date heading (e.g. "Wednesday, Oct 4" or "quarta-feira, 4 de out.").
  */
-export function formatDayHeader(date: Date, locale: InterfaceLocale = "en"): string {
-  return new Intl.DateTimeFormat(locale === "pt-BR" ? "pt-BR" : undefined, {
+export function formatDayHeader(
+  date: Date,
+  locale: InterfaceLocale = getInterfaceLocale(),
+): string {
+  return new Intl.DateTimeFormat(intlLocale(locale), {
     weekday: "long",
     month: "short",
     day: "numeric",

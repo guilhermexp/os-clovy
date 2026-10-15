@@ -1,6 +1,6 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { useState } from "react";
-import { t as translate, useT } from "../../i18n";
+import { type MessageKey, t as translate, useT } from "../../i18n";
 import { isInsufficientCreditsMessage } from "../../lib/errors";
 import { TierMiniCard } from "../account/FundingNotice";
 import type { FundingTier } from "../account/FundingNotice";
@@ -39,12 +39,37 @@ export function userFacingFailureMessage(message?: string) {
     .join(" | ");
 }
 
+/** Failure sentences the desktop backend writes into a note
+ * (`domain/processing.rs`: `user_facing_transcription_failure_message`,
+ * `note_generation_failure_for_user`). Notes persist only that English
+ * sentence, not its error code, so the sentence is the stable identifier:
+ * each key's English text is byte-identical to what Rust stores, and the
+ * banner shows it in the interface language. */
+const STORED_FAILURE_KEYS: MessageKey[] = [
+  "notes.failure.noSpeech",
+  "notes.failure.silenceSystem",
+  "notes.failure.silenceMicrophone",
+  "notes.failure.billingTemporarilyUnavailable",
+  "notes.failure.providerFailed",
+  "notes.failure.serviceBusy",
+  "notes.failure.generationBusy",
+  "notes.failure.generationFailed",
+];
+
+function storedFailureKey(body: string): MessageKey | undefined {
+  const trimmed = body.trim();
+  return STORED_FAILURE_KEYS.find((key) => translate(key, undefined, "en") === trimmed);
+}
+
 function friendlyFailureSegment(message: string) {
   const source = message.match(/^(Microphone|System):\s*/i)?.[1];
   const body = source ? message.replace(/^(Microphone|System):\s*/i, "") : message;
   const normalized = body.toLowerCase();
   let friendly = body;
-  if (normalized.includes("no_speech") || normalized.includes("no speech")) {
+  const storedKey = storedFailureKey(body);
+  if (storedKey) {
+    friendly = translate(storedKey);
+  } else if (normalized.includes("no_speech") || normalized.includes("no speech")) {
     friendly = translate("notes.failure.noSpeech");
   } else if (isInvalidClovyResponseMessage(body)) {
     friendly = translate("notes.failure.invalidResponse");

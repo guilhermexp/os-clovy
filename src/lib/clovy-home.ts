@@ -1,4 +1,4 @@
-import { formatDate, intlLocale, t } from "../i18n/translate";
+import { formatClockTime, formatDate, intlLocale, t } from "../i18n/translate";
 
 export const CLOVY_HOME_SESSION_IDS_STORAGE_KEY = "clovy:home:session-ids:v1";
 export const CLOVY_HOME_CHECK_INS_STORAGE_KEY = "clovy:home:check-ins:v1";
@@ -623,11 +623,7 @@ export function clovyHomeDayKey(iso: string): string {
 export function clovyHomeDayLabel(iso: string, now = new Date()): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  // Brazilian clocks read zero-padded 24-hour times ("09:00").
-  const time = formatDate(date, {
-    hour: intlLocale() === undefined ? "numeric" : "2-digit",
-    minute: "2-digit",
-  });
+  const time = formatClockTime(date);
   const startOfDay = (value: Date) =>
     new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
@@ -648,7 +644,7 @@ export function clovyHomeDayLabel(iso: string, now = new Date()): string {
  * ("segunda-feira") still opens the label like "Today" does. */
 function dayAt(day: string, time: string): string {
   const label = t("lib.home.dayAt", { day, time });
-  return `${label.charAt(0).toLocaleUpperCase()}${label.slice(1)}`;
+  return `${label.charAt(0).toLocaleUpperCase(intlLocale())}${label.slice(1)}`;
 }
 
 /** The live greeting for the Home surface, derived from the CURRENT clock

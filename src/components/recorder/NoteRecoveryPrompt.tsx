@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { IconRecord } from "central-icons/IconRecord";
 import { InlineNotice } from "../ui/InlineNotice";
-import { formatNumber, intlLocale, useT } from "../../i18n";
+import { formatNumber, isEnglishLocale, useT } from "../../i18n";
 import type { RecoverableRecordingDto } from "../../lib/tauri";
 
 type NoteRecoveryPromptProps = {
@@ -120,7 +120,7 @@ const ONE_DECIMAL: Intl.NumberFormatOptions = {
 };
 
 function oneDecimal(value: number): string {
-  return intlLocale() ? formatNumber(value, ONE_DECIMAL) : value.toFixed(1);
+  return isEnglishLocale() ? value.toFixed(1) : formatNumber(value, ONE_DECIMAL);
 }
 
 function formatBytes(bytes: number): string {

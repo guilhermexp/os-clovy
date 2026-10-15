@@ -3,13 +3,14 @@
  *
  * Imported schedules are preserved verbatim, so the field may hold a
  * five-field cron expression, an interval ("every 30m"), a one-off ISO date,
- * or text that is already human. Only the cron case needs translation; every
- * other input — and any cron shape too exotic to phrase with confidence
- * (combined day-of-month + day-of-week restrictions, stepped ranges) — is
- * returned unchanged rather than risk describing a schedule wrongly. */
+ * or text that is already human. Cron expressions and the stored interval
+ * grammar are phrased in the interface language; every other input — and any
+ * cron shape too exotic to phrase with confidence (combined day-of-month +
+ * day-of-week restrictions, stepped ranges) — is returned unchanged rather
+ * than risk describing a schedule wrongly. */
 
 import { getInterfaceLocale } from "../i18n/locale";
-import { formatDate, formatList, t } from "../i18n/translate";
+import { formatDate, formatList, formatClockTime as formatTime, t } from "../i18n/translate";
 
 type CronField =
   | { kind: "any" }
@@ -57,8 +58,35 @@ const MACROS: Record<string, string> = {
   "@annually": "0 0 1 1 *",
 };
 
+/** The stored interval grammar ("every 30m", "every 2h"), as minutes. The
+ * stored text is a wire value and stays English; only its display is
+ * translated. */
+const INTERVAL_PATTERN = /^every\s+(\d+)\s*(m|h|min|minutes?|hours?)$/i;
+
+function intervalMinutes(schedule: string): number | null {
+  const interval = schedule.match(INTERVAL_PATTERN);
+  if (!interval) return null;
+  const amount = Number(interval[1]);
+  const minutes = interval[2].toLowerCase().startsWith("h") ? amount * 60 : amount;
+  return minutes > 0 ? minutes : null;
+}
+
+function intervalPhrase(minutes: number): string {
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return hours === 1
+      ? t("lib.schedule.everyHour")
+      : t("lib.schedule.everyNHours", { count: hours });
+  }
+  return minutes === 1
+    ? t("lib.schedule.everyMinute")
+    : t("lib.schedule.everyNMinutes", { count: minutes });
+}
+
 export function humanizeSchedule(schedule: string): string {
   const trimmed = schedule.trim();
+  const interval = intervalMinutes(trimmed);
+  if (interval !== null) return intervalPhrase(interval);
   const source = MACROS[trimmed.toLowerCase()] ?? trimmed.replace(/^cron:?\s+/i, "");
   const fields = source.split(/\s+/);
   if (fields.length !== 5) return schedule;
@@ -228,11 +256,7 @@ function dayPhrase(days: number[], time: string): string {
 }
 
 function formatClockTime(hourOfDay: number, minute: number): string {
-  // Brazilian clocks read zero-padded 24-hour times ("09:00").
-  return formatDate(new Date(2000, 0, 1, hourOfDay, minute), {
-    hour: isEnglish() ? "numeric" : "2-digit",
-    minute: "2-digit",
-  });
+  return formatTime(new Date(2000, 0, 1, hourOfDay, minute));
 }
 
 function singleValue(field: CronField): number | null {
@@ -291,12 +315,8 @@ function cronTime(time: string): string {
 export function draftFromSchedule(schedule: string): ScheduleDraft {
   const trimmed = schedule.trim();
 
-  const interval = trimmed.match(/^every\s+(\d+)\s*(m|h|min|minutes?|hours?)$/i);
-  if (interval) {
-    const amount = Number(interval[1]);
-    const minutes = interval[2].toLowerCase().startsWith("h") ? amount * 60 : amount;
-    if (minutes > 0) return { kind: "interval", minutes };
-  }
+  const minutes = intervalMinutes(trimmed);
+  if (minutes !== null) return { kind: "interval", minutes };
 
   const fields = trimmed.split(/\s+/);
   if (fields.length === 5) {

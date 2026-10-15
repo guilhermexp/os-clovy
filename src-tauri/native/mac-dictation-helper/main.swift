@@ -713,6 +713,7 @@ final class ShortcutKeyMonitor {
 
         if globalMonitor == nil {
             emit("fn_monitor_unavailable", [
+                "code": "shortcut_monitor_unavailable",
                 "message": "Could not monitor global shortcut key events.",
             ])
         }
@@ -879,6 +880,8 @@ final class ShortcutKeyMonitor {
                 // Carbon has no fn modifier bit, and nothing permission-free
                 // can watch fn+key chords. Say so instead of silently dying.
                 emit("fn_monitor_unavailable", [
+                    "code": "shortcut_fn_chord_unsupported",
+                    "shortcut": shortcut.label,
                     "message": "The shortcut \(shortcut.label) combines Fn with another key, which is no longer supported. Pick a different shortcut in Settings.",
                 ])
                 continue
@@ -903,6 +906,8 @@ final class ShortcutKeyMonitor {
                 carbonHotKeys[nextCarbonHotKeyId] = (ShortcutIdentity(shortcut), ref)
             } else {
                 emit("fn_monitor_unavailable", [
+                    "code": "shortcut_register_failed",
+                    "shortcut": shortcut.label,
                     "message": "Could not register the shortcut \(shortcut.label).",
                 ])
             }
@@ -1723,6 +1728,7 @@ final class DictationEscapeCancelMonitor {
             return true
         } else {
             emit("escape_cancel_unavailable", [
+                "code": "escape_cancel_unavailable",
                 "message": "Could not register Escape to cancel dictation.",
             ])
             return false
@@ -2658,7 +2664,7 @@ enum PasteboardInserter {
         guard pasteboard.setString(text, forType: .string) else {
             restore(snapshot, to: pasteboard)
             emit("error", takePayload([
-                "code": "pasteboard_write_failed",
+                "code": "dictation_recovery_copy_failed",
                 "message": "Could not save or copy this dictation. The recording was kept for recovery.",
             ], takeID: takeID))
             return false

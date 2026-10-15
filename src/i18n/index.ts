@@ -12,10 +12,13 @@ export {
 } from "./locale";
 export { type TFunction, translateRich, useLocale, useT, useTRich } from "./react";
 export {
+  clockTimeOptions,
+  formatClockTime,
   formatDate,
   formatList,
   formatNumber,
   intlLocale,
+  isEnglishLocale,
   type MessageKey,
   t,
   type TranslateParams,

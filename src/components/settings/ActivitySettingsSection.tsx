@@ -19,7 +19,7 @@ import {
   type ActivityStatusDto,
 } from "../../lib/activity-capture";
 import { openPrivacySettings } from "../../lib/tauri";
-import { type MessageKey, useT } from "../../i18n";
+import { formatDate, type MessageKey, useT } from "../../i18n";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Switch } from "../ui/Switch";
 import { DaySummarySettingsSection } from "./DaySummarySettingsSection";
@@ -213,7 +213,7 @@ export function ActivitySettingsSection() {
     try {
       const d = new Date(status.lastFrameAt);
       formattedLastFrame = !Number.isNaN(d.getTime())
-        ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        ? formatDate(d, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
         : status.lastFrameAt;
     } catch {
       formattedLastFrame = status.lastFrameAt;

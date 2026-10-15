@@ -16,7 +16,7 @@ import type { CSSProperties, ReactNode, RefObject } from "react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FundingTier } from "../account/FundingNotice";
 import { Switch } from "../ui/Switch";
-import { formatDate, t as translate, useT } from "../../i18n";
+import { clockTimeOptions, formatDate, t as translate, useT } from "../../i18n";
 import type {
   FolderDto,
   LiveTranscriptEventDto,
@@ -153,8 +153,7 @@ function calendarEventSchedule(startAt: string, endAt: string) {
     day: "numeric",
   };
   const timeOptions: Intl.DateTimeFormatOptions = {
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   };
   return {
     range: translate("notes.editor.calendar.range", {

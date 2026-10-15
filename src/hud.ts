@@ -25,6 +25,7 @@ import { SPINNER_GRID_COLS, spinnerGrid } from "./lib/spinner-grid";
 import { isOnboardingComplete, subscribeToOnboardingComplete } from "./lib/onboarding";
 import { installNativeContextMenuGuard } from "./lib/native-context-menu";
 import { subscribeBrand } from "./lib/brand";
+import { messageForErrorCode } from "./lib/errors";
 import { createHudLifecycle } from "./lib/hud-lifecycle";
 import { subscribeInterfaceLocale, subscribeInterfaceLocaleAcrossWindows, t } from "./i18n";
 import "./styles/hud.css";
@@ -1351,8 +1352,12 @@ async function handleDictationEventPayload(payload: unknown) {
     }
     targetPinned = true;
     retireDictationTake();
-    // Native error messages arrive already worded; only the fallback is ours.
-    const message = String(dictationEvent.payload?.message ?? "").trim();
+    // Native errors carry a stable code; the interface language words it, and
+    // the native (English) message is only the fallback for unknown codes.
+    const message = messageForErrorCode(
+      dictationEvent.payload?.code,
+      String(dictationEvent.payload?.message ?? "").trim(),
+    );
     const transition = setHud("error", message || (() => t("hud.status.dictationFailed")));
     // Latch the error state before awaiting native placement. A key-up event
     // can arrive during that IPC call, and its secondary not_listening error

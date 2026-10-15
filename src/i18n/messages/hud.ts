@@ -18,6 +18,62 @@ export default defineMessages({
     "hud.status.pastingInto": "Pasting into {app}",
     "hud.status.previousApp": "previous app",
     "hud.status.dictationFailed": "Dictation failed.",
+    // Dictation errors by stable code (src/lib/errors.ts); the native message
+    // is only the fallback for codes without an entry.
+    "hud.error.recordingStartBusy": "Dictation is already starting.",
+    "hud.error.alreadyListening": "Dictation is already listening.",
+    "hud.error.notListening": "Dictation is not listening.",
+    "hud.error.microphonePermissionMissing": "Microphone permission is required.",
+    "hud.error.audioStartFailed": "Could not start microphone recording.",
+    "hud.error.missingRecording": "No recorded audio was available to transcribe.",
+    "hud.error.emptyTranscript": "No transcript text was available to paste.",
+    "hud.error.noSpeech": "No speech detected.",
+    "hud.error.pasteManually":
+      "Clovy couldn't paste automatically. Your transcript is on the clipboard, so you can paste it with Cmd+V.",
+    "hud.error.clipboardWriteFailed": "Could not write transcript to the clipboard.",
+    "hud.error.recoveryCopyFailed":
+      "Could not save or copy this dictation. The recording was kept for recovery.",
+    "hud.error.recoveryClipboard":
+      "Could not save this dictation. Use Cmd+V to keep the transcript.",
+    "hud.error.recoveryUnavailable":
+      "Clovy couldn't save this dictation. The recording was kept for recovery.",
+    "hud.error.helperCommandInvalid": "The dictation helper rejected a command.",
+    "hud.error.shortcutInvalid": "Shortcut configuration was invalid.",
+    "hud.error.helperUnavailable": "Dictation helper process is not running.",
+    "hud.error.notSignedIn": "Sign in to use dictation.",
+    "hud.error.responseInvalid":
+      "Dictation returned a summary instead of dictated text. Try again.",
+    "hud.error.audioWithoutText": "Dictation detected audio but produced no text. Try again.",
+    "hud.error.providerNotConfigured":
+      "Dictation requires a Groq transcription model through Clovy's model service.",
+    "hud.error.cleanupTimeout": "Dictation cleanup timed out.",
+    "hud.error.historySaveFailed": "Dictation history could not save this transcript.",
+    "hud.error.recordingPathMissing": "Dictation helper did not provide a recording path.",
+    "hud.error.hotkeyRegistrationFailed": "Could not register the dictation shortcut.",
+    "hud.error.shortcutMonitorUnavailable": "Could not monitor global shortcut key events.",
+    "hud.error.shortcutFnChordUnsupported":
+      "The shortcut {shortcut} combines Fn with another key, which is no longer supported. Pick a different shortcut in Settings.",
+    "hud.error.shortcutRegisterFailed": "Could not register the shortcut {shortcut}.",
+    "hud.error.escapeCancelUnavailable": "Could not register Escape to cancel dictation.",
+    "hud.error.cleanupInstruction": "Dictation cleanup returned an instruction response.",
+    "hud.error.cleanupNoText": "Dictation cleanup response did not contain text output.",
+    "hud.error.settingsUnavailable": "Settings lock failed.",
+    "hud.error.settingsSaveFailed": "Could not save dictation settings.",
+    "hud.error.shortcutIncomplete": "Shortcut is incomplete.",
+    "hud.error.shortcutModifierRequired": "Shortcut must include at least one modifier key.",
+    "hud.error.shortcutModifierRequiredWindows":
+      "Shortcut must include at least one modifier key (Ctrl, Alt, Shift, Win).",
+    "hud.error.shortcutKeyRequired": "Shortcut must include a supported non-modifier key.",
+    "hud.error.shortcutDoublePressWindows": "Double-press shortcuts are not supported on Windows.",
+    "hud.error.shortcutFnWindows": "The Fn key is not supported for Windows dictation shortcuts.",
+    "hud.error.shortcutModifierOnlyWindows":
+      "Modifier-only shortcuts are not supported on Windows.",
+    "hud.error.shortcutPlatformUnsupported":
+      "Dictation shortcuts are not supported on this platform.",
+    "hud.error.shortcutDuplicate": "Push-to-talk and toggle dictation shortcuts must be different.",
+    "hud.error.recordingUnsupported": "Dictation recording is not supported on this platform.",
+    "hud.error.helperRestarting": "The dictation helper is restarting.",
+    "hud.error.composerUnavailable": "Dictation could not deliver to this composer. Try again.",
     // Meeting detection prompt
     "hud.meeting.detected": "Meeting detected",
     "hud.meeting.record": "Record",
@@ -63,6 +119,66 @@ export default defineMessages({
     "hud.status.pastingInto": "Colando em {app}",
     "hud.status.previousApp": "app anterior",
     "hud.status.dictationFailed": "Falha no ditado.",
+    "hud.error.recordingStartBusy": "O ditado já está começando.",
+    "hud.error.alreadyListening": "O ditado já está ouvindo.",
+    "hud.error.notListening": "O ditado não está ouvindo.",
+    "hud.error.microphonePermissionMissing": "É preciso permitir o acesso ao microfone.",
+    "hud.error.audioStartFailed": "Não foi possível começar a gravar o microfone.",
+    "hud.error.missingRecording": "Nenhum áudio gravado estava disponível para transcrever.",
+    "hud.error.emptyTranscript": "Nenhum texto transcrito estava disponível para colar.",
+    "hud.error.noSpeech": "Nenhuma fala detectada.",
+    "hud.error.pasteManually":
+      "O Clovy não conseguiu colar automaticamente. Sua transcrição está na área de transferência, então você pode colar com Cmd+V.",
+    "hud.error.clipboardWriteFailed":
+      "Não foi possível copiar a transcrição para a área de transferência.",
+    "hud.error.recoveryCopyFailed":
+      "Não foi possível salvar nem copiar este ditado. A gravação foi guardada para recuperação.",
+    "hud.error.recoveryClipboard":
+      "Não foi possível salvar este ditado. Use Cmd+V para manter a transcrição.",
+    "hud.error.recoveryUnavailable":
+      "O Clovy não conseguiu salvar este ditado. A gravação foi guardada para recuperação.",
+    "hud.error.helperCommandInvalid": "O assistente de ditado recusou um comando.",
+    "hud.error.shortcutInvalid": "A configuração do atalho é inválida.",
+    "hud.error.helperUnavailable": "O processo auxiliar de ditado não está em execução.",
+    "hud.error.notSignedIn": "Entre na sua conta para usar o ditado.",
+    "hud.error.responseInvalid":
+      "O ditado devolveu um resumo em vez do texto ditado. Tente de novo.",
+    "hud.error.audioWithoutText": "O ditado detectou áudio, mas não gerou texto. Tente de novo.",
+    "hud.error.providerNotConfigured":
+      "O ditado precisa de um modelo de transcrição Groq pelo serviço de modelos do Clovy.",
+    "hud.error.cleanupTimeout": "A revisão do ditado demorou demais.",
+    "hud.error.historySaveFailed": "O histórico de ditado não conseguiu salvar esta transcrição.",
+    "hud.error.recordingPathMissing": "O assistente de ditado não informou onde está a gravação.",
+    "hud.error.hotkeyRegistrationFailed": "Não foi possível registrar o atalho de ditado.",
+    "hud.error.shortcutMonitorUnavailable":
+      "Não foi possível monitorar as teclas de atalho globais.",
+    "hud.error.shortcutFnChordUnsupported":
+      "O atalho {shortcut} combina Fn com outra tecla, o que não é mais suportado. Escolha outro atalho nos Ajustes.",
+    "hud.error.shortcutRegisterFailed": "Não foi possível registrar o atalho {shortcut}.",
+    "hud.error.escapeCancelUnavailable": "Não foi possível registrar Esc para cancelar o ditado.",
+    "hud.error.cleanupInstruction": "A revisão do ditado devolveu uma instrução em vez do texto.",
+    "hud.error.cleanupNoText": "A revisão do ditado não devolveu texto.",
+    "hud.error.settingsUnavailable": "Não foi possível acessar os ajustes de ditado.",
+    "hud.error.settingsSaveFailed": "Não foi possível salvar os ajustes de ditado.",
+    "hud.error.shortcutIncomplete": "O atalho está incompleto.",
+    "hud.error.shortcutModifierRequired":
+      "O atalho precisa incluir pelo menos uma tecla modificadora.",
+    "hud.error.shortcutModifierRequiredWindows":
+      "O atalho precisa incluir pelo menos uma tecla modificadora (Ctrl, Alt, Shift, Win).",
+    "hud.error.shortcutKeyRequired":
+      "O atalho precisa incluir uma tecla suportada que não seja modificadora.",
+    "hud.error.shortcutDoublePressWindows": "Atalhos de toque duplo não são suportados no Windows.",
+    "hud.error.shortcutFnWindows": "A tecla Fn não é suportada nos atalhos de ditado do Windows.",
+    "hud.error.shortcutModifierOnlyWindows":
+      "Atalhos só com teclas modificadoras não são suportados no Windows.",
+    "hud.error.shortcutPlatformUnsupported":
+      "Atalhos de ditado não são suportados nesta plataforma.",
+    "hud.error.shortcutDuplicate":
+      "Os atalhos de segurar para falar e de ligar o ditado precisam ser diferentes.",
+    "hud.error.recordingUnsupported": "A gravação de ditado não é suportada nesta plataforma.",
+    "hud.error.helperRestarting": "O processo auxiliar de ditado está reiniciando.",
+    "hud.error.composerUnavailable":
+      "O ditado não conseguiu entregar o texto a este campo. Tente de novo.",
     "hud.meeting.detected": "Reunião detectada",
     "hud.meeting.record": "Gravar",
     "hud.meeting.dismiss": "Dispensar aviso de reunião",

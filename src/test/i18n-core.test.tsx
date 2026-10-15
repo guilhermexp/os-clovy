@@ -161,8 +161,8 @@ describe("translation", () => {
     expect(t("nope.missing")).toBe("nope.missing");
   });
 
-  it("formats numbers and dates in the chosen language, English keeps system format", () => {
-    expect(intlLocale("en")).toBeUndefined();
+  it("formats numbers and dates in the interface language, never the system's", () => {
+    expect(intlLocale("en")).toBe("en");
     expect(intlLocale("pt-BR")).toBe("pt-BR");
     expect(formatNumber(1234.5, undefined, "pt-BR")).toBe("1.234,5");
     expect(

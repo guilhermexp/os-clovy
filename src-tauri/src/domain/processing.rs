@@ -3899,6 +3899,9 @@ fn is_no_speech_error(error: &AppError) -> bool {
     is_no_speech_message(&error.code) || is_no_speech_message(&error.message)
 }
 
+// The note persists only these English sentences (no error code), so the
+// desktop translates them by exact text: keep each one byte-identical to its
+// `notes.failure.*` entry in `src/i18n/messages/notes.ts` (NoteFailureBanner).
 fn user_facing_transcription_failure_message(
     code: &str,
     message: &str,
@@ -3939,6 +3942,8 @@ fn user_facing_transcription_failure_message(
     message.trim().to_string()
 }
 
+// Same contract as `user_facing_transcription_failure_message`: the sentences
+// below are translated by exact text in `notes.failure.generation*`.
 fn note_generation_failure_for_user(mut error: AppError) -> AppError {
     let normalized_code = error.code.trim().to_ascii_lowercase();
     let normalized_message = error.message.trim().to_ascii_lowercase();
@@ -5585,6 +5590,31 @@ mod tests {
             balance_failure.message,
             "Your balance is too low. Upgrade to continue."
         );
+    }
+
+    /// Notes persist only these English sentences (no error code column), so
+    /// the desktop translates them by exact text. Every sentence must exist
+    /// verbatim in the English `notes.failure.*` catalog, or that failure
+    /// would silently stop translating.
+    #[test]
+    fn stored_failure_sentences_match_the_desktop_catalog() {
+        let catalog = include_str!("../../../src/i18n/messages/notes.ts");
+        let sentences = [
+            user_facing_transcription_failure_message("no_speech", "", false, "microphone"),
+            user_facing_transcription_failure_message("no_speech", "", true, "system"),
+            user_facing_transcription_failure_message("no_speech", "", true, "microphone"),
+            user_facing_transcription_failure_message("x", "metering_provider_failed", false, "m"),
+            user_facing_transcription_failure_message("x", "upstream_provider_failed", false, "m"),
+            user_facing_transcription_failure_message("x", "authorization_denied", false, "m"),
+            note_generation_failure_for_user(AppError::new("x", "authorization_denied")).message,
+            note_generation_failure_for_user(AppError::new("x", "anything else")).message,
+        ];
+        for sentence in sentences {
+            assert!(
+                catalog.contains(&format!("\"{sentence}\"")),
+                "missing from notes.ts: {sentence}"
+            );
+        }
     }
 
     #[test]
