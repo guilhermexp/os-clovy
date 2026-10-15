@@ -3520,6 +3520,127 @@ describe("AgentWorkspace runtime wiring", () => {
     );
   });
 
+  it("starts a fresh workspace session on the default CLI engine", async () => {
+    const engineModel = "__clovy_cli_engine__:claude";
+    const base = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: engineModel, cli: "claude", legacyFallback: false });
+      }
+      // The remote catalog is unreachable: the default needs no network.
+      if (command === "list_provider_models") return Promise.reject(new Error("offline"));
+      return base?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeVisible(),
+    );
+    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
+    await user.click(composer);
+    await user.type(composer, "Fresh request");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
+        request: expect.objectContaining({ model: engineModel, title: "Fresh request" }),
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: engineModel }),
+      }),
+    );
+  });
+
+  it("hands a Home task to the default CLI engine", async () => {
+    const engineModel = "__clovy_cli_engine__:codex";
+    const user = userEvent.setup();
+    const homeSession: AgentSessionDto = {
+      ...session,
+      id: "home-session",
+      title: "Home",
+      workspacePath: "/tmp/home-session",
+    };
+    const focusedSession: AgentSessionDto = {
+      ...newSession,
+      id: "focused-session",
+      title: "Summarize this file",
+      model: engineModel,
+      workspacePath: "/tmp/focused-session",
+    };
+    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "chat_default_engine") {
+        return { modelId: engineModel, cli: "codex", legacyFallback: false };
+      }
+      if (command === "list_agent_sessions") return [homeSession, focusedSession];
+      if (command === "get_agent_session") return homeSession;
+      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
+      if (command === "list_agent_skills") return [];
+      if (command === "list_provider_models") {
+        return {
+          mode: "generation",
+          selectedModel: "open-software/auto",
+          modelType: "text",
+          models: [],
+        };
+      }
+      if (command === "provider_model_settings") {
+        return {
+          settings: { costQuality: 20 },
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
+        };
+      }
+      if (command === "create_agent_session") return focusedSession;
+      if (command === "start_agent_run") {
+        return {
+          id: "focused-run",
+          sessionId: focusedSession.id,
+          status: "running",
+          model: engineModel,
+        };
+      }
+      return undefined;
+    });
+
+    render(<AgentWorkspace homeMode initialSession={homeSession} />);
+    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
+    await waitFor(() =>
+      expect(mocks.invoke.mock.calls.some(([command]) => command === "chat_default_engine")).toBe(
+        true,
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
+    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
+    await waitFor(() => expect(screen.getByText("brief.pdf")).toBeVisible());
+    await user.type(composer, "Summarize this file");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
+        request: expect.objectContaining({ title: "Summarize this file", model: engineModel }),
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({
+          sessionId: "focused-session",
+          model: engineModel,
+          attachments: ["/tmp/brief.pdf"],
+        }),
+      }),
+    );
+  });
+
   it("keeps explicit OpenRouter BYOK text available when Clovy credits are unavailable", async () => {
     const user = userEvent.setup();
     const openrouterSession = { ...session, model: "openrouter-text" };

@@ -152,8 +152,10 @@ import {
 import { ChatEngineNotice, ChatEnginePicker } from "./composer/ChatEnginePicker";
 import {
   type ChatEngineCatalog,
+  chatDefaultEngine,
   chatEngineCatalog,
   classifyChatEngineModel,
+  defaultChatModelId,
   selectedChatEndpoint,
 } from "../../lib/chat-engine";
 import { type LlmCliId, llmSetUsage } from "../../lib/llm-providers";
@@ -902,15 +904,24 @@ export function AgentWorkspace({
         setError(undefined);
       })
       .catch((cause) => setError(messageFromError(cause)));
+    // New work starts on the default chat engine (ADR-0062): a CLI when chat
+    // is on one, read without the network, else the saved text model.
+    const applyDefaultModel = (selected: string | undefined) => {
+      if (homeMode) {
+        focusedHomeModelRef.current = selected || DEFAULT_MODEL;
+      } else if (!initialAgentSession && !initialSessionId && selected) {
+        setModel(selected);
+      }
+    };
+    const defaultEngine = chatDefaultEngine().catch(() => null);
+    void defaultEngine.then((engine) => {
+      if (engine?.modelId) applyDefaultModel(engine.modelId);
+    });
     void listProviderModels("generation")
-      .then((response) => {
+      .then(async (response) => {
         setModels(response.models);
-        if (homeMode) {
-          focusedHomeModelRef.current = response.selectedModel || DEFAULT_MODEL;
-        }
-        if (!homeMode && !initialAgentSession && !initialSessionId && response.selectedModel) {
-          setModel(response.selectedModel);
-        }
+        const engine = await defaultEngine;
+        applyDefaultModel(engine?.modelId ?? response.selectedModel);
       })
       .catch(() => undefined);
     const costQualityRequestRevision = costQualityIntentRevisionRef.current;
@@ -1209,7 +1220,9 @@ export function AgentWorkspace({
               createdSessionPartition = getCurrentDataPartitionName();
               session = await agentRuntimeBindings.createSession({
                 title: titleFromPrompt(message),
-                model: DEFAULT_MODEL,
+                // A session started from the phone runs on the default chat
+                // engine, as one started here does.
+                model: await defaultChatModelId(DEFAULT_MODEL),
                 safetyMode: "sandboxed",
                 profile: createdSessionPartition,
               });

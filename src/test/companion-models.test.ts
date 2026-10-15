@@ -4,7 +4,19 @@ import {
   companionSessionModelSelection,
   companionStoredModelId,
 } from "../lib/companion-models";
+import type { ChatEngineCliStatus } from "../lib/chat-engine";
 import type { ProviderApiKeysConfigured, ProviderModelDto } from "../lib/tauri";
+
+function cliEngine(id: string, name: string, installed = true): ChatEngineCliStatus {
+  return {
+    id,
+    name,
+    installed,
+    reason: installed ? null : "Not found in PATH",
+    modelId: `__clovy_cli_engine__:${id}`,
+    clovyTools: "available",
+  };
+}
 
 const NO_KEYS: ProviderApiKeysConfigured = {
   groq: false,
@@ -100,5 +112,42 @@ describe("companion model projection", () => {
       modelName: "Retired model",
     });
     expect(companionStoredModelId("open-software/auto", 49.6)).toBe("__june_auto_generation__:50");
+  });
+
+  it("offers the installed agent CLIs first, the default one on top, then the legacy models", () => {
+    const options = companionModelOptions([model("z-ai/glm-5.2", { name: "GLM 5.2" })], NO_KEYS, [
+      cliEngine("pi", "Pi"),
+      cliEngine("codex", "Codex"),
+      cliEngine("claude", "Claude Code"),
+      cliEngine("copilot", "GitHub Copilot", false),
+    ]);
+    expect(options.map((option) => option.id)).toEqual([
+      "__clovy_cli_engine__:claude",
+      "__clovy_cli_engine__:pi",
+      "__clovy_cli_engine__:codex",
+      "open-software/auto",
+      "z-ai/glm-5.2",
+    ]);
+    expect(options[0]).toMatchObject({
+      name: "Claude Code",
+      description: "Default. Runs on Claude Code on your Mac.",
+      routing: "remote",
+    });
+    expect(options[2].description).toBe("Runs on Codex on your Mac.");
+  });
+
+  it("names a session on a CLI engine by the CLI", () => {
+    expect(
+      companionSessionModelSelection("session-cli", "__clovy_cli_engine__:codex", [], 50, [
+        cliEngine("codex", "Codex"),
+      ]),
+    ).toEqual({
+      storedSessionId: "session-cli",
+      modelId: "__clovy_cli_engine__:codex",
+      modelName: "Codex",
+    });
+    expect(companionStoredModelId("__clovy_cli_engine__:codex", 50)).toBe(
+      "__clovy_cli_engine__:codex",
+    );
   });
 });

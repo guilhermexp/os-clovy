@@ -10,6 +10,7 @@ import {
   type ChatEngineEndpoint,
   chatEngineCatalog,
   classifyChatEngineModel,
+  defaultChatCliId,
   selectedChatEndpoint,
 } from "../../../lib/chat-engine";
 import { useComposerModelPopoverPosition } from "./ModelPicker";
@@ -223,6 +224,9 @@ export function ChatEnginePicker({
 
   const activeCatalog = propCatalog ?? internalCatalog;
   const clis = activeCatalog?.clis.length ? activeCatalog.clis : DEFAULT_CLIS;
+  // The agent CLIs come first and the default one is marked; the Clovy agent
+  // stays listed last, as the legacy engine (ADR-0062).
+  const defaultCliId = defaultChatCliId(clis);
   const endpoints = activeCatalog?.endpoints ?? [];
   const activeEndpoint = selectedChatEndpoint(model, activeCatalog, clovyModels);
 
@@ -263,24 +267,44 @@ export function ChatEnginePicker({
         {t("chat.engine.menuTitle")}
       </p>
 
-      <p className="agent-composer-model-title">{t("chat.engine.sectionClovy")}</p>
+      <p className="agent-composer-model-title">{t("chat.engine.sectionClis")}</p>
       <div className="agent-composer-model-menu">
-        <button
-          type="button"
-          className="agent-composer-model-row"
-          role="menuitemradio"
-          aria-checked={classification.kind === "clovy"}
-          onClick={handleSelectClovy}
-        >
-          <span className="agent-composer-model-choice-copy">
-            <span className="agent-composer-model-row-name">{t("chat.engine.clovy")}</span>
-          </span>
-          {classification.kind === "clovy" ? (
-            <IconCheckmark2Small size={14} aria-hidden className="agent-composer-model-row-check" />
-          ) : null}
-        </button>
+        {clis.map((cli) => {
+          const isSelected = classification.kind === "cli" && classification.cli === cli.id;
+          return (
+            <button
+              key={cli.id}
+              type="button"
+              className="agent-composer-model-row"
+              role="menuitemradio"
+              aria-checked={isSelected}
+              disabled={!cli.installed}
+              aria-disabled={!cli.installed}
+              onClick={() => handleSelectCli(cli)}
+            >
+              <span className="agent-composer-model-choice-copy">
+                <span className="agent-composer-model-row-name">{cli.name}</span>
+                {!cli.installed ? (
+                  <span className="agent-composer-model-choice-desc">
+                    {cli.reason ?? t("chat.engine.notInstalled")}
+                  </span>
+                ) : cli.id === defaultCliId ? (
+                  <span className="agent-composer-model-choice-desc">
+                    {t("chat.engine.defaultEngine")}
+                  </span>
+                ) : null}
+              </span>
+              {isSelected ? (
+                <IconCheckmark2Small
+                  size={14}
+                  aria-hidden
+                  className="agent-composer-model-row-check"
+                />
+              ) : null}
+            </button>
+          );
+        })}
       </div>
-
       {endpoints.length > 0 ? (
         <>
           <p className="agent-composer-model-title">{t("chat.engine.sectionEndpoints")}</p>
@@ -313,39 +337,25 @@ export function ChatEnginePicker({
         </>
       ) : null}
 
-      <p className="agent-composer-model-title">{t("chat.engine.sectionClis")}</p>
+      <p className="agent-composer-model-title">{t("chat.engine.sectionLegacy")}</p>
       <div className="agent-composer-model-menu">
-        {clis.map((cli) => {
-          const isSelected = classification.kind === "cli" && classification.cli === cli.id;
-          return (
-            <button
-              key={cli.id}
-              type="button"
-              className="agent-composer-model-row"
-              role="menuitemradio"
-              aria-checked={isSelected}
-              disabled={!cli.installed}
-              aria-disabled={!cli.installed}
-              onClick={() => handleSelectCli(cli)}
-            >
-              <span className="agent-composer-model-choice-copy">
-                <span className="agent-composer-model-row-name">{cli.name}</span>
-                {!cli.installed ? (
-                  <span className="agent-composer-model-choice-desc">
-                    {cli.reason ?? t("chat.engine.notInstalled")}
-                  </span>
-                ) : null}
-              </span>
-              {isSelected ? (
-                <IconCheckmark2Small
-                  size={14}
-                  aria-hidden
-                  className="agent-composer-model-row-check"
-                />
-              ) : null}
-            </button>
-          );
-        })}
+        <button
+          type="button"
+          className="agent-composer-model-row"
+          role="menuitemradio"
+          aria-checked={classification.kind === "clovy"}
+          onClick={handleSelectClovy}
+        >
+          <span className="agent-composer-model-choice-copy">
+            <span className="agent-composer-model-row-name">{t("chat.engine.clovy")}</span>
+            <span className="agent-composer-model-choice-desc">
+              {t("chat.engine.clovyLegacyDescription")}
+            </span>
+          </span>
+          {classification.kind === "clovy" ? (
+            <IconCheckmark2Small size={14} aria-hidden className="agent-composer-model-row-check" />
+          ) : null}
+        </button>
       </div>
     </div>
   ) : null;

@@ -465,6 +465,9 @@ export default defineMessages({
     "settingsPanels.llm.usageActivityDescription":
       "Activity stays off when set to None. Nothing is sent anywhere.",
     "settingsPanels.llm.providerClovy": "Clovy",
+    "settingsPanels.llm.providerClovyLegacy": "Clovy (legacy agent)",
+    "settingsPanels.llm.chatLegacyFallback":
+      "Claude Code and Codex aren't installed, so chat uses the legacy Clovy agent. Install one and restart Clovy to make it the default.",
     "settingsPanels.llm.providerNone": "None",
     "settingsPanels.llm.notInstalledSuffix": " (not installed)",
     "settingsPanels.llm.toolsOnSuffix": " (tools can't be turned off)",
@@ -995,6 +998,9 @@ export default defineMessages({
     "settingsPanels.llm.usageActivityDescription":
       "Os recursos de atividade ficam desativados quando definido como Nenhum. Nada é enviado para lugar algum.",
     "settingsPanels.llm.providerClovy": "Clovy",
+    "settingsPanels.llm.providerClovyLegacy": "Clovy (agente legado)",
+    "settingsPanels.llm.chatLegacyFallback":
+      "O Claude Code e o Codex não estão instalados, então o chat usa o agente legado do Clovy. Instale um deles e reinicie o Clovy para torná-lo o padrão.",
     "settingsPanels.llm.providerNone": "Nenhum",
     "settingsPanels.llm.notInstalledSuffix": " (não instalado)",
     "settingsPanels.llm.toolsOnSuffix": " (ferramentas não podem ser desligadas)",

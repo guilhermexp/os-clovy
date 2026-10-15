@@ -13,6 +13,7 @@ import {
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import { companionFrontendConsumerAvailable } from "../lib/companion-frontend-router";
 import { rememberSessionModel } from "../lib/agent-session-models";
+import { invoke as tauriInvoke } from "../lib/tauri";
 import {
   AGENT_NEW_SESSION_EVENT,
   AGENT_NEW_SESSION_PENDING_KEY,
@@ -1532,6 +1533,47 @@ describe("App shortcuts", () => {
         safetyMode: created.safetyMode,
       }),
     );
+  });
+
+  it("starts a phone-started session on the default CLI engine", async () => {
+    const engineModel = "__clovy_cli_engine__:claude";
+    const created = {
+      ...agentSession("session-created-on-cli", "Companion request"),
+      model: engineModel,
+      safetyMode: "sandboxed" as const,
+    };
+    mocks.createAgentSession.mockResolvedValue(created);
+    vi.mocked(tauriInvoke).mockImplementation(async (command: string) =>
+      command === "chat_default_engine"
+        ? { modelId: engineModel, cli: "claude", legacyFallback: false }
+        : [],
+    );
+    try {
+      render(<App />);
+
+      await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
+      act(() => {
+        mocks.listeners.get("clovy://companion-request")?.({
+          payload: {
+            operationId: "operation-new-cli-session-send",
+            intent: { type: "agentSend", data: { message: "Plan my week" } },
+          },
+        });
+      });
+
+      await waitFor(() =>
+        expect(mocks.createAgentSession).toHaveBeenCalledWith(
+          expect.objectContaining({ model: engineModel, safetyMode: "sandboxed" }),
+        ),
+      );
+      await waitFor(() =>
+        expect(mocks.startAgentRun).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionId: created.id, model: engineModel }),
+        ),
+      );
+    } finally {
+      vi.mocked(tauriInvoke).mockImplementation(async () => []);
+    }
   });
 
   it("rejects a cached companion send after the active partition changes", async () => {

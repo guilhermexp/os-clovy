@@ -331,7 +331,7 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
 
     if (forUsage === "activity") {
       options.push({ value: "none", label: t("settingsPanels.llm.providerNone") });
-    } else {
+    } else if (forUsage !== "chat") {
       options.push({ value: "clovy", label: t("settingsPanels.llm.providerClovy") });
     }
 
@@ -356,6 +356,17 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
       });
     }
 
+    if (forUsage === "chat") {
+      // Chat lists the agent CLIs first and the Clovy agent last, as the
+      // legacy engine (ADR-0062).
+      const clovy: (typeof options)[number] = {
+        value: "clovy",
+        label: t("settingsPanels.llm.providerClovyLegacy"),
+      };
+      const clis = options.filter((option) => option.value.startsWith("cli:"));
+      const rest = options.filter((option) => !option.value.startsWith("cli:"));
+      return [...clis, ...rest, clovy];
+    }
     return options;
   };
 
@@ -390,6 +401,11 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
           <div className="settings-row">
             <div className="settings-row-info">
               <h4 className="settings-row-title">{t("settingsPanels.llm.usageChat")}</h4>
+              {data?.cliDefaultPending && usage.chat.kind === "clovy" ? (
+                <p className="settings-row-description" role="status">
+                  {t("settingsPanels.llm.chatLegacyFallback")}
+                </p>
+              ) : null}
               {usageErrors.chat ? (
                 <p className="settings-row-error" role="alert">
                   {usageErrors.chat}
