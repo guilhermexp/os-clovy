@@ -168,7 +168,7 @@ pub(super) async fn grant_root(
     .bind(&root.display_name)
     .bind(&root.volume_device_id)
     .bind(&root.directory_file_id)
-    .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true))
+    .bind(crate::db::repositories::timestamp())
     .execute(&repositories.pool)
     .await?;
     Ok(root)
@@ -555,7 +555,7 @@ async fn insert_upload_reservation(
     .bind(request.size_bytes as i64)
     .bind(&request.sha256)
     .bind(expires_at_ms as i64)
-    .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true))
+    .bind(crate::db::repositories::timestamp())
     .bind(account_user_id)
     .bind(device_id)
     .bind(account_user_id)

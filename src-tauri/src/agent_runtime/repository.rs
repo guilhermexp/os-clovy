@@ -7,7 +7,6 @@ use super::skill_identity::{
     CLOVY_OBSIDIAN_SKILL_ID, LEGACY_OBSIDIAN_SKILL_ID,
 };
 use crate::domain::types::AppError;
-use chrono::{SecondsFormat, Utc};
 use sqlx::{query::query, row::Row};
 use sqlx_sqlite::{SqlitePool, SqliteRow};
 use std::collections::BTreeSet;
@@ -37,7 +36,7 @@ impl AgentRepository {
         workspace_path: Option<&str>,
     ) -> Result<AgentSessionDto, sqlx::Error> {
         let id = Uuid::new_v4().to_string();
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         query(
             "INSERT INTO agent_sessions
              (id, title, status, model, safety_mode, workspace_path, source, created_at, updated_at)
@@ -64,7 +63,7 @@ impl AgentRepository {
         profile: &str,
     ) -> Result<AgentSessionDto, sqlx::Error> {
         let id = Uuid::new_v4().to_string();
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let profile = profile.trim();
         let profile = if profile.is_empty() {
             "default"
@@ -129,7 +128,7 @@ impl AgentRepository {
     ) -> Result<AgentSessionDto, sqlx::Error> {
         query("UPDATE agent_sessions SET title = ?, updated_at = ? WHERE id = ?")
             .bind(title.trim())
-            .bind(now())
+            .bind(crate::db::repositories::timestamp())
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -166,7 +165,7 @@ impl AgentRepository {
         reasoning_effort: Option<&str>,
     ) -> Result<AgentRunDto, sqlx::Error> {
         let id = Uuid::new_v4().to_string();
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let mut transaction = self.pool.begin().await?;
         query(
             "INSERT INTO agent_runs
@@ -223,7 +222,7 @@ impl AgentRepository {
 
     pub async fn reset_run_sequence_for_resume(&self, run_id: &str) -> Result<(), sqlx::Error> {
         query("UPDATE agent_runs SET last_sequence = 0, updated_at = ? WHERE id = ?")
-            .bind(now())
+            .bind(crate::db::repositories::timestamp())
             .bind(run_id)
             .execute(&self.pool)
             .await?;
@@ -282,7 +281,7 @@ impl AgentRepository {
              WHERE id = ? AND run_config_json IS NULL",
         )
         .bind(config.to_string())
-        .bind(now())
+        .bind(crate::db::repositories::timestamp())
         .bind(run_id)
         .execute(&self.pool)
         .await?;
@@ -312,7 +311,7 @@ impl AgentRepository {
         delta: &str,
         external_id: &str,
     ) -> Result<Option<AgentItemDto>, sqlx::Error> {
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let mut transaction = self.pool.begin().await?;
         let updated = query(
             "UPDATE agent_runs SET last_sequence = ?, updated_at = ?
@@ -428,7 +427,7 @@ impl AgentRepository {
         delta: &str,
         external_id: &str,
     ) -> Result<Option<AgentItemDto>, sqlx::Error> {
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let mut transaction = self.pool.begin().await?;
         let updated = query(
             "UPDATE agent_runs SET last_sequence = ?, updated_at = ?
@@ -548,7 +547,7 @@ impl AgentRepository {
         text: &str,
         external_id: &str,
     ) -> Result<Option<AgentItemDto>, sqlx::Error> {
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let mut transaction = self.pool.begin().await?;
         let updated = query(
             "UPDATE agent_runs SET last_sequence = ?, updated_at = ?
@@ -659,7 +658,7 @@ impl AgentRepository {
         external_id: Option<&str>,
     ) -> Result<Option<AgentItemDto>, sqlx::Error> {
         let id = Uuid::new_v4().to_string();
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let payload_json = payload
             .value()
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?
@@ -859,7 +858,7 @@ impl AgentRepository {
                 .await?;
         }
         let id = Uuid::new_v4().to_string();
-        let created_at = now();
+        let created_at = crate::db::repositories::timestamp();
         let payload = AgentItemPayload::ContextSummary(super::domain::TextPayload {
             text: summary_text.to_string(),
             metadata: summary_metadata.cloned(),
@@ -908,7 +907,7 @@ impl AgentRepository {
         interrupted_state: Option<&serde_json::Value>,
         error: Option<(&str, &str)>,
     ) -> Result<AgentRunDto, sqlx::Error> {
-        let now = now();
+        let now = crate::db::repositories::timestamp();
         let terminal = matches!(status, "completed" | "cancelled" | "failed" | "interrupted");
         let run = self.get_run(run_id).await?;
         let updated = query("UPDATE agent_runs SET status = ?, updated_at = ?, completed_at = ?, usage_json = COALESCE(?, usage_json), interrupted_state_json = COALESCE(?, interrupted_state_json), error_code = ?, error_message = ? WHERE id = ? AND status NOT IN ('completed', 'cancelled', 'failed', 'interrupted')")
@@ -946,7 +945,7 @@ impl AgentRepository {
         if run.status != "waiting_for_user" {
             return Ok(None);
         }
-        let timestamp = now();
+        let timestamp = crate::db::repositories::timestamp();
         let mut transaction = self.pool.begin().await?;
         let retired = query(
             "UPDATE agent_items
@@ -1003,7 +1002,7 @@ impl AgentRepository {
     /// runs keep their serialized interruption state and routine runs are
     /// reconciled by the scheduler's lease-aware recovery path.
     pub async fn reconcile_non_routine_runs_after_restart(&self) -> Result<u64, sqlx::Error> {
-        let timestamp = now();
+        let timestamp = crate::db::repositories::timestamp();
         let message = "Clovy restarted before this run completed.";
         let mut transaction = self.pool.begin().await?;
         let result = query(
@@ -1091,7 +1090,7 @@ impl AgentRepository {
         managed: bool,
     ) -> Result<AgentSkillDto, sqlx::Error> {
         let canonical_id = canonical_skill_id(id);
-        let updated_at = now();
+        let updated_at = crate::db::repositories::timestamp();
         let mut transaction = self.pool.begin().await?;
         for write_id in write_skill_ids(canonical_id) {
             query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(skill_id) DO UPDATE SET enabled = excluded.enabled, managed = excluded.managed, updated_at = excluded.updated_at")
@@ -1155,9 +1154,6 @@ impl AgentRepository {
     }
 }
 
-fn now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
 
 fn session_from_row(row: SqliteRow) -> AgentSessionDto {
     AgentSessionDto {
@@ -1517,7 +1513,7 @@ mod tests {
             )
             .await
             .expect("waiting run");
-        let timestamp = now();
+        let timestamp = crate::db::repositories::timestamp();
         query(
             "UPDATE routine_runs
              SET agent_session_id = ?, agent_run_id = ?, status = 'waiting_for_user',

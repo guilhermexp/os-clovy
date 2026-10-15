@@ -453,7 +453,7 @@ pub async fn branch_agent_session(
         &mut transaction,
         &session_id,
         &branch.id,
-        &chrono::Utc::now().to_rfc3339(),
+        &crate::db::repositories::timestamp(),
     )
     .await?;
     let items = sqlx::query::query(
@@ -1537,7 +1537,7 @@ async fn resolve_agent_interruption_inner(
         None
     };
     let resolution_nonce = uuid::Uuid::new_v4().to_string();
-    let resolution_time = chrono::Utc::now().to_rfc3339();
+    let resolution_time = crate::db::repositories::timestamp();
     settle_interruption_payload(
         &mut interruption,
         &interruption_kind,
@@ -1648,7 +1648,7 @@ async fn resolve_agent_interruption_inner(
                  WHERE id = ? AND status = 'queued'",
             )
             .bind(run.last_sequence)
-            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(crate::db::repositories::timestamp())
             .bind(&run.id)
             .execute(&mut *transaction)
             .await?
@@ -1677,7 +1677,7 @@ async fn resolve_agent_interruption_inner(
                  SET status = 'waiting_for_user', updated_at = ?
                  WHERE id = ? AND status = 'running'",
             )
-            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(crate::db::repositories::timestamp())
             .bind(&session.id)
             .execute(&mut *transaction)
             .await?
@@ -2858,7 +2858,7 @@ async fn prepare_attachments(
                 .or_else(|| attachment_mime_type(&destination).map(str::to_string)),
             size_bytes: metadata.len() as i64,
             available: true,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: crate::db::repositories::timestamp(),
         });
     }
     Ok(attachments)

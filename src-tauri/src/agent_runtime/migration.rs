@@ -625,10 +625,10 @@ pub async fn import_legacy_agent_state(
     let mut source_counts = source_counts(&source).await?;
     source_counts.routines = legacy_jobs.len() as u64;
     source_counts.mcp_servers = legacy_mcp.definitions.len() as u64;
-    let started_at = now();
+    let started_at = crate::db::repositories::timestamp();
     let mut imported = MigrationCounts::default();
     let mut skipped_count = 0_u64;
-    let completed_at = now();
+    let completed_at = crate::db::repositories::timestamp();
     let secret_store = KeychainMcpSecretStore;
     let mut staged_secrets = Vec::new();
     let mut staged_artifacts = Vec::new();
@@ -1291,7 +1291,7 @@ async fn record_failed_manifest(
     .bind(serde_json::to_string(source_counts).unwrap_or_else(|_| "{}".to_string()))
     .bind(serde_json::to_string(errors).unwrap_or_else(|_| "[]".to_string()))
     .bind(started_at)
-    .bind(now())
+    .bind(crate::db::repositories::timestamp())
     .execute(pool)
     .await
     .map_err(LegacyImportError::Destination)?;
@@ -1325,8 +1325,8 @@ fn empty_manifest(path: &Path, status: &str) -> AgentMigrationManifestDto {
         imported_counts: MigrationCounts::default(),
         skipped_count: 0,
         errors: Vec::new(),
-        started_at: now(),
-        completed_at: Some(now()),
+        started_at: crate::db::repositories::timestamp(),
+        completed_at: Some(crate::db::repositories::timestamp()),
     }
 }
 
@@ -1392,9 +1392,6 @@ fn timestamp(value: f64) -> String {
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
 
 #[cfg(test)]
 mod tests {

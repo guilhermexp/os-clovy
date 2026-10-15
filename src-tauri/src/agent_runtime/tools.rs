@@ -1028,7 +1028,7 @@ async fn record_artifact(
     sqlx::query::query("INSERT INTO agent_artifacts(id, session_id, run_id, provenance, action, path, original_path, size_bytes, available, created_at) VALUES (?, ?, ?, 'tool', ?, ?, ?, ?, 1, ?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&context.session_id).bind(&context.run_id)
         .bind(action).bind(path.to_string_lossy().as_ref()).bind(original.map(|value| value.to_string_lossy().into_owned()))
-        .bind(metadata.len() as i64).bind(chrono::Utc::now().to_rfc3339()).execute(&context.repository.pool).await?;
+        .bind(metadata.len() as i64).bind(crate::db::repositories::timestamp()).execute(&context.repository.pool).await?;
     Ok(())
 }
 
@@ -1043,7 +1043,7 @@ async fn record_artifact_with_mime(
     sqlx::query::query("INSERT INTO agent_artifacts(id, session_id, run_id, provenance, action, path, original_path, mime_type, size_bytes, available, created_at) VALUES (?, ?, ?, 'tool', ?, ?, ?, ?, ?, 1, ?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&context.session_id).bind(&context.run_id)
         .bind(action).bind(path.to_string_lossy().as_ref()).bind(original.map(|value| value.to_string_lossy().into_owned()))
-        .bind(mime_type).bind(metadata.len() as i64).bind(chrono::Utc::now().to_rfc3339()).execute(&context.repository.pool).await?;
+        .bind(mime_type).bind(metadata.len() as i64).bind(crate::db::repositories::timestamp()).execute(&context.repository.pool).await?;
     Ok(())
 }
 

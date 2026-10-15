@@ -967,7 +967,7 @@ pub(crate) async fn persist_runtime_event(
         .event_id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let created_at = now();
+    let created_at = crate::db::repositories::timestamp();
     let assistant_id = format!("assistant:{}", frame.run_id);
     let reasoning_id = format!("reasoning:{}", frame.run_id);
     let mut persistence_external_id = event_id.clone();
@@ -1356,9 +1356,6 @@ async fn write_frame(stdin: &Arc<Mutex<ChildStdin>>, frame: &RpcFrame) -> Result
         .map_err(|error| AppError::new("agent_runtime_disconnected", error.to_string()))
 }
 
-fn now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
 
 fn approval_command(tool_name: &str, arguments: Option<&Value>) -> String {
     let details = match arguments {
