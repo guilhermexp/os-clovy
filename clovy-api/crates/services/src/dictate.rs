@@ -1,7 +1,6 @@
 use crate::{
     charge_flow::{
-        AsyncChargeParams, AuthorizeParams, ReleaseHoldParams, authorize_or_deny, clamp_to_cap,
-        release_hold, spawn_charge, zero_receipt,
+        AsyncChargeParams, AuthorizeParams, authorize_run_and_price, spawn_charge, zero_receipt,
     },
     error::ServiceError,
     language::fill_missing_language,
@@ -99,39 +98,28 @@ impl DictateService {
         // Hold covers the already-known price, floored at the flat estimate —
         // see the matching comment in note_transcribe.rs.
         let estimate = Credits(actual.0.max(self.flat_estimate_credits));
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::DictateTranscribe,
-            estimate,
-            hold_ttl_seconds: self.transcribe_hold_ttl_seconds,
-        })
-        .await?;
-        let transcript = match self
-            .transcriber
-            .transcribe(TranscriptionRequest {
-                audio: params.audio,
-                format: AudioFormat::from_filename(&params.filename),
-                context: params.context,
-                language: params.language,
-                model: params.model_id.clone(),
-                provider_credentials: params.provider_credentials.clone(),
-            })
-            .await
-        {
-            Ok(transcript) => transcript,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::DictateTranscribe,
-                    action_token: authorization.action_token,
+        let work = authorize_run_and_price(
+            AuthorizeParams {
+                os_accounts: self.os_accounts.as_ref(),
+                user_id: params.user_id.clone(),
+                action: ActionSlug::DictateTranscribe,
+                estimate,
+                hold_ttl_seconds: self.transcribe_hold_ttl_seconds,
+            },
+            || {
+                self.transcriber.transcribe(TranscriptionRequest {
+                    audio: params.audio,
+                    format: AudioFormat::from_filename(&params.filename),
+                    context: params.context,
+                    language: params.language,
+                    model: params.model_id.clone(),
+                    provider_credentials: params.provider_credentials.clone(),
                 })
-                .await;
-                return Err(ServiceError::from(error));
-            }
-        };
-        let transcript = fill_missing_language(transcript, requested_language.as_deref());
-        let charge_credits = clamp_to_cap(actual, authorization.cap_credits);
+            },
+            |_| Ok(actual),
+        )
+        .await?;
+        let transcript = fill_missing_language(work.output, requested_language.as_deref());
         let idempotency_key = format!(
             "dictate_transcribe:{}:{}:{}",
             params.user_id.0, params.session_id, params.utterance_id
@@ -142,8 +130,8 @@ impl DictateService {
             user_id: params.user_id.clone(),
             action: ActionSlug::DictateTranscribe,
             model_id: Some(params.model_id.0.clone()),
-            action_token: authorization.action_token,
-            credits: charge_credits,
+            action_token: work.action_token,
+            credits: work.credits,
             idempotency_key,
         });
         Ok(DictateTranscribeOutput {
@@ -192,57 +180,51 @@ impl DictateService {
                 receipt: zero_receipt(),
             });
         }
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::DictateCleanup,
-            estimate: Credits(self.flat_estimate_credits),
-            hold_ttl_seconds: self.cleanup_hold_ttl_seconds,
-        })
-        .await?;
-        let cleaned = match self
-            .cleaner
-            .cleanup(CleanupRequest {
-                kind: params.kind,
-                text: params.text,
-                dictionary_context: params.dictionary_context,
-                app_context: params.app_context,
-                style: params.style,
-                model: params.model_id.clone(),
-                system_prompt: system_prompt.to_string(),
-                provider_credentials: params.provider_credentials.clone(),
-                price_cap: self.pricing.price_cap(&params.model_id.0),
-            })
-            .await
-        {
-            Ok(cleaned) => cleaned,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::DictateCleanup,
-                    action_token: authorization.action_token,
+        let work = authorize_run_and_price(
+            AuthorizeParams {
+                os_accounts: self.os_accounts.as_ref(),
+                user_id: params.user_id.clone(),
+                action: ActionSlug::DictateCleanup,
+                estimate: Credits(self.flat_estimate_credits),
+                hold_ttl_seconds: self.cleanup_hold_ttl_seconds,
+            },
+            || {
+                self.cleaner.cleanup(CleanupRequest {
+                    kind: params.kind,
+                    text: params.text,
+                    dictionary_context: params.dictionary_context,
+                    app_context: params.app_context,
+                    style: params.style,
+                    model: params.model_id.clone(),
+                    system_prompt: system_prompt.to_string(),
+                    provider_credentials: params.provider_credentials.clone(),
+                    price_cap: self.pricing.price_cap(&params.model_id.0),
                 })
-                .await;
-                return Err(error.into());
-            }
-        };
-        let actual = self
-            .pricing
-            .price_token_usage(&params.model_id.0, cleaned.usage)?;
+            },
+            |cleaned: &CleanedText| {
+                Ok(self
+                    .pricing
+                    .price_token_usage(&params.model_id.0, cleaned.usage)?)
+            },
+        )
+        .await?;
         let receipt = pending_receipt();
         spawn_charge(AsyncChargeParams {
             os_accounts: self.os_accounts.clone(),
             user_id: params.user_id.clone(),
             action: ActionSlug::DictateCleanup,
             model_id: Some(params.model_id.0.clone()),
-            action_token: authorization.action_token,
-            credits: clamp_to_cap(actual, authorization.cap_credits),
+            action_token: work.action_token,
+            credits: work.credits,
             idempotency_key: format!(
                 "dictate_cleanup:{}:{}:{}",
                 params.user_id.0, params.session_id, params.utterance_id
             ),
         });
-        Ok(DictateCleanupOutput { cleaned, receipt })
+        Ok(DictateCleanupOutput {
+            cleaned: work.output,
+            receipt,
+        })
     }
 }
 

@@ -1,16 +1,16 @@
 use crate::{
     charge_flow::{
-        AuthorizeParams, ChargeParams, ReleaseHoldParams, authorize_or_deny, charge, clamp_to_cap,
-        log_settled, new_charge_operation_id, release_hold, zero_receipt,
+        AuthorizeParams, ChargeParams, authorize_run_and_price, charge, log_settled,
+        new_charge_operation_id, zero_receipt,
     },
     error::ServiceError,
     metering::log_skipped_user_key,
     util::{served_model, sha256_hex},
 };
 use clovy_domain::{
-    ActionSlug, Credits, GeneratedImage, ImageEditRequest, ImageEditor, ImageGenerationRequest,
-    ImageGenerator, ModelId, OsAccountsClient, ProviderCredentials, Receipt, UpstreamProvider,
-    UserId,
+    ActionSlug, Credits, DomainError, GeneratedImage, ImageEditRequest, ImageEditor,
+    ImageGenerationRequest, ImageGenerator, ModelId, OsAccountsClient, ProviderCredentials,
+    Receipt, UpstreamProvider, UserId,
 };
 use std::{
     collections::BTreeMap,
@@ -177,52 +177,40 @@ impl ImageService {
         params: &ImageGenerateParams,
         estimate: Credits,
     ) -> Result<PendingImageCharge, ServiceError> {
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::ImageGenerate,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
-        .await?;
-        let charge_created_at = Instant::now();
-        let operation_id = new_charge_operation_id();
         // A failed/rejected generation returns the error WITHOUT charging; the
         // wallet hold is released so it stops counting against the user's
         // concurrency cap (same as the web and agent chat paths).
-        let image = match self
-            .generator
-            .generate(ImageGenerationRequest {
-                prompt: params.prompt.clone(),
-                model: ModelId(params.model.clone()),
-                width: params.width,
-                height: params.height,
-                safe_mode: params.safe_mode,
-                provider_credentials: params.provider_credentials.clone(),
-            })
-            .await
-        {
-            Ok(image) => image,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::ImageGenerate,
-                    action_token: authorization.action_token,
-                })
-                .await;
-                return Err(error.into());
-            }
-        };
-        let charge_credits = clamp_to_cap(estimate, authorization.cap_credits);
+        let work = authorize_run_and_price(
+            self.authorize_params(&params.user_id, ActionSlug::ImageGenerate, estimate),
+            || async {
+                let created_at = Instant::now();
+                let operation_id = new_charge_operation_id();
+                let image = self
+                    .generator
+                    .generate(ImageGenerationRequest {
+                        prompt: params.prompt.clone(),
+                        model: ModelId(params.model.clone()),
+                        width: params.width,
+                        height: params.height,
+                        safe_mode: params.safe_mode,
+                        provider_credentials: params.provider_credentials.clone(),
+                    })
+                    .await?;
+                Ok::<_, DomainError>((image, created_at, operation_id))
+            },
+            |_| Ok(estimate),
+        )
+        .await?;
+        let (image, created_at, operation_id) = work.output;
         Ok(PendingImageCharge {
             action: ActionSlug::ImageGenerate,
             user_id: params.user_id.clone(),
             model: params.model.clone(),
             image,
-            action_token: authorization.action_token,
-            credits: charge_credits,
+            action_token: work.action_token,
+            credits: work.credits,
             idempotency_key: Self::idempotency_key(params, &operation_id),
-            created_at: charge_created_at,
+            created_at,
         })
     }
 
@@ -312,50 +300,53 @@ impl ImageService {
         model: &str,
         estimate: Credits,
     ) -> Result<PendingImageCharge, ServiceError> {
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::ImageEdit,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
+        let work = authorize_run_and_price(
+            self.authorize_params(&params.user_id, ActionSlug::ImageEdit, estimate),
+            || async {
+                let created_at = Instant::now();
+                let operation_id = new_charge_operation_id();
+                let image = self
+                    .editor
+                    .edit(ImageEditRequest {
+                        image_base64: params.image_base64.clone(),
+                        mime_type: params.mime_type.clone(),
+                        prompt: params.prompt.clone(),
+                        model: ModelId(model.to_string()),
+                        safe_mode: params.safe_mode,
+                        provider_credentials: params.provider_credentials.clone(),
+                    })
+                    .await?;
+                Ok::<_, DomainError>((image, created_at, operation_id))
+            },
+            |_| Ok(estimate),
+        )
         .await?;
-        let charge_created_at = Instant::now();
-        let operation_id = new_charge_operation_id();
-        let image = match self
-            .editor
-            .edit(ImageEditRequest {
-                image_base64: params.image_base64.clone(),
-                mime_type: params.mime_type.clone(),
-                prompt: params.prompt.clone(),
-                model: ModelId(model.to_string()),
-                safe_mode: params.safe_mode,
-                provider_credentials: params.provider_credentials.clone(),
-            })
-            .await
-        {
-            Ok(image) => image,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::ImageEdit,
-                    action_token: authorization.action_token,
-                })
-                .await;
-                return Err(error.into());
-            }
-        };
-        let charge_credits = clamp_to_cap(estimate, authorization.cap_credits);
+        let (image, created_at, operation_id) = work.output;
         Ok(PendingImageCharge {
             action: ActionSlug::ImageEdit,
             user_id: params.user_id.clone(),
             model: model.to_string(),
             image,
-            action_token: authorization.action_token,
-            credits: charge_credits,
+            action_token: work.action_token,
+            credits: work.credits,
             idempotency_key: Self::edit_idempotency_key(params, model, &operation_id),
-            created_at: charge_created_at,
+            created_at,
         })
+    }
+
+    fn authorize_params(
+        &self,
+        user_id: &UserId,
+        action: ActionSlug,
+        estimate: Credits,
+    ) -> AuthorizeParams<'_> {
+        AuthorizeParams {
+            os_accounts: self.os_accounts.as_ref(),
+            user_id: user_id.clone(),
+            action,
+            estimate,
+            hold_ttl_seconds: self.hold_ttl_seconds,
+        }
     }
 
     async fn finish_claimed_charge(
@@ -456,6 +447,7 @@ impl ImageService {
     ) -> Result<ImageGenerateOutput, ServiceError> {
         let receipt = charge(ChargeParams {
             os_accounts: os_accounts.as_ref(),
+            action: pending.action,
             action_token: pending.action_token.clone(),
             credits: pending.credits,
             idempotency_key: pending.idempotency_key.clone(),

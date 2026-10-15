@@ -1,3 +1,4 @@
+use crate::http::{LOGGED_ERROR_BODY_LIMIT, read_body_len_capped};
 use async_trait::async_trait;
 use clovy_config::OsAccountsConfig;
 use clovy_domain::{
@@ -10,8 +11,9 @@ use std::time::Duration;
 const ERR_INSUFFICIENT_CREDITS: i64 = 4301;
 // OS Accounts returns this when an idempotency key was already settled under
 // another action token. Clovy API is stateless, so a client retry reacquires
-// a fresh token for the same logical operation. Treat that as an idempotent
-// replay so an already-charged operation returns its result instead of 502ing.
+// a fresh token for the same logical operation. Surfaced as
+// `ChargeAlreadySettled` so the service releases the fresh token's hold and
+// returns the result as an idempotent replay instead of 502ing.
 const ERR_IDEMPOTENCY_KEY_COLLISION: i64 = 4001;
 const CHARGE_RETRY_ATTEMPTS: u32 = 2;
 const CHARGE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
@@ -93,7 +95,7 @@ impl P3aSink for OsAccountsP3aSink {
     async fn submit(&self, report: P3aReport) -> Result<(), DomainError> {
         let url = format!("{}/p3a/reports", self.api_url);
         let body = P3aReportWireRequest::from(report);
-        let response = self
+        let mut response = self
             .http
             .post(&url)
             .bearer_auth(&self.ingest_token)
@@ -106,8 +108,10 @@ impl P3aSink for OsAccountsP3aSink {
             })?;
         let status = response.status();
         if status.is_server_error() {
-            let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, body_bytes = body.len(), "os_accounts: P3A report server error");
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or(0);
+            tracing::error!(%status, %url, body_bytes, "os_accounts: P3A report server error");
             return Err(DomainError::MeteringProvider);
         }
         let raw = response.text().await.map_err(|error| {
@@ -137,7 +141,7 @@ impl OsAccountsClient for OsAccountsHttpClient {
     async fn authorize(&self, request: AuthorizeRequest) -> Result<Authorization, DomainError> {
         let url = format!("{}/authorize", self.api_url);
         let body = AuthorizeWireRequest::from(request);
-        let response = self
+        let mut response = self
             .http
             .post(&url)
             .bearer_auth(&self.app_api_key)
@@ -150,8 +154,10 @@ impl OsAccountsClient for OsAccountsHttpClient {
             })?;
         let status = response.status();
         if status.is_server_error() {
-            let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, body_bytes = body.len(), "os_accounts: authorize server error");
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or(0);
+            tracing::error!(%status, %url, body_bytes, "os_accounts: authorize server error");
             return Err(DomainError::MeteringProvider);
         }
         let raw = response.text().await.map_err(|error| {
@@ -221,7 +227,7 @@ impl OsAccountsHttpClient {
         url: &str,
         body: &ChargeWireRequest,
     ) -> Result<Receipt, ChargeError> {
-        let response = self
+        let mut response = self
             .http
             .post(url)
             .bearer_auth(&self.app_api_key)
@@ -234,8 +240,10 @@ impl OsAccountsHttpClient {
             })?;
         let status = response.status();
         if status.is_server_error() {
-            let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, body_bytes = body.len(), "os_accounts: charge server error (retryable)");
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or(0);
+            tracing::error!(%status, %url, body_bytes, "os_accounts: charge server error (retryable)");
             return Err(ChargeError::Retryable);
         }
         let raw = response.text().await.map_err(|error| {
@@ -260,26 +268,18 @@ impl OsAccountsHttpClient {
             return Err(ChargeError::Domain(DomainError::InsufficientCredits));
         }
         if envelope.error_code == Some(ERR_IDEMPOTENCY_KEY_COLLISION) {
-            // The operation was already charged under this key (e.g. an
+            // The key already settled under another action token (e.g. an
             // earlier request settled before a transient failure, then the
-            // client retried and received a new action token). Treat it as an
-            // idempotent replay: the user already paid, so return success.
-            //
-            // The 4001 reply carries `data: null`, so we cannot recover the
-            // amount actually settled — we report this request's `credits` as
-            // an approximation. Logged at WARN so any discrepancy between this
-            // value and the original settlement is visible to accounting/audit.
+            // client retried and received a new token). Nothing was debited
+            // on this token, so the caller must release it rather than report
+            // the requested credits as charged.
             tracing::warn!(
                 %url,
                 body_bytes = raw.len(),
-                reported_credits = body.credits,
-                "os_accounts: charge replayed - idempotency key already settled; \
-                 credits_charged reflects the requested estimate, not the settled amount"
+                requested_credits = body.credits,
+                "os_accounts: charge key already settled under another grant"
             );
-            return Ok(Receipt {
-                credits_charged: Credits(body.credits),
-                idempotent_replay: true,
-            });
+            return Err(ChargeError::Domain(DomainError::ChargeAlreadySettled));
         }
         tracing::error!(
             %status,
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn charge_treats_idempotency_collision_as_replay() {
+    async fn charge_surfaces_idempotency_collision_as_already_settled() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/charge"))
@@ -645,12 +645,9 @@ mod tests {
             })
             .await;
 
-        // Already settled under this key → success, surfaced as an idempotent
-        // replay carrying the attempted amount.
-        assert_eq!(
-            receipt.map(|value| (value.credits_charged.0, value.idempotent_replay)),
-            Ok((7, true))
-        );
+        // Already settled under another grant: nothing was debited on this
+        // token, so the collision is surfaced for the caller to release it.
+        assert_eq!(receipt, Err(DomainError::ChargeAlreadySettled));
     }
 
     #[tokio::test]

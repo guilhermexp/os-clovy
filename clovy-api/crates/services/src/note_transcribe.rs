@@ -1,8 +1,5 @@
 use crate::{
-    charge_flow::{
-        AuthorizeParams, ChargeParams, ReleaseHoldOutcome, ReleaseHoldParams, authorize_or_deny,
-        charge, clamp_to_cap, release_hold, zero_receipt,
-    },
+    charge_flow::{AuthorizeParams, metered, zero_receipt},
     error::ServiceError,
     metering::{log_skipped_user_key_for_model, uses_user_key_for_model},
     pricing::PricingTable,
@@ -42,17 +39,6 @@ struct PreparedNoteTranscription {
     estimate: Credits,
 }
 
-/// Borrowed identity fields for settling a failed preview, kept separate
-/// because the transcription request takes ownership of the audio fields.
-struct FailedPreviewSettlement<'a> {
-    user_id: &'a UserId,
-    note_id: &'a str,
-    model_id: &'a ModelId,
-    seconds: u64,
-    actual: Credits,
-    action_token: String,
-}
-
 impl NoteTranscribeService {
     pub fn new(deps: NoteTranscribeServiceDeps) -> Self {
         Self {
@@ -63,6 +49,16 @@ impl NoteTranscribeService {
             hold_ttl_seconds: deps.hold_ttl_seconds,
             flat_estimate_credits: deps.flat_estimate_credits,
             preview_max_audio_seconds: deps.preview_max_audio_seconds.max(1),
+        }
+    }
+
+    fn authorize_params(&self, user_id: &UserId, estimate: Credits) -> AuthorizeParams<'_> {
+        AuthorizeParams {
+            os_accounts: self.os_accounts.as_ref(),
+            user_id: user_id.clone(),
+            action: ActionSlug::NoteTranscribe,
+            estimate,
+            hold_ttl_seconds: self.hold_ttl_seconds,
         }
     }
 
@@ -185,50 +181,7 @@ impl NoteTranscribeService {
                 ),
             });
         }
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::NoteTranscribe,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
-        .await?;
-        tracing::info!(
-            note_id = %params.note_id,
-            model = %params.model_id.0,
-            preview = true,
-            probed_seconds = seconds,
-            computed_credits = actual.0,
-            estimate_credits = estimate.0,
-            "note_transcribe: preview request authorized"
-        );
         let audio_digest = sha256_hex(&params.audio);
-        let transcript = match self
-            .transcriber
-            .transcribe(TranscriptionRequest {
-                audio: params.audio,
-                format,
-                context: params.context,
-                language: params.language,
-                model: params.model_id.clone(),
-                provider_credentials: params.provider_credentials.clone(),
-            })
-            .await
-        {
-            Ok(transcript) => transcript,
-            Err(error) => {
-                self.release_failed_preview(FailedPreviewSettlement {
-                    user_id: &params.user_id,
-                    note_id: &params.note_id,
-                    model_id: &params.model_id,
-                    seconds,
-                    actual,
-                    action_token: authorization.action_token,
-                })
-                .await;
-                return Err(error.into());
-            }
-        };
         // Keep the legacy zero-credit key byte-identical; only consented,
         // billable previews get a distinct settlement namespace.
         let mut idempotency_key = format!(
@@ -238,20 +191,39 @@ impl NoteTranscribeService {
         if params.preview_opted_in {
             idempotency_key.push_str(":opted");
         }
-        // Consented previews (disclosed setting, user left it on) bill the
-        // computed price clamped to the authorized hold cap, exactly like the
-        // final path; everything else settles at zero per ADR-0002.
+        // A failed preview releases its hold and bills nothing. Consented
+        // previews (disclosed setting, user left it on) bill the computed
+        // price clamped to the authorized hold cap, exactly like the final
+        // path; everything else settles at zero per ADR-0002.
         let settled = if params.preview_opted_in {
-            clamp_to_cap(actual, authorization.cap_credits)
+            actual
         } else {
             Credits(0)
         };
-        let receipt = charge(ChargeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            action_token: authorization.action_token,
-            credits: settled,
+        let (transcript, receipt) = metered(
+            self.authorize_params(&params.user_id, estimate),
             idempotency_key,
-        })
+            || {
+                tracing::info!(
+                    note_id = %params.note_id,
+                    model = %params.model_id.0,
+                    preview = true,
+                    probed_seconds = seconds,
+                    computed_credits = actual.0,
+                    estimate_credits = estimate.0,
+                    "note_transcribe: preview request authorized"
+                );
+                self.transcriber.transcribe(TranscriptionRequest {
+                    audio: params.audio,
+                    format,
+                    context: params.context,
+                    language: params.language,
+                    model: params.model_id.clone(),
+                    provider_credentials: params.provider_credentials.clone(),
+                })
+            },
+            |_| Ok(settled),
+        )
         .await?;
         tracing::info!(
             user_id = %params.user_id.0,
@@ -272,40 +244,6 @@ impl NoteTranscribeService {
         })
     }
 
-    /// Settles a failed preview. Failed previews used to settle at the full
-    /// audio price just to avoid stranding the hold; release bills nothing
-    /// instead.
-    async fn release_failed_preview(&self, settlement: FailedPreviewSettlement<'_>) {
-        let FailedPreviewSettlement {
-            user_id,
-            note_id,
-            model_id,
-            seconds,
-            actual,
-            action_token,
-        } = settlement;
-        let release_outcome = release_hold(ReleaseHoldParams {
-            os_accounts: self.os_accounts.as_ref(),
-            action: ActionSlug::NoteTranscribe,
-            action_token,
-        })
-        .await;
-        if let ReleaseHoldOutcome::Settled(receipt) = release_outcome {
-            tracing::info!(
-                user_id = %user_id.0,
-                action = ActionSlug::NoteTranscribe.as_str(),
-                note_id = %note_id,
-                model = %model_id.0,
-                preview = true,
-                probed_seconds = seconds,
-                computed_credits = actual.0,
-                settled_credits = receipt.credits_charged.0,
-                idempotent_replay = receipt.idempotent_replay,
-                "settled failed note transcription"
-            );
-        }
-    }
-
     async fn transcribe_charged(
         &self,
         prepared: PreparedNoteTranscription,
@@ -322,57 +260,36 @@ impl NoteTranscribeService {
             estimate_credits = estimate.0,
             "note_transcribe: flat estimate"
         );
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::NoteTranscribe,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
-        .await?;
-        tracing::info!(
-            note_id = %params.note_id,
-            model = %params.model_id.0,
-            "note_transcribe: calling transcriber"
-        );
-        let transcript = match self
-            .transcriber
-            .transcribe(TranscriptionRequest {
-                audio: params.audio,
-                format,
-                context: params.context,
-                language: params.language,
-                model: params.model_id.clone(),
-                provider_credentials: params.provider_credentials.clone(),
-            })
-            .await
-        {
-            Ok(transcript) => transcript,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::NoteTranscribe,
-                    action_token: authorization.action_token,
-                })
-                .await;
-                return Err(error.into());
-            }
-        };
-        tracing::info!(
-            note_id = %params.note_id,
-            text_len = transcript.text.len(),
-            seconds,
-            actual_credits = actual.0,
-            "note_transcribe: transcriber returned"
-        );
-        let charge_credits = clamp_to_cap(actual, authorization.cap_credits);
         let idempotency_key = format!("note_transcribe:{}:{}", params.user_id.0, params.note_id);
-        let receipt = charge(ChargeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            action_token: authorization.action_token,
-            credits: charge_credits,
+        let (transcript, receipt) = metered(
+            self.authorize_params(&params.user_id, estimate),
             idempotency_key,
-        })
+            || {
+                tracing::info!(
+                    note_id = %params.note_id,
+                    model = %params.model_id.0,
+                    "note_transcribe: calling transcriber"
+                );
+                self.transcriber.transcribe(TranscriptionRequest {
+                    audio: params.audio,
+                    format,
+                    context: params.context,
+                    language: params.language,
+                    model: params.model_id.clone(),
+                    provider_credentials: params.provider_credentials.clone(),
+                })
+            },
+            |transcript: &Transcript| {
+                tracing::info!(
+                    note_id = %params.note_id,
+                    text_len = transcript.text.len(),
+                    seconds,
+                    actual_credits = actual.0,
+                    "note_transcribe: transcriber returned"
+                );
+                Ok(actual)
+            },
+        )
         .await?;
         tracing::info!(
             user_id = %params.user_id.0,

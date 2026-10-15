@@ -1,8 +1,5 @@
 use crate::{
-    charge_flow::{
-        AuthorizeParams, ChargeParams, ReleaseHoldParams, authorize_or_deny, charge, clamp_to_cap,
-        log_settled, release_hold, zero_receipt,
-    },
+    charge_flow::{AuthorizeParams, log_settled, metered, zero_receipt},
     error::ServiceError,
     metering::log_skipped_user_key,
     util::sha256_hex,
@@ -17,7 +14,7 @@ use std::sync::Arc;
 /// calls are flat-priced ($0.01/request upstream), so the authorize estimate
 /// and the settled charge are the same configured credit amount rather than a
 /// usage-derived figure. A failed or rejected upstream call returns the error
-/// without charging; the wallet hold simply expires, matching the agent chat
+/// without charging and releases the wallet hold, matching the agent chat
 /// path.
 pub struct WebAugmentServiceDeps {
     pub os_accounts: Arc<dyn OsAccountsClient>,
@@ -49,6 +46,21 @@ impl WebAugmentService {
         }
     }
 
+    fn authorize_params(
+        &self,
+        user_id: &UserId,
+        action: ActionSlug,
+        estimate: Credits,
+    ) -> AuthorizeParams<'_> {
+        AuthorizeParams {
+            os_accounts: self.os_accounts.as_ref(),
+            user_id: user_id.clone(),
+            action,
+            estimate,
+            hold_ttl_seconds: self.hold_ttl_seconds,
+        }
+    }
+
     pub async fn search(&self, params: WebSearchParams) -> Result<WebSearchOutput, ServiceError> {
         let estimate = Credits(self.search_credits);
         if params
@@ -74,52 +86,30 @@ impl WebAugmentService {
                 receipt: zero_receipt(),
             });
         }
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::WebSearch,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
-        .await?;
-        let results = match self
-            .searcher
-            .search(WebSearchRequest {
-                query: params.query.clone(),
-                limit: params.limit,
-                provider_credentials: params.provider_credentials.clone(),
-            })
-            .await
-        {
-            Ok(results) => results,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::WebSearch,
-                    action_token: authorization.action_token,
+        // The client-supplied request_id scopes idempotency to one logical
+        // call: a dropped-response retry reuses it (no double charge), while a
+        // genuine repeat search uses a fresh id and is charged. The full
+        // request shape (query + limit) is hashed in too, so reusing an id
+        // with a different shape still settles as a new charge rather than
+        // replaying the prior one.
+        let idempotency_key = format!(
+            "web_search:{}:{}:{}",
+            params.user_id.0,
+            params.request_id,
+            sha256_hex(search_shape(&params).as_bytes())
+        );
+        let (results, receipt) = metered(
+            self.authorize_params(&params.user_id, ActionSlug::WebSearch, estimate),
+            idempotency_key,
+            || {
+                self.searcher.search(WebSearchRequest {
+                    query: params.query.clone(),
+                    limit: params.limit,
+                    provider_credentials: params.provider_credentials.clone(),
                 })
-                .await;
-                return Err(error.into());
-            }
-        };
-        let charge_credits = clamp_to_cap(estimate, authorization.cap_credits);
-        let receipt = charge(ChargeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            action_token: authorization.action_token,
-            credits: charge_credits,
-            // The client-supplied request_id scopes idempotency to one logical
-            // call: a dropped-response retry reuses it (no double charge),
-            // while a genuine repeat search uses a fresh id and is charged. The
-            // full request shape (query + limit) is hashed in too, so reusing an
-            // id with a different shape still settles as a new charge rather than
-            // replaying the prior one.
-            idempotency_key: format!(
-                "web_search:{}:{}:{}",
-                params.user_id.0,
-                params.request_id,
-                sha256_hex(search_shape(&params).as_bytes())
-            ),
-        })
+            },
+            |_| Ok(estimate),
+        )
         .await?;
         log_settled(ActionSlug::WebSearch, &params.user_id, "web", &receipt);
         Ok(WebSearchOutput { results, receipt })
@@ -149,45 +139,23 @@ impl WebAugmentService {
                 receipt: zero_receipt(),
             });
         }
-        let authorization = authorize_or_deny(AuthorizeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            user_id: params.user_id.clone(),
-            action: ActionSlug::WebFetch,
-            estimate,
-            hold_ttl_seconds: self.hold_ttl_seconds,
-        })
-        .await?;
-        let result = match self
-            .fetcher
-            .fetch(WebFetchRequest {
-                url: params.url.clone(),
-                provider_credentials: params.provider_credentials.clone(),
-            })
-            .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::WebFetch,
-                    action_token: authorization.action_token,
+        let idempotency_key = format!(
+            "web_fetch:{}:{}:{}",
+            params.user_id.0,
+            params.request_id,
+            sha256_hex(params.url.as_bytes())
+        );
+        let (result, receipt) = metered(
+            self.authorize_params(&params.user_id, ActionSlug::WebFetch, estimate),
+            idempotency_key,
+            || {
+                self.fetcher.fetch(WebFetchRequest {
+                    url: params.url.clone(),
+                    provider_credentials: params.provider_credentials.clone(),
                 })
-                .await;
-                return Err(error.into());
-            }
-        };
-        let charge_credits = clamp_to_cap(estimate, authorization.cap_credits);
-        let receipt = charge(ChargeParams {
-            os_accounts: self.os_accounts.as_ref(),
-            action_token: authorization.action_token,
-            credits: charge_credits,
-            idempotency_key: format!(
-                "web_fetch:{}:{}:{}",
-                params.user_id.0,
-                params.request_id,
-                sha256_hex(params.url.as_bytes())
-            ),
-        })
+            },
+            |_| Ok(estimate),
+        )
         .await?;
         log_settled(ActionSlug::WebFetch, &params.user_id, "web", &receipt);
         Ok(WebFetchOutput { result, receipt })

@@ -52,7 +52,9 @@ impl From<DomainError> for ServiceError {
             DomainError::ModelNotPriced => Self::ModelNotPriced,
             DomainError::InsufficientCredits => Self::InsufficientCredits,
             DomainError::UpstreamProvider => Self::UpstreamProvider,
-            DomainError::MeteringProvider => Self::MeteringProvider,
+            DomainError::MeteringProvider | DomainError::ChargeAlreadySettled => {
+                Self::MeteringProvider
+            }
             DomainError::InvalidInput { reason } => Self::InvalidInput { reason },
         }
     }

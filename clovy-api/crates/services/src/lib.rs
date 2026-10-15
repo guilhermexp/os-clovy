@@ -130,25 +130,162 @@ mod tests {
 
         // Cap clamps the actual 60 down to 40.
         assert_eq!(output.receipt.credits_charged.0, 40);
+        let events = os_accounts.events();
+        assert_eq!(
+            events.first(),
+            Some(&RecordedCall::Authorize {
+                user_id: "usr_123".to_string(),
+                action: "note_generate".to_string(),
+                estimate: 8200,
+                hold_ttl: 300,
+            })
+        );
+        let Some(RecordedCall::Charge {
+            action_token,
+            credits,
+            idempotency_key,
+        }) = events.get(1)
+        else {
+            panic!("expected a charge after the authorize, got {events:?}");
+        };
+        assert_eq!((action_token.as_str(), *credits), ("agt_test", 40));
+        assert!(
+            idempotency_key.starts_with(&format!(
+                "note_generate:usr_123:note_1:{NOTE_GENERATE_PROMPT_VERSION}:attempt:"
+            )),
+            "unexpected key {idempotency_key}"
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(output.prompt_version, NOTE_GENERATE_PROMPT_VERSION);
+    }
+
+    #[tokio::test]
+    async fn regenerating_a_note_settles_under_a_fresh_key() {
+        // Regression: the per-note key made a regeneration's charge collide
+        // with the first generation's, so the fresh grant debited nothing
+        // and stayed open until its TTL.
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let service = note_generate_service(os_accounts.clone());
+
+        for _ in 0..2 {
+            service
+                .generate(note_generate_params())
+                .await
+                .expect("generation succeeds");
+        }
+
+        let keys = charge_keys(&os_accounts.events());
+        assert_eq!(keys.len(), 2, "both generations settle a charge");
+        assert_ne!(keys[0], keys[1], "each generation has its own key");
+    }
+
+    #[tokio::test]
+    async fn charge_key_already_settled_releases_the_new_grant_and_reports_zero() {
+        // A retried final transcription reuses its note key under a fresh
+        // grant; OS Accounts rejects the charge as already settled (4001).
+        // That grant debited nothing, so it is released and the receipt must
+        // not claim credits.
+        let os_accounts = Arc::new(RecordingOsAccounts {
+            charge_already_settled: true,
+            ..RecordingOsAccounts::default()
+        });
+        let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "audio-model",
+                PriceUnit::Seconds,
+                2,
+                ModelType::Asr,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            transcriber: Arc::new(FixedTranscriber),
+            duration_probe: Arc::new(FixedDurationProbe),
+            hold_ttl_seconds: 60,
+            flat_estimate_credits: 1024,
+            preview_max_audio_seconds: 30,
+        });
+
+        let output = service
+            .transcribe(NoteTranscribeParams {
+                user_id: UserId("usr_123".to_string()),
+                note_id: "note-1-turn-4-chunk-0".to_string(),
+                audio: vec![1, 2, 3],
+                filename: "turn.wav".to_string(),
+                context: None,
+                language: None,
+                model_id: ModelId("audio-model".to_string()),
+                preview: false,
+                preview_opted_in: false,
+                provider_credentials: ProviderCredentials::default(),
+            })
+            .await
+            .expect("an already-settled charge replays as success");
+
+        assert_eq!(output.receipt.credits_charged.0, 0);
+        assert!(output.receipt.idempotent_replay);
+        assert_eq!(
+            os_accounts.events(),
+            vec![
+                RecordedCall::Authorize {
+                    user_id: "usr_123".to_string(),
+                    action: "note_transcribe".to_string(),
+                    estimate: 1024,
+                    hold_ttl: 60,
+                },
+                RecordedCall::Charge {
+                    action_token: "agt_test".to_string(),
+                    credits: 4,
+                    idempotency_key: "note_transcribe:usr_123:note-1-turn-4-chunk-0".to_string(),
+                },
+                release_charge_event("note_transcribe"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pricing_failure_after_upstream_releases_the_hold() {
+        // Regression: a price error after the upstream answered returned the
+        // error but left the grant open until its TTL.
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let service = NoteGenerateService::new(NoteGenerateServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "text-model",
+                PriceUnit::Tokens,
+                1,
+                ModelType::Text,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            generator: Arc::new(UnpriceableUsageGenerator),
+            hold_ttl_seconds: 300,
+            flat_estimate_credits: 1024,
+        });
+
+        let result = service.generate(note_generate_params()).await;
+
+        assert!(matches!(result, Err(ServiceError::PriceOverflow)));
         assert_eq!(
             os_accounts.events(),
             vec![
                 RecordedCall::Authorize {
                     user_id: "usr_123".to_string(),
                     action: "note_generate".to_string(),
-                    estimate: 8200,
+                    estimate: 1024,
                     hold_ttl: 300,
                 },
-                RecordedCall::Charge {
-                    action_token: "agt_test".to_string(),
-                    credits: 40,
-                    idempotency_key: format!(
-                        "note_generate:usr_123:note_1:{NOTE_GENERATE_PROMPT_VERSION}"
-                    ),
-                },
+                release_charge_event("note_generate"),
             ]
         );
-        assert_eq!(output.prompt_version, NOTE_GENERATE_PROMPT_VERSION);
+    }
+
+    fn charge_keys(events: &[RecordedCall]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|call| match call {
+                RecordedCall::Charge {
+                    idempotency_key, ..
+                } => Some(idempotency_key.clone()),
+                RecordedCall::Authorize { .. } => None,
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -1951,6 +2088,8 @@ mod tests {
         cap: Option<u64>,
         deny_reason: Option<String>,
         fail_charge: bool,
+        /// Every non-release charge answers as already settled (4001).
+        charge_already_settled: bool,
         events: Mutex<Vec<RecordedCall>>,
     }
 
@@ -1961,6 +2100,7 @@ mod tests {
                 cap: Some(10_000),
                 deny_reason: None,
                 fail_charge: false,
+                charge_already_settled: false,
                 events: Mutex::new(Vec::new()),
             }
         }
@@ -1973,6 +2113,7 @@ mod tests {
                 cap,
                 deny_reason: None,
                 fail_charge: false,
+                charge_already_settled: false,
                 events: Mutex::new(Vec::new()),
             }
         }
@@ -2009,11 +2150,14 @@ mod tests {
                 events.push(RecordedCall::Charge {
                     action_token: request.action_token,
                     credits: request.credits.0,
-                    idempotency_key: request.idempotency_key,
+                    idempotency_key: request.idempotency_key.clone(),
                 });
             }
             if self.fail_charge {
                 return Err(DomainError::MeteringProvider);
+            }
+            if self.charge_already_settled && !request.idempotency_key.starts_with("release:") {
+                return Err(DomainError::ChargeAlreadySettled);
             }
             Ok(Receipt {
                 credits_charged: request.credits,
@@ -2038,6 +2182,28 @@ mod tests {
                 usage: TokenUsage {
                     prompt_tokens: 10,
                     completion_tokens: 20,
+                },
+            })
+        }
+    }
+
+    /// Usage too large to price: the upstream answered, then pricing fails.
+    struct UnpriceableUsageGenerator;
+
+    #[async_trait]
+    impl Generator for UnpriceableUsageGenerator {
+        async fn generate(
+            &self,
+            _request: GenerationRequest,
+        ) -> Result<GeneratedNote, DomainError> {
+            Ok(GeneratedNote {
+                content: "Generated note".to_string(),
+                title_suggestion: None,
+                provider: "test".to_string(),
+                route: UpstreamRouteMetadata::default(),
+                usage: TokenUsage {
+                    prompt_tokens: u64::MAX,
+                    completion_tokens: 1,
                 },
             })
         }

@@ -1,10 +1,10 @@
 use crate::error::ServiceError;
 use crate::util::sha256_hex;
 use clovy_domain::{
-    ActionSlug, Authorization, AuthorizeRequest, ChargeRequest, Credits, OsAccountsClient, Receipt,
-    UserId,
+    ActionSlug, Authorization, AuthorizeRequest, ChargeRequest, Credits, DomainError,
+    OsAccountsClient, Receipt, UserId,
 };
-use std::cmp::min;
+use std::{cmp::min, future::Future};
 
 pub(crate) struct AuthorizationOutcome {
     pub action_token: String,
@@ -119,34 +119,184 @@ pub(crate) fn zero_receipt() -> Receipt {
     }
 }
 
+/// A hold that funded one successful upstream call.
+pub(crate) struct AuthorizedWork<T> {
+    pub output: T,
+    pub action_token: String,
+    pub cap_credits: Credits,
+}
+
+/// Successful upstream work and the credits it settles at, already clamped to
+/// the authorized cap.
+pub(crate) struct PricedWork<T> {
+    pub output: T,
+    pub action_token: String,
+    pub credits: Credits,
+}
+
+/// Authorizes a hold, then runs `upstream`. A failed upstream call releases
+/// the hold and returns its error, so failed work never bills and never
+/// strands a grant. The caller settles the returned grant.
+pub(crate) async fn authorize_and_run<T, E, F, Fut>(
+    authorize: AuthorizeParams<'_>,
+    upstream: F,
+) -> Result<AuthorizedWork<T>, ServiceError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: Into<ServiceError>,
+{
+    let os_accounts = authorize.os_accounts;
+    let action = authorize.action;
+    let authorization = authorize_or_deny(authorize).await?;
+    match upstream().await {
+        Ok(output) => Ok(AuthorizedWork {
+            output,
+            action_token: authorization.action_token,
+            cap_credits: authorization.cap_credits,
+        }),
+        Err(error) => {
+            release_hold(ReleaseHoldParams {
+                os_accounts,
+                action,
+                action_token: authorization.action_token,
+            })
+            .await;
+            Err(error.into())
+        }
+    }
+}
+
+/// [`authorize_and_run`], then prices the output and clamps it to the cap.
+/// A pricing failure after the upstream answered also releases the hold:
+/// the grant must not stay open on an error the user can do nothing about,
+/// and an uncomputable price is never billed as a guess.
+pub(crate) async fn authorize_run_and_price<T, E, F, Fut, P>(
+    authorize: AuthorizeParams<'_>,
+    upstream: F,
+    price: P,
+) -> Result<PricedWork<T>, ServiceError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: Into<ServiceError>,
+    P: FnOnce(&T) -> Result<Credits, ServiceError>,
+{
+    let os_accounts = authorize.os_accounts;
+    let action = authorize.action;
+    let work = authorize_and_run(authorize, upstream).await?;
+    match price(&work.output) {
+        Ok(actual) => Ok(PricedWork {
+            output: work.output,
+            action_token: work.action_token,
+            credits: clamp_to_cap(actual, work.cap_credits),
+        }),
+        Err(error) => {
+            tracing::error!(
+                %error,
+                action = action.as_str(),
+                "pricing failed after upstream work; releasing hold"
+            );
+            release_hold(ReleaseHoldParams {
+                os_accounts,
+                action,
+                action_token: work.action_token,
+            })
+            .await;
+            Err(error)
+        }
+    }
+}
+
+/// The whole metered cycle settled in-request: authorize, run upstream,
+/// release on failure, price, clamp to cap, and charge under
+/// `idempotency_key`.
+pub(crate) async fn metered<T, E, F, Fut, P>(
+    authorize: AuthorizeParams<'_>,
+    idempotency_key: String,
+    upstream: F,
+    price: P,
+) -> Result<(T, Receipt), ServiceError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: Into<ServiceError>,
+    P: FnOnce(&T) -> Result<Credits, ServiceError>,
+{
+    let os_accounts = authorize.os_accounts;
+    let action = authorize.action;
+    let work = authorize_run_and_price(authorize, upstream, price).await?;
+    let receipt = charge(ChargeParams {
+        os_accounts,
+        action,
+        action_token: work.action_token,
+        credits: work.credits,
+        idempotency_key,
+    })
+    .await?;
+    Ok((work.output, receipt))
+}
+
 pub(crate) struct ChargeParams<'a> {
     pub os_accounts: &'a dyn OsAccountsClient,
+    pub action: ActionSlug,
     pub action_token: String,
     pub credits: Credits,
     pub idempotency_key: String,
 }
 
+/// Settles a grant. When the key already settled under an earlier grant, the
+/// operation was paid before and this grant debited nothing: release it and
+/// report the replay at zero credits rather than the requested amount.
 pub(crate) async fn charge(params: ChargeParams<'_>) -> Result<Receipt, ServiceError> {
-    params
-        .os_accounts
+    match settle_grant(
+        params.os_accounts,
+        params.action_token.clone(),
+        params.credits,
+        params.idempotency_key,
+    )
+    .await
+    {
+        Err(DomainError::ChargeAlreadySettled) => {
+            tracing::warn!(
+                action = params.action.as_str(),
+                requested_credits = params.credits.0,
+                "charge key already settled under an earlier grant; releasing this grant"
+            );
+            release_hold(ReleaseHoldParams {
+                os_accounts: params.os_accounts,
+                action: params.action,
+                action_token: params.action_token,
+            })
+            .await;
+            Ok(Receipt {
+                credits_charged: Credits(0),
+                idempotent_replay: true,
+            })
+        }
+        result => result.map_err(ServiceError::from),
+    }
+}
+
+async fn settle_grant(
+    os_accounts: &dyn OsAccountsClient,
+    action_token: String,
+    credits: Credits,
+    idempotency_key: String,
+) -> Result<Receipt, DomainError> {
+    os_accounts
         .charge(ChargeRequest {
-            action_token: params.action_token,
-            credits: params.credits,
-            idempotency_key: params.idempotency_key,
+            action_token,
+            credits,
+            idempotency_key,
         })
         .await
-        .map_err(ServiceError::from)
 }
 
 pub(crate) struct ReleaseHoldParams<'a> {
     pub os_accounts: &'a dyn OsAccountsClient,
     pub action: ActionSlug,
     pub action_token: String,
-}
-
-pub(crate) enum ReleaseHoldOutcome {
-    Settled(Receipt),
-    DeferredToTtl,
 }
 
 /// Best-effort release of a Hold whose metered work failed: settles the grant
@@ -157,7 +307,7 @@ pub(crate) enum ReleaseHoldOutcome {
 /// (the 2026-07-14 lost-transcript incident). Errors are logged, never
 /// propagated: the caller is already returning the provider failure, and an
 /// unreleased hold degrades to the old TTL-expiry behavior.
-pub(crate) async fn release_hold(params: ReleaseHoldParams<'_>) -> ReleaseHoldOutcome {
+pub(crate) async fn release_hold(params: ReleaseHoldParams<'_>) {
     // Grant-scoped key (token digest): a release can never collide with a
     // later charge of the same logical work under a fresh grant, and a
     // replayed release of the same grant settles idempotently.
@@ -166,20 +316,19 @@ pub(crate) async fn release_hold(params: ReleaseHoldParams<'_>) -> ReleaseHoldOu
         params.action.as_str(),
         &sha256_hex(params.action_token.as_bytes())[..32],
     );
-    match charge(ChargeParams {
-        os_accounts: params.os_accounts,
-        action_token: params.action_token,
-        credits: Credits(0),
+    match settle_grant(
+        params.os_accounts,
+        params.action_token,
+        Credits(0),
         idempotency_key,
-    })
+    )
     .await
     {
-        Ok(receipt) => {
+        Ok(_) => {
             tracing::info!(
                 action = params.action.as_str(),
                 "released unused hold after failed metered work"
             );
-            ReleaseHoldOutcome::Settled(receipt)
         }
         Err(error) => {
             tracing::warn!(
@@ -187,7 +336,6 @@ pub(crate) async fn release_hold(params: ReleaseHoldParams<'_>) -> ReleaseHoldOu
                 action = params.action.as_str(),
                 "failed to release unused hold; it expires via TTL"
             );
-            ReleaseHoldOutcome::DeferredToTtl
         }
     }
 }
@@ -211,6 +359,7 @@ pub(crate) fn spawn_charge(params: AsyncChargeParams) {
 async fn settle_charge(params: AsyncChargeParams) {
     let receipt = match charge(ChargeParams {
         os_accounts: params.os_accounts.as_ref(),
+        action: params.action,
         action_token: params.action_token,
         credits: params.credits,
         idempotency_key: params.idempotency_key,

@@ -31,9 +31,13 @@ pub(crate) async fn authenticated_user_with_scope(
 
 pub(crate) fn client_address(headers: &HeaderMap) -> String {
     // dstack-ingress appends the peer address as the final x-forwarded-for
-    // entry. Everything before it arrived from the client and is spoofable.
+    // entry. Everything before it arrived from the client and is spoofable,
+    // including earlier header lines when the ingress appends its own line
+    // instead of extending the client's.
     headers
-        .get("x-forwarded-for")
+        .get_all("x-forwarded-for")
+        .iter()
+        .next_back()
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(',').next_back())
         .map_or_else(|| "unknown".to_string(), |value| value.trim().to_string())
@@ -256,6 +260,18 @@ mod tests {
             "x-forwarded-for",
             HeaderValue::from_static("203.0.113.9, 198.51.100.7"),
         );
+
+        assert_eq!(client_address(&headers), "198.51.100.7");
+    }
+
+    #[test]
+    fn client_address_uses_the_last_x_forwarded_for_header_line() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.9, 192.0.2.1"),
+        );
+        headers.append("x-forwarded-for", HeaderValue::from_static("198.51.100.7"));
 
         assert_eq!(client_address(&headers), "198.51.100.7");
     }
