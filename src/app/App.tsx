@@ -56,12 +56,10 @@ import {
 import { preloadRecordingSounds } from "../lib/recording-sounds";
 import { preloadAgentSounds } from "../lib/agent-sounds";
 import {
-  AGENT_GALLERY_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSION_RENAMED_EVENT,
   AGENT_SESSIONS_HYDRATED_EVENT,
   emitAgentSessionsChanged,
-  type AgentGalleryDetail,
   type AgentSessionRenamedDetail,
   type AgentSessionsHydratedDetail,
 } from "../lib/agent-events";
@@ -1584,18 +1582,6 @@ export function App() {
     setActiveView,
     setAgentOrigin,
   });
-
-  // Dev-tools response gallery (window.__agentGallery): showing it jumps to the
-  // Agent view so the command works no matter which view is active.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const onGallery = (event: Event) => {
-      const detail = (event as CustomEvent<AgentGalleryDetail>).detail;
-      if (detail?.show) setActiveView("agent");
-    };
-    window.addEventListener(AGENT_GALLERY_EVENT, onGallery);
-    return () => window.removeEventListener(AGENT_GALLERY_EVENT, onGallery);
-  }, []);
 
   useDictationEvents({
     dictationWorkflowActiveRef,

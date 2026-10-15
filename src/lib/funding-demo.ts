@@ -27,10 +27,6 @@ const HELP = [
   '  __fundingDemo("pro")      depleted Pro (in-place Max upgrade + confirm)',
   '  __fundingDemo("max")      depleted Max (top up via the account portal)',
   '  __fundingDemo("billing")  past-due subscription (manage billing)',
-  '  __fundingDemo("stopped")  mid-turn depletion: the in-transcript stopped-turn',
-  "                            card (opens the agent error gallery; combine with a",
-  '                            branch, e.g. __fundingDemo("pro") first, to pick the',
-  "                            tier card it wears)",
   '  __fundingDemo("off")      back to the real account',
   "",
   "Shows the composer notice, sidebar chip, and note-editor notice on any view. Dev only.",
@@ -70,31 +66,11 @@ export function registerFundingDemo({
 }: {
   setOverride: (account: AccountStatus | null) => void;
 }): FundingDemoApi {
-  // The stopped-turn card is a transcript part, so it can't be forced from
-  // an account snapshot; the agent error gallery (__agentErrors, registered
-  // by AgentWorkspace's module scope) already renders it. Track whether this
-  // demo opened the gallery so "off" closes it again.
-  let openedGallery = false;
-  function agentErrors(): ((show: boolean) => string) | undefined {
-    return (window as { __agentErrors?: (show: boolean) => string }).__agentErrors;
-  }
-
-  function drive(branch?: FundingDemoBranch | "stopped" | "off") {
+  function drive(branch?: FundingDemoBranch | "off") {
     if (branch === undefined) return HELP;
     if (branch === "off") {
       setOverride(null);
-      if (openedGallery) {
-        openedGallery = false;
-        agentErrors()?.(false);
-      }
       return "funding demo off";
-    }
-    if (branch === "stopped") {
-      const show = agentErrors();
-      if (!show) return "Agent gallery unavailable; open the chat view once, then retry.";
-      openedGallery = true;
-      show(true);
-      return 'Showing the stopped-turn credits card in the agent error gallery ("Out of credits" section). __fundingDemo("off") hides it.';
     }
     const preset = DEMO_ACCOUNTS[branch];
     if (!preset) return HELP;
@@ -107,7 +83,6 @@ export function registerFundingDemo({
     dispose: () => {
       delete (window as unknown as { __fundingDemo?: typeof drive }).__fundingDemo;
       setOverride(null);
-      if (openedGallery) agentErrors()?.(false);
     },
   };
 }

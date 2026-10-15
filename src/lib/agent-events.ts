@@ -11,12 +11,6 @@ export const AGENT_SESSION_RENAMED_EVENT = "clovy:agent:session-renamed";
 export const AGENT_SESSION_STATUS_EVENT = "clovy:agent:session-status";
 export const AGENT_RUN_SETTLED_EVENT = "clovy:agent:run-settled";
 export const AGENT_OPEN_EVENT = "clovy:agent:open";
-// Dev-only: toggles the agent response gallery (window.__agentGallery) or its
-// error-focused variant (window.__agentErrors).
-export const AGENT_GALLERY_EVENT = "clovy:agent:gallery";
-
-export type AgentGalleryDetail = { show: boolean; errors?: boolean };
-
 /** Stored session id (not the runtime session id). */
 export type AgentSessionRenamedDetail = {
   sessionId: string;
