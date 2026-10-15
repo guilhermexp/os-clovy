@@ -183,6 +183,31 @@ async fn save_state(conn: &mut SqliteConnection, state: &EtlState) -> Result<(),
     Ok(())
 }
 
+/// The body of the search document receiving text, kept while a batch
+/// writes to it: read once, merged in memory, and written once when the
+/// document stops receiving text or the batch ends (an FTS5 update
+/// re-indexes the whole body, so one per frame would re-tokenize up to
+/// 32k chars every capture tick).
+struct PendingBody {
+    rowid: i64,
+    body: String,
+    changed: bool,
+}
+
+async fn flush_body(
+    conn: &mut SqliteConnection,
+    pending: &mut Option<PendingBody>,
+) -> Result<(), StoreError> {
+    if let Some(body) = pending.take().filter(|body| body.changed) {
+        query("UPDATE timeline_search SET body = ? WHERE rowid = ?")
+            .bind(body.body)
+            .bind(body.rowid)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Writes `events`, the active session, the state, and (for frame batches)
 /// the cursor in one transaction. On error nothing is written and the caller
 /// must reload the state.
@@ -194,9 +219,11 @@ pub async fn persist_batch(
     cursor: Option<(i64, DateTime<Utc>)>,
 ) -> Result<(), StoreError> {
     let mut tx = store.pool().begin_with("BEGIN IMMEDIATE").await?;
+    let mut pending = None;
     for event in events {
-        apply(&mut tx, state, event, meetings).await?;
+        apply(&mut tx, state, event, meetings, &mut pending).await?;
     }
+    flush_body(&mut tx, &mut pending).await?;
     if let (Some(open), Some(row_id)) = (state.builder.open.clone(), state.open_row_id) {
         update_session(&mut tx, row_id, &open, "active", meetings).await?;
     }
@@ -213,7 +240,12 @@ async fn apply(
     state: &mut EtlState,
     event: &TimelineEvent,
     meetings: &[Interval],
+    pending: &mut Option<PendingBody>,
 ) -> Result<(), StoreError> {
+    if !matches!(event, TimelineEvent::Window(_)) {
+        // The session's evidence (read when it closes) includes the body.
+        flush_body(conn, pending).await?;
+    }
     match event {
         TimelineEvent::Opened(session) => {
             // Defensive: the builder closes before it opens, but a lost state
@@ -256,7 +288,7 @@ async fn apply(
         }
         TimelineEvent::Window(window) => {
             if let Some(session_row_id) = state.open_row_id {
-                record_window(conn, state, session_row_id, window).await?;
+                record_window(conn, state, session_row_id, window, pending).await?;
             }
         }
         TimelineEvent::Closed(session) => {
@@ -290,6 +322,7 @@ async fn record_window(
     state: &mut EtlState,
     session_row_id: i64,
     window: &WindowSeen,
+    pending: &mut Option<PendingBody>,
 ) -> Result<(), StoreError> {
     let title = window.window_title.clone().unwrap_or_default();
     let url = window.browser_url.clone().unwrap_or_default();
@@ -310,31 +343,43 @@ async fn record_window(
     .execute(&mut *conn)
     .await?;
 
-    let current = state.doc.as_ref().filter(|doc| {
-        doc.session_row_id == session_row_id
-            && doc.window_title == title
-            && doc.browser_url == url
-            && window.at - doc.started_at < DOC_SPAN
-    });
-    if let Some(doc) = current {
+    let current = state
+        .doc
+        .as_ref()
+        .filter(|doc| {
+            doc.session_row_id == session_row_id
+                && doc.window_title == title
+                && doc.browser_url == url
+                && window.at - doc.started_at < DOC_SPAN
+        })
+        .map(|doc| doc.rowid);
+    if let Some(rowid) = current {
         if let Some(text) = &window.text {
-            let body: String = query("SELECT body FROM timeline_search WHERE rowid = ?")
-                .bind(doc.rowid)
-                .fetch_optional(&mut *conn)
-                .await?
-                .map(|row| row.get(0))
-                .unwrap_or_default();
-            if let Some(body) = merged_body(&body, text) {
-                query("UPDATE timeline_search SET body = ? WHERE rowid = ?")
-                    .bind(body)
-                    .bind(doc.rowid)
-                    .execute(&mut *conn)
-                    .await?;
+            if pending.as_ref().map(|body| body.rowid) != Some(rowid) {
+                flush_body(conn, pending).await?;
+                let body: String = query("SELECT body FROM timeline_search WHERE rowid = ?")
+                    .bind(rowid)
+                    .fetch_optional(&mut *conn)
+                    .await?
+                    .map(|row| row.get(0))
+                    .unwrap_or_default();
+                *pending = Some(PendingBody {
+                    rowid,
+                    body,
+                    changed: false,
+                });
+            }
+            if let Some(open) = pending.as_mut() {
+                if let Some(body) = merged_body(&open.body, text) {
+                    open.body = body;
+                    open.changed = true;
+                }
             }
         }
         return Ok(());
     }
 
+    flush_body(conn, pending).await?;
     let body = window
         .text
         .as_deref()
@@ -346,12 +391,17 @@ async fn record_window(
     )
     .bind(&title)
     .bind(&url)
-    .bind(body)
+    .bind(&body)
     .bind(session_row_id)
     .bind(&at)
     .execute(&mut *conn)
     .await?
     .last_insert_rowid();
+    *pending = Some(PendingBody {
+        rowid,
+        body,
+        changed: false,
+    });
     query(
         "UPDATE timeline_sessions
          SET search_rowid_first = COALESCE(search_rowid_first, ?), search_rowid_last = ?

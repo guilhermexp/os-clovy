@@ -232,6 +232,32 @@ mod tests {
         (rows.get(0), rows.get(1))
     }
 
+    /// A window's document gathers every new line, frames of one pass and
+    /// of the next alike (the body is merged in memory within a batch).
+    #[tokio::test]
+    async fn a_document_keeps_the_new_lines_of_every_frame_across_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(&dir, &MemoryKeyStore::default()).await;
+        insert_run(&store, at(9, 0, 0), 20, "Zed", "notes.md", None, "header").await;
+        run_pass(&store, at(9, 0, 40), &[]).await.unwrap();
+        insert_run(&store, at(9, 0, 40), 10, "Zed", "notes.md", None, "later").await;
+        run_pass(&store, at(9, 1, 0), &[]).await.unwrap();
+        let bodies: Vec<String> = sqlx::query::query("SELECT body FROM timeline_search")
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| sqlx::row::Row::get(row, 0))
+            .collect();
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+        let lines: Vec<&str> = bodies[0].lines().collect();
+        let mut expected = vec!["header"];
+        let numbered: Vec<String> = (0..20).map(|index| format!("line {index}")).collect();
+        expected.extend(numbered.iter().map(String::as_str));
+        expected.push("later");
+        assert_eq!(lines, expected);
+    }
+
     async fn seed_day(store: &ActivityStore) {
         // 10 min editor, 5 min browser, 20 min manual pause, then Slack.
         insert_run(
