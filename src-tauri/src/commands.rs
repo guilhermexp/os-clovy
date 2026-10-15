@@ -1223,11 +1223,9 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("/usr/bin/open")
-            .arg("-R")
-            .arg(target)
-            .spawn()
-            .map(|_| ())
+        let mut command = std::process::Command::new("/usr/bin/open");
+        command.arg("-R").arg(target);
+        spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to reveal path in Finder: {error}"))
     }
     #[cfg(target_os = "windows")]
@@ -1251,21 +1249,28 @@ pub fn reveal_path(path: String) -> Result<(), String> {
             arg.push(target.as_os_str());
             arg.push("\"");
         }
-        command
-            .raw_arg(arg)
-            .spawn()
-            .map(|_| ())
+        command.raw_arg(arg);
+        spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to reveal path in Explorer: {error}"))
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let dir = target.parent().unwrap_or(target);
-        std::process::Command::new("xdg-open")
-            .arg(dir)
-            .spawn()
-            .map(|_| ())
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(dir);
+        spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to open containing directory: {error}"))
     }
+}
+
+/// Spawns a short-lived helper without blocking the caller and reaps it on a
+/// background thread, so it never lingers as a zombie.
+fn spawn_reaped(command: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Copies the exact bundled developer extension into app data and reveals the
@@ -2050,7 +2055,8 @@ pub async fn finish_recording(
     let timing = ProcessingTiming::from_done(Instant::now());
     let repos = repositories(&app).await?;
     let finalization_started = Instant::now();
-    let finished = finish_capture(&request.session_id)?;
+    let session_id = request.session_id.clone();
+    let finished = run_blocking_capture(move || finish_capture(&session_id)).await?;
     let response = finish_recording_session_with_timing(
         &repos,
         finished,
@@ -2068,12 +2074,22 @@ pub async fn finish_recording(
     Ok(response)
 }
 
+/// Runs a capture finalization off the async runtime: it joins the writer
+/// thread and waits for system capture to stop.
+async fn run_blocking_capture<T: Send + 'static>(
+    finish: impl FnOnce() -> Result<T, AppError> + Send + 'static,
+) -> Result<T, AppError> {
+    tokio::task::spawn_blocking(finish)
+        .await
+        .map_err(|error| AppError::new("audio_finalization_failed", error.to_string()))?
+}
+
 async fn finish_active_capture_before_start(
     app: &AppHandle,
     repos: &Repositories,
 ) -> Result<(), AppError> {
     let finalization_started = Instant::now();
-    if let Some(finished) = finish_active_capture()? {
+    if let Some(finished) = run_blocking_capture(finish_active_capture).await? {
         finish_recording_session_with_timing(
             repos,
             finished,

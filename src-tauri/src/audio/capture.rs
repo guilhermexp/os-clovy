@@ -61,6 +61,10 @@ const MICROPHONE_WRITER_WARNING_MESSAGE: &str =
 const MICROPHONE_BUFFER_OVERFLOW_WARNING_MESSAGE: &str =
     "Microphone recording could not keep up. Some audio may be missing.";
 
+/// Held while a recording taken out of `ACTIVE_RECORDING` is finalized, so a
+/// new capture cannot start until the previous one released its devices.
+/// Lock order: this first, then `ACTIVE_RECORDING`.
+static RECORDING_FINALIZATION: Mutex<()> = Mutex::new(());
 static ACTIVE_RECORDING: LazyLock<Mutex<Option<ActiveRecording>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -315,6 +319,9 @@ pub fn start_capture_with_cancel(
     handshake: Arc<CaptureStartHandshake>,
 ) -> Result<StartedRecording, AppError> {
     {
+        // Waits for a recording that is still finalizing to release its
+        // devices; that recording is no longer in `ACTIVE_RECORDING`.
+        let _finalization = lock_finalization()?;
         let active = ACTIVE_RECORDING.lock().map_err(|_| {
             AppError::new("recording_lock_failed", "Recording state is unavailable.")
         })?;
@@ -765,9 +772,13 @@ pub fn is_capture_active() -> bool {
         .unwrap_or(false)
 }
 
+/// Takes the active recording and finalizes it. Blocks for as long as the
+/// writer and system capture take to stop, so async callers run it on a
+/// blocking thread; status readers are not held up because the recording
+/// leaves `ACTIVE_RECORDING` before finalization starts.
 pub fn finish_active_capture() -> Result<Option<FinishedRecording>, AppError> {
-    let mut active = lock_active()?;
-    let Some(recording) = active.take() else {
+    let _finalization = lock_finalization()?;
+    let Some(recording) = lock_active()?.take() else {
         return Ok(None);
     };
     finalize_recording(recording).map(Some)
@@ -782,7 +793,10 @@ pub fn current_status() -> Option<RecordingStatusDto> {
     active.as_ref().map(|recording| recording.status())
 }
 
+/// Takes and finalizes the recording for `session_id`; see
+/// [`finish_active_capture`] for why it blocks and what it does not block.
 pub fn finish_capture(session_id: &str) -> Result<FinishedRecording, AppError> {
+    let _finalization = lock_finalization()?;
     let mut active = lock_active()?;
     let Some(recording) = active.take() else {
         return Err(AppError::new(
@@ -801,6 +815,7 @@ pub fn finish_capture(session_id: &str) -> Result<FinishedRecording, AppError> {
             ),
         ));
     }
+    drop(active);
     finalize_recording(recording)
 }
 
@@ -933,6 +948,12 @@ fn write_input_data<I>(
     // stack work and atomics; all allocation, preview fan-out, and WAV I/O live
     // on the writer task.
     input.write(data, paused, mic_ducked);
+}
+
+fn lock_finalization() -> Result<std::sync::MutexGuard<'static, ()>, AppError> {
+    RECORDING_FINALIZATION
+        .lock()
+        .map_err(|_| AppError::new("recording_lock_failed", "Recording state is unavailable."))
 }
 
 fn lock_active() -> Result<std::sync::MutexGuard<'static, Option<ActiveRecording>>, AppError> {
