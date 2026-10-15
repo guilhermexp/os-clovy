@@ -176,7 +176,11 @@ In `crate::day_intelligence::db`, over an open `ActivityStore`:
 (numbers read now from the timeline, workstreams, meetings, and blocks). The
 MCP server's `get_day_summary` tool ([mcp-server.md](mcp-server.md#tools-and-resources))
 uses this read API over `ActivityStore` to return the stored day summary,
-workstreams, and hour reports.
+workstreams, and hour reports; `get_day_panels` calls `day_view` with its own
+`DaySources` (meetings of the open data partition through
+`sources::meetings_between`, the query `AppSources` runs too, and coding-agent
+blocks from the retention floor on) and returns the panels in minutes;
+`get_day_schedule` returns the settings below.
 
 ## Commands and event (frontend contract)
 

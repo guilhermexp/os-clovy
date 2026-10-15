@@ -29,7 +29,8 @@ decision records: [ADR-0058](adr/0058-clovy-mcp-server-relays-to-the-running-app
 Tests: `cargo test mcp_server` (protocol against test databases, the relay
 through a real socket, refusal without the secret, connection and request
 limits, JSON-RPC validation, oversized lines, calendar context across
-daylight-saving changes, serialized settings updates, coding-agent blocks, and
+daylight-saving changes, serialized settings updates, coding-agent blocks, day
+panels and schedule, and
 `src-tauri/tests/mcp_server_stdio.rs`: the built `clovy-mcp` binary spawned
 over stdio against the app side served in the test process, including the
 debug build's refusal of production data), `src/test/mcp-server-section.test.tsx`,
@@ -130,9 +131,15 @@ exclusions and the retention period like the agent tools
 | `list_app_usage` | `from`, `to`, `limit` (1-100, default 20) | Minutes and session count per app, most used first, `totalApps`, `truncated` |
 | `get_session_detail` | `id` | Session, its windows and URLs (windows on excluded domains dropped, and the text excerpt with them), text excerpt; sessions excluded or past retention are "not found" |
 | `list_coding_agent_sessions` | `from`, `to`, `limit` (1-50, default 20) | Coding-agent blocks overlapping the period ([coding-agent-sessions.md](coding-agent-sessions.md)), newest first: id, agent, source, session id, project, title, start and end, `activeMinutes`, prompts, replies, state, summary (else `firstPrompt`); only sources turned on in Settings, Activity and blocks within the retention period; never the transcript or the working directory; `totalBlocks`, `truncated` |
-| `get_day_summary` | `date` (optional local `YYYY-MM-DD`, default today) | Day summary (headline, narrative, insights, standup: done, inProgress, blockers, hoursCovered, locale, provider, trigger, generatedAt), workstreams (each hour with `periods` `[{startedAt, endedAt}]`, the bounds of the measured sessions its work was located in, not its duration, or null when only the hour is known, and `locatedMinutes`, the minutes those periods cover), and hour reports; `summary: null` with `state: "not_generated"` when none exists yet; respects retention |
+| `get_day_summary` | `date` (optional local `YYYY-MM-DD`, default today) | Day summary (headline, narrative, insights, standup: done, inProgress, blockers, hoursCovered, locale, provider, trigger, generatedAt), workstreams (each hour with `periods` `[{startedAt, endedAt}]`, the bounds of the measured sessions its work was located in, not its duration, or null when only the hour is known, and `locatedMinutes`, the minutes those periods cover), and hour reports (each activity with its `periods`, same shape, or null); `summary: null` with `state: "not_generated"` when none exists yet; respects retention |
+| `get_day_panels` | `date` (optional local `YYYY-MM-DD`, default today) | The summary's panels as the "Today" view draws them (`pipeline::day_view`, [day-intelligence.md](day-intelligence.md)), recomputed at each call: `focusedMinutes`, `idleMinutes`, `awayMinutes`, `topApps`, `categories`, `hours` (`[{hour: "YYYY-MM-DDTHH", focusedMinutes}]`, every local hour of the day), `workstreams` (`[{id, title, minutes}]`, 20 at most, `totalWorkstreams`, `truncated`), `meetings` (`count`, `minutes` of the recorded notes of the open data partition), `codingAgents` (`blocks`, `activeMinutes` of the sources turned on, prorated to the day); activity and blocks before the retention floor are left out, and a date before it answers `state: "past_retention"` with `panels: null` |
+| `get_day_schedule` | none | `summaryTime` (local `HH:MM` the day summary is written), `notifications` (`enabled`, `quietHours`: `enabled`, `start`, `end`) from Settings, Activity |
 
-Activity times are RFC 3339 with offset; omitted bounds mean today so far. `get_day_summary` takes a local date `YYYY-MM-DD` (default today).
+Activity times are RFC 3339 with offset; omitted bounds mean today so far. `get_day_summary` and `get_day_panels` take a local date `YYYY-MM-DD` (default today).
+
+Sessions and gaps leave out the app's `bundleId` and the gap's `id`: the
+"Today" view uses them only for app icons and list keys, and no tool takes a
+gap id.
 
 Resources: `clovy://context` (JSON: `now`, `date`, `time`, `weekday`,
 `timeZone` (IANA name from `TZ` or `/etc/localtime`), `utcOffset`,

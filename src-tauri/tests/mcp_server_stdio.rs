@@ -291,6 +291,8 @@ async fn mcp_server_binary_answers_a_stdio_client_from_the_active_profile() {
             "get_active_session",
             "get_activity_stats",
             "get_activity_timeline",
+            "get_day_panels",
+            "get_day_schedule",
             "get_day_summary",
             "get_note",
             "get_session_detail",
@@ -343,6 +345,20 @@ async fn mcp_server_binary_answers_a_stdio_client_from_the_active_profile() {
         .map(|session| session["app"].as_str().unwrap())
         .collect();
     assert_eq!(apps, vec!["Code", "Firefox"], "{timeline}");
+
+    let day = at(9, 0)
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let panels = client
+        .call("get_day_panels", json!({ "date": day }))
+        .await
+        .unwrap();
+    assert_eq!(panels["state"], json!("ready"), "{panels}");
+    assert_eq!(panels["panels"]["focusedMinutes"], json!(7.0), "{panels}");
+    assert_eq!(panels["panels"]["meetings"]["count"], json!(0));
+    let schedule = client.call("get_day_schedule", json!({})).await.unwrap();
+    assert_eq!(schedule["summaryTime"], json!("18:00"), "{schedule}");
 
     let guide = client
         .request("resources/read", json!({ "uri": "clovy://guide" }))

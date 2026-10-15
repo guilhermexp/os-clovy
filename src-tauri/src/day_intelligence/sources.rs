@@ -6,6 +6,7 @@ use futures_util::future::BoxFuture;
 use serde::Serialize;
 use sqlx::query::query;
 use sqlx::row::Row;
+use sqlx_sqlite::SqlitePool;
 use tauri::AppHandle;
 
 use super::schedule::LocalZone;
@@ -252,48 +253,7 @@ impl DaySources for AppSources {
                 return Vec::new();
             };
             let profile = crate::commands::active_profile(&self.app);
-            let from_text = from.to_rfc3339();
-            let to_text = to.to_rfc3339();
-            let rows = query(
-                "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, ''),
-                        r.started_at, r.ended_at, n.created_at
-                 FROM notes n LEFT JOIN recording_sessions r ON r.note_id = n.id
-                 WHERE n.profile = ? AND (
-                    (r.started_at IS NOT NULL
-                      AND julianday(r.started_at) < julianday(?)
-                      AND (r.ended_at IS NULL OR julianday(r.ended_at) > julianday(?)
-                        OR julianday(r.started_at) >= julianday(?)))
-                    OR (r.id IS NULL
-                      AND julianday(n.created_at) >= julianday(?)
-                      AND julianday(n.created_at) < julianday(?)))
-                 ORDER BY COALESCE(r.started_at, n.created_at)",
-            )
-            .bind(profile)
-            .bind(&to_text)
-            .bind(&from_text)
-            .bind(&from_text)
-            .bind(&from_text)
-            .bind(&to_text)
-            .fetch_all(&repositories.pool)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "day summary: meetings could not be read");
-                Vec::new()
-            });
-            let rows = rows
-                .iter()
-                .map(|row| {
-                    (
-                        row.get::<String, _>(0),
-                        row.get::<String, _>(1),
-                        row.get::<String, _>(2),
-                        row.get::<Option<String>, _>(3),
-                        row.get::<Option<String>, _>(4),
-                        row.get::<String, _>(5),
-                    )
-                })
-                .collect();
-            meetings_from_rows(rows, from, to, zone, Utc::now())
+            meetings_between(&repositories.pool, &profile, from, to, zone, Utc::now()).await
         })
     }
 
@@ -316,6 +276,61 @@ impl DaySources for AppSources {
                 ingestion_read_until(&crate::coding_agents::coding_agents_status(state), until)
             })
     }
+}
+
+/// Notes of the data partition `profile` recorded or created in
+/// `[from, to)` (`DaySources::meetings`), from the main database `pool`;
+/// a recording still going on ends at `now`.
+pub(crate) async fn meetings_between(
+    pool: &SqlitePool,
+    profile: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    zone: &dyn LocalZone,
+    now: DateTime<Utc>,
+) -> Vec<MeetingNote> {
+    let from_text = from.to_rfc3339();
+    let to_text = to.to_rfc3339();
+    let rows = query(
+        "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, ''),
+                    r.started_at, r.ended_at, n.created_at
+             FROM notes n LEFT JOIN recording_sessions r ON r.note_id = n.id
+             WHERE n.profile = ? AND (
+                (r.started_at IS NOT NULL
+                  AND julianday(r.started_at) < julianday(?)
+                  AND (r.ended_at IS NULL OR julianday(r.ended_at) > julianday(?)
+                    OR julianday(r.started_at) >= julianday(?)))
+                OR (r.id IS NULL
+                  AND julianday(n.created_at) >= julianday(?)
+                  AND julianday(n.created_at) < julianday(?)))
+             ORDER BY COALESCE(r.started_at, n.created_at)",
+    )
+    .bind(profile)
+    .bind(&to_text)
+    .bind(&from_text)
+    .bind(&from_text)
+    .bind(&from_text)
+    .bind(&to_text)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "day summary: meetings could not be read");
+        Vec::new()
+    });
+    let rows = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<String, _>(0),
+                row.get::<String, _>(1),
+                row.get::<String, _>(2),
+                row.get::<Option<String>, _>(3),
+                row.get::<Option<String>, _>(4),
+                row.get::<String, _>(5),
+            )
+        })
+        .collect();
+    meetings_from_rows(rows, from, to, zone, now)
 }
 
 /// Coding-agent blocks from the activity database

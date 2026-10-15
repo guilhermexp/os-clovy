@@ -15,14 +15,21 @@ use crate::activity::store::ActivityStore;
 use crate::activity::timeline::agent_tools::{
     self, gap_json, local, local_at, minutes, range, session_json, stats_json,
 };
+use crate::activity::timeline::stats::TimelineStatsDto;
 use crate::activity::timeline::{
     retention_floor, stats, timeline_view, visible_session_detail, TimelineView,
 };
-use crate::day_intelligence::schedule::SystemZone;
+use crate::coding_agents::settings::CodingAgentSources;
+use crate::day_intelligence::pipeline::{self, ReadContext};
+use crate::day_intelligence::schedule::{LocalZone, SystemZone};
+use crate::day_intelligence::sources::{
+    coding_blocks_between, meetings_between, CodingBlock, DaySources, MeetingNote,
+};
 use crate::db::repositories::{
     dictation_history_cutoff_timestamp, Repositories, DICTATION_HISTORY_RETENTION_DAYS,
 };
 use crate::domain::types::AppError;
+use futures_util::future::BoxFuture;
 
 pub const SEARCH_NOTES: &str = "search_notes";
 pub const GET_NOTE: &str = "get_note";
@@ -34,9 +41,11 @@ pub const LIST_APP_USAGE: &str = "list_app_usage";
 pub const GET_SESSION_DETAIL: &str = "get_session_detail";
 pub const LIST_CODING_AGENT_SESSIONS: &str = "list_coding_agent_sessions";
 pub const GET_DAY_SUMMARY: &str = "get_day_summary";
+pub const GET_DAY_PANELS: &str = "get_day_panels";
+pub const GET_DAY_SCHEDULE: &str = "get_day_schedule";
 
 /// Activity tools, in catalog order.
-pub const ACTIVITY_TOOLS: [&str; 8] = [
+pub const ACTIVITY_TOOLS: [&str; 10] = [
     agent_tools::GET_ACTIVITY_TIMELINE,
     agent_tools::SEARCH_ACTIVITY,
     GET_ACTIVITY_STATS,
@@ -45,6 +54,8 @@ pub const ACTIVITY_TOOLS: [&str; 8] = [
     GET_SESSION_DETAIL,
     LIST_CODING_AGENT_SESSIONS,
     GET_DAY_SUMMARY,
+    GET_DAY_PANELS,
+    GET_DAY_SCHEDULE,
 ];
 const DATA_TOOLS: [&str; 4] = [SEARCH_NOTES, GET_NOTE, LIST_DICTATIONS, LIST_MEMORIES];
 
@@ -257,6 +268,25 @@ pub fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
                 "additionalProperties": false
             }),
         ),
+        read_only(
+            GET_DAY_PANELS,
+            "The numbers next to the day's summary, read from the activity now: focused, idle, and away minutes, minutes per category, top apps, focused minutes per hour, minutes per workstream, recorded meetings (count and minutes), and coding-agent blocks with their active minutes inside the day. Omit `date` for today.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Local date in YYYY-MM-DD format (default: today)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        read_only(
+            GET_DAY_SCHEDULE,
+            "When Clovy writes the day summary on its own (local HH:MM) and how it notifies: whether activity notifications are on and the quiet hours during which they wait.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        ),
     ]);
     tools
 }
@@ -283,7 +313,7 @@ pub async fn call(data: &McpData, name: &str, arguments: &Value) -> Result<Value
                 ActivityAccess::Unavailable(error) => return Err(error.clone()),
                 ActivityAccess::Open { store, settings } => (store, settings),
             };
-            activity_tool(store, settings, name, arguments, data.now).await
+            activity_tool(data, store, settings, name, arguments).await
         }
         _ => Err(AppError::new(
             "mcp_tool_unknown",
@@ -563,12 +593,13 @@ async fn list_memories(data: &McpData, arguments: &Value) -> Result<Value, AppEr
 }
 
 async fn activity_tool(
+    data: &McpData,
     store: &ActivityStore,
     settings: &ActivitySettings,
     name: &str,
     arguments: &Value,
-    now: DateTime<Utc>,
 ) -> Result<Value, AppError> {
+    let now = data.now;
     if let Some(result) = agent_tools::dispatch(store, settings, name, arguments, now).await {
         return result;
     }
@@ -586,6 +617,8 @@ async fn activity_tool(
         GET_SESSION_DETAIL => session_detail(store, settings, arguments, now).await,
         LIST_CODING_AGENT_SESSIONS => coding_agent_sessions(store, settings, arguments, now).await,
         GET_DAY_SUMMARY => day_summary(store, settings, arguments, now).await,
+        GET_DAY_PANELS => day_panels(data, store, settings, arguments).await,
+        GET_DAY_SCHEDULE => Ok(day_schedule(settings)),
         _ => Err(AppError::new(
             "mcp_tool_unknown",
             format!("Unknown activity tool `{name}`."),
@@ -769,6 +802,13 @@ fn parse_day_argument(arguments: &Value, now: DateTime<Utc>) -> Result<NaiveDate
     }
 }
 
+/// Whether `day` ends before the retention floor: its activity is gone.
+fn past_retention(settings: &ActivitySettings, day: NaiveDate, now: DateTime<Utc>) -> bool {
+    day < retention_floor(settings, now)
+        .with_timezone(&Local)
+        .date_naive()
+}
+
 async fn day_summary(
     store: &ActivityStore,
     settings: &ActivitySettings,
@@ -778,10 +818,7 @@ async fn day_summary(
     let target_date = parse_day_argument(arguments, now)?;
     let day_key = target_date.format("%Y-%m-%d").to_string();
 
-    let floor_date = retention_floor(settings, now)
-        .with_timezone(&Local)
-        .date_naive();
-    if target_date < floor_date {
+    if past_retention(settings, target_date, now) {
         return Ok(json!({
             "date": day_key,
             "state": "past_retention",
@@ -894,6 +931,9 @@ async fn day_summary(
                     json!({
                         "description": desc,
                         "minutes": a.minutes,
+                        // Bounds of the measured sessions the activity
+                        // happened in, or null when only the hour is known.
+                        "periods": a.periods,
                         "truncated": desc_trunc,
                     })
                 })
@@ -932,4 +972,145 @@ async fn day_summary(
         result["reason"] = json!("No summary has been generated for this date yet.");
     }
     Ok(result)
+}
+
+/// The day view's sources for one MCP message: meetings from the open data
+/// partition (ADR-0059), coding-agent blocks of the sources turned on, none
+/// before the retention floor.
+struct McpDaySources<'a> {
+    notes: &'a SqlitePool,
+    profile: &'a str,
+    floor: DateTime<Utc>,
+    now: DateTime<Utc>,
+}
+
+impl DaySources for McpDaySources<'_> {
+    fn meetings<'a>(
+        &'a self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        zone: &'a dyn LocalZone,
+    ) -> BoxFuture<'a, Vec<MeetingNote>> {
+        Box::pin(meetings_between(
+            self.notes,
+            self.profile,
+            from,
+            to,
+            zone,
+            self.now,
+        ))
+    }
+
+    fn coding_blocks<'a>(
+        &'a self,
+        store: &'a ActivityStore,
+        enabled: &'a CodingAgentSources,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        zone: &'a dyn LocalZone,
+    ) -> BoxFuture<'a, Vec<CodingBlock>> {
+        Box::pin(coding_blocks_between(
+            store,
+            enabled,
+            from.max(self.floor),
+            to,
+            zone,
+        ))
+    }
+
+    /// Only generation waits for ingestion; the panels never ask.
+    fn coding_agents_read_until(&self, _until: DateTime<Utc>) -> bool {
+        true
+    }
+}
+
+/// The summary's panels (`pipeline::day_view`), as the "Today" view draws
+/// them, in minutes.
+async fn day_panels(
+    data: &McpData,
+    store: &ActivityStore,
+    settings: &ActivitySettings,
+    arguments: &Value,
+) -> Result<Value, AppError> {
+    let day = parse_day_argument(arguments, data.now)?;
+    let day_key = day.format("%Y-%m-%d").to_string();
+    if past_retention(settings, day, data.now) {
+        return Ok(json!({
+            "date": day_key,
+            "state": "past_retention",
+            "reason": "The requested date is past the activity retention period.",
+            "panels": Value::Null,
+        }));
+    }
+    let sources = McpDaySources {
+        notes: &data.notes,
+        profile: &data.profile,
+        floor: retention_floor(settings, data.now),
+        now: data.now,
+    };
+    let context = ReadContext {
+        store,
+        settings,
+        sources: &sources,
+        zone: &SystemZone,
+        now: data.now,
+    };
+    let (_, _, _, panels) = pipeline::day_view(&context, day)
+        .await
+        .map_err(|error| AppError::new("activity_day_panels_failed", error.to_string()))?;
+    let mut totals = stats_json(&TimelineStatsDto {
+        focused_ms: panels.focused_ms,
+        idle_ms: panels.idle_ms,
+        away_ms: panels.away_ms,
+        top_apps: panels.top_apps,
+        categories: panels.categories,
+    });
+    let total_workstreams = panels.workstreams.len();
+    totals["hours"] = json!(panels
+        .hours
+        .iter()
+        .map(|hour| json!({ "hour": hour.hour, "focusedMinutes": minutes(hour.focused_ms) }))
+        .collect::<Vec<_>>());
+    totals["workstreams"] = json!(panels
+        .workstreams
+        .iter()
+        .take(MAX_DAY_WORKSTREAMS)
+        .map(|workstream| json!({
+            "id": workstream.id,
+            "title": clip(&workstream.title, 500).0,
+            "minutes": workstream.minutes,
+        }))
+        .collect::<Vec<_>>());
+    totals["totalWorkstreams"] = json!(total_workstreams);
+    totals["meetings"] = json!({
+        "count": panels.meeting_count,
+        "minutes": minutes(panels.meeting_ms),
+    });
+    totals["codingAgents"] = json!({
+        "blocks": panels.coding_agent_blocks,
+        "activeMinutes": minutes(panels.coding_agent_active_seconds * 1000),
+    });
+    Ok(json!({
+        "date": day_key,
+        "state": "ready",
+        "panels": totals,
+        "truncated": total_workstreams > MAX_DAY_WORKSTREAMS,
+    }))
+}
+
+/// When the day summary is written and how activity notifications behave
+/// (Settings, Activity).
+fn day_schedule(settings: &ActivitySettings) -> Value {
+    let quiet = &settings.notifications.quiet_hours;
+    json!({
+        "summaryTime": settings.day_summary.time,
+        "notifications": {
+            "enabled": settings.notifications.enabled,
+            "quietHours": {
+                "enabled": quiet.enabled,
+                "start": quiet.start,
+                "end": quiet.end,
+            },
+        },
+    })
 }

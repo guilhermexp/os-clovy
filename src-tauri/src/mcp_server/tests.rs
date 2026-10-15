@@ -249,6 +249,8 @@ async fn activity_tools_are_listed_only_while_capture_is_on() {
             "get_session_detail",
             "list_coding_agent_sessions",
             "get_day_summary",
+            "get_day_panels",
+            "get_day_schedule",
         ]
     );
 }
@@ -1073,11 +1075,21 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
             ended_at: at(10, 0),
             active_minutes: 45,
             summary: "Worked on Zephyr importer".into(),
-            activities: vec![HourActivity {
-                description: "Coding Zephyr".into(),
-                minutes: 45,
-                periods: None,
-            }],
+            activities: vec![
+                HourActivity {
+                    description: "Coding Zephyr".into(),
+                    minutes: 40,
+                    periods: Some(vec![ActivityPeriod {
+                        started_at: "2026-10-01T09:05:00.000000Z".into(),
+                        ended_at: "2026-10-01T09:45:00.000000Z".into(),
+                    }]),
+                },
+                HourActivity {
+                    description: "Reading mail".into(),
+                    minutes: 5,
+                    periods: None,
+                },
+            ],
             distilled: "distilled text".into(),
             distill_stats: json!({}),
             locale: "en".into(),
@@ -1186,6 +1198,13 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0]["hour"], json!("2026-10-01T09"));
     assert_eq!(reports[0]["activeMinutes"], json!(45));
+    // Each activity carries where it happened, or null when only the hour
+    // is known.
+    assert_eq!(
+        reports[0]["activities"][0]["periods"],
+        json!([{"startedAt": "2026-10-01T09:05:00.000000Z", "endedAt": "2026-10-01T09:45:00.000000Z"}])
+    );
+    assert_eq!(reports[0]["activities"][1]["periods"], Value::Null);
 
     // Never includes raw distilled text
     assert!(!result.to_string().contains("distilled text"));
@@ -1252,4 +1271,233 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
     assert!(past_result["summary"].is_null());
     assert!(past_result["workstreams"].as_array().unwrap().is_empty());
     assert!(past_result["hourReports"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn day_panels_draw_the_day_from_filtered_activity_meetings_and_coding_agents() {
+    use crate::coding_agents::settings::CodingAgentSources;
+    use crate::coding_agents::store::NewBlock;
+    use crate::coding_agents::SourceId;
+    use crate::day_intelligence::db as day_db;
+    use crate::day_intelligence::db::NewHourReport;
+    use crate::day_intelligence::workstreams::{Create, FoldPlan};
+
+    let (_dir, store) = activity_store().await;
+    let pool = notes_pool().await;
+    let local_day = at(9, 0).with_timezone(&Local).date_naive();
+    let day = local_day.format("%Y-%m-%d").to_string();
+    let nine = at(9, 0)
+        .with_timezone(&Local)
+        .format("%Y-%m-%dT%H")
+        .to_string();
+
+    // A 30-minute meeting in the open partition and one in another.
+    for (id, note) in [
+        ("rec-default", "note-roadmap"),
+        ("rec-work", "note-other-profile"),
+    ] {
+        query("INSERT INTO recording_sessions (id, note_id, status, started_at, ended_at) VALUES (?, ?, 'completed', ?, ?)")
+            .bind(id)
+            .bind(note)
+            .bind(at(8, 0).to_rfc3339())
+            .bind(at(8, 30).to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let block = |source, session: &str| NewBlock {
+        source,
+        session_id: session.into(),
+        started_at: at(8, 40),
+        ended_at: at(9, 0),
+        cwd: None,
+        project: Some("os-clovy".into()),
+        title: None,
+        first_prompt: None,
+        prompt_count: 1,
+        reply_count: 1,
+        active_seconds: 600,
+        transcript: String::new(),
+        sealed: true,
+    };
+    for new in [
+        block(SourceId::ClaudeCode, "claude-1"),
+        block(SourceId::Cursor, "cursor-1"),
+    ] {
+        store
+            .upsert_coding_agent_block(&new, at(9, 0))
+            .await
+            .unwrap();
+    }
+    // A workstream comes from folding an hour report.
+    day_db::insert_hour_report(
+        &store,
+        &NewHourReport {
+            hour: nine.clone(),
+            day: day.clone(),
+            started_at: at(9, 0),
+            ended_at: at(10, 0),
+            active_minutes: 7,
+            summary: "Worked on Zephyr importer".into(),
+            activities: vec![],
+            distilled: String::new(),
+            distill_stats: json!({}),
+            locale: "en".into(),
+            provider: "test-provider".into(),
+            generated_at: at(9, 8),
+        },
+    )
+    .await
+    .unwrap();
+    day_db::apply_fold(
+        &store,
+        &day,
+        &nine,
+        &FoldPlan {
+            creates: vec![Create {
+                title: "Zephyr importer".into(),
+                summary: "Scaffolding importer".into(),
+                minutes: 7,
+                note: "Initial scaffold".into(),
+                periods: None,
+                located_minutes: 0,
+            }],
+            appends: vec![],
+        },
+        at(9, 8),
+    )
+    .await
+    .unwrap();
+
+    let settings = ActivitySettings {
+        ignored_apps: vec!["1Password".into()],
+        coding_agents: CodingAgentSources {
+            claude_code: true,
+            ..CodingAgentSources::default()
+        },
+        ..capture_on()
+    };
+    let open = |settings: ActivitySettings| ActivityAccess::Open {
+        store: store.clone(),
+        settings,
+    };
+    let data_open = data(pool.clone(), open(settings.clone()));
+
+    let result = call(&data_open, "get_day_panels", json!({ "date": day }))
+        .await
+        .unwrap();
+    assert_eq!(result["date"], json!(day));
+    assert_eq!(result["state"], json!("ready"));
+    let panels = &result["panels"];
+    // 1Password is excluded: Code (5 min) and Firefox (2 min) remain.
+    assert_eq!(panels["focusedMinutes"], json!(7.0), "{result}");
+    let apps: Vec<&str> = panels["topApps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|app| app["app"].as_str().unwrap())
+        .collect();
+    assert_eq!(apps, vec!["Code", "Firefox"]);
+    assert!(!panels["categories"].as_array().unwrap().is_empty());
+    let hours = panels["hours"].as_array().unwrap();
+    assert!(hours.len() >= 23, "{result}");
+    let at_nine = hours
+        .iter()
+        .find(|hour| hour["hour"] == json!(nine))
+        .unwrap();
+    assert_eq!(at_nine["focusedMinutes"], json!(7.0));
+    assert_eq!(
+        panels["workstreams"],
+        json!([{ "id": panels["workstreams"][0]["id"], "title": "Zephyr importer", "minutes": 7 }])
+    );
+    // Only the open partition's meeting; only the source turned on.
+    assert_eq!(panels["meetings"], json!({ "count": 1, "minutes": 30.0 }));
+    assert_eq!(
+        panels["codingAgents"],
+        json!({ "blocks": 1, "activeMinutes": 10.0 })
+    );
+
+    // Today by default.
+    let today = call(&data_open, "get_day_panels", json!({})).await.unwrap();
+    assert_eq!(today["date"], json!(day));
+
+    // The retention floor cuts the day: activity and coding-agent blocks
+    // before it are gone; a day wholly before it is past retention.
+    let mut later = data(pool.clone(), open(settings.clone()));
+    later.now = at(9, 8) + Duration::days(i64::from(settings.retention_days));
+    let floored = call(&later, "get_day_panels", json!({ "date": day }))
+        .await
+        .unwrap();
+    assert_eq!(floored["state"], json!("ready"));
+    assert_eq!(floored["panels"]["focusedMinutes"], json!(0.0), "{floored}");
+    assert_eq!(floored["panels"]["codingAgents"]["blocks"], json!(0));
+    later.now = later.now + Duration::days(2);
+    let past = call(&later, "get_day_panels", json!({ "date": day }))
+        .await
+        .unwrap();
+    assert_eq!(past["state"], json!("past_retention"));
+    assert_eq!(past["panels"], Value::Null);
+
+    let invalid = call(
+        &data_open,
+        "get_day_panels",
+        json!({ "date": "01/10/2026" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(invalid.contains("mcp_invalid_arguments"), "{invalid}");
+    let off = call(
+        &data(pool, ActivityAccess::Off),
+        "get_day_panels",
+        json!({}),
+    )
+    .await
+    .unwrap_err();
+    assert!(off.contains("activity_capture_off"), "{off}");
+}
+
+#[tokio::test]
+async fn day_schedule_reports_the_summary_time_and_notification_settings() {
+    use crate::activity::settings::{ActivityNotificationSettings, DaySummarySettings, QuietHours};
+    let (_dir, store) = activity_store().await;
+    let pool = notes_pool().await;
+    let settings = ActivitySettings {
+        day_summary: DaySummarySettings {
+            time: "07:30".into(),
+        },
+        notifications: ActivityNotificationSettings {
+            enabled: false,
+            quiet_hours: QuietHours {
+                enabled: true,
+                start: "23:00".into(),
+                end: "07:00".into(),
+            },
+        },
+        ..capture_on()
+    };
+    let open = data(
+        pool.clone(),
+        ActivityAccess::Open {
+            store: store.clone(),
+            settings,
+        },
+    );
+    assert_eq!(
+        call(&open, "get_day_schedule", json!({})).await.unwrap(),
+        json!({
+            "summaryTime": "07:30",
+            "notifications": {
+                "enabled": false,
+                "quietHours": { "enabled": true, "start": "23:00", "end": "07:00" },
+            },
+        })
+    );
+    let off = call(
+        &data(pool, ActivityAccess::Off),
+        "get_day_schedule",
+        json!({}),
+    )
+    .await
+    .unwrap_err();
+    assert!(off.contains("activity_capture_off"), "{off}");
 }

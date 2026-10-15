@@ -294,10 +294,12 @@ Clovy records meetings and dictations on the user's Mac, turns them into notes, 
 | "Details of that session" | `get_session_detail` with the session id |
 | "What did I build with Claude Code today?" | `list_coding_agent_sessions` |
 | "Summarize my day" / "What did I do yesterday?" | `get_day_summary` (`date`: YYYY-MM-DD, default today) |
+| "How was my day in numbers?" (focus per hour, categories, meetings, coding agents) | `get_day_panels` (`date`: YYYY-MM-DD, default today) |
+| "When does Clovy write my day summary?" / "Are notifications on?" | `get_day_schedule` |
 
 ## Tips
 
-- Read `clovy://context` first: it has today's date, the time, and the time zone. Activity tools take RFC 3339 times with an offset (`2026-10-04T09:00:00-03:00`); omit `from`/`to` for today so far. `get_day_summary` takes a date (`YYYY-MM-DD`), default today.
+- Read `clovy://context` first: it has today's date, the time, and the time zone. Activity tools take RFC 3339 times with an offset (`2026-10-04T09:00:00-03:00`); omit `from`/`to` for today so far. `get_day_summary` and `get_day_panels` take a date (`YYYY-MM-DD`), default today; a date before the retention period answers `state: "past_retention"`.
 - Activity tools exist only while activity capture is on. Apps and sites the user excluded never appear, and nothing older than the retention period is returned.
 - Long results are capped: look at `truncated`, `hasMore`/`nextOffset`, or `nextTranscriptOffset`, and ask for a shorter period or the next page.
 - Clovy must be open with the MCP server turned on (Settings, Agent). Otherwise every tool answers with an error saying so.
