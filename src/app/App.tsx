@@ -167,6 +167,7 @@ import {
 import { useAppExternalEvents } from "./use-app-external-events";
 
 import { useAgentAttentionNotifications } from "./use-agent-attention-notifications";
+import { startAgentRunSettlementRelay } from "../lib/agent-run-settlement";
 
 import { useAgentSessionSync } from "./use-agent-session-sync";
 
@@ -1443,6 +1444,17 @@ export function App() {
     openCompanionAgentSession,
     setActiveAgentSession,
   ]);
+
+  const agentSessionsRef = useRef(agentSessions);
+  agentSessionsRef.current = agentSessions;
+  useEffect(
+    () =>
+      startAgentRunSettlementRelay({
+        resolveTitle: (sessionId) =>
+          agentSessionsRef.current.find((session) => session.id === sessionId)?.title,
+      }),
+    [],
+  );
 
   useAgentAttentionNotifications({
     activeAgentSessionIdRef,
