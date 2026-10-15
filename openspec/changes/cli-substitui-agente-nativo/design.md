@@ -1,5 +1,81 @@
 # Design
 
+## Contratos (rascunho fase 0)
+
+Tipos públicos entregues em 0.2 (C4) e 0.3 (C1) na branch `cli-20261015/phase0-mcp`; o Main congela em 0.8. Caminhos relativos a `src-tauri/src/mcp_server/`.
+
+**C4, grupos de ferramentas** (`tools/mod.rs`; as ferramentas atuais estão em `tools/read.rs` como `ReadTools`, sem mudança de comportamento):
+
+```rust
+pub struct McpData { notes, profile, memory_enabled, activity, now }   // inalterado
+#[derive(Clone, Copy)]
+pub struct ToolCtx<'a> {
+    pub data: &'a McpData,
+    pub app: Option<&'a AppHandle>,        // None sem runtime Tauri (testes)
+    pub binding: Option<&'a TurnBinding>,  // None = cliente sem vínculo
+}
+impl ToolCtx<'_> { pub fn unbound(data: &McpData) -> ToolCtx<'_> }
+pub trait ToolGroup: Send + Sync {
+    fn needs_turn(&self) -> bool { true }  // só ReadTools devolve false
+    fn owns(&self, name: &str) -> bool;    // decide "Unknown tool" x turn_required
+    fn descriptors(&self, ctx: &ToolCtx<'_>) -> Vec<Value>;
+    fn call<'a>(&'a self, ctx: &'a ToolCtx<'a>, name: &'a str, arguments: &'a Value)
+        -> BoxFuture<'a, Result<Value, AppError>>;
+}
+pub fn groups() -> Vec<&'static dyn ToolGroup>;  // registro: uma linha por grupo
+pub fn descriptors(ctx: &ToolCtx<'_>) -> Vec<Value>;
+pub fn is_known_tool(name: &str) -> bool;
+pub async fn call(ctx: &ToolCtx<'_>, name: &str, arguments: &Value) -> Result<Value, AppError>;
+// protocol.rs
+pub async fn handle(data: &McpData, message: &Value) -> Option<Value>;    // = handle_in(&ToolCtx::unbound(data), …)
+pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value>;
+```
+
+Regra herdada por todo grupo com `needs_turn() == true`: ausente de `tools/list` sem vínculo; `tools/call` sem vínculo devolve `isError` com texto terminado em `(turn_required)` sem executar o grupo. `ToolGroup::call` devolve `Result` (não `Option<Result>` como esboçado em §1): `owns` separa "não é meu" de "falhou". Desvio de 0.2: o `AppHandle` fica em `ToolCtx`, não em `McpData`, para que os testes e a suíte `tests/mcp_server_stdio.rs` continuem montando `McpData` sem runtime Tauri.
+
+**C1, vínculo de turno** (`turns.rs`, `channel.rs`, `stdio.rs`, `mod.rs`):
+
+```rust
+pub const TOKEN_BYTES: usize = 32;                 // token = 64 hex
+pub const TURN_EXPIRED: &str = "turn_expired";     // recusa de handshake
+pub const TURN_REQUIRED: &str = "turn_required";   // erro de ferramenta
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnBinding {                           // sem o token: pode ir para log
+    pub session_id: String, pub run_id: String, pub cli: CliKind,
+    pub safety_mode: AgentSafetyMode, pub attended: bool,
+    pub surface: String,                           // "chat" | "home" | "note_chat" | "companion" | "routine"
+}
+#[derive(Clone, Default)] pub struct TurnRegistry;  // Arc interno
+impl TurnRegistry {
+    pub fn issue(&self, binding: TurnBinding) -> String;           // token novo
+    pub fn binding(&self, token: &str) -> Option<Arc<TurnBinding>>;
+    pub fn bind(&self, token: &str) -> Option<BoundTurn>;          // usado pelo canal
+    pub fn revoke(&self, token: &str) -> bool;                     // fecha as conexões do token
+    pub fn revoke_run(&self, run_id: &str) -> usize;               // fim/falha/cancelamento
+    pub fn revoke_all(&self);                                      // shutdown
+}
+pub struct BoundTurn { pub binding: Arc<TurnBinding>, /* sinal */ }
+impl BoundTurn { pub async fn revoked(&mut self) }
+// mod.rs
+impl McpServerState { pub fn turns(&self) -> &TurnRegistry }    // um registro por app, sobrevive a religar o servidor
+impl McpLaunch { pub fn for_turn(&self, token: &str) -> McpLaunch } // acrescenta ["--turn", token]
+// channel.rs
+pub type TurnHandler = Arc<dyn Fn(Value, Option<Arc<TurnBinding>>) -> Pin<Box<dyn Future<Output = Option<Value>> + Send>> + Send + Sync>;
+pub struct Service;  // From<Handler> (legado, ignora o vínculo) e From<TurnHandler>
+impl Listener {
+    pub async fn start(dir: &Path, handler: impl Into<Service>) -> io::Result<Self>;  // registro vazio
+    pub async fn start_with_turns(dir: &Path, handler: impl Into<Service>, turns: TurnRegistry) -> io::Result<Self>;
+}
+pub fn turn_handshake(secret: &str, turn: Option<&str>) -> Value;
+pub fn connect_turn(dir: &Path, turn: Option<&str>) -> Result<UnixStream, ClientError>;  // ClientError::TurnExpired
+// stdio.rs
+pub fn parse_turn(args: &[String]) -> Result<Option<String>, String>;  // "--turn" vazio = erro de uso (saída 2)
+pub fn relay_turn(dir: &Path, turn: Option<&str>, input: impl BufRead, output: Box<dyn Write + Send>);
+pub const TURN_EXPIRED_MESSAGE: &str;  // "... (turn_expired)"
+```
+
+Fio: handshake `{"clovyMcp": 1, "secret": "<hex>", "turn": "<token>"}`; `turn` ausente ou `null` = conexão sem vínculo; string desconhecida/revogada ou valor não string = `{"clovyMcp": 1, "ok": false, "error": "turn_expired"}`. O token só é consultado depois que segredo e uid conferem (segredo errado com token vivo = `unauthorized`). O token vale para várias conexões enquanto a execução vive (o relay reconecta quando a conexão cai); "uso único" = um token por execução, nunca reaproveitado. Revogar fecha só as conexões daquele token e descarta respostas pendentes; o relay então responde toda chamada com `TURN_EXPIRED_MESSAGE`. Relay antigo sem `--turn` ou app antigo que ignora `turn` = conexão sem vínculo (só leitura).
+
 ## Context
 
 Estado em `main` @ ba23ae95 (todas as citações relativas à raiz do repositório):

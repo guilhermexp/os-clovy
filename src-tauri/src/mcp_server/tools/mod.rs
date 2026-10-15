@@ -19,6 +19,7 @@ use crate::activity::store::ActivityStore;
 use crate::domain::types::AppError;
 
 pub use super::turns::TurnBinding;
+use super::turns::TURN_REQUIRED;
 pub use read::{
     is_activity_tool, ReadTools, ACTIVITY_TOOLS, GET_ACTIVE_SESSION, GET_ACTIVITY_STATS,
     GET_DAY_PANELS, GET_DAY_SCHEDULE, GET_DAY_SUMMARY, GET_NOTE, GET_SESSION_DETAIL,
@@ -113,7 +114,11 @@ pub trait ToolGroup: Send + Sync {
 
 /// Every group, in catalog order. Registering a group is one line here.
 pub fn groups() -> Vec<&'static dyn ToolGroup> {
-    vec![&ReadTools]
+    #[allow(unused_mut)]
+    let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
+    #[cfg(all(test, unix))]
+    groups.push(&super::turn_tests::TurnProbe);
+    groups
 }
 
 fn visible(group: &dyn ToolGroup, ctx: &ToolCtx<'_>) -> bool {
@@ -145,7 +150,7 @@ pub async fn call(ctx: &ToolCtx<'_>, name: &str, arguments: &Value) -> Result<Va
     };
     if !visible(group, ctx) {
         return Err(AppError::new(
-            "turn_required",
+            TURN_REQUIRED,
             format!("`{name}` is available only inside a Clovy chat turn."),
         ));
     }
