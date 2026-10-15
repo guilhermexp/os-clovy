@@ -6,7 +6,7 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use serde_json::{json, Value};
 
-use super::tools::{self, McpData};
+use super::tools::{self, McpData, ToolCtx};
 
 pub const SERVER_NAME: &str = "clovy";
 pub const CONTEXT_URI: &str = "clovy://context";
@@ -146,8 +146,15 @@ pub fn tool_error(message: &str) -> Value {
     })
 }
 
-/// Answers one JSON-RPC message; `None` for notifications and responses.
+/// Answers one JSON-RPC message for a client with neither app nor turn;
+/// `None` for notifications and responses.
 pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
+    handle_in(&ToolCtx::unbound(data), message).await
+}
+
+/// Answers one JSON-RPC message in `ctx` (the connection's turn decides
+/// which tool groups exist); `None` for notifications and responses.
+pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
     let (id, method) = match classify(message) {
         Incoming::Request { id, method } => (id, method),
         Incoming::Notification | Incoming::Response => return None,
@@ -159,11 +166,11 @@ pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
     let outcome = match method {
         "initialize" => Ok(initialize_result(&params, INSTRUCTIONS)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::descriptors(&data.activity) })),
-        "tools/call" => call_tool(data, &params).await,
+        "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx) })),
+        "tools/call" => call_tool(ctx, &params).await,
         "resources/list" => Ok(json!({ "resources": resources() })),
         "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
-        "resources/read" => read_resource(&params, data.now),
+        "resources/read" => read_resource(&params, ctx.data.now),
         other => Err((METHOD_NOT_FOUND, format!("Method not found: {other}"))),
     };
     Some(match outcome {
@@ -172,7 +179,7 @@ pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
     })
 }
 
-async fn call_tool(data: &McpData, params: &Value) -> Result<Value, (i64, String)> {
+async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, String)> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -185,7 +192,7 @@ async fn call_tool(data: &McpData, params: &Value) -> Result<Value, (i64, String
         .filter(|arguments| !arguments.is_null())
         .cloned()
         .unwrap_or_else(|| json!({}));
-    Ok(match tools::call(data, name, &arguments).await {
+    Ok(match tools::call(ctx, name, &arguments).await {
         Ok(value) => tool_result(&value),
         Err(error) => tool_error(&format!("{} ({})", error.message, error.code)),
     })

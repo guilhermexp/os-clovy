@@ -6,7 +6,8 @@
 //!
 //! Layout: `channel` (Unix socket + installation secret), `stdio` (the
 //! `clovy-mcp` relay binary), `protocol` (MCP JSON-RPC and resources),
-//! `tools` (the read-only tools). The binary never opens a database: it
+//! `tools` (tool groups: the read group for every client, bound-only groups
+//! for CLI turns), `turns` (which CLI turn a connection belongs to). The binary never opens a database: it
 //! relays to this process, which answers with the same queries and filters
 //! the app uses.
 
@@ -19,6 +20,7 @@ pub mod stdio;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod tools;
+pub mod turns;
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +30,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::domain::types::AppError;
-use tools::{ActivityAccess, McpData};
+use tools::{ActivityAccess, McpData, ToolCtx};
 
 /// The relay binary (`[[bin]]` in Cargo.toml, bundled under
 /// `Resources/native/bin/`).
@@ -309,7 +311,14 @@ fn app_handler(app: AppHandle) -> channel::Handler {
         let app = app.clone();
         Box::pin(async move {
             match app_data(&app, &message).await {
-                Ok(data) => protocol::handle(&data, &message).await,
+                Ok(data) => {
+                    let ctx = ToolCtx {
+                        data: &data,
+                        app: Some(&app),
+                        binding: None,
+                    };
+                    protocol::handle_in(&ctx, &message).await
+                }
                 Err(error) => protocol::request_id(&message).map(|id| {
                     protocol::error_response(id, protocol::SERVER_UNAVAILABLE, error.message)
                 }),
