@@ -58,3 +58,6 @@ CLAUDE.local.md
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# Orchestrator harness exports/uploads (session transcripts) — local only.
+/.orchestrator/
