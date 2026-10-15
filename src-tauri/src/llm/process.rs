@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use crate::process_group::kill_group;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 /// Upper bound kept from each of stdout and stderr (and from any output file
@@ -153,24 +154,6 @@ async fn read_capped(mut pipe: impl AsyncRead + Unpin, captured: Captured) {
         }
     }
 }
-
-#[cfg(unix)]
-fn kill_group(group: Option<u32>) {
-    let Some(group) = group.and_then(|pid| i32::try_from(pid).ok()) else {
-        return;
-    };
-    if group <= 1 {
-        return;
-    }
-    // SAFETY: killpg only signals; the group id is the child's own pid because
-    // it was spawned with `process_group(0)`, so this never reaches Clovy.
-    unsafe {
-        libc::killpg(group, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_group(_group: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {

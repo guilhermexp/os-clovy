@@ -8,6 +8,7 @@ use crate::agent_runtime::protocol::{RpcFrame, PROTOCOL_VERSION};
 use crate::agent_runtime::{AgentItemPayload, AgentRepository};
 use crate::llm::cli::CliKind;
 use crate::mcp_server::McpLaunch;
+use crate::process_group::{signal_group, GroupSignal};
 use serde_json::{json, Value};
 use sqlx::row::Row;
 use std::collections::BTreeMap;
@@ -361,7 +362,7 @@ async fn run_process<S: FrameSink>(
     };
     // Sweep helpers the CLI left in its group (MCP servers it spawned), then
     // read what is still buffered in the pipe, for a bounded time.
-    signal_group(group, SweepSignal::Kill);
+    signal_group(group, GroupSignal::Kill);
     let drain_until = tokio::time::Instant::now() + OUTPUT_DRAIN_GRACE;
     while let Ok(Ok(true)) = tokio::time::timeout_at(
         drain_until,
@@ -537,44 +538,17 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
-enum SweepSignal {
-    Terminate,
-    Kill,
-}
-
-#[cfg(unix)]
-fn signal_group(group: Option<u32>, signal: SweepSignal) {
-    let Some(group) = group.and_then(|pid| i32::try_from(pid).ok()) else {
-        return;
-    };
-    if group <= 1 {
-        return;
-    }
-    let signal = match signal {
-        SweepSignal::Terminate => libc::SIGTERM,
-        SweepSignal::Kill => libc::SIGKILL,
-    };
-    // SAFETY: killpg only signals; the group id is the child's own pid because
-    // it was spawned with `process_group(0)`, so this never reaches Clovy.
-    unsafe {
-        libc::killpg(group, signal);
-    }
-}
-
-#[cfg(not(unix))]
-fn signal_group(_group: Option<u32>, _signal: SweepSignal) {}
-
 /// SIGTERM to the whole group (the CLI may save its session), then SIGKILL
 /// after a short grace period; the child is reaped.
 async fn stop_group(child: &mut tokio::process::Child, group: Option<u32>) {
-    signal_group(group, SweepSignal::Terminate);
+    signal_group(group, GroupSignal::Terminate);
     if tokio::time::timeout(CANCEL_GRACE, child.wait())
         .await
         .is_err()
     {
         let _ = child.start_kill();
     }
-    signal_group(group, SweepSignal::Kill);
+    signal_group(group, GroupSignal::Kill);
     let _ = child.wait().await;
 }
 

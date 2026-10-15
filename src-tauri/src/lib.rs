@@ -45,6 +45,7 @@ pub mod notifications;
 pub mod obsidian;
 pub mod os_accounts;
 pub mod p3a;
+mod process_group;
 pub mod providers;
 pub mod routines;
 mod shutdown;
