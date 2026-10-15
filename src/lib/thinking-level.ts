@@ -13,8 +13,9 @@
  *
  * The choice is included in each Clovy-owned run as a per-session override, so
  * Clovy never has to rely on a provider-wide default. The user's last pick
- * is kept in localStorage as the draft for the next new session
- * (machine-local state, readable synchronously on render).
+ * is kept in localStorage as the draft for the next new session, mirroring
+ * how agent-session-modes.ts records the Unrestricted opt-in (machine-local
+ * state, readable synchronously on render).
  */
 
 import { type MessageKey, t } from "../i18n/translate";
@@ -117,8 +118,9 @@ export function saveThinkingLevel(level: ThinkingLevel) {
 }
 
 /**
- * Per-session record of each chat's reasoning effort: machine-local (like
- * the runtime's own session store) and readable synchronously on render. This is what lets the
+ * Per-session record of each chat's reasoning effort, mirroring
+ * agent-session-modes.ts: machine-local (like the runtime's own session
+ * store) and readable synchronously on render. This is what lets the
  * composer show the level a session actually runs at: its creation pin, a
  * pick made while it was open, or the effort its live runtime last reported
  * via runtime events, instead of guessing from the machine-wide draft.
