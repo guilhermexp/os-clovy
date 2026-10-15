@@ -16,7 +16,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { formatDate, t as translate, useT } from "../../i18n";
+import { t as translate, useT } from "../../i18n";
+import { formatListTimestamp } from "../../lib/date-format";
 import type { NoteListItemDto } from "../../lib/tauri";
 import { useDismiss } from "../../lib/use-dismiss";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
@@ -567,24 +568,6 @@ function formatNoteTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  if (diffMs < 0) return translate("notes.list.future");
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (sameDay) {
-    return formatDate(date, {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-  const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
-  if (diffDays < 7) {
-    return formatDate(date, { weekday: "short" });
-  }
-  return formatDate(date, {
-    month: "short",
-    day: "numeric",
-  });
+  if (now.getTime() < date.getTime()) return translate("notes.list.future");
+  return formatListTimestamp(date, now);
 }

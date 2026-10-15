@@ -18,6 +18,7 @@ import {
   useState,
 } from "react";
 import { formatDate, t as translate, useLocale, useT } from "../../i18n";
+import { isSameLocalDay } from "../../lib/date-format";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
 import { Dialog } from "../ui/Dialog";
@@ -594,10 +595,10 @@ function formatGroupLabel(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return translate("recorder.dictation.earlier");
   const now = new Date();
-  if (isSameDate(date, now)) return translate("common.today");
+  if (isSameLocalDay(date, now)) return translate("common.today");
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  if (isSameDate(date, yesterday)) return translate("common.yesterday");
+  if (isSameLocalDay(date, yesterday)) return translate("common.yesterday");
   return formatDate(date, {
     weekday: "long",
     month: "short",
@@ -624,14 +625,6 @@ function formatTranscriptTimestamp(iso: string) {
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-function isSameDate(left: Date, right: Date) {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
 }
 
 function messageFromError(err: unknown) {

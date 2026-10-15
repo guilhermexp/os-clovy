@@ -5,6 +5,7 @@ import {
   type RoutineRunSession,
 } from "../../lib/agent-routine-history";
 import { formatDate, t as translate, useT } from "../../i18n";
+import { isSameLocalDay } from "../../lib/date-format";
 
 /** Past runs of one or all routines: each row is a cron-sourced session,
  * opened in the agent view on click so the whole conversation is readable. */
@@ -67,25 +68,17 @@ export function formatRunTime(iso: string) {
     hour: "numeric",
     minute: "2-digit",
   });
-  if (isSameDate(date, now)) return translate("routines.run.today", { time });
+  if (isSameLocalDay(date, now)) return translate("routines.run.today", { time });
   const tomorrow = new Date(now);
   tomorrow.setDate(now.getDate() + 1);
-  if (isSameDate(date, tomorrow)) return translate("routines.run.tomorrow", { time });
+  if (isSameLocalDay(date, tomorrow)) return translate("routines.run.tomorrow", { time });
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  if (isSameDate(date, yesterday)) return translate("routines.run.yesterday", { time });
+  if (isSameLocalDay(date, yesterday)) return translate("routines.run.yesterday", { time });
   return formatDate(date, {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-function isSameDate(left: Date, right: Date) {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
 }

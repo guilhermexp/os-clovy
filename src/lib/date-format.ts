@@ -1,4 +1,4 @@
-import { intlLocale } from "../i18n/translate";
+import { formatDate, intlLocale } from "../i18n/translate";
 
 export const DATE_FORMAT_STORAGE_KEY = "clovy:date-format";
 export const DATE_FORMAT_CHANGED_EVENT = "clovy:date-format-changed";
@@ -53,4 +53,47 @@ export function formatCalendarDate(
 export function normalizeDateFormatPreference(value: unknown): DateFormatPreference {
   if (value === "month-first" || value === "day-first") return value;
   return "system";
+}
+
+/** Whether two dates fall on the same local calendar day. */
+export function isSameLocalDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A list row's trailing timestamp: today the time ("2:09 PM"), within a week
+ * the weekday ("Mon"), older the date ("May 22").
+ */
+export function formatListTimestamp(date: Date, now: Date = new Date()): string {
+  if (isSameLocalDay(date, now)) {
+    return formatDate(date, { hour: "numeric", minute: "2-digit" });
+  }
+  if (Math.floor((now.getTime() - date.getTime()) / DAY_MS) < 7) {
+    return formatDate(date, { weekday: "short" });
+  }
+  return formatDate(date, { month: "short", day: "numeric" });
+}
+
+export type RecentAge = { unit: "now" | "minutes" | "hours" | "days"; count: number };
+
+/**
+ * How long ago `date` was, in its largest whole unit, while under a week
+ * (anything under a minute, or in the future, is "now"); null from a week on.
+ */
+export function recentAge(date: Date, nowMs: number = Date.now()): RecentAge | null {
+  const diffMs = nowMs - date.getTime();
+  if (diffMs < 60_000) return { unit: "now", count: 0 };
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return { unit: "minutes", count: minutes };
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return { unit: "hours", count: hours };
+  const days = Math.floor(hours / 24);
+  if (days < 7) return { unit: "days", count: days };
+  return null;
 }

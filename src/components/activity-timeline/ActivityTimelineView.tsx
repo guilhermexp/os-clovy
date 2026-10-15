@@ -5,6 +5,7 @@ import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconLock } from "central-icons/IconLock";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { useLocale, useT } from "../../i18n";
+import { isSameLocalDay } from "../../lib/date-format";
 import {
   activityTimeline,
   dayRange,
@@ -71,11 +72,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
     [],
   );
 
-  const today = new Date();
-  const isToday =
-    selectedDate.getFullYear() === today.getFullYear() &&
-    selectedDate.getMonth() === today.getMonth() &&
-    selectedDate.getDate() === today.getDate();
+  const isToday = isSameLocalDay(selectedDate, new Date());
 
   // Keep nowMs current every 10 seconds for today's now-cursor; other days
   // never show it, so they do not tick.

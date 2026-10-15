@@ -105,6 +105,7 @@ import {
   formatCalendarDate,
   getStoredDateFormat,
   normalizeDateFormatPreference,
+  recentAge,
   type DateFormatChangedDetail,
   type DateFormatPreference,
 } from "../../lib/date-format";
@@ -2307,17 +2308,18 @@ function AgentSessionContextMenu({
 // Compact trailing timestamp for agent session rows: "now", "5m", "3h", "2d"
 // while recent, then "May 2". sessionTimestamp falls back to the epoch when a
 // session has no dates at all, which we render as nothing rather than 1970.
+const SESSION_AGE_KEYS = {
+  now: "shell.time.now",
+  minutes: "shell.time.minutes",
+  hours: "shell.time.hours",
+  days: "shell.time.days",
+} as const;
+
 function formatSessionTime(iso: string, dateFormat: DateFormatPreference, t: TFunction): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime()) || date.getTime() === 0) return "";
-  const diffMs = Date.now() - date.getTime();
-  if (diffMs < 60_000) return t("shell.time.now");
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 60) return t("shell.time.minutes", { count: minutes });
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return t("shell.time.hours", { count: hours });
-  const days = Math.floor(hours / 24);
-  if (days < 7) return t("shell.time.days", { count: days });
+  const age = recentAge(date);
+  if (age) return t(SESSION_AGE_KEYS[age.unit], { count: age.count });
   return formatCalendarDate(date, dateFormat, intlLocale());
 }
 

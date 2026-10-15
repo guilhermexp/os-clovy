@@ -20,7 +20,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { intlLocale, type TFunction, useT } from "../../i18n";
+import { type TFunction, useT } from "../../i18n";
+import { formatListTimestamp } from "../../lib/date-format";
 import { AGENT_DELETE_SESSION_EVENT } from "../../lib/agent-events";
 import { messageFromError } from "../../lib/errors";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
@@ -782,23 +783,5 @@ function AgentSessionListRow({
 function formatSessionTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime()) || date.getTime() === 0) return "";
-  const now = new Date();
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (sameDay) {
-    return date.toLocaleTimeString(intlLocale(), {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-  const diffDays = Math.floor((now.getTime() - date.getTime()) / (24 * 60 * 60 * 1000));
-  if (diffDays < 7) {
-    return date.toLocaleDateString(intlLocale(), { weekday: "short" });
-  }
-  return date.toLocaleDateString(intlLocale(), {
-    month: "short",
-    day: "numeric",
-  });
+  return formatListTimestamp(date);
 }

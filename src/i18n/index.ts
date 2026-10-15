@@ -15,7 +15,6 @@ export {
   formatDate,
   formatList,
   formatNumber,
-  formatRelativeTime,
   intlLocale,
   type MessageKey,
   t,

@@ -50,15 +50,6 @@ export function formatDate(
   return new Intl.DateTimeFormat(intlLocale(locale), options).format(date);
 }
 
-export function formatRelativeTime(
-  value: number,
-  unit: Intl.RelativeTimeFormatUnit,
-  options?: Intl.RelativeTimeFormatOptions,
-  locale: InterfaceLocale = getInterfaceLocale(),
-) {
-  return new Intl.RelativeTimeFormat(intlLocale(locale), options).format(value, unit);
-}
-
 export function formatList(
   items: string[],
   options?: Intl.ListFormatOptions,
