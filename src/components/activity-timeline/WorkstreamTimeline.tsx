@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { type InterfaceLocale, useLocale, useT } from "../../i18n";
+import { type InterfaceLocale, intlLocale, useLocale, useT } from "../../i18n";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { formatDuration, formatTime } from "./timeline-utils";
 import {
@@ -35,7 +35,7 @@ type WorkstreamTimelineProps = {
 function formatHourOnly(ms: number, locale: InterfaceLocale): string {
   const date = new Date(ms);
   if (locale === "pt-BR") return `${date.getHours()}h`;
-  return new Intl.DateTimeFormat("en-US", { hour: "numeric" }).format(date);
+  return new Intl.DateTimeFormat(intlLocale(locale), { hour: "numeric" }).format(date);
 }
 
 /** A rail label from the local hour (0 to 23): "9 AM" / "9h". */

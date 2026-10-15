@@ -3,7 +3,7 @@ import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconGlobe } from "central-icons/IconGlobe";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconWindowSparkle } from "central-icons/IconWindowSparkle";
-import { useLocale, useT } from "../../i18n";
+import { intlLocale, useLocale, useT } from "../../i18n";
 import {
   activityTimelineSearch,
   dayRange,
@@ -184,13 +184,10 @@ export function TimelineSearch({ onSelectResult }: TimelineSearchProps) {
           ) : (
             results.map((res) => {
               const seenDate = new Date(res.seenAt);
-              const formattedDate = new Intl.DateTimeFormat(
-                locale === "pt-BR" ? "pt-BR" : undefined,
-                {
-                  month: "short",
-                  day: "numeric",
-                },
-              ).format(seenDate);
+              const formattedDate = new Intl.DateTimeFormat(intlLocale(locale), {
+                month: "short",
+                day: "numeric",
+              }).format(seenDate);
               const timeStr = `${formattedDate}, ${formatTime(res.seenAt, locale)}`;
 
               return (

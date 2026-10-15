@@ -45,7 +45,7 @@ import {
 import { LANGUAGE_OPTIONS, languageLabel } from "../../lib/dictation-languages";
 import { autostartEnabled, autostartSupported, setAutostartEnabled } from "../../lib/autostart";
 import { replayOnboarding } from "../../lib/onboarding";
-import { errorCode } from "../../lib/errors";
+import { errorCode, messageForErrorCode } from "../../lib/errors";
 import type {
   AccountStatus,
   DictationHelperEvent,
@@ -920,7 +920,10 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "mic_test_error") {
-      const message = helperEvent.payload?.message ?? translate("settings.micTest.couldNotRecord");
+      const message = messageForErrorCode(
+        stringPayload(helperEvent.payload?.code),
+        helperEvent.payload?.message ?? translate("settings.micTest.couldNotRecord"),
+      );
       setMicTestState("error");
       setMicTestStartedAt(undefined);
       setMicTestError(message);
@@ -929,7 +932,13 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "fn_monitor_unavailable") {
-      setStatus(helperEvent.payload?.message ?? translate("settings.shortcuts.monitorUnavailable"));
+      setStatus(
+        messageForErrorCode(
+          stringPayload(helperEvent.payload?.code),
+          helperEvent.payload?.message ?? translate("settings.shortcuts.monitorUnavailable"),
+          { shortcut: stringPayload(helperEvent.payload?.shortcut) },
+        ),
+      );
       return;
     }
     if (helperEvent.type === "helper_unavailable") {
@@ -992,7 +1001,12 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "error") {
-      setStatus(helperEvent.payload?.message ?? translate("settings.helper.failed"));
+      setStatus(
+        messageForErrorCode(
+          stringPayload(helperEvent.payload?.code),
+          helperEvent.payload?.message ?? translate("settings.helper.failed"),
+        ),
+      );
     }
   }
 

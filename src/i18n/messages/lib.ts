@@ -45,6 +45,12 @@ export default defineMessages({
     "lib.errors.sharingUnavailable":
       "Sharing isn't available on this Clovy server yet. Try again after the next update.",
     "lib.errors.shareNotFound": "This share no longer exists. It may have been stopped.",
+    "lib.errors.homeChatFailed":
+      "Clovy couldn't reply just now. Your message is still here, so you can try again.",
+    "lib.errors.homeChatResearchRequired":
+      "Clovy couldn't start current research just now. Your message is still here, so you can try again.",
+    "lib.errors.homeChatEmpty": "Clovy returned an empty Home reply.",
+    "lib.errors.homeChatInvalid": "Clovy returned a Home reply it couldn't read.",
     "lib.errors.timedOut": "Operation timed out.",
     "lib.errors.accountStatusTimeout": "Account status took too long. Please try again.",
     "lib.errors.fileDropUnreadable": "Could not read the dropped file.",
@@ -401,6 +407,12 @@ export default defineMessages({
       "O compartilhamento ainda não está disponível neste servidor do Clovy. Tente de novo após a próxima atualização.",
     "lib.errors.shareNotFound":
       "Este compartilhamento não existe mais. Ele pode ter sido interrompido.",
+    "lib.errors.homeChatFailed":
+      "O Clovy não conseguiu responder agora. Sua mensagem continua aqui, então você pode tentar de novo.",
+    "lib.errors.homeChatResearchRequired":
+      "O Clovy não conseguiu começar uma pesquisa atual agora. Sua mensagem continua aqui, então você pode tentar de novo.",
+    "lib.errors.homeChatEmpty": "O Clovy devolveu uma resposta vazia na Home.",
+    "lib.errors.homeChatInvalid": "O Clovy devolveu uma resposta da Home que não conseguiu ler.",
     "lib.errors.timedOut": "A operação expirou.",
     "lib.errors.accountStatusTimeout": "O status da conta demorou demais. Tente de novo.",
     "lib.errors.fileDropUnreadable": "Não foi possível ler o arquivo arrastado.",

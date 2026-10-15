@@ -16,6 +16,7 @@ export {
   formatList,
   formatNumber,
   intlLocale,
+  isEnglishLocale,
   type MessageKey,
   t,
   type TranslateParams,

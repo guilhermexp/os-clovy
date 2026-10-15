@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useT } from "../../i18n";
+import { formatDate, useT } from "../../i18n";
 import {
   CODING_AGENT_NAMES,
   CODING_AGENT_SOURCE_FIELDS,
@@ -62,10 +62,7 @@ export function CodingAgentSourcesSection({
     } else if (status.lastError) {
       statusLine = t("codingAgents.settings.error", { message: status.lastError });
     } else if (status.lastScanAt) {
-      const time = new Date(status.lastScanAt).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
+      const time = formatDate(status.lastScanAt, { hour: "2-digit", minute: "2-digit" });
       statusLine = t("codingAgents.settings.lastScan", { time });
     }
   }

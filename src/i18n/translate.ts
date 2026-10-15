@@ -18,13 +18,20 @@ function pluralRules(locale: InterfaceLocale) {
 }
 
 /**
- * The BCP 47 tag handed to `Intl` formatters. English keeps `undefined` (the
- * system's regional format), which is what Clovy has always shown, so English
- * users see no change in their dates and numbers. Portuguese formats as pt-BR
- * so "26 de set." and "1.234,5" match the words around them.
+ * The BCP 47 tag handed to `Intl` formatters: always the interface language,
+ * never the system's. Weekday and month names, AM/PM, and separators must
+ * match the words around them, so an English UI on a Portuguese system reads
+ * "Monday at 8:00 AM" and a Portuguese UI on an English system reads
+ * "segunda-feira às 08:00" (ADR-0061).
  */
-export function intlLocale(locale: InterfaceLocale = getInterfaceLocale()): string | undefined {
-  return locale === "en" ? undefined : locale;
+export function intlLocale(locale: InterfaceLocale = getInterfaceLocale()): string {
+  return locale;
+}
+
+/** Whether `locale` is English, where copy keeps the historical fixed shapes
+ * (raw digits, `toFixed` decimals, `$1.75`). */
+export function isEnglishLocale(locale: InterfaceLocale = getInterfaceLocale()): boolean {
+  return locale === "en";
 }
 
 export function formatNumber(
@@ -55,7 +62,7 @@ export function formatList(
   options?: Intl.ListFormatOptions,
   locale: InterfaceLocale = getInterfaceLocale(),
 ) {
-  return new Intl.ListFormat(intlLocale(locale) ?? "en", options).format(items);
+  return new Intl.ListFormat(intlLocale(locale), options).format(items);
 }
 
 function lookup(locale: InterfaceLocale, key: string): Message | undefined {
@@ -77,7 +84,7 @@ function selectPlural(message: PluralMessage, count: number, locale: InterfaceLo
  * locale); other languages format with their own separators ("1.234 notas").
  */
 export function formatParamNumber(value: number, locale: InterfaceLocale) {
-  return intlLocale(locale) ? formatNumber(value, undefined, locale) : String(value);
+  return isEnglishLocale(locale) ? String(value) : formatNumber(value, undefined, locale);
 }
 
 const PLACEHOLDER = /\{(\w+)\}/g;

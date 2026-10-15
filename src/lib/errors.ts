@@ -1,10 +1,67 @@
-import { t } from "../i18n/translate";
+import { type MessageKey, t, type TranslateParams } from "../i18n/translate";
+
+/** Stable native error codes (Rust `AppError`, dictation helper events) whose
+ * English message is replaced by interface-language copy. Rust and Swift keep
+ * writing English; the code is the contract and the message is only the
+ * fallback for codes without an entry. */
+const ERROR_CODE_MESSAGES: Record<string, MessageKey> = {
+  // Dictation helper (mac-dictation-helper/main.swift)
+  recording_start_busy: "hud.error.recordingStartBusy",
+  already_listening: "hud.error.alreadyListening",
+  not_listening: "hud.error.notListening",
+  microphone_permission_missing: "hud.error.microphonePermissionMissing",
+  audio_start_failed: "hud.error.audioStartFailed",
+  missing_recording: "hud.error.missingRecording",
+  empty_transcript: "hud.error.emptyTranscript",
+  paste_target_unavailable: "hud.error.pasteManually",
+  accessibility_permission_missing: "hud.error.pasteManually",
+  pasteboard_write_failed: "hud.error.clipboardWriteFailed",
+  dictation_recovery_copy_failed: "hud.error.recoveryCopyFailed",
+  dictation_recovery_clipboard: "hud.error.recoveryClipboard",
+  invalid_input: "hud.error.helperCommandInvalid",
+  unknown_command: "hud.error.helperCommandInvalid",
+  invalid_shortcut: "hud.error.shortcutInvalid",
+  shortcut_monitor_unavailable: "hud.error.shortcutMonitorUnavailable",
+  shortcut_fn_chord_unsupported: "hud.error.shortcutFnChordUnsupported",
+  shortcut_register_failed: "hud.error.shortcutRegisterFailed",
+  escape_cancel_unavailable: "hud.error.escapeCancelUnavailable",
+  // Desktop dictation pipeline (src-tauri/src/dictation.rs)
+  no_speech: "hud.error.noSpeech",
+  dictation_helper_unavailable: "hud.error.helperUnavailable",
+  not_signed_in: "hud.error.notSignedIn",
+  dictation_recovery_unavailable: "hud.error.recoveryUnavailable",
+  dictation_response_invalid: "hud.error.responseInvalid",
+  dictation_audio_without_text: "hud.error.audioWithoutText",
+  dictation_provider_not_configured: "hud.error.providerNotConfigured",
+  dictation_cleanup_timeout: "hud.error.cleanupTimeout",
+  dictation_history_save_failed: "hud.error.historySaveFailed",
+  dictation_recording_path_missing: "hud.error.recordingPathMissing",
+  hotkey_registration_failed: "hud.error.hotkeyRegistrationFailed",
+  // Home conversation (src-tauri/src/clovy_api.rs)
+  home_chat_failed: "lib.errors.homeChatFailed",
+  home_chat_current_research_required: "lib.errors.homeChatResearchRequired",
+  home_chat_empty: "lib.errors.homeChatEmpty",
+  home_chat_invalid: "lib.errors.homeChatInvalid",
+};
+
+/** Interface-language copy for a native error code, or the native message
+ * when the code has no entry. `params` fills placeholders such as
+ * `{shortcut}`. */
+export function messageForErrorCode(
+  code: string | undefined,
+  fallback: string,
+  params?: TranslateParams,
+): string {
+  const key = code ? ERROR_CODE_MESSAGES[code] : undefined;
+  return key ? t(key, params) : fallback;
+}
 
 /** Human-readable message from a thrown value — Tauri command errors arrive
- * as objects with a `message` field, everything else falls back to String. */
+ * as objects with a `message` field (translated by `code` when Clovy knows
+ * it), everything else falls back to String. */
 export function messageFromError(err: unknown) {
   if (err && typeof err === "object" && "message" in err) {
-    return String((err as { message: unknown }).message);
+    return messageForErrorCode(errorCode(err), String((err as { message: unknown }).message));
   }
   return String(err);
 }

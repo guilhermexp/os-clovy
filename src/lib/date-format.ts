@@ -31,23 +31,43 @@ export function setStoredDateFormat(preference: DateFormatPreference) {
   );
 }
 
+/**
+ * A short calendar date ("Oct 15", "15 de out."). Month names always come from
+ * the interface language; the preference only picks the day/month order, and
+ * `system` takes that order from the system's regional format.
+ */
 export function formatCalendarDate(
   date: Date,
   preference: DateFormatPreference,
   locales: Intl.LocalesArgument = intlLocale(),
+  systemLocales: Intl.LocalesArgument = undefined,
 ) {
   const normalizedPreference = normalizeDateFormatPreference(preference);
   const formatter = new Intl.DateTimeFormat(locales, {
     month: "short",
     day: "numeric",
   });
-  if (normalizedPreference === "system") return formatter.format(date);
+  let order = normalizedPreference;
+  if (order === "system") {
+    order = dayMonthOrder(systemLocales);
+    // The language's own pattern keeps its connectors ("15 de out.") whenever
+    // it already reads in the system's order.
+    if (dayMonthOrder(locales) === order) return formatter.format(date);
+  }
 
   // Format each component on its own so locale-specific units stay attached
   // when their order is forced (for example, Japanese `7月` and `9日`).
   const month = new Intl.DateTimeFormat(locales, { month: "short" }).format(date);
   const day = new Intl.DateTimeFormat(locales, { day: "numeric" }).format(date);
-  return normalizedPreference === "month-first" ? `${month} ${day}` : `${day} ${month}`;
+  return order === "month-first" ? `${month} ${day}` : `${day} ${month}`;
+}
+
+/** Whether a locale writes the day or the month first in a short date. */
+function dayMonthOrder(locales: Intl.LocalesArgument): "month-first" | "day-first" {
+  const parts = new Intl.DateTimeFormat(locales, { month: "short", day: "numeric" })
+    .formatToParts(new Date(2000, 6, 9))
+    .map((part) => part.type);
+  return parts.indexOf("day") < parts.indexOf("month") ? "day-first" : "month-first";
 }
 
 export function normalizeDateFormatPreference(value: unknown): DateFormatPreference {

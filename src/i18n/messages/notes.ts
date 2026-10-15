@@ -72,6 +72,16 @@ export default defineMessages({
       "Billing is temporarily unavailable. Please try again in a moment.",
     "notes.failure.providerFailed": "The transcription provider could not process this audio.",
     "notes.failure.serviceBusy": "The service is busy right now. Wait a minute, then retry.",
+    "notes.failure.silenceSystem":
+      "The system audio recorded silence for the whole session. Check that audio was playing and that system audio capture is enabled.",
+    "notes.failure.silenceMicrophone":
+      "The microphone recorded silence for the whole session. Check that the right microphone is selected in Settings and that macOS input volume is up.",
+    "notes.failure.billingTemporarilyUnavailable":
+      "Billing is temporarily unavailable. Please try again in a moment.",
+    "notes.failure.generationBusy":
+      "Your recording was transcribed, but note generation is busy right now. Your transcript is saved.",
+    "notes.failure.generationFailed":
+      "Your recording was transcribed, but Clovy couldn't generate the note. Your transcript is saved.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
     "notes.failure.balanceRanOut":
       "Your balance ran out. Your recording is saved locally, so {action} and retry.",
@@ -400,6 +410,16 @@ export default defineMessages({
       "A cobrança está temporariamente indisponível. Tente de novo em instantes.",
     "notes.failure.providerFailed": "O provedor de transcrição não conseguiu processar este áudio.",
     "notes.failure.serviceBusy": "O serviço está ocupado agora. Aguarde um minuto e tente de novo.",
+    "notes.failure.silenceSystem":
+      "O áudio do sistema gravou silêncio durante toda a sessão. Confira se havia áudio tocando e se a captura do áudio do sistema está ativada.",
+    "notes.failure.silenceMicrophone":
+      "O microfone gravou silêncio durante toda a sessão. Confira se o microfone certo está selecionado nos Ajustes e se o volume de entrada do macOS está alto.",
+    "notes.failure.billingTemporarilyUnavailable":
+      "A cobrança está temporariamente indisponível. Tente de novo em instantes.",
+    "notes.failure.generationBusy":
+      "Sua gravação foi transcrita, mas a geração de notas está ocupada agora. Sua transcrição está salva.",
+    "notes.failure.generationFailed":
+      "Sua gravação foi transcrita, mas o Clovy não conseguiu gerar a nota. Sua transcrição está salva.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
     "notes.failure.balanceRanOut":
       "Seu saldo acabou. Sua gravação está salva localmente, então é só {action} e tentar de novo.",

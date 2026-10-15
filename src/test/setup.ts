@@ -19,22 +19,27 @@ vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: vi.fn(async () => undefined),
 }));
 
-// English formats with the system's regional format (`intlLocale()` returns
-// undefined), so a formatter without a locale follows the machine's LANG and
-// a pt-BR machine reads "Segunda-feira" and "10.000". Pin that default to
-// en-US so every suite formats the same on every machine; an explicit locale
-// (Portuguese) still wins.
+// A formatter without a locale follows the machine's LANG, so a pt-BR machine
+// would read "Segunda-feira" and "10.000" wherever code formats with the
+// system's locale. Pin that default to en-US so every suite formats the same
+// on every machine; an explicit locale (the interface language) still wins.
+// A suite that proves the interface language beats the system's sets
+// `globalThis.__clovyTestSystemLocale` to a different tag for its duration.
 const TEST_DEFAULT_LOCALE = "en-US";
+declare global {
+  var __clovyTestSystemLocale: string | undefined;
+}
+const testSystemLocale = () => globalThis.__clovyTestSystemLocale ?? TEST_DEFAULT_LOCALE;
 function withTestDefaultLocale<T extends object>(formatter: T): T {
   return new Proxy(formatter, {
     construct: (target, [locales, ...rest]) =>
       Reflect.construct(target as new (...args: unknown[]) => object, [
-        locales ?? TEST_DEFAULT_LOCALE,
+        locales ?? testSystemLocale(),
         ...rest,
       ]),
     apply: (target, thisArg, [locales, ...rest]) =>
       Reflect.apply(target as (...args: unknown[]) => unknown, thisArg, [
-        locales ?? TEST_DEFAULT_LOCALE,
+        locales ?? testSystemLocale(),
         ...rest,
       ]),
   });
@@ -59,7 +64,7 @@ for (const method of ["toLocaleString", "toLocaleDateString", "toLocaleTimeStrin
     locales?: Intl.LocalesArgument,
     options?: Intl.DateTimeFormatOptions,
   ) {
-    return native.call(this, locales ?? TEST_DEFAULT_LOCALE, options);
+    return native.call(this, locales ?? testSystemLocale(), options);
   };
 }
 const nativeNumberToLocaleString = Number.prototype.toLocaleString;
@@ -68,7 +73,7 @@ Number.prototype.toLocaleString = function (
   locales?: Intl.LocalesArgument,
   options?: Intl.NumberFormatOptions,
 ) {
-  return nativeNumberToLocaleString.call(this, locales ?? TEST_DEFAULT_LOCALE, options);
+  return nativeNumberToLocaleString.call(this, locales ?? testSystemLocale(), options);
 };
 
 // jsdom ships no ResizeObserver; the SegmentedControl relies on one.

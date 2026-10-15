@@ -104,8 +104,12 @@ describe("lib copy in Brazilian Portuguese", () => {
     expect(humanizeSchedule("0 8 * * 1-4")).toBe("De segunda-feira a quinta-feira às 08:00");
     expect(humanizeSchedule("0 9 1,15 * *")).toBe("Todo mês nos dias 1 e 15 às 09:00");
     expect(compactScheduleLabel("0 9 * * 1-5")).toBe("Todo dia útil 09:00");
-    // Non-cron schedules are still returned verbatim.
-    expect(humanizeSchedule("every 30m")).toBe("every 30m");
+    // The stored interval grammar stays English on disk but reads in Portuguese.
+    expect(humanizeSchedule("every 30m")).toBe("A cada 30 minutos");
+    expect(humanizeSchedule("every 2h")).toBe("A cada 2 horas");
+    expect(compactScheduleLabel("every 30m")).toBe("A cada 30 minutos");
+    // Free text is still returned verbatim.
+    expect(humanizeSchedule("every day at 9:00")).toBe("every day at 9:00");
   });
 
   it("translates user-visible error messages", () => {

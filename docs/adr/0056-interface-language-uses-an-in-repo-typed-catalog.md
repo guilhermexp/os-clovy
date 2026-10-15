@@ -71,3 +71,9 @@ Constraints that shaped the design:
   UI state such as the settings page being used to switch), and keeping the
   preference in Rust (the native side would need a new command surface while
   every other appearance preference already lives in webview storage).
+
+## Addendum (2026-10-15)
+
+Decision 4 (formatting) is superseded by
+[ADR-0061](0061-dates-and-numbers-follow-the-interface-language.md): `Intl`
+always formats in the interface language, never the system locale.

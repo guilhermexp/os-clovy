@@ -1,4 +1,4 @@
-import { formatNumber, intlLocale } from "../../i18n";
+import { formatNumber, intlLocale, isEnglishLocale } from "../../i18n";
 
 export function formatBytes(value: number | null | undefined) {
   if (!value) return "0 B";
@@ -12,9 +12,9 @@ export function formatBytes(value: number | null | undefined) {
   const amount =
     size >= 10 || unit === 0
       ? Math.round(size)
-      : intlLocale()
-        ? formatNumber(size, { minimumFractionDigits: 1, maximumFractionDigits: 1 })
-        : size.toFixed(1);
+      : isEnglishLocale()
+        ? size.toFixed(1)
+        : formatNumber(size, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   return `${amount} ${units[unit]}`;
 }
 

@@ -1,4 +1,4 @@
-import { formatNumber, intlLocale, t } from "../i18n/translate";
+import { formatNumber, isEnglishLocale, t } from "../i18n/translate";
 import type { ProviderModelDto } from "./tauri";
 
 export function pricingLabel(model: ProviderModelDto) {
@@ -74,7 +74,7 @@ export function formatCreditsAsUsd(credits: number) {
  * the same amount and precision as US dollars in their own convention
  * ("US$ 1,75"), so the currency never changes, only its notation. */
 function usd(amount: string): string {
-  if (intlLocale() === undefined) return `$${amount}`;
+  if (isEnglishLocale()) return `$${amount}`;
   const digits = amount.split(".")[1]?.length ?? 0;
   return formatNumber(Number(amount), {
     style: "currency",

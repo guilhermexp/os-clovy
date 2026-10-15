@@ -107,6 +107,36 @@ describe("HUD windows in pt-BR", () => {
     expect(document.querySelector("#hud-status")).toHaveTextContent("Pasting into Notes");
   });
 
+  it("words dictation errors by code, keeping the native message as fallback", async () => {
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+
+    await mocks.listeners.get("dictation-event")?.({
+      payload: JSON.stringify({
+        type: "error",
+        payload: {
+          code: "accessibility_permission_missing",
+          message:
+            "Clovy couldn't paste automatically. Your transcript is on the clipboard, so you can paste it with Cmd+V.",
+        },
+      }),
+    });
+    await flush();
+    expect(document.querySelector("#hud-error-text")).toHaveTextContent(
+      "O Clovy não conseguiu colar automaticamente. Sua transcrição está na área de transferência, então você pode colar com Cmd+V.",
+    );
+
+    await mocks.listeners.get("dictation-event")?.({
+      payload: JSON.stringify({
+        type: "error",
+        payload: { code: "provider_said_no", message: "Upstream said no." },
+      }),
+    });
+    await flush();
+    expect(document.querySelector("#hud-error-text")).toHaveTextContent("Upstream said no.");
+  });
+
   it("translates the persistent destination name and unknown fallback", async () => {
     loadPage("hud.html");
     await import("../hud");
