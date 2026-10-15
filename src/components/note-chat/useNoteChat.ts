@@ -154,19 +154,19 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         payload.method === "run.completed" ||
         payload.method === "run.cancelled" ||
         payload.method === "run.failed";
-      dispatchAgentSessionStatus({
-        sessionId: payload.sessionId,
-        title: projection.session?.title ?? "Note chat",
-        status:
-          payload.method === "run.completed"
-            ? "completed"
-            : payload.method === "run.cancelled"
-              ? "cancelled"
-              : payload.method === "run.failed"
-                ? "failed"
+      // The App-level run relay announces failures of every session.
+      if (payload.method !== "run.failed") {
+        dispatchAgentSessionStatus({
+          sessionId: payload.sessionId,
+          title: projection.session?.title ?? "Note chat",
+          status:
+            payload.method === "run.completed"
+              ? "completed"
+              : payload.method === "run.cancelled"
+                ? "cancelled"
                 : "running",
-        ...(payload.method === "run.failed" ? { summary: payload.data.message } : {}),
-      });
+        });
+      }
       if (terminal) void hydrate(payload.sessionId).catch(() => undefined);
     }).then((dispose) => {
       if (disposed) dispose();

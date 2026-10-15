@@ -1,6 +1,6 @@
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 import { t } from "../i18n/translate";
-import { dispatchAgentRunSettled } from "./agent-events";
+import { dispatchAgentRunSettled, dispatchAgentSessionStatus } from "./agent-events";
 import {
   loadQueuedAgentFollowUps,
   reconcileConsumedAgentFollowUp,
@@ -36,9 +36,11 @@ export type AgentRunSettlementRelayOptions = {
  * Only `run.completed` settles, and only once the session is really idle: a
  * completed run whose session still holds a queued follow-up (not consumed
  * as live steering) continues automatically, so the next run's completion
- * announces instead. Failures already travel as a `failed` session status and
- * an explicit Stop stays silent, matching the run monitor this replaces.
- * Streamed frames only track which runs are still active.
+ * announces instead. A failed run of any session, open or in the
+ * background, is announced here once as a `failed` session status (the
+ * surfaces showing the session leave that status to this relay); an explicit
+ * Stop stays silent, matching the run monitor this replaces. Streamed frames
+ * only track which runs are still active.
  */
 export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOptions) {
   const listen = options.listen ?? (tauriListen as ListenToRuntimeEvents);
@@ -78,6 +80,17 @@ export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOpt
     activeRuns.delete(payload.runId);
     consumedSteering.delete(payload.runId);
     rememberFinished(payload.runId);
+    if (payload.method === "run.failed") {
+      const title = options.resolveTitle(payload.sessionId)?.trim();
+      dispatchAgentSessionStatus({
+        sessionId: payload.sessionId,
+        ...(title ? { title } : {}),
+        status: "failed",
+        summary: payload.data.message,
+        activeCount: activeRuns.size,
+      });
+      return;
+    }
     if (payload.method !== "run.completed") return;
     const continuation = reconcileConsumedAgentFollowUp(
       readQueuedFollowUps(),

@@ -1140,7 +1140,9 @@ export function AgentWorkspace({
       backgroundStatus.delete(payload.sessionId);
       setProjection((current) => applyAgentRuntimeEvent(current, payload));
       if (announcedStatusRef.current.get(payload.sessionId) !== status) {
-        announceSessionStatus({ sessionId: payload.sessionId, status });
+        // The App-level run relay announces failures of every session.
+        if (status === "failed") announcedStatusRef.current.set(payload.sessionId, status);
+        else announceSessionStatus({ sessionId: payload.sessionId, status });
       }
       if (terminal) {
         setSubmitting(false);

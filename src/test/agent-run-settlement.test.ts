@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AGENT_RUN_SETTLED_EVENT, type AgentRunSettledDetail } from "../lib/agent-events";
+import {
+  AGENT_RUN_SETTLED_EVENT,
+  AGENT_SESSION_STATUS_EVENT,
+  type AgentRunSettledDetail,
+  type AgentSessionStatusDetail,
+} from "../lib/agent-events";
 import { saveQueuedAgentFollowUps } from "../lib/agent-follow-up-queue";
 import type { AgentRuntimeEvent } from "../lib/agent-runtime-contract";
 import { startAgentRunSettlementRelay } from "../lib/agent-run-settlement";
@@ -58,13 +63,18 @@ function startRelay(titles: Record<string, string> = {}) {
   const settled: AgentRunSettledDetail[] = [];
   const onSettled = (event: Event) =>
     settled.push((event as CustomEvent<AgentRunSettledDetail>).detail);
+  const statuses: AgentSessionStatusDetail[] = [];
+  const onStatus = (event: Event) =>
+    statuses.push((event as CustomEvent<AgentSessionStatusDetail>).detail);
   window.addEventListener(AGENT_RUN_SETTLED_EVENT, onSettled);
+  window.addEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
   cleanups.push(() => {
     dispose();
     window.removeEventListener(AGENT_RUN_SETTLED_EVENT, onSettled);
+    window.removeEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
   });
   const send = (event: AgentRuntimeEvent) => handler?.({ payload: event });
-  return { send, settled };
+  return { send, settled, statuses };
 }
 
 const cleanups: Array<() => void> = [];
@@ -154,15 +164,36 @@ describe("agent run settlement relay", () => {
     expect(settled[0]).toMatchObject({ sessionId: "session-1", title: "", activeCount: 1 });
   });
 
-  it("stays silent for failed and cancelled runs", async () => {
-    const { send, settled } = startRelay();
+  it("announces a failed run once, also for a session in the background", async () => {
+    const { send, settled, statuses } = startRelay({ "session-2": "Background task" });
     await Promise.resolve();
 
+    // session-1 is the one on screen; session-2 runs in the background.
     send(frame("session-1", "run-1", "run.started", 1));
-    send(frame("session-1", "run-1", "run.failed", 2));
+    send(frame("session-2", "run-2", "run.started", 1));
+    send(frame("session-2", "run-2", "run.failed", 2));
+    send(frame("session-2", "run-2", "run.failed", 3));
+
+    expect(settled).toHaveLength(0);
+    expect(statuses).toEqual([
+      {
+        sessionId: "session-2",
+        title: "Background task",
+        status: "failed",
+        summary: "boom",
+        activeCount: 1,
+      },
+    ]);
+  });
+
+  it("stays silent for a cancelled run", async () => {
+    const { send, settled, statuses } = startRelay();
+    await Promise.resolve();
+
     send(frame("session-2", "run-2", "run.started", 1));
     send(frame("session-2", "run-2", "run.cancelled", 2));
 
     expect(settled).toHaveLength(0);
+    expect(statuses).toHaveLength(0);
   });
 });
