@@ -257,6 +257,18 @@ impl AgentChatCompletionsResponse {
     }
 }
 
+#[cfg(test)]
+impl AgentChatCompletionsResponse {
+    pub(crate) fn from_upstream_for_test(upstream: reqwest::Response) -> Self {
+        Self {
+            status: upstream.status().as_u16(),
+            content_type: String::new(),
+            route: AgentModelRouteMetadata::default(),
+            upstream,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDto {

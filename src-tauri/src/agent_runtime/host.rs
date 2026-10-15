@@ -55,9 +55,19 @@ pub struct AgentRuntimeHost {
     startup: Mutex<()>,
     request_sequence: AtomicI64,
     interruption_resolutions: Mutex<HashMap<String, Weak<Mutex<()>>>>,
-    model_streams: Arc<Mutex<HashMap<String, ModelStream>>>,
+    model_streams: ModelStreams,
     model_scopes: Arc<Mutex<HashSet<String>>>,
     cancellations: ToolCancellationRegistry,
+}
+
+/// Open model streams by stream id. The map lock is held only to look a
+/// stream up, insert, or remove it; each stream has its own lock for the
+/// network wait, so concurrent streams never queue behind each other.
+type ModelStreams = Arc<Mutex<HashMap<String, ModelStreamSlot>>>;
+
+struct ModelStreamSlot {
+    run_id: String,
+    stream: Arc<Mutex<ModelStream>>,
 }
 
 struct ModelStream {
@@ -65,7 +75,6 @@ struct ModelStream {
     route: crate::clovy_api::AgentModelRouteMetadata,
     buffer: Vec<u8>,
     done: bool,
-    run_id: String,
 }
 
 struct RunningRuntime {
@@ -82,7 +91,7 @@ struct RuntimeReaderContext {
     repository: AgentRepository,
     stdin: Arc<Mutex<ChildStdin>>,
     pending: PendingRequests,
-    model_streams: Arc<Mutex<HashMap<String, ModelStream>>>,
+    model_streams: ModelStreams,
     model_scopes: Arc<Mutex<HashSet<String>>>,
     cancellations: ToolCancellationRegistry,
     expected_exit: Arc<AtomicBool>,
@@ -562,7 +571,7 @@ fn runtime_event_releases_run(method: Option<&str>) -> bool {
 async fn handle_runtime_request(
     app: &AppHandle,
     repository: &AgentRepository,
-    model_streams: &Arc<Mutex<HashMap<String, ModelStream>>>,
+    model_streams: &ModelStreams,
     model_scopes: &Arc<Mutex<HashSet<String>>>,
     cancellations: &ToolCancellationRegistry,
     frame: &RpcFrame,
@@ -679,12 +688,14 @@ async fn handle_runtime_request(
                 }
                 model_streams.lock().await.insert(
                     stream_id.clone(),
-                    ModelStream {
-                        response,
-                        route,
-                        buffer: Vec::new(),
-                        done: false,
+                    ModelStreamSlot {
                         run_id: frame.run_id.clone(),
+                        stream: Arc::new(Mutex::new(ModelStream {
+                            response,
+                            route,
+                            buffer: Vec::new(),
+                            done: false,
+                        })),
                     },
                 );
                 drop(scopes);
@@ -728,7 +739,7 @@ async fn handle_runtime_request(
 }
 
 async fn cancel_model_scope(
-    model_streams: &Arc<Mutex<HashMap<String, ModelStream>>>,
+    model_streams: &ModelStreams,
     model_scopes: &Arc<Mutex<HashSet<String>>>,
     cancellations: &ToolCancellationRegistry,
     run_id: &str,
@@ -737,12 +748,12 @@ async fn cancel_model_scope(
     model_streams
         .lock()
         .await
-        .retain(|_, stream| stream.run_id != run_id);
+        .retain(|_, slot| slot.run_id != run_id);
     cancellations.cancel(run_id).await;
 }
 
 async fn cancel_all_model_scopes(
-    model_streams: &Arc<Mutex<HashMap<String, ModelStream>>>,
+    model_streams: &ModelStreams,
     model_scopes: &Arc<Mutex<HashSet<String>>>,
     cancellations: &ToolCancellationRegistry,
 ) {
@@ -761,17 +772,32 @@ fn model_gateway_error_message(body: &Value) -> &str {
         .unwrap_or("Clovy's model routing service rejected the request.")
 }
 
-async fn poll_model_stream(
-    streams: &Arc<Mutex<HashMap<String, ModelStream>>>,
+async fn poll_model_stream(streams: &ModelStreams, stream_id: &str) -> Result<Value, AppError> {
+    let stream = streams
+        .lock()
+        .await
+        .get(stream_id)
+        .map(|slot| slot.stream.clone())
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_model_stream_not_found",
+                "Model stream is no longer available.",
+            )
+        })?;
+    let polled = poll_stream_once(&mut *stream.lock().await, stream_id).await;
+    // A finished or failed stream cannot be polled again.
+    if !matches!(polled, Ok((_, false))) {
+        streams.lock().await.remove(stream_id);
+    }
+    polled.map(|(result, _)| result)
+}
+
+/// Waits up to 100 ms for the next chunk; returns the poll result and
+/// whether the stream is done.
+async fn poll_stream_once(
+    stream: &mut ModelStream,
     stream_id: &str,
-) -> Result<Value, AppError> {
-    let mut streams = streams.lock().await;
-    let stream = streams.get_mut(stream_id).ok_or_else(|| {
-        AppError::new(
-            "agent_model_stream_not_found",
-            "Model stream is no longer available.",
-        )
-    })?;
+) -> Result<(Value, bool), AppError> {
     let mut chunks = Vec::new();
     if !stream.done {
         match tokio::time::timeout(
@@ -793,12 +819,10 @@ async fn poll_model_stream(
         }
     }
     let done = stream.done;
-    let result =
-        json!({ "streamId": stream_id, "chunks": chunks, "done": done, "route": stream.route });
-    if done {
-        streams.remove(stream_id);
-    }
-    Ok(result)
+    Ok((
+        json!({ "streamId": stream_id, "chunks": chunks, "done": done, "route": stream.route }),
+        done,
+    ))
 }
 
 fn parse_sse_chunks(stream: &mut ModelStream, output: &mut Vec<Value>) -> Result<(), AppError> {
@@ -1556,6 +1580,98 @@ fn redact_key_tokens(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model stream whose upstream answers with `body` and then closes.
+    async fn model_stream(body: &'static str) -> ModelStreamSlot {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        });
+        let upstream = crate::http_client::base_client_builder()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        ModelStreamSlot {
+            run_id: "run-1".into(),
+            stream: Arc::new(Mutex::new(ModelStream {
+                response: crate::clovy_api::AgentChatCompletionsResponse::from_upstream_for_test(
+                    upstream,
+                ),
+                route: Default::default(),
+                buffer: Vec::new(),
+                done: false,
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_model_stream_is_removed_from_the_open_streams() {
+        let streams = ModelStreams::default();
+        let slot = model_stream("data: {not json}\n\n").await;
+        streams.lock().await.insert("broken".into(), slot);
+
+        let mut error = None;
+        for _ in 0..50 {
+            match poll_model_stream(&streams, "broken").await {
+                Ok(result) => assert_eq!(result["done"], false),
+                Err(failure) => {
+                    error = Some(failure);
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(error.unwrap().code, "agent_model_stream_invalid");
+        assert!(streams.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_model_stream_is_polled_while_another_stream_waits_on_the_network() {
+        let streams = ModelStreams::default();
+        let waiting = model_stream("").await;
+        let waiting_stream = waiting.stream.clone();
+        streams.lock().await.insert("waiting".into(), waiting);
+        streams
+            .lock()
+            .await
+            .insert("ready".into(), model_stream("data: {\"n\":1}\n\n").await);
+        // Stands in for a poll of `waiting` that is blocked on its upstream.
+        let _in_flight = waiting_stream.lock().await;
+
+        let mut chunks = Vec::new();
+        let mut done = false;
+        for _ in 0..50 {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                poll_model_stream(&streams, "ready"),
+            )
+            .await
+            .expect("another stream's poll held this one up")
+            .unwrap();
+            chunks.extend(result["chunks"].as_array().unwrap().iter().cloned());
+            if result["done"] == true {
+                done = true;
+                break;
+            }
+        }
+
+        assert!(done);
+        assert_eq!(chunks, vec![json!({ "n": 1 })]);
+        assert!(streams.lock().await.contains_key("waiting"));
+    }
 
     #[test]
     fn consumed_steering_uses_message_id_as_its_persisted_external_id() {
