@@ -767,9 +767,8 @@ async fn cancel_all_model_scopes(
 }
 
 fn model_gateway_error_message(body: &Value) -> String {
-    crate::http_client::json_error_message(body, MODEL_GATEWAY_ERROR_MAX_CHARS).unwrap_or_else(
-        || "Clovy's model routing service rejected the request.".to_string(),
-    )
+    crate::http_client::json_error_message(body, MODEL_GATEWAY_ERROR_MAX_CHARS)
+        .unwrap_or_else(|| "Clovy's model routing service rejected the request.".to_string())
 }
 
 async fn poll_model_stream(streams: &ModelStreams, stream_id: &str) -> Result<Value, AppError> {
@@ -1355,7 +1354,6 @@ async fn write_frame(stdin: &Arc<Mutex<ChildStdin>>, frame: &RpcFrame) -> Result
         .await
         .map_err(|error| AppError::new("agent_runtime_disconnected", error.to_string()))
 }
-
 
 fn approval_command(tool_name: &str, arguments: Option<&Value>) -> String {
     let details = match arguments {

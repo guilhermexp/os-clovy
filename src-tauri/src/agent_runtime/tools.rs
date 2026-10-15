@@ -455,12 +455,17 @@ async fn search_clovy_notes_for_profile(
     )
     .bind(profile).bind(&pattern).bind(&pattern).bind(&pattern).bind(&pattern)
     .fetch_all(pool).await?;
-    let notes: Vec<Value> = rows.into_iter().map(|row| json!({
-        "id": row.get::<String, _>("id"), "title": row.get::<String, _>("title"),
-        "note": search_excerpt(&row.get::<String, _>("note"), query_text),
-        "transcript": search_excerpt(&row.get::<String, _>("transcript"), query_text),
-        "updatedAt": row.get::<String, _>("updated_at")
-    })).collect();
+    let notes: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<String, _>("id"), "title": row.get::<String, _>("title"),
+                "note": search_excerpt(&row.get::<String, _>("note"), query_text),
+                "transcript": search_excerpt(&row.get::<String, _>("transcript"), query_text),
+                "updatedAt": row.get::<String, _>("updated_at")
+            })
+        })
+        .collect();
     let dictations = query("SELECT id, text, language, created_at FROM dictation_history WHERE profile = ? AND text LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT 20")
         .bind(profile).bind(&pattern).fetch_all(pool).await?;
     let dictations: Vec<Value> = dictations.into_iter().map(|row| json!({
@@ -1636,7 +1641,9 @@ fn spawn_bounded_reader(
 
 /// Waits briefly for EOF, then returns whatever was read; bytes already
 /// captured are never discarded.
-async fn collect_bounded((mut task, output): (tokio::task::JoinHandle<()>, SharedOutput)) -> String {
+async fn collect_bounded(
+    (mut task, output): (tokio::task::JoinHandle<()>, SharedOutput),
+) -> String {
     if tokio::time::timeout(SHELL_PIPE_DRAIN_GRACE, &mut task)
         .await
         .is_err()
@@ -1788,7 +1795,10 @@ mod tests {
         let started = std::time::Instant::now();
 
         let result = run_shell_command(
-            shell(directory.path(), "sleep 60 & echo $! > helper.pid; echo done"),
+            shell(
+                directory.path(),
+                "sleep 60 & echo $! > helper.pid; echo done",
+            ),
             std::future::pending(),
         )
         .await
@@ -1830,7 +1840,10 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        assert!(process_is_gone(helper), "helper {helper} survived cancellation");
+        assert!(
+            process_is_gone(helper),
+            "helper {helper} survived cancellation"
+        );
     }
 
     #[test]
@@ -1963,7 +1976,10 @@ mod tests {
             .await
             .unwrap();
 
-        for excerpt in [&result["notes"][0]["note"], &result["dictations"][0]["text"]] {
+        for excerpt in [
+            &result["notes"][0]["note"],
+            &result["dictations"][0]["text"],
+        ] {
             let excerpt = excerpt.as_str().unwrap();
             assert!(excerpt.contains("needle"));
             assert!(excerpt.starts_with("...") && excerpt.ends_with("..."));

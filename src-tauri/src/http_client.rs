@@ -53,7 +53,10 @@ mod tests {
         assert_eq!(json_error_message(&bare, 100).as_deref(), Some("bare"));
         let envelope = json!({ "error_code": 2001, "message": "top" });
         assert_eq!(json_error_message(&envelope, 100).as_deref(), Some("top"));
-        assert_eq!(json_error_message(&json!({ "error": { "code": 1 } }), 100), None);
+        assert_eq!(
+            json_error_message(&json!({ "error": { "code": 1 } }), 100),
+            None
+        );
         assert_eq!(json_error_message(&json!({ "message": "" }), 100), None);
     }
 

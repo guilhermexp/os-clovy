@@ -5,6 +5,7 @@
 //! that forks helpers (node workers, MCP servers) never leaves an orphan.
 //! Output is capped so a runaway CLI cannot exhaust memory.
 
+use crate::process_group::kill_group;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -12,7 +13,6 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use crate::process_group::kill_group;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 /// Upper bound kept from each of stdout and stderr (and from any output file

@@ -1154,7 +1154,6 @@ impl AgentRepository {
     }
 }
 
-
 fn session_from_row(row: SqliteRow) -> AgentSessionDto {
     AgentSessionDto {
         id: row.get("id"),

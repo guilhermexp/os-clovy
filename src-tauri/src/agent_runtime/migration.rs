@@ -1392,7 +1392,6 @@ fn timestamp(value: f64) -> String {
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{
