@@ -51,6 +51,7 @@ import {
   providerModelSettings,
   type LiveTranscriptEventDto,
   type MeetingEndStatus,
+  type NoteDto,
 } from "../lib/tauri";
 import { preloadRecordingSounds } from "../lib/recording-sounds";
 import { preloadAgentSounds } from "../lib/agent-sounds";
@@ -630,6 +631,7 @@ export function App() {
   const selectedNoteId = selectedNote?.id;
   const visibleEditorNoteId = activeView === "meetings" ? selectedNoteId : undefined;
   const previousVisibleEditorNoteIdRef = useRef<string | undefined>(undefined);
+  const latestNoteRequestRef = useRef(0);
   useEffect(() => {
     const previousNoteId = previousVisibleEditorNoteIdRef.current;
     previousVisibleEditorNoteIdRef.current = visibleEditorNoteId;
@@ -2107,9 +2109,23 @@ export function App() {
     setAgentOrigin(undefined);
   }
 
-  async function handleSelectNote(noteId: string) {
+  // Opening a note overlaps with the next open (fast clicks): only the newest
+  // open's note is shown, and only its failure is reported.
+  async function openLatestNote(noteId: string): Promise<NoteDto | undefined> {
+    const request = ++latestNoteRequestRef.current;
     try {
       const note = await getNote(noteId);
+      return request === latestNoteRequestRef.current ? note : undefined;
+    } catch (err) {
+      if (request === latestNoteRequestRef.current) throw err;
+      return undefined;
+    }
+  }
+
+  async function handleSelectNote(noteId: string) {
+    try {
+      const note = await openLatestNote(noteId);
+      if (!note) return;
       dispatch({ type: "noteLoaded", note });
       setOriginFolderId(undefined);
       setOriginAllNotes(false);
@@ -2123,7 +2139,8 @@ export function App() {
   // the note opens with a "Back to All notes" breadcrumb up top.
   async function handleSelectNoteFromAllNotes(noteId: string) {
     try {
-      const note = await getNote(noteId);
+      const note = await openLatestNote(noteId);
+      if (!note) return;
       dispatch({ type: "noteLoaded", note });
       setOriginFolderId(undefined);
       setOriginAllNotes(true);
