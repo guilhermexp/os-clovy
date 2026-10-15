@@ -468,6 +468,7 @@ pub fn run() {
             mcp_server::mcp_server_status,
             mcp_server::mcp_server_set_enabled,
             chat_engine::chat_engine_catalog,
+            chat_engine::chat_default_engine,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())

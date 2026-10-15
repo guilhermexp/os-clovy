@@ -51,6 +51,43 @@ pub fn cli_for_model(model: &str) -> Option<CliKind> {
         .and_then(CliKind::parse)
 }
 
+/// Note references the composer writes into a message (`@note:<id>`, as
+/// `noteReferenceToken` makes them), in order and without repeats.
+pub fn note_references(message: &str) -> Vec<&str> {
+    let mut ids = Vec::new();
+    let mut rest = message;
+    while let Some(start) = rest.find("@note:") {
+        let after = &rest[start + "@note:".len()..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(after.len());
+        let id = &after[..end];
+        if !id.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+        }
+        rest = &after[end..];
+    }
+    ids
+}
+
+/// A CLI does not know what `@note:<id>` means: a message that references
+/// notes (the note chat panel always references its note) gets a line that
+/// tells it to read them with Clovy's `get_note` tool.
+pub fn with_note_reference_context(message: &str) -> String {
+    let ids = note_references(message);
+    if ids.is_empty() {
+        return message.to_string();
+    }
+    let list = ids
+        .iter()
+        .map(|id| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{message}\n\n(`@note:<id>` refers to a Clovy note. Read each referenced note ({list}) with the `get_note` tool of the Clovy MCP server, passing the id, before answering.)"
+    )
+}
+
 /// Receives a turn's runtime events in order.
 pub trait FrameSink: Send + Sync {
     fn publish(&self, frame: RpcFrame) -> impl Future<Output = ()> + Send;
@@ -172,6 +209,21 @@ pub struct CliTurnRequest {
     pub workspace: PathBuf,
     /// The user's message (with attachment paths already appended).
     pub input: String,
+    pub policy: cli::TurnPolicy,
+}
+
+/// Refuses an unattended turn on a CLI whose tools Clovy cannot confine.
+pub fn check_policy(kind: CliKind, policy: cli::TurnPolicy) -> Result<(), AppError> {
+    if policy == cli::TurnPolicy::Unattended && !cli::supports_unattended(kind) {
+        return Err(AppError::new(
+            "agent_cli_unattended_unsupported",
+            format!(
+                "{} cannot run a routine: Clovy can only limit Claude Code and Codex to read-only tools.",
+                kind.display_name()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolves the CLI on the login-shell PATH and runs the turn in the
@@ -184,6 +236,7 @@ pub async fn start_cli_turn(
     request: CliTurnRequest,
     ticket: TurnTicket,
 ) -> Result<(), AppError> {
+    check_policy(request.kind, request.policy)?;
     let env = crate::llm::shell_env::login_env().await;
     let program = env
         .which(request.kind.id())
@@ -208,6 +261,7 @@ pub async fn start_cli_turn(
         workspace: request.workspace,
         input: request.input,
         mcp,
+        policy: request.policy,
     };
     let sink = AppSink {
         app: app.clone(),
@@ -273,6 +327,46 @@ pub struct EndpointEngineDto {
 pub struct ChatEngineCatalogDto {
     pub clis: Vec<CliEngineDto>,
     pub endpoints: Vec<EndpointEngineDto>,
+}
+
+/// The engine new chat work starts on (sessions, note chat, Home handoffs,
+/// companion sessions; ADR-0062).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDefaultEngineDto {
+    /// The session model id of the CLI chat runs on; `None` when chat is on
+    /// the Clovy agent or an endpoint (callers keep their own default).
+    pub model_id: Option<String>,
+    pub cli: Option<CliKind>,
+    /// Chat is on the legacy Clovy agent only because neither Claude Code
+    /// nor Codex is installed.
+    pub legacy_fallback: bool,
+}
+
+pub fn default_engine_of(
+    settings: &crate::providers::ProviderModelSettings,
+) -> ChatDefaultEngineDto {
+    let cli = match &settings.llm_usage.chat {
+        crate::llm::registry::ProviderRef::Cli { id } => Some(*id),
+        _ => None,
+    };
+    ChatDefaultEngineDto {
+        model_id: cli.map(engine_model_id),
+        cli,
+        legacy_fallback: crate::llm::registry::cli_default_pending(settings),
+    }
+}
+
+/// The default chat engine, after the one-time move to the default CLI
+/// (`crate::providers::ensure_cli_default`). Needs no network.
+#[tauri::command]
+pub async fn chat_default_engine(
+    state: tauri::State<'_, crate::providers::ProviderSettingsState>,
+) -> Result<ChatDefaultEngineDto, AppError> {
+    crate::providers::ensure_cli_default(&state).await;
+    Ok(default_engine_of(&crate::providers::settings_snapshot(
+        &state,
+    )?))
 }
 
 /// The engines a chat session can use: the six CLIs (installed or not, and

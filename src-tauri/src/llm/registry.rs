@@ -171,6 +171,10 @@ pub struct LlmProvidersDto {
     pub endpoints: Vec<LlmEndpointDto>,
     pub usage: LlmUsageSelection,
     pub cli_levels: BTreeMap<CliKind, StructuredOutputLevel>,
+    /// Chat still runs on the legacy Clovy agent only because neither
+    /// Claude Code nor Codex was found ([`apply_cli_default`] retries on the
+    /// next launch).
+    pub cli_default_pending: bool,
 }
 
 impl From<&ProviderModelSettings> for LlmProvidersDto {
@@ -183,6 +187,7 @@ impl From<&ProviderModelSettings> for LlmProvidersDto {
                 .collect(),
             usage: settings.llm_usage.clone(),
             cli_levels: settings.llm_cli_levels.clone(),
+            cli_default_pending: cli_default_pending(settings),
         }
     }
 }
@@ -340,6 +345,45 @@ pub fn migrate_legacy_local_generation(
     settings
 }
 
+/// The CLIs that become the default chat engine, in order of preference.
+pub const DEFAULT_CHAT_CLIS: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
+
+/// The default chat engine on this machine: Claude Code, else Codex, else
+/// none (chat stays on the legacy Clovy agent).
+pub fn default_chat_cli(installed: impl Fn(CliKind) -> bool) -> Option<CliKind> {
+    DEFAULT_CHAT_CLIS.into_iter().find(|kind| installed(*kind))
+}
+
+/// One-time move of chat to the default CLI engine (ADR-0062). Chat on the
+/// Clovy agent, the old default, moves to [`default_chat_cli`]; any other
+/// chat choice (an endpoint or a CLI) is the user's and is kept. The move is
+/// recorded in `llm_cli_default_applied`, so it never runs twice; with
+/// neither CLI installed nothing is recorded and the next launch retries.
+/// An explicit chat choice made later ([`set_usage`], the text-model picker)
+/// also records it. Returns the CLI chat moved to.
+pub fn apply_cli_default(
+    settings: &mut ProviderModelSettings,
+    installed: impl Fn(CliKind) -> bool,
+) -> Option<CliKind> {
+    if settings.llm_cli_default_applied {
+        return None;
+    }
+    if settings.llm_usage.chat != ProviderRef::Clovy {
+        settings.llm_cli_default_applied = true;
+        return None;
+    }
+    let kind = default_chat_cli(installed)?;
+    settings.llm_usage.chat = ProviderRef::Cli { id: kind };
+    settings.llm_cli_default_applied = true;
+    normalize(settings);
+    Some(kind)
+}
+
+/// Chat is on the legacy Clovy agent only because no default CLI was found.
+pub fn cli_default_pending(settings: &ProviderModelSettings) -> bool {
+    !settings.llm_cli_default_applied && settings.llm_usage.chat == ProviderRef::Clovy
+}
+
 /// Drops selections that point at missing endpoints and invalid kinds, then
 /// mirrors the chat selection into the legacy generation fields.
 pub fn normalize(settings: &mut ProviderModelSettings) {
@@ -420,6 +464,10 @@ pub fn set_usage(
         require_json_schema(&registry, &provider)?;
     }
     *settings.llm_usage.slot(usage) = provider;
+    if usage == LlmUsage::Chat {
+        // An explicit chat choice, Clovy included, is never moved again.
+        settings.llm_cli_default_applied = true;
+    }
     normalize(settings);
     Ok(())
 }
@@ -1003,5 +1051,101 @@ mod tests {
         assert_eq!(registry.endpoint_for_model("qwen").unwrap().id, "other");
         assert_eq!(registry.endpoint_for_model("m").unwrap().id, "ep");
         assert!(registry.endpoint_for_model("unknown").is_none());
+    }
+
+    fn chat_on_clovy() -> ProviderModelSettings {
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.llm_usage.chat = ProviderRef::Clovy;
+        settings.llm_cli_default_applied = false;
+        settings
+    }
+
+    #[test]
+    fn llm_chat_moves_once_to_claude_code_when_it_is_installed() {
+        // An existing install whose chat was on the Clovy agent (the old
+        // default), and a new install, which starts there too.
+        let mut settings = chat_on_clovy();
+        let moved = apply_cli_default(&mut settings, |_| true);
+        assert_eq!(moved, Some(CliKind::Claude));
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert!(settings.llm_cli_default_applied);
+        assert!(!cli_default_pending(&settings));
+        // Recorded: a second launch changes nothing, even if the user has
+        // gone back to Clovy since.
+        settings.llm_usage.chat = ProviderRef::Clovy;
+        let before = settings.clone();
+        assert_eq!(apply_cli_default(&mut settings, |_| true), None);
+        assert_eq!(settings, before);
+    }
+
+    #[test]
+    fn llm_chat_moves_to_codex_when_claude_code_is_missing() {
+        let mut settings = chat_on_clovy();
+        let moved = apply_cli_default(&mut settings, |kind| kind == CliKind::Codex);
+        assert_eq!(moved, Some(CliKind::Codex));
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        // Other CLIs never become the default.
+        let mut settings = chat_on_clovy();
+        assert_eq!(
+            apply_cli_default(&mut settings, |kind| kind == CliKind::Pi),
+            None
+        );
+        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+    }
+
+    #[test]
+    fn llm_chat_stays_on_clovy_and_retries_when_no_default_cli_is_installed() {
+        let mut settings = chat_on_clovy();
+        assert_eq!(apply_cli_default(&mut settings, |_| false), None);
+        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+        // Not recorded, so the next launch tries again; the settings view
+        // says why chat is on the legacy agent.
+        assert!(!settings.llm_cli_default_applied);
+        assert!(cli_default_pending(&settings));
+        assert!(LlmProvidersDto::from(&settings).cli_default_pending);
+        assert_eq!(
+            apply_cli_default(&mut settings, |kind| kind == CliKind::Claude),
+            Some(CliKind::Claude)
+        );
+    }
+
+    #[test]
+    fn llm_a_chosen_chat_engine_is_never_moved_to_the_default_cli() {
+        // An endpoint or a CLI the user picked stays.
+        let mut settings = chat_on_clovy();
+        settings.llm_usage.chat = ProviderRef::Cli { id: CliKind::Pi };
+        assert_eq!(apply_cli_default(&mut settings, |_| true), None);
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli { id: CliKind::Pi }
+        );
+        assert!(settings.llm_cli_default_applied);
+        // Choosing Clovy explicitly (with no CLI installed yet) is recorded,
+        // so installing Claude Code later does not override it.
+        let mut settings = chat_on_clovy();
+        set_usage(&mut settings, LlmUsage::Chat, ProviderRef::Clovy, |_| false).unwrap();
+        assert_eq!(apply_cli_default(&mut settings, |_| true), None);
+        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+    }
+
+    #[test]
+    fn llm_settings_saved_before_the_cli_default_are_moved_on_load() {
+        // A settings file from before ADR-0062 has no flag: chat on Clovy is
+        // the old default and is pending the move.
+        let store = MemorySecretStore::default();
+        let settings = load(&legacy_settings_json("venice"), &store);
+        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+        assert!(!settings.llm_cli_default_applied);
+        assert!(cli_default_pending(&settings));
+        let written = serde_json::to_value(&settings).unwrap();
+        assert_eq!(written["llmCliDefaultApplied"], false);
     }
 }

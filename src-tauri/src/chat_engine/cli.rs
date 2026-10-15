@@ -67,6 +67,31 @@ pub fn preassigns_conversation(kind: CliKind) -> bool {
     matches!(kind, CliKind::Pi | CliKind::Copilot)
 }
 
+/// What a turn may do without a person present.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TurnPolicy {
+    /// A chat turn: the CLI's own permission settings apply, and nothing is
+    /// pre-granted.
+    #[default]
+    Interactive,
+    /// A routine (nobody is there to approve anything): read-only tools,
+    /// Clovy's MCP tools, and the web, and nothing else. Only the default
+    /// CLIs ([`supports_unattended`]) run unattended.
+    Unattended,
+}
+
+/// The built-in claude tools an unattended turn has (`--tools`); every other
+/// built-in tool (Bash, Edit, Write, ...) does not exist in that turn.
+pub const UNATTENDED_CLAUDE_TOOLS: &str = "Read,Grep,Glob,WebSearch,WebFetch";
+/// The tools an unattended claude turn may use without asking
+/// (`--allowedTools`): the built-in set above and Clovy's MCP tools.
+pub const UNATTENDED_CLAUDE_ALLOWED: &str = "Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*";
+
+/// CLIs whose tools Clovy can confine to the unattended set per run.
+pub fn supports_unattended(kind: CliKind) -> bool {
+    matches!(kind, CliKind::Claude | CliKind::Codex)
+}
+
 /// One turn, ready to spawn in the session workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnInvocation {
@@ -80,14 +105,18 @@ pub struct TurnInvocation {
 /// Builds one turn. `conversation` is the id to resume (claude, codex, agy,
 /// cursor-agent) or the id Clovy chose (pi, copilot; always `Some` for them).
 /// `mcp` is offered only to CLIs that [`accepts_mcp`]; configuration files go
-/// to `scratch`.
+/// to `scratch`. `policy` [`TurnPolicy::Unattended`] confines claude and
+/// codex to the unattended tool set; callers refuse it for other CLIs
+/// ([`supports_unattended`]).
 pub fn turn_invocation(
     kind: CliKind,
     prompt: &str,
     conversation: Option<&str>,
     mcp: Option<&McpLaunch>,
     scratch: &Path,
+    policy: TurnPolicy,
 ) -> TurnInvocation {
+    let unattended = policy == TurnPolicy::Unattended;
     let mut files = Vec::new();
     let mut remove_env = Vec::new();
     let mut stdin = None;
@@ -112,6 +141,18 @@ pub fn turn_invocation(
                 args.push("--mcp-config".into());
                 args.push(file.display().to_string());
             }
+            if unattended {
+                // Only the read-only built-ins exist, only they and Clovy's
+                // MCP tools run without a prompt (nobody can answer one), and
+                // the user's other MCP servers are not loaded.
+                args.extend(strings(&[
+                    "--tools",
+                    UNATTENDED_CLAUDE_TOOLS,
+                    "--allowedTools",
+                    UNATTENDED_CLAUDE_ALLOWED,
+                    "--strict-mcp-config",
+                ]));
+            }
             // Same rule as one-shot calls: a stray API key in the profile
             // would move the user from their subscription to metered billing.
             remove_env.push("ANTHROPIC_API_KEY");
@@ -127,8 +168,17 @@ pub fn turn_invocation(
                 "--json",
                 "--skip-git-repo-check",
                 "-c",
-                "sandbox_mode=\"workspace-write\"",
+                if unattended {
+                    // Commands may read but never write or reach the network,
+                    // and nothing waits for an approval.
+                    "sandbox_mode=\"read-only\""
+                } else {
+                    "sandbox_mode=\"workspace-write\""
+                },
             ]));
+            if unattended {
+                args.extend(strings(&["-c", "approval_policy=\"never\""]));
+            }
             if let Some(launch) = mcp {
                 args.push("-c".into());
                 args.push(format!(

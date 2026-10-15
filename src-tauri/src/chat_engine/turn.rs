@@ -44,6 +44,7 @@ pub struct TurnContext {
     pub input: String,
     /// Clovy's MCP server, for CLIs that accept it.
     pub mcp: Option<McpLaunch>,
+    pub policy: cli::TurnPolicy,
 }
 
 enum TurnEnd {
@@ -154,6 +155,7 @@ pub async fn execute_turn<S: FrameSink>(
         conversation.as_deref(),
         mcp,
         scratch.path(),
+        context.policy,
     );
     for (path, content) in &invocation.files {
         if let Err(error) = std::fs::write(path, content) {
