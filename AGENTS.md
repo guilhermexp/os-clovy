@@ -144,6 +144,7 @@ distinct from the `specs/` Spec Kit feature specs.)
 - [no-all-caps](spec/no-all-caps.md) — no ALL CAPS in UI, no `text-transform: uppercase`
 - [icons-central-only](spec/icons-central-only.md) — icons from `central-icons` / `central-icons-filled` only (never lucide)
 - [design-tokens](spec/design-tokens.md) — use the variables in `src/styles/tokens.css`
+- [no-tabular-numerals](spec/no-tabular-numerals.md) — UI numbers use proportional figures, never `tabular-nums`
 - [type-scale](spec/type-scale.md) — font sizes only from `--fs-*`; headings follow the mapping table
 - [font-weights](spec/font-weights.md) — only 400 and `var(--fw-medium)`, never raw 500/600/700
 - [font-families](spec/font-families.md) — sans is the voice; serif for headings/display, mono for code
