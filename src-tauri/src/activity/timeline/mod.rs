@@ -255,7 +255,7 @@ pub async fn search_view(
 }
 
 fn parse_request_time(value: &str, field: &str) -> Result<DateTime<Utc>, AppError> {
-    builder::parse_time(value).ok_or_else(|| {
+    crate::activity::store::parse_time(value).ok_or_else(|| {
         AppError::new(
             "activity_timeline_invalid_range",
             format!("`{field}` must be an RFC 3339 timestamp"),
@@ -328,12 +328,12 @@ async fn meeting_intervals(app: &AppHandle, since: DateTime<Utc>) -> Vec<Interva
     rows.iter()
         .filter_map(|row| {
             use sqlx::row::Row;
-            let start = builder::parse_time(row.try_get::<&str, _>(0).ok()?)?;
+            let start = crate::activity::store::parse_time(row.try_get::<&str, _>(0).ok()?)?;
             let end = row
                 .try_get::<Option<&str>, _>(1)
                 .ok()
                 .flatten()
-                .and_then(builder::parse_time)
+                .and_then(crate::activity::store::parse_time)
                 .unwrap_or(now);
             (end >= since).then_some((start, end))
         })
@@ -358,7 +358,7 @@ async fn meeting_window_start(
         .frames_after(cursor.last_frame_id, 1)
         .await?
         .first()
-        .and_then(|frame| builder::parse_time(&frame.captured_at));
+        .and_then(|frame| crate::activity::store::parse_time(&frame.captured_at));
     Ok([open_started, first_unprocessed]
         .into_iter()
         .flatten()

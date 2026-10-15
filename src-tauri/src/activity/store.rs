@@ -542,6 +542,14 @@ pub fn timestamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
+/// Reads an RFC 3339 timestamp (any offset, surrounding whitespace ignored)
+/// as UTC: the stored [`timestamp`] format and the ones agents write.
+pub fn parse_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
 fn text_hash(text: &str) -> String {
     Sha256::digest(text.as_bytes())
         .iter()

@@ -132,8 +132,8 @@ async fn completed_hours_get_reports_with_measured_minutes_and_fold_into_workstr
 #[tokio::test]
 async fn a_workstream_hour_takes_the_measured_times_of_the_sessions_its_activities_name() {
     use super::hour::ActivityPeriod;
+    use crate::activity::store::parse_time;
     use crate::activity::store::timestamp;
-    use crate::activity::timeline::builder::parse_time;
 
     let (_dir, store) = day_store().await;
     let settings = settings();

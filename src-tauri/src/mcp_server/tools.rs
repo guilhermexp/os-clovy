@@ -706,7 +706,7 @@ async fn session_detail(
     let domain = (session.context_kind == Some(ContextKind::Domain))
         .then_some(session.context.as_deref())
         .flatten();
-    let expired = crate::activity::timeline::builder::parse_time(&session.ended_at)
+    let expired = crate::activity::store::parse_time(&session.ended_at)
         .map_or(true, |ended| ended < retention_floor(settings, now));
     if expired
         || session_excluded(

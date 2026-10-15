@@ -15,8 +15,9 @@ use super::{
     for_each_json_line, is_real_dir, is_regular_file, list_subdirs, source_root, str_at,
     SourceRoots,
 };
+use crate::activity::store::parse_time;
 use crate::coding_agents::record::{
-    cap, inner_tag, parse_time, Record, RecordKind, RecordSink, SessionInfo, TOOL_TEXT_CAP,
+    cap, inner_tag, Record, RecordKind, RecordSink, SessionInfo, TOOL_TEXT_CAP,
 };
 
 pub fn cli_root(roots: &SourceRoots) -> PathBuf {

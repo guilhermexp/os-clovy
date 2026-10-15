@@ -5,9 +5,10 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use super::builder::{parse_time, GapKind};
+use super::builder::GapKind;
 use super::categorize::Category;
 use super::db::{TimelineGapDto, TimelineSessionDto};
+use crate::activity::store::parse_time;
 
 const TOP_APPS: usize = 5;
 

@@ -14,8 +14,8 @@ use serde_json::Value;
 
 use super::prompts;
 use super::sources::{CodingBlock, MeetingNote};
+use crate::activity::store::parse_time;
 use crate::activity::store::timestamp;
-use crate::activity::timeline::builder::parse_time;
 
 /// The bounds of a measured session an activity happened in (UTC, RFC 3339).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

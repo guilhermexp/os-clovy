@@ -7,8 +7,9 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use super::builder::{self, parse_time, BatchSignals, PauseSpan, TimelineEvent};
+use super::builder::{self, BatchSignals, PauseSpan, TimelineEvent};
 use super::db::{self, Interval};
+use crate::activity::store::parse_time;
 use crate::activity::store::{ActivityStore, StoreError, TIMELINE_CONSUMER};
 
 pub const BATCH_SIZE: u32 = 500;

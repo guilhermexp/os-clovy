@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::context::{frame_context, SessionContext};
-use crate::activity::store::{PauseReason, StoredFrame};
+use crate::activity::store::{parse_time, PauseReason, StoredFrame};
 
 /// Longer than this without a useful frame is a gap.
 pub const GAP_THRESHOLD: Duration = Duration::seconds(300);
@@ -23,12 +23,6 @@ const INPUT_BEFORE: Duration = Duration::seconds(3);
 const INPUT_AFTER: Duration = Duration::seconds(1);
 /// Lock screen and screen saver: never a session, never useful.
 const AWAY_APPS: &[&str] = &["loginwindow", "screensaverengine"];
-
-pub fn parse_time(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|at| at.with_timezone(&Utc))
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

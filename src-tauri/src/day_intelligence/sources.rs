@@ -9,7 +9,7 @@ use sqlx::row::Row;
 use tauri::AppHandle;
 
 use super::schedule::LocalZone;
-use crate::activity::store::ActivityStore;
+use crate::activity::store::{parse_time, ActivityStore};
 use crate::coding_agents::store::CodingAgentBlock;
 use crate::coding_agents::CodingAgentsStatusDto;
 
@@ -55,7 +55,7 @@ impl MeetingNote {
             "{}-{} · {kind} \"{title}\" ({} min)",
             self.start_local,
             self.end_local,
-            self.duration_ms / 60_000
+            whole_minutes(self.duration_ms)
         );
         if let Some(excerpt) = &self.excerpt {
             line.push_str(": ");
@@ -89,7 +89,7 @@ impl CodingBlock {
             self.start_local,
             self.end_local,
             self.source,
-            self.active_seconds / 60
+            whole_minutes(self.active_seconds * 1000)
         );
         if let Some(project) = &self.project {
             line.push_str(&format!(" · project {project}"));
@@ -150,14 +150,14 @@ pub fn excerpt(text: &str) -> Option<String> {
     (!collapsed.is_empty()).then(|| collapsed.chars().take(EXCERPT_CHARS).collect())
 }
 
-pub fn hhmm(zone: &dyn LocalZone, at: DateTime<Utc>) -> String {
-    zone.local(at).format("%H:%M").to_string()
+/// Whole minutes of a duration, rounded to the nearest minute: the one
+/// rounding every prompt and measure of day intelligence uses.
+pub fn whole_minutes(ms: i64) -> i64 {
+    (ms + 30_000).div_euclid(60_000)
 }
 
-fn parse_time(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|at| at.with_timezone(&Utc))
+pub fn hhmm(zone: &dyn LocalZone, at: DateTime<Utc>) -> String {
+    zone.local(at).format("%H:%M").to_string()
 }
 
 /// Groups note rows (one per recording session, or one without a recording)
@@ -385,6 +385,41 @@ pub(crate) mod tests {
         pub meetings: Vec<MeetingNote>,
         pub blocks: Vec<CodingBlock>,
         pub ingestion_scanned_at: std::sync::Mutex<Option<DateTime<Utc>>>,
+    }
+
+    /// Sessions, meetings, and coding blocks in one prompt round their
+    /// minutes the same way (2.5 min is 3, not 2).
+    #[test]
+    fn prompt_lines_round_minutes_like_the_measured_sessions() {
+        assert_eq!(whole_minutes(150_000), 3);
+        assert_eq!(whole_minutes(89_000), 1);
+        let block = CodingBlock {
+            source: "Codex".into(),
+            project: None,
+            title: None,
+            started_at: "2026-10-04T14:00:00Z".into(),
+            ended_at: "2026-10-04T14:03:00Z".into(),
+            start_local: "11:00".into(),
+            end_local: "11:03".into(),
+            active_seconds: 150,
+            summary: None,
+        };
+        assert_eq!(block.prompt_line(), "11:00-11:03 · Codex · 3 min");
+        let meeting = MeetingNote {
+            note_id: "n".into(),
+            title: "Standup".into(),
+            started_at: "2026-10-04T14:00:00Z".into(),
+            ended_at: "2026-10-04T14:03:00Z".into(),
+            start_local: "11:00".into(),
+            end_local: "11:03".into(),
+            duration_ms: 150_000,
+            recorded: true,
+            excerpt: None,
+        };
+        assert_eq!(
+            meeting.prompt_line(),
+            "11:00-11:03 · meeting \"Standup\" (3 min)"
+        );
     }
 
     fn overlaps(start: &str, end: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {

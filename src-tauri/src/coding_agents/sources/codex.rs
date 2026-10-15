@@ -21,8 +21,9 @@ use super::{
     file_stem, for_each_json_line, for_each_line, is_regular_file, list_dir, list_subdirs,
     source_root, str_at, under, SourceRoots,
 };
+use crate::activity::store::parse_time;
 use crate::coding_agents::record::{
-    cap, parse_time, Record, RecordKind, RecordSink, SessionInfo, TOOL_INPUT_CAP,
+    cap, Record, RecordKind, RecordSink, SessionInfo, TOOL_INPUT_CAP,
 };
 
 pub fn root(roots: &SourceRoots) -> PathBuf {

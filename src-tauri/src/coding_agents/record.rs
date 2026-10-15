@@ -85,12 +85,6 @@ pub fn is_clovy_prompt(body: &str) -> bool {
         .is_some_and(|line| line == crate::llm::CLOVY_AUTHORSHIP_MARKER)
 }
 
-pub fn parse_time(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value.trim())
-        .ok()
-        .map(|at| at.with_timezone(&Utc))
-}
-
 pub fn from_epoch_millis(millis: f64) -> Option<DateTime<Utc>> {
     if !millis.is_finite() || millis <= 0.0 {
         return None;
