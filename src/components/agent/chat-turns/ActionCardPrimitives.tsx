@@ -147,10 +147,14 @@ export function CollapsibleActionCard({
 export function ApproveSplitButton({
   disabled,
   allowPermanent,
+  scopeMenu = true,
   onChoice,
 }: {
   disabled: boolean;
   allowPermanent?: boolean;
+  /** `false` drops the scope caret: the request can only be approved once
+   * (approvals asked by a CLI turn grant nothing beyond the call). */
+  scopeMenu?: boolean;
   onChoice: (choice: AgentApprovalChoice) => void;
 }) {
   const t = useT();
@@ -235,19 +239,21 @@ export function ApproveSplitButton({
       >
         {t("chat.approval.approve")}
       </button>
-      <button
-        ref={scopeRef}
-        type="button"
-        className="agent-approval-scope"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={t("chat.approval.approveOptions")}
-        disabled={disabled}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <IconChevronDownSmall size={14} aria-hidden />
-      </button>
-      {open ? (
+      {scopeMenu ? (
+        <button
+          ref={scopeRef}
+          type="button"
+          className="agent-approval-scope"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={t("chat.approval.approveOptions")}
+          disabled={disabled}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <IconChevronDownSmall size={14} aria-hidden />
+        </button>
+      ) : null}
+      {scopeMenu && open ? (
         <div
           ref={menuRef}
           className="agent-approval-scope-menu"

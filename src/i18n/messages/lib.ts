@@ -266,6 +266,10 @@ export default defineMessages({
     "lib.upstream.tryAgain": "Try again",
     "lib.upstream.noticeBody": "The upstream provider could not complete this request.",
     "lib.companion.messageTruncated": "[Message truncated on companion]",
+    "lib.companion.cliApprovalWaitingOnMac":
+      "Clovy is waiting for your approval on your Mac: {action}",
+    "lib.companion.cliQuestionWaitingOnMac":
+      "Clovy has a question waiting for you on your Mac: {question}",
     "lib.companion.autoDescription": "Chooses the best available model for each request.",
     "lib.companion.cliEngineDescription": "Runs on {name} on your Mac.",
     "lib.companion.cliEngineDefaultDescription": "Default. Runs on {name} on your Mac.",
@@ -721,6 +725,9 @@ export default defineMessages({
     "lib.upstream.tryAgain": "Tentar de novo",
     "lib.upstream.noticeBody": "O provedor do modelo não conseguiu concluir esta solicitação.",
     "lib.companion.messageTruncated": "[Mensagem truncada no dispositivo vinculado]",
+    "lib.companion.cliApprovalWaitingOnMac": "O Clovy aguarda sua aprovação no Mac: {action}",
+    "lib.companion.cliQuestionWaitingOnMac":
+      "O Clovy tem uma pergunta esperando por você no Mac: {question}",
     "lib.companion.autoDescription": "Escolhe o melhor modelo disponível para cada solicitação.",
     "lib.companion.cliEngineDescription": "Executa no {name} do seu Mac.",
     "lib.companion.cliEngineDefaultDescription": "Padrão. Executa no {name} do seu Mac.",

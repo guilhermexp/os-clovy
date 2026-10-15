@@ -25,6 +25,10 @@ export default defineMessages({
     "chat.clarify.placeholder": "Type your answer",
     "chat.clarify.sending": "Sending",
     "chat.clarify.send": "Send",
+    "chat.clarify.expired": "Question expired",
+    "chat.clarify.expiredBody": "Nobody answered in time, so Clovy continued without an answer.",
+    "chat.clarify.cancelled": "Question cancelled",
+    "chat.clarify.cancelledBody": "The run stopped before anyone answered.",
     "chat.access.notNow": "Not now",
     "chat.access.enabling": "Enabling…",
     "chat.cliAccess.description":
@@ -50,6 +54,10 @@ export default defineMessages({
       "The connection closed before Clovy could confirm the response. This approval is no longer actionable, but it may have already been applied. Check the agent activity before retrying.",
     "chat.approval.expiredBody":
       "This approval is no longer pending. Clovy did not approve anything.",
+    "chat.approval.timedOutBody": "Nobody answered in time. Clovy did not run this action.",
+    "chat.approval.cancelled": "Approval cancelled",
+    "chat.approval.cancelledBody":
+      "The run stopped before anyone answered. Clovy did not run this action.",
     "chat.approval.approve": "Approve",
     "chat.approval.deny": "Deny",
     "chat.approval.approveOnce": "Approve once",
@@ -233,6 +241,10 @@ export default defineMessages({
     "chat.clarify.placeholder": "Digite sua resposta",
     "chat.clarify.sending": "Enviando",
     "chat.clarify.send": "Enviar",
+    "chat.clarify.expired": "Pergunta expirada",
+    "chat.clarify.expiredBody": "Ninguém respondeu a tempo, então o Clovy seguiu sem resposta.",
+    "chat.clarify.cancelled": "Pergunta cancelada",
+    "chat.clarify.cancelledBody": "A execução parou antes de alguém responder.",
     "chat.access.notNow": "Agora não",
     "chat.access.enabling": "Ativando…",
     "chat.cliAccess.description":
@@ -257,6 +269,10 @@ export default defineMessages({
     "chat.approval.unconfirmedBody":
       "A conexão foi encerrada antes que o Clovy pudesse confirmar a resposta. Esta aprovação não pode mais ser usada, mas talvez já tenha sido aplicada. Verifique a atividade do agente antes de tentar de novo.",
     "chat.approval.expiredBody": "Esta aprovação não está mais pendente. O Clovy não aprovou nada.",
+    "chat.approval.timedOutBody": "Ninguém respondeu a tempo. O Clovy não executou esta ação.",
+    "chat.approval.cancelled": "Aprovação cancelada",
+    "chat.approval.cancelledBody":
+      "A execução parou antes de alguém responder. O Clovy não executou esta ação.",
     "chat.approval.approve": "Aprovar",
     "chat.approval.deny": "Negar",
     "chat.approval.approveOnce": "Aprovar uma vez",

@@ -1274,6 +1274,18 @@ pub async fn resolve_agent_interruption(
     host: State<'_, AgentRuntimeHost>,
     request: ResolveInterruptionRequest,
 ) -> Result<Value, AppError> {
+    // Items asked by a CLI turn (`engine: "cli"`) wait in the approval
+    // broker, not in a paused sidecar run.
+    if let Some(run) = crate::approval_broker::commands::resolve_cli_interruption(
+        &app,
+        &request.run_id,
+        &request.interruption_id,
+        &request.resolution,
+    )
+    .await?
+    {
+        return Ok(run_json(run));
+    }
     resolve_agent_interruption_inner(&app, &host, request, InterruptionResolutionOrigin::Desktop)
         .await
 }

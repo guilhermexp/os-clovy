@@ -26,6 +26,22 @@ export function ClarifyPart({
   const [draft, setDraft] = useState("");
   const disabled = part.status !== "pending" || submitting !== undefined;
 
+  // A CLI question that nobody answered (timeout, or the run stopped) never
+  // reached the agent: it says so instead of "Skipped".
+  if (part.status === "expired" || part.status === "cancelled") {
+    const expired = part.status === "expired";
+    return (
+      <ResolvedActionRow
+        denied
+        label={expired ? t("chat.clarify.expired") : t("chat.clarify.cancelled")}
+        detail={part.question}
+      >
+        <p>{part.question}</p>
+        <p>{expired ? t("chat.clarify.expiredBody") : t("chat.clarify.cancelledBody")}</p>
+      </ResolvedActionRow>
+    );
+  }
+
   // Resolved clarify collapses to a quiet receipt row: "Answered" (or "Skipped")
   // plus the question, expandable to the full question and answer.
   if (part.status !== "pending") {
@@ -347,6 +363,9 @@ export function ApprovalPart({
   submitting?: AgentApprovalChoice;
 }) {
   const t = useT();
+  // Asked by a CLI turn through the approval broker: one approval per call,
+  // and no model explanation (the native explain path is not involved).
+  const cli = part.engine === "cli";
   const disabled = Boolean(submitting) || part.status !== "pending";
   const activeChoice = part.choice ?? submitting;
   // A card that has actually resolved collapses to a receipt row. A submission
@@ -391,6 +410,24 @@ export function ApprovalPart({
   // command (or description) truncated to one line, expandable to the full
   // description and command — no action buttons.
   if (resolved) {
+    const commandDetail = part.command ? (
+      <span className="agent-resolved-mono">{part.command}</span>
+    ) : (
+      part.description
+    );
+    if (part.status === "cancelled" || (cli && part.status === "expired")) {
+      const cancelled = part.status === "cancelled";
+      return (
+        <ResolvedActionRow
+          denied
+          label={cancelled ? t("chat.approval.cancelled") : t("chat.approval.expired")}
+          detail={commandDetail}
+        >
+          <p>{cancelled ? t("chat.approval.cancelledBody") : t("chat.approval.timedOutBody")}</p>
+          {part.command ? <pre>{part.command}</pre> : null}
+        </ResolvedActionRow>
+      );
+    }
     if (part.status === "expired") {
       const outcomeUnconfirmed = part.retiredReason === "unconfirmed";
       return (
@@ -449,7 +486,8 @@ export function ApprovalPart({
     <div className="agent-approval-actions">
       <ApproveSplitButton
         disabled={disabled}
-        allowPermanent={part.allowPermanent}
+        allowPermanent={part.allowPermanent && !cli}
+        scopeMenu={!cli}
         onChoice={(choice) => onApproval(part, choice)}
       />
       <button
@@ -460,19 +498,21 @@ export function ApprovalPart({
       >
         {t("chat.approval.deny")}
       </button>
-      <button
-        type="button"
-        className="btn btn-ghost agent-approval-explain"
-        aria-expanded={explainOpen}
-        // Only advertise the panel while it's actually in the DOM (the body
-        // renders only when the card is expanded and the explanation is open).
-        aria-controls={explainOpen ? explanationId : undefined}
-        disabled={disabled}
-        onClick={toggleExplain}
-      >
-        <IconLightBulbSimple size={14} aria-hidden />
-        {explainOpen ? t("chat.approval.hideExplanation") : t("chat.approval.explainFirst")}
-      </button>
+      {cli ? null : (
+        <button
+          type="button"
+          className="btn btn-ghost agent-approval-explain"
+          aria-expanded={explainOpen}
+          // Only advertise the panel while it's actually in the DOM (the body
+          // renders only when the card is expanded and the explanation is open).
+          aria-controls={explainOpen ? explanationId : undefined}
+          disabled={disabled}
+          onClick={toggleExplain}
+        >
+          <IconLightBulbSimple size={14} aria-hidden />
+          {explainOpen ? t("chat.approval.hideExplanation") : t("chat.approval.explainFirst")}
+        </button>
+      )}
     </div>
   );
 

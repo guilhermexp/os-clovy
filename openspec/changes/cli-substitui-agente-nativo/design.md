@@ -105,6 +105,54 @@ Nunca: `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, 
 
 **ADRs**: rascunho ADR-0063 nesta change (broker e escrita no MCP). Na fase 4, ADR nova que supera ADR-0038, ADR-0040, ADR-0013, as partes de runtime de ADR-0039 (rotinas e MCP continuam, agora sobre CLI) e reancora ADR-0053 no broker; ADR-0058 recebe adendo apontando para a ADR-0063; `spec/mcp-tool-naming.md` passa a apontar `src-tauri/src/mcp_server/tools/` e o delta `clovy-mcp-server` como dono dos nomes.
 
+## Contratos (rascunho fase 0) — broker
+
+Implementado em `src-tauri/src/approval_broker/` (tarefa 0.5). Rascunho até o congelamento em 0.8.
+
+```rust
+// approval_broker/mod.rs
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600); // < 900 s passados ao CLI (§3)
+pub const CLI_ENGINE: &str = "cli";                              // `engine` do item
+
+pub struct ApprovalTurn {          // valores simples; o Main mapeia `TurnBinding` para cá em 0.8
+    pub session_id: String,
+    pub run_id: String,
+    pub cli: String,               // "claude", "codex", ...
+    pub safety_mode: AgentSafetyMode,
+    pub attended: bool,            // false = rotina: negação imediata
+}
+pub struct ApprovalRequest { pub tool: String, pub call_id: Option<String>, pub kind: ApprovalKind }
+pub enum ApprovalKind {
+    Approval { title: String, description: String, arguments: Value, preview: Option<String> },
+    Clarification { question: String, choices: Vec<String> },
+}
+pub enum ApprovalOutcome { Approved, Answered(String) }
+pub enum ApprovalDenial { UserDenied, TimedOut, RunCancelled, UnattendedRequiresApproval, Unavailable(String) }
+impl ApprovalDenial { pub fn code(&self) -> &'static str; pub fn message(&self) -> String }
+
+impl ApprovalBroker {               // estado Tauri (`app.state::<ApprovalBroker>()`), clonável
+    pub async fn request(&self, turn: &ApprovalTurn, request: ApprovalRequest)
+        -> Result<ApprovalOutcome, ApprovalDenial>;
+    pub async fn cancel_run(&self, run_id: &str) -> usize;   // pendentes da execução → run_cancelled
+    pub fn close(&self);                                     // encerramento do app
+}
+```
+
+| `ApprovalDenial` | `code()` (erro da ferramenta, `isError`) | Item |
+|---|---|---|
+| `UserDenied` | `user_denied` | `resolved`, `resolution: "deny"` |
+| `TimedOut` | `approval_timed_out` | `expired`, `retiredReason: "timeout"` |
+| `RunCancelled` | `run_cancelled` | `cancelled`, `retiredReason: "cancelled"` (ou `"restarted"` na abertura) |
+| `UnattendedRequiresApproval` | `unattended_requires_approval` | nenhum (sem cartão) |
+| `Unavailable(_)` | `approval_unavailable` | falha de armazenamento; a ferramenta não executa |
+
+- **Item.** Mesmo `interruption` do nativo (`id`, `sessionId`, `runId`, `status`, `createdAt`, `kind`, `toolName`, `toolCallId`, `title`, `description`, `command`, `allowAlways: false` ou `question`/`choices`) com `engine: "cli"` e `cli`. `title`/`description` vêm do código da ferramenta; `command` é gerado pelo broker de `preview` ou dos argumentos, com `sanitize_log`. `external_id` = `interruption:{run}:{id}`.
+- **Eventos.** `interruption.requested` ao pedir e `interruption.updated` (novo, mesmo `data: {itemId, interruption}`) ao decidir, expirar ou cancelar. O broker não avança `agent_runs.last_sequence` (o turno CLI numera os próprios eventos); o frontend aplica eventos de interrupção CLI fora do portão de sequência (`src/lib/agent-runtime-adapter.ts`).
+- **Resolução.** `resolve_agent_interruption` chama `approval_broker::commands::resolve_cli_interruption` primeiro; item com `engine: "cli"` nunca chega a `run.resume`. `once`/`session`/`always` aprovam uma vez (gravado `resolution: "once"`); clarificação exige `answer` (texto livre ou opção). Segunda resposta, resposta tardia ou de outro processo → `agent_interruption_expired`; tipo trocado → `agent_interruption_resolution_invalid`.
+- **Decisão única.** Quem remove o waiter da tabela em memória é dono do desfecho (decisão, timeout, cancelamento, queda da chamada MCP); o item só sai de `pending` uma vez (`UPDATE … WHERE status = 'pending'`). Sem pendentes na execução, ela volta de `waiting_for_user` a `running`.
+- **Fim da execução.** `setup` escuta `run.completed`/`run.cancelled`/`run.failed` em `clovy://agent-runtime-event` e chama `cancel_run`; assim `cancel_agent_run` (que para o turno CLI) cancela o cartão sem desvio no próprio comando. `close()` roda em `RunEvent::ExitRequested`. Na abertura, `store::cancel_stale` marca `cancelled` os itens CLI pendentes de outro processo e encerra a execução como `cancelled`.
+- **Companion (D4).** O telefone recebe `waitingForUser` pelo evento `interruption.requested` como hoje e, na lista de mensagens, um aviso de que o pedido aguarda resposta no Mac. Nenhuma resposta remota para itens CLI nesta fase; `computer_use` respondível pelo telefone é a fatia 2.6.
+
 ## Spikes obrigatórios (fase 0, antes das fatias)
 
 | Id | Pergunta | Se a resposta for "não" |

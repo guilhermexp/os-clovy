@@ -133,9 +133,15 @@ type AgentInterruptionBase = {
   id: string;
   sessionId: string;
   runId: string;
-  status: "pending" | "resolved" | "expired";
+  /** `cancelled` only on items asked by a CLI turn (`engine: "cli"`). */
+  status: "pending" | "resolved" | "expired" | "cancelled";
   createdAt: string;
   resolvedAt?: string;
+  /** Set when a CLI turn asked through the approval broker. */
+  engine?: "cli";
+  /** Why a CLI item left `pending` without an answer (`timeout`,
+   * `cancelled`, `restarted`). */
+  retiredReason?: string;
 };
 
 export type AgentApprovalInterruptionDto = AgentInterruptionBase & {
@@ -256,6 +262,12 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "interruption.requested";
+        data: { itemId: string; interruption: AgentInterruptionDto };
+      }
+    | {
+        /** A CLI item was answered, expired, or cancelled (approval broker). */
+        eventId: string;
+        method: "interruption.updated";
         data: { itemId: string; interruption: AgentInterruptionDto };
       }
     | { eventId: string; method: "usage.updated"; data: AgentUsageDto }
