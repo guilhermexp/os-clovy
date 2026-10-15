@@ -688,6 +688,11 @@ pub fn setup(app: &tauri::App) {
     app.listen_any(
         crate::agent_runtime::host::AGENT_RUNTIME_EVENT,
         move |event| {
+            // Every streamed delta passes here: skip the parse while no tool
+            // waits, which is nearly always.
+            if on_end.lock_waiters().is_empty() {
+                return;
+            }
             let Some(run_id) = terminal_run_id(event.payload()) else {
                 return;
             };
