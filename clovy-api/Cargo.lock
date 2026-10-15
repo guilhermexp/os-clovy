@@ -479,7 +479,6 @@ dependencies = [
  "async-trait",
  "clovy-domain",
  "sqlx",
- "tracing",
  "uuid",
 ]
 
