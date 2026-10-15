@@ -4,6 +4,8 @@
 //! other slices use (the MCP `get_day_summary` tool): `summary_of_day`,
 //! `workstreams_of_day`, `hour_reports_of_day`.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -143,40 +145,43 @@ pub async fn workstreams_of_day(
     store: &ActivityStore,
     day: &str,
 ) -> Result<Vec<WorkstreamDto>, StoreError> {
-    let rows = query("SELECT id, title, summary FROM day_workstreams WHERE day = ? ORDER BY id")
-        .bind(day)
-        .fetch_all(store.pool())
-        .await?;
-    let mut workstreams = Vec::with_capacity(rows.len());
+    let rows = query(
+        "SELECT w.id, w.title, w.summary, h.hour, h.minutes, h.note, h.periods_json
+         FROM day_workstreams w
+         LEFT JOIN day_workstream_hours h ON h.workstream_id = w.id
+         WHERE w.day = ? ORDER BY w.id, h.hour",
+    )
+    .bind(day)
+    .fetch_all(store.pool())
+    .await?;
+    let mut workstreams: Vec<WorkstreamDto> = Vec::new();
     for row in &rows {
         let id: i64 = row.get(0);
-        let hours: Vec<WorkstreamHourDto> = query(
-            "SELECT hour, minutes, note, periods_json FROM day_workstream_hours
-             WHERE workstream_id = ? ORDER BY hour",
-        )
-        .bind(id)
-        .fetch_all(store.pool())
-        .await?
-        .iter()
-        .map(|hour| {
-            let location: Option<StoredLocation> = hour
-                .get::<Option<&str>, _>(3)
-                .and_then(|json| serde_json::from_str(json).ok());
-            WorkstreamHourDto {
-                hour: hour.get(0),
-                minutes: hour.get(1),
-                note: hour.get(2),
-                located_minutes: location.as_ref().map_or(0, |found| found.located_minutes),
-                periods: location.map(|found| found.periods),
-            }
-        })
-        .collect();
-        workstreams.push(WorkstreamDto {
-            id,
-            title: row.get(1),
-            summary: row.get(2),
-            minutes: hours.iter().map(|hour| hour.minutes).sum(),
-            hours,
+        if workstreams.last().map(|workstream| workstream.id) != Some(id) {
+            workstreams.push(WorkstreamDto {
+                id,
+                title: row.get(1),
+                summary: row.get(2),
+                minutes: 0,
+                hours: Vec::new(),
+            });
+        }
+        let (Some(hour), Some(workstream)) =
+            (row.get::<Option<String>, _>(3), workstreams.last_mut())
+        else {
+            continue;
+        };
+        let location: Option<StoredLocation> = row
+            .get::<Option<&str>, _>(6)
+            .and_then(|json| serde_json::from_str(json).ok());
+        let minutes: i64 = row.get(4);
+        workstream.minutes += minutes;
+        workstream.hours.push(WorkstreamHourDto {
+            hour,
+            minutes,
+            note: row.get(5),
+            located_minutes: location.as_ref().map_or(0, |found| found.located_minutes),
+            periods: location.map(|found| found.periods),
         });
     }
     Ok(workstreams)
@@ -432,32 +437,44 @@ pub async fn prune(store: &ActivityStore, cutoff_day: &str) -> Result<u64, Store
     Ok(removed)
 }
 
-/// Window segments (local text) of a timeline session seen in `[from, to)`.
+/// One window segment of a session: when it was seen, its URL, its text.
+pub type SessionDocument = (String, Option<String>, String);
+
+/// Window segments (local text) seen in `[from, to)` of each of the
+/// timeline sessions, in one query.
 pub async fn session_documents(
     store: &ActivityStore,
-    session_id: i64,
+    session_ids: &[i64],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-) -> Result<Vec<(String, Option<String>, String)>, StoreError> {
-    Ok(query(
-        "SELECT ts.seen_at, ts.browser_url, ts.body
+) -> Result<HashMap<i64, Vec<SessionDocument>>, StoreError> {
+    let mut documents: HashMap<i64, Vec<SessionDocument>> = HashMap::new();
+    if session_ids.is_empty() {
+        return Ok(documents);
+    }
+    let rows = query(
+        "SELECT s.id, ts.seen_at, ts.browser_url, ts.body
          FROM timeline_sessions s JOIN timeline_search ts
            ON ts.rowid BETWEEN s.search_rowid_first AND s.search_rowid_last
           AND ts.session_id = s.id
-         WHERE s.id = ? AND ts.seen_at >= ? AND ts.seen_at < ? AND ts.body <> ''
+         WHERE s.id IN (SELECT value FROM json_each(?))
+           AND ts.seen_at >= ? AND ts.seen_at < ? AND ts.body <> ''
          ORDER BY ts.rowid",
     )
-    .bind(session_id)
+    .bind(json!(session_ids).to_string())
     .bind(timestamp(from))
     .bind(timestamp(to))
     .fetch_all(store.pool())
-    .await?
-    .iter()
-    .map(|row| {
-        let url: String = row.get(1);
-        (row.get(0), (!url.is_empty()).then_some(url), row.get(2))
-    })
-    .collect())
+    .await?;
+    for row in &rows {
+        let url: String = row.get(2);
+        documents.entry(row.get(0)).or_default().push((
+            row.get(1),
+            (!url.is_empty()).then_some(url),
+            row.get(3),
+        ));
+    }
+    Ok(documents)
 }
 
 /// Debug export sections (development builds): the newest days.

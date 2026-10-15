@@ -148,13 +148,16 @@ pub async fn report_hour(
     }
     let mut texts = Vec::new();
     let mut lines = Vec::new();
+    let ids: Vec<i64> = view.sessions.iter().map(|session| session.id).collect();
+    let mut by_session = db::session_documents(deps.store, &ids, window.start, window.end).await?;
     for session in &view.sessions {
         let line = session_line(session, window, deps.zone);
         let start = crate::activity::store::parse_time(&session.started_at).unwrap_or(window.start);
         let end = crate::activity::store::parse_time(&session.ended_at).unwrap_or(window.end);
         let seconds = (end.min(window.end) - start.max(window.start)).num_seconds();
-        let documents = db::session_documents(deps.store, session.id, window.start, window.end)
-            .await?
+        let documents = by_session
+            .remove(&session.id)
+            .unwrap_or_default()
             .into_iter()
             .filter(|(_, url, _)| {
                 !url.as_deref().is_some_and(|url| {
