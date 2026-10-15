@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
@@ -77,13 +77,16 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
     selectedDate.getMonth() === today.getMonth() &&
     selectedDate.getDate() === today.getDate();
 
-  // Keep nowMs current every 10 seconds for the timeline now-cursor
+  // Keep nowMs current every 10 seconds for today's now-cursor; other days
+  // never show it, so they do not tick.
   useEffect(() => {
+    if (!isToday) return;
+    setNowMs(Date.now());
     const timer = setInterval(() => {
       setNowMs(Date.now());
     }, 10_000);
     return () => clearInterval(timer);
-  }, []);
+  }, [isToday]);
 
   // Compute local day bounds
   const range = dayRange(selectedDate);
@@ -94,6 +97,9 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
   useEffect(() => {
     let active = true;
     const currentRange = dayRange(selectedDate);
+    // Another day's sessions never show under this day's header.
+    setTimeline(null);
+    setLoading(true);
 
     const load = async () => {
       try {
@@ -120,7 +126,8 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
     void onActivityTimelineUpdated(() => {
       void load();
     }).then((fn) => {
-      unlisten = fn;
+      if (active) unlisten = fn;
+      else fn();
     });
 
     // When viewing today, also refetch every 30s so the active session grows
@@ -205,6 +212,13 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
   };
 
   const selectSession = (id: number) => setSelection({ kind: "session", id });
+  const toggleWorkstream = useCallback(
+    (id: number) =>
+      setSelection((current) =>
+        current?.kind === "workstream" && current.id === id ? null : { kind: "workstream", id },
+      ),
+    [],
+  );
   const selectedSessionId = selection?.kind === "session" ? selection.id : null;
 
   // Header date display string
@@ -403,13 +417,7 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
                     onClearSelection={() => setSelection(null)}
                     nowMs={gridNowMs}
                     selectedId={selectedCard ? selectedCard.workstream.id : null}
-                    onSelect={(id) =>
-                      setSelection((current) =>
-                        current?.kind === "workstream" && current.id === id
-                          ? null
-                          : { kind: "workstream", id },
-                      )
-                    }
+                    onSelect={toggleWorkstream}
                   />
                 ) : !intelligence.loaded ? (
                   <div className="timeline-loading-state">

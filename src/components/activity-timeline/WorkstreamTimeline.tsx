@@ -1,6 +1,7 @@
 import {
   type CSSProperties,
   type MouseEvent,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -175,7 +176,8 @@ export function WorkstreamTimeline({
   );
 }
 
-function WorkstreamCard({
+/** Memoized: the parent re-renders on every now tick and selection change. */
+const WorkstreamCard = memo(function WorkstreamCard({
   card,
   selected,
   textScale,
@@ -292,7 +294,7 @@ function WorkstreamCard({
       )}
     </button>
   );
-}
+});
 
 /** The rendered height of a card's title and meta, 0 until measured. */
 function useHeaderHeight(ref: { current: HTMLSpanElement | null }, enabled: boolean) {
