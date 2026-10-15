@@ -1,7 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentRunDto, AgentSessionDto } from "../lib/agent-runtime-contract";
+import { AGENT_SESSION_STATUS_EVENT, type AgentSessionStatusDetail } from "../lib/agent-events";
+import type {
+  AgentRunDto,
+  AgentRuntimeEvent,
+  AgentSessionDto,
+} from "../lib/agent-runtime-contract";
 import { AGENT_RUN_AUTO_MODEL_PREFIX, AUTO_MODEL_ID } from "../lib/agent-model-selection";
 import {
   resetCurrentDataPartitionForTests,
@@ -83,6 +88,64 @@ describe("note chat sessions", () => {
     mocks.cancelRun.mockResolvedValue(undefined);
     mocks.listen.mockReset();
     mocks.listen.mockResolvedValue(() => undefined);
+  });
+
+  it("dispatches a session status when it changes, not once per streamed token", async () => {
+    rememberNoteChatSession("note-1", "note-session");
+    mocks.getSession.mockResolvedValue(session());
+    mocks.listItems.mockResolvedValue([]);
+    let runtimeListener: ((event: { payload: AgentRuntimeEvent }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_event, handler) => {
+      runtimeListener = handler;
+      return () => undefined;
+    });
+    const statuses: string[] = [];
+    const onStatus = (event: Event) =>
+      statuses.push((event as CustomEvent<AgentSessionStatusDetail>).detail.status);
+    window.addEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
+    try {
+      const { result } = renderHook(() => useNoteChat({ id: "note-1", title: "Planning" }));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      await waitFor(() => expect(runtimeListener).toBeDefined());
+
+      const frame = { protocolVersion: 1, sessionId: "note-session", runId: "run-1" } as const;
+      act(() => {
+        runtimeListener?.({
+          payload: {
+            ...frame,
+            sequence: 1,
+            eventId: "started",
+            method: "run.started",
+            data: { startedAt: "now", model: "model-a" },
+          },
+        });
+        for (let sequence = 2; sequence < 22; sequence += 1) {
+          runtimeListener?.({
+            payload: {
+              ...frame,
+              sequence,
+              eventId: `delta-${sequence}`,
+              method: "message.delta",
+              data: { itemId: "answer", role: "assistant", delta: "x", createdAt: "now" },
+            },
+          });
+        }
+        runtimeListener?.({
+          payload: {
+            ...frame,
+            sequence: 22,
+            eventId: "completed",
+            method: "run.completed",
+            data: { completedAt: "now" },
+          },
+        });
+      });
+
+      // One dispatch (window event plus Tauri emit) per status change.
+      expect(statuses).toEqual(["running", "completed"]);
+    } finally {
+      window.removeEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
+    }
   });
 
   it("remembers and forgets a note session pairing", () => {

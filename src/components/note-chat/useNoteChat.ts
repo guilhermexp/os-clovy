@@ -8,7 +8,11 @@ import {
   type AgentRuntimeProjection,
 } from "../../lib/agent-runtime-adapter";
 import type { AgentItemDto, AgentRuntimeEvent } from "../../lib/agent-runtime-contract";
-import { dispatchAgentSessionStatus } from "../../lib/agent-events";
+import {
+  dispatchAgentSessionStatus,
+  type AgentSessionStatusDetail,
+  type AgentSessionStatusKind,
+} from "../../lib/agent-events";
 import { agentModelSelection } from "../../lib/agent-model-selection";
 import {
   AGENT_SESSION_MODEL_CHANGED_EVENT,
@@ -84,6 +88,15 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
   const sessionIdRef = useRef<string>();
   const activeSubmitRef = useRef<symbol>();
   const selectedStoredModelRef = useRef(DEFAULT_MODEL);
+  const announcedStatusRef = useRef(new Map<string, AgentSessionStatusKind>());
+  /** Dispatches a session status only when it changes, not once per
+   * streamed token. */
+  const announceStatus = useCallback((detail: AgentSessionStatusDetail) => {
+    if (!detail.sessionId) return;
+    if (announcedStatusRef.current.get(detail.sessionId) === detail.status) return;
+    announcedStatusRef.current.set(detail.sessionId, detail.status);
+    dispatchAgentSessionStatus(detail);
+  }, []);
   const applyStoredModel = useCallback((storedModel: string) => {
     selectedStoredModelRef.current = storedModel;
     setModelState(agentModelSelection(storedModel).modelId || DEFAULT_MODEL);
@@ -155,8 +168,10 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         payload.method === "run.cancelled" ||
         payload.method === "run.failed";
       // The App-level run relay announces failures of every session.
-      if (payload.method !== "run.failed") {
-        dispatchAgentSessionStatus({
+      if (payload.method === "run.failed") {
+        announcedStatusRef.current.set(payload.sessionId, "failed");
+      } else {
+        announceStatus({
           sessionId: payload.sessionId,
           title: projection.session?.title ?? "Note chat",
           status:
@@ -176,7 +191,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
       disposed = true;
       unlisten?.();
     };
-  }, [hydrate, projection.session?.title]);
+  }, [announceStatus, hydrate, projection.session?.title]);
 
   useEffect(() => {
     const applyExternalSessionModel = (event: Event) => {
@@ -272,7 +287,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         accepted = true;
         if (current()) {
           setProjection((existing) => ({ ...existing, session, run }));
-          dispatchAgentSessionStatus({
+          announceStatus({
             sessionId: session.id,
             title: session.title,
             status: "starting",
@@ -289,7 +304,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         }
       }
     },
-    [loading, model, note, projection.items, projection.session, working],
+    [announceStatus, loading, model, note, projection.items, projection.session, working],
   );
 
   const stop = useCallback(() => {
@@ -323,7 +338,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         const nextRun = await agentRuntimeBindings.retryRun(runId);
         if (current()) {
           setProjection((existing) => ({ ...existing, run: nextRun }));
-          dispatchAgentSessionStatus({
+          announceStatus({
             sessionId: session.id,
             title: session.title,
             status: "starting",
@@ -340,7 +355,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         }
       }
     },
-    [loading, projection.items, projection.run, projection.session],
+    [announceStatus, loading, projection.items, projection.run, projection.session],
   );
 
   return {
