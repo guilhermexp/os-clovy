@@ -54,8 +54,10 @@ language was.
   `ERROR_CODE_MESSAGES` with catalog keys whose English text matches the
   native message. Unmapped codes still show the native English message.
 - Changing a note failure sentence in `processing.rs` requires the same change
-  to its `notes.failure.*` English entry; otherwise that failure falls back to
-  untranslated English.
+  to its `notes.failure.*` English entry; the Rust test
+  `stored_failure_sentences_match_the_desktop_catalog` fails until both match.
+  Persisting the code instead needs a new `notes` column (schema migration),
+  so it was deferred.
 - Stored routine intervals ("every 30m") stay English on disk (a wire value)
   and are phrased from the catalog for display.
 - Rejected alternatives: keeping the system locale for English (the reported

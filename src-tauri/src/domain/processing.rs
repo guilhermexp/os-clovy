@@ -5592,6 +5592,31 @@ mod tests {
         );
     }
 
+    /// Notes persist only these English sentences (no error code column), so
+    /// the desktop translates them by exact text. Every sentence must exist
+    /// verbatim in the English `notes.failure.*` catalog, or that failure
+    /// would silently stop translating.
+    #[test]
+    fn stored_failure_sentences_match_the_desktop_catalog() {
+        let catalog = include_str!("../../../src/i18n/messages/notes.ts");
+        let sentences = [
+            user_facing_transcription_failure_message("no_speech", "", false, "microphone"),
+            user_facing_transcription_failure_message("no_speech", "", true, "system"),
+            user_facing_transcription_failure_message("no_speech", "", true, "microphone"),
+            user_facing_transcription_failure_message("x", "metering_provider_failed", false, "m"),
+            user_facing_transcription_failure_message("x", "upstream_provider_failed", false, "m"),
+            user_facing_transcription_failure_message("x", "authorization_denied", false, "m"),
+            note_generation_failure_for_user(AppError::new("x", "authorization_denied")).message,
+            note_generation_failure_for_user(AppError::new("x", "anything else")).message,
+        ];
+        for sentence in sentences {
+            assert!(
+                catalog.contains(&format!("\"{sentence}\"")),
+                "missing from notes.ts: {sentence}"
+            );
+        }
+    }
+
     #[test]
     fn transcript_coverage_counts_normal_turn_spans() {
         let mic_path = PathBuf::from("microphone.wav");
