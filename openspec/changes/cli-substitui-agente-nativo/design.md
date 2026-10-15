@@ -117,7 +117,9 @@ Nunca: `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, 
 
 Resultados entram em `design.md` (seção "Resultados dos spikes") antes da fase 2.
 
-## Decisões pendentes do dono (recomendação conservadora)
+## Decisões do dono
+
+Aceitas pelo dono em 2026-10-15: D1-D9 conforme as recomendações abaixo. O dono também autorizou seguir até a remoção (fase 4); o critério de corte de `native-agent-removal` continua valendo, então a fase 4 só começa com a fase 3 (gate e smoke) aprovada.
 
 - **D1 - `unrestricted` nos CLIs.** Recomendo o mapeamento da tabela §3 (Claude `acceptEdits`, Codex rede liberada, escrita sempre restrita ao workspace e shell sempre aprovado). Alternativa mais permissiva (Codex `danger-full-access`) não recomendada.
 - **D2 - Linear/MCPs do usuário.** Recomendo gateway pelo `clovy-mcp` (credenciais ficam no app, política e Seatbelt mantidos). Repasse direto no `--mcp-config` só seria aceitável para servidores stdio sem segredo, e mesmo assim perde aprovação e Seatbelt.
