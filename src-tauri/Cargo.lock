@@ -866,7 +866,6 @@ dependencies = [
  "cua-driver-core",
  "dotenvy",
  "dunce",
- "futures-core",
  "futures-util",
  "hound",
  "imagesize",

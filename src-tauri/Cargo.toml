@@ -58,7 +58,6 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cpal = "0.15"
 dotenvy = "0.15"
-futures-core = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 hound = "3.5"
 imagesize = "0.13"
