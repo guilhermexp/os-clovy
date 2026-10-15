@@ -13,7 +13,7 @@ use super::embedder::{Embedder, EmbedderStatus};
 use super::hour::{self, HourInput, SessionLine};
 use super::prompts;
 use super::schedule::{self, day_key, HourWindow, LocalZone, RunOutcome};
-use super::sources::{hhmm, DaySources};
+use super::sources::{hhmm, whole_minutes, DaySources};
 use super::summary::{
     self, DayInput, DayPanelsDto, DaySummaryDto, HourFocusDto, HourReportDto, SummaryTrigger,
 };
@@ -88,10 +88,6 @@ pub enum HourOutcome {
     Empty,
 }
 
-fn minutes_of(ms: i64) -> i64 {
-    (ms + 30_000) / 60_000
-}
-
 async fn call(
     deps: &Deps<'_>,
     system: &str,
@@ -114,10 +110,10 @@ fn session_line(
     window: &HourWindow,
     zone: &dyn LocalZone,
 ) -> SessionLine {
-    let start = timeline::builder::parse_time(&session.started_at)
+    let start = crate::activity::store::parse_time(&session.started_at)
         .unwrap_or(window.start)
         .max(window.start);
-    let end = timeline::builder::parse_time(&session.ended_at)
+    let end = crate::activity::store::parse_time(&session.ended_at)
         .unwrap_or(window.end)
         .min(window.end);
     SessionLine {
@@ -128,7 +124,7 @@ fn session_line(
         app: session.app_name.clone(),
         context: session.context.clone(),
         category: session.category.as_db().to_string(),
-        minutes: minutes_of((end - start).num_milliseconds().max(0)),
+        minutes: whole_minutes((end - start).num_milliseconds().max(0)),
         window: session.window_title.clone(),
     }
 }
@@ -146,19 +142,22 @@ pub async fn report_hour(
         deps.now,
     )
     .await?;
-    let active_minutes = minutes_of(view.stats.focused_ms);
+    let active_minutes = whole_minutes(view.stats.focused_ms);
     if active_minutes == 0 {
         return Ok(HourOutcome::Empty);
     }
     let mut texts = Vec::new();
     let mut lines = Vec::new();
+    let ids: Vec<i64> = view.sessions.iter().map(|session| session.id).collect();
+    let mut by_session = db::session_documents(deps.store, &ids, window.start, window.end).await?;
     for session in &view.sessions {
         let line = session_line(session, window, deps.zone);
-        let start = timeline::builder::parse_time(&session.started_at).unwrap_or(window.start);
-        let end = timeline::builder::parse_time(&session.ended_at).unwrap_or(window.end);
+        let start = crate::activity::store::parse_time(&session.started_at).unwrap_or(window.start);
+        let end = crate::activity::store::parse_time(&session.ended_at).unwrap_or(window.end);
         let seconds = (end.min(window.end) - start.max(window.start)).num_seconds();
-        let documents = db::session_documents(deps.store, session.id, window.start, window.end)
-            .await?
+        let documents = by_session
+            .remove(&session.id)
+            .unwrap_or_default()
             .into_iter()
             .filter(|(_, url, _)| {
                 !url.as_deref().is_some_and(|url| {
@@ -166,7 +165,7 @@ pub async fn report_hour(
                 })
             })
             .map(|(seen_at, _, body)| {
-                let at = timeline::builder::parse_time(&seen_at).unwrap_or(window.start);
+                let at = crate::activity::store::parse_time(&seen_at).unwrap_or(window.start);
                 (hhmm(deps.zone, at), body)
             })
             .collect();
@@ -188,7 +187,13 @@ pub async fn report_hour(
     let distilled = distill::distill(&texts, &header, deps.embedder).await;
     let blocks = deps
         .sources
-        .coding_blocks(deps.store, window.start, window.end, deps.zone)
+        .coding_blocks(
+            deps.store,
+            &deps.settings.coding_agents,
+            window.start,
+            window.end,
+            deps.zone,
+        )
         .await;
     let meetings = deps
         .sources
@@ -282,7 +287,7 @@ pub async fn built_until(
     Ok(cursor
         .last_frame_at
         .as_deref()
-        .and_then(timeline::builder::parse_time)
+        .and_then(crate::activity::store::parse_time)
         .unwrap_or(DateTime::<Utc>::UNIX_EPOCH))
 }
 
@@ -572,7 +577,13 @@ pub async fn generate_summary(
     let meetings = deps.sources.meetings(from, to, deps.zone).await;
     let blocks = deps
         .sources
-        .coding_blocks(deps.store, from, to, deps.zone)
+        .coding_blocks(
+            deps.store,
+            &deps.settings.coding_agents,
+            from,
+            to,
+            deps.zone,
+        )
         .await;
     if reports.is_empty() && meetings.is_empty() && blocks.is_empty() {
         return Ok(None);
@@ -676,7 +687,13 @@ pub async fn day_view(
             context.sources.meetings(from, to, context.zone).await,
             context
                 .sources
-                .coding_blocks(context.store, from, to, context.zone)
+                .coding_blocks(
+                    context.store,
+                    &context.settings.coding_agents,
+                    from,
+                    to,
+                    context.zone,
+                )
                 .await,
         ),
         None => (Vec::new(), Vec::new()),

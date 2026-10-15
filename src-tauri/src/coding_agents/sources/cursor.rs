@@ -13,9 +13,9 @@ use sqlx::query::query;
 
 use super::sqlite::{text_column, value_for_key, Snapshot};
 use super::{is_regular_file, source_root, str_at, SourceRoots};
+use crate::activity::store::parse_time;
 use crate::coding_agents::record::{
-    cap, from_epoch_millis, parse_time, Record, RecordKind, SessionInfo, TOOL_INPUT_CAP,
-    TOOL_TEXT_CAP,
+    cap, from_epoch_millis, Record, RecordKind, SessionInfo, TOOL_INPUT_CAP, TOOL_TEXT_CAP,
 };
 use crate::coding_agents::segment::BlockBuilder;
 

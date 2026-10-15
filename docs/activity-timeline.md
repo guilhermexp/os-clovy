@@ -130,7 +130,8 @@ All in `crate::activity::timeline` over an open `ActivityStore`:
 |---|---|
 | `timeline_view(store, settings, from, to, now)` | Sessions and gaps overlapping `[from, to)` plus `TimelineStatsDto`, after current exclusions and retention |
 | `search_view(store, settings, query, from, to, limit, now)` | FTS5 results (best first) with session id, app, title, URL, `seen_at`, snippet |
-| `db::session_detail(store, id)` | Session, its windows (most seen first, ≤ 20), and a text excerpt (≤ 1500 chars) |
+| `visible_session_detail(store, settings, id, now)` | The session detail the view and the MCP server show: `None` past retention or when excluded; windows on excluded URLs are dropped, and the text excerpt with them |
+| `db::session_detail(store, id)` | Session, its windows (most seen first, ≤ 20), and a text excerpt (≤ 1500 chars), unfiltered |
 | `db::sessions_between`, `db::gaps_between` | Raw rows without filtering |
 | `refresh_before_read(app, store)` | Bounded catch-up before a read (at most 2,000 frames; skipped while another pass runs) |
 
@@ -146,7 +147,7 @@ allowed rows are found or the matches run out.
 | Command | Request | Returns |
 |---|---|---|
 | `activity_timeline` | `{ request: { from, to } }` (RFC 3339) | `{ availability, message, captureEnabled, sessions, gaps, stats }`; a gap with `ongoing: true` (`id` 0) runs to the time of the read |
-| `activity_timeline_session` | `{ request: { id } }` | `{ session, windows, textExcerpt }`; error `activity_session_not_found` |
+| `activity_timeline_session` | `{ request: { id } }` | `{ session, windows, textExcerpt }` through `visible_session_detail`; error `activity_session_not_found` (also past retention or excluded) |
 | `activity_timeline_search` | `{ request: { query, from, to, limit } }` (`from`/`to`/`limit` nullable; limit 1 to 200, default 50) | `{ availability, results }` |
 | `activity_app_icon` | `{ request: { bundleId } }` | The installed app's icon as a 64x64 PNG data URL (at most 64 KB), or `null` when the app is gone, the id is malformed, or the platform is not macOS |
 

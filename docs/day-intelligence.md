@@ -157,7 +157,8 @@ Days are local `YYYY-MM-DD`, hours local `YYYY-MM-DDTHH`; `started_at` /
 | `day_summaries` | `day` (PK), `headline`, `narrative`, `insights_json`, `standup_json` (`{done, in_progress, blockers}`), `hours_covered`, `locale`, `provider`, `trigger` (`scheduled`/`manual`), `generated_at` | Regenerating replaces the row |
 | `day_intelligence_runs` | `key` (PK), `attempts`, `outcome` (`ok`/`failed`/`empty`), `last_error`, `next_attempt_at`, `updated_at` | Scheduler bookkeeping |
 
-Retention follows capture's period: rows of days before it are deleted hourly.
+Retention follows capture's period: rows of days before it are deleted hourly,
+whenever the activity database is open, also while capture is off.
 The debug export adds `dayHourReports`, `dayWorkstreams`, `daySummaries`, and
 `dayIntelligenceRuns` (newest three days).
 
@@ -204,7 +205,9 @@ Invalid times load the defaults.
 `sources::coding_blocks_between` reads
 `ActivityStore::coding_agent_blocks_between`
 ([coding-agent-sessions.md](coding-agent-sessions.md#rust-api-for-later-slices-crateactivitystoreactivitystore))
-for each hour report and for the day summary and its panels. Each block
+for each hour report and for the day summary and its panels, keeping only
+the sources still turned on in Settings, Activity (like the MCP server's
+`list_coding_agent_sessions`). Each block
 carries the agent's name, project, title, local times, active minutes, and
 its summary once ingestion wrote one, else its first prompt (never the
 transcript). A block counts only inside the window (one ending exactly at

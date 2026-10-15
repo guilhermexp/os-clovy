@@ -241,7 +241,7 @@ pub struct DayInput<'a> {
 /// workstreams, hour reports, meetings and notes, and coding-agent blocks
 /// inside the untrusted-data fence.
 pub fn prompt(input: &DayInput<'_>) -> String {
-    let minutes = |ms: i64| ms / 60_000;
+    let minutes = super::sources::whole_minutes;
     let mut out = format!(
         "=== THE DAY: {} ===\nMeasured (already shown next to your text; do not restate): focused {} min, idle {} min, away {} min.\n",
         input.day,

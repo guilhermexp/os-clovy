@@ -11,8 +11,9 @@ use serde_json::Value;
 use super::{
     for_each_json_line, is_regular_file, list_subdirs, source_root, str_at, under, SourceRoots,
 };
+use crate::activity::store::parse_time;
 use crate::coding_agents::record::{
-    cap, parse_time, Record, RecordKind, RecordSink, SessionInfo, TOOL_INPUT_CAP,
+    cap, Record, RecordKind, RecordSink, SessionInfo, TOOL_INPUT_CAP,
 };
 
 pub fn root(roots: &SourceRoots) -> PathBuf {

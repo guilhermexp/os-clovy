@@ -3,7 +3,7 @@
 //! summary runs (once per day at the configured time, or right after waking
 //! if the Mac slept through it), retry backoff, and quiet hours.
 
-use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Days, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 
 use crate::activity::settings::{parse_clock, QuietHours};
 
@@ -111,6 +111,38 @@ pub fn hours_of_day(zone: &dyn LocalZone, day: NaiveDate) -> Vec<HourWindow> {
 
 pub fn local_day(zone: &dyn LocalZone, at: DateTime<Utc>) -> NaiveDate {
     zone.local(at).date()
+}
+
+/// Local midnight `days_back` days before the local day of `at`: the start
+/// of [`day_bounds`], so a skipped midnight (DST at 00:00) starts the day at
+/// the first minute that exists. Should a day have no start at all, the
+/// same number of whole days before `at`.
+pub fn local_midnight(zone: &dyn LocalZone, at: DateTime<Utc>, days_back: u64) -> DateTime<Utc> {
+    local_day(zone, at)
+        .checked_sub_days(Days::new(days_back))
+        .and_then(|day| day_bounds(zone, day))
+        .map_or_else(
+            || at - Duration::days(days_back as i64 + 1),
+            |(start, _)| start,
+        )
+}
+
+/// A named time zone (DST rules included) for tests.
+#[cfg(test)]
+pub struct NamedZone(pub chrono_tz::Tz);
+
+#[cfg(test)]
+impl LocalZone for NamedZone {
+    fn local(&self, at: DateTime<Utc>) -> NaiveDateTime {
+        at.with_timezone(&self.0).naive_local()
+    }
+
+    fn instant(&self, local: NaiveDateTime) -> Option<DateTime<Utc>> {
+        self.0
+            .from_local_datetime(&local)
+            .earliest()
+            .map(|at| at.with_timezone(&Utc))
+    }
 }
 
 /// Completed hours of `day`: ended by `now` and by `built_until` (how far
@@ -263,6 +295,26 @@ mod tests {
             .unwrap()
             .and_hms_opt(hour, minute, 0)
             .unwrap()
+    }
+
+    /// Santiago skips midnight on 2026-09-06 (00:00 becomes 01:00): "today"
+    /// starts at 01:00, not 24 hours ago or now.
+    #[test]
+    fn a_skipped_midnight_starts_the_day_at_the_first_minute_that_exists() {
+        use chrono_tz::America::Santiago;
+        let zone = NamedZone(Santiago);
+        let now = Santiago
+            .with_ymd_and_hms(2026, 9, 6, 15, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let start = Santiago.with_ymd_and_hms(2026, 9, 6, 1, 0, 0).unwrap();
+        assert_eq!(local_midnight(&zone, now, 0), start);
+        let tomorrow = now + Duration::days(1);
+        assert_eq!(local_midnight(&zone, tomorrow, 1), start);
+        assert_eq!(
+            local_midnight(&zone, tomorrow, 0),
+            Santiago.with_ymd_and_hms(2026, 9, 7, 0, 0, 0).unwrap()
+        );
     }
 
     #[test]
