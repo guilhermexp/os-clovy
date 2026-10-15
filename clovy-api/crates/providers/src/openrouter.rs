@@ -1,3 +1,4 @@
+use crate::http::{LOGGED_ERROR_BODY_LIMIT, read_body_len_capped};
 use crate::retry::{self, UpstreamAttemptError};
 use async_trait::async_trait;
 use clovy_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit, UpstreamConfig};
@@ -455,7 +456,7 @@ impl OpenRouterChat {
             .post(&url)
             .bearer_auth(api_key)
             .json(&body);
-        let response = request.send().await.map_err(|error| {
+        let mut response = request.send().await.map_err(|error| {
             tracing::error!(
                 %error,
                 %url,
@@ -472,21 +473,23 @@ impl OpenRouterChat {
             .unwrap_or("application/json")
             .to_string();
         if !status.is_success() {
-            let body = response.bytes().await.map_err(|error| {
-                tracing::error!(
-                    %error,
-                    %url,
-                    model = %model.0,
-                    "openrouter: agent chat body read failed"
-                );
-                DomainError::UpstreamProvider
-            })?;
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        %error,
+                        %url,
+                        model = %model.0,
+                        "openrouter: agent chat body read failed"
+                    );
+                    DomainError::UpstreamProvider
+                })?;
             return Err(handle_agent_chat_non_success(
                 AgentChatNonSuccess {
                     status,
                     url: &url,
                     model: &model.0,
-                    body_bytes: body.len(),
+                    body_bytes,
                 },
                 auth.provider_credentials,
             ));
@@ -550,21 +553,23 @@ impl OpenRouterChat {
             .unwrap_or("application/json")
             .to_string();
         if !status.is_success() {
-            let body = response.bytes().await.map_err(|error| {
-                tracing::error!(
-                    %error,
-                    %url,
-                    model = %model.0,
-                    "openrouter: agent chat body read failed"
-                );
-                DomainError::UpstreamProvider
-            })?;
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        %error,
+                        %url,
+                        model = %model.0,
+                        "openrouter: agent chat body read failed"
+                    );
+                    DomainError::UpstreamProvider
+                })?;
             return Err(handle_agent_chat_non_success(
                 AgentChatNonSuccess {
                     status,
                     url: &url,
                     model: &model.0,
-                    body_bytes: body.len(),
+                    body_bytes,
                 },
                 auth.provider_credentials,
             ));
@@ -745,7 +750,7 @@ struct StreamPump<'a> {
 }
 
 async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
-    let mut accumulated = Vec::new();
+    let mut body = StreamBodyParser::new(&pump.content_type);
     let mut forwarding = true;
     let is_sse = pump.content_type.contains("text/event-stream");
     // The stream opens at a line boundary by definition.
@@ -759,7 +764,7 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
             chunk = pump.response.chunk() => {
                 match chunk {
                     Ok(Some(chunk)) => {
-                        accumulated.extend_from_slice(&chunk);
+                        body.push(&chunk);
                         // Chunk boundaries are arbitrary bytes, not SSE event
                         // boundaries — a heartbeat is only legal at a line
                         // start, or it would splice into a partial `data:`
@@ -780,7 +785,7 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
                         heartbeat.reset();
                     }
                     Ok(None) => {
-                        let outcome = stream_body_state(&accumulated, &pump.content_type).outcome();
+                        let outcome = body.finish().outcome();
                         let _ = pump.outcome_tx.send(outcome);
                         return;
                     }
@@ -793,7 +798,7 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
                         // upstream fault — or a cut before response content arrived —
                         // charges nothing, matching the buffered path which
                         // errors before its charge line.
-                        let body_state = stream_body_state(&accumulated, &pump.content_type);
+                        let body_state = body.finish();
                         let deliberate_cut = error.is_timeout() && body_state.delivered && !body_state.failed;
                         tracing::error!(
                             %error,
@@ -1147,36 +1152,83 @@ impl StreamBodyState {
 }
 
 fn stream_body_state(body: &[u8], content_type: &str) -> StreamBodyState {
-    let mut state = StreamBodyState::default();
-    if !content_type.contains("text/event-stream") {
-        if let Ok(value) = serde_json::from_slice(body) {
-            state.observe(&value);
+    let mut parser = StreamBodyParser::new(content_type);
+    parser.push(body);
+    parser.finish()
+}
+
+/// Folds a response body into a [`StreamBodyState`] as chunks arrive, so the
+/// stream pump never keeps the whole body only to read its usage at the end.
+/// An SSE body holds just the line and event being parsed; any other body is
+/// one JSON document and is buffered until it ends.
+struct StreamBodyParser {
+    sse: bool,
+    state: StreamBodyState,
+    /// Current incomplete SSE line, or the whole body when not SSE.
+    pending: Vec<u8>,
+    /// `data:` payload of the SSE event being assembled.
+    data: String,
+    /// The previous byte was a CR, so a following LF ends no extra line.
+    after_cr: bool,
+}
+
+impl StreamBodyParser {
+    fn new(content_type: &str) -> Self {
+        Self {
+            sse: content_type.contains("text/event-stream"),
+            state: StreamBodyState::default(),
+            pending: Vec::new(),
+            data: String::new(),
+            after_cr: false,
         }
-        return state;
     }
-    // Parse complete SSE events, not transport chunks or individual data
-    // lines. CRLF/CR, comments, named events and multi-line data are legal.
-    let text = String::from_utf8_lossy(body)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
-    let mut data = String::new();
-    for line in text.split_terminator('\n') {
+
+    fn push(&mut self, chunk: &[u8]) {
+        if !self.sse {
+            self.pending.extend_from_slice(chunk);
+            return;
+        }
+        // Parse complete SSE events, not transport chunks or individual data
+        // lines. CRLF/CR, comments, named events and multi-line data are legal.
+        for &byte in chunk {
+            let after_cr = std::mem::replace(&mut self.after_cr, byte == b'\r');
+            match byte {
+                b'\n' if after_cr => {}
+                b'\n' | b'\r' => self.end_line(),
+                _ => self.pending.push(byte),
+            }
+        }
+    }
+
+    fn end_line(&mut self) {
+        let line = std::mem::take(&mut self.pending);
+        let line = String::from_utf8_lossy(&line);
         if line.is_empty() {
-            if !data.trim().is_empty() && data.trim() != "[DONE]" {
-                match serde_json::from_str(&data) {
-                    Ok(value) => state.observe(&value),
-                    Err(_) => state.failed = true,
+            let event = self.data.trim();
+            if !event.is_empty() && event != "[DONE]" {
+                match serde_json::from_str(event) {
+                    Ok(value) => self.state.observe(&value),
+                    Err(_) => self.state.failed = true,
                 }
             }
-            data.clear();
+            self.data.clear();
         } else if let Some(value) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
+            if !self.data.is_empty() {
+                self.data.push('\n');
             }
-            data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            self.data.push_str(value.strip_prefix(' ').unwrap_or(value));
         }
     }
-    state
+
+    /// An unterminated trailing line or event is never dispatched.
+    fn finish(mut self) -> StreamBodyState {
+        if !self.sse
+            && let Ok(value) = serde_json::from_slice(&self.pending)
+        {
+            self.state.observe(&value);
+        }
+        self.state
+    }
 }
 
 fn usage_from_sse(body: &[u8]) -> Result<TokenUsage, DomainError> {
@@ -2496,6 +2548,49 @@ mod tests {
                 super::stream_body_state(body.as_bytes(), "text/event-stream").outcome(),
                 AgentChatStreamOutcome::CompletedWithoutUsage
             );
+        }
+    }
+
+    #[test]
+    fn incremental_body_parse_matches_whole_body_at_every_chunk_split() {
+        // The pump folds chunks as they arrive instead of keeping the body;
+        // an SSE line, a CRLF pair or a multi-line event split across chunks
+        // must parse exactly as the whole body does.
+        for (body, expected) in [
+            (
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n\r\n\
+                 data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\r\n\r\n\
+                 data: [DONE]\r\n\r\n",
+                AgentChatStreamOutcome::Usage(TokenUsage {
+                    prompt_tokens: 3,
+                    completion_tokens: 4,
+                }),
+            ),
+            (
+                "data: {\n: ignored\ndata: \"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\r\r",
+                AgentChatStreamOutcome::CompletedWithoutUsage,
+            ),
+            (
+                "event: message\r\ndata: {\r\ndata: \"error\":{\"code\":\"server_error\"}}\r\n\r\n",
+                AgentChatStreamOutcome::Failed,
+            ),
+        ] {
+            assert_eq!(
+                super::stream_body_state(body.as_bytes(), "text/event-stream").outcome(),
+                expected
+            );
+            let bytes = body.as_bytes();
+            for split in 0..=bytes.len() {
+                let mut parser = super::StreamBodyParser::new("text/event-stream");
+                parser.push(&bytes[..split]);
+                parser.push(&bytes[split..]);
+                assert_eq!(parser.finish().outcome(), expected, "split at {split}");
+            }
+            let mut parser = super::StreamBodyParser::new("text/event-stream");
+            for byte in bytes {
+                parser.push(std::slice::from_ref(byte));
+            }
+            assert_eq!(parser.finish().outcome(), expected, "byte at a time");
         }
     }
 

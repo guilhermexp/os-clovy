@@ -1,3 +1,4 @@
+use crate::http::{LOGGED_ERROR_BODY_LIMIT, read_body_len_capped};
 use async_trait::async_trait;
 use clovy_config::OsAccountsConfig;
 use clovy_domain::{
@@ -94,7 +95,7 @@ impl P3aSink for OsAccountsP3aSink {
     async fn submit(&self, report: P3aReport) -> Result<(), DomainError> {
         let url = format!("{}/p3a/reports", self.api_url);
         let body = P3aReportWireRequest::from(report);
-        let response = self
+        let mut response = self
             .http
             .post(&url)
             .bearer_auth(&self.ingest_token)
@@ -107,8 +108,10 @@ impl P3aSink for OsAccountsP3aSink {
             })?;
         let status = response.status();
         if status.is_server_error() {
-            let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, body_bytes = body.len(), "os_accounts: P3A report server error");
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or(0);
+            tracing::error!(%status, %url, body_bytes, "os_accounts: P3A report server error");
             return Err(DomainError::MeteringProvider);
         }
         let raw = response.text().await.map_err(|error| {
@@ -138,7 +141,7 @@ impl OsAccountsClient for OsAccountsHttpClient {
     async fn authorize(&self, request: AuthorizeRequest) -> Result<Authorization, DomainError> {
         let url = format!("{}/authorize", self.api_url);
         let body = AuthorizeWireRequest::from(request);
-        let response = self
+        let mut response = self
             .http
             .post(&url)
             .bearer_auth(&self.app_api_key)
@@ -151,8 +154,10 @@ impl OsAccountsClient for OsAccountsHttpClient {
             })?;
         let status = response.status();
         if status.is_server_error() {
-            let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, body_bytes = body.len(), "os_accounts: authorize server error");
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or(0);
+            tracing::error!(%status, %url, body_bytes, "os_accounts: authorize server error");
             return Err(DomainError::MeteringProvider);
         }
         let raw = response.text().await.map_err(|error| {
@@ -222,7 +227,7 @@ impl OsAccountsHttpClient {
         url: &str,
         body: &ChargeWireRequest,
     ) -> Result<Receipt, ChargeError> {
-        let response = self
+        let mut response = self
             .http
             .post(url)
             .bearer_auth(&self.app_api_key)
@@ -235,8 +240,10 @@ impl OsAccountsHttpClient {
             })?;
         let status = response.status();
         if status.is_server_error() {
-            let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, body_bytes = body.len(), "os_accounts: charge server error (retryable)");
+            let body_bytes = read_body_len_capped(&mut response, LOGGED_ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or(0);
+            tracing::error!(%status, %url, body_bytes, "os_accounts: charge server error (retryable)");
             return Err(ChargeError::Retryable);
         }
         let raw = response.text().await.map_err(|error| {
