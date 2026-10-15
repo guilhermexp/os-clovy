@@ -6,6 +6,7 @@ pub mod agent_mcp;
 pub mod agent_recorder;
 pub mod agent_runtime;
 pub mod app_paths;
+pub mod approval_broker;
 pub mod audio;
 pub mod browser;
 mod browser_broker;
@@ -486,6 +487,9 @@ pub fn run() {
         .setup(|app| {
             browser::setup_on_app_start();
             agent_runtime::tools::seed_bundled_skills(app.handle());
+            // Before any CLI turn can ask: cancels requests a previous
+            // process left pending.
+            approval_broker::setup(app);
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
             // After the tray exists: the capture thread publishes its state
@@ -525,6 +529,7 @@ pub fn run() {
         .expect("failed to build Clovy")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { code, api, .. } => {
+                approval_broker::close(app);
                 shutdown::handle_exit_requested(app, code, &api);
             }
             // Tao emits only Exit for macOS logout/application termination.
