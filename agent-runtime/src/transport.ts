@@ -171,12 +171,21 @@ export class NdjsonRpcPeer {
     this.output.write(encodeFrame(frame));
   }
 
+  /** Drops a settled run's sequence counter; the host resets its own on resume. */
+  forgetSequence(sessionId: string, runId: string): void {
+    this.sequences.delete(sequenceKey(sessionId, runId));
+  }
+
   private nextSequence(sessionId: string, runId: string): number {
-    const key = `${sessionId}\u0000${runId}`;
+    const key = sequenceKey(sessionId, runId);
     const next = (this.sequences.get(key) ?? 0) + 1;
     this.sequences.set(key, next);
     return next;
   }
+}
+
+function sequenceKey(sessionId: string, runId: string): string {
+  return `${sessionId}\u0000${runId}`;
 }
 
 function abortError(): Error {

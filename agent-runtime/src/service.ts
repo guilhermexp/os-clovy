@@ -316,6 +316,9 @@ export class RuntimeService {
       }
     } finally {
       this.activeRuns.delete(runKey(sessionId, runId));
+      // Every frame of the run, including the failure log above, already
+      // took its sequence.
+      this.peer?.forgetSequence(sessionId, runId);
     }
   }
 
@@ -379,8 +382,32 @@ function runKey(sessionId: string, runId: string): string {
   return `${sessionId}\u0000${runId}`;
 }
 
+const ABORT_ERROR_NAMES = new Set(["AbortError", "APIUserAbortError", "CanceledError", "CancelledError"]);
+/** Host app error codes that mean the run's work was cancelled, not failed. */
+const HOST_CANCELLATION_CODES = new Set([
+  "agent_model_scope_cancelled",
+  "agent_model_scope_inactive",
+  "agent_tool_cancelled",
+]);
+
+/**
+ * Recognizes cancellation by error identity (an abort error, or a host
+ * failure carrying a cancellation code), anywhere in the cause chain. The
+ * message is never inspected: a real failure may mention "aborted".
+ */
 function isAbortError(error: unknown): boolean {
-  return error instanceof Error && (error.name === "AbortError" || /aborted|cancelled/i.test(error.message));
+  for (let current = error, depth = 0; current instanceof Error && depth < 8; depth += 1) {
+    if (ABORT_ERROR_NAMES.has(current.name)) return true;
+    if (current instanceof ProtocolError && HOST_CANCELLATION_CODES.has(appErrorCode(current.data))) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+function appErrorCode(data: unknown): string {
+  return typeof data === "object" && data !== null && "appErrorCode" in data && typeof data.appErrorCode === "string"
+    ? data.appErrorCode
+    : "";
 }
 
 function throwIfAborted(signal: AbortSignal): void {

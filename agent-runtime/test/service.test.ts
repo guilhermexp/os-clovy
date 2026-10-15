@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PassThrough } from "node:stream";
+import { ProtocolError } from "../src/protocol.ts";
 import { MODEL_CHAT_COMPLETIONS_TOOL } from "../src/rpc-model-provider.ts";
 import { OpenAIAgentsEngine } from "../src/sdk-engine.ts";
 import { RuntimeService } from "../src/service.ts";
@@ -151,6 +152,37 @@ test("cancels an active run with its abort signal", async () => {
   assert.deepEqual(await service.handle(request("run.cancel", {})), { cancelled: true });
   await nextTurn();
   assert.ok(frames().some((frame) => frame.method === "run.cancelled"));
+});
+
+test("forgets a run's frame sequence once the run settles", async () => {
+  const { service, peer } = harness(new FakeEngine());
+  await initialize(service);
+  await service.handle(request("run.start", runParams));
+  await nextTurn();
+  assert.equal(peer.sequences.size, 0);
+});
+
+test("reports a failure that mentions aborting as a failure, not a cancellation", async () => {
+  const { service, frames } = harness(new FailingEngine(new Error("Upstream connection aborted by peer")));
+  await initialize(service);
+  await service.handle(request("run.start", runParams));
+  await nextTurn();
+  const methods = frames().map((frame) => frame.method);
+  assert.ok(methods.includes("run.failed"));
+  assert.ok(!methods.includes("run.cancelled"));
+});
+
+test("reports a host cancellation of the model scope as a cancellation", async () => {
+  const hostCancellation = new ProtocolError(-32603, "The agent model request was cancelled.", {
+    appErrorCode: "agent_model_scope_cancelled",
+  });
+  const { service, frames } = harness(new FailingEngine(new Error("Model call failed", { cause: hostCancellation })));
+  await initialize(service);
+  await service.handle(request("run.start", runParams));
+  await nextTurn();
+  const methods = frames().map((frame) => frame.method);
+  assert.ok(methods.includes("run.cancelled"));
+  assert.ok(!methods.includes("run.failed"));
 });
 
 test("accepts before summarizing and cancels without starting a run", async () => {
@@ -503,6 +535,19 @@ class BlockingSummaryEngine extends FakeEngine {
   }
 }
 
+class FailingEngine extends FakeEngine {
+  readonly error: Error;
+
+  constructor(error: Error) {
+    super();
+    this.error = error;
+  }
+
+  override async start(): Promise<EngineResult> {
+    throw this.error;
+  }
+}
+
 class WaitingEngine extends FakeEngine {
   override async start(input: EngineRunInput): Promise<EngineResult> {
     return new Promise((resolve, reject) => {
@@ -557,6 +602,7 @@ function harness(engine: AgentEngine) {
   service.attach(peer);
   return {
     service,
+    peer,
     frames: () =>
       text
         .trim()
