@@ -17,7 +17,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { formatDate, t as translate, useLocale, useT } from "../../i18n";
+import { clockTimeOptions, formatDate, t as translate, useLocale, useT } from "../../i18n";
 import { isSameLocalDay } from "../../lib/date-format";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
@@ -610,8 +610,7 @@ function formatTime(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   return formatDate(date, {
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   });
 }
 
@@ -622,8 +621,7 @@ function formatTranscriptTimestamp(iso: string) {
     weekday: "long",
     month: "short",
     day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   });
 }
 

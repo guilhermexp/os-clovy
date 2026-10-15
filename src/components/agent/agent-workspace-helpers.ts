@@ -1,4 +1,4 @@
-import { formatNumber, intlLocale, isEnglishLocale } from "../../i18n";
+import { clockTimeOptions, formatNumber, intlLocale, isEnglishLocale } from "../../i18n";
 
 export function formatBytes(value: number | null | undefined) {
   if (!value) return "0 B";
@@ -24,7 +24,6 @@ export function relativeDate(value: string) {
   return new Intl.DateTimeFormat(intlLocale(), {
     month: "short",
     day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   }).format(date);
 }

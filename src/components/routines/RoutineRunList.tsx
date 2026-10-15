@@ -4,7 +4,7 @@ import {
   sessionTimestamp,
   type RoutineRunSession,
 } from "../../lib/agent-routine-history";
-import { formatDate, t as translate, useT } from "../../i18n";
+import { clockTimeOptions, formatDate, t as translate, useT } from "../../i18n";
 import { isSameLocalDay } from "../../lib/date-format";
 
 /** Past runs of one or all routines: each row is a cron-sourced session,
@@ -65,8 +65,7 @@ export function formatRunTime(iso: string) {
   if (Number.isNaN(date.getTime())) return iso;
   const now = new Date();
   const time = formatDate(date, {
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   });
   if (isSameLocalDay(date, now)) return translate("routines.run.today", { time });
   const tomorrow = new Date(now);
@@ -78,7 +77,6 @@ export function formatRunTime(iso: string) {
   return formatDate(date, {
     month: "short",
     day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   });
 }

@@ -10,7 +10,7 @@
  * than risk describing a schedule wrongly. */
 
 import { getInterfaceLocale } from "../i18n/locale";
-import { formatDate, formatList, t } from "../i18n/translate";
+import { formatDate, formatList, formatClockTime as formatTime, t } from "../i18n/translate";
 
 type CronField =
   | { kind: "any" }
@@ -256,11 +256,7 @@ function dayPhrase(days: number[], time: string): string {
 }
 
 function formatClockTime(hourOfDay: number, minute: number): string {
-  // Brazilian clocks read zero-padded 24-hour times ("09:00").
-  return formatDate(new Date(2000, 0, 1, hourOfDay, minute), {
-    hour: isEnglish() ? "numeric" : "2-digit",
-    minute: "2-digit",
-  });
+  return formatTime(new Date(2000, 0, 1, hourOfDay, minute));
 }
 
 function singleValue(field: CronField): number | null {

@@ -2,7 +2,7 @@ import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconStop } from "central-icons/IconStop";
 import { IconTelevision } from "central-icons/IconTelevision";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { intlLocale, t as translate, useT, useTRich } from "../../i18n";
+import { clockTimeOptions, intlLocale, t as translate, useT, useTRich } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import {
@@ -16,8 +16,7 @@ import {
 
 function expiryLabel(expiresAtMs: number) {
   return new Intl.DateTimeFormat(intlLocale(), {
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   }).format(new Date(expiresAtMs));
 }
 

@@ -57,6 +57,25 @@ export function formatDate(
   return new Intl.DateTimeFormat(intlLocale(locale), options).format(date);
 }
 
+/**
+ * The one clock-time shape for every visible time: "8:00 AM" in English and
+ * zero-padded 24-hour "08:00" in Portuguese. Spread it into wider options
+ * (`{ month: "short", day: "numeric", ...clockTimeOptions() }`).
+ */
+export function clockTimeOptions(
+  locale: InterfaceLocale = getInterfaceLocale(),
+): Intl.DateTimeFormatOptions {
+  return { hour: isEnglishLocale(locale) ? "numeric" : "2-digit", minute: "2-digit" };
+}
+
+/** A clock time ("8:00 AM", "08:00") in the interface language. */
+export function formatClockTime(
+  value: Date | number | string,
+  locale: InterfaceLocale = getInterfaceLocale(),
+) {
+  return formatDate(value, clockTimeOptions(locale), locale);
+}
+
 export function formatList(
   items: string[],
   options?: Intl.ListFormatOptions,

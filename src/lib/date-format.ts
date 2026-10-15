@@ -1,4 +1,4 @@
-import { formatDate, intlLocale } from "../i18n/translate";
+import { formatClockTime, formatDate, intlLocale } from "../i18n/translate";
 
 export const DATE_FORMAT_STORAGE_KEY = "clovy:date-format";
 export const DATE_FORMAT_CHANGED_EVENT = "clovy:date-format-changed";
@@ -33,8 +33,10 @@ export function setStoredDateFormat(preference: DateFormatPreference) {
 
 /**
  * A short calendar date ("Oct 15", "15 de out."). Month names always come from
- * the interface language; the preference only picks the day/month order, and
- * `system` takes that order from the system's regional format.
+ * the interface language; the preference only picks the day/month order.
+ * `system` takes that order from the system's regional format only when the
+ * system speaks the interface language (en-GB for an English UI); otherwise
+ * it is the language's own pattern ("12 de out." on an en-US system).
  */
 export function formatCalendarDate(
   date: Date,
@@ -49,6 +51,7 @@ export function formatCalendarDate(
   });
   let order = normalizedPreference;
   if (order === "system") {
+    if (language(systemLocales) !== language(locales)) return formatter.format(date);
     order = dayMonthOrder(systemLocales);
     // The language's own pattern keeps its connectors ("15 de out.") whenever
     // it already reads in the system's order.
@@ -60,6 +63,11 @@ export function formatCalendarDate(
   const month = new Intl.DateTimeFormat(locales, { month: "short" }).format(date);
   const day = new Intl.DateTimeFormat(locales, { day: "numeric" }).format(date);
   return order === "month-first" ? `${month} ${day}` : `${day} ${month}`;
+}
+
+/** The language subtag a locale resolves to ("pt" for pt-BR). */
+function language(locales: Intl.LocalesArgument): string {
+  return new Intl.Locale(new Intl.DateTimeFormat(locales).resolvedOptions().locale).language;
 }
 
 /** Whether a locale writes the day or the month first in a short date. */
@@ -92,7 +100,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 export function formatListTimestamp(date: Date, now: Date = new Date()): string {
   if (isSameLocalDay(date, now)) {
-    return formatDate(date, { hour: "numeric", minute: "2-digit" });
+    return formatClockTime(date);
   }
   if (Math.floor((now.getTime() - date.getTime()) / DAY_MS) < 7) {
     return formatDate(date, { weekday: "short" });

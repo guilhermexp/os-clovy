@@ -46,7 +46,7 @@ describe("interface language owns every date and time", () => {
   it("reads segunda-feira às 08:00 in Portuguese on an English system", () => {
     withSystemLocale("en-US");
     applyInterfaceLocale("pt-BR");
-    expect(formatTime(new Date(2026, 9, 15, 9, 30).toISOString())).toBe("9:30");
+    expect(formatTime(new Date(2026, 9, 15, 9, 30).toISOString())).toBe("09:30");
     expect(clovyHomeDayLabel(MONDAY_8AM, NOW)).toBe("Segunda-feira às 08:00");
     expect(formatListTimestamp(new Date(2026, 9, 12, 8), NOW)).toBe("seg.");
     expect(humanizeSchedule("0 8 * * 1")).toBe("Toda segunda-feira às 08:00");
@@ -56,18 +56,40 @@ describe("interface language owns every date and time", () => {
     const date = new Date(2026, 9, 12, 12);
     withSystemLocale("pt-BR");
     applyInterfaceLocale("en");
-    // `system` follows the system's order (day first in pt-BR) with English names.
+    // A Portuguese system's order does not apply to an English interface.
+    expect(formatCalendarDate(date, "system")).toBe("Oct 12");
+    expect(formatCalendarDate(date, "day-first")).toBe("12 Oct");
+
+    // Same language: the system's regional order applies (en-GB is day first).
+    withSystemLocale("en-GB");
     expect(formatCalendarDate(date, "system")).toBe("12 Oct");
-    expect(formatCalendarDate(date, "month-first")).toBe("Oct 12");
 
     withSystemLocale("en-US");
-    expect(formatCalendarDate(date, "system")).toBe("Oct 12");
+    applyInterfaceLocale("pt-BR");
+    // An English system's order does not apply to a Portuguese interface.
+    expect(formatCalendarDate(date, "system")).toBe("12 de out.");
+    expect(formatCalendarDate(date, "month-first")).toBe("out. 12");
 
     withSystemLocale("pt-BR");
-    applyInterfaceLocale("pt-BR");
-    // Same order as the language's own pattern: keep its connector.
     expect(formatCalendarDate(date, "system")).toBe("12 de out.");
     expect(formatCalendarDate(date, "day-first")).toBe("12 out.");
+  });
+
+  it("writes one clock shape per language across Home, Routines, and the Timeline", () => {
+    const at930 = new Date(2026, 9, 15, 9, 30);
+    withSystemLocale("en-US");
+    applyInterfaceLocale("pt-BR");
+    expect(formatTime(at930.toISOString())).toBe("09:30");
+    expect(formatListTimestamp(at930, NOW)).toBe("09:30");
+    expect(humanizeSchedule("30 9 * * *")).toBe("Todo dia às 09:30");
+    expect(clovyHomeDayLabel(at930.toISOString(), NOW)).toBe("Hoje às 09:30");
+
+    withSystemLocale("pt-BR");
+    applyInterfaceLocale("en");
+    expect(plain(formatTime(at930.toISOString()))).toBe("9:30 AM");
+    expect(plain(formatListTimestamp(at930, NOW))).toBe("9:30 AM");
+    expect(plain(humanizeSchedule("30 9 * * *"))).toBe("Every day at 9:30 AM");
+    expect(plain(clovyHomeDayLabel(at930.toISOString(), NOW))).toBe("Today at 9:30 AM");
   });
 
   it("phrases stored intervals in the interface language", () => {

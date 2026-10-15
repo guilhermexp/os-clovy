@@ -1,4 +1,10 @@
-import { getInterfaceLocale, type InterfaceLocale, intlLocale, type MessageKey } from "../../i18n";
+import {
+  formatClockTime,
+  getInterfaceLocale,
+  type InterfaceLocale,
+  intlLocale,
+  type MessageKey,
+} from "../../i18n";
 import type {
   ActivityCategory,
   TimelineGapKind,
@@ -82,11 +88,7 @@ export function formatTime(
   dateStr: string,
   locale: InterfaceLocale = getInterfaceLocale(),
 ): string {
-  const date = new Date(dateStr);
-  return new Intl.DateTimeFormat(intlLocale(locale), {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
+  return formatClockTime(dateStr, locale);
 }
 
 /**
