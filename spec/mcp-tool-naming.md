@@ -51,6 +51,9 @@ name in a document and a name in code disagree, the document that *owns* the
 contract wins and the code is the bug; if no document owns it, that is the
 defect to fix first.
 
+The note tools (`search_june`, `get_note`, `get_dictation`) are named in
+[docs/agent-note-tools.md](../docs/agent-note-tools.md).
+
 Inspect the current host-tool catalog and dispatch before coining anything:
 `src-tauri/src/agent_runtime/api.rs`,
 `src-tauri/src/agent_runtime/native_connectors.rs`, and

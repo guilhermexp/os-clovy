@@ -1414,7 +1414,9 @@ async fn routine_trust(pool: &SqlitePool, routine_id: &str) -> (Vec<String>, Opt
 fn routine_base_tool_allowed(name: &str, enabled_toolsets: &[String]) -> bool {
     let has = |toolset: &str| enabled_toolsets.iter().any(|value| value == toolset);
     match name {
-        "search_june" => has("context_engine") || has("memory") || has("session_search"),
+        "search_june" | "get_note" | "get_dictation" => {
+            has("context_engine") || has("memory") || has("session_search")
+        }
         "web_search" | "web_fetch" => has("web"),
         "list_files" | "read_file" | "preview_file" | "search_files" => has("file"),
         "list_skills" | "load_skill" => has("skills"),
@@ -1511,7 +1513,9 @@ pub async fn routine_mcp_server_allowed_for_session(
 
 fn base_unattended_tools() -> Value {
     json!([
-        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations. Returns each match's id with an excerpt around the match.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
+        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations. Returns each match's id with an excerpt around the match; call get_note with a note id or get_dictation with a dictation id to read it whole.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
+        { "name": "get_note", "description": "Read one Clovy note and its latest transcript by note id. Long texts come in pages: call again with contentOffset or transcriptOffset set to the nextContentOffset or nextTranscriptOffset of the previous page.", "parameters": { "type": "object", "properties": { "id": { "type": "string" }, "contentOffset": { "type": "integer", "minimum": 0 }, "transcriptOffset": { "type": "integer", "minimum": 0 } }, "required": ["id"], "additionalProperties": false } },
+        { "name": "get_dictation", "description": "Read one Clovy dictation by id. Long text comes in pages: call again with textOffset set to the nextTextOffset of the previous page.", "parameters": { "type": "object", "properties": { "id": { "type": "string" }, "textOffset": { "type": "integer", "minimum": 0 } }, "required": ["id"], "additionalProperties": false } },
         { "name": "web_search", "description": "Search the public web.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
         { "name": "web_fetch", "description": "Fetch a public web page.", "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false } },
         { "name": "list_files", "description": "List files in the routine workspace.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": [], "additionalProperties": false } },
