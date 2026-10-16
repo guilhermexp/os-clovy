@@ -401,6 +401,11 @@ async fn run_cleanup(app: &tauri::AppHandle, _deadline: ShutdownDeadline) -> Cle
     if let Err(error) = dictation_result {
         tracing::warn!(%error, "dictation shutdown worker could not be joined");
     }
+    // Every CLI turn has ended (or its wait ran out): no turn token may bind
+    // an MCP connection any more.
+    if let Some(mcp) = app.try_state::<crate::mcp_server::McpServerState>() {
+        mcp.turns().revoke_all();
+    }
     CleanupOutcome::Completed
 }
 

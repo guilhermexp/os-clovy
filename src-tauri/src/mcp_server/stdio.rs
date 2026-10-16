@@ -251,6 +251,7 @@ mod unix {
             let (thread_alive, thread_pending, thread_output) =
                 (Arc::clone(&alive), Arc::clone(&pending), Arc::clone(output));
             let probe_dir = dir.to_path_buf();
+            let bound = turn.is_some();
             std::thread::spawn(move || {
                 for line in BufReader::new(reader).lines() {
                     let Ok(line) = line else { break };
@@ -273,7 +274,12 @@ mod unix {
                     .map(|(_, message)| message)
                     .collect();
                 if !orphans.is_empty() {
-                    let reason = dropped_reason(&probe_dir);
+                    // A bound connection only closes while the socket is up
+                    // when its turn was revoked.
+                    let reason = match dropped_reason(&probe_dir) {
+                        DROPPED_MESSAGE if bound => TURN_EXPIRED_MESSAGE,
+                        other => other,
+                    };
                     for message in orphans {
                         if let Some(response) = fallback(&message, reason) {
                             emit(&thread_output, &response);

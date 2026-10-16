@@ -23,6 +23,8 @@
 pub mod commands;
 pub mod store;
 #[cfg(test)]
+pub(crate) mod testing;
+#[cfg(test)]
 mod tests;
 
 use crate::agent_runtime::AgentSafetyMode;

@@ -11,7 +11,8 @@
 //! `{"clovyMcp": 1, "ok": true}`, or `{"clovyMcp": 1, "ok": false, "error":
 //! "unauthorized"}` (or `"busy"` when every connection slot is taken, or
 //! `"turn_expired"` when the turn token is unknown or revoked) and closes. A
-//! bound connection is closed when its turn is revoked (`super::turns`). After `ok`, each line is one MCP JSON-RPC message in either
+//! bound connection is closed when its turn is revoked (`super::turns`),
+//! after the calls it was serving answer (at most 2 s). After `ok`, each line is one MCP JSON-RPC message in either
 //! direction; responses may arrive out of order.
 //!
 //! Limits (every process of the same user can reach the socket): at most
@@ -117,6 +118,9 @@ mod unix {
     use crate::mcp_server::turns::{BoundTurn, TurnBinding, TurnRegistry, TURN_EXPIRED};
 
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+    /// How long a revoked connection waits for the answers of the calls it
+    /// was serving before it closes.
+    const REVOKE_GRACE: Duration = Duration::from_secs(2);
     const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
     /// Answers one MCP message (`None` for notifications), whatever the
@@ -420,9 +424,22 @@ mod unix {
                 }
             }
         }
-        // Shutdown or revocation: pending answers are dropped.
-        if *shutdown.borrow() || cut {
+        if *shutdown.borrow() {
+            // App shutdown: pending answers are dropped.
             writer.abort();
+        } else if cut {
+            // Revocation: no new request is read, but the calls already in
+            // flight still answer (a cancelled run settles its approvals
+            // first, so a waiting tool returns `run_cancelled`), for at most
+            // REVOKE_GRACE; then the connection closes.
+            drop(responses);
+            let mut writer = writer;
+            if tokio::time::timeout(REVOKE_GRACE, &mut writer)
+                .await
+                .is_err()
+            {
+                writer.abort();
+            }
         } else {
             // The client closed its side: let pending answers drain.
             drop(responses);

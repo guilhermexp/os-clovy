@@ -500,6 +500,7 @@ fn turn_handler(notes: SqlitePool) -> channel::TurnHandler {
                 data: &data,
                 app: None,
                 binding: binding.as_deref(),
+                broker: None,
             };
             protocol::handle_in(&ctx, &message).await
         })

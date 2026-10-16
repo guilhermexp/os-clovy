@@ -31,10 +31,9 @@ use std::time::Duration;
 const PROBE_WRITE: &str = "probe_write";
 
 /// A write tool as a parity slice writes one: bound-only, and it acts only
-/// after the broker approved the call for the connection's turn.
-struct ProbeWrite {
-    broker: ApprovalBroker,
-}
+/// after the context's broker approved the call for the connection's turn.
+#[derive(Clone, Copy)]
+struct ProbeWrite;
 
 impl ToolGroup for ProbeWrite {
     fn owns(&self, name: &str) -> bool {
@@ -67,28 +66,27 @@ impl ToolGroup for ProbeWrite {
                     preview: None,
                 },
             };
-            match self
-                .broker
+            ctx.broker()?
                 .request(&ApprovalTurn::from(binding), request)
                 .await
-            {
-                Ok(_) => Ok(json!({ "written": true, "runId": binding.run_id })),
-                Err(denial) => Err(AppError::new(denial.code(), denial.message())),
-            }
+                .map_err(|denial| AppError::new(denial.code(), denial.message()))?;
+            Ok(json!({ "written": true, "runId": binding.run_id }))
         })
     }
 }
 
 /// The app's handler shape with the probe group in front of the read tools.
-fn handler(data: McpData, probe: Arc<ProbeWrite>) -> channel::TurnHandler {
+fn handler(data: McpData, broker: ApprovalBroker) -> channel::TurnHandler {
     let data = Arc::new(data);
+    let probe = ProbeWrite;
     Arc::new(move |message: Value, binding: Option<Arc<TurnBinding>>| {
-        let (data, probe) = (Arc::clone(&data), Arc::clone(&probe));
+        let (data, broker) = (Arc::clone(&data), broker.clone());
         Box::pin(async move {
             let ctx = ToolCtx {
                 data: &data,
                 app: None,
                 binding: binding.as_deref(),
+                broker: Some(&broker),
             };
             let name = message["params"]["name"].as_str().unwrap_or_default();
             if message["method"] == "tools/list" && ctx.binding.is_some() {
@@ -225,13 +223,13 @@ impl Rig {
             crate::mcp_server::tests::notes_pool().await,
             ActivityAccess::Off,
         );
-        let probe = Arc::new(ProbeWrite {
-            broker: broker.clone(),
-        });
-        let listener =
-            channel::Listener::start_with_turns(dir.path(), handler(data, probe), turns.clone())
-                .await
-                .unwrap();
+        let listener = channel::Listener::start_with_turns(
+            dir.path(),
+            handler(data, broker.clone()),
+            turns.clone(),
+        )
+        .await
+        .unwrap();
         Self {
             harness,
             turns,
@@ -442,17 +440,10 @@ async fn tool_call_through_the_turn_binding(answer: Answer) {
             assert_eq!(item.payload["status"], "resolved");
         }
         Answer::Cancel => {
-            // The broker answered `run_cancelled`, or the revoked token
-            // closed the connection before that answer went out (the relay
-            // then reports the dropped connection). Either way the CLI is
-            // being stopped and nothing ran.
+            // The pending call gets the broker's answer before the revoked
+            // token closes the connection.
             assert_eq!(result["result"]["isError"], true);
-            assert!(
-                text.ends_with("(run_cancelled)")
-                    || text.ends_with("(turn_expired)")
-                    || text == stdio::DROPPED_MESSAGE,
-                "{text}"
-            );
+            assert!(text.ends_with("(run_cancelled)"), "{text}");
             assert_eq!(item.payload["status"], "cancelled");
         }
     }
@@ -509,6 +500,160 @@ async fn chat_engine_turn_binding_tool_call_denied_returns_user_denied() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_engine_turn_binding_cancel_settles_the_card_and_revokes_the_token() {
     tool_call_through_the_turn_binding(Answer::Cancel).await;
+}
+
+/// The phase 2 test path: a write group run directly with a scripted broker,
+/// no socket and no Tauri runtime.
+#[tokio::test]
+async fn chat_engine_write_group_runs_against_a_scripted_broker() {
+    use crate::approval_broker::testing::{Scripted, TestBroker};
+    let broker = TestBroker::new([Scripted::Approve, Scripted::Deny]).await;
+    let data = crate::mcp_server::tests::data(
+        crate::mcp_server::tests::notes_pool().await,
+        ActivityAccess::Off,
+    );
+    let attended = broker.turn(CliKind::Codex, true).await;
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&attended),
+        broker: Some(broker.broker()),
+    };
+    let args = json!({ "path": "notes.txt" });
+    assert_eq!(
+        ProbeWrite.call(&ctx, PROBE_WRITE, &args).await.unwrap(),
+        json!({ "written": true, "runId": attended.run_id })
+    );
+    let denied = ProbeWrite.call(&ctx, PROBE_WRITE, &args).await.unwrap_err();
+    assert_eq!(denied.code, "user_denied");
+    let cards = broker.requests();
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[0]["toolName"], PROBE_WRITE);
+    assert_eq!(cards[0]["title"], "Write a test file");
+    assert_eq!(cards[0]["cli"], "codex");
+
+    // A routine is refused without a card.
+    let routine = broker.turn(CliKind::Claude, false).await;
+    let ctx_routine = ToolCtx {
+        binding: Some(&routine),
+        ..ctx
+    };
+    let refused = ProbeWrite
+        .call(&ctx_routine, PROBE_WRITE, &args)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, "unattended_requires_approval");
+    assert_eq!(broker.requests().len(), 2);
+
+    // Without a broker the tool refuses instead of acting.
+    let no_broker = ToolCtx {
+        broker: None,
+        ..ctx
+    };
+    let unavailable = ProbeWrite
+        .call(&no_broker, PROBE_WRITE, &args)
+        .await
+        .unwrap_err();
+    assert_eq!(unavailable.code, "approval_unavailable");
+
+    // A card nobody answers ends with the run.
+    let waiting = TestBroker::new([Scripted::Leave]).await;
+    let turn = waiting.turn(CliKind::Claude, true).await;
+    let ctx_waiting = ToolCtx {
+        binding: Some(&turn),
+        broker: Some(waiting.broker()),
+        ..ctx
+    };
+    let call = ProbeWrite.call(&ctx_waiting, PROBE_WRITE, &args);
+    let cancel = async {
+        wait_for("the card", || !waiting.broker().waiting_ids().is_empty()).await;
+        waiting.broker().cancel_run(&turn.run_id).await
+    };
+    let (outcome, cancelled) = tokio::join!(call, cancel);
+    assert_eq!(cancelled, 1);
+    assert_eq!(outcome.unwrap_err().code, "run_cancelled");
+}
+
+/// A revoked turn still answers the calls it was serving before it closes:
+/// the CLI reads that answer, not a dropped connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_engine_revoked_turn_answers_its_pending_call_before_closing() {
+    let turns = TurnRegistry::default();
+    let dir = tempfile::tempdir().unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let handler: channel::TurnHandler = {
+        let (release, entered) = (Arc::clone(&release), Arc::clone(&entered));
+        Arc::new(move |message: Value, _binding: Option<Arc<TurnBinding>>| {
+            let (release, entered) = (Arc::clone(&release), Arc::clone(&entered));
+            Box::pin(async move {
+                if message["method"] != "tools/call" {
+                    return Some(json!({ "jsonrpc": "2.0", "id": message["id"], "result": {} }));
+                }
+                entered.notify_one();
+                release.notified().await;
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": protocol::tool_error("The run was cancelled. (run_cancelled)"),
+                }))
+            })
+        })
+    };
+    let _listener = channel::Listener::start_with_turns(dir.path(), handler, turns.clone())
+        .await
+        .unwrap();
+    let token = turns.issue(TurnBinding {
+        session_id: "session-1".into(),
+        run_id: "run-1".into(),
+        cli: CliKind::Claude,
+        safety_mode: AgentSafetyMode::Sandboxed,
+        attended: true,
+        surface: "chat".into(),
+    });
+    let (gate, gated) = std::sync::mpsc::channel::<()>();
+    let output = Output::default();
+    let relay = {
+        let (dir, token, sink) = (dir.path().to_path_buf(), token.clone(), output.clone());
+        let input = format!("{}\n{}\n", initialize(), call_probe());
+        tokio::task::spawn_blocking(move || {
+            stdio::relay_turn(
+                &dir,
+                Some(&token),
+                std::io::BufReader::new(OpenInput {
+                    lines: std::io::Cursor::new(input.into_bytes()),
+                    gate: gated,
+                }),
+                Box::new(sink),
+            );
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .expect("the call reached the app");
+    // The run is cancelled: the token goes first, the answer right after.
+    assert_eq!(turns.revoke_run("run-1"), 1);
+    release.notify_one();
+    let answered = output.clone();
+    wait_for("the call's answer", move || {
+        answered.messages().iter().any(|message| message["id"] == 2)
+    })
+    .await;
+    let _ = gate.send(());
+    relay.await.unwrap();
+    let answer = output
+        .messages()
+        .into_iter()
+        .find(|message| message["id"] == 2)
+        .unwrap();
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.ends_with("(run_cancelled)"), "{text}");
+    // And the token opens nothing any more.
+    let dir = dir.path().to_path_buf();
+    let refused = tokio::task::spawn_blocking(move || channel::connect_turn(&dir, Some(&token)))
+        .await
+        .unwrap();
+    assert!(matches!(refused, Err(ClientError::TurnExpired)));
 }
 
 /// A fake CLI that copies the MCP configuration it got (claude, copilot) and

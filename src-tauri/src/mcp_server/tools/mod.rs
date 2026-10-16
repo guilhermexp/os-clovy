@@ -16,6 +16,7 @@ use tauri::AppHandle;
 
 use crate::activity::settings::ActivitySettings;
 use crate::activity::store::ActivityStore;
+use crate::approval_broker::ApprovalBroker;
 use crate::domain::types::AppError;
 
 pub use super::turns::TurnBinding;
@@ -62,24 +63,39 @@ impl ActivityAccess {
 
 /// What one tool call runs with: the data the message may read, the app (for
 /// groups that act through it; `None` where no Tauri runtime exists, as in
-/// tests), and the CLI turn the connection is bound to (`None` for every
-/// client outside a Clovy CLI turn).
+/// tests), the CLI turn the connection is bound to (`None` for every client
+/// outside a Clovy CLI turn), and the approval broker write tools ask before
+/// acting (the app's, or a test broker:
+/// `crate::approval_broker::testing::TestBroker`).
 #[derive(Clone, Copy)]
 pub struct ToolCtx<'a> {
     pub data: &'a McpData,
     pub app: Option<&'a AppHandle>,
     pub binding: Option<&'a TurnBinding>,
+    pub broker: Option<&'a ApprovalBroker>,
 }
 
 impl<'a> ToolCtx<'a> {
-    /// A context with neither app nor turn (what an unbound client gets
-    /// apart from the app handle).
+    /// A context with neither app, turn, nor broker (what an unbound client
+    /// gets apart from the app handle).
     pub fn unbound(data: &'a McpData) -> Self {
         Self {
             data,
             app: None,
             binding: None,
+            broker: None,
         }
+    }
+
+    /// The approval broker; `approval_unavailable` when the context has none
+    /// (the tool must not act without asking).
+    pub fn broker(&self) -> Result<&'a ApprovalBroker, AppError> {
+        self.broker.ok_or_else(|| {
+            AppError::new(
+                "approval_unavailable",
+                "Clovy could not ask for approval: the approval broker is unavailable.",
+            )
+        })
     }
 }
 

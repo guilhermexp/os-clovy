@@ -339,10 +339,12 @@ fn app_handler(app: AppHandle) -> channel::TurnHandler {
         Box::pin(async move {
             match app_data(&app, &message).await {
                 Ok(data) => {
+                    let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
                     let ctx = ToolCtx {
                         data: &data,
                         app: Some(&app),
                         binding: binding.as_deref(),
+                        broker: broker.as_deref(),
                     };
                     protocol::handle_in(&ctx, &message).await
                 }
