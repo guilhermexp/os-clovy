@@ -6,6 +6,12 @@
 //! unbound clients (Cursor, `claude mcp add`) see the read group alone, as
 //! ADR-0058 describes, and calling a bound-only tool answers `turn_required`.
 
+pub(crate) mod browser;
+#[cfg(test)]
+mod browser_tests;
+pub(crate) mod computer_use;
+#[cfg(test)]
+mod computer_use_tests;
 mod memory;
 #[cfg(test)]
 mod memory_tests;
@@ -124,6 +130,14 @@ pub trait ToolGroup: Send + Sync {
     /// may still narrow by `ctx.binding` (for example by CLI).
     fn descriptors(&self, ctx: &ToolCtx<'_>) -> Vec<Value>;
 
+    /// The group's `tools/list` entries when building them needs I/O
+    /// (connector accounts, a hosted server's inventory, user MCP
+    /// discovery). `tools/list` awaits this; the default is
+    /// [`ToolGroup::descriptors`], so static groups implement only that.
+    fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Vec<Value>> {
+        Box::pin(async move { self.descriptors(ctx) })
+    }
+
     /// Runs one of the group's tools (`owns(name)` holds). Errors become
     /// `isError` tool results.
     fn call<'a>(
@@ -140,6 +154,8 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
     groups.push(&routines::RoutineTools);
     groups.push(&memory::MemoryTools);
+    groups.push(&browser::BROWSER);
+    groups.push(&computer_use::COMPUTER_USE);
     #[cfg(all(test, unix))]
     groups.push(&super::turn_tests::TurnProbe);
     groups
@@ -149,13 +165,13 @@ fn visible(group: &dyn ToolGroup, ctx: &ToolCtx<'_>) -> bool {
     ctx.binding.is_some() || !group.needs_turn()
 }
 
-/// The `tools/list` catalog for this context.
-pub fn descriptors(ctx: &ToolCtx<'_>) -> Vec<Value> {
-    groups()
-        .into_iter()
-        .filter(|group| visible(*group, ctx))
-        .flat_map(|group| group.descriptors(ctx))
-        .collect()
+/// The `tools/list` catalog for this context, in group order.
+pub async fn descriptors(ctx: &ToolCtx<'_>) -> Vec<Value> {
+    let mut tools = Vec::new();
+    for group in groups().into_iter().filter(|group| visible(*group, ctx)) {
+        tools.extend(group.catalog(ctx).await);
+    }
+    tools
 }
 
 /// Whether some group owns `name` (bound-only tools included).

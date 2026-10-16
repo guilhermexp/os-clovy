@@ -129,12 +129,58 @@ pub fn initialize_result(params: &Value, instructions: &str) -> Value {
     })
 }
 
-/// A tool result whose single text block is `value` as JSON.
+/// A tool result whose single text block is `value` as JSON, or, when the
+/// tool returned [`content_value`], those MCP content blocks as they are.
 pub fn tool_result(value: &Value) -> Value {
+    if let Some(blocks) = content_blocks(value) {
+        return json!({ "content": blocks, "isError": false });
+    }
     json!({
         "content": [{ "type": "text", "text": value.to_string() }],
         "isError": false,
     })
+}
+
+/// The reserved key of [`content_value`]. Tools that return plain JSON never
+/// use it, so their results keep the single text block.
+pub const CONTENT_KEY: &str = "$mcpContent";
+
+/// A tool return value carrying MCP content blocks instead of one JSON text
+/// block (addendum to contract C4, 2026-10-15): `text` and `image` blocks
+/// only, built with [`text_block`] and [`image_block`].
+pub fn content_value(blocks: Vec<Value>) -> Value {
+    json!({ CONTENT_KEY: blocks })
+}
+
+pub fn text_block(text: impl Into<String>) -> Value {
+    json!({ "type": "text", "text": text.into() })
+}
+
+/// An image block: `data` is base64, `mime_type` an `image/*` type.
+pub fn image_block(data: impl Into<String>, mime_type: impl Into<String>) -> Value {
+    json!({ "type": "image", "data": data.into(), "mimeType": mime_type.into() })
+}
+
+/// The blocks of a [`content_value`], when every one is a well-formed text
+/// or image block; anything else is serialized as JSON text like before.
+fn content_blocks(value: &Value) -> Option<&Vec<Value>> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let blocks = object.get(CONTENT_KEY)?.as_array()?;
+    let valid = |block: &Value| match block.get("type").and_then(Value::as_str) {
+        Some("text") => block.get("text").is_some_and(Value::is_string),
+        Some("image") => {
+            block.get("data").is_some_and(Value::is_string)
+                && block
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .is_some_and(|mime| mime.starts_with("image/"))
+        }
+        _ => false,
+    };
+    (!blocks.is_empty() && blocks.iter().all(valid)).then_some(blocks)
 }
 
 /// A failed tool call the model can read (MCP reports tool failures as
@@ -166,7 +212,7 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
     let outcome = match method {
         "initialize" => Ok(initialize_result(&params, INSTRUCTIONS)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx) })),
+        "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx).await })),
         "tools/call" => call_tool(ctx, &params).await,
         "resources/list" => Ok(json!({ "resources": resources() })),
         "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),

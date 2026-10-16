@@ -40,6 +40,18 @@ pub fn tool_error(message: &str) -> Value;    // isError:true
 - Grupo com `needs_turn() == true`: ausente de `tools/list` sem vínculo; `tools/call` sem vínculo devolve `isError` terminado em `(turn_required)` sem executar o grupo.
 - `Err(AppError)` de `ToolGroup::call` vira `isError` com texto `"<message> (<code>)"` (`protocol.rs`). O código é a parte estável para o modelo e para os testes.
 - `ToolGroup::call` devolve `Result` (não `Option<Result>` como esboçado em §1): `owns` separa "não é meu" de "falhou". O `AppHandle` fica em `ToolCtx`, não em `McpData` (desvio de §1), para os testes montarem `McpData` sem runtime Tauri.
+- **Adendo 2026-10-15, blocos de conteúdo (aditivo, autorizado pelo Main na revisão de 2.6).** Uma ferramenta pode devolver blocos de conteúdo MCP em vez de um texto JSON:
+
+  ```rust
+  // protocol.rs
+  pub const CONTENT_KEY: &str = "$mcpContent";
+  pub fn content_value(blocks: Vec<Value>) -> Value;           // {"$mcpContent": [...]}
+  pub fn text_block(text: impl Into<String>) -> Value;         // {type:"text", text}
+  pub fn image_block(data: impl Into<String>, mime_type: impl Into<String>) -> Value; // {type:"image", data:<base64>, mimeType:"image/*"}
+  ```
+
+  `tool_result` devolve `{content: <blocos>, isError: false}` quando o valor é exatamente `{"$mcpContent": [...]}` com blocos `text`/`image` bem formados; qualquer outro valor (inclusive blocos inválidos ou vazios) continua num único bloco de texto JSON, então as ferramentas existentes não mudam. Usam hoje: `computer_use` (captura como `image`, texto e conteúdo estruturado como `text`) e `screenshot` do navegador (PNG como `image` e o resultado do broker como `text`). Imagens acima de 3 MiB em base64 ficam no Clovy. Test: `computer_use_tests::content_values_become_mcp_blocks_and_plain_values_stay_one_text_block` e `tests/mcp_server_stdio.rs::mcp_server_binary_carries_image_content_blocks_to_the_cli` (binário `clovy-mcp`).
+- **Adendo 2026-10-15, catálogo assíncrono (aditivo, Main, desbloqueio de 2.9/2.10).** `ToolGroup` ganha `fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Vec<Value>>`, cujo padrão devolve `descriptors(ctx)`; `tools::descriptors(ctx)` passa a ser `async` e `tools/list` aguarda o `catalog` de cada grupo visível, na ordem de registro. Grupos estáticos continuam implementando só `descriptors`. Grupos cujo catálogo depende de I/O (contas de conectores, inventário do Notion hospedado, descoberta de MCPs do usuário e Linear) sobrescrevem `catalog`, reutilizando a descoberta assíncrona existente; falha de descoberta de um servidor omite as ferramentas dele e não derruba o `tools/list`. `owns(name)` continua síncrono: grupos dinâmicos decidem por prefixo (`mcp_`, `notion-`) ou por um nome fixo da tabela do delta.
 - **Broker no contexto.** `mcp_server/mod.rs` preenche `broker` com `app.try_state::<ApprovalBroker>()`; testes passam o de `approval_broker::testing::TestBroker` (abaixo). Um grupo de escrita nunca age sem `ctx.broker()?` aprovar: sem broker a ferramenta falha com `approval_unavailable`.
 
 ### C1, vínculo de turno (`mcp_server/{turns.rs,channel.rs,stdio.rs,mod.rs}`, `chat_engine/{turn.rs,mod.rs}`)

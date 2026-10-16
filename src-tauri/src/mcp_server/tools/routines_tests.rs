@@ -141,9 +141,10 @@ async fn routines_denied_unattended_unbound_and_unavailable_leave_database_uncha
         "delete_routine",
     ] {
         assert!(!descriptors(&ToolCtx::unbound(&data))
+            .await
             .iter()
             .any(|tool| tool["name"] == name));
-        let tools = descriptors(&ctx);
+        let tools = descriptors(&ctx).await;
         let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
         assert_eq!(tool["annotations"]["readOnlyHint"], name == "list_routines");
     }
