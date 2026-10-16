@@ -6,6 +6,9 @@
 //! unbound clients (Cursor, `claude mcp add`) see the read group alone, as
 //! ADR-0058 describes, and calling a bound-only tool answers `turn_required`.
 
+mod memory;
+#[cfg(test)]
+mod memory_tests;
 mod read;
 mod routines;
 #[cfg(test)]
@@ -136,6 +139,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     #[allow(unused_mut)]
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
     groups.push(&routines::RoutineTools);
+    groups.push(&memory::MemoryTools);
     #[cfg(all(test, unix))]
     groups.push(&super::turn_tests::TurnProbe);
     groups
