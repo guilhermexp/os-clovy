@@ -99,7 +99,7 @@ async fn policy_claude_interaction_tools_are_listed_to_claude_turns() {
         binding: Some(&binding),
         ..crate::mcp_server::tools::ToolCtx::unbound(&data)
     };
-    let listed = crate::mcp_server::tools::descriptors(&ctx);
+    let listed = crate::mcp_server::tools::descriptors(&ctx).await;
     for name in ["approve_action", "request_clarification"] {
         assert!(
             listed.iter().any(|tool| tool["name"] == name),

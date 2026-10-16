@@ -170,7 +170,7 @@ async fn recorder_without_a_broker_or_turn_never_records() {
 
     // Unbound: not listed, and turn_required through the registry.
     let unbound = ToolCtx::unbound(&data);
-    let listed = super::descriptors(&unbound);
+    let listed = super::descriptors(&unbound).await;
     for name in ["start_recording", "stop_recording", "recording_status"] {
         assert!(listed.iter().all(|tool| tool["name"] != name), "{name}");
         let error = super::call(&unbound, name, &json!({})).await.unwrap_err();

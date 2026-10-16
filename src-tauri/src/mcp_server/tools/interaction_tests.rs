@@ -189,7 +189,7 @@ async fn interaction_unbound_clients_neither_see_nor_reach_the_tools() {
     let broker = TestBroker::new([Scripted::Approve]).await;
     let data = data(&broker);
     let unbound = ToolCtx::unbound(&data);
-    let listed = super::descriptors(&unbound);
+    let listed = super::descriptors(&unbound).await;
     for name in ["request_clarification", "approve_action"] {
         assert!(!names(&listed).contains(&name), "{name}");
         let error = super::call(&unbound, name, &bash_permission())

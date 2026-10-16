@@ -335,7 +335,7 @@ async fn media_tools_are_bound_only_listed_without_read_only_hint_and_refused_un
     let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
     let data = turn.data();
     let unbound = ToolCtx::unbound(&data);
-    let unbound_names = super::descriptors(&unbound);
+    let unbound_names = super::descriptors(&unbound).await;
     for name in ["generate_image", "edit_image", "generate_video"] {
         assert!(!names(&unbound_names).contains(&name), "{name} unbound");
         let refused = super::call(&unbound, name, &json!({ "prompt": "x" }))
@@ -356,7 +356,7 @@ async fn media_tools_are_bound_only_listed_without_read_only_hint_and_refused_un
         assert_eq!(tool["annotations"]["readOnlyHint"], false, "{tool}");
         assert_eq!(tool["annotations"]["openWorldHint"], true, "{tool}");
     }
-    assert!(names(&super::descriptors(&bound)).contains(&"generate_video"));
+    assert!(names(&super::descriptors(&bound).await).contains(&"generate_video"));
     assert!(turn.artifacts().await.is_empty());
 }
 

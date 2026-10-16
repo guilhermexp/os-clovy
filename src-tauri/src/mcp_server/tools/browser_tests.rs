@@ -161,13 +161,13 @@ async fn browser_tools_are_listed_only_for_attended_turns_with_read_only_hints()
     let chat = rig.approvals.turn(CliKind::Claude, true).await;
     let routine = rig.approvals.turn(CliKind::Codex, false).await;
 
-    let unbound = names(&super::descriptors(&ToolCtx::unbound(&rig.data)));
+    let unbound = names(&super::descriptors(&ToolCtx::unbound(&rig.data)).await);
     assert!(BROWSER_TOOLS
         .iter()
         .all(|tool| !unbound.contains(&tool.to_string())));
     assert!(rig.group().descriptors(&rig.ctx(Some(&routine))).is_empty());
 
-    let listed = super::descriptors(&rig.ctx(Some(&chat)));
+    let listed = super::descriptors(&rig.ctx(Some(&chat))).await;
     let browser: Vec<&Value> = listed
         .iter()
         .filter(|tool| BROWSER_TOOLS.contains(&tool["name"].as_str().unwrap_or_default()))

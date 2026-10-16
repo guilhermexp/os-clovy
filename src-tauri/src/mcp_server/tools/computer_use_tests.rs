@@ -157,15 +157,16 @@ async fn computer_use_is_listed_only_for_attended_turns() {
     let data = data(&broker);
     let chat = broker.turn(CliKind::Claude, true).await;
     let routine = broker.turn(CliKind::Codex, false).await;
-    let listed = |ctx: &ToolCtx<'_>| {
+    async fn listed(ctx: &ToolCtx<'_>) -> Vec<Value> {
         super::descriptors(ctx)
+            .await
             .into_iter()
             .filter(|tool| tool["name"] == COMPUTER_USE_TOOL)
-            .collect::<Vec<_>>()
-    };
-    assert!(listed(&ToolCtx::unbound(&data)).is_empty());
-    assert!(listed(&ctx(&data, &broker, &routine)).is_empty());
-    let tool = listed(&ctx(&data, &broker, &chat));
+            .collect()
+    }
+    assert!(listed(&ToolCtx::unbound(&data)).await.is_empty());
+    assert!(listed(&ctx(&data, &broker, &routine)).await.is_empty());
+    let tool = listed(&ctx(&data, &broker, &chat)).await;
     assert_eq!(tool.len(), 1);
     assert_eq!(tool[0]["annotations"]["readOnlyHint"], false);
     assert_eq!(tool[0]["inputSchema"]["required"], json!(["action"]));
