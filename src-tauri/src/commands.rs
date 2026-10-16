@@ -29,22 +29,22 @@ use crate::{
             ClaudeProjectCandidateDto, CompletedSessionDto, CreateDictionaryEntryRequest,
             CreateFolderRequest, CreateNoteRequest, DeleteDictionaryEntryRequest,
             DeleteFolderRequest, DeleteNoteRequest, DeleteNotesRequest, DictionaryEntryDto,
-            DownloadNoteAudioRequest, DownloadNoteAudioResponse, ExplainAgentApprovalRequest,
-            ExplainAgentApprovalResponse, FinishRecordingResponse, GetNoteRequest,
-            ImportClaudeProjectsRequest, ListNotesRequest, ListNotesResponse, MemoryDto,
-            MemorySettingsDto, MicrophonePermissionResponse, NoteDto, OpenPrivacySettingsRequest,
-            ProcessingStatus, ProfileDataSummaryDto, RecordingOrigin, RecordingOriginMetadata,
-            RecordingSessionDto, RecordingSource, RecordingSourceMode, RecordingSourceReadinessDto,
-            RecordingStatusDto, RemoveNoteFromFolderRequest, RemoveSessionFromFolderRequest,
-            RenameFolderRequest, RetryProcessingRequest, SessionFolderDto, SessionProfileDto,
-            SessionRequest, SetSessionCompletedRequest, ShareAddInvitesRequest, ShareCreateRequest,
-            ShareCreatedDto, ShareDeleteRequest, ShareDto, ShareGetRequest, ShareInviteKeyDto,
-            ShareInviteKeySaveRequest, ShareInviteKeysGetRequest, ShareInvitesAddedDto,
-            ShareKeyDto, ShareKeyGetRequest, ShareKeySaveRequest, ShareRevokeInviteRequest,
-            ShareSummaryDto, SourceReadinessDto, StartMeetingRecordingRequest,
-            StartRecordingRequest, SubmitIssueReportRequest, SubmitIssueReportResponse,
-            SuggestAgentSessionTitleRequest, SuggestAgentSessionTitleResponse,
-            UpdateDictionaryEntryRequest, UpdateNoteRequest, UpdateNoteResponse,
+            DownloadNoteAudioRequest, DownloadNoteAudioResponse, FinishRecordingResponse,
+            GetNoteRequest, ImportClaudeProjectsRequest, ListNotesRequest, ListNotesResponse,
+            MemoryDto, MemorySettingsDto, MicrophonePermissionResponse, NoteDto,
+            OpenPrivacySettingsRequest, ProcessingStatus, ProfileDataSummaryDto, RecordingOrigin,
+            RecordingOriginMetadata, RecordingSessionDto, RecordingSource, RecordingSourceMode,
+            RecordingSourceReadinessDto, RecordingStatusDto, RemoveNoteFromFolderRequest,
+            RemoveSessionFromFolderRequest, RenameFolderRequest, RetryProcessingRequest,
+            SessionFolderDto, SessionProfileDto, SessionRequest, SetSessionCompletedRequest,
+            ShareAddInvitesRequest, ShareCreateRequest, ShareCreatedDto, ShareDeleteRequest,
+            ShareDto, ShareGetRequest, ShareInviteKeyDto, ShareInviteKeySaveRequest,
+            ShareInviteKeysGetRequest, ShareInvitesAddedDto, ShareKeyDto, ShareKeyGetRequest,
+            ShareKeySaveRequest, ShareRevokeInviteRequest, ShareSummaryDto, SourceReadinessDto,
+            StartMeetingRecordingRequest, StartRecordingRequest, SubmitIssueReportRequest,
+            SubmitIssueReportResponse, SuggestAgentSessionTitleRequest,
+            SuggestAgentSessionTitleResponse, UpdateDictionaryEntryRequest, UpdateNoteRequest,
+            UpdateNoteResponse,
         },
     },
     meeting_detection::{MeetingStartRecordingOutcome, MeetingStartRequestState},
@@ -1029,16 +1029,6 @@ fn diagnostic_field(value: &str, max_chars: usize) -> String {
         .chars()
         .take(max_chars)
         .collect()
-}
-
-#[tauri::command]
-pub async fn explain_agent_approval(
-    request: ExplainAgentApprovalRequest,
-) -> Result<ExplainAgentApprovalResponse, AppError> {
-    let explanation =
-        crate::clovy_api::explain_agent_approval(&request.description, request.command.as_deref())
-            .await?;
-    Ok(ExplainAgentApprovalResponse { explanation })
 }
 
 #[tauri::command]
