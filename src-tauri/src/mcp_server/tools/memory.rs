@@ -121,7 +121,13 @@ pub(super) async fn call_with_settings(
         }
         "forget_memory" => {
             let id = id.unwrap_or_default();
-            repos.delete_memory(&ctx.data.profile, id).await?;
+            crate::commands::forget_memory_with_settings(
+                &repos,
+                settings_path,
+                &ctx.data.profile,
+                id,
+            )
+            .await?;
             Ok(json!({"forgotten":true,"id":id}))
         }
         _ => Err(AppError::new("mcp_tool_unknown", "Unknown memory tool.")),
