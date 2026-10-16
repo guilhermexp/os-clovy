@@ -114,7 +114,10 @@ impl Harness {
             workspace: self.workspace.path().to_path_buf(),
             input: input.to_string(),
             mcp,
-            policy: cli::TurnPolicy::Interactive,
+            turns: None,
+            safety_mode: AgentSafetyMode::Sandboxed,
+            attended: true,
+            images: Vec::new(),
         }
     }
 
@@ -803,54 +806,14 @@ fn chat_engine_model_ids_round_trip() {
     assert_eq!(cli_for_model("open-software/auto"), None);
 }
 
-#[test]
-fn chat_engine_turns_never_pass_permission_bypass_flags() {
-    let forbidden = [
-        "--dangerously-skip-permissions",
-        "--yolo",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--force",
-        "-f",
-        "--always-approve",
-        "--allow-all",
-        "--allow-all-tools",
-        "--approve-mcps",
-        "--permission-mode",
-        "--allowedTools",
-    ];
-    let launch = McpLaunch {
-        command: PathBuf::from("/bin/clovy-mcp"),
-        args: vec![],
-    };
-    let scratch = tempfile::tempdir().unwrap();
-    for kind in CliKind::ALL {
-        for conversation in [None, Some("id-1")] {
-            let invocation = cli::turn_invocation(
-                kind,
-                "hello",
-                conversation,
-                Some(&launch),
-                scratch.path(),
-                cli::TurnPolicy::Interactive,
-            );
-            for arg in &invocation.args {
-                assert!(!forbidden.contains(&arg.as_str()), "{kind:?} passes {arg}");
-            }
-        }
-    }
-    // codex keeps its sandbox to the session workspace.
-    let codex = cli::turn_invocation(
-        CliKind::Codex,
-        "hello",
-        Some("t"),
-        None,
-        scratch.path(),
-        cli::TurnPolicy::Interactive,
-    );
-    assert!(codex
-        .args
-        .contains(&"sandbox_mode=\"workspace-write\"".to_string()));
-}
+const ATTENDED: policy::TurnPermissions = policy::TurnPermissions {
+    safety_mode: AgentSafetyMode::Sandboxed,
+    attended: true,
+};
+const UNATTENDED: policy::TurnPermissions = policy::TurnPermissions {
+    safety_mode: AgentSafetyMode::Sandboxed,
+    attended: false,
+};
 
 #[test]
 fn chat_engine_unattended_claude_turn_has_only_read_tools_clovy_mcp_and_web() {
@@ -865,7 +828,8 @@ fn chat_engine_unattended_claude_turn_has_only_read_tools_clovy_mcp_and_web() {
         None,
         Some(&launch),
         scratch.path(),
-        cli::TurnPolicy::Unattended,
+        UNATTENDED,
+        &[],
     );
     let value_after = |flag: &str| {
         let at = invocation
@@ -888,27 +852,31 @@ fn chat_engine_unattended_claude_turn_has_only_read_tools_clovy_mcp_and_web() {
             .any(|tool| ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"].contains(tool)),
         "{allowed:?}"
     );
+    assert_eq!(value_after("--permission-mode"), "default");
     // Only Clovy's MCP server, never the user's others.
     assert!(invocation.args.contains(&"--strict-mcp-config".to_string()));
     assert!(invocation.args.contains(&"--mcp-config".to_string()));
-    let forbidden = [
-        "--dangerously-skip-permissions",
-        "--allow-dangerously-skip-permissions",
-        "--permission-mode",
-    ];
-    for arg in &invocation.args {
-        assert!(!forbidden.contains(&arg.as_str()), "passes {arg}");
-    }
-    // A chat turn keeps the CLI's own permission settings.
+    // Exactly one --allowedTools: the attended `mcp__clovy__*` grant is not
+    // added on top of the read-only set.
+    assert_eq!(
+        invocation
+            .args
+            .iter()
+            .filter(|arg| *arg == "--allowedTools")
+            .count(),
+        1
+    );
+    // A chat turn loads the user's own MCP servers too (D7).
     let chat = cli::turn_invocation(
         CliKind::Claude,
         "hello",
         None,
         Some(&launch),
         scratch.path(),
-        cli::TurnPolicy::Interactive,
+        ATTENDED,
+        &[],
     );
-    for flag in ["--tools", "--allowedTools", "--strict-mcp-config"] {
+    for flag in ["--tools", "--strict-mcp-config"] {
         assert!(!chat.args.contains(&flag.to_string()), "chat passes {flag}");
     }
 }
@@ -923,7 +891,8 @@ fn chat_engine_unattended_codex_turn_is_read_only_and_never_waits_for_approval()
             conversation,
             None,
             scratch.path(),
-            cli::TurnPolicy::Unattended,
+            UNATTENDED,
+            &[],
         );
         assert!(invocation
             .args
@@ -934,16 +903,13 @@ fn chat_engine_unattended_codex_turn_is_read_only_and_never_waits_for_approval()
         assert!(invocation
             .args
             .contains(&"approval_policy=\"never\"".to_string()));
-        assert!(!invocation
-            .args
-            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     }
 }
 
 #[test]
 fn chat_engine_refuses_unattended_turns_on_clis_it_cannot_confine() {
     for kind in CliKind::ALL {
-        let checked = check_policy(kind, cli::TurnPolicy::Unattended);
+        let checked = check_policy(kind, false);
         if matches!(kind, CliKind::Claude | CliKind::Codex) {
             assert!(checked.is_ok(), "{kind:?}");
         } else {
@@ -953,7 +919,7 @@ fn chat_engine_refuses_unattended_turns_on_clis_it_cannot_confine() {
                 "{kind:?}"
             );
         }
-        assert!(check_policy(kind, cli::TurnPolicy::Interactive).is_ok());
+        assert!(check_policy(kind, true).is_ok());
     }
 }
 

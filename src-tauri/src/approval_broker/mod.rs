@@ -58,6 +58,19 @@ pub struct ApprovalTurn {
     pub attended: bool,
 }
 
+impl From<&crate::mcp_server::turns::TurnBinding> for ApprovalTurn {
+    /// The turn of a bound MCP connection (`ToolCtx::binding`).
+    fn from(binding: &crate::mcp_server::turns::TurnBinding) -> Self {
+        Self {
+            session_id: binding.session_id.clone(),
+            run_id: binding.run_id.clone(),
+            cli: binding.cli.id().to_string(),
+            safety_mode: binding.safety_mode,
+            attended: binding.attended,
+        }
+    }
+}
+
 /// What a tool asks the user.
 #[derive(Clone, Debug)]
 pub struct ApprovalRequest {

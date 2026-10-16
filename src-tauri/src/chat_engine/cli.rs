@@ -9,18 +9,19 @@
 //! | CLI | Turn | Resume id | Clovy MCP server |
 //! |---|---|---|---|
 //! | claude | `-p --output-format stream-json --verbose --include-partial-messages`, prompt on stdin | `session_id` of `system/init`, `--resume <id>` | `--mcp-config <file>` |
-//! | codex | `exec [resume] --json --skip-git-repo-check -c sandbox_mode="workspace-write" [<id>] -`, prompt on stdin | `thread_id` of `thread.started` | `-c mcp_servers.clovy.*` |
+//! | codex | `exec [resume] --json --skip-git-repo-check [--image <path>]... -c <policy>... [<id>] -`, prompt on stdin | `thread_id` of `thread.started` | `-c mcp_servers.clovy.*` |
 //! | pi | `--print --mode json --session-id <id>`, prompt on stdin | chosen by Clovy (UUID) | no MCP support |
 //! | agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`, `--conversation <id>` | only through `agy mcp add` (global), not offered |
 //! | cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`, `--resume <id>` | project servers need approval in Cursor, not offered |
 //! | copilot | `--prompt=<prompt> --output-format json --session-id <id>` | chosen by Clovy (UUID) | `--additional-mcp-config @<file>` |
 //!
-//! No flag that skips or pre-grants the CLI's own permission prompts is ever
-//! passed: each CLI runs in its default non-interactive mode in the session
-//! workspace (codex with the `workspace-write` sandbox). An action the CLI
-//! refuses for lack of approval comes back as a failed tool marked
-//! `needs_approval`.
+//! Permission flags, configuration overrides, and environment come from
+//! [`super::policy`] (by CLI, safety mode, and whether a person watches the
+//! turn); nothing here adds its own. No flag that skips or pre-grants
+//! approvals is ever passed. An action the CLI refuses for lack of approval
+//! comes back as a failed tool marked `needs_approval`.
 
+use super::policy::{self, TurnPermissions};
 use crate::llm::cli::CliKind;
 use crate::mcp_server::{McpLaunch, SERVER_KEY};
 use serde_json::{json, Value};
@@ -67,26 +68,6 @@ pub fn preassigns_conversation(kind: CliKind) -> bool {
     matches!(kind, CliKind::Pi | CliKind::Copilot)
 }
 
-/// What a turn may do without a person present.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TurnPolicy {
-    /// A chat turn: the CLI's own permission settings apply, and nothing is
-    /// pre-granted.
-    #[default]
-    Interactive,
-    /// A routine (nobody is there to approve anything): read-only tools,
-    /// Clovy's MCP tools, and the web, and nothing else. Only the default
-    /// CLIs ([`supports_unattended`]) run unattended.
-    Unattended,
-}
-
-/// The built-in claude tools an unattended turn has (`--tools`); every other
-/// built-in tool (Bash, Edit, Write, ...) does not exist in that turn.
-pub const UNATTENDED_CLAUDE_TOOLS: &str = "Read,Grep,Glob,WebSearch,WebFetch";
-/// The tools an unattended claude turn may use without asking
-/// (`--allowedTools`): the built-in set above and Clovy's MCP tools.
-pub const UNATTENDED_CLAUDE_ALLOWED: &str = "Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*";
-
 /// CLIs whose tools Clovy can confine to the unattended set per run.
 pub fn supports_unattended(kind: CliKind) -> bool {
     matches!(kind, CliKind::Claude | CliKind::Codex)
@@ -98,6 +79,8 @@ pub struct TurnInvocation {
     pub args: Vec<String>,
     pub stdin: Option<String>,
     pub remove_env: Vec<&'static str>,
+    /// Environment set on the CLI process (the policy's tool timeout).
+    pub set_env: Vec<(&'static str, String)>,
     /// Files to write before spawning (MCP configuration), path and content.
     pub files: Vec<(PathBuf, String)>,
 }
@@ -105,18 +88,20 @@ pub struct TurnInvocation {
 /// Builds one turn. `conversation` is the id to resume (claude, codex, agy,
 /// cursor-agent) or the id Clovy chose (pi, copilot; always `Some` for them).
 /// `mcp` is offered only to CLIs that [`accepts_mcp`]; configuration files go
-/// to `scratch`. `policy` [`TurnPolicy::Unattended`] confines claude and
-/// codex to the unattended tool set; callers refuse it for other CLIs
-/// ([`supports_unattended`]).
+/// to `scratch`. `permissions` select the policy ([`policy::turn_policy`]);
+/// callers refuse unattended turns on CLIs that do not
+/// [`supports_unattended`]. `images` reach the CLIs that take image files
+/// ([`policy::image_args`]).
 pub fn turn_invocation(
     kind: CliKind,
     prompt: &str,
     conversation: Option<&str>,
     mcp: Option<&McpLaunch>,
     scratch: &Path,
-    policy: TurnPolicy,
+    permissions: TurnPermissions,
+    images: &[PathBuf],
 ) -> TurnInvocation {
-    let unattended = policy == TurnPolicy::Unattended;
+    let policy = policy::turn_policy(kind, permissions);
     let mut files = Vec::new();
     let mut remove_env = Vec::new();
     let mut stdin = None;
@@ -140,19 +125,9 @@ pub fn turn_invocation(
                 ));
                 args.push("--mcp-config".into());
                 args.push(file.display().to_string());
+                args.extend(policy.mcp_args.iter().cloned());
             }
-            if unattended {
-                // Only the read-only built-ins exist, only they and Clovy's
-                // MCP tools run without a prompt (nobody can answer one), and
-                // the user's other MCP servers are not loaded.
-                args.extend(strings(&[
-                    "--tools",
-                    UNATTENDED_CLAUDE_TOOLS,
-                    "--allowedTools",
-                    UNATTENDED_CLAUDE_ALLOWED,
-                    "--strict-mcp-config",
-                ]));
-            }
+            args.extend(policy.args.iter().cloned());
             // Same rule as one-shot calls: a stray API key in the profile
             // would move the user from their subscription to metered billing.
             remove_env.push("ANTHROPIC_API_KEY");
@@ -164,21 +139,9 @@ pub fn turn_invocation(
             if conversation.is_some() {
                 args.push("resume".into());
             }
-            args.extend(strings(&[
-                "--json",
-                "--skip-git-repo-check",
-                "-c",
-                if unattended {
-                    // Commands may read but never write or reach the network,
-                    // and nothing waits for an approval.
-                    "sandbox_mode=\"read-only\""
-                } else {
-                    "sandbox_mode=\"workspace-write\""
-                },
-            ]));
-            if unattended {
-                args.extend(strings(&["-c", "approval_policy=\"never\""]));
-            }
+            args.extend(strings(&["--json", "--skip-git-repo-check"]));
+            args.extend(policy::image_args(kind, images));
+            args.extend(policy.args.iter().cloned());
             if let Some(launch) = mcp {
                 args.push("-c".into());
                 args.push(format!(
@@ -190,6 +153,7 @@ pub fn turn_invocation(
                     "mcp_servers.{SERVER_KEY}.args={}",
                     json!(launch.args)
                 ));
+                args.extend(policy.mcp_args.iter().cloned());
             }
             if let Some(id) = conversation {
                 args.push(id.to_string());
@@ -265,6 +229,7 @@ pub fn turn_invocation(
         args,
         stdin,
         remove_env,
+        set_env: policy.env,
         files,
     }
 }

@@ -14,7 +14,11 @@
 //! Contract and per-CLI formats: `docs/llm-providers.md` (CLI chat engine)
 //! and [`cli`].
 
+#[cfg(all(test, unix))]
+#[path = "binding_tests.rs"]
+mod binding_tests;
 pub mod cli;
+pub mod policy;
 #[cfg(test)]
 #[path = "red_tests.rs"]
 mod red_tests;
@@ -23,7 +27,7 @@ mod tests;
 pub mod turn;
 
 use crate::agent_runtime::protocol::RpcFrame;
-use crate::agent_runtime::AgentRepository;
+use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use serde::Serialize;
@@ -201,6 +205,26 @@ impl ChatEngineHost {
     }
 }
 
+/// Cancels a CLI run (`cancel_agent_run`): settles the run's pending
+/// approval requests as `run_cancelled` (their cards turn cancelled and the
+/// waiting tools answer the CLI), revokes the run's turn token so its MCP
+/// connections close, and stops the CLI's process group. The turn then
+/// publishes `run.cancelled`. `false` when no CLI turn runs under `run_id`.
+pub async fn cancel_cli_run(
+    host: &ChatEngineHost,
+    broker: Option<&crate::approval_broker::ApprovalBroker>,
+    turns: Option<&crate::mcp_server::turns::TurnRegistry>,
+    run_id: &str,
+) -> bool {
+    if let Some(broker) = broker {
+        broker.cancel_run(run_id).await;
+    }
+    if let Some(turns) = turns {
+        turns.revoke_run(run_id);
+    }
+    host.cancel(run_id)
+}
+
 /// A message to run on a CLI engine.
 pub struct CliTurnRequest {
     pub session_id: String,
@@ -209,12 +233,18 @@ pub struct CliTurnRequest {
     pub workspace: PathBuf,
     /// The user's message (with attachment paths already appended).
     pub input: String,
-    pub policy: cli::TurnPolicy,
+    /// Image attachments of the message (absolute paths in the workspace).
+    pub images: Vec<PathBuf>,
+    /// The session's safety mode.
+    pub safety_mode: AgentSafetyMode,
+    /// A person watches the turn: `true` for chat, `false` for routines
+    /// (read-only tools, and every approval is refused).
+    pub attended: bool,
 }
 
 /// Refuses an unattended turn on a CLI whose tools Clovy cannot confine.
-pub fn check_policy(kind: CliKind, policy: cli::TurnPolicy) -> Result<(), AppError> {
-    if policy == cli::TurnPolicy::Unattended && !cli::supports_unattended(kind) {
+pub fn check_policy(kind: CliKind, attended: bool) -> Result<(), AppError> {
+    if !attended && !cli::supports_unattended(kind) {
         return Err(AppError::new(
             "agent_cli_unattended_unsupported",
             format!(
@@ -236,7 +266,7 @@ pub async fn start_cli_turn(
     request: CliTurnRequest,
     ticket: TurnTicket,
 ) -> Result<(), AppError> {
-    check_policy(request.kind, request.policy)?;
+    check_policy(request.kind, request.attended)?;
     let env = crate::llm::shell_env::login_env().await;
     let program = env
         .which(request.kind.id())
@@ -252,6 +282,9 @@ pub async fn start_cli_turn(
     } else {
         None
     };
+    let turns = app
+        .try_state::<crate::mcp_server::McpServerState>()
+        .map(|state| state.turns().clone());
     let context = turn::TurnContext {
         session_id: request.session_id,
         run_id: request.run_id,
@@ -261,7 +294,10 @@ pub async fn start_cli_turn(
         workspace: request.workspace,
         input: request.input,
         mcp,
-        policy: request.policy,
+        turns,
+        safety_mode: request.safety_mode,
+        attended: request.attended,
+        images: request.images,
     };
     let sink = AppSink {
         app: app.clone(),

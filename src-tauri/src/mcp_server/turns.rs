@@ -55,6 +55,16 @@ pub struct TurnRegistry {
     turns: Arc<Mutex<HashMap<String, Live>>>,
 }
 
+impl std::fmt::Debug for TurnRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Tokens never reach logs.
+        formatter
+            .debug_struct("TurnRegistry")
+            .field("live", &self.turns().len())
+            .finish()
+    }
+}
+
 /// A connection's live turn: the binding and a signal that fires when the
 /// token is revoked.
 pub struct BoundTurn {

@@ -972,7 +972,9 @@ async fn start_cli_claim(
             kind,
             workspace: workspace.to_path_buf(),
             input: routine_cli_prompt(claim),
-            policy: crate::chat_engine::cli::TurnPolicy::Unattended,
+            images: Vec::new(),
+            safety_mode: claim.safety_mode,
+            attended: false,
         },
         ticket,
     )
@@ -3045,7 +3047,6 @@ mod tests {
 
     #[tokio::test]
     async fn routine_on_a_cli_engine_runs_unattended_and_records_its_result() {
-        use crate::chat_engine::cli::TurnPolicy;
         use crate::llm::cli::CliKind;
         use std::os::unix::fs::PermissionsExt;
 
@@ -3105,7 +3106,10 @@ mod tests {
             workspace: workspace.path().to_path_buf(),
             input: routine_cli_prompt(&claimed),
             mcp: None,
-            policy: TurnPolicy::Unattended,
+            turns: None,
+            safety_mode: claimed.safety_mode,
+            attended: false,
+            images: Vec::new(),
         };
         let sink = RoutineSink {
             repository: repository.clone(),

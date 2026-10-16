@@ -729,6 +729,7 @@ pub async fn start_agent_run(
                 prompt: &request.prompt,
                 attachments: &prepared_attachments,
                 original_paths: Some(&request.attachments),
+                safety_mode: request.safety_mode,
             },
         )
         .await;
@@ -827,6 +828,7 @@ struct CliRunStart<'a> {
     attachments: &'a [MessageAttachmentPayload],
     /// The picked paths of a new message (absent on retry).
     original_paths: Option<&'a [String]>,
+    safety_mode: AgentSafetyMode,
 }
 
 /// Persists the user message of a run on a CLI chat engine and starts the
@@ -888,9 +890,11 @@ async fn start_cli_run(
                 kind: start.kind,
                 workspace: PathBuf::from(start.workspace),
                 input: crate::chat_engine::with_note_reference_context(
-                    &message_with_attachment_context(start.prompt, start.attachments),
+                    &cli_message_with_attachments(start.prompt, start.attachments),
                 ),
-                policy: crate::chat_engine::cli::TurnPolicy::Interactive,
+                images: cli_image_attachments(start.attachments),
+                safety_mode: start.safety_mode,
+                attended: true,
             },
             ticket,
         )
@@ -905,6 +909,37 @@ async fn start_cli_run(
     Ok(run_json(repository.get_run(start.run_id).await?))
 }
 
+/// The attachment manifest a CLI turn receives: the CLI reads the files
+/// with its own tools.
+fn cli_message_with_attachments(message: &str, attachments: &[MessageAttachmentPayload]) -> String {
+    if attachments.is_empty() {
+        return message.to_string();
+    }
+    let manifest = attachments
+        .iter()
+        .map(|attachment| format!("- {} ({})", attachment.name, attachment.path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[Clovy attachment manifest v1]\nThe following files are in your workspace. Read them when needed:\n{manifest}\n\n{message}"
+    )
+}
+
+/// The message's available image attachments, for CLIs that take images.
+fn cli_image_attachments(attachments: &[MessageAttachmentPayload]) -> Vec<PathBuf> {
+    attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.available
+                && attachment
+                    .mime_type
+                    .as_deref()
+                    .is_some_and(is_supported_vision_mime_type)
+        })
+        .map(|attachment| PathBuf::from(&attachment.path))
+        .collect()
+}
+
 #[tauri::command]
 pub async fn cancel_agent_run(
     host: State<'_, AgentRuntimeHost>,
@@ -914,9 +949,15 @@ pub async fn cancel_agent_run(
     let repository = repository(&app).await?;
     let run = repository.get_run(&run_id).await?;
     if crate::chat_engine::cli_for_model(&run.model).is_some() {
-        if app
-            .state::<crate::chat_engine::ChatEngineHost>()
-            .cancel(&run.id)
+        let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
+        let mcp = app.try_state::<crate::mcp_server::McpServerState>();
+        if crate::chat_engine::cancel_cli_run(
+            &app.state::<crate::chat_engine::ChatEngineHost>(),
+            broker.as_deref(),
+            mcp.as_ref().map(|state| state.turns()),
+            &run.id,
+        )
+        .await
         {
             return Ok(());
         }
@@ -1036,6 +1077,7 @@ pub async fn retry_agent_run(
                 prompt: &prompt,
                 attachments: &attachments,
                 original_paths: None,
+                safety_mode: session.safety_mode,
             },
         )
         .await;
@@ -4022,5 +4064,32 @@ mod tests {
 
         assert_eq!(history[0]["attachments"], json!([]));
         assert_eq!(history[1]["attachments"][0]["path"], "/new.png");
+    }
+
+    #[test]
+    fn cli_turns_get_a_manifest_without_clovy_file_tools_and_their_images() {
+        let attachment = |name: &str, mime: &str, available: bool| MessageAttachmentPayload {
+            id: name.into(),
+            name: name.into(),
+            path: format!("/workspace/attachments/{name}"),
+            mime_type: Some(mime.into()),
+            size_bytes: 42,
+            available,
+            created_at: "2026-10-15T12:00:00Z".into(),
+        };
+        let attachments = [
+            attachment("brief.md", "text/markdown", true),
+            attachment("chart.png", "image/png", true),
+            attachment("gone.jpg", "image/jpeg", false),
+        ];
+        let message = cli_message_with_attachments("Read this.", &attachments);
+        assert!(!message.contains("Clovy's file tools"), "{message}");
+        assert!(message.contains("- brief.md (/workspace/attachments/brief.md)"));
+        assert!(message.ends_with("Read this."));
+        assert_eq!(
+            cli_image_attachments(&attachments),
+            [PathBuf::from("/workspace/attachments/chart.png")]
+        );
+        assert_eq!(cli_message_with_attachments("Hi", &[]), "Hi");
     }
 }

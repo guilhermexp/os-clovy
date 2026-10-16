@@ -3,10 +3,13 @@
 //! path as the sidecar's (`agent_runtime::host::persist_runtime_event`).
 
 use super::cli::{self, EngineEvent, StreamTranslator};
+use super::policy::TurnPermissions;
 use super::{engine_model_id, FrameSink};
 use crate::agent_runtime::protocol::{RpcFrame, PROTOCOL_VERSION};
+use crate::agent_runtime::AgentSafetyMode;
 use crate::agent_runtime::{AgentItemPayload, AgentRepository};
 use crate::llm::cli::CliKind;
+use crate::mcp_server::turns::{TurnBinding, TurnRegistry};
 use crate::mcp_server::McpLaunch;
 use crate::process_group::{signal_group, GroupSignal};
 use serde_json::{json, Value};
@@ -44,7 +47,71 @@ pub struct TurnContext {
     pub input: String,
     /// Clovy's MCP server, for CLIs that accept it.
     pub mcp: Option<McpLaunch>,
-    pub policy: cli::TurnPolicy,
+    /// Where the turn's MCP connections are bound (`McpServerState::turns`):
+    /// with it, the server gets `--turn <token>` for this run only. Without
+    /// it, the server runs unbound (read-only tools).
+    pub turns: Option<TurnRegistry>,
+    /// The session's safety mode.
+    pub safety_mode: AgentSafetyMode,
+    /// A person watches the turn (`false` for routines).
+    pub attended: bool,
+    /// Image attachments of the message (absolute paths in the workspace).
+    pub images: Vec<PathBuf>,
+}
+
+impl TurnContext {
+    pub fn permissions(&self) -> TurnPermissions {
+        TurnPermissions {
+            safety_mode: self.safety_mode,
+            attended: self.attended,
+        }
+    }
+
+    /// The binding the turn's token stands for.
+    pub fn binding(&self) -> TurnBinding {
+        TurnBinding {
+            session_id: self.session_id.clone(),
+            run_id: self.run_id.clone(),
+            cli: self.kind,
+            safety_mode: self.safety_mode,
+            attended: self.attended,
+            surface: if self.attended { "chat" } else { "routine" }.into(),
+        }
+    }
+}
+
+/// The turn token of one run: issued before the CLI starts and revoked when
+/// dropped (the turn ended, failed, or was cancelled; the app is quitting),
+/// which closes the run's MCP connections.
+pub struct TurnGrant {
+    turns: TurnRegistry,
+    token: String,
+}
+
+impl TurnGrant {
+    pub fn issue(turns: &TurnRegistry, binding: TurnBinding) -> Self {
+        Self {
+            token: turns.issue(binding),
+            turns: turns.clone(),
+        }
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+impl Drop for TurnGrant {
+    fn drop(&mut self) {
+        self.turns.revoke(&self.token);
+    }
+}
+
+impl std::fmt::Debug for TurnGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token never reaches logs.
+        formatter.write_str("TurnGrant(..)")
+    }
 }
 
 enum TurnEnd {
@@ -145,17 +212,28 @@ pub async fn execute_turn<S: FrameSink>(
             return;
         }
     };
+    // The token lives exactly as long as this turn: every return below
+    // drops it, which revokes it.
+    let mut grant = None;
     let mcp = context
         .mcp
         .as_ref()
-        .filter(|_| cli::accepts_mcp(context.kind));
+        .filter(|_| cli::accepts_mcp(context.kind))
+        .map(|launch| match &context.turns {
+            Some(turns) => {
+                let issued = grant.insert(TurnGrant::issue(turns, context.binding()));
+                launch.for_turn(issued.token())
+            }
+            None => launch.clone(),
+        });
     let invocation = cli::turn_invocation(
         context.kind,
         &prompt,
         conversation.as_deref(),
-        mcp,
+        mcp.as_ref(),
         scratch.path(),
-        context.policy,
+        context.permissions(),
+        &context.images,
     );
     for (path, content) in &invocation.files {
         if let Err(error) = std::fs::write(path, content) {
@@ -171,6 +249,9 @@ pub async fn execute_turn<S: FrameSink>(
     let mut env = crate::llm::shell_env::cli_environment(&context.env);
     for name in &invocation.remove_env {
         env.remove(*name);
+    }
+    for (name, value) in &invocation.set_env {
+        env.insert((*name).to_string(), value.clone());
     }
     // A cancel may have arrived while the turn was being prepared; nothing is
     // spawned for a cancelled or already settled run.
@@ -201,6 +282,7 @@ pub async fn execute_turn<S: FrameSink>(
     )
     .await;
     drop(scratch);
+    drop(grant);
 
     let TurnState {
         mut frames,
