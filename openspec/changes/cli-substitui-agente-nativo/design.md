@@ -2,7 +2,7 @@
 
 ## Contratos (congelados)
 
-Proposta de congelamento preparada em 0.8 sobre `main` + `cli-20261015/phase0-engine` (0.2-0.7 entregues); o Main revisa, aplica o item pendente marcado abaixo e congela. Depois do congelamento, mudança de contrato volta ao Main e é registrada aqui. Caminhos relativos a `src-tauri/src/`.
+Congelados em 2026-10-15 pelo Main (tarefa 0.8) sobre `cli-20261015/phase0-engine` (0.2-0.7 e os ajustes do congelamento). Mudança de contrato a partir daqui volta ao Main e é registrada nesta seção. Caminhos relativos a `src-tauri/src/`.
 
 ### C4, grupos de ferramentas (`mcp_server/tools/mod.rs`, `mcp_server/protocol.rs`)
 
@@ -13,8 +13,12 @@ pub struct ToolCtx<'a> {
     pub data: &'a McpData,
     pub app: Option<&'a AppHandle>,        // None sem runtime Tauri (testes)
     pub binding: Option<&'a TurnBinding>,  // None = cliente sem vínculo
+    pub broker: Option<&'a ApprovalBroker>,// o do app (mod.rs) ou o de teste
 }
-impl ToolCtx<'_> { pub fn unbound(data: &McpData) -> ToolCtx<'_> }
+impl<'a> ToolCtx<'a> {
+    pub fn unbound(data: &'a McpData) -> ToolCtx<'a>;                       // sem app, vínculo nem broker
+    pub fn broker(&self) -> Result<&'a ApprovalBroker, AppError>;           // approval_unavailable se None
+}
 pub trait ToolGroup: Send + Sync {
     fn needs_turn(&self) -> bool { true }  // só ReadTools devolve false
     fn owns(&self, name: &str) -> bool;    // decide "Unknown tool" x turn_required
@@ -36,7 +40,7 @@ pub fn tool_error(message: &str) -> Value;    // isError:true
 - Grupo com `needs_turn() == true`: ausente de `tools/list` sem vínculo; `tools/call` sem vínculo devolve `isError` terminado em `(turn_required)` sem executar o grupo.
 - `Err(AppError)` de `ToolGroup::call` vira `isError` com texto `"<message> (<code>)"` (`protocol.rs`). O código é a parte estável para o modelo e para os testes.
 - `ToolGroup::call` devolve `Result` (não `Option<Result>` como esboçado em §1): `owns` separa "não é meu" de "falhou". O `AppHandle` fica em `ToolCtx`, não em `McpData` (desvio de §1), para os testes montarem `McpData` sem runtime Tauri.
-- **Pendente para o Main no congelamento (proposta):** acesso ao broker sem `AppHandle`. Os testes das fatias da fase 2 precisam aprovar/negar sem runtime Tauri, e `tauri` não tem a feature `test` neste repo. Proposta: `ToolCtx` ganha `pub broker: Option<&'a ApprovalBroker>`, preenchido em `mcp_server/mod.rs` a partir de `app.try_state::<ApprovalBroker>()`, e `impl ToolCtx { pub fn broker(&self) -> Result<&ApprovalBroker, AppError> }` com erro `approval_unavailable` quando ausente. Donos: `mcp_server/{tools/mod.rs,mod.rs}`, `mcp_server/turn_tests.rs` (literal de `ToolCtx`). Sem isso, cada grupo guarda o broker no próprio valor (como `ProbeWrite` em `chat_engine/binding_tests.rs`), o que não cabe num `&'static dyn ToolGroup` registrado.
+- **Broker no contexto.** `mcp_server/mod.rs` preenche `broker` com `app.try_state::<ApprovalBroker>()`; testes passam o de `approval_broker::testing::TestBroker` (abaixo). Um grupo de escrita nunca age sem `ctx.broker()?` aprovar: sem broker a ferramenta falha com `approval_unavailable`.
 
 ### C1, vínculo de turno (`mcp_server/{turns.rs,channel.rs,stdio.rs,mod.rs}`, `chat_engine/{turn.rs,mod.rs}`)
 
@@ -58,7 +62,7 @@ impl TurnRegistry {
     pub fn bind(&self, token: &str) -> Option<BoundTurn>;          // usado pelo canal
     pub fn revoke(&self, token: &str) -> bool;                     // fecha as conexões do token
     pub fn revoke_run(&self, run_id: &str) -> usize;               // fim/falha/cancelamento
-    pub fn revoke_all(&self);                                      // reservado; ver "Encerramento"
+    pub fn revoke_all(&self);                                      // shutdown (shutdown.rs)
 }
 pub struct BoundTurn { pub binding: Arc<TurnBinding>, /* sinal */ }
 impl BoundTurn { pub async fn revoked(&mut self) }
@@ -99,10 +103,10 @@ pub async fn cancel_cli_run(host: &ChatEngineHost, broker: Option<&ApprovalBroke
     turns: Option<&TurnRegistry>, run_id: &str) -> bool;
 ```
 
-- Fio: handshake `{"clovyMcp": 1, "secret": "<hex>", "turn": "<token>"}`; `turn` ausente ou `null` = conexão sem vínculo; string desconhecida/revogada ou valor não string = `{"clovyMcp": 1, "ok": false, "error": "turn_expired"}`. O token só é consultado depois que segredo e uid conferem. Vale para várias conexões enquanto a execução vive (o relay reconecta); um token por execução, nunca reaproveitado. Revogar fecha só as conexões daquele token e descarta respostas pendentes; chamadas novas recebem `TURN_EXPIRED_MESSAGE`; uma chamada em voo no instante da revogação recebe a mensagem de conexão caída do relay (`DROPPED_MESSAGE`). Relay antigo sem `--turn` ou app antigo que ignora `turn` = conexão sem vínculo.
+- Fio: handshake `{"clovyMcp": 1, "secret": "<hex>", "turn": "<token>"}`; `turn` ausente ou `null` = conexão sem vínculo; string desconhecida/revogada ou valor não string = `{"clovyMcp": 1, "ok": false, "error": "turn_expired"}`. O token só é consultado depois que segredo e uid conferem. Vale para várias conexões enquanto a execução vive (o relay reconecta); um token por execução, nunca reaproveitado. Revogar fecha só as conexões daquele token: a conexão para de ler pedidos, entrega as respostas das chamadas em voo (no máximo 2 s, `REVOKE_GRACE` em `channel.rs`) e fecha; chamadas novas, e uma chamada ainda sem resposta no fim do prazo, recebem `TURN_EXPIRED_MESSAGE` do relay (conexão vinculada que cai com o socket de pé = turno revogado). Relay antigo sem `--turn` ou app antigo que ignora `turn` = conexão sem vínculo.
 - Emissão: `execute_turn` emite o token quando o CLI aceita MCP e há `turns` (`start_cli_turn` pega `McpServerState::turns()`), monta `launch.for_turn(token)` (Claude e Copilot no arquivo temporário, Codex em `-c mcp_servers.clovy.args`) e segura o `TurnGrant` até o processo terminar; todo retorno revoga. O token não vai no prompt nem no ambiente.
-- Cancelamento: `cancel_agent_run` chama `cancel_cli_run`: `broker.cancel_run(run)` (cartões `cancelled`, ferramenta responde `run_cancelled`), `turns.revoke_run(run)`, depois `ChatEngineHost::cancel` (SIGTERM ao grupo). O ouvinte de eventos terminais do broker continua cobrindo fim e falha.
-- Encerramento: `ChatEngineHost::shutdown` cancela cada turno e espera até 5 s; o `TurnGrant` de cada turno revoga ao terminar e o processo do app sai em seguida. `revoke_all` não é chamado hoje (o registro morre com o processo); fica no contrato para o Main ligar em `shutdown.rs` se quiser revogação explícita antes do fim do processo.
+- Cancelamento: `cancel_agent_run` chama `cancel_cli_run`: `broker.cancel_run(run)` (cartões `cancelled`), `turns.revoke_run(run)`, depois `ChatEngineHost::cancel` (SIGTERM ao grupo). A chamada que esperava o cartão responde `run_cancelled` ao CLI antes de a conexão revogada fechar. O ouvinte de eventos terminais do broker continua cobrindo fim e falha.
+- Encerramento: `ChatEngineHost::shutdown` cancela cada turno e espera até 5 s (cada `TurnGrant` revoga ao terminar); em seguida `shutdown::run_cleanup` chama `McpServerState::turns().revoke_all()`.
 
 ### C2, broker de aprovação (`approval_broker/`)
 
@@ -129,6 +133,17 @@ impl ApprovalBroker {               // estado Tauri (`app.state::<ApprovalBroker
     pub async fn cancel_run(&self, run_id: &str) -> usize;   // pendentes da execução → run_cancelled
     pub fn close(&self);                                     // encerramento do app
     pub fn waiting_ids(&self) -> Vec<String>;
+}
+// approval_broker/testing.rs (#[cfg(test)]): broker para testes de grupos, sem Tauri
+pub(crate) enum Scripted { Approve, Deny, Answer(String), Leave }   // decisão do próximo cartão
+impl TestBroker {
+    pub async fn new(script: impl IntoIterator<Item = Scripted>) -> Self;  // banco em memória com migrações
+    pub async fn with_timeout(script, timeout: Duration) -> Self;
+    pub fn broker(&self) -> &ApprovalBroker;                 // para ToolCtx.broker
+    pub fn pool(&self) -> &SqlitePool;
+    pub async fn turn(&self, cli: CliKind, attended: bool) -> TurnBinding;  // sessão + execução running
+    pub fn requests(&self) -> Vec<Value>;                    // cartões pedidos, em ordem
+    pub fn events(&self) -> Vec<(String, Value)>;
 }
 pub trait BrokerIo: Send + Sync + 'static { fn pool(&self) -> BoxFuture<'_, Result<SqlitePool, AppError>>;
     fn emit(&self, session_id: &str, run_id: &str, sequence: i64, method: &str, data: Value); }
@@ -184,7 +199,7 @@ pub fn turn_invocation(kind, prompt, conversation, mcp: Option<&McpLaunch>, scra
 
 ### Exemplo mínimo: grupo de escrita com broker e vínculo
 
-Assume a proposta pendente de C4 (`ctx.broker()`); até ela, o grupo obtém o broker de `ctx.app` (`app.state::<ApprovalBroker>()`). Versão executável com o broker no valor do grupo: `ProbeWrite` em `chat_engine/binding_tests.rs`.
+Versões executáveis: `ProbeWrite` em `chat_engine/binding_tests.rs` (direto com `TestBroker` e ponta a ponta pelo socket e relay).
 
 ```rust
 pub struct NotesWrite;
@@ -222,7 +237,20 @@ impl ToolGroup for NotesWrite {
 // tools/mod.rs (Main): groups.push(&notes::NotesWrite);
 ```
 
-Teste da fatia: `TurnRegistry` + `Listener::start_with_turns` + `stdio::relay_turn` com o token, broker com `BrokerIo` em memória, resolução por `approval_broker::commands::resolve`; aprovar, negar, cancelar e conexão sem vínculo (`turn_required`), como `chat_engine/binding_tests.rs`.
+Teste da fatia sem socket (o caminho padrão da fase 2):
+
+```rust
+let broker = TestBroker::new([Scripted::Approve, Scripted::Deny]).await;
+let binding = broker.turn(CliKind::Claude, true).await;
+let ctx = ToolCtx { data: &data, app: None, binding: Some(&binding), broker: Some(broker.broker()) };
+assert!(NotesWrite.call(&ctx, SAVE_THING, &args).await.is_ok());                          // aprovado
+assert_eq!(NotesWrite.call(&ctx, SAVE_THING, &args).await.unwrap_err().code, "user_denied");
+let routine = broker.turn(CliKind::Codex, false).await;                                      // sem cartão
+assert_eq!(NotesWrite.call(&ToolCtx { binding: Some(&routine), ..ctx }, SAVE_THING, &args)
+    .await.unwrap_err().code, "unattended_requires_approval");
+```
+
+Ponta a ponta (quando a fatia precisar do fio): `TurnRegistry` + `Listener::start_with_turns` + `stdio::relay_turn` com o token, como `chat_engine/binding_tests.rs`.
 
 ## Context
 

@@ -286,7 +286,11 @@ One message on a CLI engine is one CLI process in the session workspace:
   bound to the run and see the tools that need a turn. It is revoked when
   the turn ends, fails, or is cancelled (`chat_engine::turn::TurnGrant`), and
   on cancel before the process has stopped; a new handshake with it is then
-  refused with `turn_expired`. Each run gets a new token.
+  refused with `turn_expired`. A revoked connection reads no new request but
+  still delivers the answers of the calls it was serving (at most 2 s) before
+  it closes; a call still unanswered then gets `turn_expired` from the relay.
+  App shutdown revokes every token after the turns stop
+  (`shutdown::run_cleanup`). Each run gets a new token.
 - **Note references.** A message that references notes (`@note:<id>`, which
   the note chat panel always puts first) reaches the CLI with a line asking it
   to read them with Clovy's `get_note` tool
