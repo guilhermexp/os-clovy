@@ -212,7 +212,7 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
     let outcome = match method {
         "initialize" => Ok(initialize_result(&params, INSTRUCTIONS)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx) })),
+        "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx).await })),
         "tools/call" => call_tool(ctx, &params).await,
         "resources/list" => Ok(json!({ "resources": resources() })),
         "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
