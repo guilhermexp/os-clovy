@@ -56,6 +56,32 @@ impl AgentRecorderBroker {
         action: AgentRecorderAction,
         source_mode: Option<RecordingSourceMode>,
     ) -> Result<serde_json::Value, AppError> {
+        self.request_with(action, source_mode, |payload| {
+            app.get_webview_window("main")
+                .ok_or_else(|| {
+                    AppError::new(
+                        "agent_recorder_window_unavailable",
+                        "The Clovy window is unavailable.",
+                    )
+                })
+                .and_then(|window| {
+                    window.emit(REQUEST_EVENT, payload).map_err(|error| {
+                        AppError::new("agent_recorder_emit_failed", error.to_string())
+                    })
+                })
+        })
+        .await
+    }
+
+    /// [`Self::request`] with the delivery to the frontend given by the
+    /// caller (`emit` receives the `clovy://agent-recorder-request` payload),
+    /// so tests can answer as the frontend does through [`Self::resolve`].
+    pub(crate) async fn request_with(
+        &self,
+        action: AgentRecorderAction,
+        source_mode: Option<RecordingSourceMode>,
+        emit: impl FnOnce(serde_json::Value) -> Result<(), AppError>,
+    ) -> Result<serde_json::Value, AppError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = oneshot::channel();
         self.pending
@@ -67,20 +93,9 @@ impl AgentRecorderBroker {
             action,
             source_mode,
         };
-        let emit_result = app
-            .get_webview_window("main")
-            .ok_or_else(|| {
-                AppError::new(
-                    "agent_recorder_window_unavailable",
-                    "The Clovy window is unavailable.",
-                )
-            })
-            .and_then(|window| {
-                window
-                    .emit(REQUEST_EVENT, payload)
-                    .map_err(|error| AppError::new("agent_recorder_emit_failed", error.to_string()))
-            });
-        if let Err(error) = emit_result {
+        let payload = serde_json::to_value(payload)
+            .map_err(|error| AppError::new("agent_recorder_emit_failed", error.to_string()))?;
+        if let Err(error) = emit(payload) {
             self.remove_pending(&request_id);
             return Err(error);
         }
@@ -123,7 +138,7 @@ impl AgentRecorderBroker {
         }
     }
 
-    fn resolve(&self, request: ResolveAgentRecorderRequest) -> Result<(), AppError> {
+    pub(crate) fn resolve(&self, request: ResolveAgentRecorderRequest) -> Result<(), AppError> {
         let request_id = request.request_id.clone();
         let sender = self
             .pending
@@ -157,6 +172,18 @@ impl AgentRecorderBroker {
             }
         }
         Ok(())
+    }
+}
+
+/// The recording source `start_recording` asks for (`sourceMode`); anything
+/// but `microphonePlusSystem` records the microphone only.
+pub(crate) fn source_mode_argument(arguments: &serde_json::Value) -> RecordingSourceMode {
+    match arguments
+        .get("sourceMode")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("microphonePlusSystem") => RecordingSourceMode::MicrophonePlusSystem,
+        _ => RecordingSourceMode::MicrophoneOnly,
     }
 }
 

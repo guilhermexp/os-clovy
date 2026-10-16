@@ -158,12 +158,7 @@ pub async fn dispatch_tool(
         )?)
         .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))?),
         "start_recording" => {
-            let source_mode = match arguments.get("sourceMode").and_then(Value::as_str) {
-                Some("microphonePlusSystem") => {
-                    crate::domain::types::RecordingSourceMode::MicrophonePlusSystem
-                }
-                _ => crate::domain::types::RecordingSourceMode::MicrophoneOnly,
-            };
+            let source_mode = crate::agent_recorder::source_mode_argument(&arguments);
             context
                 .app
                 .state::<crate::agent_recorder::AgentRecorderBroker>()
@@ -185,8 +180,7 @@ pub async fn dispatch_tool(
                 )
                 .await
         }
-        "recording_status" => serde_json::to_value(crate::audio::capture::current_status())
-            .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string())),
+        "recording_status" => crate::mcp_server::tools::recorder::recording_status(),
         "web_search" => web(context, "/v1/web/search", &arguments).await,
         "web_fetch" => web(context, "/v1/web/fetch", &arguments).await,
         "list_files" => list_files(context, &arguments).await,

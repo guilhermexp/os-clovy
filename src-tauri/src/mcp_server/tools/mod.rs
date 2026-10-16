@@ -10,6 +10,9 @@ pub(crate) mod media;
 #[cfg(test)]
 mod media_tests;
 mod read;
+pub(crate) mod recorder;
+#[cfg(test)]
+mod recorder_tests;
 
 use chrono::{DateTime, Utc};
 use futures_util::future::BoxFuture;
@@ -136,6 +139,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     #[allow(unused_mut)]
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
     groups.push(&media::MediaTools);
+    groups.push(&recorder::RecorderTools);
     #[cfg(all(test, unix))]
     groups.push(&super::turn_tests::TurnProbe);
     groups
