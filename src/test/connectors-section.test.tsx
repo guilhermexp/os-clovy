@@ -11,7 +11,6 @@ const mocks = vi.hoisted(() => ({
   connectorsConnect: vi.fn(),
   connectorsCancelConnect: vi.fn(),
   connectorsDisconnect: vi.fn(),
-  connectorsApplyRuntime: vi.fn(),
   extensionPairingStatus: vi.fn(),
   registerBrowserExtensionHost: vi.fn(),
   browserTransportPolicy: vi.fn(),
@@ -47,7 +46,6 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   connectorsConnect: mocks.connectorsConnect,
   connectorsCancelConnect: mocks.connectorsCancelConnect,
   connectorsDisconnect: mocks.connectorsDisconnect,
-  connectorsApplyRuntime: mocks.connectorsApplyRuntime,
   extensionPairingStatus: mocks.extensionPairingStatus,
   registerBrowserExtensionHost: mocks.registerBrowserExtensionHost,
   browserTransportPolicy: mocks.browserTransportPolicy,
@@ -130,7 +128,6 @@ beforeEach(() => {
   );
   mocks.connectorsConnect.mockResolvedValue(account());
   mocks.connectorsDisconnect.mockResolvedValue(undefined);
-  mocks.connectorsApplyRuntime.mockResolvedValue(undefined);
   mocks.connectorsCancelConnect.mockResolvedValue(undefined);
   mocks.connectorsLinearTeams.mockResolvedValue({ teams: [], truncated: false });
   mocks.connectorsSetSelectedTeams.mockResolvedValue(linearAccount());
@@ -473,7 +470,6 @@ describe("ConnectorsSection", () => {
     await userEvent.click(screen.getByRole("button", { name: "Disconnect Notion" }));
 
     await waitFor(() => expect(mocks.notionConnectorDisconnect).toHaveBeenCalled());
-    expect(mocks.connectorsApplyRuntime).not.toHaveBeenCalled();
     expect(mocks.notionConnectorConnect).not.toHaveBeenCalled();
   });
 
@@ -571,7 +567,7 @@ describe("ConnectorsSection", () => {
     expect(screen.getByText(/Connect apps and services in local mode/i)).toBeInTheDocument();
   });
 
-  it("connects an account from the feature-bundle dialog and applies the runtime", async () => {
+  it("connects an account from the feature-bundle dialog and refreshes the account list", async () => {
     render(<ConnectorsSection />);
 
     await userEvent.click(await findEnabledConnect("Connect Google"));
@@ -592,7 +588,8 @@ describe("ConnectorsSection", () => {
         provider: "google",
       }),
     );
-    await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalled());
+    expect(mocks.toastError).not.toHaveBeenCalled();
     expect(await screen.findByText(/alex@example\.com/)).toBeInTheDocument();
   });
 
@@ -660,7 +657,8 @@ describe("ConnectorsSection", () => {
         provider: "google",
       }),
     );
-    await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalled());
+    expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
   it("revokes by default so a disconnect cannot orphan the grant", async () => {
@@ -725,7 +723,6 @@ describe("ConnectorsSection — Linear", () => {
         provider: "linear",
       }),
     );
-    expect(mocks.connectorsApplyRuntime).not.toHaveBeenCalled();
     expect(mocks.connectorsLinearTeams).not.toHaveBeenCalled();
     expect(mocks.connectorsSetSelectedTeams).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: /Linear teams/i })).toBeNull();
@@ -760,7 +757,6 @@ describe("ConnectorsSection — Linear", () => {
         provider: "linear",
       }),
     );
-    expect(mocks.connectorsApplyRuntime).not.toHaveBeenCalled();
     expect(mocks.connectorsLinearTeams).not.toHaveBeenCalled();
   });
 
@@ -783,14 +779,10 @@ describe("ConnectorsSection — Linear", () => {
         provider: "linear",
       }),
     );
-    expect(mocks.connectorsApplyRuntime).not.toHaveBeenCalled();
   });
 
-  it("disconnects successfully when the retired runtime command is unavailable", async () => {
+  it("disconnects Linear and refreshes the account list without a runtime apply step", async () => {
     mocks.connectorsList.mockResolvedValue([linearAccount()]);
-    mocks.connectorsApplyRuntime.mockRejectedValue(
-      new Error("Command connectors_apply_runtime not found"),
-    );
     render(<ConnectorsSection />);
     await screen.findByText(/Acme/);
 
@@ -805,7 +797,6 @@ describe("ConnectorsSection — Linear", () => {
         revoke: true,
       }),
     );
-    expect(mocks.connectorsApplyRuntime).not.toHaveBeenCalled();
     expect(mocks.toastError).not.toHaveBeenCalled();
     expect(mocks.toastSuccess).toHaveBeenCalledWith("Disconnected Acme");
     expect(await findEnabledConnect("Connect Linear")).toBeInTheDocument();
@@ -858,7 +849,7 @@ describe("ConnectorsSection — GitHub", () => {
     expect(screen.getByText(/read issues, pull requests, and code/i)).toBeInTheDocument();
   });
 
-  it("connects with github_read by default and applies the runtime", async () => {
+  it("connects with github_read by default and refreshes the account list", async () => {
     mocks.connectorsConnect.mockResolvedValue(githubAccount());
     render(<ConnectorsSection />);
 
@@ -883,7 +874,8 @@ describe("ConnectorsSection — GitHub", () => {
         provider: "github",
       }),
     );
-    await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalled());
+    expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
   it("adds github_write when the write checkbox is checked", async () => {
@@ -951,7 +943,8 @@ describe("ConnectorsSection — GitHub", () => {
         provider: "github",
       }),
     );
-    await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalled());
+    expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
   it("GitHub reconnect opens the dialog and device-code panel is visible when the event fires", async () => {
@@ -1057,7 +1050,7 @@ describe("ConnectorsSection — GitHub", () => {
     expect(screen.queryByText("Select teams to finish setup")).toBeNull();
   });
 
-  it("disconnects a GitHub account with revoke and applies the runtime", async () => {
+  it("disconnects a GitHub account with revoke and refreshes the account list", async () => {
     mocks.connectorsList.mockResolvedValue([githubAccount()]);
     render(<ConnectorsSection />);
     await screen.findByText(/octocat/);
@@ -1077,7 +1070,8 @@ describe("ConnectorsSection — GitHub", () => {
         revoke: true,
       }),
     );
-    await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalled());
+    expect(mocks.toastError).not.toHaveBeenCalled();
     expect(await findEnabledConnect("Connect GitHub")).toBeInTheDocument();
   });
 
