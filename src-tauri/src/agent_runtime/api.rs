@@ -1346,6 +1346,18 @@ pub(crate) async fn resolve_companion_computer_use_approval(
     origin: crate::companion::ComputerUseApprovalOrigin,
 ) -> Result<Value, AppError> {
     use sqlx::row::Row;
+    // A CLI turn's request waits in the approval broker, not in the sidecar.
+    if let Some(result) = crate::companion::resolve_cli_computer_use_approval(
+        app,
+        request_id,
+        stored_session_id,
+        decision,
+        origin.clone(),
+    )
+    .await
+    {
+        return result;
+    }
     let repository = repository(app).await?;
     let row = sqlx::query::query(
         "SELECT run_id
@@ -2454,12 +2466,15 @@ async fn tool_descriptors(
         ,{ "name": "delete_routine", "description": "Delete a Clovy routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
         ,{ "name": "request_clarification", "description": "Pause and ask the user a question when their answer is required to continue.", "parameters": { "type": "object", "properties": { "question": { "type": "string" }, "choices": { "type": "array", "items": { "type": "string" } } }, "required": ["question", "choices"], "additionalProperties": false }, "requiresApproval": true }
         ,{ "name": "request_secret", "description": "Securely request a secret from the user. The result is an opaque one-use reference for a safety-controlled tool, never the secret value.", "parameters": { "type": "object", "properties": { "reason": { "type": "string" } }, "required": ["reason"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "computer_use", "description": "Operate the attended computer-use session through Clovy's permission and approval broker.", "parameters": { "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true }, "requiresApproval": true }
     ]);
     tools
         .as_array_mut()
         .expect("tool descriptor catalog is an array")
         .extend(crate::mcp_server::tools::browser::runtime_descriptors());
+    tools
+        .as_array_mut()
+        .expect("tool descriptor catalog is an array")
+        .push(crate::mcp_server::tools::computer_use::runtime_descriptor());
     tools
         .as_array_mut()
         .expect("tool descriptor catalog is an array")

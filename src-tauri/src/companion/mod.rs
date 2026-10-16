@@ -60,6 +60,7 @@ pub struct CompanionRuntime {
     account_activity_changed: Notify,
     peer_capabilities: Mutex<HashMap<Uuid, HashSet<Capability>>>,
     computer_use_approvals: Mutex<ComputerUseApprovalRegistry>,
+    cli_computer_use_requests: CliComputerUseRequests,
     effective_enabled: OnceLock<bool>,
     desktop_display_name: OnceLock<String>,
 }
@@ -84,6 +85,7 @@ impl Default for CompanionRuntime {
             account_activity_changed: Notify::new(),
             peer_capabilities: Mutex::default(),
             computer_use_approvals: Mutex::default(),
+            cli_computer_use_requests: CliComputerUseRequests::default(),
             effective_enabled: OnceLock::new(),
             desktop_display_name: OnceLock::new(),
         }
@@ -1892,6 +1894,222 @@ pub(crate) fn publish_computer_use_execution_status(
         status = ?protocol_status,
         "recorded companion Computer use execution status"
     );
+}
+
+/// One `computer_use` approval of a CLI turn offered to linked devices
+/// (`cli-substitui-agente-nativo`, slice 2.6; ADR-0053 scope, D4). The card
+/// itself is an approval-broker item; the linked device sees the same
+/// request as a native one, and its answer settles that item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CliComputerUseRequest {
+    pub run_id: String,
+    pub stored_session_id: String,
+    pub tool_call_id: String,
+}
+
+/// CLI requests by linked-device request id, so a device's answer reaches
+/// the approval broker instead of the native runtime.
+#[derive(Debug, Default)]
+pub(crate) struct CliComputerUseRequests(Mutex<HashMap<String, CliComputerUseRequest>>);
+
+impl CliComputerUseRequests {
+    pub(crate) fn insert(&self, request_id: &str, request: CliComputerUseRequest) {
+        if let Ok(mut requests) = self.0.lock() {
+            requests.insert(request_id.to_string(), request);
+        }
+    }
+
+    pub(crate) fn get(
+        &self,
+        request_id: &str,
+        stored_session_id: &str,
+    ) -> Option<CliComputerUseRequest> {
+        self.0
+            .lock()
+            .ok()?
+            .get(request_id)
+            .filter(|request| request.stored_session_id == stored_session_id)
+            .cloned()
+    }
+
+    pub(crate) fn remove(&self, request_id: &str) {
+        if let Ok(mut requests) = self.0.lock() {
+            requests.remove(request_id);
+        }
+    }
+}
+
+/// Settles the approval-broker card of `request` with a linked device's
+/// decision. A card already decided (on the Mac, by an earlier answer, by
+/// timeout or cancellation) answers `agent_interruption_expired`.
+pub(crate) async fn resolve_cli_computer_use_card(
+    broker: &crate::approval_broker::ApprovalBroker,
+    pool: &sqlx_sqlite::SqlitePool,
+    request: &CliComputerUseRequest,
+    approve: bool,
+) -> Result<(), AppError> {
+    use sqlx::row::Row;
+    let row = sqlx::query::query(
+        "SELECT json_extract(payload_json, '$.id') AS interruption_id FROM agent_items
+         WHERE kind = 'interruption'
+           AND run_id = ?
+           AND session_id = ?
+           AND json_extract(payload_json, '$.toolName') = 'computer_use'
+           AND json_extract(payload_json, '$.toolCallId') = ?
+           AND json_extract(payload_json, '$.engine') = ?
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(&request.run_id)
+    .bind(&request.stored_session_id)
+    .bind(&request.tool_call_id)
+    .bind(crate::approval_broker::CLI_ENGINE)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        AppError::new(
+            "companion_computer_use_approval_not_found",
+            "This Computer use approval request is no longer pending.",
+        )
+    })?;
+    let interruption_id: String = row.get("interruption_id");
+    let resolution = serde_json::json!({
+        "kind": "approval",
+        "choice": if approve { "once" } else { "deny" },
+    });
+    if crate::approval_broker::commands::resolve(
+        broker,
+        pool,
+        &request.run_id,
+        &interruption_id,
+        &resolution,
+    )
+    .await?
+    {
+        Ok(())
+    } else {
+        Err(crate::approval_broker::expired_error())
+    }
+}
+
+/// Offers a CLI turn's `computer_use` approval to linked devices, like the
+/// native runtime does on `interruption.requested`. `false` when no device
+/// can answer it (the approval stays on the Mac).
+pub(crate) async fn offer_cli_computer_use_approval(
+    app: &AppHandle,
+    request_id: &str,
+    request: CliComputerUseRequest,
+    arguments: &serde_json::Value,
+) -> bool {
+    let runtime = app.state::<CompanionRuntime>();
+    runtime
+        .cli_computer_use_requests
+        .insert(request_id, request.clone());
+    match register_computer_use_approval(
+        app,
+        request_id,
+        &request.tool_call_id,
+        &request.stored_session_id,
+        arguments,
+    )
+    .await
+    {
+        Ok(true) => true,
+        Ok(false) => {
+            runtime.cli_computer_use_requests.remove(request_id);
+            false
+        }
+        Err(error) => {
+            runtime.cli_computer_use_requests.remove(request_id);
+            tracing::warn!(
+                code = %error.code,
+                request_id,
+                stored_session_id = %request.stored_session_id,
+                "did not route a CLI Computer use approval to a linked companion"
+            );
+            false
+        }
+    }
+}
+
+/// The approval broker answered a CLI request first (the Mac, a timeout, or
+/// the run's end): retire the linked device's card with that outcome.
+pub(crate) fn retire_cli_computer_use_approval(
+    app: &AppHandle,
+    request_id: &str,
+    stored_session_id: &str,
+    approved: bool,
+) {
+    complete_computer_use_resolution(app, request_id, stored_session_id, approved, false, None);
+    app.state::<CompanionRuntime>()
+        .cli_computer_use_requests
+        .remove(request_id);
+}
+
+/// A linked device's decision (or its expiry) for a CLI request. `None` when
+/// `request_id` is not a CLI request: the caller continues with the native
+/// path. Approving arms the one-use remote permit before the card settles, so
+/// the action that runs right after consumes it.
+pub(crate) async fn resolve_cli_computer_use_approval(
+    app: &AppHandle,
+    request_id: &str,
+    stored_session_id: &str,
+    decision: ComputerUseApprovalDecision,
+    origin: ComputerUseApprovalOrigin,
+) -> Option<Result<serde_json::Value, AppError>> {
+    let runtime = app.state::<CompanionRuntime>();
+    let request = runtime
+        .cli_computer_use_requests
+        .get(request_id, stored_session_id)?;
+    Some(
+        async {
+            begin_companion_computer_use_resolution(
+                app,
+                request_id,
+                stored_session_id,
+                origin.clone(),
+            )?;
+            let approved = decision == ComputerUseApprovalDecision::Approve
+                && origin != ComputerUseApprovalOrigin::Timeout;
+            let remote_permit =
+                approved && matches!(origin, ComputerUseApprovalOrigin::Companion { .. });
+            if approved {
+                complete_computer_use_resolution(
+                    app,
+                    request_id,
+                    stored_session_id,
+                    true,
+                    remote_permit,
+                    Some(origin.clone()),
+                );
+            }
+            let settled = match app.try_state::<crate::approval_broker::ApprovalBroker>() {
+                Some(broker) => {
+                    let pool = repositories(app).await?.pool;
+                    resolve_cli_computer_use_card(&broker, &pool, &request, approved).await
+                }
+                None => Err(crate::approval_broker::expired_error()),
+            };
+            if let Err(error) = settled {
+                cancel_computer_use_resolution(app, request_id, stored_session_id);
+                runtime.cli_computer_use_requests.remove(request_id);
+                return Err(error);
+            }
+            if !approved {
+                complete_computer_use_resolution(
+                    app,
+                    request_id,
+                    stored_session_id,
+                    false,
+                    false,
+                    Some(origin),
+                );
+            }
+            runtime.cli_computer_use_requests.remove(request_id);
+            Ok(serde_json::json!({ "resolved": true, "approved": approved }))
+        }
+        .await,
+    )
 }
 
 fn retire_computer_use_approvals(app: &AppHandle, status: ComputerUseApprovalStatus) {

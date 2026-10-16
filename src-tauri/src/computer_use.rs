@@ -94,6 +94,9 @@ pub struct ComputerUseState {
     approvals: Mutex<HashMap<String, PendingEntry>>,
     authorized_apps: Mutex<HashSet<AppAuthorizationKey>>,
     attended_runs: Mutex<HashSet<String>>,
+    /// Runs of CLI turns that were granted a lease ([`begin_turn_lease`]);
+    /// a run here whose lease is gone was stopped, and stays stopped.
+    turn_leases: Mutex<HashSet<String>>,
     attended_generation: AtomicU64,
     cleanup_in_progress: AtomicU32,
     epoch: AtomicU64,
@@ -2361,6 +2364,140 @@ pub async fn computer_use_end_run(
         stop_if_idle(&app, &state, generation).await;
     }
     Ok(())
+}
+
+/// The lease of an attended CLI chat turn (`cli-substitui-agente-nativo`,
+/// slice 2.6): the turn binding of the MCP connection grants it, in place of
+/// the chat surface calling [`computer_use_begin_run`]. The first
+/// `computer_use` call of the run opens it, later calls of the same run keep
+/// it, and the run's terminal event (`run.completed`, `run.cancelled`,
+/// `run.failed`) ends it like [`computer_use_end_run`]. Stop stays sticky for
+/// the rest of the run: once Stop clears the lease, the same run cannot open
+/// it again. Unattended turns never get one.
+pub(crate) fn begin_turn_lease(
+    app: &AppHandle,
+    binding: &crate::mcp_server::turns::TurnBinding,
+) -> Result<(), AppError> {
+    let state = app.state::<ComputerUseState>();
+    if begin_turn_lease_in(&state, binding)? {
+        end_turn_lease_with_run(app, binding.run_id.clone());
+    }
+    Ok(())
+}
+
+/// [`begin_turn_lease`] without the app: `Ok(true)` when this call opened
+/// the run's lease (the caller arranges its end).
+pub(crate) fn begin_turn_lease_in(
+    state: &ComputerUseState,
+    binding: &crate::mcp_server::turns::TurnBinding,
+) -> Result<bool, AppError> {
+    if !binding.attended {
+        return Err(AppError::new(
+            "computer_use_attended_run_required",
+            "Computer use is available only during a turn started from Clovy chat.",
+        ));
+    }
+    if state.cleanup_in_progress.load(Ordering::SeqCst) != 0 {
+        return Err(AppError::new(
+            "computer_use_stopping",
+            "Computer use is still stopping. Start the task again in a moment.",
+        ));
+    }
+    let key = turn_lease_key(&binding.run_id);
+    let mut leases = state
+        .turn_leases
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
+    if leases.contains(&binding.run_id) {
+        let live = state
+            .attended_runs
+            .lock()
+            .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?
+            .contains(&key);
+        return if live {
+            Ok(false)
+        } else {
+            Err(AppError::new(
+                "computer_use_stopped",
+                "Computer use was stopped for this turn. Send a new message to use it again.",
+            ))
+        };
+    }
+    begin_run_lease(state, key)?;
+    leases.insert(binding.run_id.clone());
+    Ok(true)
+}
+
+/// Ends the lease of `run_id`; `Some(generation)` when no attended run is
+/// left (the caller may stop the idle driver, as `computer_use_end_run`).
+pub(crate) fn end_turn_lease_in(
+    state: &ComputerUseState,
+    run_id: &str,
+) -> Result<Option<u64>, AppError> {
+    if let Ok(mut leases) = state.turn_leases.lock() {
+        leases.remove(run_id);
+    }
+    end_run_lease(state, &turn_lease_key(run_id))
+}
+
+fn turn_lease_key(run_id: &str) -> String {
+    format!("cli-turn:{run_id}")
+}
+
+/// Ends the run's lease when the run publishes its terminal event.
+fn end_turn_lease_with_run(app: &AppHandle, run_id: String) {
+    use tauri::Listener;
+    let listener: Arc<Mutex<Option<tauri::EventId>>> = Arc::default();
+    let own = Arc::clone(&listener);
+    let handle = app.clone();
+    let id = app.listen_any(
+        crate::agent_runtime::host::AGENT_RUNTIME_EVENT,
+        move |event| {
+            if !is_terminal_event_of(event.payload(), &run_id) {
+                return;
+            }
+            if let Some(id) = own.lock().ok().and_then(|mut id| id.take()) {
+                handle.unlisten(id);
+            }
+            let app = handle.clone();
+            let run_id = run_id.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<ComputerUseState>();
+                if let Ok(Some(generation)) = end_turn_lease_in(&state, &run_id) {
+                    stop_if_idle(&app, &state, generation).await;
+                }
+            });
+        },
+    );
+    if let Ok(mut slot) = listener.lock() {
+        *slot = Some(id);
+    };
+}
+
+fn is_terminal_event_of(payload: &str, run_id: &str) -> bool {
+    // Every streamed delta passes here; skip the parse for other runs.
+    if !payload.contains(run_id) {
+        return false;
+    }
+    let Ok(event) = serde_json::from_str::<Value>(payload) else {
+        return false;
+    };
+    event.get("runId").and_then(Value::as_str) == Some(run_id)
+        && matches!(
+            event.get("method").and_then(Value::as_str),
+            Some("run.completed" | "run.cancelled" | "run.failed")
+        )
+}
+
+#[cfg(test)]
+pub(crate) fn has_attended_run(state: &ComputerUseState) -> bool {
+    ensure_attended_run(state).is_ok()
+}
+
+/// Stop for tests without an app: clears every lease, as [`stop_inner`].
+#[cfg(test)]
+pub(crate) fn clear_leases_for_test(state: &ComputerUseState) {
+    state.attended_runs.lock().unwrap().clear();
 }
 
 fn validate_run_session_id(session_id: &str) -> Result<String, AppError> {

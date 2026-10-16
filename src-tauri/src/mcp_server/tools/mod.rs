@@ -9,6 +9,9 @@
 pub(crate) mod browser;
 #[cfg(test)]
 mod browser_tests;
+pub(crate) mod computer_use;
+#[cfg(test)]
+mod computer_use_tests;
 mod read;
 
 use chrono::{DateTime, Utc};
@@ -136,6 +139,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     #[allow(unused_mut)]
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
     groups.push(&browser::BROWSER);
+    groups.push(&computer_use::COMPUTER_USE);
     #[cfg(all(test, unix))]
     groups.push(&super::turn_tests::TurnProbe);
     groups
