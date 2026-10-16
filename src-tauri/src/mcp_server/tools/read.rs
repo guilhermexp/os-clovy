@@ -153,11 +153,12 @@ fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
         ),
         read_only(
             GET_NOTE,
-            "Read one Clovy note by id: title, note text, and its latest transcript. Long transcripts come in pages; pass `transcriptOffset` from `nextTranscriptOffset` to continue.",
+            "Read one Clovy note by id: title, note text, and its latest transcript. Long content and transcripts come in pages; continue with `contentOffset` or `transcriptOffset` from the corresponding next offset.",
             json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
+                    "contentOffset": { "type": "integer", "minimum": 0, "default": 0, "description": "Character offset into the note content." },
                     "transcriptOffset": { "type": "integer", "minimum": 0, "default": 0, "description": "Character offset into the transcript." }
                 },
                 "required": ["id"],
@@ -451,22 +452,12 @@ async fn get_note(data: &McpData, arguments: &Value) -> Result<Value, AppError> 
         .get("transcriptOffset")
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
-    let row = query(&format!(
-        "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, '') AS note,
-                {LATEST_TRANSCRIPT} AS transcript, n.created_at, n.updated_at
-         FROM notes n WHERE n.id = ? AND n.profile = ?"
-    ))
-    .bind(id)
-    .bind(&data.profile)
-    .fetch_optional(&data.notes)
-    .await?
-    .ok_or_else(|| {
-        AppError::new(
-            "note_not_found",
-            "No note with this id in the data set open in Clovy.",
-        )
-    })?;
-    let (content, content_truncated) = clip(&row.get::<String, _>("note"), NOTE_CONTENT_MAX_CHARS);
+    let row = super::notes::read_note(&data.notes, &data.profile, id).await?;
+    let content_offset = super::notes::character_offset(arguments, "contentOffset")?;
+    let note: String = row.get("note");
+    let (content, content_total, next_content_offset) =
+        super::notes::character_page(&note, content_offset, NOTE_CONTENT_MAX_CHARS);
+    let content_truncated = content.chars().count() < content_total;
     let transcript: String = row.get("transcript");
     let total = transcript.chars().count();
     let page: String = transcript
@@ -482,6 +473,9 @@ async fn get_note(data: &McpData, arguments: &Value) -> Result<Value, AppError> 
         "updatedAt": row.get::<String, _>("updated_at"),
         "content": content,
         "contentTruncated": content_truncated,
+        "contentOffset": content_offset,
+        "contentTotalChars": content_total,
+        "nextContentOffset": next_content_offset,
         "transcript": page,
         "transcriptOffset": offset,
         "transcriptTotalChars": total,

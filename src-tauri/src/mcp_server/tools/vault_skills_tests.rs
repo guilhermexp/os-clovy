@@ -1,0 +1,222 @@
+use super::{call, descriptors, ActivityAccess, McpData, ToolCtx};
+use crate::agent_runtime::AgentRepository;
+use crate::approval_broker::testing::TestBroker;
+use crate::llm::cli::CliKind;
+use serde_json::json;
+
+#[tokio::test]
+async fn skills_follow_global_settings_and_preserve_root_precedence() {
+    let broker = TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let managed = tempfile::tempdir().unwrap();
+    let global = tempfile::tempdir().unwrap();
+    for (root, name, content) in [
+        (managed.path(), "enabled", "Managed instructions"),
+        (global.path(), "enabled", "Global duplicate"),
+        (global.path(), "disabled", "Disabled instructions"),
+        (global.path(), "new-skill", "Default enabled instructions"),
+    ] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        std::fs::write(root.join(name).join("SKILL.md"), content).unwrap();
+    }
+    let roots = vec![managed.path().to_path_buf(), global.path().to_path_buf()];
+    let repo = AgentRepository::new(broker.pool().clone());
+    repo.set_skill_enabled("disabled", false, false)
+        .await
+        .unwrap();
+    let data = McpData {
+        notes: broker.pool().clone(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: ActivityAccess::Off,
+        now: chrono::Utc::now(),
+    };
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: None,
+    };
+    let listed = super::vault_skills::call_with_roots(&ctx, "list_skills", &json!({}), &roots)
+        .await
+        .unwrap();
+    let skills = listed["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 2);
+    assert!(skills.iter().all(|skill| skill["name"] != "disabled"));
+    let loaded = super::vault_skills::call_with_roots(
+        &ctx,
+        "load_skill",
+        &json!({"name":"enabled"}),
+        &roots,
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded["content"], "Managed instructions");
+    assert_eq!(
+        loaded["path"],
+        managed.path().join("enabled/SKILL.md").to_str().unwrap()
+    );
+    assert_eq!(
+        super::vault_skills::call_with_roots(
+            &ctx,
+            "load_skill",
+            &json!({"name":"disabled"}),
+            &roots
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "agent_skill_disabled"
+    );
+    repo.set_skill_enabled("disabled", true, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        super::vault_skills::call_with_roots(
+            &ctx,
+            "load_skill",
+            &json!({"name":"disabled"}),
+            &roots
+        )
+        .await
+        .unwrap()["content"],
+        "Disabled instructions"
+    );
+    assert!(broker.requests().is_empty());
+}
+
+#[tokio::test]
+async fn skills_preserve_aliases_validation_and_native_snapshot_policy() {
+    let broker = TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Codex, true).await;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("june-obsidian")).unwrap();
+    std::fs::write(
+        root.path().join("june-obsidian/SKILL.md"),
+        "Legacy instructions",
+    )
+    .unwrap();
+    let roots = vec![root.path().to_path_buf()];
+    let data = McpData {
+        notes: broker.pool().clone(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: ActivityAccess::Off,
+        now: chrono::Utc::now(),
+    };
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: None,
+    };
+    assert_eq!(
+        super::vault_skills::call_with_roots(
+            &ctx,
+            "load_skill",
+            &json!({"name":"clovy-obsidian"}),
+            &roots
+        )
+        .await
+        .unwrap()["content"],
+        "Legacy instructions"
+    );
+    std::fs::create_dir_all(root.path().join("clovy-obsidian")).unwrap();
+    std::fs::write(
+        root.path().join("clovy-obsidian/SKILL.md"),
+        "Canonical instructions",
+    )
+    .unwrap();
+    assert_eq!(
+        super::vault_skills::call_with_roots(&ctx, "list_skills", &json!({}), &roots)
+            .await
+            .unwrap()["skills"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        super::vault_skills::call_with_roots(
+            &ctx,
+            "load_skill",
+            &json!({"name":"june-obsidian"}),
+            &roots
+        )
+        .await
+        .unwrap()["content"],
+        "Canonical instructions"
+    );
+    for name in ["../escape", "a/b", "a\\b", ".", ".."] {
+        assert_eq!(
+            super::vault_skills::call_with_roots(&ctx, "load_skill", &json!({"name":name}), &roots)
+                .await
+                .unwrap_err()
+                .code,
+            "agent_skill_invalid"
+        );
+    }
+    let snapshot = std::collections::HashMap::new();
+    assert!(
+        super::vault_skills::list_skills_from_roots(&roots, &snapshot, false)
+            .await
+            .unwrap()["skills"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        super::vault_skills::load_skill_from_roots(&roots, &snapshot, "clovy-obsidian")
+            .await
+            .unwrap_err()
+            .code,
+        "agent_skill_disabled"
+    );
+    for name in ["get_obsidian_vault", "list_skills", "load_skill"] {
+        assert_eq!(
+            call(&ToolCtx::unbound(&data), name, &json!({}))
+                .await
+                .unwrap_err()
+                .code,
+            "turn_required"
+        );
+        assert!(!descriptors(&ToolCtx::unbound(&data))
+            .await
+            .iter()
+            .any(|tool| tool["name"] == name));
+        assert!(descriptors(&ctx)
+            .await
+            .iter()
+            .any(|tool| tool["name"] == name && tool["annotations"]["readOnlyHint"] == true));
+    }
+}
+
+#[test]
+fn vault_result_preserves_discovery_contract_for_test_vault() {
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir(vault.path().join(".obsidian")).unwrap();
+    let path = vault.path().canonicalize().unwrap();
+    let result = super::vault_skills::vault_result(Ok(crate::obsidian::ObsidianDiscovery {
+        connected: true,
+        available: true,
+        vault: Some(crate::obsidian::ObsidianDiscoveryVault {
+            name: "Test vault".into(),
+            path: Some(path.to_str().unwrap().into()),
+        }),
+    }))
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({"connected":true,"available":true,"vault":{"name":"Test vault","path":path}})
+    );
+    let unavailable = super::vault_skills::vault_result(Ok(crate::obsidian::ObsidianDiscovery {
+        connected: true,
+        available: false,
+        vault: Some(crate::obsidian::ObsidianDiscoveryVault {
+            name: "Test vault".into(),
+            path: None,
+        }),
+    }))
+    .unwrap();
+    assert!(unavailable["vault"].get("path").is_none());
+}

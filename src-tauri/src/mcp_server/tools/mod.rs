@@ -24,10 +24,22 @@ mod interaction_tests;
 pub(crate) mod media;
 #[cfg(test)]
 mod media_tests;
+mod memory;
+#[cfg(test)]
+mod memory_tests;
+pub(crate) mod notes;
+#[cfg(test)]
+mod notes_tests;
 mod read;
 pub(crate) mod recorder;
 #[cfg(test)]
 mod recorder_tests;
+mod routines;
+#[cfg(test)]
+mod routines_tests;
+pub(crate) mod vault_skills;
+#[cfg(test)]
+mod vault_skills_tests;
 
 use chrono::{DateTime, Utc};
 use futures_util::future::BoxFuture;
@@ -161,6 +173,10 @@ pub trait ToolGroup: Send + Sync {
 pub fn groups() -> Vec<&'static dyn ToolGroup> {
     #[allow(unused_mut)]
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
+    groups.push(&routines::RoutineTools);
+    groups.push(&memory::MemoryTools);
+    groups.push(&notes::NoteTools);
+    groups.push(&vault_skills::VaultSkillTools);
     groups.push(&connectors::CONNECTORS);
     groups.push(&gateway::GATEWAY);
     groups.push(&browser::BROWSER);

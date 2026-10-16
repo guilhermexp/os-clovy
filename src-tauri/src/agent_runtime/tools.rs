@@ -1,4 +1,4 @@
-use super::skill_identity::{canonical_skill_id, read_skill_ids, reconcile_managed_obsidian_skill};
+use super::skill_identity::{canonical_skill_id, reconcile_managed_obsidian_skill};
 use super::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use crate::mcp_server::tools::media::{self, parse_video_call, VideoCall, VideoJobOutcome};
@@ -153,10 +153,9 @@ pub async fn dispatch_tool(
         "generate_image" => generate_image(context, &arguments).await,
         "edit_image" => edit_image(context, &arguments).await,
         "generate_video" => generate_video(context, &arguments).await,
-        "get_obsidian_vault" => Ok(serde_json::to_value(crate::obsidian::discovery_for_app(
-            &context.app,
-        )?)
-        .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))?),
+        "get_obsidian_vault" => crate::mcp_server::tools::vault_skills::vault_result(
+            crate::obsidian::discovery_for_app(&context.app),
+        ),
         "start_recording" => {
             let source_mode = crate::agent_recorder::source_mode_argument(&arguments);
             context
@@ -473,17 +472,7 @@ async fn get_clovy_note_for_profile(
     content_offset: usize,
     transcript_offset: usize,
 ) -> Result<Value, AppError> {
-    let row = query(
-        "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, '') AS note,
-                COALESCE((SELECT text FROM transcripts t WHERE t.note_id = n.id ORDER BY t.created_at DESC LIMIT 1), '') AS transcript,
-                n.updated_at
-         FROM notes n WHERE n.id = ? AND n.profile = ?",
-    )
-    .bind(note_id)
-    .bind(profile)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::new("note_not_found", "No note with this id in the active profile."))?;
+    let row = crate::mcp_server::tools::notes::read_note(pool, profile, note_id).await?;
     let note: String = row.get("note");
     let transcript: String = row.get("transcript");
     let (content, content_offset, next_content_offset) = text_page(&note, content_offset);
@@ -523,19 +512,8 @@ async fn get_clovy_dictation_for_profile(
     dictation_id: &str,
     text_offset: usize,
 ) -> Result<Value, AppError> {
-    let row = query(
-        "SELECT id, text, language, created_at FROM dictation_history WHERE id = ? AND profile = ?",
-    )
-    .bind(dictation_id)
-    .bind(profile)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| {
-        AppError::new(
-            "dictation_not_found",
-            "No dictation with this id in the active profile.",
-        )
-    })?;
+    let row =
+        crate::mcp_server::tools::notes::read_dictation(pool, profile, dictation_id, None).await?;
     let text: String = row.get("text");
     let (page, text_offset, next_text_offset) = text_page(&text, text_offset);
     Ok(json!({
@@ -569,22 +547,7 @@ fn byte_offset(arguments: &Value, key: &str) -> Result<usize, AppError> {
 /// on a character boundary. Returns the page, its actual start, and the next
 /// page's start when text remains.
 fn text_page(text: &str, offset: usize) -> (&str, usize, Option<usize>) {
-    let start = floor_char_boundary(text, offset.min(text.len()));
-    let end = floor_char_boundary(text, start.saturating_add(NOTE_PAGE_BYTES).min(text.len()));
-    // A page always advances, even if one character were wider than a page.
-    let end = if end == start && start < text.len() {
-        start + text[start..].chars().next().map_or(0, char::len_utf8)
-    } else {
-        end
-    };
-    (&text[start..end], start, (end < text.len()).then_some(end))
-}
-
-fn floor_char_boundary(text: &str, mut index: usize) -> usize {
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
+    crate::mcp_server::tools::notes::byte_page(text, offset, NOTE_PAGE_BYTES)
 }
 
 async fn list_memories(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
@@ -1247,76 +1210,38 @@ async fn notion_tool(
 }
 
 async fn list_skills(context: &ToolContext) -> Result<Value, AppError> {
-    let allowed = context
+    let enabled = context
         .repository
         .run_enabled_skills(&context.run_id)
         .await?
         .into_iter()
-        .map(|name| canonical_skill_id(&name).to_string())
-        .collect::<std::collections::HashSet<_>>();
-    let roots = skill_roots(&context.app);
-    let mut skills = Vec::new();
-    for root in roots {
-        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
-            continue;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let stored_name = entry.file_name().to_string_lossy().into_owned();
-            let name = canonical_skill_id(&stored_name).to_string();
-            if stored_name != name && root.join(&name).join("SKILL.md").is_file() {
-                continue;
-            }
-            if allowed.contains(&name)
-                && entry.path().join("SKILL.md").is_file()
-                && !skills.iter().any(|skill: &Value| {
-                    skill.get("name").and_then(Value::as_str) == Some(name.as_str())
-                })
-            {
-                skills.push(json!({ "name": name, "root": root }));
-            }
-        }
-    }
-    Ok(json!({ "skills": skills }))
+        .map(|name| (canonical_skill_id(&name).to_string(), true))
+        .collect();
+    crate::mcp_server::tools::vault_skills::list_skills_from_roots(
+        &crate::mcp_server::tools::vault_skills::skill_roots(&context.app),
+        &enabled,
+        false,
+    )
+    .await
 }
 
 async fn load_skill(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let requested_name = required_string(arguments, "name")?;
-    if requested_name.contains('/')
-        || requested_name.contains('\\')
-        || requested_name == "."
-        || requested_name == ".."
-    {
-        return Err(AppError::new(
-            "agent_skill_invalid",
-            "Skill name is invalid.",
-        ));
-    }
-    let name = canonical_skill_id(requested_name);
-    if !context
+    let requested = required_string(arguments, "name")?;
+    // Preserve native validation before reading the run's enabled snapshot.
+    let name = crate::mcp_server::tools::vault_skills::validate_skill_name(requested)?;
+    let enabled = context
         .repository
         .run_enabled_skills(&context.run_id)
         .await?
-        .iter()
-        .any(|allowed| canonical_skill_id(allowed) == name)
-    {
-        return Err(AppError::new(
-            "agent_skill_disabled",
-            "This skill is not enabled for the current run.",
-        ));
-    }
-    for root in skill_roots(&context.app) {
-        for read_id in read_skill_ids(name) {
-            let path = root.join(read_id).join("SKILL.md");
-            if path.is_file() {
-                let content = tokio::fs::read_to_string(&path).await.map_err(io_error)?;
-                return Ok(json!({ "name": name, "content": content, "path": path }));
-            }
-        }
-    }
-    Err(AppError::new(
-        "agent_skill_not_found",
-        "Skill was not found.",
-    ))
+        .into_iter()
+        .map(|name| (canonical_skill_id(&name).to_string(), true))
+        .collect();
+    crate::mcp_server::tools::vault_skills::load_skill_from_roots(
+        &crate::mcp_server::tools::vault_skills::skill_roots(&context.app),
+        &enabled,
+        name,
+    )
+    .await
 }
 
 async fn consume_clarification_answer(context: &ToolContext) -> Result<Value, AppError> {
@@ -1427,18 +1352,6 @@ fn resolve_path_with_scope(
         }
     }
     Ok(resolved)
-}
-
-fn skill_roots(app: &AppHandle) -> Vec<PathBuf> {
-    let mut roots = crate::app_paths::app_data_dir(app)
-        .ok()
-        .map(|path| path.join("agents").join("skills"))
-        .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join(".agents").join("skills"));
-    }
-    roots
 }
 
 /// Seeds bundled agent skills (packaged as Tauri resources) into the managed
@@ -1821,7 +1734,7 @@ mod tests {
             .await
             .unwrap();
         for statement in [
-            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, generated_content TEXT, edited_content TEXT, profile TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, generated_content TEXT, edited_content TEXT, profile TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)",
             "CREATE TABLE transcripts (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
             "CREATE TABLE dictation_history (id TEXT PRIMARY KEY, text TEXT NOT NULL, language TEXT, profile TEXT NOT NULL, created_at TEXT NOT NULL)",
         ] {

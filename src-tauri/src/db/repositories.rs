@@ -2130,7 +2130,55 @@ impl Repositories {
     }
 
     pub async fn delete_memory(&self, profile: &str, id: &str) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await?;
+        self.delete_memory_inner(profile, id, false).await
+    }
+
+    /// Agent deletion honors the project's memory gate at the write boundary.
+    /// Explicit user deletion remains unconditional through `delete_memory`.
+    pub(crate) async fn forget_memory(&self, profile: &str, id: &str) -> Result<(), AppError> {
+        self.delete_memory_inner(profile, id, true).await
+    }
+
+    async fn delete_memory_inner(
+        &self,
+        profile: &str,
+        id: &str,
+        enforce_project_gate: bool,
+    ) -> Result<(), AppError> {
+        let mut tx = if enforce_project_gate {
+            // Reserve the writer before reading the project. No concurrent
+            // toggle can commit between this validation and the DELETE.
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if enforce_project_gate {
+            let row = query(
+                "SELECT m.folder_id, f.id AS project_id, f.memory_disabled
+                FROM memories m LEFT JOIN folders f
+                  ON f.id = m.folder_id AND f.profile = m.profile AND f.deleted_at IS NULL
+                WHERE m.id = ? AND m.profile = ?",
+            )
+            .bind(id)
+            .bind(profile)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?;
+            if row.get::<Option<String>, _>("folder_id").is_some() {
+                if row.get::<Option<String>, _>("project_id").is_none() {
+                    return Err(AppError::new(
+                        "folder_not_found",
+                        "Project was not found or has already been deleted.",
+                    ));
+                }
+                if row.get::<i64, _>("memory_disabled") != 0 {
+                    return Err(AppError::new(
+                        "memory_disabled",
+                        "Memory is disabled for this scope.",
+                    ));
+                }
+            }
+        }
         let result = query("DELETE FROM memories WHERE id = ? AND profile = ?")
             .bind(id)
             .bind(profile)

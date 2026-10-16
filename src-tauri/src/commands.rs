@@ -793,16 +793,20 @@ pub async fn set_memory_enabled(
     app: AppHandle,
     enabled: bool,
 ) -> Result<MemorySettingsDto, AppError> {
-    // Keep the transaction lock through persistence, direct policy mutation,
-    // live-runtime convergence, and the authoritative response read. Otherwise
-    // two commands can persist in order but finish out of order, allowing an
-    // older response to overwrite the UI after a newer choice has landed.
+    let path = memory_settings_path(&app)?;
+    set_memory_enabled_with_settings(&path, enabled).await
+}
+
+/// Shared settings mutation, including the same global write lock used by
+/// memory persistence. Tests use a temporary settings file through this path.
+pub(crate) async fn set_memory_enabled_with_settings(
+    path: &Path,
+    enabled: bool,
+) -> Result<MemorySettingsDto, AppError> {
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     let settings = MemorySettingsDto { enabled };
-    let path = memory_settings_path(&app)?;
-    persist_memory_settings(&path, &settings)?;
-    // The persisted file is authoritative for Clovy's own memory write gate.
-    Ok(load_memory_settings(&path))
+    persist_memory_settings(path, &settings)?;
+    Ok(load_memory_settings(path))
 }
 
 pub(crate) async fn create_memory_with_settings(
@@ -829,6 +833,19 @@ pub(crate) async fn create_memory_with_settings(
     repos
         .create_memory(profile, folder_id, content, source)
         .await
+}
+
+/// Agent-only deletion: the global settings lock spans project validation,
+/// DELETE, tombstone and commit. Explicit user deletion stays unconditional.
+pub(crate) async fn forget_memory_with_settings(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
+    ensure_memory_enabled(settings_path)?;
+    repos.forget_memory(profile, id).await
 }
 
 async fn update_memory_with_settings(
