@@ -996,15 +996,24 @@ fn chat_engine_cursor_one_delta_segment_before_a_tool_call_is_not_doubled() {
 
 /// A minimal OpenAI-compatible server that streams one tool call
 /// (`search_june`) as server-sent events and records the request body.
+///
+/// Its base URL carries a path prefix unique to this server, and only
+/// `POST <prefix>/chat/completions` is recorded and answered: a freshly
+/// opened localhost port also receives requests from outside the test (a
+/// tool on the machine that probes new ports sends `HEAD /`), which must not
+/// count as a request the code under test sent.
 async fn streaming_tool_call_server() -> (String, std::sync::Arc<StdMutex<Vec<Value>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let prefix = format!("/{}/v1", uuid::Uuid::new_v4().simple());
+    let request_line = format!("POST {prefix}/chat/completions ");
     let requests = std::sync::Arc::new(StdMutex::new(Vec::new()));
     let recorded = requests.clone();
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let recorded = recorded.clone();
+            let request_line = request_line.clone();
             tokio::spawn(async move {
                 let mut buffer = Vec::new();
                 let mut chunk = [0_u8; 8192];
@@ -1029,6 +1038,12 @@ async fn streaming_tool_call_server() -> (String, std::sync::Arc<StdMutex<Vec<Va
                         }
                     }
                 };
+                if !buffer.starts_with(request_line.as_bytes()) {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                    return;
+                }
                 recorded
                     .lock()
                     .unwrap()
@@ -1054,7 +1069,39 @@ async fn streaming_tool_call_server() -> (String, std::sync::Arc<StdMutex<Vec<Va
             });
         }
     });
-    (format!("http://{address}/v1"), requests)
+    (format!("http://{address}{prefix}"), requests)
+}
+
+/// The cause of the intermittent failure of
+/// `chat_engine_endpoint_choice_keeps_its_identity_when_endpoints_share_a_model`
+/// (two requests at the second endpoint): a tool on the machine probed the
+/// newly opened port with `HEAD /`, and the fake server counted it. Requests
+/// that are not this server's own chat completions are never recorded.
+#[tokio::test]
+async fn chat_engine_fake_endpoint_ignores_requests_from_outside_the_test() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (base_url, requests) = streaming_tool_call_server().await;
+    let authority = base_url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    for probe in [
+        format!(
+            "HEAD / HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            authority.rsplit(':').next().unwrap()
+        ),
+        "POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+            .to_string(),
+    ] {
+        let mut socket = tokio::net::TcpStream::connect(&authority).await.unwrap();
+        socket.write_all(probe.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        socket.read_to_string(&mut answer).await.unwrap();
+        assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
+    }
+    assert!(requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
