@@ -1886,30 +1886,9 @@ input:focus-visible,
   white-space: nowrap;
 }
 
-.agent-approval-explanation {
-  display: grid;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-  border-left: 2px solid color-mix(in oklch, var(--warm-strong) 52%, var(--border));
-  padding: var(--sp-1) 0 var(--sp-1) var(--sp-3);
-}
-
-.agent-approval-explanation p {
-  margin: 0;
-}
-
-/* Spinner + label sit flush without this — the glyph needs a gap from the
- * "Working out…" text and a shared baseline. */
-.agent-approval-explanation-loading {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
 /* Buttons come from the .btn system, but at the small control height and
  * smaller type so the row reads quiet. On the approval card, a split "Approve"
- * (with a scope caret) and a quiet "Deny" anchor the row, and "Explain first"
- * demotes to a plain text button pushed to the right edge. */
+ * (with a scope caret) and a quiet "Deny" anchor the row. */
 .agent-approval-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1928,7 +1907,7 @@ input:focus-visible,
   opacity: 0.55;
 }
 
-/* "Explain first" and "Deny" are plain neutral ghost buttons: only Approve
+/* "Deny" is a plain neutral ghost button: only Approve
  * carries color (green). The system .btn-ghost:hover fills --muted (a mid grey)
  * which jumps starkly from transparent on the near-white card, so the footer's
  * ghost buttons rest on the softer --surface-subtle instead. Denying is the
@@ -1938,13 +1917,7 @@ input:focus-visible,
   background: var(--surface-subtle);
 }
 
-/* Explain sits at the right edge of the footer, past the anchor actions. `auto`
- * still wraps cleanly when the row runs out of room. */
-.agent-approval-actions .agent-approval-explain {
-  margin-left: auto;
-}
-
-/* Deny is quieter than the Approve/Explain labels at rest (it is the secondary
+/* Deny is quieter than the Approve label at rest (it is the secondary
  * choice), firming to the shared subtle-gray hover. */
 .agent-approval-deny {
   color: var(--muted-foreground);
@@ -1987,7 +1960,7 @@ input:focus-visible,
   /* Concentric with the rail: inset by the 1px border + 2px gutter. */
   border-radius: calc(var(--r-md) - 3px);
   /* Solid gray fill (the system secondary surface); firms to --muted on hover.
-   * Approve reads as primary by being filled, against the ghost Deny/Explain. */
+   * Approve reads as primary by being filled, against the ghost Deny. */
   background: var(--surface-subtle);
   color: var(--secondary-foreground);
   font-size: var(--fs-md);
