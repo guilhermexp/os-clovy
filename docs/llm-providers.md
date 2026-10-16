@@ -211,35 +211,82 @@ One message on a CLI engine is one CLI process in the session workspace:
 | CLI | Turn | Resume id | Clovy's tools |
 |---|---|---|---|
 | claude | `-p --output-format stream-json --verbose --include-partial-messages`, prompt on stdin | `session_id` of `system/init`; `--resume <id>` | `--mcp-config <temporary file>` |
-| codex | `exec [resume] --json --skip-git-repo-check -c sandbox_mode="workspace-write" [<id>] -`, prompt on stdin | `thread_id` of `thread.started` | `-c mcp_servers.clovy.command=… -c mcp_servers.clovy.args=…` |
+| codex | `exec [resume] --json --skip-git-repo-check [--image <path>]... -c <policy>... [<id>] -`, prompt on stdin | `thread_id` of `thread.started` | `-c mcp_servers.clovy.command=… -c mcp_servers.clovy.args=…` |
 | pi | `--print --mode json --session-id <id>`, prompt on stdin | a UUID Clovy chooses on the first turn | none (pi has no MCP) |
 | agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`; `--conversation <id>` | none (only `agy mcp add`, which edits its global configuration) |
 | cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`; `--resume <id>` | none (project MCP servers need approval inside Cursor) |
 | copilot | `--prompt=<prompt> --output-format json --session-id <id>` | a UUID Clovy chooses on the first turn | `--additional-mcp-config=@<temporary file>` |
 
-- **Permissions.** In a chat turn (`TurnPolicy::Interactive`) no flag that
-  skips or pre-grants a CLI's approvals is ever passed (`--dangerously-skip-permissions`, `--yolo`, `--force`,
-  `--dangerously-bypass-approvals-and-sandbox`, `--always-approve`,
-  `--allow-all*`, `--approve-mcps`, `--permission-mode`, `--allowedTools`).
-  `--trust` (cursor-agent) and `--skip-git-repo-check` (codex) only accept the
-  session workspace, a directory Clovy created, as a workspace. An action the
-  CLI refuses for lack of approval becomes a failed tool item whose error says
-  so (`needsApproval: true` in the event). Measured: claude answers the tool
-  with "Claude requested permissions to …, but you haven't granted it yet";
-  codex marks the command `declined` or the sandbox blocks it ("operation not
-  permitted"); agy fails the step with "permission check failed … user denied
-  permission"; cursor-agent completes the call as `rejected`; copilot fails
-  the tool with a permission error.
-- **Unattended turns** (`TurnPolicy::Unattended`, routines only). Nobody can
+- **Permissions.** The flags come from one table, `chat_engine::policy`, by
+  CLI, the session's safety mode (`sandboxed` or `unrestricted`), and whether
+  a person watches the turn (`attended`: chat `true`, routines `false`); the
+  turn builder only places them. The rule is: never a flag that skips or
+  pre-grants approvals (`--dangerously-skip-permissions`,
+  `--allow-dangerously-skip-permissions`, `--permission-mode bypassPermissions`,
+  `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access`,
+  `--approve-for-me`, `--yolo`, `--full-auto`, `--always-approve`,
+  `--allow-all*`, `--approve-mcps`; `policy::FORBIDDEN`, swept over every
+  combination by a test), and in an attended turn `--allowedTools` only for
+  `mcp__clovy__*`:
+
+  | Turn | claude | codex |
+  |---|---|---|
+  | attended, `sandboxed` | `--permission-mode default`; with Clovy's server `--allowedTools mcp__clovy__*` | `sandbox_mode="workspace-write"`, `sandbox_workspace_write.network_access=false`, `approval_policy="never"` |
+  | attended, `unrestricted` | `--permission-mode acceptEdits` (edits in the workspace without asking; shell and the rest still ask), same `--allowedTools` | as `sandboxed` with `network_access=true` |
+  | unattended (routines) | see below | see below |
+
+  Every codex turn also gets `web_search="live"` and, with Clovy's server,
+  `mcp_servers.clovy.default_tools_approval_mode="approve"` (codex `exec`
+  fails an MCP tool without `readOnlyHint` otherwise; the approval broker
+  inside each Clovy write tool is the authority, for that server only) and
+  `mcp_servers.clovy.tool_timeout_sec=900`; claude gets `MCP_TOOL_TIMEOUT=900000`.
+  Both outlast the broker's 10-minute wait (`approval_broker::APPROVAL_TIMEOUT`,
+  checked at compile time). Image attachments reach codex as one `--image`
+  per file, placed before the `-c` flags because `exec --image` takes every
+  value that follows (a path with a comma stays in the manifest only); claude
+  reads them from the manifest. The permission mode is always explicit, so a
+  `defaultMode` in the user's own claude settings never decides it. Attended
+  turns never get `--strict-mcp-config`: the MCP servers and claude.ai
+  connectors the user configured in the CLI also load, and a server of the
+  user's named `clovy` is replaced by the turn's. Once Clovy's
+  `approve_action` and `request_clarification` tools exist (parity slice
+  2.11, `policy::CLAUDE_INTERACTION_TOOLS`), claude also gets
+  `--permission-prompt-tool mcp__clovy__approve_action --disallowedTools
+  mcp__clovy__approve_action AskUserQuestion`, so its own permission requests
+  become Clovy approval cards. Until then, and always on codex, an action the
+  CLI refuses for lack of approval becomes a failed tool item whose error
+  says so (`needsApproval: true` in the event). Measured: claude answers the
+  tool with "Claude requested permissions to …, but you haven't granted it
+  yet"; codex marks the command `declined` or the sandbox blocks it
+  ("operation not permitted"); agy fails the step with "permission check
+  failed … user denied permission"; cursor-agent completes the call as
+  `rejected`; copilot fails the tool with a permission error. pi, agy,
+  cursor-agent, and copilot get no policy flags (their default
+  non-interactive mode). `--trust` (cursor-agent) and `--skip-git-repo-check`
+  (codex) only accept the session workspace, a directory Clovy created, as a
+  workspace.
+- **Unattended turns** (`attended: false`, routines only). Nobody can
   approve anything, so the tools are confined instead: claude gets
-  `--tools Read,Grep,Glob,WebSearch,WebFetch` (no other built-in exists in
-  the turn), `--allowedTools Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*`,
-  and `--strict-mcp-config` (Clovy's server only); codex gets
-  `sandbox_mode="read-only"` and `approval_policy="never"` (the user's own
-  codex configuration still decides web search and its other MCP servers).
+  `--permission-mode default`, `--tools Read,Grep,Glob,WebSearch,WebFetch` (no
+  other built-in exists in the turn),
+  `--allowedTools Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*` (the only
+  `--allowedTools` beyond Clovy's tools: the read-only set itself), and
+  `--strict-mcp-config` (Clovy's server only); codex gets
+  `sandbox_mode="read-only"`, `approval_policy="never"`, and the same web
+  search and server settings as an attended turn. Clovy's write tools reach
+  the broker, which refuses them at once (`unattended_requires_approval`).
   `chat_engine::check_policy` refuses an unattended turn on any other CLI
-  (`agent_cli_unattended_unsupported`). No skip or bypass flag is passed here
-  either.
+  (`agent_cli_unattended_unsupported`).
+- **Turn binding.** When Clovy's server is in the turn, the turn issues a
+  token in the server's turn registry (`mcp_server::turns::TurnRegistry`,
+  binding: session, run, CLI, safety mode, attended) and the CLI's server
+  arguments carry `--turn <token>` (claude and copilot in the temporary
+  configuration file, codex in `mcp_servers.clovy.args`); the token never
+  goes into the prompt or the environment. Connections opened with it are
+  bound to the run and see the tools that need a turn. It is revoked when
+  the turn ends, fails, or is cancelled (`chat_engine::turn::TurnGrant`), and
+  on cancel before the process has stopped; a new handshake with it is then
+  refused with `turn_expired`. Each run gets a new token.
 - **Note references.** A message that references notes (`@note:<id>`, which
   the note chat panel always puts first) reaches the CLI with a line asking it
   to read them with Clovy's `get_note` tool
@@ -269,8 +316,10 @@ One message on a CLI engine is one CLI process in the session workspace:
 - **Cancel.** The run's cancellation is registered (`ChatEngineHost::register`)
   before anything is awaited for it, and the turn checks it and the run's
   status again right before spawning, so a cancel during launch preparation
-  starts nothing. Cancelling sends SIGTERM to the CLI's process group, then
-  SIGKILL after 2 s.
+  starts nothing. `cancel_agent_run` (`chat_engine::cancel_cli_run`) first
+  settles the run's pending approval cards as cancelled (the waiting tool
+  answers `run_cancelled`), revokes the run's turn token, then sends SIGTERM to
+  the CLI's process group, then SIGKILL after 2 s.
 - **End of the CLI.** The CLI's exit is watched alongside its stdout: when it
   exits, its process group is swept (MCP servers and helpers it started,
   including one still holding stdout), and output still in the pipe is read
@@ -278,7 +327,8 @@ One message on a CLI engine is one CLI process in the session workspace:
 - **App shutdown.** The shutdown coordinator (`shutdown::run_cleanup`, also
   used for restart and update) calls `ChatEngineHost::shutdown`: new turns are
   refused, every turn is cancelled, and it waits up to 5 s for each to stop its
-  process group and publish `run.cancelled`.
+  process group and publish `run.cancelled`; each turn's token is revoked as
+  its turn ends.
 - **Messages during a run.** `steer_agent_run` answers
   `{ accepted: false, reason: "cli_engine" }`; the composer's follow-up queue
   sends the message as the next turn when the run ends.
@@ -295,7 +345,8 @@ Claude Code or Codex (`providers::default_unattended_cli`); the claim
 snapshots `__clovy_cli_engine__:<cli>` as its model. `routines::start_claim`
 writes the session, run, prompt, and claim mapping as for the Clovy agent
 (`persist_claim_run`) and starts the turn with `chat_engine::start_cli_turn`
-under the unattended policy above. The prompt tells the CLI it runs
+unattended (`attended: false`, with the routine's safety mode) under the
+policy above. The prompt tells the CLI it runs
 unattended and which tools it has. Its events go through the same persistence
 as a chat turn, which projects the routine run's end, status, and error into
 the routine history (`mark_agent_run_terminal`); the CLI's answer is the
@@ -333,10 +384,16 @@ Keychain key saved for that endpoint (the key never reaches the webview).
 - `cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine` covers
   the CLI chat engine with a fake CLI per CLI (two turns with the resume id,
   stream to events and items, cancel without orphans, a message sent during a
-  run, the MCP configuration each CLI receives, approval refusals, failures)
+  run, the MCP configuration each CLI receives, approval refusals, failures),
+  the permission table and the forbidden-flag sweep (`chat_engine::policy`),
+  the turn token (present in each CLI's server arguments, bound to the run,
+  revoked at the end) and a write tool approved, denied, and cancelled through
+  the broker over a real socket and the relay code (`chat_engine::binding_tests`),
   and the endpoint as the agent's model against a fake streaming server with a
   tool call. `cargo test chat_engine_real -- --ignored --nocapture` runs two
-  turns on the installed claude, codex, and pi.
+  turns on the installed claude, codex, and pi, and the policy's argv on the
+  installed claude and codex with the built `clovy-mcp` and an approval card
+  (`chat_engine_real_policy_smoke`, after `cargo build --bin clovy-mcp`).
 - `pnpm exec vitest run src/test/llm-providers src/test/chat-engine` covers the
   settings section and the engine picker; `src/test/note-chat-default-engine`,
   `src/test/companion-models`, and the default-engine cases in
