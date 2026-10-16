@@ -6,6 +6,10 @@
 //! with the native engine; names fixed in the `clovy-mcp-server` delta of the
 //! OpenSpec change `cli-substitui-agente-nativo`).
 //!
+//! An image comes back as MCP content blocks (`protocol::content_value`): the
+//! artifact (id, path, metadata) as text, never its base64, and the image as
+//! an `image` block while it fits the 3 MiB block limit.
+//!
 //! The helpers below the group are shared with the native tools
 //! (`agent_runtime/tools.rs`) until that engine is removed: the video job
 //! loop, the waiting-for-key result, and the artifact writes.
@@ -20,10 +24,12 @@ use serde_json::{json, Value};
 use sqlx_sqlite::SqlitePool;
 use tauri::AppHandle;
 
+use super::computer_use::MAX_IMAGE_BASE64;
 use super::{ToolCtx, ToolGroup, TurnBinding};
 use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
 use crate::clovy_api::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::domain::types::AppError;
+use crate::mcp_server::protocol;
 use crate::mcp_server::turns::TURN_REQUIRED;
 use crate::providers::{EditImageRequest, GenerateImageRequest, GenerateVideoRequest};
 
@@ -218,7 +224,7 @@ pub(crate) async fn call(
                     safe_mode: None,
                 })
                 .await?;
-            persist_generated_image(&target, prompt, generated).await
+            mcp_image_result(&target, prompt, generated).await
         }
         EDIT_IMAGE => {
             let requested = required_string(arguments, "sourcePath")?;
@@ -242,7 +248,7 @@ pub(crate) async fn call(
                     model: None,
                 })
                 .await?;
-            persist_generated_image(&target, instruction, generated).await
+            mcp_image_result(&target, instruction, generated).await
         }
         GENERATE_VIDEO => {
             let call = parse_video_call(arguments, None)?;
@@ -538,13 +544,12 @@ fn waiting_for_provider_key_message(reason: &str) -> &'static str {
     }
 }
 
-/// Writes a generated image into the session's artifacts and returns the
-/// tool result.
-pub(crate) async fn persist_generated_image(
+/// Writes a generated image into the session's artifacts: its path and
+/// artifact id.
+async fn store_generated_image(
     target: &ArtifactTarget<'_>,
-    prompt: &str,
-    generated: GeneratedImageDto,
-) -> Result<Value, AppError> {
+    generated: &GeneratedImageDto,
+) -> Result<(PathBuf, String), AppError> {
     let bytes = BASE64
         .decode(&generated.image_base64)
         .map_err(|error| AppError::new("image_response_invalid", error.to_string()))?;
@@ -564,7 +569,19 @@ pub(crate) async fn persist_generated_image(
     )
     .await?;
     tokio::fs::write(&path, &bytes).await.map_err(io_error)?;
-    record_artifact(target, &path, "created", None, Some(&generated.mime_type)).await?;
+    let artifact_id =
+        record_artifact(target, &path, "created", None, Some(&generated.mime_type)).await?;
+    Ok((path, artifact_id))
+}
+
+/// The native tools' image result: the artifact with the image as a data
+/// URL, which the native chat renders.
+pub(crate) async fn persist_generated_image(
+    target: &ArtifactTarget<'_>,
+    prompt: &str,
+    generated: GeneratedImageDto,
+) -> Result<Value, AppError> {
+    let (path, _) = store_generated_image(target, &generated).await?;
     Ok(json!({
         "mediaType": "image",
         "dataUrl": format!("data:{};base64,{}", generated.mime_type, generated.image_base64),
@@ -574,6 +591,40 @@ pub(crate) async fn persist_generated_image(
         "prompt": prompt,
         "name": path.file_name().map(|name| name.to_string_lossy().into_owned())
     }))
+}
+
+/// The MCP image result: a text block with the artifact (id, path,
+/// metadata; no base64), then the image as an MCP `image` block when its
+/// base64 fits the content-block limit (`MAX_IMAGE_BASE64`); a larger image
+/// stays in the artifact and the text says so.
+async fn mcp_image_result(
+    target: &ArtifactTarget<'_>,
+    prompt: &str,
+    generated: GeneratedImageDto,
+) -> Result<Value, AppError> {
+    let (path, artifact_id) = store_generated_image(target, &generated).await?;
+    let inline = generated.image_base64.len() <= MAX_IMAGE_BASE64;
+    let mut text = json!({
+        "mediaType": "image",
+        "artifactId": artifact_id,
+        "path": crate::filesystem::normalize_path_for_external_use(&path),
+        "name": path.file_name().map(|name| name.to_string_lossy().into_owned()),
+        "mimeType": generated.mime_type,
+        "model": generated.model,
+        "prompt": prompt,
+        "imageAttached": inline,
+    });
+    if !inline {
+        text["note"] = json!("The image is too large to attach; read it from path.");
+    }
+    let mut blocks = vec![protocol::text_block(text.to_string())];
+    if inline {
+        blocks.push(protocol::image_block(
+            generated.image_base64,
+            generated.mime_type,
+        ));
+    }
+    Ok(protocol::content_value(blocks))
 }
 
 /// Reads a source image for `edit_image`: base64 and media type, refusing
@@ -618,20 +669,22 @@ async fn artifact_path(workspace: &Path, file_name: &str) -> Result<PathBuf, App
     Ok(folder.canonicalize().map_err(io_error)?.join(file_name))
 }
 
-/// Records a file a tool created as one of the session's artifacts.
+/// Records a file a tool created as one of the session's artifacts; the
+/// artifact id.
 pub(crate) async fn record_artifact(
     target: &ArtifactTarget<'_>,
     path: &Path,
     action: &str,
     original: Option<&Path>,
     mime_type: Option<&str>,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let metadata = tokio::fs::metadata(path).await.map_err(io_error)?;
+    let id = uuid::Uuid::new_v4().to_string();
     sqlx::query::query("INSERT INTO agent_artifacts(id, session_id, run_id, provenance, action, path, original_path, mime_type, size_bytes, available, created_at) VALUES (?, ?, ?, 'tool', ?, ?, ?, ?, ?, 1, ?)")
-        .bind(uuid::Uuid::new_v4().to_string()).bind(target.session_id).bind(target.run_id)
+        .bind(&id).bind(target.session_id).bind(target.run_id)
         .bind(action).bind(path.to_string_lossy().as_ref()).bind(original.map(|value| value.to_string_lossy().into_owned()))
         .bind(mime_type).bind(metadata.len() as i64).bind(crate::db::repositories::timestamp()).execute(target.pool).await?;
-    Ok(())
+    Ok(id)
 }
 
 /// A requested path made absolute against the workspace and canonical (a

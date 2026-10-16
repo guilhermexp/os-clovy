@@ -32,6 +32,8 @@ const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake image";
 struct FakeClovyApi {
     calls: Mutex<Vec<String>>,
     statuses: Mutex<VecDeque<Result<VideoStatusDto, AppError>>>,
+    /// The generated image's bytes (default: a small PNG).
+    image_bytes: Option<Vec<u8>>,
     /// With the script used up: still rendering (`true`) or done.
     stuck: Mutex<bool>,
     video_file: Option<std::path::PathBuf>,
@@ -52,7 +54,7 @@ impl FakeClovyApi {
 
     fn image(&self) -> GeneratedImageDto {
         GeneratedImageDto {
-            image_base64: BASE64.encode(PNG_BYTES),
+            image_base64: BASE64.encode(self.image_bytes.as_deref().unwrap_or(PNG_BYTES)),
             mime_type: "image/png".into(),
             model: "fixture-image".into(),
             provider: "fal".into(),
@@ -201,6 +203,79 @@ fn names(tools: &[Value]) -> Vec<&str> {
         .collect()
 }
 
+/// The MCP content blocks the CLI receives for a tool's return value.
+fn content(result: &Value) -> Vec<Value> {
+    crate::mcp_server::protocol::tool_result(result)["content"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// The JSON of an image result's text block.
+fn image_text(result: &Value) -> Value {
+    serde_json::from_str(content(result)[0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn media_image_over_the_block_limit_stays_in_the_artifact() {
+    let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
+    // 2.5 MB of bytes: about 3.3 MiB of base64, over the 3 MiB limit.
+    let big = vec![7u8; 2_500_000];
+    let api = FakeClovyApi {
+        image_bytes: Some(big.clone()),
+        ..FakeClovyApi::default()
+    };
+    let result = turn
+        .call(
+            &api,
+            quick(Duration::from_secs(5)),
+            GENERATE_IMAGE,
+            json!({ "prompt": "a big lake" }),
+        )
+        .await
+        .unwrap();
+    let content = content(&result);
+    assert_eq!(content.len(), 1, "no image block over the limit");
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.len() < 2_000,
+        "no base64 in the text: {} bytes",
+        text.len()
+    );
+    let result: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(result["imageAttached"], false);
+    assert_eq!(
+        std::fs::read(result["path"].as_str().unwrap()).unwrap(),
+        big
+    );
+    assert_eq!(
+        turn.artifacts().await[0].id,
+        result["artifactId"].as_str().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn media_native_image_result_keeps_its_data_url() {
+    let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
+    let target = media::ArtifactTarget {
+        pool: turn.pool(),
+        workspace: turn.workspace.path(),
+        session_id: &turn.binding.session_id,
+        run_id: &turn.binding.run_id,
+    };
+    let result = media::persist_generated_image(&target, "a lake", FakeClovyApi::default().image())
+        .await
+        .unwrap();
+    assert_eq!(
+        result["dataUrl"],
+        format!("data:image/png;base64,{}", BASE64.encode(PNG_BYTES))
+    );
+    assert!(result
+        .get(crate::mcp_server::protocol::CONTENT_KEY)
+        .is_none());
+    assert_eq!(content(&result).len(), 1, "one JSON text block, as before");
+}
+
 #[tokio::test]
 async fn media_generate_image_lands_in_the_session_workspace_and_artifact_list() {
     let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
@@ -217,6 +292,19 @@ async fn media_generate_image_lands_in_the_session_workspace_and_artifact_list()
         .unwrap();
 
     assert_eq!(api.calls(), ["image:a calm lake"]);
+    // What the CLI receives: the artifact as text (no base64), the image as
+    // an MCP image block.
+    let content = content(&result);
+    assert_eq!(content.len(), 2);
+    assert_eq!(
+        content[1],
+        json!({ "type": "image", "data": BASE64.encode(PNG_BYTES), "mimeType": "image/png" })
+    );
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(!text.contains(&BASE64.encode(PNG_BYTES)), "{text}");
+    let result: Value = serde_json::from_str(text).unwrap();
+    assert!(result.get("dataUrl").is_none(), "{result}");
+    assert_eq!(result["imageAttached"], true);
     assert_eq!(result["mediaType"], "image");
     assert_eq!(result["prompt"], "a calm lake");
     assert_eq!(result["mimeType"], "image/png");
@@ -236,6 +324,7 @@ async fn media_generate_image_lands_in_the_session_workspace_and_artifact_list()
         listed[0].run_id.as_deref(),
         Some(turn.binding.run_id.as_str())
     );
+    assert_eq!(listed[0].id, result["artifactId"].as_str().unwrap());
     assert_eq!(listed[0].mime_type.as_deref(), Some("image/png"));
     assert_eq!(listed[0].action, "created");
     assert_eq!(listed[0].size_bytes, Some(PNG_BYTES.len() as i64));
@@ -290,7 +379,9 @@ async fn media_edit_image_reads_sources_in_the_workspace_and_only_there_when_san
         )
         .await
         .unwrap();
+    let edited = image_text(&edited);
     assert_eq!(edited["mediaType"], "image");
+    assert_eq!(edited["prompt"], "make it blue");
     assert_eq!(
         api.calls(),
         [format!(
@@ -553,6 +644,7 @@ async fn media_generate_image_reaches_a_fake_clovy_api_over_http() {
             .call(&ctx, GENERATE_IMAGE, &json!({ "prompt": "a lighthouse" }))
             .await
             .unwrap();
+        let result = image_text(&result);
         assert_eq!(result["model"], "fixture-image");
         assert_eq!(
             std::fs::read(result["path"].as_str().unwrap()).unwrap(),
