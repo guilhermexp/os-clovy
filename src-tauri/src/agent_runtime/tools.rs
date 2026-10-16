@@ -221,34 +221,11 @@ pub async fn dispatch_tool(
         name if crate::connectors::notion::runtime_name_to_provider(name).is_some() => {
             notion_tool(context, name, &arguments).await
         }
-        name if matches!(
-            name,
-            "start_session"
-                | "close_session"
-                | "navigate"
-                | "snapshot"
-                | "screenshot"
-                | "click"
-                | "fill"
-                | "press"
-                | "back"
-                | "list_tabs"
-                | "open_tab"
-                | "switch_tab"
-                | "close_tab"
-                | "accept_shared_tab"
-        ) =>
-        {
+        name if crate::mcp_server::tools::browser::is_browser_tool(name) => {
             let broker = context
                 .app
                 .state::<std::sync::Arc<crate::browser_broker::BrowserBroker>>();
-            broker
-                .execute_for(
-                    crate::browser_broker::BrowserBrokerContext::Attended,
-                    name,
-                    arguments,
-                )
-                .await
+            crate::mcp_server::tools::browser::execute_attended(&broker, name, arguments).await
         }
         name if name.starts_with("mcp_") => mcp_tool(context, name, arguments).await,
         // These capabilities stay behind Rust-owned seams. Their existing brokers

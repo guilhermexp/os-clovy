@@ -577,3 +577,83 @@ async fn mcp_server_binary_binds_a_turn_until_it_is_revoked() {
     assert_eq!(status.code(), Some(2));
     listener.stop();
 }
+
+/// The app side of a turn whose `computer_use` answers with a capture as MCP
+/// content blocks (`protocol::content_value`), as the computer use group
+/// does after an approved action.
+fn image_handler(notes: SqlitePool, image: String) -> channel::TurnHandler {
+    let inner = turn_handler(notes);
+    Arc::new(move |message: Value, binding: Option<Arc<TurnBinding>>| {
+        let is_capture = binding.is_some()
+            && protocol::method(&message) == Some("tools/call")
+            && message.pointer("/params/name") == Some(&json!("computer_use"));
+        if !is_capture {
+            return inner(message, binding);
+        }
+        let image = image.clone();
+        Box::pin(async move {
+            let id = protocol::request_id(&message)?;
+            Some(protocol::result_response(
+                id,
+                protocol::tool_result(&protocol::content_value(vec![
+                    protocol::text_block("[1] button \"Save\""),
+                    protocol::image_block(image, "image/png"),
+                ])),
+            ))
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_server_binary_carries_image_content_blocks_to_the_cli() {
+    use base64::Engine as _;
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let turns = TurnRegistry::default();
+    // About 1 MiB of base64, the size of a real window capture.
+    let image = base64::engine::general_purpose::STANDARD.encode(vec![7_u8; 768 * 1024]);
+    let listener = channel::Listener::start_with_turns(
+        &dir,
+        image_handler(notes_pool().await, image.clone()),
+        turns.clone(),
+    )
+    .await
+    .unwrap();
+    let token = turns.issue(TurnBinding {
+        session_id: "session-1".into(),
+        run_id: "run-1".into(),
+        cli: CliKind::Claude,
+        safety_mode: AgentSafetyMode::Sandboxed,
+        attended: true,
+        surface: "chat".into(),
+    });
+    let mut client = Client::spawn_for_turn(&dir, &token).await;
+    let response = client
+        .request(
+            "tools/call",
+            json!({ "name": "computer_use", "arguments": { "action": "capture", "app": "TextEdit" } }),
+        )
+        .await;
+    let result = &response["result"];
+    assert_eq!(result["isError"], json!(false), "{response}");
+    assert_eq!(
+        result["content"][0],
+        json!({ "type": "text", "text": "[1] button \"Save\"" })
+    );
+    assert_eq!(result["content"][1]["type"], json!("image"));
+    assert_eq!(result["content"][1]["mimeType"], json!("image/png"));
+    assert_eq!(result["content"][1]["data"], json!(image));
+
+    // A plain tool keeps its single JSON text block.
+    let plain = client
+        .request(
+            "tools/call",
+            json!({ "name": "search_notes", "arguments": { "query": "zephyr" } }),
+        )
+        .await;
+    let blocks = plain["result"]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], json!("text"));
+    client.close().await;
+    listener.stop();
+}
