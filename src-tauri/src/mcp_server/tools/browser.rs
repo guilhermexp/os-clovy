@@ -22,6 +22,7 @@ use super::{ToolCtx, ToolGroup};
 use crate::approval_broker::ApprovalDenial;
 use crate::browser_broker::{BrowserBroker, BrowserBrokerContext};
 use crate::domain::types::AppError;
+use crate::mcp_server::protocol;
 use crate::mcp_server::turns::TURN_REQUIRED;
 
 /// The Browser use tools, in catalog order.
@@ -152,6 +153,29 @@ pub(crate) async fn execute_attended(
         .await
 }
 
+/// A screenshot result for the CLI: the PNG as an MCP `image` block (when it
+/// is small enough to send) and the broker's result as JSON text.
+fn with_screenshot_image(broker: &BrowserBroker, result: Value) -> Value {
+    use base64::Engine as _;
+    let Some(path) = result["fileReference"]
+        .as_str()
+        .and_then(|reference| broker.screenshot_file(reference))
+    else {
+        return result;
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return result;
+    };
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    if data.len() > super::computer_use::MAX_IMAGE_BASE64 {
+        return result;
+    }
+    protocol::content_value(vec![
+        protocol::image_block(data, "image/png"),
+        protocol::text_block(result.to_string()),
+    ])
+}
+
 /// The browser group. The registered instance uses the app's broker; tests
 /// build one over their own broker and fake transport.
 pub struct BrowserTools {
@@ -228,7 +252,12 @@ impl ToolGroup for BrowserTools {
                 return Err(AppError::new(denial.code(), denial.message()));
             }
             let broker = self.broker(ctx)?;
-            execute_attended(&broker, name, arguments.clone()).await
+            let result = execute_attended(&broker, name, arguments.clone()).await?;
+            Ok(if name == "screenshot" {
+                with_screenshot_image(&broker, result)
+            } else {
+                result
+            })
         })
     }
 }

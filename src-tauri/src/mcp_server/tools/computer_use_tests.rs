@@ -14,11 +14,12 @@ use super::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 use crate::approval_broker::testing::{Scripted, TestBroker};
 use crate::companion::{CliComputerUseRequest, CliComputerUseRequests};
 use crate::computer_use::{
-    begin_turn_lease_in, clear_leases_for_test, end_turn_lease_in, has_attended_run,
-    ComputerUseState,
+    begin_turn_lease_in, check_eligibility, clear_leases_for_test, end_turn_lease_in,
+    has_attended_run, watch_turn_in, ActionOrigin, BoxedBool, ComputerUseState, EligibilityProbe,
 };
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
+use crate::mcp_server::protocol;
 use crate::mcp_server::turns::TurnBinding;
 
 /// A fake Computer use driver and phone: records what the group asked.
@@ -226,11 +227,18 @@ async fn desktop_approval_runs_one_action_with_its_permit_and_a_second_answer_is
         *host.leases.lock().unwrap(),
         std::slice::from_ref(&chat.run_id)
     );
-    // Driver text and structured content reach the CLI; image bytes do not.
-    assert_eq!(result["content"][0]["text"], "[1] button \"Save\"");
-    assert_eq!(result["structuredContent"]["target_app"], "TextEdit");
-    assert_eq!(result["content"][1]["type"], "image");
-    assert!(!result.to_string().contains("iVBORw0KGgo="));
+    // The MCP result carries the capture as an image block, beside the
+    // driver's text and structured content.
+    let mcp = crate::mcp_server::protocol::tool_result(&result);
+    assert_eq!(mcp["isError"], false);
+    assert_eq!(
+        mcp["content"],
+        json!([
+            { "type": "text", "text": "[1] button \"Save\"" },
+            { "type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png" },
+            { "type": "text", "text": "{\"target_app\":\"TextEdit\"}" }
+        ])
+    );
 
     let second = desktop_answer(&broker, &cards[0], "once")
         .await
@@ -415,4 +423,114 @@ fn the_turn_binding_grants_the_lease_and_stop_stays_sticky_for_the_run() {
     assert!(begin_turn_lease_in(&state, &binding("run-b", true)).unwrap());
     assert!(end_turn_lease_in(&state, "run-b").unwrap().is_some());
     assert!(!has_attended_run(&state));
+}
+
+#[test]
+fn a_run_that_ends_before_its_lease_is_granted_never_gets_one() {
+    let state = ComputerUseState::default();
+    let turn = binding("run-c", true);
+    // The end listener is registered first ...
+    assert!(watch_turn_in(&state, &turn).unwrap());
+    // ... and the run ends before the lease is granted.
+    assert_eq!(end_turn_lease_in(&state, "run-c").unwrap(), None);
+    assert_eq!(
+        begin_turn_lease_in(&state, &turn).unwrap_err().code,
+        "computer_use_turn_ended"
+    );
+    assert!(!has_attended_run(&state));
+    assert_eq!(
+        watch_turn_in(&state, &turn).unwrap_err().code,
+        "computer_use_turn_ended"
+    );
+
+    // The normal order: watched, granted, then ended.
+    let turn = binding("run-d", true);
+    assert!(watch_turn_in(&state, &turn).unwrap());
+    assert!(begin_turn_lease_in(&state, &turn).unwrap());
+    assert!(!watch_turn_in(&state, &turn).unwrap());
+    assert!(has_attended_run(&state));
+    assert!(end_turn_lease_in(&state, "run-d").unwrap().is_some());
+    assert!(!has_attended_run(&state));
+}
+
+/// Platform, rollout, grant and driver available; no Clovy plan and a
+/// native model without vision. Records which facts were asked.
+#[derive(Default)]
+struct Probe {
+    asked: Mutex<Vec<&'static str>>,
+}
+
+impl Probe {
+    fn ask(&self, fact: &'static str, answer: bool) -> BoxedBool<'_> {
+        self.asked.lock().unwrap().push(fact);
+        Box::pin(async move { answer })
+    }
+}
+
+impl EligibilityProbe for Probe {
+    fn macos(&self) -> bool {
+        true
+    }
+    fn rollout_enabled(&self) -> BoxedBool<'_> {
+        self.ask("rollout", true)
+    }
+    fn grant_enabled(&self) -> BoxedBool<'_> {
+        self.ask("grant", true)
+    }
+    fn plan_eligible(&self) -> BoxedBool<'_> {
+        self.ask("plan", false)
+    }
+    fn native_model_supports_vision(&self) -> BoxedBool<'_> {
+        self.ask("vision", false)
+    }
+    fn driver(&self) -> Result<(), AppError> {
+        self.asked.lock().unwrap().push("driver");
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_cli_turn_needs_neither_the_clovy_plan_nor_a_native_vision_model() {
+    let native = Probe::default();
+    assert_eq!(
+        check_eligibility(ActionOrigin::NativeAgent, &native)
+            .await
+            .unwrap_err()
+            .code,
+        "computer_use_plan_required"
+    );
+
+    let cli = Probe::default();
+    check_eligibility(ActionOrigin::CliTurn, &cli)
+        .await
+        .unwrap();
+    assert_eq!(*cli.asked.lock().unwrap(), ["rollout", "grant", "driver"]);
+}
+
+#[test]
+fn content_values_become_mcp_blocks_and_plain_values_stay_one_text_block() {
+    let plain = json!({ "saved": true });
+    assert_eq!(
+        protocol::tool_result(&plain),
+        json!({ "content": [{ "type": "text", "text": "{\"saved\":true}" }], "isError": false })
+    );
+    let blocks = protocol::content_value(vec![
+        protocol::text_block("caption"),
+        protocol::image_block("AAAA", "image/png"),
+    ]);
+    assert_eq!(
+        protocol::tool_result(&blocks)["content"][1],
+        json!({ "type": "image", "data": "AAAA", "mimeType": "image/png" })
+    );
+    // Anything but well-formed text and image blocks stays JSON text.
+    for odd in [
+        json!({ protocol::CONTENT_KEY: [{ "type": "audio", "data": "AAAA" }] }),
+        json!({ protocol::CONTENT_KEY: [{ "type": "image", "data": "AAAA", "mimeType": "text/html" }] }),
+        json!({ protocol::CONTENT_KEY: [], }),
+        json!({ protocol::CONTENT_KEY: [protocol::text_block("x")], "other": 1 }),
+    ] {
+        let result = protocol::tool_result(&odd);
+        assert_eq!(result["content"].as_array().unwrap().len(), 1);
+        assert_eq!(result["content"][0]["type"], "text");
+    }
 }

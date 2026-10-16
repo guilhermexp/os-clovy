@@ -13,11 +13,15 @@ use super::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 use crate::approval_broker::testing::TestBroker;
 use crate::browser::policy::InteractiveElement;
 use crate::browser_broker::{
-    BrowserBroker, BrowserTransport, BrowserTransportKind, TransportFuture, TransportResponse,
+    BrowserBroker, BrowserTransport, BrowserTransportKind, TransportArtifact, TransportFuture,
+    TransportResponse,
 };
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use crate::mcp_server::turns::TurnBinding;
+
+/// The first bytes of a PNG file (the fake screenshot).
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 /// An attended browser whose page has one button, labelled by the test.
 struct FakeTransport {
@@ -55,6 +59,7 @@ impl BrowserTransport for FakeTransport {
             self.calls.lock().unwrap().push(tool.to_string());
             let data = match tool {
                 "open_tab" => json!({ "tabId": 7, "url": "about:blank" }),
+                "list_tabs" => json!({ "tabs": [] }),
                 "snapshot" => json!({ "epoch": 1, "snapshot": "button e0:n1 \"Send\"" }),
                 "inspect_reference" => json!({
                     "element": self.element.clone(),
@@ -70,6 +75,16 @@ impl BrowserTransport for FakeTransport {
                     }
                     self.actions.fetch_add(1, Ordering::SeqCst);
                     json!({ "epoch": 2, "snapshot": "sent" })
+                }
+                "screenshot" => {
+                    return Ok(TransportResponse::artifact(
+                        json!({ "epoch": 1 }),
+                        TransportArtifact {
+                            kind: "screenshot".into(),
+                            mime_type: "image/png".into(),
+                            bytes: PNG.to_vec(),
+                        },
+                    ))
                 }
                 _ => json!({}),
             };
@@ -280,4 +295,43 @@ async fn registered_group_without_an_app_reports_the_browser_unavailable() {
         .await
         .unwrap_err();
     assert_eq!(error.code, "browser_unavailable");
+}
+
+#[tokio::test]
+async fn screenshot_reaches_the_cli_as_an_image_block() {
+    use base64::Engine as _;
+    let rig = Rig::new("Send").await;
+    let chat = rig.approvals.turn(CliKind::Claude, true).await;
+    let ctx = rig.ctx(Some(&chat));
+    let session_id = open_session(&rig, &ctx).await;
+    let result = rig
+        .group()
+        .call(
+            &ctx,
+            "screenshot",
+            &json!({ "session_id": session_id, "tab_id": 7 }),
+        )
+        .await
+        .unwrap();
+    let mcp = crate::mcp_server::protocol::tool_result(&result);
+    assert_eq!(mcp["content"][0]["type"], "image");
+    assert_eq!(mcp["content"][0]["mimeType"], "image/png");
+    assert_eq!(
+        mcp["content"][0]["data"],
+        base64::engine::general_purpose::STANDARD.encode(PNG)
+    );
+    let text: Value = serde_json::from_str(mcp["content"][1]["text"].as_str().unwrap()).unwrap();
+    assert!(text["fileReference"]
+        .as_str()
+        .unwrap()
+        .starts_with("browser-screenshot-"));
+    // Other tools keep the single JSON text block.
+    let listed = rig
+        .group()
+        .call(&ctx, "list_tabs", &json!({ "session_id": session_id }))
+        .await
+        .unwrap();
+    let listed = crate::mcp_server::protocol::tool_result(&listed);
+    assert_eq!(listed["content"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["content"][0]["type"], "text");
 }

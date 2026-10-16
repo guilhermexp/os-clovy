@@ -94,9 +94,9 @@ pub struct ComputerUseState {
     approvals: Mutex<HashMap<String, PendingEntry>>,
     authorized_apps: Mutex<HashSet<AppAuthorizationKey>>,
     attended_runs: Mutex<HashSet<String>>,
-    /// Runs of CLI turns that were granted a lease ([`begin_turn_lease`]);
-    /// a run here whose lease is gone was stopped, and stays stopped.
-    turn_leases: Mutex<HashSet<String>>,
+    /// CLI turns by run id ([`begin_turn_lease`]): a granted run whose lease
+    /// is gone was stopped and stays stopped; an ended run never gets one.
+    turn_leases: Mutex<HashMap<String, TurnLease>>,
     attended_generation: AtomicU64,
     cleanup_in_progress: AtomicU32,
     epoch: AtomicU64,
@@ -2371,31 +2371,76 @@ pub async fn computer_use_end_run(
 /// the chat surface calling [`computer_use_begin_run`]. The first
 /// `computer_use` call of the run opens it, later calls of the same run keep
 /// it, and the run's terminal event (`run.completed`, `run.cancelled`,
-/// `run.failed`) ends it like [`computer_use_end_run`]. Stop stays sticky for
-/// the rest of the run: once Stop clears the lease, the same run cannot open
-/// it again. Unattended turns never get one.
+/// `run.failed`) ends it like [`computer_use_end_run`]. The end listener is
+/// registered before the lease is granted, and an ended run is remembered,
+/// so a run that ends meanwhile can never leave a lease behind. Stop stays
+/// sticky for the rest of the run: once Stop clears the lease, the same run
+/// cannot open it again. Unattended turns never get one.
 pub(crate) fn begin_turn_lease(
     app: &AppHandle,
     binding: &crate::mcp_server::turns::TurnBinding,
 ) -> Result<(), AppError> {
     let state = app.state::<ComputerUseState>();
-    if begin_turn_lease_in(&state, binding)? {
+    if watch_turn_in(&state, binding)? {
         end_turn_lease_with_run(app, binding.run_id.clone());
     }
-    Ok(())
+    begin_turn_lease_in(&state, binding).map(|_| ())
 }
 
-/// [`begin_turn_lease`] without the app: `Ok(true)` when this call opened
-/// the run's lease (the caller arranges its end).
+/// Where a CLI turn's lease stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnLease {
+    /// The end listener is registered; no lease yet.
+    Watched,
+    /// The lease was granted (it may since have been stopped).
+    Granted,
+    /// The run published its terminal event.
+    Ended,
+}
+
+fn turn_leases(
+    state: &ComputerUseState,
+) -> Result<std::sync::MutexGuard<'_, HashMap<String, TurnLease>>, AppError> {
+    state
+        .turn_leases
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))
+}
+
+fn turn_ended_error() -> AppError {
+    AppError::new(
+        "computer_use_turn_ended",
+        "This turn already ended. Send a new message to use Computer use.",
+    )
+}
+
+/// First step of [`begin_turn_lease`]: `Ok(true)` when the caller must
+/// register the run's end listener (before [`begin_turn_lease_in`]).
+pub(crate) fn watch_turn_in(
+    state: &ComputerUseState,
+    binding: &crate::mcp_server::turns::TurnBinding,
+) -> Result<bool, AppError> {
+    if !binding.attended {
+        return Err(attended_run_required());
+    }
+    let mut leases = turn_leases(state)?;
+    match leases.get(&binding.run_id) {
+        Some(TurnLease::Ended) => Err(turn_ended_error()),
+        Some(_) => Ok(false),
+        None => {
+            leases.insert(binding.run_id.clone(), TurnLease::Watched);
+            Ok(true)
+        }
+    }
+}
+
+/// Grants the run's lease: `Ok(true)` when this call opened it.
 pub(crate) fn begin_turn_lease_in(
     state: &ComputerUseState,
     binding: &crate::mcp_server::turns::TurnBinding,
 ) -> Result<bool, AppError> {
     if !binding.attended {
-        return Err(AppError::new(
-            "computer_use_attended_run_required",
-            "Computer use is available only during a turn started from Clovy chat.",
-        ));
+        return Err(attended_run_required());
     }
     if state.cleanup_in_progress.load(Ordering::SeqCst) != 0 {
         return Err(AppError::new(
@@ -2404,40 +2449,50 @@ pub(crate) fn begin_turn_lease_in(
         ));
     }
     let key = turn_lease_key(&binding.run_id);
-    let mut leases = state
-        .turn_leases
-        .lock()
-        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
-    if leases.contains(&binding.run_id) {
-        let live = state
-            .attended_runs
-            .lock()
-            .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?
-            .contains(&key);
-        return if live {
-            Ok(false)
-        } else {
-            Err(AppError::new(
-                "computer_use_stopped",
-                "Computer use was stopped for this turn. Send a new message to use it again.",
-            ))
-        };
+    let mut leases = turn_leases(state)?;
+    match leases.get(&binding.run_id) {
+        Some(TurnLease::Ended) => return Err(turn_ended_error()),
+        Some(TurnLease::Granted) => {
+            let live = state
+                .attended_runs
+                .lock()
+                .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?
+                .contains(&key);
+            return if live {
+                Ok(false)
+            } else {
+                Err(AppError::new(
+                    "computer_use_stopped",
+                    "Computer use was stopped for this turn. Send a new message to use it again.",
+                ))
+            };
+        }
+        Some(TurnLease::Watched) | None => {}
     }
     begin_run_lease(state, key)?;
-    leases.insert(binding.run_id.clone());
+    leases.insert(binding.run_id.clone(), TurnLease::Granted);
     Ok(true)
 }
 
-/// Ends the lease of `run_id`; `Some(generation)` when no attended run is
-/// left (the caller may stop the idle driver, as `computer_use_end_run`).
+fn attended_run_required() -> AppError {
+    AppError::new(
+        "computer_use_attended_run_required",
+        "Computer use is available only during a turn started from Clovy chat.",
+    )
+}
+
+/// The run ended: forgets its lease and refuses any later one. `Some(generation)`
+/// when no attended run is left (the caller may stop the idle driver, as
+/// `computer_use_end_run`).
 pub(crate) fn end_turn_lease_in(
     state: &ComputerUseState,
     run_id: &str,
 ) -> Result<Option<u64>, AppError> {
-    if let Ok(mut leases) = state.turn_leases.lock() {
-        leases.remove(run_id);
-    }
-    end_run_lease(state, &turn_lease_key(run_id))
+    let mut leases = turn_leases(state)?;
+    leases.insert(run_id.to_string(), TurnLease::Ended);
+    let ended = end_run_lease(state, &turn_lease_key(run_id));
+    drop(leases);
+    ended
 }
 
 fn turn_lease_key(run_id: &str) -> String {
@@ -2447,8 +2502,9 @@ fn turn_lease_key(run_id: &str) -> String {
 /// Ends the run's lease when the run publishes its terminal event.
 fn end_turn_lease_with_run(app: &AppHandle, run_id: String) {
     use tauri::Listener;
-    let listener: Arc<Mutex<Option<tauri::EventId>>> = Arc::default();
-    let own = Arc::clone(&listener);
+    // (listener id once known, whether the event already fired)
+    let slot: Arc<Mutex<(Option<tauri::EventId>, bool)>> = Arc::default();
+    let own = Arc::clone(&slot);
     let handle = app.clone();
     let id = app.listen_any(
         crate::agent_runtime::host::AGENT_RUNTIME_EVENT,
@@ -2456,21 +2512,29 @@ fn end_turn_lease_with_run(app: &AppHandle, run_id: String) {
             if !is_terminal_event_of(event.payload(), &run_id) {
                 return;
             }
-            if let Some(id) = own.lock().ok().and_then(|mut id| id.take()) {
-                handle.unlisten(id);
-            }
-            let app = handle.clone();
-            let run_id = run_id.clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app.state::<ComputerUseState>();
-                if let Ok(Some(generation)) = end_turn_lease_in(&state, &run_id) {
-                    stop_if_idle(&app, &state, generation).await;
+            let state = handle.state::<ComputerUseState>();
+            let idle = end_turn_lease_in(&state, &run_id).ok().flatten();
+            if let Ok(mut slot) = own.lock() {
+                slot.1 = true;
+                if let Some(id) = slot.0.take() {
+                    handle.unlisten(id);
                 }
-            });
+            }
+            if let Some(generation) = idle {
+                let app = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<ComputerUseState>();
+                    stop_if_idle(&app, &state, generation).await;
+                });
+            }
         },
     );
-    if let Ok(mut slot) = listener.lock() {
-        *slot = Some(id);
+    if let Ok(mut slot) = slot.lock() {
+        if slot.1 {
+            app.unlisten(id);
+        } else {
+            slot.0 = Some(id);
+        }
     };
 }
 
@@ -2746,6 +2810,23 @@ pub(crate) async fn handle_proxy_action_for_call(
     handle_proxy_action_inner(app, arguments, companion_permit.as_ref()).await
 }
 
+/// [`handle_proxy_action_for_call`] for a CLI turn: same broker, permit, and
+/// per-app authorization, with the CLI turn's eligibility
+/// ([`ActionOrigin::CliTurn`]).
+pub(crate) async fn handle_cli_action_for_call(
+    app: &AppHandle,
+    arguments: Value,
+    stored_session_id: &str,
+    call_id: &str,
+) -> Value {
+    ACTION_ORIGIN
+        .scope(
+            ActionOrigin::CliTurn,
+            handle_proxy_action_for_call(app, arguments, stored_session_id, Some(call_id)),
+        )
+        .await
+}
+
 async fn handle_proxy_action_inner(
     app: &AppHandle,
     arguments: Value,
@@ -2973,38 +3054,103 @@ fn ensure_task_generation_current(
     }
 }
 
+/// Who asked for a Computer use action. The native agent runs on Clovy's
+/// own generation model and plan; a CLI turn (`cli-substitui-agente-nativo`,
+/// slice 2.6) brings its own model and account, so its eligibility is the
+/// platform, the rollout gate, the user's Computer use grant, and the
+/// driver (macOS permissions are the driver's to check).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionOrigin {
+    NativeAgent,
+    CliTurn,
+}
+
+tokio::task_local! {
+    static ACTION_ORIGIN: ActionOrigin;
+}
+
+fn current_action_origin() -> ActionOrigin {
+    ACTION_ORIGIN
+        .try_with(|origin| *origin)
+        .unwrap_or(ActionOrigin::NativeAgent)
+}
+
+/// The facts eligibility depends on, asked lazily so a CLI turn never asks
+/// for the plan or the native model.
+pub(crate) trait EligibilityProbe: Sync {
+    fn macos(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+    fn rollout_enabled(&self) -> BoxedBool<'_>;
+    fn grant_enabled(&self) -> BoxedBool<'_>;
+    fn plan_eligible(&self) -> BoxedBool<'_>;
+    fn native_model_supports_vision(&self) -> BoxedBool<'_>;
+    fn driver(&self) -> Result<(), AppError>;
+}
+
+pub(crate) type BoxedBool<'a> = std::pin::Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+struct AppEligibility<'a>(&'a AppHandle);
+
+impl EligibilityProbe for AppEligibility<'_> {
+    fn rollout_enabled(&self) -> BoxedBool<'_> {
+        Box::pin(async { rollout_gate().await.enabled })
+    }
+    fn grant_enabled(&self) -> BoxedBool<'_> {
+        Box::pin(grant_enabled(self.0))
+    }
+    fn plan_eligible(&self) -> BoxedBool<'_> {
+        Box::pin(plan_eligible())
+    }
+    fn native_model_supports_vision(&self) -> BoxedBool<'_> {
+        Box::pin(crate::providers::generation_model_supports_vision())
+    }
+    fn driver(&self) -> Result<(), AppError> {
+        bundled_driver_executable(self.0).map(|_| ())
+    }
+}
+
 async fn ensure_action_eligible(app: &AppHandle) -> Result<(), AppError> {
-    if !cfg!(target_os = "macos") {
+    check_eligibility(current_action_origin(), &AppEligibility(app)).await
+}
+
+pub(crate) async fn check_eligibility(
+    origin: ActionOrigin,
+    probe: &dyn EligibilityProbe,
+) -> Result<(), AppError> {
+    if !probe.macos() {
         return Err(AppError::new(
             "computer_use_unsupported",
             "Computer use is available on macOS only.",
         ));
     }
-    if !rollout_gate().await.enabled {
+    if !probe.rollout_enabled().await {
         return Err(AppError::new(
             "computer_use_rollout_disabled",
             "Computer use is temporarily unavailable for this Clovy or macOS version.",
         ));
     }
-    if !grant_enabled(app).await {
+    if !probe.grant_enabled().await {
         return Err(AppError::new(
             "computer_use_grant_required",
             "Computer use is off. Enable it in Plugins and finish setup.",
         ));
     }
-    if !plan_eligible().await {
-        return Err(AppError::new(
-            "computer_use_plan_required",
-            "Computer use requires an active Pro or Max plan.",
-        ));
+    if origin == ActionOrigin::NativeAgent {
+        if !probe.plan_eligible().await {
+            return Err(AppError::new(
+                "computer_use_plan_required",
+                "Computer use requires an active Pro or Max plan.",
+            ));
+        }
+        if !probe.native_model_supports_vision().await {
+            return Err(AppError::new(
+                "computer_use_model_unsupported",
+                "The selected model cannot use Computer use. Switch to a vision-capable model.",
+            ));
+        }
     }
-    if !crate::providers::generation_model_supports_vision().await {
-        return Err(AppError::new(
-            "computer_use_model_unsupported",
-            "The selected model cannot use Computer use. Switch to a vision-capable model.",
-        ));
-    }
-    bundled_driver_executable(app).map(|_| ())
+    probe.driver()
 }
 
 async fn driver_call(

@@ -1876,6 +1876,20 @@ impl BrowserBroker {
         Ok(response.data)
     }
 
+    /// The stored screenshot `file_reference` names (as [`Self::store_artifact`]
+    /// returned it); `None` for anything else.
+    pub(crate) fn screenshot_file(&self, file_reference: &str) -> Option<PathBuf> {
+        let valid = file_reference.starts_with("browser-screenshot-")
+            && file_reference.ends_with(".png")
+            && !file_reference.contains(['/', '\\'])
+            && !file_reference.contains("..");
+        if !valid {
+            return None;
+        }
+        let path = self.lock().screenshot_root.as_ref()?.join(file_reference);
+        path.is_file().then_some(path)
+    }
+
     fn store_artifact(&self, artifact: TransportArtifact) -> Result<Value, AppError> {
         let state = self.lock();
         let (root, extension, media) = match (artifact.kind.as_str(), artifact.mime_type.as_str()) {
