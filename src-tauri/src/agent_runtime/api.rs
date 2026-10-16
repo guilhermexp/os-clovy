@@ -2434,20 +2434,6 @@ async fn tool_descriptors(
         { "name": "start_recording", "description": "Start a visible Clovy recording only when the user explicitly asks to begin recording now.", "parameters": { "type": "object", "properties": { "sourceMode": { "type": "string", "enum": ["microphoneOnly", "microphonePlusSystem"] } }, "required": [], "additionalProperties": false }, "requiresApproval": true },
         { "name": "stop_recording", "description": "Stop the recording currently visible in Clovy.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false }, "requiresApproval": true },
         { "name": "recording_status", "description": "Check whether Clovy is currently recording and return the active recording metadata.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "start_session", "description": "Start an attended Clovy Browser use session.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "close_session", "description": "Close an attended Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": false } },
-        { "name": "navigate", "description": "Navigate a Clovy Browser use session to a URL.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "url": { "type": "string" } }, "required": ["session_id", "url"], "additionalProperties": true } },
-        { "name": "snapshot", "description": "Read the visible page and interactive references from a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "screenshot", "description": "Capture a screenshot from a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "click", "description": "Click an interactive reference in a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "ref": { "type": "string" } }, "required": ["session_id", "ref"], "additionalProperties": true } },
-        { "name": "fill", "description": "Fill an interactive reference in a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "ref": { "type": "string" }, "value": { "type": "string" } }, "required": ["session_id", "ref", "value"], "additionalProperties": true } },
-        { "name": "press", "description": "Press a key in a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "key": { "type": "string" } }, "required": ["session_id", "key"], "additionalProperties": true } },
-        { "name": "back", "description": "Navigate back in a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "list_tabs", "description": "List tabs owned by a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "open_tab", "description": "Open a task-owned tab in a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "url": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "switch_tab", "description": "Switch the active task-owned tab in a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "tab_id": {} }, "required": ["session_id", "tab_id"], "additionalProperties": true } },
-        { "name": "close_tab", "description": "Close a task-owned tab in a Clovy Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "tab_id": {} }, "required": ["session_id", "tab_id"], "additionalProperties": true } },
-        { "name": "accept_shared_tab", "description": "Accept a one-use browser tab share code supplied by the user.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "share_code": { "type": "string" } }, "required": ["session_id", "share_code"], "additionalProperties": true } },
         { "name": "web_search", "description": "Search the public web.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
         { "name": "web_fetch", "description": "Fetch a public web page.", "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false } },
         { "name": "list_files", "description": "List files in a directory.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": [], "additionalProperties": false } },
@@ -2470,6 +2456,10 @@ async fn tool_descriptors(
         ,{ "name": "request_secret", "description": "Securely request a secret from the user. The result is an opaque one-use reference for a safety-controlled tool, never the secret value.", "parameters": { "type": "object", "properties": { "reason": { "type": "string" } }, "required": ["reason"], "additionalProperties": false }, "requiresApproval": true }
         ,{ "name": "computer_use", "description": "Operate the attended computer-use session through Clovy's permission and approval broker.", "parameters": { "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true }, "requiresApproval": true }
     ]);
+    tools
+        .as_array_mut()
+        .expect("tool descriptor catalog is an array")
+        .extend(crate::mcp_server::tools::browser::runtime_descriptors());
     tools
         .as_array_mut()
         .expect("tool descriptor catalog is an array")

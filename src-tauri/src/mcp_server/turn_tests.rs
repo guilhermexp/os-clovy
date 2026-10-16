@@ -230,9 +230,12 @@ async fn a_bound_relay_runs_turn_tools_in_its_session_and_run() {
 
     let output = relay(&dir, Some(&token), &list_and_probe()).await;
     let messages = output.messages(2);
-    let mut expected = read_catalog();
-    expected.push(PROBE.to_string());
-    assert_eq!(names(by_id(&messages, 1)), expected);
+    // The read catalog first, then the bound-only groups (the parity groups
+    // of phase 2 and this probe).
+    let listed = names(by_id(&messages, 1));
+    let read = read_catalog();
+    assert_eq!(listed[..read.len()], read[..]);
+    assert_eq!(listed.iter().filter(|name| *name == PROBE).count(), 1);
     let probed: Value = serde_json::from_str(
         by_id(&messages, 2)["result"]["content"][0]["text"]
             .as_str()
