@@ -1,4 +1,4 @@
-use super::skill_identity::{canonical_skill_id, read_skill_ids, reconcile_managed_obsidian_skill};
+use super::skill_identity::{canonical_skill_id, reconcile_managed_obsidian_skill};
 use super::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -153,10 +153,9 @@ pub async fn dispatch_tool(
         "generate_image" => generate_image(context, &arguments).await,
         "edit_image" => edit_image(context, &arguments).await,
         "generate_video" => generate_video(context, &arguments).await,
-        "get_obsidian_vault" => Ok(serde_json::to_value(crate::obsidian::discovery_for_app(
-            &context.app,
-        )?)
-        .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))?),
+        "get_obsidian_vault" => crate::mcp_server::tools::vault_skills::vault_result(
+            crate::obsidian::discovery_for_app(&context.app),
+        ),
         "start_recording" => {
             let source_mode = match arguments.get("sourceMode").and_then(Value::as_str) {
                 Some("microphonePlusSystem") => {
@@ -1422,76 +1421,38 @@ async fn notion_tool(
 }
 
 async fn list_skills(context: &ToolContext) -> Result<Value, AppError> {
-    let allowed = context
+    let enabled = context
         .repository
         .run_enabled_skills(&context.run_id)
         .await?
         .into_iter()
-        .map(|name| canonical_skill_id(&name).to_string())
-        .collect::<std::collections::HashSet<_>>();
-    let roots = skill_roots(&context.app);
-    let mut skills = Vec::new();
-    for root in roots {
-        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
-            continue;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let stored_name = entry.file_name().to_string_lossy().into_owned();
-            let name = canonical_skill_id(&stored_name).to_string();
-            if stored_name != name && root.join(&name).join("SKILL.md").is_file() {
-                continue;
-            }
-            if allowed.contains(&name)
-                && entry.path().join("SKILL.md").is_file()
-                && !skills.iter().any(|skill: &Value| {
-                    skill.get("name").and_then(Value::as_str) == Some(name.as_str())
-                })
-            {
-                skills.push(json!({ "name": name, "root": root }));
-            }
-        }
-    }
-    Ok(json!({ "skills": skills }))
+        .map(|name| (canonical_skill_id(&name).to_string(), true))
+        .collect();
+    crate::mcp_server::tools::vault_skills::list_skills_from_roots(
+        &crate::mcp_server::tools::vault_skills::skill_roots(&context.app),
+        &enabled,
+        false,
+    )
+    .await
 }
 
 async fn load_skill(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let requested_name = required_string(arguments, "name")?;
-    if requested_name.contains('/')
-        || requested_name.contains('\\')
-        || requested_name == "."
-        || requested_name == ".."
-    {
-        return Err(AppError::new(
-            "agent_skill_invalid",
-            "Skill name is invalid.",
-        ));
-    }
-    let name = canonical_skill_id(requested_name);
-    if !context
+    let requested = required_string(arguments, "name")?;
+    // Preserve native validation before reading the run's enabled snapshot.
+    let name = crate::mcp_server::tools::vault_skills::validate_skill_name(requested)?;
+    let enabled = context
         .repository
         .run_enabled_skills(&context.run_id)
         .await?
-        .iter()
-        .any(|allowed| canonical_skill_id(allowed) == name)
-    {
-        return Err(AppError::new(
-            "agent_skill_disabled",
-            "This skill is not enabled for the current run.",
-        ));
-    }
-    for root in skill_roots(&context.app) {
-        for read_id in read_skill_ids(name) {
-            let path = root.join(read_id).join("SKILL.md");
-            if path.is_file() {
-                let content = tokio::fs::read_to_string(&path).await.map_err(io_error)?;
-                return Ok(json!({ "name": name, "content": content, "path": path }));
-            }
-        }
-    }
-    Err(AppError::new(
-        "agent_skill_not_found",
-        "Skill was not found.",
-    ))
+        .into_iter()
+        .map(|name| (canonical_skill_id(&name).to_string(), true))
+        .collect();
+    crate::mcp_server::tools::vault_skills::load_skill_from_roots(
+        &crate::mcp_server::tools::vault_skills::skill_roots(&context.app),
+        &enabled,
+        name,
+    )
+    .await
 }
 
 async fn consume_clarification_answer(context: &ToolContext) -> Result<Value, AppError> {
@@ -1622,18 +1583,6 @@ fn resolve_path_with_scope(
         }
     }
     Ok(resolved)
-}
-
-fn skill_roots(app: &AppHandle) -> Vec<PathBuf> {
-    let mut roots = crate::app_paths::app_data_dir(app)
-        .ok()
-        .map(|path| path.join("agents").join("skills"))
-        .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join(".agents").join("skills"));
-    }
-    roots
 }
 
 /// Seeds bundled agent skills (packaged as Tauri resources) into the managed

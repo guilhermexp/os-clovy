@@ -22,6 +22,9 @@ mod read;
 mod routines;
 #[cfg(test)]
 mod routines_tests;
+pub(crate) mod vault_skills;
+#[cfg(test)]
+mod vault_skills_tests;
 
 use chrono::{DateTime, Utc};
 use futures_util::future::BoxFuture;
@@ -158,6 +161,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     groups.push(&routines::RoutineTools);
     groups.push(&memory::MemoryTools);
     groups.push(&notes::NoteTools);
+    groups.push(&vault_skills::VaultSkillTools);
     groups.push(&browser::BROWSER);
     groups.push(&computer_use::COMPUTER_USE);
     #[cfg(all(test, unix))]
