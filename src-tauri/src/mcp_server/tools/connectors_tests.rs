@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct HttpFixture {
     pub url: String,
     pub calls: Arc<Mutex<Vec<(String, Value)>>>,
+    pub active: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for HttpFixture {
@@ -50,6 +51,9 @@ impl Drop for HttpFixture {
 }
 impl HttpFixture {
     pub async fn new() -> Self {
+        Self::with_elicitation(false).await
+    }
+    pub async fn with_elicitation(elicit: bool) -> Self {
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
             net::TcpListener,
@@ -58,10 +62,20 @@ impl HttpFixture {
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
+        let active = Arc::new(AtomicUsize::new(0));
+        let active_requests = active.clone();
+        let answers = Arc::new(Mutex::new(std::collections::HashMap::<
+            String,
+            Arc<tokio::sync::Notify>,
+        >::new()));
+        let question_ids = Arc::new(AtomicUsize::new(0));
         let task = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let calls = recorded.clone();
+                let active = active_requests.clone();
+                let answers = answers.clone();
+                let question_ids = question_ids.clone();
                 tokio::spawn(async move {
                     let mut bytes = Vec::new();
                     let (start, size) = loop {
@@ -93,6 +107,45 @@ impl HttpFixture {
                     }
                     let body: Value = serde_json::from_slice(&bytes[start..start + size]).unwrap();
                     calls.lock().unwrap().push((headers, body.clone()));
+                    if elicit && body.get("method").is_none() && body.get("result").is_some() {
+                        if let Some(answered) = body["id"]
+                            .as_str()
+                            .and_then(|id| answers.lock().unwrap().get(id).cloned())
+                        {
+                            answered.notify_one();
+                        }
+                        stream.write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                        return;
+                    }
+                    if elicit && body["method"] == "tools/call" {
+                        active.fetch_add(1, Ordering::SeqCst);
+                        let question_id =
+                            format!("ask-team-{}", question_ids.fetch_add(1, Ordering::SeqCst));
+                        let answered = Arc::new(tokio::sync::Notify::new());
+                        answers
+                            .lock()
+                            .unwrap()
+                            .insert(question_id.clone(), answered.clone());
+                        let question = format!(
+                            "data: {}\n\n",
+                            json!({"jsonrpc":"2.0","id":question_id,"method":"elicitation/create","params":{"message":"Which team?","requestedSchema":{"type":"object","properties":{"team":{"type":"string"}}}}})
+                        );
+                        let result = format!(
+                            "data: {}\n\n",
+                            json!({"jsonrpc":"2.0","id":body["id"],"result":{"content":[{"type":"text","text":"selected core"}]}})
+                        );
+                        let head = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",question.len()+result.len());
+                        stream.write_all(head.as_bytes()).await.unwrap();
+                        stream.write_all(question.as_bytes()).await.unwrap();
+                        let mut eof = [0_u8; 1];
+                        tokio::select! {
+                            _=answered.notified()=> {let _=stream.write_all(result.as_bytes()).await;},
+                            _=stream.read(&mut eof)=>{},
+                            _=tokio::time::sleep(std::time::Duration::from_secs(10))=>{},
+                        }
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        return;
+                    }
                     let result = match body["method"].as_str() {
                         Some("initialize") => {
                             json!({"protocolVersion":"2025-06-18", "capabilities":{}, "serverInfo":{"name":"fixture", "version":"1"}})
@@ -111,7 +164,12 @@ impl HttpFixture {
                 });
             }
         });
-        Self { url, calls, task }
+        Self {
+            url,
+            calls,
+            active,
+            task,
+        }
     }
     pub fn tool_calls(&self) -> usize {
         self.calls

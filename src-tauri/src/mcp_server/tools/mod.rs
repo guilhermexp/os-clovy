@@ -15,6 +15,9 @@ mod computer_use_tests;
 mod connectors;
 #[cfg(test)]
 mod connectors_tests;
+mod gateway;
+#[cfg(test)]
+mod gateway_tests;
 mod read;
 
 use chrono::{DateTime, Utc};
@@ -150,6 +153,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     #[allow(unused_mut)]
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
     groups.push(&connectors::CONNECTORS);
+    groups.push(&gateway::GATEWAY);
     groups.push(&browser::BROWSER);
     groups.push(&computer_use::COMPUTER_USE);
     #[cfg(all(test, unix))]
