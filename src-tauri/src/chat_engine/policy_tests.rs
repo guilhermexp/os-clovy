@@ -51,7 +51,7 @@ fn policy_claude_attended_turns_ask_through_the_default_mode_and_grant_only_clov
         );
         assert_eq!(policy.env, vec![("MCP_TOOL_TIMEOUT", "900000".to_string())]);
 
-        // Once slice 2.11 ships `approve_action` and `request_clarification`.
+        // With `approve_action` and `request_clarification` (slice 2.11).
         let ready = policy_with(CliKind::Claude, permissions(mode, true), true);
         assert_eq!(ready.args, policy.args);
         assert_eq!(
@@ -67,11 +67,43 @@ fn policy_claude_attended_turns_ask_through_the_default_mode_and_grant_only_clov
             ])
         );
     }
-    // Off until the tools exist: the prompt tool would name a missing tool.
+    // On: the prompt tool names a tool the Clovy server lists to claude turns.
     for mode in MODES {
         assert_eq!(
             turn_policy(CliKind::Claude, permissions(mode, true)),
-            policy_with(CliKind::Claude, permissions(mode, true), false)
+            policy_with(CliKind::Claude, permissions(mode, true), true)
+        );
+    }
+}
+
+/// The prompt tool the claude row names is one the Clovy server lists to a
+/// claude turn.
+#[tokio::test]
+async fn policy_claude_interaction_tools_are_listed_to_claude_turns() {
+    let data = crate::mcp_server::tools::McpData {
+        notes: sqlx_sqlite::SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: crate::mcp_server::tools::ActivityAccess::Off,
+        now: chrono::Utc::now(),
+    };
+    let binding = crate::mcp_server::turns::TurnBinding {
+        session_id: "session-1".into(),
+        run_id: "run-1".into(),
+        cli: CliKind::Claude,
+        safety_mode: AgentSafetyMode::Sandboxed,
+        attended: true,
+        surface: "chat".into(),
+    };
+    let ctx = crate::mcp_server::tools::ToolCtx {
+        binding: Some(&binding),
+        ..crate::mcp_server::tools::ToolCtx::unbound(&data)
+    };
+    let listed = crate::mcp_server::tools::descriptors(&ctx);
+    for name in ["approve_action", "request_clarification"] {
+        assert!(
+            listed.iter().any(|tool| tool["name"] == name),
+            "{name} is not listed to a claude turn"
         );
     }
 }

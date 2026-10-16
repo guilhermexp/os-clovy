@@ -6,6 +6,9 @@
 //! unbound clients (Cursor, `claude mcp add`) see the read group alone, as
 //! ADR-0058 describes, and calling a bound-only tool answers `turn_required`.
 
+mod interaction;
+#[cfg(test)]
+mod interaction_tests;
 pub(crate) mod media;
 #[cfg(test)]
 mod media_tests;
@@ -140,6 +143,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
     groups.push(&media::MediaTools);
     groups.push(&recorder::RecorderTools);
+    groups.push(&interaction::InteractionTools);
     #[cfg(all(test, unix))]
     groups.push(&super::turn_tests::TurnProbe);
     groups
