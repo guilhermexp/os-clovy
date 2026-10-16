@@ -78,11 +78,71 @@ const MANAGED_MCP_CURSOR_MAX_CHARS: usize = 2_048;
 type SharedMcpSession = Arc<AsyncMutex<McpSessionSlot>>;
 static MCP_SESSIONS: OnceLock<AsyncMutex<HashMap<String, SharedMcpSession>>> = OnceLock::new();
 
+// A CLI invocation owns its transport through every clarification. Separate
+// invocations, including two calls in one turn, never see a native or another
+// CLI call's parked request. Nested discovery uses the same ownership scope.
+tokio::task_local! { static CLI_MCP_SCOPE: (String, String); }
+
+/// Run a CLI tool operation (including discovery and elicitation) without a
+/// native ToolContext. Credentials still resolve exclusively in this module.
+pub async fn in_cli_turn<F: Future>(run_id: &str, operation: F) -> F::Output {
+    if CLI_MCP_SCOPE
+        .try_with(|(run, _)| run == run_id)
+        .unwrap_or(false)
+    {
+        return operation.await;
+    }
+    let scope_id = Uuid::new_v4().to_string();
+    CLI_MCP_SCOPE
+        .scope((run_id.to_string(), scope_id.clone()), async move {
+            let mut cleanup = CliScopeCleanup(scope_id.clone());
+            let output = operation.await;
+            retire_cli_scope(&scope_id).await;
+            cleanup.0.clear();
+            output
+        })
+        .await
+}
+struct CliScopeCleanup(String);
+impl Drop for CliScopeCleanup {
+    fn drop(&mut self) {
+        if !self.0.is_empty() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let scope_id = std::mem::take(&mut self.0);
+                runtime.spawn(async move {
+                    retire_cli_scope(&scope_id).await;
+                });
+            }
+        }
+    }
+}
+async fn retire_cli_scope(scope_id: &str) {
+    let Some(sessions) = MCP_SESSIONS.get() else {
+        return;
+    };
+    let retired = {
+        let mut sessions = sessions.lock().await;
+        let prefix = format!("cli:{scope_id}:");
+        let keys = sessions
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| sessions.remove(&key))
+            .collect::<Vec<_>>()
+    };
+    for session in retired {
+        session.lock().await.close().await;
+    }
+}
+
 struct McpSessionSlot {
     fingerprint: String,
     next_request_id: u64,
     transport: Option<PersistentMcpTransport>,
     discovery_pages: BTreeMap<String, Value>,
+    parked_call: Option<Value>,
 }
 
 enum PersistentMcpTransport {
@@ -1559,7 +1619,13 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
             if !server_available(&server, sandboxed, workspace) {
                 continue;
             }
-            let secret = self.load_server_secrets(&server, false).await?;
+            let secret = match self.load_server_secrets(&server, false).await {
+                Ok(secret) => secret,
+                Err(error) => {
+                    tracing::warn!(error_code = "agent_mcp_discovery_failed", server_id = %server.id, error = %error, "MCP credentials unavailable; continuing with the remaining servers");
+                    continue;
+                }
+            };
             let mut discovered =
                 discover_server(&server, &secret, sandboxed.then_some(workspace).flatten()).await;
             if matches!(discovered, Err(AgentMcpError::Unauthorized)) && !secret.oauth.is_empty() {
@@ -1575,8 +1641,23 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
                     Err(error) => Err(error),
                 };
             }
-            match discovered {
-                Ok(tools) => next.register(&server, tools)?,
+            // Stage one server atomically. A malformed inventory or a mapped
+            // name collision must not erase healthy servers or leave a
+            // partially registered failing server in the catalog.
+            let registered = discovered.and_then(|tools| {
+                let mut staged = McpToolRegistry::default();
+                staged.register(&server, tools)?;
+                if staged
+                    .tools
+                    .keys()
+                    .any(|name| next.tools.contains_key(name))
+                {
+                    return Err(AgentMcpError::DuplicateServer);
+                }
+                Ok(staged)
+            });
+            match registered {
+                Ok(staged) => next.tools.extend(staged.tools),
                 Err(error) => tracing::warn!(
                     error_code = "agent_mcp_discovery_failed",
                     server_id = %server.id,
@@ -1588,7 +1669,15 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
         }
         if let Some(app) = app {
             match discover_managed_linear(app, sandboxed.then_some(workspace).flatten()).await {
-                Ok(Some((server, tools))) => next.register_managed_linear(&server, tools)?,
+                Ok(Some((server, tools))) => {
+                    let mut staged = McpToolRegistry::default();
+                    match staged.register_managed_linear(&server, tools) {
+                        Ok(()) => next.tools.extend(staged.tools),
+                        Err(error) => {
+                            tracing::warn!(error_code = "linear_managed_mcp_discovery_failed", error = %error, "Linear hosted MCP inventory unavailable")
+                        }
+                    }
+                }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
                     error_code = "linear_managed_mcp_discovery_failed",
@@ -2223,6 +2312,15 @@ async fn session_request(
             .transport
             .as_ref()
             .is_some_and(PersistentMcpTransport::has_pending_elicitation);
+        if CLI_MCP_SCOPE.try_with(|_| ()).is_ok() && method == "tools/call" {
+            if elicitation_answer.is_some() {
+                if !has_pending_elicitation || slot.parked_call.as_ref() != Some(&params) {
+                    return Err(AgentMcpError::ToolUnavailable);
+                }
+            } else if has_pending_elicitation {
+                return Err(AgentMcpError::ToolUnavailable);
+            }
+        }
         if has_pending_elicitation {
             if let Some(cached) = discovery_cache_key
                 .as_ref()
@@ -2283,6 +2381,9 @@ async fn session_request(
             };
             match result {
                 Ok(value) => {
+                    if method == "tools/call" {
+                        slot.parked_call = None;
+                    }
                     if let Some(key) = discovery_cache_key.as_ref() {
                         slot.discovery_pages.insert(key.clone(), value.clone());
                     }
@@ -2291,6 +2392,12 @@ async fn session_request(
                 // Discovery/listing is read-only and can be retried after a
                 // reconnect. A tool call may already have mutated remote
                 // state before its response was lost, so never replay it.
+                Err(AgentMcpError::ElicitationRequired(message)) => {
+                    if method == "tools/call" {
+                        slot.parked_call = Some(params.clone());
+                    }
+                    return Err(AgentMcpError::ElicitationRequired(message));
+                }
                 Err(AgentMcpError::Transport) if attempt == 0 && method != "tools/call" => {
                     slot.close().await;
                 }
@@ -2332,6 +2439,7 @@ async fn persistent_session(
                 next_request_id: 2,
                 transport: None,
                 discovery_pages: BTreeMap::new(),
+                parked_call: None,
             }))
         })
         .clone()
@@ -2344,7 +2452,10 @@ fn session_key(
     let workspace = sandbox_workspace
         .and_then(|path| path.canonicalize().ok())
         .unwrap_or_default();
-    format!("{}:{}", server.id, workspace.display())
+    let base = format!("{}:{}", server.id, workspace.display());
+    CLI_MCP_SCOPE
+        .try_with(|(_, scope)| format!("cli:{scope}:{base}"))
+        .unwrap_or(base)
 }
 
 fn session_fingerprint(
@@ -2809,6 +2920,7 @@ impl McpSessionSlot {
         }
         self.transport = None;
         self.discovery_pages.clear();
+        self.parked_call = None;
     }
 }
 
@@ -2845,7 +2957,21 @@ pub(crate) async fn retire_server_sessions(server_id: &str) {
         let mut sessions = sessions.lock().await;
         let keys = sessions
             .keys()
-            .filter(|key| key.starts_with(&format!("{server_id}:")))
+            .filter(|key| {
+                let server_prefix = format!("{server_id}:");
+                match CLI_MCP_SCOPE.try_with(|(_, scope)| format!("cli:{scope}:{server_prefix}")) {
+                    Ok(prefix) => key.starts_with(&prefix),
+                    // Disconnect/shutdown outside an invocation retires every
+                    // scope for this server; a CLI failure retires only its own.
+                    Err(_) => {
+                        key.starts_with(&server_prefix)
+                            || key
+                                .strip_prefix("cli:")
+                                .and_then(|rest| rest.split_once(':'))
+                                .is_some_and(|(_, rest)| rest.starts_with(&server_prefix))
+                    }
+                }
+            })
             .cloned()
             .collect::<Vec<_>>();
         keys.into_iter()
