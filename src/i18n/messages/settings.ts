@@ -262,11 +262,6 @@ export default defineMessages({
     "settings.experiments.companionPendingOn":
       "Companion pairing is saved as on and will become available after Clovy restarts.",
     "settings.experiments.companionAria": "Enable experimental Companion pairing",
-    "settings.experiments.agentRuntime": "Agent runtime",
-    "settings.experiments.agentRuntimeDescription":
-      "Restart the agent to apply the Browser use change.",
-    "settings.experiments.restarting": "Restarting...",
-    "settings.experiments.restart": "Restart agent",
     "settings.experiments.extension": "Browser extension (unpacked)",
     "settings.experiments.extensionDescription":
       "Open chrome://extensions, turn on Developer mode, choose Load unpacked, and select the revealed folder.",
@@ -633,11 +628,6 @@ export default defineMessages({
     "settings.experiments.companionPendingOn":
       "O pareamento do Companion está salvo como ativado e ficará disponível depois que o Clovy reiniciar.",
     "settings.experiments.companionAria": "Ativar o pareamento do Companion experimental",
-    "settings.experiments.agentRuntime": "Runtime do agente",
-    "settings.experiments.agentRuntimeDescription":
-      "Reinicie o agente para aplicar a mudança no uso do navegador.",
-    "settings.experiments.restarting": "Reiniciando...",
-    "settings.experiments.restart": "Reiniciar agente",
     "settings.experiments.extension": "Extensão do navegador (descompactada)",
     "settings.experiments.extensionDescription":
       "Abra chrome://extensions, ative o Modo do desenvolvedor, escolha Carregar sem compactação e selecione a pasta exibida.",

@@ -20,7 +20,6 @@ import { type MessageKey, t as translate, useT } from "../../i18n";
 import {
   CONNECTORS_CHANGED_EVENT,
   GITHUB_DEVICE_CODE_EVENT,
-  connectorsApplyRuntime,
   connectorsCancelConnect,
   connectorsConnect,
   connectorsDisconnect,
@@ -547,10 +546,8 @@ export function ConnectorsSection({
       scopes: input.scopes,
       loginHint: input.loginHint,
     });
-    // The Clovy-owned runtime derives managed Linear MCP availability from
-    // current connector state for every run. Other providers retain their
-    // existing apply behavior until their migrations are handled separately.
-    if (input.provider !== "linear") await connectorsApplyRuntime();
+    // The Clovy-owned runtime reads connector state for every run, so a new
+    // account needs no runtime apply step: refreshing Settings is enough.
     await refresh();
     return account;
   }
@@ -804,7 +801,6 @@ export function ConnectorsSection({
     setDisconnecting(true);
     try {
       const outcome = await connectorsDisconnect({ accountId: account.accountId, revoke });
-      if (account.provider !== "linear") await connectorsApplyRuntime();
       await refresh();
       setDisconnectTarget(null);
       if (outcome?.providerRevocationConfirmed === false) {

@@ -16,7 +16,7 @@ import {
   type AgentRunDto,
 } from "../lib/agent-runtime-contract";
 
-vi.mock("../lib/tauri", () => ({ explainAgentApproval: vi.fn() }));
+vi.mock("../lib/tauri", () => ({}));
 
 const createdAt = "2026-10-15T12:00:00Z";
 
@@ -101,7 +101,7 @@ describe("CLI approval cards", () => {
     expect(container.querySelector("pre")?.textContent).toBe(
       'create_routine {"name": "Daily digest"}',
     );
-    // One approval per call, and no model explanation.
+    // One approval per call.
     expect(screen.queryByText("Explain first")).toBeNull();
     expect(screen.queryByLabelText("Approve options")).toBeNull();
 
@@ -114,14 +114,16 @@ describe("CLI approval cards", () => {
     expect(onApproval).toHaveBeenLastCalledWith(expect.anything(), "deny");
   });
 
-  it("keeps the native card unchanged", () => {
+  it("keeps the native scope menu without the retired model explanation", () => {
     const item = cliApproval();
     if (item.kind === "interruption") {
       const { engine: _engine, ...native } = item.interruption;
       item.interruption = native as AgentInterruptionDto;
     }
     renderApproval(item);
-    expect(screen.getByText("Explain first")).toBeTruthy();
+    // `explain_agent_approval` left the command surface with the native
+    // runtime, so the card must not offer a button that can only fail.
+    expect(screen.queryByText("Explain first")).toBeNull();
     expect(screen.getByLabelText("Approve options")).toBeTruthy();
   });
 

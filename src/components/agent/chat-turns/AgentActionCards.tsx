@@ -1,11 +1,9 @@
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
-import { IconLightBulbSimple } from "central-icons/IconLightBulbSimple";
-import { useId, useState } from "react";
+import { useState } from "react";
 import { type TFunction, useT } from "../../../i18n";
 import type { AgentApprovalChoice, AgentChatPart } from "../../../lib/agent-chat-runtime";
-import { explainAgentApproval, type PendingBrowserApproval } from "../../../lib/tauri";
-import { Spinner } from "../../ui/Spinner";
+import type { PendingBrowserApproval } from "../../../lib/tauri";
 import {
   ApproveSplitButton,
   CollapsibleActionCard,
@@ -363,8 +361,7 @@ export function ApprovalPart({
   submitting?: AgentApprovalChoice;
 }) {
   const t = useT();
-  // Asked by a CLI turn through the approval broker: one approval per call,
-  // and no model explanation (the native explain path is not involved).
+  // Asked by a CLI turn through the approval broker: one approval per call.
   const cli = part.engine === "cli";
   const disabled = Boolean(submitting) || part.status !== "pending";
   const activeChoice = part.choice ?? submitting;
@@ -373,39 +370,6 @@ export function ApprovalPart({
   // in-progress line ("Approving once") stays visible until it resolves.
   const resolved = part.status !== "pending";
   const showResult = resolved || activeChoice !== undefined;
-  // The whole card is compact by default; expanding reveals the full body.
-  const [expanded, setExpanded] = useState(false);
-  const [explainOpen, setExplainOpen] = useState(false);
-  // "Explain first" asks the generation model what this specific request
-  // would do — the request stays parked, nothing is approved by asking.
-  // The answer is cached for the card's lifetime; an error retries on the
-  // next open and falls back to static copy meanwhile.
-  const [explanation, setExplanation] = useState<string>();
-  const [explainState, setExplainState] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const explanationId = useId();
-
-  function toggleExplain() {
-    const nextOpen = !explainOpen;
-    setExplainOpen(nextOpen);
-    // Opening the explanation auto-expands the card so the panel has room.
-    if (nextOpen) setExpanded(true);
-    if (!nextOpen || explainState === "loading" || explainState === "ready") {
-      return;
-    }
-    setExplainState("loading");
-    explainAgentApproval({
-      description: part.description,
-      command: part.command || undefined,
-    })
-      .then((response) => {
-        setExplanation(response.explanation);
-        setExplainState("ready");
-      })
-      .catch(() => {
-        setExplainState("error");
-      });
-  }
-
   // Resolved collapses to a quiet receipt row: the outcome label plus the
   // command (or description) truncated to one line, expandable to the full
   // description and command — no action buttons.
@@ -481,8 +445,7 @@ export function ApprovalPart({
     </p>
   ) : (
     // Compact footer: a split "Approve" (approves once, caret opens the scope
-    // menu) and a quiet "Deny" anchor the row; "Explain first" demotes to a
-    // plain text-level button pushed to the right edge.
+    // menu) and a quiet "Deny" anchor the row.
     <div className="agent-approval-actions">
       <ApproveSplitButton
         disabled={disabled}
@@ -498,21 +461,6 @@ export function ApprovalPart({
       >
         {t("chat.approval.deny")}
       </button>
-      {cli ? null : (
-        <button
-          type="button"
-          className="btn btn-ghost agent-approval-explain"
-          aria-expanded={explainOpen}
-          // Only advertise the panel while it's actually in the DOM (the body
-          // renders only when the card is expanded and the explanation is open).
-          aria-controls={explainOpen ? explanationId : undefined}
-          disabled={disabled}
-          onClick={toggleExplain}
-        >
-          <IconLightBulbSimple size={14} aria-hidden />
-          {explainOpen ? t("chat.approval.hideExplanation") : t("chat.approval.explainFirst")}
-        </button>
-      )}
     </div>
   );
 
@@ -521,42 +469,13 @@ export function ApprovalPart({
       title={t("chat.approval.required")}
       description={part.description}
       command={part.command ? <pre>{part.command}</pre> : null}
-      // The command is always shown; the only expandable body is the optional
-      // explanation, which its own "Explain first" button toggles.
+      // The command is always shown and there is no supplementary body.
       hasDetails={false}
-      expanded={expanded}
-      onToggleExpanded={() => {
-        const next = !expanded;
-        setExpanded(next);
-        if (!next) setExplainOpen(false);
-      }}
+      expanded={false}
+      onToggleExpanded={() => {}}
       footer={footer}
     >
-      {explainOpen ? (
-        <div className="agent-approval-explanation" id={explanationId}>
-          {explainState === "loading" ? (
-            <p className="agent-approval-explanation-loading" role="status" aria-live="polite">
-              <Spinner aria-hidden />
-              <span>{t("chat.approval.explaining")}</span>
-            </p>
-          ) : explainState === "ready" && explanation ? (
-            explanation
-              .split(/\n{2,}/)
-              .map((paragraph) => paragraph.trim())
-              .filter(Boolean)
-              .map((paragraph, index) => <p key={index}>{paragraph}</p>)
-          ) : (
-            // Generation unavailable (offline, signed out): keep the
-            // static framing rather than an empty panel.
-            <p>{t("chat.approval.pausedFallback")}</p>
-          )}
-          <p>
-            {part.allowPermanent
-              ? t("chat.approval.scopeHelpPermanent")
-              : t("chat.approval.scopeHelp")}
-          </p>
-        </div>
-      ) : null}
+      {null}
     </CollapsibleActionCard>
   );
 }

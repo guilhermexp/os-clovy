@@ -928,20 +928,6 @@ pub struct SubmitIssueReportResponse {
     pub skipped_attachment_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExplainAgentApprovalRequest {
-    pub description: String,
-    #[serde(default)]
-    pub command: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExplainAgentApprovalResponse {
-    pub explanation: String,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ProcessingStatus {

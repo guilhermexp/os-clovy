@@ -109,7 +109,7 @@ describe("pending action card styles", () => {
   it("frames the split button as an outlined container with gray-filled segments", () => {
     // The container is just a hairline outline (transparent bg) binding the two
     // segments; the gray fill lives on the buttons themselves. Approve reads as
-    // primary by being filled, against the ghost Deny/Explain — no dark or
+    // primary by being filled, against the ghost Deny — no dark or
     // colored weight. The risk lives in the request, not the button.
     const split = cssRuleFor(".agent-approval-split");
     expect(split).toContain("background: transparent;");
@@ -169,11 +169,8 @@ describe("pending action card styles", () => {
     expect(cssRuleFor(".agent-clarify-form div")).toContain("margin-top: var(--sp-1);");
   });
 
-  it("keeps Explain and Deny as plain neutral ghost buttons (only Approve is colored)", () => {
-    // Explain is no longer brand-themed — no svg brand rule, no open-state brand.
-    expect(() => cssRuleFor(".agent-approval-explain svg")).toThrow();
-    expect(() => cssRuleFor('.agent-approval-explain[aria-expanded="true"]')).toThrow();
-    // Both footer ghost buttons share a soft neutral gray hover (no exclusion
+  it("keeps Deny as a plain neutral ghost button (only Approve is colored)", () => {
+    // Footer ghost buttons share a soft neutral gray hover (no exclusion
     // for Deny, which is no longer red).
     const ghostHover = cssRuleFor(".agent-approval-actions .btn-ghost:hover:not(:disabled)");
     expect(ghostHover).toContain("background: var(--surface-subtle);");

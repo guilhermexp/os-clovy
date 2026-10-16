@@ -1106,18 +1106,6 @@ export async function submitIssueReport(request: SubmitIssueReportRequest) {
   return invoke<SubmitIssueReportResponse>("submit_issue_report", { request });
 }
 
-export type ExplainAgentApprovalResponse = {
-  explanation: string;
-};
-
-/** One-shot generation call that explains a pending approval request in
- * plain language — the agent runtime stays parked on the approval. */
-export async function explainAgentApproval(input: { description: string; command?: string }) {
-  return invoke<ExplainAgentApprovalResponse>("explain_agent_approval", {
-    request: input,
-  });
-}
-
 export async function agentFilePreview(path: string) {
   return invoke<string | null>("read_agent_artifact_preview", { request: { path } });
 }
@@ -2062,10 +2050,6 @@ export async function obsidianConfigure(vaultPath: string) {
 
 export async function obsidianDisconnect() {
   return invoke<ObsidianStatus>("obsidian_disconnect");
-}
-
-export async function connectorsApplyRuntime() {
-  return invoke<void>("connectors_apply_runtime");
 }
 
 export async function routineTrustGet(jobId: string) {

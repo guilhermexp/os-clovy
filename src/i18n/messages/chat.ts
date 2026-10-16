@@ -65,14 +65,6 @@ export default defineMessages({
     "chat.approval.approveOptions": "Approve options",
     "chat.approval.approveScope": "Approve scope",
     "chat.approval.details": "Details",
-    "chat.approval.hideExplanation": "Hide explanation",
-    "chat.approval.explainFirst": "Explain first",
-    "chat.approval.explaining": "Working out what this request does…",
-    "chat.approval.pausedFallback":
-      "Clovy is paused because this request needs your explicit permission before it can continue.",
-    "chat.approval.scopeHelp": "Approve once allows only this request. Deny blocks the request.",
-    "chat.approval.scopeHelpPermanent":
-      "Approve once allows only this request. Always allows matching requests in future sessions. Deny blocks the request.",
     "chat.approval.approvingOnce": "Approving once",
     "chat.approval.approvedOnce": "Approved once",
     "chat.approval.approvingSession": "Approving for this session",
@@ -280,15 +272,6 @@ export default defineMessages({
     "chat.approval.approveOptions": "Opções de aprovação",
     "chat.approval.approveScope": "Escopo da aprovação",
     "chat.approval.details": "Detalhes",
-    "chat.approval.hideExplanation": "Ocultar explicação",
-    "chat.approval.explainFirst": "Explicar antes",
-    "chat.approval.explaining": "Analisando o que esta solicitação faz…",
-    "chat.approval.pausedFallback":
-      "O Clovy está pausado porque esta solicitação precisa da sua permissão explícita para continuar.",
-    "chat.approval.scopeHelp":
-      "Aprovar uma vez permite apenas esta solicitação. Negar bloqueia a solicitação.",
-    "chat.approval.scopeHelpPermanent":
-      "Aprovar uma vez permite apenas esta solicitação. Sempre permite solicitações equivalentes em sessões futuras. Negar bloqueia a solicitação.",
     "chat.approval.approvingOnce": "Aprovando uma vez",
     "chat.approval.approvedOnce": "Aprovado uma vez",
     "chat.approval.approvingSession": "Aprovando para esta sessão",
