@@ -791,6 +791,73 @@ pub async fn capture_execution_revision(
     Ok(connection_revision())
 }
 
+/// Immutable action prepared before a CLI approval. Its arguments and the
+/// connection epoch stay in the host; model input never supplies a receipt.
+pub(crate) struct BrokerAction {
+    tool: String,
+    arguments: serde_json::Value,
+    revision: u64,
+}
+impl BrokerAction {
+    pub(crate) fn prepare(tool: &str, arguments: &serde_json::Value) -> Result<Self, AppError> {
+        let Some((tool, true)) = runtime_name_to_provider(tool) else {
+            return Err(AppError::new(
+                "notion_tool_not_allowed",
+                "This Notion action is not enabled.",
+            ));
+        };
+        preflight_action_arguments(tool, arguments)?;
+        Ok(Self {
+            tool: tool.into(),
+            arguments: arguments.clone(),
+            revision: connection_revision(),
+        })
+    }
+    pub(crate) fn presentation(&self) -> (String, String, Option<String>) {
+        let (title, description, _, preview) =
+            action_approval_presentation(&self.tool, &self.arguments);
+        (title, description, Some(preview))
+    }
+    /// Claims the exact broker item once. This replaces the legacy SDK's
+    /// run/call digest for CLI actions; the legacy entry points stay intact.
+    pub(crate) async fn claim(
+        &self,
+        pool: &sqlx_sqlite::SqlitePool,
+        turn: &crate::mcp_server::turns::TurnBinding,
+        approval_id: &str,
+    ) -> Result<(), AppError> {
+        ensure_connection_revision(self.revision)?;
+        let changed = sqlx::query::query("UPDATE agent_items SET payload_json = json_set(payload_json, '$.executionState', 'consumed') WHERE session_id = ? AND run_id = ? AND kind = 'interruption' AND json_extract(payload_json, '$.id') = ? AND json_extract(payload_json, '$.engine') = 'cli' AND json_extract(payload_json, '$.kind') = 'approval' AND json_extract(payload_json, '$.toolName') = ? AND json_extract(payload_json, '$.status') = 'resolved' AND json_extract(payload_json, '$.approved') = 1 AND COALESCE(json_extract(payload_json, '$.executionState'), 'unconsumed') = 'unconsumed'")
+            .bind(&turn.session_id).bind(&turn.run_id).bind(approval_id).bind(&self.tool).execute(pool).await?.rows_affected();
+        if changed != 1 {
+            return Err(AppError::new(
+                "notion_action_binding_missing",
+                "This Notion approval is unavailable or already consumed.",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) async fn execute(
+        self,
+        app: &AppHandle,
+        pool: &sqlx_sqlite::SqlitePool,
+        turn: &crate::mcp_server::turns::TurnBinding,
+        approval_id: &str,
+    ) -> Result<NotionHostedToolCallResult, AppError> {
+        self.claim(pool, turn, approval_id).await?;
+        call_hosted_action_tool_approved(
+            app,
+            NotionHostedToolCallRequest {
+                tool_name: self.tool,
+                arguments: self.arguments,
+                deadline_unix_ms: None,
+            },
+            self.revision,
+        )
+        .await
+    }
+}
+
 fn action_binding_digest(
     tool_name: &str,
     arguments: &serde_json::Value,
