@@ -1,7 +1,7 @@
 use super::skill_identity::{canonical_skill_id, read_skill_ids, reconcile_managed_obsidian_skill};
 use super::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use crate::mcp_server::tools::media::{self, parse_video_call, VideoCall, VideoJobOutcome};
 use serde_json::{json, Value};
 use sqlx::{query::query, row::Row};
 use std::{
@@ -158,12 +158,7 @@ pub async fn dispatch_tool(
         )?)
         .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))?),
         "start_recording" => {
-            let source_mode = match arguments.get("sourceMode").and_then(Value::as_str) {
-                Some("microphonePlusSystem") => {
-                    crate::domain::types::RecordingSourceMode::MicrophonePlusSystem
-                }
-                _ => crate::domain::types::RecordingSourceMode::MicrophoneOnly,
-            };
+            let source_mode = crate::agent_recorder::source_mode_argument(&arguments);
             context
                 .app
                 .state::<crate::agent_recorder::AgentRecorderBroker>()
@@ -185,8 +180,7 @@ pub async fn dispatch_tool(
                 )
                 .await
         }
-        "recording_status" => serde_json::to_value(crate::audio::capture::current_status())
-            .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string())),
+        "recording_status" => crate::mcp_server::tools::recorder::recording_status(),
         "web_search" => web(context, "/v1/web/search", &arguments).await,
         "web_fetch" => web(context, "/v1/web/fetch", &arguments).await,
         "list_files" => list_files(context, &arguments).await,
@@ -679,42 +673,27 @@ async fn generate_image(context: &ToolContext, arguments: &Value) -> Result<Valu
         safe_mode: None,
     })
     .await?;
-    persist_generated_image(context, prompt, generated).await
+    media::persist_generated_image(&artifact_target(context), prompt, generated).await
 }
 
 async fn edit_image(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
     let source = resolve_path(context, required_string(arguments, "sourcePath")?, true)?;
     let instruction = required_string(arguments, "instruction")?.trim();
-    let bytes = tokio::fs::read(&source).await.map_err(io_error)?;
-    if bytes.len() > 20 * 1024 * 1024 {
-        return Err(AppError::new(
-            "image_source_too_large",
-            "The source image exceeds the 20 MB edit limit.",
-        ));
-    }
-    let mime_type = image_mime_type(&source).ok_or_else(|| {
-        AppError::new(
-            "image_source_invalid",
-            "The source must be a PNG, JPEG, WebP, or GIF image.",
-        )
-    })?;
+    let (image, mime_type) = media::read_edit_source(&source).await?;
     let generated = crate::providers::edit_image(crate::providers::EditImageRequest {
-        image: BASE64.encode(bytes),
+        image,
         prompt: instruction.to_string(),
         request_id: context.call_id.clone(),
         mime_type: Some(mime_type.to_string()),
         model: None,
     })
     .await?;
-    persist_generated_image(context, instruction, generated).await
+    media::persist_generated_image(&artifact_target(context), instruction, generated).await
 }
 
 async fn generate_video(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
     let call = parse_video_call(arguments, context.call_id.clone())?;
-    let prompt = match &call {
-        VideoCall::Create(request) => Some(request.prompt.clone()),
-        VideoCall::Resume { .. } => None,
-    };
+    let prompt = call.prompt();
     let mut cancelled = context.cancellations.register(&context.run_id).await;
     let (job_id, outcome) = run_video_call(
         call,
@@ -728,96 +707,32 @@ async fn generate_video(context: &ToolContext, arguments: &Value) -> Result<Valu
         &mut cancelled,
     )
     .await?;
-    let (path, mime_type, model) = match outcome {
-        VideoJobOutcome::Completed {
-            path,
-            mime_type,
-            model,
-        } => (path, mime_type, model),
-        VideoJobOutcome::WaitingForProviderKey { reason } => {
-            // A normal result, not a failure: the run goes on, and the model
-            // keeps the job id to continue this same job once the key is fixed.
-            let message = waiting_for_provider_key_message(&reason);
-            return Ok(json!({
-                "status": "waitingForProviderKey",
-                "provider": crate::providers::BuiltinProvider::Fal.id(),
-                "jobId": job_id,
-                "reason": reason,
-                "message": message,
-            }));
-        }
-    };
-    let source = PathBuf::from(path);
-    let destination = resolve_path(
-        context,
-        &format!(
-            "artifacts/generated-video-{}.mp4",
-            uuid::Uuid::new_v4().simple()
-        ),
-        false,
-    )?;
-    if let Some(parent) = destination.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
+    media::finish_video_call(
+        &artifact_target(context),
+        job_id,
+        outcome,
+        prompt,
+        context.call_id.clone(),
+    )
+    .await
+}
+
+/// The session workspace and rows a native tool's artifact goes to.
+fn artifact_target(context: &ToolContext) -> media::ArtifactTarget<'_> {
+    media::ArtifactTarget {
+        pool: &context.repository.pool,
+        workspace: &context.workspace,
+        session_id: &context.session_id,
+        run_id: &context.run_id,
     }
-    tokio::fs::copy(&source, &destination)
-        .await
-        .map_err(io_error)?;
-    record_artifact_with_mime(context, &destination, "created", None, &mime_type).await?;
-    Ok(json!({
-        "mediaType": "video",
-        "path": crate::filesystem::normalize_path_for_external_use(&destination),
-        "mimeType": mime_type,
-        "model": model,
-        "prompt": prompt,
-        "requestId": context.call_id,
-        "name": destination.file_name().map(|name| name.to_string_lossy().into_owned())
-    }))
 }
 
-/// One `generate_video` call: start a new video, or continue the job an earlier
-/// call left waiting for the user's fal key. A continuation carries only the
-/// job id, so nothing in it can start another generation.
-enum VideoCall {
-    Create(crate::providers::GenerateVideoRequest),
-    Resume { job_id: String },
-}
-
-fn parse_video_call(arguments: &Value, call_id: Option<String>) -> Result<VideoCall, AppError> {
-    if let Some(job_id) = optional_nonempty_string(arguments, "jobId")? {
-        return Ok(VideoCall::Resume { job_id });
-    }
-    Ok(VideoCall::Create(crate::providers::GenerateVideoRequest {
-        prompt: required_string(arguments, "prompt")?.trim().to_string(),
-        model: None,
-        request_id: call_id,
-        duration: optional_nonempty_string(arguments, "duration")?,
-        resolution: None,
-        aspect_ratio: optional_nonempty_string(arguments, "aspectRatio")?,
-        audio: arguments.get("audio").and_then(Value::as_bool),
-    }))
-}
-
-/// Where following one video job ended, short of an error.
-#[derive(Debug, PartialEq)]
-enum VideoJobOutcome {
-    Completed {
-        path: String,
-        mime_type: String,
-        model: String,
-    },
-    /// The job stays on the server, but this desktop cannot reach it until the
-    /// user saves a valid key from the fal account that started it.
-    WaitingForProviderKey { reason: String },
-}
-
-/// Runs one call. A new video sends its single submit and follows the job it
-/// gets back; a continuation follows the named job with no submit. A failed
-/// submit is an error, never a job. Returns the job id with the outcome so a
-/// waiting result can name it.
+/// Runs one `generate_video` call until its job ends or the run is stopped
+/// (the shared loop: `media::follow_video_call`).
 async fn run_video_call<S, SFut, P, PFut>(
     call: VideoCall,
     submit: S,
-    mut poll: P,
+    poll: P,
     cancelled: &mut ToolCancellationRegistration,
 ) -> Result<(String, VideoJobOutcome), AppError>
 where
@@ -826,125 +741,14 @@ where
     P: FnMut(String) -> PFut,
     PFut: Future<Output = Result<crate::clovy_api::VideoStatusDto, AppError>>,
 {
-    let job_id = match call {
-        VideoCall::Create(request) => submit(request).await?.job_id,
-        VideoCall::Resume { job_id } => job_id,
-    };
-    loop {
-        let result = tokio::select! {
-            result = poll(job_id.clone()) => result,
-            _ = cancelled.cancelled() => return Err(video_cancelled()),
-        };
-        match result {
-            Ok(crate::clovy_api::VideoStatusDto::Processing { .. }) => {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                    _ = cancelled.cancelled() => return Err(video_cancelled()),
-                }
-            }
-            Ok(crate::clovy_api::VideoStatusDto::Failed { reason }) => {
-                return Err(AppError::new("video_generation_failed", reason));
-            }
-            Ok(crate::clovy_api::VideoStatusDto::Completed {
-                path,
-                mime_type,
-                model,
-                ..
-            }) => {
-                let outcome = VideoJobOutcome::Completed {
-                    path,
-                    mime_type,
-                    model,
-                };
-                return Ok((job_id, outcome));
-            }
-            Err(error) if video_poll_waits_for_provider_key(&error) => {
-                let outcome = VideoJobOutcome::WaitingForProviderKey { reason: error.code };
-                return Ok((job_id, outcome));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-fn video_cancelled() -> AppError {
-    AppError::new("agent_tool_cancelled", "Video generation was cancelled.")
-}
-
-/// Poll failures that leave the job on the server and clear once the user saves
-/// a valid key from the fal account that started it (a rotated key from that
-/// account works): Clovy API's three key answers, and this desktop failing to
-/// read the saved key, which keeps the poll from reaching Clovy API at all.
-fn video_poll_waits_for_provider_key(error: &AppError) -> bool {
-    matches!(
-        error.code.as_str(),
-        "fal_api_key_required"
-            | "fal_api_key_rejected"
-            | "fal_request_inaccessible"
-            | "provider_api_key_unavailable"
+    media::follow_video_call(
+        call,
+        submit,
+        poll,
+        cancelled.cancelled(),
+        media::VideoPolling::UNTIL_DONE,
     )
-}
-
-fn waiting_for_provider_key_message(reason: &str) -> &'static str {
-    if reason == "provider_api_key_unavailable" {
-        "Clovy could not read your saved fal key, so it could not check on this video. Save a valid key from the fal account that started it in Settings, then ask to continue this video."
-    } else {
-        "fal could not continue this video with the key Clovy has now. Save a valid key from the fal account that started it in Settings, then ask to continue this video."
-    }
-}
-
-async fn persist_generated_image(
-    context: &ToolContext,
-    prompt: &str,
-    generated: crate::clovy_api::GeneratedImageDto,
-) -> Result<Value, AppError> {
-    let bytes = BASE64
-        .decode(&generated.image_base64)
-        .map_err(|error| AppError::new("image_response_invalid", error.to_string()))?;
-    let extension = match generated.mime_type.as_str() {
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        _ => "png",
-    };
-    let path = resolve_path(
-        context,
-        &format!(
-            "artifacts/generated-image-{}.{}",
-            uuid::Uuid::new_v4().simple(),
-            extension
-        ),
-        false,
-    )?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
-    }
-    tokio::fs::write(&path, &bytes).await.map_err(io_error)?;
-    record_artifact_with_mime(context, &path, "created", None, &generated.mime_type).await?;
-    Ok(json!({
-        "mediaType": "image",
-        "dataUrl": format!("data:{};base64,{}", generated.mime_type, generated.image_base64),
-        "path": crate::filesystem::normalize_path_for_external_use(&path),
-        "mimeType": generated.mime_type,
-        "model": generated.model,
-        "prompt": prompt,
-        "name": path.file_name().map(|name| name.to_string_lossy().into_owned())
-    }))
-}
-
-fn image_mime_type(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("png") => Some("image/png"),
-        Some("jpg" | "jpeg") => Some("image/jpeg"),
-        Some("webp") => Some("image/webp"),
-        Some("gif") => Some("image/gif"),
-        _ => None,
-    }
+    .await
 }
 
 async fn ensure_memory_scope_enabled(
@@ -1152,21 +956,6 @@ async fn record_artifact(
         .bind(uuid::Uuid::new_v4().to_string()).bind(&context.session_id).bind(&context.run_id)
         .bind(action).bind(path.to_string_lossy().as_ref()).bind(original.map(|value| value.to_string_lossy().into_owned()))
         .bind(metadata.len() as i64).bind(crate::db::repositories::timestamp()).execute(&context.repository.pool).await?;
-    Ok(())
-}
-
-async fn record_artifact_with_mime(
-    context: &ToolContext,
-    path: &Path,
-    action: &str,
-    original: Option<&Path>,
-    mime_type: &str,
-) -> Result<(), AppError> {
-    let metadata = tokio::fs::metadata(path).await.map_err(io_error)?;
-    sqlx::query::query("INSERT INTO agent_artifacts(id, session_id, run_id, provenance, action, path, original_path, mime_type, size_bytes, available, created_at) VALUES (?, ?, ?, 'tool', ?, ?, ?, ?, ?, 1, ?)")
-        .bind(uuid::Uuid::new_v4().to_string()).bind(&context.session_id).bind(&context.run_id)
-        .bind(action).bind(path.to_string_lossy().as_ref()).bind(original.map(|value| value.to_string_lossy().into_owned()))
-        .bind(mime_type).bind(metadata.len() as i64).bind(crate::db::repositories::timestamp()).execute(&context.repository.pool).await?;
     Ok(())
 }
 
@@ -1620,27 +1409,7 @@ fn resolve_path_with_scope(
     must_exist: bool,
     scope: PathScope,
 ) -> Result<PathBuf, AppError> {
-    let requested = Path::new(requested);
-    let joined = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        context.workspace.join(requested)
-    };
-    let resolved = if must_exist || joined.exists() {
-        joined.canonicalize().map_err(io_error)?
-    } else {
-        let mut existing = joined.as_path();
-        while !existing.exists() {
-            existing = existing.parent().ok_or_else(|| {
-                AppError::new("agent_path_invalid", "Path has no existing ancestor.")
-            })?;
-        }
-        let canonical_existing = existing.canonicalize().map_err(io_error)?;
-        let suffix = joined
-            .strip_prefix(existing)
-            .map_err(|_| AppError::new("agent_path_invalid", "Path could not be resolved."))?;
-        canonical_existing.join(suffix)
-    };
+    let resolved = media::resolve_requested_path(&context.workspace, requested, must_exist)?;
     if context.safety_mode == AgentSafetyMode::Sandboxed {
         let workspace = context.workspace.canonicalize().map_err(io_error)?;
         if !is_within(&resolved, &workspace) {

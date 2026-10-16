@@ -18,7 +18,16 @@ mod connectors_tests;
 mod gateway;
 #[cfg(test)]
 mod gateway_tests;
+mod interaction;
+#[cfg(test)]
+mod interaction_tests;
+pub(crate) mod media;
+#[cfg(test)]
+mod media_tests;
 mod read;
+pub(crate) mod recorder;
+#[cfg(test)]
+mod recorder_tests;
 
 use chrono::{DateTime, Utc};
 use futures_util::future::BoxFuture;
@@ -156,6 +165,9 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     groups.push(&gateway::GATEWAY);
     groups.push(&browser::BROWSER);
     groups.push(&computer_use::COMPUTER_USE);
+    groups.push(&media::MediaTools);
+    groups.push(&recorder::RecorderTools);
+    groups.push(&interaction::InteractionTools);
     #[cfg(all(test, unix))]
     groups.push(&super::turn_tests::TurnProbe);
     groups

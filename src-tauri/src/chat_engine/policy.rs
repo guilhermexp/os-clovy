@@ -37,10 +37,11 @@ const _: () = assert!(CLI_TOOL_TIMEOUT.as_secs() > APPROVAL_TIMEOUT.as_secs());
 
 /// Whether claude's own permission requests go to Clovy's `approve_action`
 /// tool (`--permission-prompt-tool`, spike S1) and claude's built-in
-/// question tool is replaced by `request_clarification`. Both tools arrive
-/// with parity slice 2.11, which turns this on; until then claude refuses
-/// what needs approval and the refusal shows as `needsApproval`.
-pub const CLAUDE_INTERACTION_TOOLS: bool = false;
+/// question tool is replaced by `request_clarification`. On since parity
+/// slice 2.11 shipped both tools (`mcp_server/tools/interaction.rs`); off,
+/// claude refuses what needs approval and the refusal shows as
+/// `needsApproval`.
+pub const CLAUDE_INTERACTION_TOOLS: bool = true;
 
 /// The Clovy tool claude sends its permission requests to.
 pub const CLAUDE_PROMPT_TOOL: &str = "mcp__clovy__approve_action";
