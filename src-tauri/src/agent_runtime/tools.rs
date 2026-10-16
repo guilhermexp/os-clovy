@@ -479,17 +479,7 @@ async fn get_clovy_note_for_profile(
     content_offset: usize,
     transcript_offset: usize,
 ) -> Result<Value, AppError> {
-    let row = query(
-        "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, '') AS note,
-                COALESCE((SELECT text FROM transcripts t WHERE t.note_id = n.id ORDER BY t.created_at DESC LIMIT 1), '') AS transcript,
-                n.updated_at
-         FROM notes n WHERE n.id = ? AND n.profile = ?",
-    )
-    .bind(note_id)
-    .bind(profile)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::new("note_not_found", "No note with this id in the active profile."))?;
+    let row = crate::mcp_server::tools::notes::read_note(pool, profile, note_id).await?;
     let note: String = row.get("note");
     let transcript: String = row.get("transcript");
     let (content, content_offset, next_content_offset) = text_page(&note, content_offset);
@@ -529,19 +519,8 @@ async fn get_clovy_dictation_for_profile(
     dictation_id: &str,
     text_offset: usize,
 ) -> Result<Value, AppError> {
-    let row = query(
-        "SELECT id, text, language, created_at FROM dictation_history WHERE id = ? AND profile = ?",
-    )
-    .bind(dictation_id)
-    .bind(profile)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| {
-        AppError::new(
-            "dictation_not_found",
-            "No dictation with this id in the active profile.",
-        )
-    })?;
+    let row =
+        crate::mcp_server::tools::notes::read_dictation(pool, profile, dictation_id, None).await?;
     let text: String = row.get("text");
     let (page, text_offset, next_text_offset) = text_page(&text, text_offset);
     Ok(json!({
@@ -575,22 +554,7 @@ fn byte_offset(arguments: &Value, key: &str) -> Result<usize, AppError> {
 /// on a character boundary. Returns the page, its actual start, and the next
 /// page's start when text remains.
 fn text_page(text: &str, offset: usize) -> (&str, usize, Option<usize>) {
-    let start = floor_char_boundary(text, offset.min(text.len()));
-    let end = floor_char_boundary(text, start.saturating_add(NOTE_PAGE_BYTES).min(text.len()));
-    // A page always advances, even if one character were wider than a page.
-    let end = if end == start && start < text.len() {
-        start + text[start..].chars().next().map_or(0, char::len_utf8)
-    } else {
-        end
-    };
-    (&text[start..end], start, (end < text.len()).then_some(end))
-}
-
-fn floor_char_boundary(text: &str, mut index: usize) -> usize {
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
+    crate::mcp_server::tools::notes::byte_page(text, offset, NOTE_PAGE_BYTES)
 }
 
 async fn list_memories(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
@@ -2052,7 +2016,7 @@ mod tests {
             .await
             .unwrap();
         for statement in [
-            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, generated_content TEXT, edited_content TEXT, profile TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, generated_content TEXT, edited_content TEXT, profile TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)",
             "CREATE TABLE transcripts (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
             "CREATE TABLE dictation_history (id TEXT PRIMARY KEY, text TEXT NOT NULL, language TEXT, profile TEXT NOT NULL, created_at TEXT NOT NULL)",
         ] {

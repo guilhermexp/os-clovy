@@ -15,6 +15,9 @@ mod computer_use_tests;
 mod memory;
 #[cfg(test)]
 mod memory_tests;
+pub(crate) mod notes;
+#[cfg(test)]
+mod notes_tests;
 mod read;
 mod routines;
 #[cfg(test)]
@@ -154,6 +157,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     let mut groups: Vec<&'static dyn ToolGroup> = vec![&ReadTools];
     groups.push(&routines::RoutineTools);
     groups.push(&memory::MemoryTools);
+    groups.push(&notes::NoteTools);
     groups.push(&browser::BROWSER);
     groups.push(&computer_use::COMPUTER_USE);
     #[cfg(all(test, unix))]
