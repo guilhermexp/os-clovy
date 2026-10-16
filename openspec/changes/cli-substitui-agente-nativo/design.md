@@ -1,13 +1,13 @@
 # Design
 
-## Contratos (rascunho fase 0)
+## Contratos (congelados)
 
-Tipos públicos entregues em 0.2 (C4) e 0.3 (C1) na branch `cli-20261015/phase0-mcp`; o Main congela em 0.8. Caminhos relativos a `src-tauri/src/mcp_server/`.
+Proposta de congelamento preparada em 0.8 sobre `main` + `cli-20261015/phase0-engine` (0.2-0.7 entregues); o Main revisa, aplica o item pendente marcado abaixo e congela. Depois do congelamento, mudança de contrato volta ao Main e é registrada aqui. Caminhos relativos a `src-tauri/src/`.
 
-**C4, grupos de ferramentas** (`tools/mod.rs`; as ferramentas atuais estão em `tools/read.rs` como `ReadTools`, sem mudança de comportamento):
+### C4, grupos de ferramentas (`mcp_server/tools/mod.rs`, `mcp_server/protocol.rs`)
 
 ```rust
-pub struct McpData { notes, profile, memory_enabled, activity, now }   // inalterado
+pub struct McpData { notes, profile, memory_enabled, activity, now }   // inalterado; sem AppHandle
 #[derive(Clone, Copy)]
 pub struct ToolCtx<'a> {
     pub data: &'a McpData,
@@ -22,20 +22,26 @@ pub trait ToolGroup: Send + Sync {
     fn call<'a>(&'a self, ctx: &'a ToolCtx<'a>, name: &'a str, arguments: &'a Value)
         -> BoxFuture<'a, Result<Value, AppError>>;
 }
-pub fn groups() -> Vec<&'static dyn ToolGroup>;  // registro: uma linha por grupo
+pub fn groups() -> Vec<&'static dyn ToolGroup>;  // registro: uma linha por grupo (Main)
 pub fn descriptors(ctx: &ToolCtx<'_>) -> Vec<Value>;
 pub fn is_known_tool(name: &str) -> bool;
 pub async fn call(ctx: &ToolCtx<'_>, name: &str, arguments: &Value) -> Result<Value, AppError>;
 // protocol.rs
 pub async fn handle(data: &McpData, message: &Value) -> Option<Value>;    // = handle_in(&ToolCtx::unbound(data), …)
 pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value>;
+pub fn tool_result(value: &Value) -> Value;   // {content:[{type:text,text:<json>}], isError:false}
+pub fn tool_error(message: &str) -> Value;    // isError:true
 ```
 
-Regra herdada por todo grupo com `needs_turn() == true`: ausente de `tools/list` sem vínculo; `tools/call` sem vínculo devolve `isError` com texto terminado em `(turn_required)` sem executar o grupo. `ToolGroup::call` devolve `Result` (não `Option<Result>` como esboçado em §1): `owns` separa "não é meu" de "falhou". Desvio de 0.2: o `AppHandle` fica em `ToolCtx`, não em `McpData`, para que os testes e a suíte `tests/mcp_server_stdio.rs` continuem montando `McpData` sem runtime Tauri.
+- Grupo com `needs_turn() == true`: ausente de `tools/list` sem vínculo; `tools/call` sem vínculo devolve `isError` terminado em `(turn_required)` sem executar o grupo.
+- `Err(AppError)` de `ToolGroup::call` vira `isError` com texto `"<message> (<code>)"` (`protocol.rs`). O código é a parte estável para o modelo e para os testes.
+- `ToolGroup::call` devolve `Result` (não `Option<Result>` como esboçado em §1): `owns` separa "não é meu" de "falhou". O `AppHandle` fica em `ToolCtx`, não em `McpData` (desvio de §1), para os testes montarem `McpData` sem runtime Tauri.
+- **Pendente para o Main no congelamento (proposta):** acesso ao broker sem `AppHandle`. Os testes das fatias da fase 2 precisam aprovar/negar sem runtime Tauri, e `tauri` não tem a feature `test` neste repo. Proposta: `ToolCtx` ganha `pub broker: Option<&'a ApprovalBroker>`, preenchido em `mcp_server/mod.rs` a partir de `app.try_state::<ApprovalBroker>()`, e `impl ToolCtx { pub fn broker(&self) -> Result<&ApprovalBroker, AppError> }` com erro `approval_unavailable` quando ausente. Donos: `mcp_server/{tools/mod.rs,mod.rs}`, `mcp_server/turn_tests.rs` (literal de `ToolCtx`). Sem isso, cada grupo guarda o broker no próprio valor (como `ProbeWrite` em `chat_engine/binding_tests.rs`), o que não cabe num `&'static dyn ToolGroup` registrado.
 
-**C1, vínculo de turno** (`turns.rs`, `channel.rs`, `stdio.rs`, `mod.rs`):
+### C1, vínculo de turno (`mcp_server/{turns.rs,channel.rs,stdio.rs,mod.rs}`, `chat_engine/{turn.rs,mod.rs}`)
 
 ```rust
+// mcp_server/turns.rs
 pub const TOKEN_BYTES: usize = 32;                 // token = 64 hex
 pub const TURN_EXPIRED: &str = "turn_expired";     // recusa de handshake
 pub const TURN_REQUIRED: &str = "turn_required";   // erro de ferramenta
@@ -43,23 +49,23 @@ pub const TURN_REQUIRED: &str = "turn_required";   // erro de ferramenta
 pub struct TurnBinding {                           // sem o token: pode ir para log
     pub session_id: String, pub run_id: String, pub cli: CliKind,
     pub safety_mode: AgentSafetyMode, pub attended: bool,
-    pub surface: String,                           // "chat" | "home" | "note_chat" | "companion" | "routine"
+    pub surface: String,                           // "chat" (assistido) | "routine" (não assistido) hoje
 }
-#[derive(Clone, Default)] pub struct TurnRegistry;  // Arc interno
+#[derive(Clone, Default)] pub struct TurnRegistry;  // Arc interno; Debug só com a contagem
 impl TurnRegistry {
     pub fn issue(&self, binding: TurnBinding) -> String;           // token novo
     pub fn binding(&self, token: &str) -> Option<Arc<TurnBinding>>;
     pub fn bind(&self, token: &str) -> Option<BoundTurn>;          // usado pelo canal
     pub fn revoke(&self, token: &str) -> bool;                     // fecha as conexões do token
     pub fn revoke_run(&self, run_id: &str) -> usize;               // fim/falha/cancelamento
-    pub fn revoke_all(&self);                                      // shutdown
+    pub fn revoke_all(&self);                                      // reservado; ver "Encerramento"
 }
 pub struct BoundTurn { pub binding: Arc<TurnBinding>, /* sinal */ }
 impl BoundTurn { pub async fn revoked(&mut self) }
-// mod.rs
+// mcp_server/mod.rs
 impl McpServerState { pub fn turns(&self) -> &TurnRegistry }    // um registro por app, sobrevive a religar o servidor
 impl McpLaunch { pub fn for_turn(&self, token: &str) -> McpLaunch } // acrescenta ["--turn", token]
-// channel.rs
+// mcp_server/channel.rs
 pub type TurnHandler = Arc<dyn Fn(Value, Option<Arc<TurnBinding>>) -> Pin<Box<dyn Future<Output = Option<Value>> + Send>> + Send + Sync>;
 pub struct Service;  // From<Handler> (legado, ignora o vínculo) e From<TurnHandler>
 impl Listener {
@@ -68,13 +74,155 @@ impl Listener {
 }
 pub fn turn_handshake(secret: &str, turn: Option<&str>) -> Value;
 pub fn connect_turn(dir: &Path, turn: Option<&str>) -> Result<UnixStream, ClientError>;  // ClientError::TurnExpired
-// stdio.rs
+// mcp_server/stdio.rs
 pub fn parse_turn(args: &[String]) -> Result<Option<String>, String>;  // "--turn" vazio = erro de uso (saída 2)
 pub fn relay_turn(dir: &Path, turn: Option<&str>, input: impl BufRead, output: Box<dyn Write + Send>);
 pub const TURN_EXPIRED_MESSAGE: &str;  // "... (turn_expired)"
+
+// chat_engine/turn.rs (lado do motor, 0.4)
+pub struct TurnContext {                 // um turno resolvido
+    /* session_id, run_id, kind, program, env, workspace, input, */
+    pub mcp: Option<McpLaunch>,          // servidor sem vínculo; o turno acrescenta --turn
+    pub turns: Option<TurnRegistry>,     // None = servidor sem vínculo (só leitura)
+    pub safety_mode: AgentSafetyMode,
+    pub attended: bool,                  // chat true, rotinas false
+    pub images: Vec<PathBuf>,            // anexos de imagem (caminhos absolutos no workspace)
+}
+impl TurnContext { pub fn permissions(&self) -> TurnPermissions; pub fn binding(&self) -> TurnBinding }
+pub struct TurnGrant;                    // token do turno; Drop = revoke
+impl TurnGrant { pub fn issue(turns: &TurnRegistry, binding: TurnBinding) -> Self; pub fn token(&self) -> &str }
+// chat_engine/mod.rs
+pub struct CliTurnRequest { /* session_id, run_id, kind, workspace, input, */
+    pub images: Vec<PathBuf>, pub safety_mode: AgentSafetyMode, pub attended: bool }
+pub fn check_policy(kind: CliKind, attended: bool) -> Result<(), AppError>;  // agent_cli_unattended_unsupported
+pub async fn cancel_cli_run(host: &ChatEngineHost, broker: Option<&ApprovalBroker>,
+    turns: Option<&TurnRegistry>, run_id: &str) -> bool;
 ```
 
-Fio: handshake `{"clovyMcp": 1, "secret": "<hex>", "turn": "<token>"}`; `turn` ausente ou `null` = conexão sem vínculo; string desconhecida/revogada ou valor não string = `{"clovyMcp": 1, "ok": false, "error": "turn_expired"}`. O token só é consultado depois que segredo e uid conferem (segredo errado com token vivo = `unauthorized`). O token vale para várias conexões enquanto a execução vive (o relay reconecta quando a conexão cai); "uso único" = um token por execução, nunca reaproveitado. Revogar fecha só as conexões daquele token e descarta respostas pendentes; o relay então responde toda chamada com `TURN_EXPIRED_MESSAGE`. Relay antigo sem `--turn` ou app antigo que ignora `turn` = conexão sem vínculo (só leitura).
+- Fio: handshake `{"clovyMcp": 1, "secret": "<hex>", "turn": "<token>"}`; `turn` ausente ou `null` = conexão sem vínculo; string desconhecida/revogada ou valor não string = `{"clovyMcp": 1, "ok": false, "error": "turn_expired"}`. O token só é consultado depois que segredo e uid conferem. Vale para várias conexões enquanto a execução vive (o relay reconecta); um token por execução, nunca reaproveitado. Revogar fecha só as conexões daquele token e descarta respostas pendentes; chamadas novas recebem `TURN_EXPIRED_MESSAGE`; uma chamada em voo no instante da revogação recebe a mensagem de conexão caída do relay (`DROPPED_MESSAGE`). Relay antigo sem `--turn` ou app antigo que ignora `turn` = conexão sem vínculo.
+- Emissão: `execute_turn` emite o token quando o CLI aceita MCP e há `turns` (`start_cli_turn` pega `McpServerState::turns()`), monta `launch.for_turn(token)` (Claude e Copilot no arquivo temporário, Codex em `-c mcp_servers.clovy.args`) e segura o `TurnGrant` até o processo terminar; todo retorno revoga. O token não vai no prompt nem no ambiente.
+- Cancelamento: `cancel_agent_run` chama `cancel_cli_run`: `broker.cancel_run(run)` (cartões `cancelled`, ferramenta responde `run_cancelled`), `turns.revoke_run(run)`, depois `ChatEngineHost::cancel` (SIGTERM ao grupo). O ouvinte de eventos terminais do broker continua cobrindo fim e falha.
+- Encerramento: `ChatEngineHost::shutdown` cancela cada turno e espera até 5 s; o `TurnGrant` de cada turno revoga ao terminar e o processo do app sai em seguida. `revoke_all` não é chamado hoje (o registro morre com o processo); fica no contrato para o Main ligar em `shutdown.rs` se quiser revogação explícita antes do fim do processo.
+
+### C2, broker de aprovação (`approval_broker/`)
+
+```rust
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600); // < CLI_TOOL_TIMEOUT (900 s), checado em compilação
+pub const CLI_ENGINE: &str = "cli";                              // `engine` do item
+
+pub struct ApprovalTurn { pub session_id: String, pub run_id: String, pub cli: String,
+    pub safety_mode: AgentSafetyMode, pub attended: bool }
+impl From<&TurnBinding> for ApprovalTurn;                        // ctx.binding → turno do broker
+pub struct ApprovalRequest { pub tool: String, pub call_id: Option<String>, pub kind: ApprovalKind }
+pub enum ApprovalKind {
+    Approval { title: String, description: String, arguments: Value, preview: Option<String> },
+    Clarification { question: String, choices: Vec<String> },
+}
+pub enum ApprovalOutcome { Approved, Answered(String) }
+pub enum ApprovalDenial { UserDenied, TimedOut, RunCancelled, UnattendedRequiresApproval, Unavailable(String) }
+impl ApprovalDenial { pub fn code(&self) -> &'static str; pub fn message(&self) -> String }
+
+impl ApprovalBroker {               // estado Tauri (`app.state::<ApprovalBroker>()`), clonável
+    pub fn new(io: impl BrokerIo, clock: impl Clock, timeout: Duration) -> Self;  // testes: banco em memória + relógio manual
+    pub async fn request(&self, turn: &ApprovalTurn, request: ApprovalRequest)
+        -> Result<ApprovalOutcome, ApprovalDenial>;
+    pub async fn cancel_run(&self, run_id: &str) -> usize;   // pendentes da execução → run_cancelled
+    pub fn close(&self);                                     // encerramento do app
+    pub fn waiting_ids(&self) -> Vec<String>;
+}
+pub trait BrokerIo: Send + Sync + 'static { fn pool(&self) -> BoxFuture<'_, Result<SqlitePool, AppError>>;
+    fn emit(&self, session_id: &str, run_id: &str, sequence: i64, method: &str, data: Value); }
+// approval_broker/commands.rs
+pub async fn resolve_cli_interruption(app: &AppHandle, run_id: &str, interruption_id: &str, resolution: &Value)
+    -> Result<Option<AgentRunDto>, AppError>;   // Ok(None) = não é item CLI
+```
+
+| `ApprovalDenial` | `code()` (erro da ferramenta, `isError`) | Item |
+|---|---|---|
+| `UserDenied` | `user_denied` | `resolved`, `resolution: "deny"` |
+| `TimedOut` | `approval_timed_out` | `expired`, `retiredReason: "timeout"` |
+| `RunCancelled` | `run_cancelled` | `cancelled`, `retiredReason: "cancelled"` (ou `"restarted"` na abertura) |
+| `UnattendedRequiresApproval` | `unattended_requires_approval` | nenhum (sem cartão) |
+| `Unavailable(_)` | `approval_unavailable` | falha de armazenamento; a ferramenta não executa |
+
+- **Item.** Mesmo `interruption` do nativo (`id`, `sessionId`, `runId`, `status`, `createdAt`, `kind`, `toolName`, `toolCallId`, `title`, `description`, `command`, `allowAlways: false` ou `question`/`choices`) com `engine: "cli"` e `cli`. `title`/`description` vêm do código da ferramenta, nunca do modelo; `command` é gerado pelo broker de `preview` ou dos argumentos, com `sanitize_log`. `external_id` = `interruption:{run}:{id}`.
+- **Eventos.** `interruption.requested` ao pedir e `interruption.updated` (mesmo `data: {itemId, interruption}`) ao decidir, expirar ou cancelar. O broker não avança `agent_runs.last_sequence`; o frontend aplica eventos de interrupção CLI fora do portão de sequência (`src/lib/agent-runtime-adapter.ts`).
+- **Resolução.** `resolve_agent_interruption` chama `resolve_cli_interruption` primeiro; item com `engine: "cli"` nunca chega a `run.resume`. `{"kind":"approval","choice":"once"|"session"|"always"}` aprova uma vez (gravado `resolution: "once"`), `"deny"` nega; clarificação exige `{"kind":"clarification","answer"}`. Segunda resposta, resposta tardia ou de outro processo → `agent_interruption_expired`; tipo trocado → `agent_interruption_resolution_invalid`.
+- **Decisão única.** Quem remove o waiter da tabela em memória é dono do desfecho (decisão, timeout, cancelamento, queda da chamada MCP); o item só sai de `pending` uma vez (`UPDATE … WHERE status = 'pending'`). Sem pendentes, a execução volta de `waiting_for_user` a `running`.
+- **Fim da execução.** `setup` escuta `run.completed`/`run.cancelled`/`run.failed` e chama `cancel_run`; `cancel_cli_run` cancela antes de parar o processo. `close()` roda em `RunEvent::ExitRequested`. Na abertura, `store::cancel_stale` marca `cancelled` os itens CLI pendentes de outro processo e encerra a execução como `cancelled`.
+- **Companion (D4).** O telefone recebe `waitingForUser` pelo evento `interruption.requested` e um aviso de que o pedido aguarda resposta no Mac. Nenhuma resposta remota para itens CLI nesta fase; `computer_use` pelo telefone é a fatia 2.6.
+
+### C3, política de permissões (`chat_engine/policy.rs`, consumida por `chat_engine/cli.rs`)
+
+```rust
+pub const CLI_TOOL_TIMEOUT: Duration = Duration::from_secs(900);  // claude MCP_TOOL_TIMEOUT, codex tool_timeout_sec (S3)
+pub const CLAUDE_INTERACTION_TOOLS: bool = false;   // 2.11 liga: --permission-prompt-tool + --disallowedTools
+pub const CLAUDE_PROMPT_TOOL: &str = "mcp__clovy__approve_action";
+pub const FORBIDDEN: &[&str];                       // fragmentos proibidos em qualquer argv
+#[derive(Clone, Copy)] pub struct TurnPermissions { pub safety_mode: AgentSafetyMode, pub attended: bool }
+pub struct TurnPolicy { pub args: Vec<String>, pub mcp_args: Vec<String>, pub env: Vec<(&'static str, String)> }
+pub fn turn_policy(kind: CliKind, permissions: TurnPermissions) -> TurnPolicy;
+pub fn image_args(kind: CliKind, images: &[PathBuf]) -> Vec<String>;   // codex: --image por anexo
+pub fn forbidden_in(arg: &str) -> Option<&'static str>;
+// cli.rs
+pub fn turn_invocation(kind, prompt, conversation, mcp: Option<&McpLaunch>, scratch,
+    permissions: TurnPermissions, images: &[PathBuf]) -> TurnInvocation;  // + set_env
+```
+
+| Turno | Claude Code | Codex |
+|---|---|---|
+| Assistido, `sandboxed` | `--permission-mode default`; com o servidor do Clovy `--allowedTools mcp__clovy__*`; env `MCP_TOOL_TIMEOUT=900000` | `-c sandbox_mode="workspace-write"`, `-c sandbox_workspace_write.network_access=false`, `-c approval_policy="never"`, `-c web_search="live"` |
+| Assistido, `unrestricted` (D1) | `--permission-mode acceptEdits` (edições no workspace; shell e o resto continuam perguntando), resto igual | igual, com `network_access=true` (escrita ainda só no workspace) |
+| Não assistido (rotinas) | `--permission-mode default --tools Read,Grep,Glob,WebSearch,WebFetch --allowedTools Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__* --strict-mcp-config` (fase 1, revisada) | `-c sandbox_mode="read-only"`, `-c approval_policy="never"`, `-c web_search="live"` |
+| Com o servidor do Clovy, todo turno Codex | n/a | `-c mcp_servers.clovy.default_tools_approval_mode="approve"` (S2, só o servidor `clovy`) e `-c mcp_servers.clovy.tool_timeout_sec=900` |
+| Quando `CLAUDE_INTERACTION_TOOLS` (2.11) | `--permission-prompt-tool mcp__clovy__approve_action --disallowedTools mcp__clovy__approve_action AskUserQuestion` (S1) | n/a |
+
+- pi, agy, cursor-agent e copilot não têm linha: modo não interativo padrão, só turnos assistidos (`check_policy`).
+- Prompt sempre por stdin no Claude e no Codex (S1: listas variádicas). No Codex, `--image` vem antes dos `-c` (o `--image` de `exec` também é variádico); caminho com vírgula fica só no manifesto. Claude lê imagens pelo manifesto.
+- Turnos assistidos nunca levam `--strict-mcp-config` (D7). `--allowedTools` em turno assistido só `mcp__clovy__*`; a única exceção é o conjunto só-leitura das rotinas.
+- Proibidos em qualquer combinação (`FORBIDDEN`, teste de varredura): `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `bypassPermissions`, `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access`, `--approve-for-me`, `--yolo`, `--full-auto`, `--always-approve`, `--allow-all`, `--allow-all-tools`, `--approve-mcps`.
+
+### Exemplo mínimo: grupo de escrita com broker e vínculo
+
+Assume a proposta pendente de C4 (`ctx.broker()`); até ela, o grupo obtém o broker de `ctx.app` (`app.state::<ApprovalBroker>()`). Versão executável com o broker no valor do grupo: `ProbeWrite` em `chat_engine/binding_tests.rs`.
+
+```rust
+pub struct NotesWrite;
+pub const SAVE_THING: &str = "save_thing";
+
+impl ToolGroup for NotesWrite {
+    fn owns(&self, name: &str) -> bool { name == SAVE_THING }
+    fn descriptors(&self, _ctx: &ToolCtx<'_>) -> Vec<Value> {
+        vec![json!({ "name": SAVE_THING, "description": "…", "inputSchema": { "type": "object" } })]
+    }
+    fn call<'a>(&'a self, ctx: &'a ToolCtx<'a>, name: &'a str, arguments: &'a Value)
+        -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(async move {
+            // needs_turn() == true: tools::call só chega aqui com vínculo.
+            let binding = ctx.binding.ok_or_else(|| AppError::new(TURN_REQUIRED, "…"))?;
+            let request = ApprovalRequest {
+                tool: name.to_string(),
+                call_id: None,
+                kind: ApprovalKind::Approval {
+                    title: "Save a thing".into(),                 // texto do app, nunca do modelo
+                    description: "Clovy saves one thing in this session.".into(),
+                    arguments: arguments.clone(),
+                    preview: None,
+                },
+            };
+            ctx.broker()?
+                .request(&ApprovalTurn::from(binding), request)
+                .await
+                .map_err(|denial| AppError::new(denial.code(), denial.message()))?;
+            // Só depois da aprovação: escrever, usando binding.session_id/run_id.
+            Ok(json!({ "saved": true }))
+        })
+    }
+}
+// tools/mod.rs (Main): groups.push(&notes::NotesWrite);
+```
+
+Teste da fatia: `TurnRegistry` + `Listener::start_with_turns` + `stdio::relay_turn` com o token, broker com `BrokerIo` em memória, resolução por `approval_broker::commands::resolve`; aprovar, negar, cancelar e conexão sem vínculo (`turn_required`), como `chat_engine/binding_tests.rs`.
 
 ## Context
 
@@ -145,7 +293,7 @@ Novo módulo `src-tauri/src/approval_broker/` (`mod.rs`, `store.rs`, `commands.r
 
 ### 3. Política de permissões (contrato compartilhado C3)
 
-Novo `src-tauri/src/chat_engine/policy.rs` produz flags a partir de `(cli, safety_mode, attended)`; `CliTurnRequest` e `TurnContext` ganham `safety_mode` e `attended`.
+Novo `src-tauri/src/chat_engine/policy.rs` produz flags a partir de `(cli, safety_mode, attended)`; `CliTurnRequest` e `TurnContext` ganham `safety_mode` e `attended`. Tabela original abaixo; a vigente, com os ajustes de S1-S5 e D1, está em "Contratos (congelados)", C3.
 
 | Caso | Claude Code | Codex |
 |---|---|---|
@@ -180,54 +328,6 @@ Nunca: `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, 
 **Histórico**: sessões nativas continuam legíveis (itens e artefatos são agnósticos de motor). Próxima mensagem numa sessão nativa vai para o CLI padrão com o histórico prefixado (`turn.rs:616-657`). `retry_agent_run` de execução nativa mapeia para o CLI padrão. Execuções `waiting_for_user` nativas são encerradas como `cancelled` por migração. Segredos órfãos do serviço `co.opensoftware.clovy.agent-secrets` são apagados uma vez.
 
 **ADRs**: rascunho ADR-0063 nesta change (broker e escrita no MCP). Na fase 4, ADR nova que supera ADR-0038, ADR-0040, ADR-0013, as partes de runtime de ADR-0039 (rotinas e MCP continuam, agora sobre CLI) e reancora ADR-0053 no broker; ADR-0058 recebe adendo apontando para a ADR-0063; `spec/mcp-tool-naming.md` passa a apontar `src-tauri/src/mcp_server/tools/` e o delta `clovy-mcp-server` como dono dos nomes.
-
-## Contratos (rascunho fase 0) — broker
-
-Implementado em `src-tauri/src/approval_broker/` (tarefa 0.5). Rascunho até o congelamento em 0.8.
-
-```rust
-// approval_broker/mod.rs
-pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600); // < 900 s passados ao CLI (§3)
-pub const CLI_ENGINE: &str = "cli";                              // `engine` do item
-
-pub struct ApprovalTurn {          // valores simples; o Main mapeia `TurnBinding` para cá em 0.8
-    pub session_id: String,
-    pub run_id: String,
-    pub cli: String,               // "claude", "codex", ...
-    pub safety_mode: AgentSafetyMode,
-    pub attended: bool,            // false = rotina: negação imediata
-}
-pub struct ApprovalRequest { pub tool: String, pub call_id: Option<String>, pub kind: ApprovalKind }
-pub enum ApprovalKind {
-    Approval { title: String, description: String, arguments: Value, preview: Option<String> },
-    Clarification { question: String, choices: Vec<String> },
-}
-pub enum ApprovalOutcome { Approved, Answered(String) }
-pub enum ApprovalDenial { UserDenied, TimedOut, RunCancelled, UnattendedRequiresApproval, Unavailable(String) }
-impl ApprovalDenial { pub fn code(&self) -> &'static str; pub fn message(&self) -> String }
-
-impl ApprovalBroker {               // estado Tauri (`app.state::<ApprovalBroker>()`), clonável
-    pub async fn request(&self, turn: &ApprovalTurn, request: ApprovalRequest)
-        -> Result<ApprovalOutcome, ApprovalDenial>;
-    pub async fn cancel_run(&self, run_id: &str) -> usize;   // pendentes da execução → run_cancelled
-    pub fn close(&self);                                     // encerramento do app
-}
-```
-
-| `ApprovalDenial` | `code()` (erro da ferramenta, `isError`) | Item |
-|---|---|---|
-| `UserDenied` | `user_denied` | `resolved`, `resolution: "deny"` |
-| `TimedOut` | `approval_timed_out` | `expired`, `retiredReason: "timeout"` |
-| `RunCancelled` | `run_cancelled` | `cancelled`, `retiredReason: "cancelled"` (ou `"restarted"` na abertura) |
-| `UnattendedRequiresApproval` | `unattended_requires_approval` | nenhum (sem cartão) |
-| `Unavailable(_)` | `approval_unavailable` | falha de armazenamento; a ferramenta não executa |
-
-- **Item.** Mesmo `interruption` do nativo (`id`, `sessionId`, `runId`, `status`, `createdAt`, `kind`, `toolName`, `toolCallId`, `title`, `description`, `command`, `allowAlways: false` ou `question`/`choices`) com `engine: "cli"` e `cli`. `title`/`description` vêm do código da ferramenta; `command` é gerado pelo broker de `preview` ou dos argumentos, com `sanitize_log`. `external_id` = `interruption:{run}:{id}`.
-- **Eventos.** `interruption.requested` ao pedir e `interruption.updated` (novo, mesmo `data: {itemId, interruption}`) ao decidir, expirar ou cancelar. O broker não avança `agent_runs.last_sequence` (o turno CLI numera os próprios eventos); o frontend aplica eventos de interrupção CLI fora do portão de sequência (`src/lib/agent-runtime-adapter.ts`).
-- **Resolução.** `resolve_agent_interruption` chama `approval_broker::commands::resolve_cli_interruption` primeiro; item com `engine: "cli"` nunca chega a `run.resume`. `once`/`session`/`always` aprovam uma vez (gravado `resolution: "once"`); clarificação exige `answer` (texto livre ou opção). Segunda resposta, resposta tardia ou de outro processo → `agent_interruption_expired`; tipo trocado → `agent_interruption_resolution_invalid`.
-- **Decisão única.** Quem remove o waiter da tabela em memória é dono do desfecho (decisão, timeout, cancelamento, queda da chamada MCP); o item só sai de `pending` uma vez (`UPDATE … WHERE status = 'pending'`). Sem pendentes na execução, ela volta de `waiting_for_user` a `running`.
-- **Fim da execução.** `setup` escuta `run.completed`/`run.cancelled`/`run.failed` em `clovy://agent-runtime-event` e chama `cancel_run`; assim `cancel_agent_run` (que para o turno CLI) cancela o cartão sem desvio no próprio comando. `close()` roda em `RunEvent::ExitRequested`. Na abertura, `store::cancel_stale` marca `cancelled` os itens CLI pendentes de outro processo e encerra a execução como `cancelled`.
-- **Companion (D4).** O telefone recebe `waitingForUser` pelo evento `interruption.requested` como hoje e, na lista de mensagens, um aviso de que o pedido aguarda resposta no Mac. Nenhuma resposta remota para itens CLI nesta fase; `computer_use` respondível pelo telefone é a fatia 2.6.
 
 ## Spikes obrigatórios (fase 0, antes das fatias)
 
