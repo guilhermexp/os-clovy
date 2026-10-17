@@ -115,3 +115,14 @@ describe("dictation helper: paste without a fixed wait (D6)", () => {
     expect(wait).toMatch(/waitForActivation\(\s*of: target,[\s\S]*settleAfterActivation: true/);
   });
 });
+
+describe("dictation helper: reports the take's length (R7)", () => {
+  it("sends the finished file's length with recording_ready", () => {
+    const ready = code(body("private func emitRecordingReady("));
+    expect(ready).toContain("audioDurationSeconds(at: recordingURL)");
+    expect(ready).toContain('basePayload["audioDurationSeconds"]');
+    expect(ready.indexOf('basePayload["audioDurationSeconds"]')).toBeLessThan(
+      ready.indexOf('emit("recording_ready", basePayload)'),
+    );
+  });
+});
