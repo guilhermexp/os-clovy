@@ -95,3 +95,23 @@ describe("dictation helper: ready before the first press (D4)", () => {
     expect(code(body("func shutdown()"))).toContain("discardPreparedRecorder()");
   });
 });
+
+describe("dictation helper: paste without a fixed wait (D6)", () => {
+  it("pastes at once into a target that was already frontmost", () => {
+    const paste = code(body("static func paste(_ text: String, takeID: String?)"));
+    expect(paste).toContain("let targetWasActive = target.isActive");
+    expect(paste).toContain("settleAfterActivation: !targetWasActive");
+    const wait = code(body("private static func waitForActivation("));
+    const immediate = wait.indexOf("guard settleAfterActivation else");
+    const settle = wait.indexOf("activationSettleDelay");
+    expect(immediate).toBeGreaterThan(-1);
+    expect(settle).toBeGreaterThan(immediate);
+    expect(wait.slice(immediate, settle)).toContain("completion(true)");
+  });
+
+  it("still polls and settles for a target it had to activate", () => {
+    const wait = code(body("private static func waitForActivation("));
+    expect(wait).toContain("activationPollInterval");
+    expect(wait).toMatch(/waitForActivation\(\s*of: target,[\s\S]*settleAfterActivation: true/);
+  });
+});
