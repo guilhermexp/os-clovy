@@ -83,7 +83,7 @@ os-clovy/
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/day_intelligence/ # distillation + local embeddings, hourly reports, workstreams, day summary/standup, schedule, notifications (docs/day-intelligence.md; tests: `cargo test day_intelligence`)
 │   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated local socket, read-only tools/resources (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
-│   ├── src/chat_engine/     # agent CLIs as a chat session's engine: resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
+│   ├── src/chat_engine/     # agent CLIs as a chat session's engine (Home included, ADR-0064): resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface; every command invoked from `src/` must be in `lib.rs` `generate_handler!` (guard: `src/test/tauri-command-registry.test.ts`)
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060)
 ├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)
