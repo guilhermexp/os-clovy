@@ -424,7 +424,24 @@ pub struct HotkeyStatus {
 /// Only an explicit user drag is remembered within this process. Resizes and
 /// native startup moves must never replace the configured screen-edge anchor.
 pub struct HudPosition {
-    inner: Mutex<Option<(i32, i32)>>,
+    inner: Mutex<HudPositionState>,
+}
+
+#[derive(Default)]
+struct HudPositionState {
+    saved: Option<(i32, i32)>,
+}
+
+impl HudPositionState {
+    fn begin_drag(&mut self, position: (i32, i32)) {
+        self.saved = Some(position);
+    }
+
+    fn resized(&mut self, position: (i32, i32)) {
+        if self.saved.is_some() {
+            self.saved = Some(position);
+        }
+    }
 }
 
 pub struct ShortcutActivationState {
@@ -1429,7 +1446,7 @@ fn default_shortcut_for_kind(kind: DictationShortcutKind) -> DictationShortcutSe
 
 pub fn setup(app: &mut tauri::App) {
     app.manage(HudPosition {
-        inner: Mutex::new(None),
+        inner: Mutex::new(HudPositionState::default()),
     });
     app.manage(HudHoverState {
         stop_bounds: Mutex::new(None),
@@ -1670,7 +1687,7 @@ pub fn set_dictation_hud_placement(
     })?;
     if let Some(position) = app.try_state::<HudPosition>() {
         if let Ok(mut saved) = position.inner.lock() {
-            *saved = None;
+            saved.saved = None;
         }
     }
     if let Some(hud) = app.get_webview_window("hud") {
@@ -2179,7 +2196,7 @@ pub fn dictation_hud_start_drag(app: AppHandle) {
             app_for_drag.try_state::<HudPosition>(),
         ) {
             if let Ok(mut saved) = state.inner.lock() {
-                *saved = Some((position.x, position.y));
+                saved.begin_drag((position.x, position.y));
             }
         }
     });
@@ -2233,9 +2250,7 @@ fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: b
     let _ = hud.set_position(PhysicalPosition::new(target_x, target_y));
     if let Some(state) = hud.app_handle().try_state::<HudPosition>() {
         if let Ok(mut saved) = state.inner.lock() {
-            if saved.is_some() {
-                *saved = Some((target_x, target_y));
-            }
+            saved.resized((target_x, target_y));
         }
     }
 }
@@ -7626,7 +7641,7 @@ fn position_hud_window(app: &AppHandle, hud: &WebviewWindow) {
     // Clovy resets the HUD to the configured edge so it can't end up lost on a
     // monitor that's no longer connected.
     if let Some(state) = app.try_state::<HudPosition>() {
-        let saved = state.inner.lock().ok().and_then(|guard| *guard);
+        let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
             if hud_position_is_visible(hud, x, y, window_size) {
                 let _ = hud.set_position(PhysicalPosition::new(x, y));
@@ -7654,7 +7669,7 @@ fn current_or_next_hud_position(
     }
 
     if let Some(state) = app.try_state::<HudPosition>() {
-        let saved = state.inner.lock().ok().and_then(|guard| *guard);
+        let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
             if hud_position_is_visible(hud, x, y, window_size) {
                 return Some(PhysicalPosition::new(x, y));
@@ -8143,6 +8158,24 @@ pub fn key_code_for_code(code: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictation_hud_drag_start_does_not_replace_the_last_completed_drag() {
+        let mut state = HudPositionState {
+            saved: Some((500, 900)),
+        };
+        state.begin_drag((864, 1120));
+        assert_eq!(state.saved, Some((500, 900)));
+    }
+
+    #[test]
+    fn dictation_hud_prompt_resize_does_not_replace_the_saved_dictation_drag() {
+        let mut state = HudPositionState {
+            saved: Some((500, 900)),
+        };
+        state.resized((749, 42));
+        assert_eq!(state.saved, Some((500, 900)));
+    }
 
     #[test]
     fn dictation_hud_origin_uses_the_selected_work_area_edge_at_each_scale() {
