@@ -22,7 +22,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Prova 
 
 ## 4. Prova
 
-- [ ] 4.1 `make verify` sem falhas novas.
+- [x] 4.1 `make verify` sem falhas novas. Feito: exit 0, vitest 200 arquivos e 2012 testes, 48 suítes Rust ok, log em `.tmp/verify/inicio-no-claude-code/run-20261017/make-verify.log`.
 - [ ] 4.2 Prova nativa com identificador próprio e Clovy API local sem chave da OpenRouter: enviar "eae" e uma segunda mensagem que depende da primeira no Início, ver as respostas do Claude Code, reiniciar o app e ver a conversa; conferir no banco da cópia de perfil os itens da sessão do Início e no log da Clovy API nenhuma chamada a `/v1/chat/completions`. Evidência em `.tmp/verify/inicio-no-claude-code/run-<id>/report.md`.
 
 ## Workflow follow-up
