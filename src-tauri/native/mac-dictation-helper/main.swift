@@ -2629,7 +2629,9 @@ enum PasteboardInserter {
     /// whichever app is frontmost instead.
     private static let activationTimeout: TimeInterval = 1.0
     /// Frontmost app activation and key-window focus do not land at the same
-    /// instant, so a short settle delay protects the synthetic Cmd+V target.
+    /// instant, so a short settle delay protects the synthetic Cmd+V target
+    /// after the helper had to activate it. A target already frontmost when
+    /// the paste begins needs none (ditado-rapido D6).
     private static let activationSettleDelay: TimeInterval = 0.18
     /// Restore is measured from the keystroke so the target gets a full window
     /// to read the transcript from the pasteboard.
@@ -2679,7 +2681,8 @@ enum PasteboardInserter {
             return
         }
 
-        let targetActivated = target.isActive ? true : target.activate(options: [])
+        let targetWasActive = target.isActive
+        let targetActivated = targetWasActive ? true : target.activate(options: [])
         var targetPayload: [String: Any] = [
             "app": FocusTargetController.shared.pasteTargetDescription(),
             "activated": boolStatus(targetActivated),
@@ -2690,7 +2693,8 @@ enum PasteboardInserter {
 
         waitForActivation(
             of: target,
-            deadline: DispatchTime.now() + activationTimeout
+            deadline: DispatchTime.now() + activationTimeout,
+            settleAfterActivation: !targetWasActive
         ) { targetIsFrontmost in
             // Cmd+V goes wherever the window server thinks focus is, so posting
             // it while the pinned app is not frontmost types the transcript
@@ -2745,6 +2749,7 @@ enum PasteboardInserter {
     private static func waitForActivation(
         of target: NSRunningApplication,
         deadline: DispatchTime,
+        settleAfterActivation: Bool,
         completion: @escaping (_ targetIsFrontmost: Bool) -> Void
     ) {
         guard !target.isTerminated else {
@@ -2753,6 +2758,11 @@ enum PasteboardInserter {
         }
 
         if target.isActive {
+            // Frontmost before the paste began: its focus is settled already.
+            guard settleAfterActivation else {
+                completion(true)
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + activationSettleDelay) {
                 completion(!target.isTerminated && target.isActive)
             }
@@ -2768,7 +2778,12 @@ enum PasteboardInserter {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + activationPollInterval) {
-            waitForActivation(of: target, deadline: deadline, completion: completion)
+            waitForActivation(
+                of: target,
+                deadline: deadline,
+                settleAfterActivation: true,
+                completion: completion
+            )
         }
     }
 
