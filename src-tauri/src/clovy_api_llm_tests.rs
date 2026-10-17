@@ -131,6 +131,51 @@ async fn llm_note_generated_by_fake_cli_is_persisted_like_a_clovy_note() {
     );
 }
 
+#[tokio::test]
+async fn note_transcript_correction_runs_on_the_notes_cli_not_clovy_api() {
+    // ditado-rapido R2: dictation cleanup left the registry, so the note
+    // transcript correction follows the engine that writes the note.
+    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+    let _restore = Restore;
+    let bin = tempfile::tempdir().unwrap();
+    let stdin_log = bin.path().join("stdin.txt");
+    let claude = bin.path().join("claude");
+    std::fs::write(
+        &claude,
+        format!(
+            "#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Ship the Clovy updater fix.\"}}'\n",
+            stdin_log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    set_login_env_for_tests(Some(LoginEnv::from_vars(BTreeMap::from([(
+        "PATH".to_string(),
+        format!("{}:/usr/bin:/bin", bin.path().display()),
+    )]))));
+    let mut settings = crate::providers::default_settings_for_tests();
+    settings.llm_usage.notes = ProviderRef::Cli {
+        id: CliKind::Claude,
+    };
+    crate::providers::replace_current_settings_for_tests(settings);
+
+    // Clovy API is unreachable here (no sign-in), so an answer can only
+    // come from the CLI.
+    let corrected = cleanup_text(DictateCleanupRequestParams {
+        text: "ship the clovie updater fix".to_string(),
+        dictionary_context: Some("Clovy".to_string()),
+        app_context: None,
+        style: NOTE_TRANSCRIPT_CLEANUP_STYLE.to_string(),
+        session_id: "note_transcript".to_string(),
+        utterance_id: "turn-1".to_string(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(corrected, "Ship the Clovy updater fix.");
+    let prompt = std::fs::read_to_string(&stdin_log).unwrap();
+    assert!(prompt.contains("ship the clovie updater fix"));
+}
+
 /// Generates a note with the real `claude` CLI found through the real
 /// login shell (no fakes). Needs `claude` installed and signed in.
 #[tokio::test]
