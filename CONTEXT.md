@@ -295,11 +295,12 @@ focus target.
 ### Agent runtime
 
 **Home conversation**:
-Clovy's persistent relationship-level conversation for quick answers, ongoing
-context, and task handoffs. Each data partition has at most one Home backing
-session. Concrete work can start a normal focused **agent session** without
-leaving Home, and the Home backing session is omitted from focused-session
-lists and native recent-session shortcuts.
+Clovy's persistent conversation on the home screen. Each message is a turn of
+the default CLI engine in the Home backing session, which works like any CLI
+session (tools, approvals, errors) and is the conversation's store. Each data
+partition has at most one Home backing session, omitted from focused-session
+lists and native recent-session shortcuts. Task cards from older builds still
+open the focused **agent session** they started; Home no longer starts one.
 _Avoid_: dashboard, default agent session, Hermes Home.
 
 **Agent harness**:

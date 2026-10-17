@@ -2,6 +2,7 @@
 status: accepted
 date: 2026-10-15
 supersedes: ADR-0038 (in part, as the default engine), ADR-0039 (in part, the engine routines run on)
+superseded_by: ADR-0064 (in part, Home)
 ---
 
 # CLI engines are the default agent; the native harness is legacy
@@ -68,3 +69,10 @@ and features that still need it.
   user's CLI subscription.
 - A routine with an explicit model, or on a machine where chat is not on
   Claude Code or Codex, still runs on the native harness with its toolsets.
+
+## Addendum (2026-10-17): superseded in part by ADR-0064
+
+Home's triage on Clovy API (decision 3) and the consequence "Home triage still
+needs Clovy API and credits" no longer hold: Home runs entirely on the default
+CLI engine, in its hidden session
+([ADR-0064](0064-home-runs-on-the-default-cli-engine.md)).

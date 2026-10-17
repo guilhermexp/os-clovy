@@ -72,8 +72,9 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0059](adr/0059-activity-is-per-installation-not-per-data-partition.md) - activity (timeline and coding-agent blocks) belongs to the installation, not to a data partition; MCP activity tools read it like the "Today" view while notes, dictations, and memories stay in the current partition
 - [adr/0060](adr/0060-development-app-runs-as-a-signed-bundle-that-owns-its-grants.md) - `pnpm tauri:dev` runs a signed `Clovy Dev.app` beside Cargo's output that owns its privacy grants: no TCC resets, one Apple Development identity for the app and its helpers, and a launcher that disclaims the terminal's responsibility
 - [adr/0061](adr/0061-dates-and-numbers-follow-the-interface-language.md) - dates, times, and numbers always format in the interface language (supersedes ADR-0056 decision 4); the date-format preference only picks day/month order; native errors are worded by stable code in the frontend
-- [adr/0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md) - Claude Code, else Codex, is the default engine of new sessions, note chat, Home handoffs, companion sessions, and Auto routines (unattended, read-only tools plus Clovy's MCP and web); one recorded settings move; the Clovy agent stays as legacy (supersedes ADR-0038/0039 in part)
+- [adr/0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md) - Claude Code, else Codex, is the default engine of new sessions, note chat, Home (since ADR-0064), companion sessions, and Auto routines (unattended, read-only tools plus Clovy's MCP and web); one recorded settings move; the Clovy agent stays as legacy (supersedes ADR-0038/0039 in part)
 - [adr/0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md) - (proposed) CLI chat turns get Clovy's write tools through a turn-bound `clovy-mcp` connection and an in-app approval broker; external clients stay read-only; user MCP servers and Linear reach CLIs through the same gateway
+- [adr/0064](adr/0064-home-runs-on-the-default-cli-engine.md) - Home runs on the default CLI engine in its hidden session, without Clovy API; old Home turns are imported once from local storage; the Clovy API Home commands are removed (supersedes ADR-0062 in part)
 
 ## Enforceable rules (spec/)
 
@@ -108,7 +109,7 @@ Per-repo config the engineering skills read before acting (see the
 
 ## Subsystems
 
-- [home-assistant.md](home-assistant.md) - persistent Home conversation and focused-session handoff contract
+- [home-assistant.md](home-assistant.md) - persistent Home conversation on the default CLI engine, its hidden session, and the legacy history import
 - [companion-architecture.md](companion-architecture.md) - iPhone/iPad companion topology, responsibility split, data flow, and limits
 - [companion-protocol.md](companion-protocol.md) - versioned encrypted application protocol and capability allowlist
 - [companion-threat-model.md](companion-threat-model.md) - assets, attackers, mitigations, and accepted risks
