@@ -198,6 +198,7 @@ pub fn run() {
             agent_runtime::api::branch_agent_session,
             agent_runtime::api::delete_agent_session,
             agent_runtime::api::list_agent_items,
+            agent_runtime::api::import_legacy_home_turns,
             agent_runtime::api::stage_agent_attachment_bytes,
             agent_runtime::api::discard_staged_agent_attachments,
             agent_runtime::api::prune_staged_agent_attachments,
