@@ -322,3 +322,90 @@ fn the_desktop_cleanup_prompt_is_a_copy_of_clovy_apis() {
         include_str!("../../clovy-api/crates/services/src/prompts/dictate_cleanup.md")
     );
 }
+
+/// Saved-key state for the R5/R6 tests: which providers have a recorded key.
+fn record_keys(groq: bool, openrouter: bool) {
+    let mut settings = crate::providers::default_settings_for_tests();
+    settings.provider_api_keys_configured.groq = groq;
+    settings.provider_api_keys_configured.openrouter = openrouter;
+    crate::providers::replace_current_settings_for_tests(settings);
+}
+
+struct RestoreKeys;
+
+impl Drop for RestoreKeys {
+    fn drop(&mut self) {
+        let store = crate::llm::secrets::store();
+        let _ = store.delete(BuiltinProvider::Groq.secret_account());
+        let _ = store.delete(BuiltinProvider::OpenRouter.secret_account());
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_openrouter_key_does_not_block_groq_transcription() {
+    // R5: each take reads only the key of the provider it calls.
+    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+    let _restore = RestoreKeys;
+    let store = crate::llm::secrets::store();
+    store
+        .set(BuiltinProvider::Groq.secret_account(), "gsk-user")
+        .unwrap();
+    // Recorded but missing from the store: reading it is an error.
+    let _ = store.delete(BuiltinProvider::OpenRouter.secret_account());
+    record_keys(true, true);
+
+    assert_eq!(
+        dictation_user_key(BuiltinProvider::Groq)
+            .unwrap()
+            .as_deref(),
+        Some("gsk-user")
+    );
+    assert_eq!(
+        dictation_user_key(BuiltinProvider::OpenRouter)
+            .unwrap_err()
+            .code,
+        "provider_api_key_unavailable"
+    );
+    assert_eq!(
+        dictation_user_key(BuiltinProvider::Groq)
+            .unwrap()
+            .as_deref(),
+        Some("gsk-user")
+    );
+}
+
+#[tokio::test]
+async fn a_changed_key_is_used_by_the_very_next_take() {
+    // R6: no second cache that could republish a key after it changed. The
+    // order is fixed: read, change, read; the second read sees the change.
+    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+    let _restore = RestoreKeys;
+    let store = crate::llm::secrets::store();
+    store
+        .set(BuiltinProvider::Groq.secret_account(), "gsk-old")
+        .unwrap();
+    record_keys(true, false);
+    assert_eq!(
+        dictation_user_key(BuiltinProvider::Groq)
+            .unwrap()
+            .as_deref(),
+        Some("gsk-old")
+    );
+
+    store
+        .set(BuiltinProvider::Groq.secret_account(), "gsk-new")
+        .unwrap();
+    assert_eq!(
+        dictation_user_key(BuiltinProvider::Groq)
+            .unwrap()
+            .as_deref(),
+        Some("gsk-new")
+    );
+
+    let _ = store.delete(BuiltinProvider::Groq.secret_account());
+    record_keys(false, false);
+    assert_eq!(dictation_user_key(BuiltinProvider::Groq).unwrap(), None);
+}
