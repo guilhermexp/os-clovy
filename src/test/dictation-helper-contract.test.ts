@@ -130,7 +130,7 @@ describe("dictation helper: reports the take's length (R7)", () => {
 describe("dictation helper: the cue cut uses the file's own clock (R1)", () => {
   it("measures the default recorder's cue offset with currentTime", () => {
     const begin = code(body("private func beginDictationCapture()"));
-    expect(begin).toContain("audioRecorder.currentTime");
+    expect(begin).toMatch(/audioRecorder\??\.currentTime/);
     // recordingStartedAt is set before the recorder exists: not the file clock.
     expect(begin).not.toContain("recordingStartedAt");
   });

@@ -1291,6 +1291,8 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
     private let writer: AVAssetWriter
     private let writerInput: AVAssetWriterInput
     private var didStartWriting = false
+    /// The first written sample's time: the file's time zero. Set on `queue`.
+    private var firstSamplePresentationTime: CMTime?
     private var isStopping = false
     private var finishHandler: ((Error?) -> Void)?
     private let failureHandler: (Error) -> Void
@@ -1351,6 +1353,16 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         session.startRunning()
     }
 
+    /// Now, on the clock that stamps this session's samples.
+    func clockTime() -> CMTime {
+        CMClockGetTime(session.synchronizationClock ?? CMClockGetHostTimeClock())
+    }
+
+    /// When the file starts, on `clockTime()`'s clock; nil before any sample.
+    var firstSampleTime: CMTime? {
+        queue.sync { firstSamplePresentationTime }
+    }
+
     func stop(_ completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
             guard let self else {
@@ -1408,7 +1420,9 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
                 fail(writer.error ?? SelectedDeviceRecorderError.cannotStartWriter)
                 return
             }
-            writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            let firstSample = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            writer.startSession(atSourceTime: firstSample)
+            firstSamplePresentationTime = firstSample
             didStartWriting = true
         }
 
@@ -1789,6 +1803,8 @@ final class DictationController {
     /// Seconds at the start of the current take's file covered by the start
     /// cue; cut before `recording_ready`. Zero when no cue played.
     private var startCueTrimSeconds: TimeInterval = 0
+    /// When the start cue ends, on a pinned microphone's sample clock.
+    private var startCueEndClockTime: CMTime?
     private var activeTakeID: String?
     private var cancelledTakeIDs = Set<String>()
     /// Identifies the recorder whose asynchronous callbacks may mutate the
@@ -1912,10 +1928,39 @@ final class DictationController {
         guard isListening, recordingPurpose == .dictation else {
             return
         }
-        let cueOffset = ProcessInfo.processInfo.systemUptime - recordingStartedAt
-        if let cueLength = RecordingCuePlayer.play(.start) {
-            startCueTrimSeconds = cueOffset + cueLength + startCueTrimMarginSeconds
+        // Measured on the file's own clock, read just before the cue plays.
+        let fileTime = audioRecorder?.currentTime
+        let clockTime = selectedDeviceRecorder?.clockTime()
+        guard let cueLength = RecordingCuePlayer.play(.start) else {
+            return
         }
+        if let fileTime {
+            // AVAudioRecorder's file starts at record(): currentTime is how
+            // far into the file the cue begins.
+            startCueTrimSeconds = fileTime + cueLength + startCueTrimMarginSeconds
+        } else if let clockTime {
+            // A pinned microphone's file starts at its first sample, which
+            // may come after the cue started; settled when the take stops.
+            startCueEndClockTime = CMTimeAdd(
+                clockTime,
+                CMTime(seconds: cueLength, preferredTimescale: 44_100)
+            )
+        }
+    }
+
+    /// The pinned-microphone file starts at its first sample: cut only what
+    /// is left of the cue after it, nothing when the cue ended first.
+    private func settleSelectedDeviceCueTrim(firstSampleTime: CMTime?) {
+        guard
+            let cueEnd = startCueEndClockTime,
+            let firstSampleTime,
+            firstSampleTime.isNumeric
+        else {
+            startCueTrimSeconds = 0
+            return
+        }
+        let remaining = CMTimeGetSeconds(CMTimeSubtract(cueEnd, firstSampleTime))
+        startCueTrimSeconds = remaining > 0 ? remaining + startCueTrimMarginSeconds : 0
     }
 
     func stop(takeID: String? = nil) {
@@ -2365,6 +2410,9 @@ final class DictationController {
                     else {
                         return
                     }
+                    self.settleSelectedDeviceCueTrim(
+                        firstSampleTime: selectedDeviceRecorder.firstSampleTime
+                    )
                     self.selectedDeviceRecorder = nil
                     RecordingCuePlayer.play(.stop)
                     if let error {
@@ -2591,6 +2639,7 @@ final class DictationController {
         DictationEscapeCancelMonitor.shared.stop()
         maxObservedAudioLevel = 0
         startCueTrimSeconds = 0
+        startCueEndClockTime = nil
         recordingStartedAt = 0
         micTestStopWorkItem?.cancel()
         micTestStopWorkItem = nil

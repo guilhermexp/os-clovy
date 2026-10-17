@@ -76,8 +76,11 @@ a take.
 
 The start cue used to play before recording began, which kept Clovy's sound
 out of the transcript but delayed capture by the cue's length (336 ms). Now
-recording starts on the key-down and the cue plays at the same time; when the
-recording stops, the helper cuts the cue's span from the start of the file
+recording starts on the key-down and the cue plays at the same time. The
+cue's span is measured on the file's own clock: the default recorder's
+`currentTime` when the cue starts, or, for a pinned microphone (whose file
+starts at its first sample), what is left of the cue after that sample. When
+the recording stops, the helper cuts that span from the start of the file
 with a passthrough export (no re-encoding) before `recording_ready`. If the
 export fails, the uncut file is used. See the design of `ditado-rapido` (D3)
 for why this technique was chosen.
