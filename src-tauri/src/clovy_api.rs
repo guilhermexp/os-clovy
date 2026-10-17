@@ -912,11 +912,12 @@ fn normalized_language(language: Option<&str>) -> Option<&str> {
     })
 }
 
-/// Transcript cleanup (dictation and note transcripts) on the provider chosen
-/// for dictation cleanup: Clovy API by default, or the user's endpoint/CLI
-/// with the same system prompt and message layout Clovy API uses.
+/// Note transcript correction on the engine that writes the note (the notes
+/// selection): Clovy API by default, or the user's endpoint/CLI with the same
+/// system prompt and message layout Clovy API uses. Dictation cleanup has its
+/// own route ([`dictate_cleanup`]).
 pub async fn cleanup_text(params: DictateCleanupRequestParams) -> Result<String, AppError> {
-    let provider = crate::llm::provider_for(crate::llm::registry::LlmUsage::DictationCleanup);
+    let provider = crate::llm::provider_for(crate::llm::registry::LlmUsage::Notes);
     if matches!(
         provider,
         crate::llm::registry::ProviderRef::Endpoint { .. }

@@ -58,7 +58,7 @@ semaphore and follows the CLI isolation contract below.
 
 `llm::provider_for(LlmUsage::X)` returns the selection for chat, notes,
 dictation cleanup, or activity. The dictation-cleanup selection is always
-Clovy API (see below).
+Clovy API and nothing reads it (see below).
 
 ## Structured output levels
 
@@ -183,8 +183,8 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   straight to OpenRouter with the user's own key or through
   `/v1/dictate/cleanup` without it ([dictation.md](dictation.md), ADR-0065).
 - **Note transcript cleanup.** `clovy_api::cleanup_text` sends style
-  `note_transcript_cleanup` on the dictation-cleanup selection, which is now
-  always Clovy API; it selects the note correction prompt with the full
+  `note_transcript_cleanup` on the notes selection (the engine that writes the
+  note: Clovy API, the endpoint, or the CLI); it selects the note correction prompt with the full
   dictionary and earlier same-source turns as context; the Whisper prompt
   itself only carries the short dictionary hint (see
   [configuration.md](configuration.md#transcription-context)).

@@ -230,7 +230,7 @@ _Avoid_: full correction context, instructions, previous transcript.
 
 **Correction context**:
 The authorized dictionary and prior same-source transcript used by the
-selected text engine to correct a note transcript; dictation cleanup
+notes text engine to correct a note transcript; dictation cleanup
 retains its own complete dictionary context. It is not an ASR hint and does
 not include another audio source's transcript.
 _Avoid_: ASR hint, recognition prompt, cross-source transcript.
