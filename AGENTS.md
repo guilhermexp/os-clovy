@@ -388,8 +388,9 @@ For the **provider cutover**, exercise the actual desktop against the updated
 local Clovy API, not a deployed old backend. In an isolated copied profile,
 check migration without changing CLI/endpoints/history, configured/missing
 key states, remote model availability and actionable errors. Native dictation
-and notes require voice/audio actions; chat, note generation and cleanup require
-the selected text engine. Media proof includes generated/edited images,
+and notes require voice/audio actions; chat, note generation and note transcript
+cleanup require the selected text engine; dictation cleanup is optional and
+runs only on an OpenRouter model (`docs/dictation.md`). Media proof includes generated/edited images,
 non-square/oriented/extreme-ratio inputs, video generation and image animation
 through valid final assets; a recoverable BYOK poll must resume the same job
 without another submit. Search and extraction require real normalized results.
