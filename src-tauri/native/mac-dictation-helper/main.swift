@@ -2282,9 +2282,13 @@ final class DictationController {
         if let activeTakeID {
             basePayload["takeId"] = activeTakeID
         }
-        // No speech analysis before the upload (ditado-rapido D5): Whisper's
-        // empty transcript is the only "no speech" signal, decided in Rust.
-        // The peak level travels along for diagnosis only.
+        // Rust ends a take under half a second as no speech without an
+        // upload: Whisper invents text for near-empty audio (design D5).
+        if let duration = audioDurationSeconds(at: recordingURL) {
+            basePayload["audioDurationSeconds"] = String(format: "%.3f", duration)
+        }
+        // No speech classifier before the upload (ditado-rapido D5). The peak
+        // level travels along for diagnosis only.
         emit("recording_ready", basePayload)
     }
 

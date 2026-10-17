@@ -52,6 +52,8 @@ const DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS: u64 = 30_000;
 /// filler-heavy run-on speech reliably, while at 2 KB and beyond it degrades
 /// into echoing the transcript back with no punctuation at all.
 const DICTATION_CLEANUP_CHUNK_TARGET_BYTES: usize = 800;
+/// Takes with less audio than this never reach Whisper (design D5).
+const DICTATION_MIN_UPLOAD_SECONDS: f32 = 0.5;
 /// Chunks of one long transcript cleaned at the same time (design D7).
 const DICTATION_CLEANUP_PARALLEL_CHUNKS: usize = 4;
 /// App-context slug sent with dictation cleanup when the paste target is a
@@ -5454,6 +5456,7 @@ async fn transcribe_recording_ready_inner(
                 app_context,
             },
             recording.observed_audio_level,
+            recording.audio_seconds,
         ),
     )
     .await;
@@ -5840,11 +5843,21 @@ async fn run_dictation_pipeline<T, C>(
     cleanup: &DictationCleanupConfig,
     context: DictationCleanupContext,
     observed_audio_level: Option<f32>,
+    audio_seconds: Option<f32>,
 ) -> DictationPipelineResult
 where
     T: DictationTranscriber + Sync,
     C: DictationCleaner + Sync,
 {
+    if audio_seconds.is_some_and(|seconds| seconds < DICTATION_MIN_UPLOAD_SECONDS) {
+        // Whisper invents text ("Thank you.") for near-empty audio; such a
+        // take is no speech without an upload (design D5, R7).
+        tracing::info!(audio_seconds, "dictation take too short to transcribe");
+        return DictationPipelineResult {
+            outcome: whisper_no_speech_outcome(observed_audio_level),
+            cleanup_skipped: None,
+        };
+    }
     let session_id = request.session_id.clone();
     let utterance_id = request.utterance_id.clone();
     let mut cleanup_skipped = None;
@@ -6358,6 +6371,8 @@ fn recording_ready_info_from_event(
         audio_path: PathBuf::from(path),
         take_id: dictation_take_id_from_event(event).map(str::to_string),
         observed_audio_level: observed_audio_level_from_event(event),
+        audio_seconds: finite_f32_from_event_payload(event, "audioDurationSeconds")
+            .filter(|seconds| *seconds >= 0.0),
         speech_confidence: speech_confidence_from_event(event),
         speech_analysis_status: speech_analysis_status_from_event(event),
         target_bundle_id: event
@@ -6431,6 +6446,8 @@ enum SpeechAnalysisStatus {
 #[derive(Debug)]
 struct RecordingReadyInfo {
     audio_path: PathBuf,
+    /// Length of the finished file. Missing from older helpers and Windows.
+    audio_seconds: Option<f32>,
     /// Opaque helper-generated identity for this capture. Older helper builds
     /// omit it and use the coordinator's single active legacy token.
     take_id: Option<String>,
@@ -11245,6 +11262,7 @@ mod tests {
     fn low_speech_evidence_requires_both_low_audio_signals() {
         let info =
             |speech_confidence, speech_analysis_status, observed_audio_level| RecordingReadyInfo {
+                audio_seconds: None,
                 audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
                 take_id: None,
                 observed_audio_level,
@@ -11284,6 +11302,7 @@ mod tests {
     #[test]
     fn short_capture_is_quarantined_regardless_of_level_but_analysis_failure_fails_open() {
         let info = |status, speech_confidence| RecordingReadyInfo {
+            audio_seconds: None,
             audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
             take_id: None,
             observed_audio_level: Some(0.0305),
@@ -11298,6 +11317,7 @@ mod tests {
             None,
         )));
         let loud_short_capture = RecordingReadyInfo {
+            audio_seconds: None,
             audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
             take_id: None,
             observed_audio_level: Some(DICTATION_AUDIO_ACTIVITY_THRESHOLD),

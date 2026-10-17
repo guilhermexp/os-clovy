@@ -596,10 +596,11 @@ pub(crate) async fn dictate_transcribe_via<K: DictationTokens>(
             provider: response.provider,
         });
     };
-    // The same request Clovy API makes to Groq for /v1/dictate.
+    // The request Clovy API makes to Groq for /v1/dictate, but verbose, so
+    // segments Whisper itself marks as no speech can be dropped (design D5).
     let mut form = Form::new()
         .text("model", model)
-        .text("response_format", "json")
+        .text("response_format", "verbose_json")
         .part("file", audio);
     if let Some(context) = context {
         form = form.text("prompt", context);
@@ -625,17 +626,49 @@ pub(crate) async fn dictate_transcribe_via<K: DictationTokens>(
         .await
         .map_err(|_| AppError::new("provider_response_invalid", INVALID_DIRECT_RESPONSE))?;
     Ok(TranscriptionProviderResult {
-        text: body.text.trim().to_string(),
+        text: groq_speech_text(&body),
         language: body.language,
         provider: BuiltinProvider::Groq.id().to_string(),
     })
 }
+
+/// Segments at or above this `no_speech_prob` are Whisper's guesses over
+/// silence (its classic "Thank you."), not words the user said.
+const GROQ_NO_SPEECH_PROB_LIMIT: f64 = 0.6;
 
 #[derive(Deserialize)]
 struct GroqTranscription {
     text: String,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    segments: Option<Vec<GroqSegment>>,
+}
+
+#[derive(Deserialize)]
+struct GroqSegment {
+    text: String,
+    #[serde(default)]
+    no_speech_prob: Option<f64>,
+}
+
+/// The transcript without no-speech segments; the plain text when Groq sent
+/// no segments. Empty when every segment was no speech.
+fn groq_speech_text(body: &GroqTranscription) -> String {
+    let Some(segments) = body.segments.as_ref() else {
+        return body.text.trim().to_string();
+    };
+    segments
+        .iter()
+        .filter(|segment| {
+            !segment
+                .no_speech_prob
+                .is_some_and(|probability| probability >= GROQ_NO_SPEECH_PROB_LIMIT)
+        })
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 const INVALID_DIRECT_RESPONSE: &str = "The provider returned an invalid response.";

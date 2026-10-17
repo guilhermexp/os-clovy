@@ -26,12 +26,15 @@ takes never deliver), and
    No speech analysis runs before the upload.
 4. **Transcription** (`clovy_api::dictate_transcribe`). With the user's own
    Groq key it posts straight to `api.groq.com/openai/v1/audio/transcriptions`
-   (model, `response_format=json`, the short dictionary hint as `prompt`, and
+   (model, `response_format=verbose_json`, the short dictionary hint as `prompt`, and
    `language`), carrying only that key. Without one it posts to Clovy API's
    `/v1/dictate`.
-5. **No speech.** A transcript with no letters or digits (empty or only
-   punctuation) ends the take with `no_speech` and nothing is pasted. The
-   meter level is only logged.
+5. **No speech.** A take under 0.5 s of audio (`audioDurationSeconds` in
+   `recording_ready`) is not uploaded. On the direct Groq route the request
+   asks for `verbose_json` and segments with `no_speech_prob` of 0.6 or more
+   are dropped, since Whisper invents text over silence. A transcript with no
+   letters or digits left (empty or only punctuation) ends the take with
+   `no_speech` and nothing is pasted. The meter level is only logged.
 6. **Cleanup** (optional, off by default). Off, the pasted text is Whisper's
    transcript only trimmed: no filler removal and no style. With **Clean up dictation text** on
    in Settings > Style, the transcript goes to the chosen OpenRouter model in

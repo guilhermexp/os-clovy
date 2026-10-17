@@ -45,6 +45,8 @@ Na abertura do app e depois de cada tomada: o helper carrega os sons, consulta a
 
 O helper deixa de rodar `SNAudioFileAnalyzer` antes de `recording_ready`. Se o Whisper devolver texto vazio (ou só pontuação), o Rust emite `no_speech`. A heurística de nível de áudio continua só como dado de diagnóstico no log.
 
+**Proteção contra alucinação no silêncio (rodada 2, R7, 2026-10-17).** O `SNAudioFileAnalyzer` também evitava colar o que o Whisper inventa sobre áudio quase vazio ("Thank you."). No lugar dele: (a) o helper manda a duração do arquivo em `recording_ready` (`audioDurationSeconds`); tomada com menos de 0,5 s não vai ao Whisper e vira "nenhuma fala" sem colar (sem duração, helper antigo ou Windows, segue o envio); (b) na rota direta ao Groq a transcrição pede `response_format=verbose_json` e descarta os segmentos com `no_speech_prob >= 0.6`; se nada sobrar, o texto fica vazio e vira `no_speech`. A rota pela Clovy API não muda (contrato v1).
+
 ### D6. Colagem sem espera fixa
 
 Quando o destino já está ativo, cola sem `activationSettleDelay`; o polling de ativação (20 ms, até 1 s) continua para destinos que precisam ser ativados.
