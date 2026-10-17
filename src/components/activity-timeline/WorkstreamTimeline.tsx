@@ -119,14 +119,17 @@ export function WorkstreamTimeline({
       aria-label={t("activity.grid.label")}
       data-has-selection={selectedId !== null || undefined}
     >
-      <header className="ws-timeline-header">
-        <h3 className="ws-timeline-title">
-          {t("activity.grid.count", { count: layout.workstreams.length })}
-        </h3>
-        <span className="ws-timeline-total">
-          {t("activity.grid.active", { duration: formatDuration(activeMs, locale) })}
-        </span>
-      </header>
+      {/* An empty grid sits under the notice that says why; it counts nothing. */}
+      {layout.workstreams.length > 0 ? (
+        <header className="ws-timeline-header">
+          <h3 className="ws-timeline-title">
+            {t("activity.grid.count", { count: layout.workstreams.length })}
+          </h3>
+          <span className="ws-timeline-total">
+            {t("activity.grid.active", { duration: formatDuration(activeMs, locale) })}
+          </span>
+        </header>
+      ) : null}
       <div className="ws-timeline-scroller scroll-fade-mask" ref={setScroller} {...fade.props}>
         {/* biome-ignore lint/a11y/useKeyWithClickEvents: Escape clears the selection from the keyboard. */}
         {/* biome-ignore lint/a11y/noStaticElementInteractions: the click only clears the selection; cards stay the controls. */}

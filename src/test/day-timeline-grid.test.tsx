@@ -407,14 +407,13 @@ describe("Today grid of workstreams", () => {
     });
   });
 
-  it("keeps the captured sessions reachable when no workstream exists yet", async () => {
+  it("keeps the captured sessions under Sessions when no workstream exists yet", async () => {
     serve({}, "missing");
     render(<ActivityTimelineView />);
 
     expect(await screen.findByText(/Workstreams need an activity provider/)).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /Timeline grid refactor/ }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("DayGrid.tsx - os-clovy")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
     fireEvent.click(await screen.findByText("DayGrid.tsx - os-clovy"));
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("activity_timeline_session", {
@@ -437,5 +436,67 @@ describe("Today grid of workstreams", () => {
     expect(within(removed).getByTestId("app-icon-fallback")).toBeInTheDocument();
     expect(within(removed).getByText("Removed App")).toBeInTheDocument();
     expect(within(removed).getByText(formatDuration(20 * 60_000, "en"))).toBeInTheDocument();
+  });
+});
+
+// A day with captured sessions and no workstream yet keeps the grid's hour
+// rail, empty, under the notice that says why; the session list stays under
+// Sessions.
+describe("Today grid without workstreams", () => {
+  beforeEach(() => {
+    applyInterfaceLocale("en");
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  const expectEmptyGrid = async () => {
+    const grid = await screen.findByRole("region", { name: "Workstreams of the day" });
+    expect(within(grid).getByTestId("timeline-canvas")).toBeInTheDocument();
+    expect(within(grid).getAllByTestId("timeline-hour").length).toBeGreaterThan(0);
+    expect(within(grid).queryAllByRole("button")).toHaveLength(0);
+    expect(screen.queryByText("DayGrid.tsx - os-clovy")).not.toBeInTheDocument();
+    expect(document.querySelector(".timeline-session-list")).toBeNull();
+  };
+
+  it("shows the empty grid while the hours wait to be summarized", async () => {
+    serve({});
+    render(<ActivityTimelineView />);
+
+    expect(await screen.findByText(/Workstreams appear after each hour ends/)).toBeInTheDocument();
+    await expectEmptyGrid();
+    // Today keeps the current hour on the rail.
+    expect(
+      screen.getAllByTestId("timeline-hour").some((hour) => hour.dataset.current === "true"),
+    ).toBe(true);
+  });
+
+  it("shows the empty grid with the provider action when no provider is set", async () => {
+    serve({}, "missing");
+    const onNavigateToSettings = vi.fn();
+    render(<ActivityTimelineView onNavigateToSettings={onNavigateToSettings} />);
+
+    expect(await screen.findByText(/Workstreams need an activity provider/)).toBeInTheDocument();
+    await expectEmptyGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Choose a provider" }));
+    expect(onNavigateToSettings).toHaveBeenCalledWith("models");
+  });
+
+  it("shows the empty grid under the load error", async () => {
+    serve({});
+    const served = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "day_intelligence_day") throw new Error("database locked");
+      return served?.(command, args);
+    });
+    render(<ActivityTimelineView />);
+
+    expect(
+      await screen.findByText("Could not load workstreams: database locked"),
+    ).toBeInTheDocument();
+    await expectEmptyGrid();
   });
 });

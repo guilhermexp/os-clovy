@@ -129,6 +129,7 @@ describe("Today view lifecycle", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: "Previous day" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Next day" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
     await screen.findAllByText("Visual Studio Code");
 
     const before = commits;

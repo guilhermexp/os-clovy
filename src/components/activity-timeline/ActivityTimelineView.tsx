@@ -29,7 +29,7 @@ import { formatDayHeader } from "./timeline-utils";
 import { useDayIntelligence } from "./use-day-intelligence";
 import { useTimelineCanvas } from "./use-timeline-canvas";
 import { WorkstreamDetail } from "./WorkstreamDetail";
-import { layoutWorkstreamTimeline } from "./workstream-timeline-layout";
+import { layoutEmptyTimeline, layoutWorkstreamTimeline } from "./workstream-timeline-layout";
 import { WorkstreamTimeline } from "./WorkstreamTimeline";
 
 export type ActivityTimelineViewProps = {
@@ -168,6 +168,19 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
       canvas.cardGap,
       canvas.textScale,
     ],
+  );
+  const sessions = timeline?.sessions;
+  // No workstream yet: the same hour rail, empty, around what was captured.
+  const emptyLayout = useMemo(
+    () =>
+      layoutEmptyTimeline(
+        (sessions ?? []).map((session) => ({
+          startMs: Date.parse(session.startedAt),
+          endMs: Date.parse(session.endedAt),
+        })),
+        { dayStartMs, dayEndMs, nowMs: gridNowMs, canvasHeight: canvas.canvasHeight },
+      ),
+    [sessions, dayStartMs, dayEndMs, gridNowMs, canvas.canvasHeight],
   );
   // A selection is the whole workstream, whichever of its cards was clicked.
   const selectedCard =
@@ -421,9 +434,12 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
                     <span className="dot-spinner" aria-hidden="true" />
                   </div>
                 ) : (
-                  /* No workstream yet: say why, and keep the captured sessions at hand. */
+                  /* No workstream yet: say why over the empty grid; the captured
+                     sessions stay under Sessions. */
                   <>
-                    {timeline && timeline.sessions.length > 0 ? (
+                    {intelligence.error ||
+                    (timeline && timeline.sessions.length > 0) ||
+                    (intelligence.data && intelligence.data.provider !== "ready") ? (
                       <div className="timeline-notice-banner timeline-notice-muted">
                         <IconCircleInfo size={15} aria-hidden="true" />
                         <span className="timeline-notice-text">
@@ -448,13 +464,20 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
                           </button>
                         ) : null}
                       </div>
+                    ) : timeline ? (
+                      <div className="timeline-empty-message">
+                        <p>{t("activity.timeline.emptyDay")}</p>
+                      </div>
                     ) : null}
-                    {timeline ? (
-                      <TimelineSessionList
-                        sessions={timeline.sessions}
-                        gaps={timeline.gaps}
-                        selectedSessionId={selectedSessionId}
-                        onSelectSession={selectSession}
+                    {emptyLayout.hours.length > 0 ? (
+                      <WorkstreamTimeline
+                        viewportRef={canvas.ref}
+                        layout={emptyLayout}
+                        textScale={canvas.textScale}
+                        onClearSelection={() => setSelection(null)}
+                        nowMs={gridNowMs}
+                        selectedId={null}
+                        onSelect={toggleWorkstream}
                       />
                     ) : null}
                   </>

@@ -205,6 +205,8 @@ describe("ActivityTimelineView", () => {
 
   it("renders sessions, idle gap, active session, and stats matching the DTO", async () => {
     render(<ActivityTimelineView />);
+    // The captured sessions live under Sessions; Workstreams shows the grid.
+    fireEvent.click(await screen.findByRole("button", { name: "Sessions" }));
 
     // Sessions and gap rows in list
     const vsCodeElements = await screen.findAllByText("Visual Studio Code");
@@ -265,6 +267,8 @@ describe("ActivityTimelineView", () => {
 
   it("clicking a session loads and shows session detail with window titles, URL, and text excerpt", async () => {
     render(<ActivityTimelineView />);
+    // The captured sessions live under Sessions; Workstreams shows the grid.
+    fireEvent.click(await screen.findByRole("button", { name: "Sessions" }));
 
     await screen.findAllByText("Visual Studio Code");
     const sessionBtn = screen.getByText("ActivityTimelineView.tsx - os-clovy");
@@ -335,6 +339,7 @@ describe("ActivityTimelineView", () => {
 
     // Header title for today
     expect(await screen.findByRole("heading", { name: "Hoje" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Sessões" }));
 
     // Metrics in pt-BR
     expect(screen.getByText("Focado")).toBeInTheDocument();
@@ -417,6 +422,8 @@ describe("ActivityTimelineView", () => {
     });
 
     render(<ActivityTimelineView />);
+    // The captured sessions live under Sessions; Workstreams shows the grid.
+    fireEvent.click(await screen.findByRole("button", { name: "Sessions" }));
     await screen.findAllByText("Visual Studio Code");
 
     const sessionBtn = screen.getByText("ActivityTimelineView.tsx - os-clovy");

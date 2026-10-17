@@ -451,52 +451,24 @@ export function visibleNotes(
   return shown > 0 ? { shown, more: count - shown } : { shown: 0, more: 0 };
 }
 
-export function layoutWorkstreamTimeline(
-  workstreams: WorkstreamDto[],
-  options: {
-    dayStartMs: number;
-    dayEndMs: number;
-    /** Today's current time; null on other days. */
-    nowMs?: number | null;
-    timeZone?: string;
-    /** Usable canvas height: the scroller's content box. */
-    canvasHeight?: number;
-    /** Resolved --control-xs / title line box and --sp-2 from the interface. */
-    minCardHeight?: number;
-    cardGap?: number;
-    /** The interface text-size preference (1 at the default size). */
-    textScale?: number;
-  },
-): WorkstreamTimelineLayout {
-  const { dayStartMs, dayEndMs, timeZone } = options;
-  const minHeight = options.minCardHeight ?? 22;
-  const gap = options.cardGap ?? 6;
-  const textScale = options.textScale ?? 1;
-  const nowMs =
-    options.nowMs != null && options.nowMs > dayStartMs && options.nowMs < dayEndMs
-      ? options.nowMs
-      : null;
-  const hours = localHourStarts(dayStartMs, dayEndMs, timeZone);
-  const placed = workstreams.flatMap((workstream) => {
-    const entry = placeWorkstream(workstream, hours, dayStartMs, dayEndMs);
-    return entry ? [entry] : [];
-  });
-  if (placed.length === 0) {
-    return {
-      workstreams: [],
-      cards: [],
-      hours: [],
-      height: 0,
-      pxPerMin: BASE_PX_PER_MIN,
-      toPx: () => 0,
-    };
-  }
-  const busySegments = placed.flatMap((entry) => entry.whole.segments);
+type Range = { startMs: number; endMs: number };
+
+/**
+ * The hour axis around some work: the visible window, its scale, and the rail
+ * labels. Shared by the grid of workstreams and the empty grid of a day that
+ * has none yet, so both follow the same window and scale rules.
+ */
+function layoutAxis(
+  work: Range[],
+  hours: LocalHour[],
+  options: { dayStartMs: number; dayEndMs: number; nowMs: number | null; canvasHeight?: number },
+) {
+  const { dayStartMs, dayEndMs, nowMs } = options;
   const busy = (startMs: number, endMs: number) =>
-    busySegments.some((segment) => segment.startMs < endMs && segment.endMs > startMs);
+    work.some((range) => range.startMs < endMs && range.endMs > startMs);
   const window = timeWindow(
-    Math.min(...busySegments.map((segment) => segment.startMs)),
-    Math.max(...busySegments.map((segment) => segment.endMs)),
+    Math.min(...work.map((range) => range.startMs)),
+    Math.max(...work.map((range) => range.endMs)),
     nowMs,
     dayStartMs,
     dayEndMs,
@@ -524,6 +496,74 @@ export function layoutWorkstreamTimeline(
     return Math.round(piece.top + fraction * piece.height);
   };
 
+  // Labels: every hour with work and the hour right after one (where the work
+  // stopped); today, nothing after the current hour, which is always marked.
+  const marks: TimelineHour[] = [];
+  hours.forEach((hour, index) => {
+    const hourEnd = hours[index + 1]?.ms ?? dayEndMs;
+    const current = nowMs !== null && hour.ms <= nowMs && nowMs < hourEnd;
+    if (nowMs !== null && hour.ms > nowMs) return;
+    const previous = hours[index - 1];
+    const worked = busy(hour.ms, hourEnd);
+    const workedBefore = previous !== undefined && busy(previous.ms, hour.ms);
+    if (!worked && !workedBefore && !current) return;
+    marks.push({ ms: hour.ms, hour: hour.hour, top: toPx(hour.ms), current });
+  });
+
+  return { hours: marks, height, pxPerMin, toPx };
+}
+
+/** Today's current time when it falls inside the day; null otherwise. */
+function nowInDay(nowMs: number | null | undefined, dayStartMs: number, dayEndMs: number) {
+  return nowMs != null && nowMs > dayStartMs && nowMs < dayEndMs ? nowMs : null;
+}
+
+const EMPTY_LAYOUT: WorkstreamTimelineLayout = {
+  workstreams: [],
+  cards: [],
+  hours: [],
+  height: 0,
+  pxPerMin: BASE_PX_PER_MIN,
+  toPx: () => 0,
+};
+
+export function layoutWorkstreamTimeline(
+  workstreams: WorkstreamDto[],
+  options: {
+    dayStartMs: number;
+    dayEndMs: number;
+    /** Today's current time; null on other days. */
+    nowMs?: number | null;
+    timeZone?: string;
+    /** Usable canvas height: the scroller's content box. */
+    canvasHeight?: number;
+    /** Resolved --control-xs / title line box and --sp-2 from the interface. */
+    minCardHeight?: number;
+    cardGap?: number;
+    /** The interface text-size preference (1 at the default size). */
+    textScale?: number;
+  },
+): WorkstreamTimelineLayout {
+  const { dayStartMs, dayEndMs, timeZone } = options;
+  const minHeight = options.minCardHeight ?? 22;
+  const gap = options.cardGap ?? 6;
+  const textScale = options.textScale ?? 1;
+  const nowMs = nowInDay(options.nowMs, dayStartMs, dayEndMs);
+  const hours = localHourStarts(dayStartMs, dayEndMs, timeZone);
+  const placed = workstreams.flatMap((workstream) => {
+    const entry = placeWorkstream(workstream, hours, dayStartMs, dayEndMs);
+    return entry ? [entry] : [];
+  });
+  if (placed.length === 0) return EMPTY_LAYOUT;
+  const busySegments = placed.flatMap((entry) => entry.whole.segments);
+  const axis = layoutAxis(busySegments, hours, {
+    dayStartMs,
+    dayEndMs,
+    nowMs,
+    canvasHeight: options.canvasHeight,
+  });
+  const { toPx } = axis;
+
   const cards = placed.flatMap(({ stretches }) =>
     stretches.map((stretch, part): PlacedCard => {
       const cardTop = toPx(stretch.startMs);
@@ -545,20 +585,6 @@ export function layoutWorkstreamTimeline(
   );
   assignLanes(cards, minHeight, gap);
 
-  // Labels: every hour with work and the hour right after one (where the work
-  // stopped); today, nothing after the current hour, which is always marked.
-  const marks: TimelineHour[] = [];
-  hours.forEach((hour, index) => {
-    const hourEnd = hours[index + 1]?.ms ?? dayEndMs;
-    const current = nowMs !== null && hour.ms <= nowMs && nowMs < hourEnd;
-    if (nowMs !== null && hour.ms > nowMs) return;
-    const previous = hours[index - 1];
-    const worked = busy(hour.ms, hourEnd);
-    const workedBefore = previous !== undefined && busy(previous.ms, hour.ms);
-    if (!worked && !workedBefore && !current) return;
-    marks.push({ ms: hour.ms, hour: hour.hour, top: toPx(hour.ms), current });
-  });
-
   cards.sort(
     (a, b) => a.startMs - b.startMs || a.workstream.id - b.workstream.id || a.part - b.part,
   );
@@ -573,9 +599,50 @@ export function layoutWorkstreamTimeline(
         (a, b) => (firstCard.get(a.workstream.id) ?? 0) - (firstCard.get(b.workstream.id) ?? 0),
       ),
     cards: cards.map(({ realHeight: _realHeight, ...card }) => card),
-    hours: marks,
-    height: Math.max(height, ...cards.map((card) => card.top + card.height)),
-    pxPerMin,
+    hours: axis.hours,
+    height: Math.max(axis.height, ...cards.map((card) => card.top + card.height)),
+    pxPerMin: axis.pxPerMin,
     toPx,
   };
+}
+
+/**
+ * The grid of a day with no workstream yet: the same hour axis, with no
+ * cards. The captured activity stands in for the work, so the window and
+ * scale match what the grid shows once the hours are summarized; today
+ * without any captured activity, the window ends at now.
+ */
+export function layoutEmptyTimeline(
+  activity: Range[],
+  options: {
+    dayStartMs: number;
+    dayEndMs: number;
+    /** Today's current time; null on other days. */
+    nowMs?: number | null;
+    timeZone?: string;
+    canvasHeight?: number;
+  },
+): WorkstreamTimelineLayout {
+  const { dayStartMs, dayEndMs, timeZone } = options;
+  const nowMs = nowInDay(options.nowMs, dayStartMs, dayEndMs);
+  let work = activity.flatMap((range) => {
+    const startMs = Math.max(range.startMs, dayStartMs);
+    const endMs = Math.min(range.endMs, dayEndMs);
+    return endMs > startMs ? [{ startMs, endMs }] : [];
+  });
+  if (work.length === 0) {
+    // A past day with nothing captured has no hours to anchor a grid on.
+    if (nowMs === null) return EMPTY_LAYOUT;
+    work = [
+      { startMs: Math.max(dayStartMs, nowMs - (MIN_WINDOW_MS - WINDOW_PAD_MS)), endMs: nowMs },
+    ];
+  }
+  const hours = localHourStarts(dayStartMs, dayEndMs, timeZone);
+  const axis = layoutAxis(work, hours, {
+    dayStartMs,
+    dayEndMs,
+    nowMs,
+    canvasHeight: options.canvasHeight,
+  });
+  return { workstreams: [], cards: [], ...axis };
 }
