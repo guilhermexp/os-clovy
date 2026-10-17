@@ -54,9 +54,6 @@ const DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS: u64 = 30_000;
 const DICTATION_CLEANUP_CHUNK_TARGET_BYTES: usize = 800;
 /// Chunks of one long transcript cleaned at the same time (design D7).
 const DICTATION_CLEANUP_PARALLEL_CHUNKS: usize = 4;
-/// Below this input size a chunk plausibly is a single sentence, so a cleaned
-/// result without sentence punctuation is not evidence of the echo failure.
-const DICTATION_CLEANUP_RETRY_MIN_CHUNK_BYTES: usize = 300;
 /// App-context slug sent with dictation cleanup when the paste target is a
 /// known kind of app, so the cleaned text is laid out for that surface.
 /// Email is the only recognized context today.
@@ -5959,10 +5956,7 @@ async fn clean_dictation_transcript<C: DictationCleaner + Sync>(
             .iter()
             .enumerate()
             .map(|(index, chunk)| {
-                cleanup_dictation_chunk_with_retry(
-                    cleaner,
-                    call(chunk, format!("{utterance_id}-c{index}")),
-                )
+                cleanup_dictation_call(cleaner, call(chunk, format!("{utterance_id}-c{index}")))
             })
             .collect();
         let cleaned: Vec<String> = futures_util::stream::iter(calls)
@@ -6019,66 +6013,6 @@ fn join_cleaned_dictation_chunks(chunks: &[String]) -> String {
         joined.push_str(chunk);
     }
     joined
-}
-
-/// One chunk of a chunked cleanup. Transport errors propagate (the caller
-/// pastes the raw transcript). Content-quality failures get one retry — the
-/// provider is not deterministic even at temperature 0, and a retry usually
-/// punctuates a chunk the first attempt echoed — then keep the best text so
-/// one stubborn chunk never costs the rest of the dictation its cleanup.
-async fn cleanup_dictation_chunk_with_retry<C: DictationCleaner + Sync>(
-    cleaner: &C,
-    call: DictationCleanupCall,
-) -> Result<String, AppError> {
-    let chunk = call.text.clone();
-    // A distinct utterance id: the retry wants a fresh model completion, so
-    // it must not share the first attempt's idempotency identity.
-    let retry = DictationCleanupCall {
-        utterance_id: format!("{}r", call.utterance_id),
-        ..call.clone()
-    };
-    match cleanup_dictation_call(cleaner, call).await {
-        Ok(cleaned) if !cleaned_chunk_lacks_sentence_punctuation(&chunk, &cleaned) => Ok(cleaned),
-        Ok(unpunctuated) => match cleanup_dictation_call(cleaner, retry).await {
-            Ok(retried) if !cleaned_chunk_lacks_sentence_punctuation(&chunk, &retried) => {
-                Ok(retried)
-            }
-            // Keep the first attempt: unpunctuated but still cleaned
-            // (fillers stripped) beats both raw text and failing the
-            // whole dictation's cleanup over one stubborn chunk.
-            _ => {
-                tracing::warn!(
-                    chunk_bytes = chunk.len(),
-                    "dictation cleanup chunk still unpunctuated after retry",
-                );
-                Ok(unpunctuated)
-            }
-        },
-        Err(error)
-            if error.code == "provider_response_invalid"
-                || error.code == "dictation_cleanup_invalid" =>
-        {
-            match cleanup_dictation_call(cleaner, retry).await {
-                Ok(retried) => Ok(retried),
-                Err(retry_error)
-                    if retry_error.code == "provider_response_invalid"
-                        || retry_error.code == "dictation_cleanup_invalid" =>
-                {
-                    // The model refused this chunk twice; keep the speaker's
-                    // words raw rather than dropping them or failing the
-                    // whole dictation's cleanup.
-                    tracing::warn!(
-                        code = %retry_error.code,
-                        chunk_bytes = chunk.len(),
-                        "dictation cleanup chunk kept raw after retry",
-                    );
-                    Ok(chunk)
-                }
-                Err(retry_error) => Err(retry_error),
-            }
-        }
-        Err(error) => Err(error),
-    }
 }
 
 /// One cleanup chat completion plus content-quality checks, capped at the
@@ -6155,14 +6089,6 @@ fn split_dictation_cleanup_chunks(text: &str, target_bytes: usize) -> Vec<&str> 
 
 fn character_width_at(text: &str, index: usize) -> usize {
     text[index..].chars().next().map_or(1, char::len_utf8)
-}
-
-/// Whether a cleaned chunk came back without any sentence punctuation at a
-/// size where some is clearly expected — the JUN-212 failure shape, where the
-/// model echoes long run-on speech verbatim instead of punctuating it.
-fn cleaned_chunk_lacks_sentence_punctuation(chunk_input: &str, cleaned: &str) -> bool {
-    chunk_input.len() >= DICTATION_CLEANUP_RETRY_MIN_CHUNK_BYTES
-        && !cleaned.contains(['.', '!', '?', ':', ';', '\n', '。', '！', '？'])
 }
 
 /// The paste fell back to the raw ASR transcript; the pipeline already
@@ -11901,25 +11827,6 @@ mod tests {
             split_dictation_cleanup_chunks(&text, DICTATION_CLEANUP_CHUNK_TARGET_BYTES),
             vec![text.as_str()]
         );
-    }
-
-    #[test]
-    fn unpunctuated_echo_of_a_long_chunk_triggers_a_retry() {
-        let input = jun_212_style_transcript();
-        let chunk = &input[..500];
-
-        // The echo failure: same run-on words back, zero punctuation.
-        assert!(cleaned_chunk_lacks_sentence_punctuation(chunk, chunk));
-        // A punctuated cleaning passes.
-        assert!(!cleaned_chunk_lacks_sentence_punctuation(
-            chunk,
-            "The side nav looks really sharp. Meeting should be used sparingly."
-        ));
-        // A short chunk may legitimately be one unterminated sentence.
-        assert!(!cleaned_chunk_lacks_sentence_punctuation(
-            "add milk to the shopping list",
-            "add milk to the shopping list"
-        ));
     }
 
     #[test]
