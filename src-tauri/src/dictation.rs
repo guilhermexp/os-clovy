@@ -8521,6 +8521,68 @@ mod tests {
     }
 
     #[test]
+    fn default_settings_leave_dictation_cleanup_off_on_the_default_openrouter_model() {
+        let settings = DictationSettings::default();
+        assert!(!settings.cleanup_enabled);
+        assert_eq!(settings.cleanup_model, DEFAULT_DICTATION_CLEANUP_MODEL);
+        assert!(settings.cleanup_migrated);
+    }
+
+    #[test]
+    fn settings_saved_before_optional_cleanup_migrate_to_off_once() {
+        // A file from before ditado-rapido: cleanup always ran (on the CLI,
+        // an endpoint, or Clovy API). It migrates to off, once.
+        let mut settings: DictationSettings = serde_json::from_str(
+            r#"{"pushToTalkShortcut":{"keyCode":0,"code":"Fn","modifiers":{"command":false,"control":false,"option":false,"shift":false,"function":true},"label":"Fn","pressCount":1},"style":"formal","cleanupEnabled":true}"#,
+        )
+        .expect("legacy settings should deserialize");
+        assert!(!settings.cleanup_migrated);
+        assert!(migrate_dictation_cleanup(&mut settings));
+        assert!(!settings.cleanup_enabled);
+        assert!(settings.cleanup_migrated);
+        assert_eq!(settings.style, DictationStyle::Formal);
+
+        // After the migration the user turns cleanup on; the next launch
+        // reads it back and the migration does not run again.
+        settings.cleanup_enabled = true;
+        let stored = serde_json::to_string(&settings).unwrap();
+        let mut reloaded: DictationSettings = serde_json::from_str(&stored).unwrap();
+        assert!(!migrate_dictation_cleanup(&mut reloaded));
+        assert!(reloaded.cleanup_enabled);
+        assert_eq!(reloaded.cleanup_model, DEFAULT_DICTATION_CLEANUP_MODEL);
+    }
+
+    #[test]
+    fn dictation_cleanup_model_accepts_only_openrouter_model_ids() {
+        assert_eq!(
+            validate_dictation_cleanup_model(" openai/gpt-5-mini ").unwrap(),
+            "openai/gpt-5-mini"
+        );
+        assert_eq!(
+            validate_dictation_cleanup_model("nvidia/nemotron-3-nano-30b-a3b:free").unwrap(),
+            "nvidia/nemotron-3-nano-30b-a3b:free"
+        );
+        for invalid in [
+            "",
+            "   ",
+            "claude",
+            "cli:claude",
+            "endpoint:ep",
+            "/model",
+            "vendor/",
+            "vendor/model name",
+            "__june_local_generation__:x/y",
+        ] {
+            assert_eq!(
+                validate_dictation_cleanup_model(invalid).unwrap_err().code,
+                "dictation_cleanup_model_invalid",
+                "{invalid:?}"
+            );
+        }
+        assert!(validate_dictation_cleanup_model(&format!("a/{}", "b".repeat(200))).is_err());
+    }
+
+    #[test]
     fn legacy_settings_reset_to_defaults_and_preserve_microphone() {
         let settings: DictationSettings = serde_json::from_str(
             r#"{"shortcut":"control_option_space","activationMode":"toggle","microphone":{"id":"usb","name":"USB Mic"}}"#,

@@ -1137,6 +1137,88 @@ mod tests {
     }
 
     #[test]
+    fn llm_dictation_cleanup_refuses_clis_and_endpoints() {
+        // Dictation cleanup runs only on Clovy's OpenRouter route (ditado-rapido
+        // D1): never a CLI process nor a local endpoint, even with tools off.
+        let mut settings = settings_with_endpoint(Some(StructuredOutputLevel::Strict));
+        for provider in [
+            ProviderRef::Cli {
+                id: CliKind::Claude,
+            },
+            ProviderRef::Cli { id: CliKind::Codex },
+            ProviderRef::Endpoint {
+                id: "ep".to_string(),
+            },
+            ProviderRef::None,
+        ] {
+            let error = set_usage(
+                &mut settings,
+                LlmUsage::DictationCleanup,
+                provider.clone(),
+                |_| true,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "llm_provider_not_allowed", "{provider:?}");
+        }
+        assert_eq!(settings.llm_usage.dictation_cleanup, ProviderRef::Clovy);
+        set_usage(
+            &mut settings,
+            LlmUsage::DictationCleanup,
+            ProviderRef::Clovy,
+            |_| true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn llm_normalize_moves_a_cli_or_endpoint_dictation_cleanup_to_clovy() {
+        for stored in [
+            ProviderRef::Cli {
+                id: CliKind::Claude,
+            },
+            ProviderRef::Endpoint {
+                id: "ep".to_string(),
+            },
+        ] {
+            let mut settings = settings_with_endpoint(None);
+            settings.llm_usage.dictation_cleanup = stored.clone();
+            normalize(&mut settings);
+            assert_eq!(
+                settings.llm_usage.dictation_cleanup,
+                ProviderRef::Clovy,
+                "{stored:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn llm_provider_settings_with_cli_dictation_cleanup_load_on_clovy() {
+        // The owner's profile before ditado-rapido: cleanup on Claude Code.
+        let store = MemorySecretStore::default();
+        let raw = r#"{
+          "transcriptionProvider": "groq",
+          "generationProvider": "openrouter",
+          "llmRegistryMigrated": true,
+          "llmCliDefaultApplied": true,
+          "llmUsage": {
+            "chat": { "kind": "cli", "id": "claude" },
+            "notes": { "kind": "cli", "id": "claude" },
+            "dictationCleanup": { "kind": "cli", "id": "claude" },
+            "activity": { "kind": "none" }
+          }
+        }"#;
+        let settings = load(raw, &store);
+        assert_eq!(settings.llm_usage.dictation_cleanup, ProviderRef::Clovy);
+        // Notes keep their CLI: only dictation cleanup changed.
+        assert_eq!(
+            settings.llm_usage.notes,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+    }
+
+    #[test]
     fn llm_settings_saved_before_the_cli_default_are_moved_on_load() {
         // A settings file from before ADR-0062 has no flag: chat on Clovy is
         // the old default and is pending the move.
