@@ -271,8 +271,11 @@ build scripts in `pnpm-workspace.yaml` — live in
 - **Service-managed upstream provider keys live only in Clovy API, never in the desktop binary.**
   Keys for Groq, OpenRouter, fal and Tavily, and the OS Accounts App API key,
   belong to Clovy API. Explicit user BYOK credentials stay in the local
-  credential store and are forwarded through Clovy API only for their matching
-  eligible provider route; they are not credentials for another vendor.
+  credential store and go only to their own provider: forwarded through Clovy
+  API on that provider's eligible route, or, for dictation transcription and
+  dictation cleanup, sent from the desktop straight to that provider
+  ([ADR-0065](docs/adr/0065-dictation-calls-the-users-own-provider-directly.md)).
+  They are never credentials for another vendor.
 - **Clovy API must stay backward-compatible — no breaking changes.** Clovy ships
   and auto-updates in production, so installs in the wild keep calling older
   `/v1/*` contracts. Never remove or repurpose an existing endpoint, request

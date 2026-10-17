@@ -11,7 +11,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Mediç
 ## 2. Rota direta com chave própria
 
 - [x] 2.1 Transcrição direta ao Groq com BYOK e limpeza direta à OpenRouter com BYOK, cliente HTTP único aquecido; sem chave, Clovy API como antes (D2, D4 parte Rust). Verificar: testes de integração com servidores falsos contando requisições por destino e cabeçalhos com só a chave do provedor chamado.
-- [ ] 2.2 ADR nova (chave do usuário direto ao provedor), regra em `AGENTS.md` (Boundaries), `docs/llm-providers.md` e doc do ditado. Verificar: busca sem a regra antiga "forwarded through Clovy API only" fora de ADRs históricas.
+- [x] 2.2 ADR nova (chave do usuário direto ao provedor), regra em `AGENTS.md` (Boundaries), `docs/llm-providers.md` e doc do ditado. Verificar: busca sem a regra antiga "forwarded through Clovy API only" fora de ADRs históricas.
 
 ## 3. Helper: início, aquecimento, fala e colagem
 

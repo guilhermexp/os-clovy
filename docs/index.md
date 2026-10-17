@@ -75,6 +75,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md) - Claude Code, else Codex, is the default engine of new sessions, note chat, Home (since ADR-0064), companion sessions, and Auto routines (unattended, read-only tools plus Clovy's MCP and web); one recorded settings move; the Clovy agent stays as legacy (supersedes ADR-0038/0039 in part)
 - [adr/0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md) - (proposed) CLI chat turns get Clovy's write tools through a turn-bound `clovy-mcp` connection and an in-app approval broker; external clients stay read-only; user MCP servers and Linear reach CLIs through the same gateway
 - [adr/0064](adr/0064-home-runs-on-the-default-cli-engine.md) - Home runs on the default CLI engine in its hidden session, without Clovy API; old Home turns are imported once from local storage; the Clovy API Home commands are removed (supersedes ADR-0062 in part)
+- [adr/0065](adr/0065-dictation-calls-the-users-own-provider-directly.md) - with the user's own Groq or OpenRouter key, dictation transcription and cleanup go straight from the desktop to that provider carrying only that key; service keys stay in Clovy API
 
 ## Enforceable rules (spec/)
 
@@ -150,6 +151,7 @@ Per-repo config the engineering skills read before acting (see the
 - [coding-agent-sessions.md](coding-agent-sessions.md) - coding-agent session ingestion: read-only readers for seven local agents, block cutting and lifecycle, summaries by the agent's own CLI or the activity provider, the `coding_agent_blocks` schema (activity migration 3) and its query API, the "Today" view lane
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
+- [dictation.md](dictation.md) - dictation take: shortcut to capture start, the transcription route (direct to Groq with the user's key, else Clovy API), optional OpenRouter cleanup, "no speech" after Whisper, paste, warm-up, and latency targets
 - [llm-providers.md](llm-providers.md) - own providers: agent CLIs and named OpenAI-compatible endpoints, per-use selection, one-shot generation API, structured-output levels, CLI isolation contract, and the CLI chat engine (per-CLI turn, resume, stream, cancel, permissions, Clovy's tools)
 - [clovy-api-prd.md](clovy-api-prd.md) — Clovy API: upstream AI calls + OS Accounts authorize/charge (the canonical service spec)
 - [telemetry.md](telemetry.md) — public overview of Clovy telemetry, current behavior, and policies

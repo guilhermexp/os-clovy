@@ -57,7 +57,8 @@ summarize a coding-agent block with that agent's own CLI
 semaphore and follows the CLI isolation contract below.
 
 `llm::provider_for(LlmUsage::X)` returns the selection for chat, notes,
-dictation cleanup, or activity.
+dictation cleanup, or activity. The dictation-cleanup selection is always
+Clovy API (see below).
 
 ## Structured output levels
 
@@ -96,7 +97,7 @@ call only runs on a CLI that can be started with every tool off**
 A refused CLI fails with `LlmError::CliToolsNotDisabled` (`llm_cli_tools_not_disabled`)
 before anything is spawned, in `generate`, `generate_for_activity`,
 `generate_on_cli_for_activity`, and the connection test. `llm_set_usage`
-refuses it for notes, dictation cleanup, and activity (chat goes through the
+refuses it for notes and activity (chat goes through the
 [CLI chat engine](#cli-chat-engine), which keeps every CLI), and the Models tab
 disables it in those menus and hides its test button. A selection saved before
 this rule fails at use time with the same error; nothing is rerouted silently.
@@ -173,12 +174,19 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   selection: Clovy API (with the saved remote model), the endpoint, or the CLI
   (same system prompt and source layout as the endpoint route; stored provider
   `cli:<id>`).
-- **Dictation cleanup.** `clovy_api::cleanup_text` (dictation and note
-  transcript cleanup) uses the dictation-cleanup selection with Clovy API's
-  cleanup prompt and message layout. Note transcripts send style
-  `note_transcript_cleanup`, which selects the note correction prompt on every
-  route, with the full dictionary and earlier same-source turns as context; the
-  Whisper prompt itself only carries the short dictionary hint (see
+- **Dictation cleanup.** Never an own provider: `llm_set_usage` refuses a CLI,
+  an endpoint, or none for `dictationCleanup` (`llm_provider_not_allowed`), and
+  `normalize` moves a stored CLI or endpoint choice back to Clovy API, so the
+  Models tab has no dictation cleanup row. Dictation cleanup is optional and
+  off by default; when on, `clovy_api::dictate_cleanup` sends one OpenRouter
+  chat completion per chunk on the model chosen in the dictation settings,
+  straight to OpenRouter with the user's own key or through
+  `/v1/dictate/cleanup` without it ([dictation.md](dictation.md), ADR-0065).
+- **Note transcript cleanup.** `clovy_api::cleanup_text` sends style
+  `note_transcript_cleanup` on the dictation-cleanup selection, which is now
+  always Clovy API; it selects the note correction prompt with the full
+  dictionary and earlier same-source turns as context; the Whisper prompt
+  itself only carries the short dictionary hint (see
   [configuration.md](configuration.md#transcription-context)).
 - **Activity.** Defaults to none; Clovy API is not allowed.
 
