@@ -8819,6 +8819,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dictation_with_cleanup_off_pastes_whisper_text_only_trimmed() {
+        // Spec "Limpeza desligada": no filler backstop, no style either.
+        let transcriber = FakeTranscriber::text("  um, so Send it to Samir, uh  ");
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &FakeCleaner::default(),
+            pipeline_request(),
+            &DictationCleanupConfig {
+                style: DictationStyle::CasualLowercase,
+                ..cleanup_config(false)
+            },
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("um, so Send it to Samir, uh"));
+        assert_eq!(
+            result.outcome.transcript.as_ref().map(|t| t.text.as_str()),
+            Some("um, so Send it to Samir, uh")
+        );
+    }
+
+    #[tokio::test]
     async fn dictation_with_cleanup_on_pastes_the_cleaned_text_from_the_chosen_model() {
         let transcriber = FakeTranscriber::text("send it to samir");
         let cleaner = FakeCleaner::default();
