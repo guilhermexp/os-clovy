@@ -5,7 +5,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Mediç
 ## 1. Limpeza opcional e só OpenRouter
 
 - [x] 1.1 `DictationSettings` com `cleanupEnabled` (padrão `false`) e `cleanupModel` (OpenRouter); registro recusa `cli` e endpoint para `DictationCleanup`; migração única com marcador (design D1). Verificar: testes unitários de normalização e de migração com fixtures (`cli: claude`, endpoint, Clovy) falhando antes e passando depois.
-- [ ] 1.2 Pipeline do ditado: com limpeza desligada não chama limpador; ligada, pedaços em paralelo (limite 4), falha ou prazo cola o bruto com aviso (D7). Verificar: testes de integração com transcritor e limpador falsos.
+- [x] 1.2 Pipeline do ditado: com limpeza desligada não chama limpador; ligada, pedaços em paralelo (limite 4), falha ou prazo cola o bruto com aviso (D7). Verificar: testes de integração com transcritor e limpador falsos.
 - [ ] 1.3 Configurações: controle "Limpar texto do ditado" e escolha do modelo OpenRouter (estilo só aparece com limpeza ligada), i18n pt-BR/en. Verificar: teste de componente (controle desligado por padrão, seletor sem CLIs).
 
 ## 2. Rota direta com chave própria

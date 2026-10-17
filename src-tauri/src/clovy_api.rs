@@ -551,6 +551,25 @@ pub async fn cleanup_text(params: DictateCleanupRequestParams) -> Result<String,
     Ok(response.text)
 }
 
+/// Dictation cleanup on the user's chosen OpenRouter model through Clovy API.
+/// Never a CLI or endpoint: dictation cleanup is one chat completion.
+pub async fn dictate_cleanup(
+    params: DictateCleanupRequestParams,
+    model: String,
+) -> Result<String, AppError> {
+    let body = DictateCleanupBody {
+        session_id: params.session_id,
+        utterance_id: params.utterance_id,
+        text: params.text,
+        dictionary_context: params.dictionary_context,
+        app_context: params.app_context,
+        style: params.style,
+        model,
+    };
+    let response: CleanupResponse = post_json("/v1/dictate/cleanup", &body, true).await?;
+    Ok(response.text)
+}
+
 /// The `style` the note pipeline sends with transcript cleanup. It selects the
 /// note-transcript correction contract, not the dictation cleanup rules: a
 /// local cleanup engine receives [`NOTE_TRANSCRIPT_CLEANUP_SYSTEM_PROMPT`] here,

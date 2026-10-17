@@ -1,7 +1,7 @@
 #[cfg(target_os = "windows")]
 use crate::audio::turns::normalize_wav_for_transcription;
 use crate::clovy_api::{
-    cleanup_text, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
+    dictate_cleanup, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
     TranscriptionProviderResult, DEFAULT_DICTATION_CLEANUP_MODEL,
 };
 use crate::domain::{
@@ -10,6 +10,7 @@ use crate::domain::{
 };
 use crate::providers::{configured_transcription_provider, PROVIDER_GROQ};
 use chrono::Utc;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fs,
@@ -51,6 +52,8 @@ const DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS: u64 = 30_000;
 /// filler-heavy run-on speech reliably, while at 2 KB and beyond it degrades
 /// into echoing the transcript back with no punctuation at all.
 const DICTATION_CLEANUP_CHUNK_TARGET_BYTES: usize = 800;
+/// Chunks of one long transcript cleaned at the same time (design D7).
+const DICTATION_CLEANUP_PARALLEL_CHUNKS: usize = 4;
 /// Below this input size a chunk plausibly is a single sentence, so a cleaned
 /// result without sentence punctuation is not evidence of the echo failure.
 const DICTATION_CLEANUP_RETRY_MIN_CHUNK_BYTES: usize = 300;
@@ -5397,7 +5400,8 @@ async fn transcribe_recording_ready_inner(
         }
     };
     let current_settings = current_dictation_settings(app).unwrap_or_default();
-    let style = current_settings.style;
+    let cleanup = DictationCleanupConfig::from_settings(&current_settings);
+    let style = cleanup.style;
     let language = current_settings.language;
     let Some(dictionary) =
         run_dictation_take_step(take, transcription_dictionary_for_app(app)).await
@@ -5424,22 +5428,32 @@ async fn transcribe_recording_ready_inner(
             return;
         }
     };
-    let result = run_dictation_take_step(
+    let pipeline = run_dictation_take_step(
         take,
-        dictate_transcribe(DictateTranscribeRequest {
-            audio_path: transcription_audio.clone(),
-            // Whisper's prompt only steers spelling: it gets the short dictionary
-            // hint, and cleanup below gets the full dictionary.
-            context: dictionary
-                .as_ref()
-                .and_then(|dictionary| dictionary.asr_hint.clone()),
-            language,
-            session_id: session_id.clone(),
-            utterance_id: utterance_id.clone(),
-        }),
+        run_dictation_pipeline(
+            &ServiceDictationTranscriber,
+            &ServiceDictationCleaner,
+            DictateTranscribeRequest {
+                audio_path: transcription_audio.clone(),
+                // Whisper's prompt only steers spelling: it gets the short
+                // dictionary hint, and cleanup gets the full dictionary.
+                context: dictionary
+                    .as_ref()
+                    .and_then(|dictionary| dictionary.asr_hint.clone()),
+                language,
+                session_id,
+                utterance_id: utterance_id.clone(),
+            },
+            &cleanup,
+            DictationCleanupContext {
+                dictionary_context: dictionary.map(|dictionary| dictionary.context),
+                app_context,
+            },
+            recording.observed_audio_level,
+        ),
     )
     .await;
-    let Some(result) = result else {
+    let Some(pipeline) = pipeline else {
         tracing::info!(
             take_id = take.id(),
             utterance_id,
@@ -5452,25 +5466,10 @@ async fn transcribe_recording_ready_inner(
         let _ = fs::remove_file(&transcription_audio);
     }
     remove_windows_dictation_audio(&recording.audio_path);
-    let result = run_dictation_take_step(
-        take,
-        maybe_cleanup_dictation_result(
-            app,
-            &provider,
-            result,
-            dictionary.map(|dictionary| dictionary.context),
-            app_context,
-            style,
-            session_id,
-            utterance_id,
-        ),
-    )
-    .await;
-    let Some(result) = result else {
-        remove_cancelled_dictation_audio(&audio_path, None);
-        return;
-    };
-    let outcome = outcome_from_transcription_result(result, recording.observed_audio_level, style);
+    if let Some(error) = pipeline.cleanup_skipped.as_ref() {
+        emit_dictation_cleanup_skipped(app, &provider, error);
+    }
+    let outcome = pipeline.outcome;
     let mut delivery_claim = None;
     let history_already_persisted = if low_speech_evidence {
         let recovery_transcript = outcome
@@ -5731,61 +5730,170 @@ async fn transcription_dictionary_for_app(app: &AppHandle) -> Option<Transcripti
     build_transcription_dictionary(&entries)
 }
 
-async fn maybe_cleanup_dictation_result(
-    app: &AppHandle,
-    provider: &str,
-    result: Result<TranscriptionProviderResult, AppError>,
+/// The cleanup choice one take reads once (ditado-rapido D1, D7).
+#[derive(Clone, Debug)]
+struct DictationCleanupConfig {
+    enabled: bool,
+    /// OpenRouter model id for the cleanup chat completion.
+    model: String,
+    style: DictationStyle,
+    /// Budget for the whole cleanup of a transcript of this many bytes.
+    timeout: fn(usize) -> Duration,
+}
+
+impl DictationCleanupConfig {
+    fn from_settings(settings: &DictationSettings) -> Self {
+        Self {
+            enabled: settings.cleanup_enabled,
+            model: settings.cleanup_model.clone(),
+            style: settings.style,
+            timeout: dictation_cleanup_timeout,
+        }
+    }
+}
+
+/// What the cleanup model gets besides the transcript.
+#[derive(Clone, Debug, Default)]
+struct DictationCleanupContext {
+    dictionary_context: Option<String>,
+    app_context: Option<String>,
+}
+
+/// One cleanup chat completion for one chunk of a transcript.
+#[derive(Clone, Debug)]
+struct DictationCleanupCall {
+    text: String,
     dictionary_context: Option<String>,
     app_context: Option<String>,
     style: DictationStyle,
+    model: String,
     session_id: String,
     utterance_id: String,
-) -> Result<TranscriptionProviderResult, AppError> {
-    let mut transcript = match result {
-        Ok(transcript) => transcript,
-        Err(error) => return Err(error),
-    };
-    let transcript_bytes = transcript.text.trim().len();
-    tracing::info!(
-        provider,
-        style = ?style,
-        app_context = app_context.as_deref(),
-        transcript_bytes,
-        timeout_ms = dictation_cleanup_timeout(transcript_bytes).as_millis() as u64,
-        "dictation cleanup starting",
-    );
-    let started_at = Instant::now();
-    match cleanup_dictation_text(
-        &transcript.text,
-        dictionary_context.as_deref(),
-        app_context,
-        style,
-        session_id,
-        utterance_id,
-    )
-    .await
-    {
-        Ok(cleaned) => {
-            if !cleaned.trim().is_empty() {
-                transcript.text = cleaned;
-                tracing::info!(
-                    provider,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "dictation cleanup applied",
-                );
-            }
-        }
-        Err(error) => {
-            emit_dictation_cleanup_skipped(
-                app,
-                provider,
-                &error,
-                transcript_bytes,
-                started_at.elapsed(),
-            );
-        }
+}
+
+/// Turns one finished recording into text (Groq Whisper).
+trait DictationTranscriber {
+    fn transcribe(
+        &self,
+        request: DictateTranscribeRequest,
+    ) -> impl Future<Output = Result<TranscriptionProviderResult, AppError>> + Send;
+}
+
+/// Cleans one chunk of a transcript with a single chat completion.
+trait DictationCleaner {
+    fn clean(
+        &self,
+        call: DictationCleanupCall,
+    ) -> impl Future<Output = Result<String, AppError>> + Send;
+}
+
+/// The production transcriber.
+struct ServiceDictationTranscriber;
+
+impl DictationTranscriber for ServiceDictationTranscriber {
+    fn transcribe(
+        &self,
+        request: DictateTranscribeRequest,
+    ) -> impl Future<Output = Result<TranscriptionProviderResult, AppError>> + Send {
+        dictate_transcribe(request)
     }
-    Ok(transcript)
+}
+
+/// The production cleaner: the chosen OpenRouter model through Clovy API.
+struct ServiceDictationCleaner;
+
+impl DictationCleaner for ServiceDictationCleaner {
+    fn clean(
+        &self,
+        call: DictationCleanupCall,
+    ) -> impl Future<Output = Result<String, AppError>> + Send {
+        dictate_cleanup(
+            DictateCleanupRequestParams {
+                text: call.text,
+                dictionary_context: call.dictionary_context,
+                app_context: call.app_context,
+                style: call.style.instruction().to_string(),
+                session_id: call.session_id,
+                utterance_id: call.utterance_id,
+            },
+            call.model,
+        )
+    }
+}
+
+struct DictationPipelineResult {
+    outcome: DictationTranscriptionOutcome,
+    /// Why cleanup was skipped; the raw transcript was used instead.
+    cleanup_skipped: Option<AppError>,
+}
+
+/// Transcribe one take and, only when cleanup is on, clean the transcript.
+/// A failed or timed-out cleanup keeps the whole raw transcript.
+async fn run_dictation_pipeline<T, C>(
+    transcriber: &T,
+    cleaner: &C,
+    request: DictateTranscribeRequest,
+    cleanup: &DictationCleanupConfig,
+    context: DictationCleanupContext,
+    observed_audio_level: Option<f32>,
+) -> DictationPipelineResult
+where
+    T: DictationTranscriber + Sync,
+    C: DictationCleaner + Sync,
+{
+    let session_id = request.session_id.clone();
+    let utterance_id = request.utterance_id.clone();
+    let mut cleanup_skipped = None;
+    let result = match transcriber.transcribe(request).await {
+        Ok(mut transcript) if cleanup.enabled && !transcript.text.trim().is_empty() => {
+            let transcript_bytes = transcript.text.trim().len();
+            tracing::info!(
+                model = %cleanup.model,
+                style = ?cleanup.style,
+                app_context = context.app_context.as_deref(),
+                transcript_bytes,
+                timeout_ms = (cleanup.timeout)(transcript_bytes).as_millis() as u64,
+                "dictation cleanup starting",
+            );
+            let started_at = Instant::now();
+            match clean_dictation_transcript(
+                cleaner,
+                &transcript.text,
+                cleanup,
+                &context,
+                &session_id,
+                &utterance_id,
+            )
+            .await
+            {
+                Ok(cleaned) => {
+                    if !cleaned.trim().is_empty() {
+                        transcript.text = cleaned;
+                    }
+                    tracing::info!(
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "dictation cleanup applied",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        code = %error.code,
+                        message = %error.message,
+                        transcript_bytes,
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "dictation cleanup skipped; pasting raw transcript",
+                    );
+                    cleanup_skipped = Some(error);
+                }
+            }
+            Ok(transcript)
+        }
+        other => other,
+    };
+    DictationPipelineResult {
+        outcome: outcome_from_transcription_result(result, observed_audio_level, cleanup.style),
+        cleanup_skipped,
+    }
 }
 
 /// Budget for one cleanup round-trip, scaled to the transcript so long
@@ -5798,153 +5906,70 @@ fn dictation_cleanup_timeout(text_bytes: usize) -> Duration {
     Duration::from_millis(scaled.min(DICTATION_CLEANUP_MAX_TIMEOUT_MS))
 }
 
-async fn cleanup_dictation_text(
+/// Clean a transcript within its budget. Long transcripts are cleaned a
+/// word-boundary chunk at a time, up to [`DICTATION_CLEANUP_PARALLEL_CHUNKS`]
+/// at once, and rejoined in order: the cleanup model reliably punctuates
+/// short passages but degrades into an unpunctuated verbatim echo on long
+/// run-on speech (JUN-212). Each chunk gets its own utterance id suffix so
+/// metering treats it as its own unit of work. Any chunk that fails or runs
+/// out of the budget fails the whole cleanup, so the caller pastes the raw
+/// transcript rather than a mix (ditado-rapido D7).
+async fn clean_dictation_transcript<C: DictationCleaner + Sync>(
+    cleaner: &C,
     text: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
+    config: &DictationCleanupConfig,
+    context: &DictationCleanupContext,
+    session_id: &str,
+    utterance_id: &str,
 ) -> Result<String, AppError> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(String::new());
     }
+    let call = |chunk: &str, utterance_id: String| DictationCleanupCall {
+        text: chunk.to_string(),
+        dictionary_context: context.dictionary_context.clone(),
+        app_context: context.app_context.clone(),
+        style: config.style,
+        model: config.model.clone(),
+        session_id: session_id.to_string(),
+        utterance_id,
+    };
     let chunks = split_dictation_cleanup_chunks(text, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
-    if chunks.len() == 1 {
-        return match tokio::time::timeout(
-            dictation_cleanup_timeout(text.len()).min(Duration::from_millis(
-                DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS,
-            )),
-            cleanup_dictation_call(
-                text,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                utterance_id,
-            ),
-        )
+    let work = async {
+        if chunks.len() == 1 {
+            let cleaned =
+                cleanup_dictation_call(cleaner, call(text, utterance_id.to_string())).await?;
+            return Ok(trim_cleaned_dictation(&cleaned));
+        }
+        // Built eagerly: a lazily mapped stream trips the higher-ranked
+        // `Send` check of the spawned take future.
+        let calls: Vec<_> = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                cleanup_dictation_chunk_with_retry(
+                    cleaner,
+                    call(chunk, format!("{utterance_id}-c{index}")),
+                )
+            })
+            .collect();
+        let cleaned: Vec<String> = futures_util::stream::iter(calls)
+            .buffered(DICTATION_CLEANUP_PARALLEL_CHUNKS)
+            .map_ok(|cleaned| trim_cleaned_dictation_chunk(&cleaned))
+            .try_collect()
+            .await?;
+        tracing::info!(chunk_count = chunks.len(), "dictation cleanup ran chunked");
+        Ok(join_cleaned_dictation_chunks(&cleaned))
+    };
+    tokio::time::timeout((config.timeout)(text.len()), work)
         .await
-        {
-            Ok(result) => Ok(trim_cleaned_dictation(&result?)),
-            Err(_) => Err(AppError::new(
+        .unwrap_or_else(|_| {
+            Err(AppError::new(
                 "dictation_cleanup_timeout",
                 "Dictation cleanup timed out.",
-            )),
-        };
-    }
-    cleanup_dictation_chunks(
-        &chunks,
-        dictionary_context,
-        app_context,
-        style,
-        session_id,
-        utterance_id,
-    )
-    .await
-}
-
-/// Clean a long transcript through `/v1/dictate/cleanup` a word-boundary
-/// chunk at a time and rejoin the results. The cleanup model reliably
-/// punctuates short passages but degrades into an unpunctuated verbatim echo
-/// on long run-on speech (JUN-212). Each chunk gets its own utterance id
-/// suffix so metering treats it as its own unit of work.
-///
-/// Chunks that already cleaned up are never discarded: they were billed, so
-/// their output must reach the paste. Running out of the shared deadline or
-/// hitting a transport error mid-batch degrades the affected chunk and the
-/// rest to their raw text. Only an error before any chunk succeeds fails the
-/// whole cleanup (the caller's raw-transcript fallback, as before).
-async fn cleanup_dictation_chunks(
-    chunks: &[&str],
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
-) -> Result<String, AppError> {
-    let total_bytes: usize = chunks.iter().map(|chunk| chunk.len()).sum();
-    let deadline = Instant::now() + dictation_cleanup_timeout(total_bytes);
-    let chunk_count = chunks.len();
-    let mut cleaned_chunks: Vec<String> = Vec::with_capacity(chunk_count);
-    let mut raw_chunks = 0usize;
-    let mut any_cleaned = false;
-    for (index, chunk) in chunks.iter().enumerate() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            raw_chunks += 1;
-            cleaned_chunks.push((*chunk).to_string());
-            continue;
-        }
-        let chunk_utterance_id = format!("{utterance_id}-c{index}");
-        // Bounded by both the batch deadline and the per-request billing
-        // hold cap (the chunk budget covers at most two small requests).
-        let chunk_budget = remaining.min(Duration::from_millis(
-            DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS,
-        ));
-        match tokio::time::timeout(
-            chunk_budget,
-            cleanup_dictation_chunk_with_retry(
-                chunk,
-                dictionary_context,
-                app_context.clone(),
-                style,
-                session_id.clone(),
-                chunk_utterance_id,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(cleaned)) => {
-                any_cleaned = true;
-                cleaned_chunks.push(trim_cleaned_dictation_chunk(&cleaned));
-            }
-            Ok(Err(error)) => {
-                // Nothing cleaned yet: fail the whole cleanup so the caller
-                // emits the skip event and pastes the raw transcript.
-                if !any_cleaned {
-                    return Err(error);
-                }
-                // Mid-batch failure after billed successes: keep the cleaned
-                // chunks and degrade this one and the rest to raw. Retrying
-                // the remainder against a failing backend would only burn
-                // the deadline.
-                tracing::warn!(
-                    code = %error.code,
-                    chunk_index = index,
-                    "dictation cleanup chunk failed mid-batch; keeping raw for the rest",
-                );
-                for rest in &chunks[index..] {
-                    raw_chunks += 1;
-                    cleaned_chunks.push((*rest).to_string());
-                }
-                break;
-            }
-            Err(_) => {
-                // This chunk ran out of its budget (the batch deadline or the
-                // per-request cap): keep it raw and move on. Chunks that
-                // already cleaned up are preserved; later chunks still get
-                // whatever batch budget is left.
-                tracing::warn!(
-                    chunk_index = index,
-                    chunk_bytes = chunk.len(),
-                    "dictation cleanup chunk timed out; keeping raw chunk",
-                );
-                raw_chunks += 1;
-                cleaned_chunks.push((*chunk).to_string());
-            }
-        }
-    }
-    if raw_chunks > 0 {
-        tracing::warn!(
-            chunk_count,
-            raw_chunks,
-            "dictation cleanup degraded; some chunks pasted raw",
-        );
-    }
-    tracing::info!(chunk_count, raw_chunks, "dictation cleanup ran chunked");
-    Ok(join_cleaned_dictation_chunks(&cleaned_chunks))
+            ))
+        })
 }
 
 /// Trim a single-call cleanup result (the historical behavior).
@@ -5985,116 +6010,83 @@ fn join_cleaned_dictation_chunks(chunks: &[String]) -> String {
     joined
 }
 
-/// One chunk of a chunked cleanup. Transport errors propagate to the caller,
-/// which keeps any already-cleaned chunks and degrades the rest to raw.
-/// Content-quality failures get one retry — the provider is not deterministic
-/// even at temperature 0, and a retry usually punctuates a chunk the first
-/// attempt echoed — then degrade to the raw chunk so one bad chunk never
-/// costs the rest of the dictation its cleanup.
-async fn cleanup_dictation_chunk_with_retry(
-    chunk: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    chunk_utterance_id: String,
+/// One chunk of a chunked cleanup. Transport errors propagate (the caller
+/// pastes the raw transcript). Content-quality failures get one retry — the
+/// provider is not deterministic even at temperature 0, and a retry usually
+/// punctuates a chunk the first attempt echoed — then keep the best text so
+/// one stubborn chunk never costs the rest of the dictation its cleanup.
+async fn cleanup_dictation_chunk_with_retry<C: DictationCleaner + Sync>(
+    cleaner: &C,
+    call: DictationCleanupCall,
 ) -> Result<String, AppError> {
-    let first = cleanup_dictation_call(
-        chunk,
-        dictionary_context,
-        app_context.clone(),
-        style,
-        session_id.clone(),
-        chunk_utterance_id.clone(),
-    )
-    .await;
+    let chunk = call.text.clone();
     // A distinct utterance id: the retry wants a fresh model completion, so
     // it must not share the first attempt's idempotency identity.
-    let retry_utterance_id = format!("{chunk_utterance_id}r");
-    match first {
-        Ok(cleaned) if !cleaned_chunk_lacks_sentence_punctuation(chunk, &cleaned) => Ok(cleaned),
-        Ok(unpunctuated) => {
-            match cleanup_dictation_call(
-                chunk,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                retry_utterance_id,
-            )
-            .await
-            {
-                Ok(retried) if !cleaned_chunk_lacks_sentence_punctuation(chunk, &retried) => {
-                    Ok(retried)
-                }
-                // Keep the first attempt: unpunctuated but still cleaned
-                // (fillers stripped) beats both raw text and failing the
-                // whole dictation's cleanup over one stubborn chunk.
-                _ => {
-                    tracing::warn!(
-                        chunk_bytes = chunk.len(),
-                        "dictation cleanup chunk still unpunctuated after retry",
-                    );
-                    Ok(unpunctuated)
-                }
+    let retry = DictationCleanupCall {
+        utterance_id: format!("{}r", call.utterance_id),
+        ..call.clone()
+    };
+    match cleanup_dictation_call(cleaner, call).await {
+        Ok(cleaned) if !cleaned_chunk_lacks_sentence_punctuation(&chunk, &cleaned) => Ok(cleaned),
+        Ok(unpunctuated) => match cleanup_dictation_call(cleaner, retry).await {
+            Ok(retried) if !cleaned_chunk_lacks_sentence_punctuation(&chunk, &retried) => {
+                Ok(retried)
             }
-        }
+            // Keep the first attempt: unpunctuated but still cleaned
+            // (fillers stripped) beats both raw text and failing the
+            // whole dictation's cleanup over one stubborn chunk.
+            _ => {
+                tracing::warn!(
+                    chunk_bytes = chunk.len(),
+                    "dictation cleanup chunk still unpunctuated after retry",
+                );
+                Ok(unpunctuated)
+            }
+        },
         Err(error)
             if error.code == "provider_response_invalid"
                 || error.code == "dictation_cleanup_invalid" =>
         {
-            match cleanup_dictation_call(
-                chunk,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                retry_utterance_id,
-            )
-            .await
-            {
+            match cleanup_dictation_call(cleaner, retry).await {
                 Ok(retried) => Ok(retried),
-                Err(retry_error) => {
+                Err(retry_error)
                     if retry_error.code == "provider_response_invalid"
-                        || retry_error.code == "dictation_cleanup_invalid"
-                    {
-                        // The model refused this chunk twice; keep the
-                        // speaker's words raw rather than dropping them or
-                        // failing the whole dictation's cleanup.
-                        tracing::warn!(
-                            code = %retry_error.code,
-                            chunk_bytes = chunk.len(),
-                            "dictation cleanup chunk kept raw after retry",
-                        );
-                        Ok(chunk.to_string())
-                    } else {
-                        Err(retry_error)
-                    }
+                        || retry_error.code == "dictation_cleanup_invalid" =>
+                {
+                    // The model refused this chunk twice; keep the speaker's
+                    // words raw rather than dropping them or failing the
+                    // whole dictation's cleanup.
+                    tracing::warn!(
+                        code = %retry_error.code,
+                        chunk_bytes = chunk.len(),
+                        "dictation cleanup chunk kept raw after retry",
+                    );
+                    Ok(chunk)
                 }
+                Err(retry_error) => Err(retry_error),
             }
         }
         Err(error) => Err(error),
     }
 }
 
-/// One `/v1/dictate/cleanup` round-trip plus content-quality checks.
-async fn cleanup_dictation_call(
-    text: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
+/// One cleanup chat completion plus content-quality checks, capped at the
+/// per-request billing hold (`DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS`).
+async fn cleanup_dictation_call<C: DictationCleaner + Sync>(
+    cleaner: &C,
+    call: DictationCleanupCall,
 ) -> Result<String, AppError> {
-    let cleaned = cleanup_text(DictateCleanupRequestParams {
-        text: text.to_string(),
-        dictionary_context: dictionary_context.map(str::to_string),
-        app_context,
-        style: style.instruction().to_string(),
-        session_id,
-        utterance_id,
-    })
-    .await?;
+    let cleaned = tokio::time::timeout(
+        Duration::from_millis(DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS),
+        cleaner.clean(call),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(AppError::new(
+            "dictation_cleanup_timeout",
+            "Dictation cleanup timed out.",
+        ))
+    })?;
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return Err(AppError::new(
@@ -6162,24 +6154,9 @@ fn cleaned_chunk_lacks_sentence_punctuation(chunk_input: &str, cleaned: &str) ->
         && !cleaned.contains(['.', '!', '?', ':', ';', '\n', '。', '！', '？'])
 }
 
-/// The paste falls back to the raw ASR transcript when cleanup fails, so this
-/// warn line (with the transcript size and how long the attempt ran) is the
-/// only trace that the pasted text skipped punctuation and filler cleanup.
-fn emit_dictation_cleanup_skipped(
-    app: &AppHandle,
-    provider: &str,
-    error: &AppError,
-    transcript_bytes: usize,
-    elapsed: Duration,
-) {
-    tracing::warn!(
-        provider,
-        code = %error.code,
-        message = %error.message,
-        transcript_bytes,
-        elapsed_ms = elapsed.as_millis() as u64,
-        "dictation cleanup skipped; pasting raw transcript",
-    );
+/// The paste fell back to the raw ASR transcript; the pipeline already
+/// logged why. This event lets the HUD show a discreet notice.
+fn emit_dictation_cleanup_skipped(app: &AppHandle, provider: &str, error: &AppError) {
     emit_dictation_event_value(
         app,
         serde_json::json!({
@@ -8780,7 +8757,7 @@ mod tests {
         assert!(cleaner.calls.lock().unwrap().is_empty());
         assert!(result.cleanup_skipped.is_none());
         // Only the deterministic filler backstop ran; no LLM.
-        assert_eq!(pasted_text(&result), Some("Send it to samir"));
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
     }
 
     #[tokio::test]
@@ -8829,7 +8806,7 @@ mod tests {
             Some(0.3),
         )
         .await;
-        assert_eq!(pasted_text(&result), Some("Send it to samir"));
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
         assert_eq!(
             result.cleanup_skipped.map(|error| error.code).as_deref(),
             Some("clovy_request_failed")
@@ -8855,7 +8832,7 @@ mod tests {
             Some(0.3),
         )
         .await;
-        assert_eq!(pasted_text(&result), Some("Send it to samir"));
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
         assert_eq!(
             result.cleanup_skipped.map(|error| error.code).as_deref(),
             Some("dictation_cleanup_timeout")
@@ -8865,7 +8842,8 @@ mod tests {
     #[tokio::test]
     async fn long_dictation_cleans_chunks_in_parallel_up_to_four_and_keeps_their_order() {
         let transcript = long_transcript(7, "word350");
-        let chunks = split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
         assert!(chunks.len() > 4, "{} chunks", chunks.len());
         let expected = chunks
             .iter()
