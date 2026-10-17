@@ -5421,3 +5421,7 @@ Microphone: Great. Let's ship the feed fix this week, then review the onboarding
 #[cfg(test)]
 #[path = "clovy_api_llm_tests.rs"]
 mod llm_note_tests;
+
+#[cfg(test)]
+#[path = "clovy_api_dictation_tests.rs"]
+mod dictation_route_tests;
