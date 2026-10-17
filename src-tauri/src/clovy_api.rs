@@ -804,7 +804,8 @@ pub(crate) async fn warm_dictation_via<K: DictationTokens>(
 
 /// Warms dictation's route when it has been idle long enough for the pooled
 /// connection to be gone: at launch, and before a press after a quiet minute.
-/// Also reads the user's keys and the OS Accounts token into memory.
+/// Also reads the user's keys (into the Keychain cache) and the OS Accounts
+/// token.
 pub fn warm_dictation_route_if_idle() {
     let now = std::time::Instant::now();
     {
@@ -819,6 +820,8 @@ pub fn warm_dictation_route_if_idle() {
     }
     tauri::async_runtime::spawn(async {
         let transport = production_dictation_transport();
+        // Each provider warms on its own: one unreadable key never stops the
+        // other. Reading the OpenRouter key fills the Keychain cache.
         let groq_key = dictation_user_key(BuiltinProvider::Groq).ok().flatten();
         let _ = dictation_user_key(BuiltinProvider::OpenRouter);
         if groq_key.is_none() {
@@ -851,47 +854,12 @@ fn mark_dictation_route_used() {
     }
 }
 
-/// The user's own Groq and OpenRouter keys, read from the credential store
-/// once and kept in memory so a take pays no Keychain read.
-#[derive(Clone, Default)]
-struct DictationUserKeys {
-    groq: Option<String>,
-    openrouter: Option<String>,
-}
-
-fn dictation_user_keys() -> &'static Mutex<Option<DictationUserKeys>> {
-    static KEYS: OnceLock<Mutex<Option<DictationUserKeys>>> = OnceLock::new();
-    KEYS.get_or_init(|| Mutex::new(None))
-}
-
+/// The user's own key for `provider`, and only that provider's. No cache
+/// here: the Keychain store already caches per account and is updated when a
+/// key is saved or removed, so a take never reads a stale key and one
+/// provider's unreadable key never blocks another.
 fn dictation_user_key(provider: BuiltinProvider) -> Result<Option<String>, AppError> {
-    let cache = dictation_user_keys();
-    if let Some(keys) = cache.lock().ok().and_then(|keys| keys.clone()) {
-        return Ok(match provider {
-            BuiltinProvider::Groq => keys.groq,
-            BuiltinProvider::OpenRouter => keys.openrouter,
-            _ => None,
-        });
-    }
-    let keys = DictationUserKeys {
-        groq: crate::providers::provider_api_key(BuiltinProvider::Groq)?,
-        openrouter: crate::providers::provider_api_key(BuiltinProvider::OpenRouter)?,
-    };
-    if let Ok(mut cached) = cache.lock() {
-        *cached = Some(keys.clone());
-    }
-    Ok(match provider {
-        BuiltinProvider::Groq => keys.groq,
-        BuiltinProvider::OpenRouter => keys.openrouter,
-        _ => None,
-    })
-}
-
-/// Called whenever a saved provider key changes, so the next take reads it.
-pub fn forget_dictation_user_keys() {
-    if let Ok(mut cached) = dictation_user_keys().lock() {
-        *cached = None;
-    }
+    crate::providers::provider_api_key(provider)
 }
 
 fn direct_dictation_client() -> &'static reqwest::Client {

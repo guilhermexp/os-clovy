@@ -61,7 +61,8 @@ endpoint, or a CLI). The `dictationCleanup` selection in
 ## Warm-up
 
 At launch and on a key-down after a minute idle, Clovy reads the user's Groq
-and OpenRouter keys into memory (cleared whenever a key is saved or removed),
+and OpenRouter keys, each on its own, into the Keychain store's per-account
+cache (the same cache a key save or removal updates; there is no second one),
 fetches the OS Accounts token when the take will use Clovy API, and opens the
 transcription connection without sending audio: `GET /models` on Groq with
 the user's key, else Clovy API's `GET /healthz`. The helper preloads the cues
