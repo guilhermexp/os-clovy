@@ -54,11 +54,28 @@ defect to fix first.
 The note tools (`search_june`, `get_note`, `get_dictation`) are named in
 [docs/agent-note-tools.md](../docs/agent-note-tools.md).
 
-Inspect the current host-tool catalog and dispatch before coining anything:
-`src-tauri/src/agent_runtime/api.rs`,
+Clovy's tools for CLI chat turns are served by the Clovy MCP server. Its read
+tools are named in the `clovy-mcp-server` specs of the OpenSpec changes
+`add-activity-intelligence` and `default-capture-and-session-mcp`; its
+turn-bound tools (memory, media, recorder, Browser use, Computer use, vault
+and skills, routines, connectors, interaction) are named in the
+`clovy-mcp-server` delta of the OpenSpec change `cli-substitui-agente-nativo`
+([ADR-0063](../docs/adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)),
+which owns them, and implemented one group per file in
+`src-tauri/src/mcp_server/tools/`. They keep the names of the native host
+tools they replace. [docs/mcp-server.md](../docs/mcp-server.md) references
+those names without coining them, and
+`src-tauri/tests/mcp_server_doc_catalog.rs` fails when its tables and the
+server's `tools/list` disagree.
+
+Inspect the current catalogs and dispatch before coining anything: the
+Clovy MCP server's groups in `src-tauri/src/mcp_server/tools/`, and the
+legacy host tools in `src-tauri/src/agent_runtime/api.rs`,
 `src-tauri/src/agent_runtime/native_connectors.rs`, and
 `src-tauri/src/agent_runtime/tools.rs`.
 
 **Exceptions.** Tools supplied by external MCP servers, including
 user-connected and provider-hosted servers, are not ours to name; use them as
-they come. This rule binds June-owned in-loop host tools only.
+they come (Notion's `notion-*`, and the gateway's `mcp_<server>_<tool>` and
+`mcp_linear_*`, which only prefix the server's own names). This rule binds
+June-owned in-loop host tools and the Clovy MCP server's own tools only.

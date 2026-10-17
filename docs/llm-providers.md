@@ -248,12 +248,17 @@ One message on a CLI engine is one CLI process in the session workspace:
   `defaultMode` in the user's own claude settings never decides it. Attended
   turns never get `--strict-mcp-config`: the MCP servers and claude.ai
   connectors the user configured in the CLI also load, and a server of the
-  user's named `clovy` is replaced by the turn's. Once Clovy's
-  `approve_action` and `request_clarification` tools exist (parity slice
-  2.11, `policy::CLAUDE_INTERACTION_TOOLS`), claude also gets
-  `--permission-prompt-tool mcp__clovy__approve_action --disallowedTools
-  mcp__clovy__approve_action AskUserQuestion`, so its own permission requests
-  become Clovy approval cards. Until then, and always on codex, an action the
+  user's named `clovy` is replaced by the turn's. With Clovy's server, claude
+  also gets `--permission-prompt-tool mcp__clovy__approve_action
+  --disallowedTools mcp__clovy__approve_action AskUserQuestion`
+  (`policy::CLAUDE_INTERACTION_TOOLS`): its own permission requests (shell,
+  edits, reads outside the workspace) go to Clovy's `approve_action` tool and
+  become Clovy approval cards through the approval broker, the model cannot
+  call that tool itself, and it asks questions through Clovy's
+  `request_clarification` instead of `AskUserQuestion`
+  ([mcp-server.md](mcp-server.md#approval-broker)). Codex has no such hook
+  in `exec`: its own actions stay inside its sandbox. On codex, and on claude
+  without Clovy's server, an action the
   CLI refuses for lack of approval becomes a failed tool item whose error
   says so (`needsApproval: true` in the event). Measured: claude answers the
   tool with "Claude requested permissions to …, but you haven't granted it
@@ -339,7 +344,14 @@ One message on a CLI engine is one CLI process in the session workspace:
 - **Clovy's tools.** Given to claude, codex, and copilot while the Clovy MCP
   server is on ([mcp-server.md](mcp-server.md)); `chat_engine_catalog` reports
   `clovyTools` (`available`, `server_off`, `unsupported`) and the session says
-  when it has none. Compaction is refused (`agent_compaction_unsupported`):
+  when it has none. A bound turn gets the read tools plus the turn-bound
+  tools (notes, memory, routines, vault and skills, media, recorder,
+  connectors, the MCP gateway, interaction, and, in attended turns, Browser
+  use and Computer use); every Clovy write asks the approval broker first and
+  an unattended turn's writes are refused (`unattended_requires_approval`),
+  see [mcp-server.md](mcp-server.md#tools-for-turn-bound-connections). The
+  agent's web search and fetch come from the CLI itself (claude's
+  `WebSearch`/`WebFetch`, codex `web_search="live"`), not Clovy API. Compaction is refused (`agent_compaction_unsupported`):
   the CLI manages its own context.
 
 ## Routines on a CLI engine

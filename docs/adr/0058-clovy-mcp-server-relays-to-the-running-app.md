@@ -71,3 +71,22 @@ decision they are turned on once, recorded by `defaultsVersion` in
 `activity-settings.json` (see [docs/activity-capture.md](../activity-capture.md)).
 The relay, socket, secret, and same-user checks are unchanged; tools still
 answer only once the listener is ready.
+
+## Addendum: turn-bound write tools (2026-10-17)
+
+The decision above serves read-only tools to every client. Since the parity
+slices of the OpenSpec change `cli-substitui-agente-nativo` reached `main`
+(2026-10-17), a connection opened by a Clovy CLI chat turn carries a turn
+token in the handshake (additive `turn` field, protocol version still `1`)
+and also gets turn-bound tools, including writes that ask the in-app approval
+broker first. That decision and its trade-offs are
+[ADR-0063](0063-cli-turns-get-write-tools-through-an-approval-broker.md),
+still `proposed` until the owner accepts the parity proof; it supersedes
+"everything is read-only" for turn-bound connections only.
+
+Unchanged by it: the relay, the socket and its 0600 mode, the installation
+secret, the same-user check, and the read-only surface for every connection
+without a turn token (Cursor, `claude mcp add`). The binary still never opens
+a database. The token is checked only after the secret and user id, so it
+never opens the socket by itself. Contract: [docs/mcp-server.md](../mcp-server.md)
+("Turn binding", "Approval broker", and the tool tables).
