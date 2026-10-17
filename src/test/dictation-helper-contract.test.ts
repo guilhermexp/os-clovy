@@ -61,3 +61,37 @@ describe("dictation helper: capture starts on the press (D3)", () => {
     expect(trim).toContain("AVAssetExportPresetPassthrough");
   });
 });
+
+describe("dictation helper: ready before the first press (D4)", () => {
+  const launch = code(source.slice(source.indexOf('emit("ready")')));
+
+  it("loads the cues and prepares the first recorder at launch", () => {
+    expect(launch).toContain("RecordingCuePlayer.preload()");
+    expect(launch).toContain("dictation.prepareNextRecording()");
+    // Both before the run loop, so they are done by the first press.
+    expect(launch.indexOf("dictation.prepareNextRecording()")).toBeLessThan(
+      launch.indexOf("app.run()"),
+    );
+  });
+
+  it("prepares a recorder without recording", () => {
+    const prepare = code(body("func prepareNextRecording()"));
+    expect(prepare).toContain("authorizationStatus(for: .audio) == .authorized");
+    expect(prepare).toContain("prepareToRecord()");
+    expect(prepare).not.toMatch(/\.record\(/);
+  });
+
+  it("uses the prepared recorder for a take and prepares the next one after it", () => {
+    const start = code(body("private func startRecording("));
+    expect(start).toContain("takePreparedRecorder()");
+    const reset = code(body("private func resetRecordingState("));
+    expect(reset).toContain("prepareNextRecording()");
+  });
+
+  it("drops a prepared recorder when the microphone choice or devices change", () => {
+    expect(code(body("func setMicrophone("))).toContain("discardPreparedRecorder()");
+    expect(source).toContain("AVCaptureDevice.wasConnectedNotification");
+    expect(source).toContain("AVCaptureDevice.wasDisconnectedNotification");
+    expect(code(body("func shutdown()"))).toContain("discardPreparedRecorder()");
+  });
+});
