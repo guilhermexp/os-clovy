@@ -305,6 +305,10 @@ harness tickets, not `JUN-*`.
   use the isolated `co.opensoftware.june-dev` dirs; never set
   `OS_CLOVY_USE_PROD_DATA_DIR` in tests or verification. Keychain items created
   by dev builds must use a `-dev` service suffix.
+  Persisted Rust paths must use `app_paths::app_data_dir` or
+  `app_paths::app_config_dir`, not the raw Tauri resolver. A signed Dev bundle
+  alone does not isolate `app.path().app_config_dir()` or the frontend's
+  `appConfigDir()`; those can still resolve the release directory.
 - **Dev permissions:** `pnpm tauri:dev` runs `src-tauri/target/<profile>/Clovy Dev.app`
   (bundle id `<identifier>.dev`), signed with the single Apple Development
   identity or `CLOVY_DEV_SIGNING_IDENTITY`, and never resets TCC grants

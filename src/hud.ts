@@ -1521,7 +1521,7 @@ hud?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
   if (event.target instanceof Element && event.target.closest("button")) return;
   event.preventDefault();
-  void appWindow?.startDragging().catch(() => {});
+  void invoke("dictation_hud_start_drag").catch(() => {});
 });
 
 // While the collapse tween plays, window sizing is locked (syncWindowToPill

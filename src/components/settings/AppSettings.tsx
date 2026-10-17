@@ -273,6 +273,7 @@ const DEFAULT_SETTINGS: DictationSettingsDto = {
   language: undefined,
   cleanupEnabled: false,
   cleanupModel: "nvidia/nemotron-3-nano-30b-a3b",
+  hudPlacement: "bottom",
 };
 
 const WINDOWS_DEFAULT_SHORTCUTS: Record<DictationShortcutKind, DictationShortcutSetting> = {

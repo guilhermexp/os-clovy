@@ -61,6 +61,24 @@ once to cleanup off, whatever engine cleanup used before (Clovy API, an
 endpoint, or a CLI). The `dictationCleanup` selection in
 `provider-settings.json` is kept on disk but always reads as Clovy API.
 
+The same file stores `hudPlacement`: `bottom` by default, including files
+without the field, or `top`. Settings > Dictation > Style exposes **Indicator
+position**, independently of cleanup. The frame is horizontally centered in
+the cursor monitor's work area with a 12 logical-pixel margin above the Dock
+or below the menu bar. Resizing preserves the nearest vertical edge so a
+bottom pill grows upward; error details and the native Esc hint use the
+available side (`above` at the bottom, `below` at the top).
+
+Only an explicit user drag is remembered for the current process. Native
+startup positioning and resize-generated `Moved` events are not drag state:
+remembering them used to restore AppKit's initial centered frame instead of
+the configured edge. Meeting-detection prompts in the dictation window keep
+their top anchor; the separate recording HUD is unchanged.
+
+The settings path uses `app_paths::app_config_dir`, the same dev/release
+isolation as provider settings. Debug builds never import the release
+settings file into the dev profile.
+
 ## Warm-up
 
 At launch and on a key-down after a minute idle, Clovy reads the user's Groq
@@ -104,5 +122,7 @@ From the `dictation-events.log` of the app being measured:
   hosts: requests per destination, only the called provider's key, warm-up.
 - `cargo test llm::registry` - the registry refuses a CLI or endpoint for
   dictation cleanup.
-- `src/test/dictation-cleanup-settings.test.tsx` - the cleanup switch and the
-  OpenRouter-only model picker.
+- `cargo test dictation_hud_` - top/bottom origin, Dock/no Dock, 1x/2x,
+  offset monitors, resize bounds, and settings save/reload compatibility.
+- `src/test/dictation-cleanup-settings.test.tsx` - the cleanup switch,
+  OpenRouter-only model picker, and indicator-position persistence errors.

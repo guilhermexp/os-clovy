@@ -23,6 +23,7 @@ vi.mock("../lib/tauri", () => ({
   dictationSettings: mocks.dictationSettings,
   setDictationStyle: mocks.setDictationStyle,
   setDictationCleanup: vi.fn(),
+  setDictationHudPlacement: vi.fn(),
   listProviderModels: vi.fn().mockResolvedValue({ models: [] }),
 }));
 
@@ -60,6 +61,7 @@ describe("StyleSettingsSection", () => {
         // The style applies only while cleanup is on.
         cleanupEnabled: true,
         cleanupModel: "nvidia/nemotron-3-nano-30b-a3b",
+        hudPlacement: "bottom",
       },
     });
     mocks.setDictationStyle.mockImplementation(async (style) => ({

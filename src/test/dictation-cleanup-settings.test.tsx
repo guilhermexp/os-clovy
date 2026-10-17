@@ -55,8 +55,8 @@ describe("dictation cleanup settings", () => {
         cleanupModel: cleanupModel ?? "nvidia/nemotron-3-nano-30b-a3b",
       }),
     );
-    mocks.setDictationHudPlacement.mockImplementation(
-      async (placement: "bottom" | "top") => settings(false, placement),
+    mocks.setDictationHudPlacement.mockImplementation(async (placement: "bottom" | "top") =>
+      settings(false, placement),
     );
     mocks.listProviderModels.mockResolvedValue({
       mode: "generation",

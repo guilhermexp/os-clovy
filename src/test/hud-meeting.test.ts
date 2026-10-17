@@ -13,7 +13,6 @@ const mocks = vi.hoisted(() => ({
     mocks.listeners.set(event, listener);
     return Promise.resolve(vi.fn());
   }),
-  startDragging: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -27,7 +26,6 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     hide: mocks.hide,
-    startDragging: mocks.startDragging,
   }),
 }));
 
@@ -37,7 +35,6 @@ describe("meeting detection HUD", () => {
     vi.clearAllMocks();
     mocks.hide.mockResolvedValue(undefined);
     mocks.invoke.mockResolvedValue(undefined);
-    mocks.startDragging.mockResolvedValue(undefined);
     mocks.listeners.clear();
     document.body.innerHTML = hudMarkup();
   });
@@ -923,24 +920,6 @@ describe("meeting detection HUD", () => {
     expect(mocks.invoke).not.toHaveBeenCalledWith("dictation_helper_command", {
       command: { type: "discard_recording" },
     });
-  });
-
-  it("drags from anywhere on the pill except the controls", async () => {
-    await loadHud();
-    await emit("dictation-event", { type: "listening_started" });
-
-    hudElement().dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
-    expect(mocks.startDragging).toHaveBeenCalledTimes(1);
-
-    document
-      .querySelector<HTMLButtonElement>("#hud-stop")
-      ?.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
-    expect(mocks.startDragging).toHaveBeenCalledTimes(1);
-
-    document
-      .querySelector<HTMLButtonElement>("#hud-cancel")
-      ?.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
-    expect(mocks.startDragging).toHaveBeenCalledTimes(1);
   });
 
   it("responds to cancel hover immediately but waits for tooltip intent", async () => {

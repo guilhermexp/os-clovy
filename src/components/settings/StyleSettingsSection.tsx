@@ -3,9 +3,10 @@ import {
   dictationSettings,
   listProviderModels,
   setDictationCleanup,
+  setDictationHudPlacement,
   setDictationStyle,
 } from "../../lib/tauri";
-import type { DictationStyle, ProviderModelDto } from "../../lib/tauri";
+import type { DictationHudPlacement, DictationStyle, ProviderModelDto } from "../../lib/tauri";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Switch } from "../ui/Switch";
 import { type MessageKey, useT } from "../../i18n";
@@ -15,6 +16,11 @@ const STYLE_OPTIONS = [
   { value: "casualLowercase" as const, labelKey: "settings.style.casual" },
   { value: "formal" as const, labelKey: "settings.style.formal" },
 ] satisfies { value: DictationStyle; labelKey: MessageKey }[];
+
+const HUD_PLACEMENT_OPTIONS = [
+  { value: "bottom" as const, labelKey: "settings.style.hudPlacementBottom" },
+  { value: "top" as const, labelKey: "settings.style.hudPlacementTop" },
+] satisfies { value: DictationHudPlacement; labelKey: MessageKey }[];
 
 const SAMPLES: Record<DictationStyle, { description: MessageKey; sample: MessageKey }> = {
   standard: {
@@ -49,6 +55,7 @@ function cleanupModelOptions(models: ProviderModelDto[]): CleanupModelOption[] {
 export function StyleSettingsSection() {
   const t = useT();
   const [style, setStyle] = useState<DictationStyle>("standard");
+  const [hudPlacement, setHudPlacement] = useState<DictationHudPlacement>("bottom");
   const [cleanupEnabled, setCleanupEnabled] = useState(false);
   const [cleanupModel, setCleanupModel] = useState("");
   const [models, setModels] = useState<CleanupModelOption[]>([]);
@@ -62,6 +69,7 @@ export function StyleSettingsSection() {
         setStyle(response.settings.style);
         setCleanupEnabled(response.settings.cleanupEnabled ?? false);
         setCleanupModel(response.settings.cleanupModel ?? "");
+        setHudPlacement(response.settings.hudPlacement ?? "bottom");
       })
       .catch((caught: unknown) => {
         if (!cancelled) setError(messageFromError(caught));
@@ -113,6 +121,19 @@ export function StyleSettingsSection() {
     }
   }
 
+  async function selectHudPlacement(nextPlacement: DictationHudPlacement) {
+    const previous = hudPlacement;
+    setHudPlacement(nextPlacement);
+    try {
+      const next = await setDictationHudPlacement(nextPlacement);
+      setHudPlacement(next.hudPlacement ?? nextPlacement);
+      setError(undefined);
+    } catch (caught) {
+      setHudPlacement(previous);
+      setError(messageFromError(caught));
+    }
+  }
+
   async function selectStyle(nextStyle: DictationStyle) {
     setStyle(nextStyle);
     try {
@@ -137,6 +158,27 @@ export function StyleSettingsSection() {
       </h2>
       <div className="settings-card">
         <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-info">
+              <h3 id="dictation-hud-placement-title" className="settings-row-title">
+                {t("settings.style.hudPlacement")}
+              </h3>
+              <p className="settings-row-description">
+                {t("settings.style.hudPlacementDescription")}
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <SegmentedControl
+                value={hudPlacement}
+                onValueChange={(value) => void selectHudPlacement(value)}
+                options={HUD_PLACEMENT_OPTIONS.map((option) => ({
+                  value: option.value,
+                  label: t(option.labelKey),
+                }))}
+                aria-label={t("settings.style.hudPlacement")}
+              />
+            </div>
+          </div>
           <div className="settings-row">
             <div className="settings-row-info">
               <h3 id="dictation-cleanup-title" className="settings-row-title">

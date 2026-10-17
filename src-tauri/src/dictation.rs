@@ -25,9 +25,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
-};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
 
 /// Cleanup regenerates the whole transcript through the LLM, so its latency
 /// grows with dictation length. A flat budget silently degraded long
@@ -423,10 +421,8 @@ pub struct HotkeyStatus {
     event: Mutex<serde_json::Value>,
 }
 
-/// Position the HUD remembers between dictation sessions in the same process.
-/// Intentionally process-scoped, not disk-persisted: every fresh launch of
-/// Clovy should put the pill back at top-center, but within a single run
-/// the user's drag-to-corner choice should stick.
+/// Only an explicit user drag is remembered within this process. Resizes and
+/// native startup moves must never replace the configured screen-edge anchor.
 pub struct HudPosition {
     inner: Mutex<Option<(i32, i32)>>,
 }
@@ -467,6 +463,14 @@ pub fn configured_transcription_language() -> Option<String> {
         .and_then(|settings| settings.language.clone())
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DictationHudPlacement {
+    #[default]
+    Bottom,
+    Top,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationSettings {
@@ -474,6 +478,7 @@ pub struct DictationSettings {
     pub toggle_shortcut: DictationShortcutSetting,
     pub microphone: DictationMicrophoneSetting,
     pub style: DictationStyle,
+    pub hud_placement: DictationHudPlacement,
     pub language: Option<String>,
     /// Off by default: the Whisper transcript is pasted with no LLM call.
     pub cleanup_enabled: bool,
@@ -491,6 +496,7 @@ impl Default for DictationSettings {
             toggle_shortcut: DictationShortcutSetting::control_option_t(),
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
+            hud_placement: DictationHudPlacement::default(),
             language: None,
             cleanup_enabled: false,
             cleanup_model: DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
@@ -549,6 +555,7 @@ impl<'de> Deserialize<'de> for DictationSettings {
             toggle_shortcut: Option<DictationShortcutSetting>,
             microphone: Option<DictationMicrophoneSetting>,
             style: Option<DictationStyle>,
+            hud_placement: Option<DictationHudPlacement>,
             language: Option<String>,
             cleanup_enabled: Option<bool>,
             cleanup_model: Option<String>,
@@ -583,6 +590,7 @@ impl<'de> Deserialize<'de> for DictationSettings {
                 .unwrap_or_else(DictationShortcutSetting::control_option_t),
             microphone: settings.microphone.unwrap_or(microphone),
             style: settings.style.unwrap_or_default(),
+            hud_placement: settings.hud_placement.unwrap_or_default(),
             language: normalize_language(settings.language),
             cleanup_enabled: settings.cleanup_enabled.unwrap_or(false),
             cleanup_model: settings
@@ -1652,6 +1660,26 @@ pub fn set_dictation_style(
 }
 
 #[tauri::command]
+pub fn set_dictation_hud_placement(
+    app: AppHandle,
+    state: State<'_, DictationSettingsState>,
+    placement: DictationHudPlacement,
+) -> Result<DictationSettings, AppError> {
+    let settings = update_settings(&state, |settings| {
+        settings.hud_placement = placement;
+    })?;
+    if let Some(position) = app.try_state::<HudPosition>() {
+        if let Ok(mut saved) = position.inner.lock() {
+            *saved = None;
+        }
+    }
+    if let Some(hud) = app.get_webview_window("hud") {
+        position_hud_window(&app, &hud);
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
 pub fn set_dictation_cleanup(
     state: State<'_, DictationSettingsState>,
     enabled: bool,
@@ -2134,8 +2162,31 @@ pub fn dictation_hud_set_size(app: AppHandle, width: f64, height: f64, animate: 
     animate_frame_to(&hud, new_size, animate);
 }
 
-/// Ease the window to `new_size`, keeping its center anchored. Skips the
-/// animation (snaps) when the window is hidden or `animate` is false.
+/// Remember only an actual drag, never the Moved events emitted by resizing.
+/// On macOS the native drag runs a nested event loop until the mouse is released.
+#[tauri::command]
+pub fn dictation_hud_start_drag(app: AppHandle) {
+    let Some(hud) = app.get_webview_window("hud") else {
+        return;
+    };
+    let app_for_drag = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if hud.start_dragging().is_err() {
+            return;
+        }
+        if let (Ok(position), Some(state)) = (
+            hud.outer_position(),
+            app_for_drag.try_state::<HudPosition>(),
+        ) {
+            if let Ok(mut saved) = state.inner.lock() {
+                *saved = Some((position.x, position.y));
+            }
+        }
+    });
+}
+
+/// Ease the window to `new_size`, keeping the nearest vertical edge anchored.
+/// Hidden windows are positioned by show, not resized around their startup frame.
 fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: bool) {
     let (Ok(position), Ok(old_size)) = (hud.outer_position(), hud.outer_size()) else {
         return;
@@ -2143,8 +2194,22 @@ fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: b
     if new_size == old_size {
         return;
     }
-    let target_x = position.x + (old_size.width as i32 - new_size.width as i32) / 2;
-    let target_y = position.y + (old_size.height as i32 - new_size.height as i32) / 2;
+    if !hud.is_visible().unwrap_or(false) {
+        // Before the first show, the OS chooses an arbitrary initial frame.
+        // Centering a resize there used to emit Moved and masquerade as a drag.
+        let _ = hud.set_size(new_size);
+        return;
+    }
+    let monitor = hud
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| hud.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let (target_x, target_y) =
+        dictation_hud_resized_origin(*monitor.work_area(), position, old_size, new_size);
 
     if animate && hud.is_visible().unwrap_or(false) {
         const STEPS: u32 = 12;
@@ -2166,6 +2231,36 @@ fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: b
     }
     let _ = hud.set_size(new_size);
     let _ = hud.set_position(PhysicalPosition::new(target_x, target_y));
+    if let Some(state) = hud.app_handle().try_state::<HudPosition>() {
+        if let Ok(mut saved) = state.inner.lock() {
+            if saved.is_some() {
+                *saved = Some((target_x, target_y));
+            }
+        }
+    }
+}
+
+fn dictation_hud_resized_origin(
+    work_area: tauri::PhysicalRect<i32, u32>,
+    position: PhysicalPosition<i32>,
+    old_size: PhysicalSize<u32>,
+    new_size: PhysicalSize<u32>,
+) -> (i32, i32) {
+    let x = position.x + (old_size.width as i32 - new_size.width as i32) / 2;
+    let below_middle = position.y + old_size.height as i32 / 2
+        > work_area.position.y + work_area.size.height as i32 / 2;
+    let y = if below_middle {
+        position.y + old_size.height as i32 - new_size.height as i32
+    } else {
+        position.y
+    };
+    let max_x = work_area.position.x + (work_area.size.width as i32 - new_size.width as i32).max(0);
+    let max_y =
+        work_area.position.y + (work_area.size.height as i32 - new_size.height as i32).max(0);
+    (
+        x.clamp(work_area.position.x, max_x),
+        y.clamp(work_area.position.y, max_y),
+    )
 }
 
 /// Set the native window alpha. The exit dissolve is driven from the webview
@@ -2223,7 +2318,7 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     let entering = enter.unwrap_or(false);
     let was_hidden = !hud.is_visible().unwrap_or(false)
         || HUD_WOKEN_FADED.load(std::sync::atomic::Ordering::Relaxed);
-    if !hud.is_visible().unwrap_or(false) && !entering {
+    if !entering {
         position_hud_window(&app, &hud);
     }
     HUD_WOKEN_FADED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -2245,7 +2340,7 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     let target = hud
         .outer_size()
         .ok()
-        .and_then(|size| default_hud_position(&hud, size));
+        .and_then(|size| hud_position_for_placement(&hud, size, DictationHudPlacement::Top));
     let Some((x, y)) = target else {
         let alpha_hud = hud.clone();
         let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 1.0));
@@ -3606,8 +3701,7 @@ fn focus_main_window(app: &AppHandle) {
 }
 
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
+    crate::app_paths::app_config_dir(app)
         .ok()
         .map(|directory| directory.join("dictation-settings.json"))
 }
@@ -7529,7 +7623,7 @@ fn position_hud_window(app: &AppHandle, hud: &WebviewWindow) {
 
     // Restore the in-memory drag position if it's still on-screen. This
     // doesn't persist across app restarts — that's deliberate; quitting
-    // Clovy resets the HUD to top-center so it can't end up lost on a
+    // Clovy resets the HUD to the configured edge so it can't end up lost on a
     // monitor that's no longer connected.
     if let Some(state) = app.try_state::<HudPosition>() {
         let saved = state.inner.lock().ok().and_then(|guard| *guard);
@@ -7580,14 +7674,21 @@ fn position_hud_window_top_center(hud: &WebviewWindow) {
     let Ok(window_size) = hud.outer_size() else {
         return;
     };
-    if let Some((x, y)) = default_hud_position(hud, window_size) {
+    if let Some((x, y)) = hud_position_for_placement(hud, window_size, DictationHudPlacement::Top) {
         let _ = hud.set_position(PhysicalPosition::new(x, y));
     }
 }
 
 fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> Option<(i32, i32)> {
-    // Geometry is kept pure so monitor/scale fixtures exercise the same path.
+    let placement = settings_store().lock().ok()?.hud_placement;
+    hud_position_for_placement(hud, window_size, placement)
+}
 
+fn hud_position_for_placement(
+    hud: &WebviewWindow,
+    window_size: PhysicalSize<u32>,
+    placement: DictationHudPlacement,
+) -> Option<(i32, i32)> {
     let monitor = hud
         .cursor_position()
         .ok()
@@ -7599,21 +7700,26 @@ fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> 
         *monitor.work_area(),
         window_size,
         monitor.scale_factor(),
-        &*settings_store().lock().ok()?,
+        placement,
     ))
 }
 
 fn dictation_hud_origin(
     work_area: tauri::PhysicalRect<i32, u32>,
     window_size: PhysicalSize<u32>,
-    _scale: f64,
-    _settings: &DictationSettings,
+    scale: f64,
+    placement: DictationHudPlacement,
 ) -> (i32, i32) {
-    let work_center_x = work_area.position.x + work_area.size.width as i32 / 2;
-    (
-        work_center_x - window_size.width as i32 / 2,
-        work_area.position.y + 12,
-    )
+    let margin = (12.0 * scale).round() as i32;
+    let x = work_area.position.x + (work_area.size.width as i32 - window_size.width as i32) / 2;
+    let top = work_area.position.y + margin;
+    let bottom =
+        work_area.position.y + work_area.size.height as i32 - window_size.height as i32 - margin;
+    let y = match placement {
+        DictationHudPlacement::Bottom => bottom.max(top),
+        DictationHudPlacement::Top => top,
+    };
+    (x, y)
 }
 
 /// Treat a saved position as still usable as long as the pill overlaps a
@@ -7666,17 +7772,6 @@ fn configure_hud_window(app: &AppHandle) -> Result<(), String> {
                 tracing::warn!(%error, "failed to clear dictation HUD vibrancy");
             }
         }
-
-        let app_for_events = app.clone();
-        hud.on_window_event(move |event| {
-            if let WindowEvent::Moved(position) = event {
-                if let Some(state) = app_for_events.try_state::<HudPosition>() {
-                    if let Ok(mut guard) = state.inner.lock() {
-                        *guard = Some((position.x, position.y));
-                    }
-                }
-            }
-        });
     }
     Ok(())
 }
@@ -8056,10 +8151,28 @@ mod tests {
         let cases = [
             ((0, 30, 1920, 1170), (200, 68), 1.0, (860, 1120), (860, 42)),
             ((0, 30, 1920, 1090), (200, 68), 1.0, (860, 1040), (860, 42)),
-            ((0, 60, 3840, 2340), (400, 136), 2.0, (1720, 2240), (1720, 84)),
-            ((0, 60, 3840, 2180), (400, 136), 2.0, (1720, 2080), (1720, 84)),
+            (
+                (0, 60, 3840, 2340),
+                (400, 136),
+                2.0,
+                (1720, 2240),
+                (1720, 84),
+            ),
+            (
+                (0, 60, 3840, 2180),
+                (400, 136),
+                2.0,
+                (1720, 2080),
+                (1720, 84),
+            ),
             ((80, 30, 1840, 1170), (200, 68), 1.0, (900, 1120), (900, 42)),
-            ((-2560, -1380, 2560, 1380), (400, 136), 2.0, (-1480, -160), (-1480, -1356)),
+            (
+                (-2560, -1380, 2560, 1380),
+                (400, 136),
+                2.0,
+                (-1480, -160),
+                (-1480, -1356),
+            ),
         ];
         for ((x, y, width, height), (w, h), scale, bottom, top) in cases {
             let work_area = tauri::PhysicalRect {
@@ -8070,7 +8183,12 @@ mod tests {
                 let settings: DictationSettings =
                     serde_json::from_value(serde_json::json!({"hudPlacement": placement})).unwrap();
                 assert_eq!(
-                    dictation_hud_origin(work_area, PhysicalSize::new(w, h), scale, &settings),
+                    dictation_hud_origin(
+                        work_area,
+                        PhysicalSize::new(w, h),
+                        scale,
+                        settings.hud_placement
+                    ),
                     expected,
                     "{placement} at {scale}x in {work_area:?}",
                 );
@@ -8086,11 +8204,21 @@ mod tests {
         };
         let settings: DictationSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(
-            dictation_hud_origin(work_area, PhysicalSize::new(400, 136), 2.0, &settings),
+            dictation_hud_origin(
+                work_area,
+                PhysicalSize::new(400, 136),
+                2.0,
+                settings.hud_placement
+            ),
             (1720, 2080),
         );
         assert_eq!(
-            dictation_hud_origin(work_area, PhysicalSize::new(800, 400), 2.0, &settings),
+            dictation_hud_origin(
+                work_area,
+                PhysicalSize::new(800, 400),
+                2.0,
+                settings.hud_placement
+            ),
             (1520, 1816),
         );
     }
@@ -8103,12 +8231,38 @@ mod tests {
         for placement in ["top", "bottom"] {
             let settings: DictationSettings = serde_json::from_value(serde_json::json!({
                 "style": "formal", "hudPlacement": placement
-            })).unwrap();
+            }))
+            .unwrap();
             let reloaded: DictationSettings =
                 serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
-            assert_eq!(serde_json::to_value(&reloaded).unwrap()["hudPlacement"], placement);
+            assert_eq!(
+                serde_json::to_value(&reloaded).unwrap()["hudPlacement"],
+                placement
+            );
             assert_eq!(reloaded.style, DictationStyle::Formal);
         }
+    }
+
+    #[test]
+    fn dictation_hud_resize_keeps_the_nearest_edge_and_clamps_dragged_pills() {
+        let work = tauri::PhysicalRect {
+            position: PhysicalPosition::new(-2560, -1380),
+            size: PhysicalSize::new(2560, 1380),
+        };
+        let short = PhysicalSize::new(400, 136);
+        let tall = PhysicalSize::new(800, 400);
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-1480, -160), short, tall),
+            (-1680, -424),
+        );
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-1480, -1356), short, tall),
+            (-1680, -1356),
+        );
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-300, -100), short, tall),
+            (-800, -400),
+        );
     }
 
     #[test]
