@@ -63,3 +63,13 @@ ADR-0064 "Home runs on the default CLI engine" substitui a frase do Início na d
 ## Migration Plan
 
 Sem migração de esquema SQL prevista: itens importados usam as tabelas de sessão existentes; o marcador de importação fica num item ou campo já disponível da sessão (o construtor escolhe; se precisar de coluna, migração nova sem apagar arquivos antigos). Rollback: reverter o merge; o `localStorage` antigo continua intacto, então a versão anterior volta a mostrar o histórico.
+
+## Implementation notes (2026-10-17)
+
+- **D2 confirmado:** `start_agent_run` usa o modelo do pedido e grava esse modelo na sessão (`UPDATE agent_sessions SET model = ?` antes de `start_cli_run`). A sessão antiga `open-software/auto` adota o motor no próprio envio, sem migração; sessões novas do Início já nascem no motor padrão.
+- **Um só caminho de envio:** o Início usa o mesmo `submit` das sessões; só a obtenção da sessão (`ensureHomeSession`) e o modelo do turno (`homeEngineModelId`, lido a cada envio) mudam. Isso traz de graça a fila e o direcionamento de mensagens enviadas durante um turno e a linha de mensagem não enviada das sessões. Sem CLI instalado, o Início pede `__clovy_cli_engine__:claude` para que o turno falhe com o erro de motor ausente das sessões CLI.
+- **Marcador da importação:** prefixo `home-import:<id da sessão>:` no `external_id` dos itens importados (nenhuma coluna nova). Itens sem texto (turno só com cartão, só anexo) não são importados.
+- **Cartões antigos:** lidos só para exibição; um cartão que ficou em `starting` aparece como falho em memória, sem regravar o `localStorage`. Sem novos cartões, o botão de tentar de novo dos cartões falhos sai junto com `startHomeTask`.
+- **Removido por ser só da triagem:** o demo de desenvolvimento do Início (`__homeDemo`, `homeDemoReply`), o limite próprio de 64.000 caracteres do Início e a linha de mensagem não enviada específica do Início (substituída pela das sessões).
+- **`persona.rs` fica:** ainda é usado pelas instruções do agente nativo (`agent_runtime/api.rs`) e pelas rotinas (`routines.rs`).
+- **Documentação:** além de `CONTEXT.md` e `llm-providers.md`, `docs/home-assistant.md` (que descrevia a triagem inteira) foi reescrito e `docs/index.md` ganhou a ADR-0064.
