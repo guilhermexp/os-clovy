@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   dictationSettings: vi.fn(),
   setDictationStyle: vi.fn(),
   setDictationCleanup: vi.fn(),
+  setDictationHudPlacement: vi.fn(),
   listProviderModels: vi.fn(),
 }));
 
@@ -14,6 +15,7 @@ vi.mock("../lib/tauri", () => ({
   dictationSettings: mocks.dictationSettings,
   setDictationStyle: mocks.setDictationStyle,
   setDictationCleanup: mocks.setDictationCleanup,
+  setDictationHudPlacement: mocks.setDictationHudPlacement,
   listProviderModels: mocks.listProviderModels,
 }));
 
@@ -21,7 +23,7 @@ function model(id: string, name: string, provider = "openrouter") {
   return { id, name, provider, modelType: "text", traits: [], capabilities: [] };
 }
 
-function settings(cleanupEnabled: boolean) {
+function settings(cleanupEnabled: boolean, hudPlacement: "bottom" | "top" = "bottom") {
   return {
     pushToTalkShortcut: {
       code: "Fn",
@@ -39,6 +41,7 @@ function settings(cleanupEnabled: boolean) {
     style: "standard",
     cleanupEnabled,
     cleanupModel: "nvidia/nemotron-3-nano-30b-a3b",
+    hudPlacement,
   };
 }
 
@@ -51,6 +54,9 @@ describe("dictation cleanup settings", () => {
         ...settings(enabled),
         cleanupModel: cleanupModel ?? "nvidia/nemotron-3-nano-30b-a3b",
       }),
+    );
+    mocks.setDictationHudPlacement.mockImplementation(
+      async (placement: "bottom" | "top") => settings(false, placement),
     );
     mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
@@ -94,5 +100,25 @@ describe("dictation cleanup settings", () => {
     await waitFor(() =>
       expect(mocks.setDictationCleanup).toHaveBeenLastCalledWith(true, "openai/gpt-5-mini"),
     );
+  });
+
+  it("loads indicator position as top, attempts switching to bottom, and reverts to top if persistence fails", async () => {
+    const user = userEvent.setup();
+    mocks.dictationSettings.mockResolvedValue({ settings: settings(false, "top") });
+    mocks.setDictationHudPlacement.mockRejectedValueOnce(new Error("Failed to save placement"));
+
+    render(<StyleSettingsSection />);
+
+    const topButton = await screen.findByRole("button", { name: "Top" });
+    const bottomButton = screen.getByRole("button", { name: "Bottom" });
+    await waitFor(() => expect(topButton).toHaveAttribute("aria-pressed", "true"));
+    expect(bottomButton).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(bottomButton);
+
+    await waitFor(() => expect(mocks.setDictationHudPlacement).toHaveBeenCalledWith("bottom"));
+    await waitFor(() => expect(topButton).toHaveAttribute("aria-pressed", "true"));
+    expect(bottomButton).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("Failed to save placement")).toBeInTheDocument();
   });
 });

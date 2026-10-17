@@ -7586,7 +7586,7 @@ fn position_hud_window_top_center(hud: &WebviewWindow) {
 }
 
 fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> Option<(i32, i32)> {
-    const HUD_TOP_MARGIN: i32 = 12;
+    // Geometry is kept pure so monitor/scale fixtures exercise the same path.
 
     let monitor = hud
         .cursor_position()
@@ -7595,15 +7595,25 @@ fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> 
         .or_else(|| hud.current_monitor().ok().flatten())
         .or_else(|| hud.primary_monitor().ok().flatten())?;
 
-    let work_area = monitor.work_area();
-    let work_top = work_area.position.y;
-    let work_center_x = work_area.position.x + work_area.size.width as i32 / 2;
+    Some(dictation_hud_origin(
+        *monitor.work_area(),
+        window_size,
+        monitor.scale_factor(),
+        &*settings_store().lock().ok()?,
+    ))
+}
 
-    // The window is the pill plus its transparent shadow gutter. Anchor the
-    // full frame; the webview centers the pill inside it.
-    let x = work_center_x - window_size.width as i32 / 2;
-    let y = work_top + HUD_TOP_MARGIN;
-    Some((x, y))
+fn dictation_hud_origin(
+    work_area: tauri::PhysicalRect<i32, u32>,
+    window_size: PhysicalSize<u32>,
+    _scale: f64,
+    _settings: &DictationSettings,
+) -> (i32, i32) {
+    let work_center_x = work_area.position.x + work_area.size.width as i32 / 2;
+    (
+        work_center_x - window_size.width as i32 / 2,
+        work_area.position.y + 12,
+    )
 }
 
 /// Treat a saved position as still usable as long as the pill overlaps a
@@ -8038,6 +8048,68 @@ pub fn key_code_for_code(code: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictation_hud_origin_uses_the_selected_work_area_edge_at_each_scale() {
+        // Physical work areas: menu excluded, with bottom/side/no Dock and a
+        // secondary display to the left and above the primary one.
+        let cases = [
+            ((0, 30, 1920, 1170), (200, 68), 1.0, (860, 1120), (860, 42)),
+            ((0, 30, 1920, 1090), (200, 68), 1.0, (860, 1040), (860, 42)),
+            ((0, 60, 3840, 2340), (400, 136), 2.0, (1720, 2240), (1720, 84)),
+            ((0, 60, 3840, 2180), (400, 136), 2.0, (1720, 2080), (1720, 84)),
+            ((80, 30, 1840, 1170), (200, 68), 1.0, (900, 1120), (900, 42)),
+            ((-2560, -1380, 2560, 1380), (400, 136), 2.0, (-1480, -160), (-1480, -1356)),
+        ];
+        for ((x, y, width, height), (w, h), scale, bottom, top) in cases {
+            let work_area = tauri::PhysicalRect {
+                position: PhysicalPosition::new(x, y),
+                size: PhysicalSize::new(width, height),
+            };
+            for (placement, expected) in [("bottom", bottom), ("top", top)] {
+                let settings: DictationSettings =
+                    serde_json::from_value(serde_json::json!({"hudPlacement": placement})).unwrap();
+                assert_eq!(
+                    dictation_hud_origin(work_area, PhysicalSize::new(w, h), scale, &settings),
+                    expected,
+                    "{placement} at {scale}x in {work_area:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dictation_hud_origin_keeps_growing_pills_above_the_dock() {
+        let work_area = tauri::PhysicalRect {
+            position: PhysicalPosition::new(0, 60),
+            size: PhysicalSize::new(3840, 2180),
+        };
+        let settings: DictationSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            dictation_hud_origin(work_area, PhysicalSize::new(400, 136), 2.0, &settings),
+            (1720, 2080),
+        );
+        assert_eq!(
+            dictation_hud_origin(work_area, PhysicalSize::new(800, 400), 2.0, &settings),
+            (1520, 1816),
+        );
+    }
+
+    #[test]
+    fn dictation_hud_settings_preserve_the_anchor_across_save_and_reload() {
+        let legacy: DictationSettings = serde_json::from_str(r#"{"style":"formal"}"#).unwrap();
+        let old_json = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(old_json["hudPlacement"], "bottom");
+        for placement in ["top", "bottom"] {
+            let settings: DictationSettings = serde_json::from_value(serde_json::json!({
+                "style": "formal", "hudPlacement": placement
+            })).unwrap();
+            let reloaded: DictationSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&reloaded).unwrap()["hudPlacement"], placement);
+            assert_eq!(reloaded.style, DictationStyle::Formal);
+        }
+    }
 
     #[test]
     fn cancel_tooltip_intent_has_independent_open_and_close_delays() {
