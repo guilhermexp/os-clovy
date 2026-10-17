@@ -1,4 +1,4 @@
-import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AgentArtifactDto,
   AgentInterruptionDto,
@@ -17,30 +17,6 @@ import { clovyHomeProfileRemovalPlan, reconcileClovyHomeProfileRemoval } from ".
 // Re-exported so modules that build their own command calls route through the
 // same `invoke` as the rest of the app's bindings.
 export { invoke };
-
-export type ClovyHomeChatMessage = {
-  role: "user" | "assistant";
-  content: string;
-};
-
-export type ClovyHomeChatResponse = {
-  content?: string;
-  task?: {
-    title: string;
-    prompt: string;
-    summary?: string;
-    requiresCurrentResearch?: boolean;
-  };
-};
-
-export type ClovyHomeChatOptions = {
-  /** Data partition captured at the send boundary for memory isolation. */
-  profile?: string;
-  /** Bounded excerpts from older turns outside the verbatim recent window. */
-  historyContext?: string;
-  /** Receives upstream model text as it arrives. */
-  onDelta?: (content: string) => void;
-};
 
 export type ClovyPersonaArea = "work" | "personal" | "thinking" | "play";
 
@@ -61,23 +37,17 @@ export async function setClovyPersona(request: Omit<ClovyPersonaSettings, "schem
   return invoke<ClovyPersonaSettings>("set_clovy_persona", { request });
 }
 
-/** Lightweight private conversation path for Home. Concrete work is returned
- * as a structured handoff and continues in a normal Clovy agent session. */
-export async function clovyHomeChat(
-  messages: ClovyHomeChatMessage[],
-  options: ClovyHomeChatOptions = {},
-) {
-  const onEvent = new Channel<{ event: "delta"; data: { content: string } }>();
-  onEvent.onmessage = (event) => {
-    if (event.event === "delta") options.onDelta?.(event.data.content);
-  };
-  return invoke<ClovyHomeChatResponse>("clovy_home_chat", {
-    request: {
-      profile: options.profile,
-      ...(options.historyContext ? { historyContext: options.historyContext } : {}),
-      messages,
-    },
-    onEvent,
+export type LegacyHomeImport = {
+  imported: number;
+  skipped: number;
+  alreadyImported: boolean;
+};
+
+/** Imports, once, the Home turns older builds kept only in local storage
+ * into the Home session (ADR-0064). The local copy is left as it is. */
+export async function importLegacyHomeTurns(sessionId: string, turns: unknown[]) {
+  return invoke<LegacyHomeImport>("import_legacy_home_turns", {
+    request: { sessionId, turns },
   });
 }
 

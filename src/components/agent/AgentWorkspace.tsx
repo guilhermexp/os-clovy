@@ -52,12 +52,10 @@ import {
   companionPublishAgentEvent,
   type CompanionAgentStatus,
   type CompanionFrontendRequest,
-  assignSessionToProfile,
   discardStagedAgentAttachments,
   downloadAgentArtifact,
   dictationHelperCommand,
-  clovyHomeChat,
-  type ClovyHomeChatResponse,
+  importLegacyHomeTurns,
   listProviderModels,
   providerModelSettings,
   pruneStagedAgentAttachments,
@@ -151,8 +149,10 @@ import {
 } from "./composer/ModelPicker";
 import { ChatEngineNotice, ChatEnginePicker } from "./composer/ChatEnginePicker";
 import {
+  CLI_ENGINE_MODEL_PREFIX,
   type ChatEngineCatalog,
   chatDefaultEngine,
+  DEFAULT_CHAT_CLI_IDS,
   chatEngineCatalog,
   classifyChatEngineModel,
   defaultChatModelId,
@@ -188,32 +188,14 @@ import {
   clovyHomeGreetingParts,
   clovyHomeNudgePrompts,
   CLOVY_HOME_THREAD_CHANGED_EVENT,
-  resolveClovyHomeThreadSessionId,
   stripClovyHomeContextFromPreview,
-  withClovyHomeCurrentResearch,
-  withClovyHomeLatestTaskIntent,
-  type ClovyHomeConversationContext,
-  type ClovyHomeTaskRequest,
 } from "../../lib/clovy-home";
 import type { AgentChatTurn } from "../../lib/agent-chat-runtime";
 import {
-  clearHomeTaskHandoffActive,
   compareHomeTurnOrder,
-  enqueueHomeDirectChat,
-  existingHomeTaskHandoffForSourceTurn,
-  homeConversationGreetingReply,
-  homeConversationContextFromTurns,
-  isHomeTaskReplayWithoutNewIntent,
-  isHomeTaskHandoffAcknowledgement,
-  homeDemoReply,
-  insertHomeDirectReply,
-  markHomeTaskHandoffActive,
-  persistHomeDirectTurns,
-  persistHomeTaskHandoffs,
-  readAllHomeTaskHandoffAttachments,
-  readHomeDirectTurns,
+  homeTaskCardTurns,
   readHomeTaskHandoffs,
-  recoverInterruptedHomeTaskHandoffs,
+  readLegacyHomeDirectTurns,
   type HomeTaskHandoff,
 } from "./home-thread";
 
@@ -233,6 +215,17 @@ export {
 
 export const AGENT_RUNTIME_EVENT = "clovy://agent-runtime-event";
 const DEFAULT_MODEL = AUTO_MODEL_ID;
+/** Home runs on the default CLI engine (ADR-0064). With no CLI installed it
+ * still asks Claude Code, so the turn fails with the CLI sessions' error. */
+const HOME_FALLBACK_ENGINE_MODEL = `${CLI_ENGINE_MODEL_PREFIX}${DEFAULT_CHAT_CLI_IDS[0]}`;
+
+async function homeEngineModelId(): Promise<string> {
+  try {
+    return (await chatDefaultEngine()).modelId ?? HOME_FALLBACK_ENGINE_MODEL;
+  } catch {
+    return HOME_FALLBACK_ENGINE_MODEL;
+  }
+}
 const AGENT_SUGGESTED_MODEL_IDS = [AUTO_MODEL_ID] as const;
 const AGENT_AUTO_MODEL: ProviderModelDto = {
   provider: "",
@@ -453,10 +446,11 @@ export function AgentWorkspace({
     };
   }, [usageOpen]);
 
-  const focusedHomeModelRef = useRef(DEFAULT_MODEL);
-  const focusedHomeThinkingLevelRef = useRef(loadThinkingLevel());
+  const homeEngineModelRef = useRef(HOME_FALLBACK_ENGINE_MODEL);
   const initialModelSelection = agentModelSelection(initialAgentSession?.model || DEFAULT_MODEL);
-  const [model, setModel] = useState(homeMode ? AUTO_MODEL_ID : initialModelSelection.modelId);
+  const [model, setModel] = useState(
+    homeMode ? HOME_FALLBACK_ENGINE_MODEL : initialModelSelection.modelId,
+  );
   const modelRef = useRef(model);
   modelRef.current = model;
   const [engineCatalog, setEngineCatalog] = useState<ChatEngineCatalog | null>(null);
@@ -586,17 +580,6 @@ export function AgentWorkspace({
   const recoverableSubmissionRef = useRef(recoverableSubmission);
   recoverableSubmissionRef.current = recoverableSubmission;
   const recoverableSubmissionSnapshotRef = useRef<typeof recoverableSubmission>();
-  const [recoverableHomeSubmission, setRecoverableHomeSubmissionState] = useState<{
-    id: string;
-    prompt: string;
-    attachments: string[];
-  }>();
-  const recoverableHomeSubmissionRef = useRef(recoverableHomeSubmission);
-  recoverableHomeSubmissionRef.current = recoverableHomeSubmission;
-  const setRecoverableHomeSubmission = useCallback((value: typeof recoverableHomeSubmission) => {
-    recoverableHomeSubmissionRef.current = value;
-    setRecoverableHomeSubmissionState(value);
-  }, []);
   const [pendingInitialTurn, setPendingInitialTurn] = useState<{
     prompt: string;
     storedSessionId?: string;
@@ -646,23 +629,12 @@ export function AgentWorkspace({
   const requestSubmittedMessageScroll = useCallback(() => {
     setSubmittedScrollRevision((revision) => revision + 1);
   }, []);
-  const [homeDirectTurns, setHomeDirectTurns] = useState<AgentChatTurn[]>(() =>
-    homeMode ? readHomeDirectTurns(initialSessionId) : [],
-  );
-  const homeDirectTurnsRef = useRef(homeDirectTurns);
-  const [homeTaskHandoffs, setHomeTaskHandoffs] = useState<HomeTaskHandoff[]>(() =>
-    homeMode ? readHomeTaskHandoffs(initialSessionId) : [],
-  );
-  const [homeStreamingReply, setHomeStreamingReply] = useState<AgentChatTurn | null>(null);
-  const [homeDirectPendingCount, setHomeDirectPendingCount] = useState(0);
-  const homeSessionPromiseRef = useRef<Promise<string> | null>(null);
+  const [homeTaskCards, setHomeTaskCards] = useState<
+    Array<{ turn: AgentChatTurn; handoff: HomeTaskHandoff }>
+  >([]);
+  const homeSessionPromiseRef = useRef<Promise<AgentSessionDto> | null>(null);
   const homeSessionCreationDraftOwnerRef = useRef<string>();
   const [homeSessionCreating, setHomeSessionCreating] = useState(false);
-  const handledHomeTaskToolCallsRef = useRef(new Set<string>());
-
-  useEffect(() => {
-    homeDirectTurnsRef.current = homeDirectTurns;
-  }, [homeDirectTurns]);
 
   const startNewSession = useCallback(
     (request?: AgentNewSessionDetail) => {
@@ -770,15 +742,20 @@ export function AgentWorkspace({
     ? creditActionsDisabledReason
     : undefined;
 
+  const readHomeTaskCards = useCallback(
+    (storedSessionId: string) =>
+      homeTaskCardTurns(
+        readLegacyHomeDirectTurns(storedSessionId),
+        readHomeTaskHandoffs(storedSessionId),
+      ),
+    [],
+  );
+
   useEffect(() => {
     if (!homeMode || !selectedId) return;
-    const restoredTurns = readHomeDirectTurns(selectedId);
-    const restoredHandoffs = recoverInterruptedHomeTaskHandoffs(selectedId);
-    homeDirectTurnsRef.current = restoredTurns;
-    setHomeDirectTurns(restoredTurns);
-    setHomeTaskHandoffs(restoredHandoffs);
+    setHomeTaskCards(readHomeTaskCards(selectedId));
     onHomeSessionCreated?.(selectedId);
-  }, [homeMode, onHomeSessionCreated, selectedId]);
+  }, [homeMode, onHomeSessionCreated, readHomeTaskCards, selectedId]);
 
   useEffect(() => {
     if (!homeMode) return;
@@ -786,14 +763,11 @@ export function AgentWorkspace({
       const storedSessionId = (event as CustomEvent<{ storedSessionId?: string }>).detail
         ?.storedSessionId;
       if (!storedSessionId || storedSessionId !== selectedIdRef.current) return;
-      const restoredTurns = readHomeDirectTurns(storedSessionId);
-      homeDirectTurnsRef.current = restoredTurns;
-      setHomeDirectTurns(restoredTurns);
-      setHomeTaskHandoffs(readHomeTaskHandoffs(storedSessionId));
+      setHomeTaskCards(readHomeTaskCards(storedSessionId));
     };
     window.addEventListener(CLOVY_HOME_THREAD_CHANGED_EVENT, refreshHomeThread);
     return () => window.removeEventListener(CLOVY_HOME_THREAD_CHANGED_EVENT, refreshHomeThread);
-  }, [homeMode]);
+  }, [homeMode, readHomeTaskCards]);
 
   const publishSessions = useCallback((next: AgentSessionDto[]) => {
     setSessions(next);
@@ -875,7 +849,7 @@ export function AgentWorkspace({
       setHydratedSelectionId(sessionId);
       setArtifacts(files);
       if (homeMode) {
-        setModel(AUTO_MODEL_ID);
+        setModel(homeEngineModelRef.current);
       } else {
         applySessionModel(loadSessionModels()[session.id] ?? session.model);
       }
@@ -889,6 +863,22 @@ export function AgentWorkspace({
     },
     [applySessionModel, homeMode, onSessionSelected, updateQueuedFollowUps],
   );
+
+  // Older builds kept the Home conversation only in local storage: import it
+  // into the Home session. The import is idempotent in the database, so every
+  // open may ask; the local copy stays as recovery (ADR-0064).
+  useEffect(() => {
+    if (!homeMode || !selectedId) return;
+    const legacyTurns = readLegacyHomeDirectTurns(selectedId);
+    if (legacyTurns.length === 0) return;
+    void importLegacyHomeTurns(selectedId, legacyTurns)
+      .then((result) => {
+        if (result.imported > 0 && selectedIdRef.current === selectedId) {
+          return hydrate(selectedId);
+        }
+      })
+      .catch(() => undefined);
+  }, [homeMode, hydrate, selectedId]);
 
   useEffect(() => {
     void refreshSessions()
@@ -908,7 +898,11 @@ export function AgentWorkspace({
     // is on one, read without the network, else the saved text model.
     const applyDefaultModel = (selected: string | undefined) => {
       if (homeMode) {
-        focusedHomeModelRef.current = selected || DEFAULT_MODEL;
+        // Home's turns resolve the engine again at send (homeEngineModelId).
+        if (selected?.startsWith(CLI_ENGINE_MODEL_PREFIX)) {
+          homeEngineModelRef.current = selected;
+          setModel(selected);
+        }
       } else if (!initialAgentSession && !initialSessionId && selected) {
         setModel(selected);
       }
@@ -976,9 +970,11 @@ export function AgentWorkspace({
         ...current.filter((session) => session.id !== initialSession.id),
       ]);
       setProjection((current) => ({ ...current, session: initialSession }));
-      applySessionModel(
-        loadSessionModels()[initialSession.id] ?? (initialSession.model || DEFAULT_MODEL),
-      );
+      if (!homeMode) {
+        applySessionModel(
+          loadSessionModels()[initialSession.id] ?? (initialSession.model || DEFAULT_MODEL),
+        );
+      }
       setSafetyMode(initialSession.safetyMode);
       setNewSessionMode(false);
     }
@@ -1435,6 +1431,10 @@ export function AgentWorkspace({
       setError(t("agent.error.waitForAttachments"));
       return;
     }
+    if (homeMode && !selectedIdRef.current && homeSessionPromiseRef.current) {
+      setError(t("agent.home.error.starting"));
+      return;
+    }
     const queuedSubmission = queuedSubmissionSnapshotRef.current;
     const clearQueuedSubmissionAttempt = () => {
       queuedSubmissionSnapshotRef.current = undefined;
@@ -1535,7 +1535,8 @@ export function AgentWorkspace({
     submissionOwnerRef.current = submissionId;
     setSubmitting(true);
     setError(undefined);
-    const creatingSession = !selectedSession || newSessionMode;
+    // Home's session is hidden and created on its first send (ensureHomeSession).
+    const creatingSession = !homeMode && (!selectedSession || newSessionMode);
     const creationRequestId = creatingSession ? crypto.randomUUID() : undefined;
     const optimisticId = `optimistic:${crypto.randomUUID()}`;
     const optimisticCreatedAt = new Date().toISOString();
@@ -1575,7 +1576,9 @@ export function AgentWorkspace({
     }
     try {
       let session = selectedSession;
-      if (!session || newSessionMode) {
+      if (homeMode) {
+        session = await ensureHomeSession();
+      } else if (!session || newSessionMode) {
         const createdSession = await agentRuntimeBindings.createSession({
           title: titleFromPrompt(prompt),
           model: submittedModel,
@@ -1659,15 +1662,16 @@ export function AgentWorkspace({
         .filter((skill) => skill.enabled)
         .map((skill) => skill.id);
       const preparedPrompt = preparePromptForSession(activeSession.id, prompt);
+      const runModel = homeMode ? await homeEngineModelId() : submittedModel;
       const run = await agentRuntimeBindings.startRun({
         sessionId: activeSession.id,
         prompt: preparedPrompt.text,
-        model: submittedModel,
+        model: runModel,
         reasoningEffort: thinkingEffortForLevel(submittedThinkingLevel) as
           | "minimal"
           | "medium"
           | "high",
-        safetyMode,
+        safetyMode: homeMode ? "sandboxed" : safetyMode,
         workspacePath: activeSession.workspacePath,
         enabledSkillIds,
         attachments: attachedPaths,
@@ -1740,9 +1744,11 @@ export function AgentWorkspace({
       }
       submissionOwnerRef.current = undefined;
       setSubmitting(false);
-      const operationIsVisible = creationRequestId
-        ? pendingSessionCreationRef.current === creationRequestId
-        : selectedIdRef.current === selectedSession?.id;
+      const operationIsVisible = homeMode
+        ? true
+        : creationRequestId
+          ? pendingSessionCreationRef.current === creationRequestId
+          : selectedIdRef.current === selectedSession?.id;
       if (!operationIsVisible) {
         inFlightAttachmentLeasesRef.current.delete(submissionId);
         if (!queuedSnapshot && !recoveredSnapshot) {
@@ -1779,21 +1785,30 @@ export function AgentWorkspace({
     }
   }
 
-  async function ensureHomeSession(): Promise<string> {
+  /** The Home session, created on the default CLI engine at the first send
+   * (ADR-0064). An older Home session adopts the engine with its next turn:
+   * `start_agent_run` stores the turn's model on the session. */
+  async function ensureHomeSession(): Promise<AgentSessionDto> {
     const selected = selectedIdRef.current;
-    if (selected) return selected;
+    if (selected) {
+      return selectedSession?.id === selected
+        ? selectedSession
+        : await agentRuntimeBindings.getSession(selected);
+    }
     if (homeSessionPromiseRef.current) return homeSessionPromiseRef.current;
 
     const draftOwnerId = crypto.randomUUID();
     homeSessionCreationDraftOwnerRef.current = draftOwnerId;
     creationDraftDestinationsRef.current.set(draftOwnerId, undefined);
-    const creation = agentRuntimeBindings
-      .createSession({
-        title: "Home",
-        model: AUTO_MODEL_ID,
-        safetyMode: "sandboxed",
-        profile: getCurrentDataPartitionName(),
-      })
+    const creation = homeEngineModelId()
+      .then((engineModel) =>
+        agentRuntimeBindings.createSession({
+          title: "Home",
+          model: engineModel,
+          safetyMode: "sandboxed",
+          profile: getCurrentDataPartitionName(),
+        }),
+      )
       .then((createdSession) => {
         creationDraftDestinationsRef.current.set(draftOwnerId, createdSession.id);
         transferPendingAgentSessionDraft(draftOwnerId, createdSession.id);
@@ -1807,7 +1822,7 @@ export function AgentWorkspace({
         setProjection(createAgentRuntimeProjection({ session: createdSession }));
         rememberSessionThinkingLevel(createdSession.id, "instant");
         onHomeSessionCreated?.(createdSession.id);
-        return createdSession.id;
+        return createdSession;
       })
       .catch((cause) => {
         clearPendingAgentSessionDraft(draftOwnerId);
@@ -1826,390 +1841,6 @@ export function AgentWorkspace({
         }
         setHomeSessionCreating(false);
       }
-    }
-  }
-
-  function commitHomeDirectTurns(storedSessionId: string, nextTurns: AgentChatTurn[]) {
-    homeDirectTurnsRef.current = nextTurns;
-    setHomeDirectTurns(nextTurns);
-    persistHomeDirectTurns(storedSessionId, nextTurns);
-  }
-
-  async function startHomeTask(
-    request: ClovyHomeTaskRequest,
-    toolCallId: string,
-    conversation: ClovyHomeConversationContext,
-    homeStoredSessionId: string,
-    profile: string,
-    taskAttachments: string[] = [],
-    sourceUserTurnId?: string,
-  ) {
-    const activeHomeSessionId = resolveClovyHomeThreadSessionId(homeStoredSessionId);
-    if (!activeHomeSessionId) return;
-    if (handledHomeTaskToolCallsRef.current.has(toolCallId)) return;
-    const handoffId = `home-task-${toolCallId}`;
-    const storedHandoffs = readHomeTaskHandoffs(homeStoredSessionId);
-    const existing = storedHandoffs.find((handoff) => handoff.id === handoffId);
-    if (existing && existing.status !== "failed") {
-      handledHomeTaskToolCallsRef.current.add(toolCallId);
-      return;
-    }
-    const existingForSourceTurn = existingHomeTaskHandoffForSourceTurn(
-      storedHandoffs,
-      sourceUserTurnId,
-    );
-    if (existingForSourceTurn) {
-      handledHomeTaskToolCallsRef.current.add(toolCallId);
-      return;
-    }
-    handledHomeTaskToolCallsRef.current.add(toolCallId);
-    markHomeTaskHandoffActive(homeStoredSessionId, handoffId);
-    const starting: HomeTaskHandoff = {
-      ...request,
-      id: handoffId,
-      status: "starting",
-      profile,
-      ...(sourceUserTurnId ? { sourceUserTurnId } : {}),
-      ...(taskAttachments.length ? { attachments: taskAttachments } : {}),
-    };
-    const nextHandoffs = storedHandoffs.some((handoff) => handoff.id === handoffId)
-      ? storedHandoffs.map((handoff) => (handoff.id === handoffId ? starting : handoff))
-      : [...storedHandoffs, starting];
-    setHomeTaskHandoffs(nextHandoffs);
-    persistHomeTaskHandoffs(homeStoredSessionId, nextHandoffs);
-
-    const updateHandoff = (patch: Partial<HomeTaskHandoff>) => {
-      const next = readHomeTaskHandoffs(homeStoredSessionId).map((handoff) =>
-        handoff.id === handoffId ? { ...handoff, ...patch } : handoff,
-      );
-      setHomeTaskHandoffs(next);
-      persistHomeTaskHandoffs(homeStoredSessionId, next);
-    };
-
-    let focusedSession: AgentSessionDto | undefined;
-    try {
-      const focusedModel = agentRunModelId(focusedHomeModelRef.current, costQualityRef.current);
-      const focusedThinkingLevel = focusedHomeThinkingLevelRef.current;
-      focusedSession = await agentRuntimeBindings.createSession({
-        title: request.title,
-        model: focusedModel,
-        safetyMode: "sandboxed",
-        profile: activeHomeSessionId === homeStoredSessionId ? profile : "default",
-      });
-      const activeAfterCreation = resolveClovyHomeThreadSessionId(homeStoredSessionId);
-      if (!activeAfterCreation) {
-        await agentRuntimeBindings.deleteSession(focusedSession.id);
-        return;
-      }
-      if (activeAfterCreation !== activeHomeSessionId) {
-        await assignSessionToProfile(focusedSession.id, "default");
-      }
-      const enabledSkillIds = (await agentRuntimeBindings.listSkills())
-        .filter((skill) => skill.enabled)
-        .map((skill) => skill.id);
-      const runtimePrompt = request.requiresCurrentResearch
-        ? withClovyHomeCurrentResearch(request.prompt, conversation)
-        : request.prompt;
-      await agentRuntimeBindings.startRun({
-        sessionId: focusedSession.id,
-        prompt: runtimePrompt,
-        model: focusedModel,
-        reasoningEffort: thinkingEffortForLevel(focusedThinkingLevel) as
-          | "minimal"
-          | "medium"
-          | "high",
-        safetyMode: "sandboxed",
-        workspacePath: focusedSession.workspacePath,
-        enabledSkillIds,
-        attachments: taskAttachments,
-      });
-      void discardStagedAgentAttachments(taskAttachments).catch(() => undefined);
-      updateHandoff({ status: "running", storedSessionId: focusedSession.id });
-      void refreshSessions().catch(() => undefined);
-    } catch (cause) {
-      if (focusedSession) {
-        await agentRuntimeBindings.deleteSession(focusedSession.id).catch(() => undefined);
-      }
-      updateHandoff({ status: "failed", error: messageFromError(cause) });
-    } finally {
-      clearHomeTaskHandoffActive(homeStoredSessionId, handoffId);
-    }
-  }
-
-  function retryHomeTask(handoff: HomeTaskHandoff) {
-    if (handoff.status !== "failed") return;
-    const toolCallId = handoff.id.replace(/^home-task-/, "");
-    handledHomeTaskToolCallsRef.current.delete(toolCallId);
-    const homeStoredSessionId = selectedIdRef.current;
-    if (!homeStoredSessionId) return;
-    const conversation = homeConversationContextFromTurns([
-      ...turns,
-      ...readHomeDirectTurns(homeStoredSessionId),
-    ]);
-    void startHomeTask(
-      {
-        title: handoff.title,
-        prompt: handoff.prompt,
-        ...(handoff.summary ? { summary: handoff.summary } : {}),
-        ...(handoff.requiresCurrentResearch ? { requiresCurrentResearch: true } : {}),
-      },
-      toolCallId,
-      conversation,
-      homeStoredSessionId,
-      handoff.profile ?? getCurrentDataPartitionName(),
-      handoff.attachments ?? [],
-      handoff.sourceUserTurnId,
-    );
-  }
-
-  async function submitHomeMessage(event?: FormEvent) {
-    event?.preventDefault();
-    if (recoverableHomeSubmissionRef.current) {
-      setError(t("agent.home.error.unsentPending"));
-      return;
-    }
-    if (dropOwnerRef.current) {
-      setError(t("agent.error.waitForAttachments"));
-      return;
-    }
-    if (!selectedIdRef.current && homeSessionPromiseRef.current) {
-      setError(t("agent.home.error.starting"));
-      return;
-    }
-    const message = draftRef.current.trim();
-    if (!message || submitting || textActionsDisabledReason) return;
-    if (Array.from(message).length > 64_000) {
-      setError(t("agent.home.error.tooLong"));
-      return;
-    }
-    const submittedHomeStoredSessionId = selectedIdRef.current;
-    const submittedHomeDraftRevision =
-      submittedHomeStoredSessionId &&
-      readAgentSessionDraft(submittedHomeStoredSessionId)?.trim() === message
-        ? readAgentSessionDraftRevision(submittedHomeStoredSessionId)
-        : undefined;
-    const profile = getCurrentDataPartitionName();
-    const messageAttachments = attachmentsRef.current;
-    const attachmentLeaseId = `home:${crypto.randomUUID()}`;
-    if (messageAttachments.length > 0) {
-      inFlightAttachmentLeasesRef.current.set(attachmentLeaseId, [...new Set(messageAttachments)]);
-    }
-    const messageAttachmentGeneration = attachmentGenerationRef.current;
-    setComposerDraft("", { persist: false });
-    setComposerAttachments([]);
-    setHomeDirectPendingCount((count) => count + 1);
-
-    let storedSessionId: string | undefined;
-    try {
-      storedSessionId = await ensureHomeSession();
-      const suffix = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      const userTurn: AgentChatTurn = {
-        id: `home:direct:user:${suffix}`,
-        role: "user",
-        createdAt: new Date().toISOString(),
-        status: "complete",
-        parts: [
-          { type: "text", text: message, status: "complete" },
-          ...messageAttachments.map((path) => ({
-            type: "attachment" as const,
-            name: path.split(/[\\/]/).pop() || path,
-            path,
-            kind: /\.(?:png|jpe?g|gif|webp|tiff?|bmp|avif)$/i.test(path)
-              ? ("image" as const)
-              : ("file" as const),
-          })),
-        ],
-      };
-      const priorDirectTurns = readHomeDirectTurns(storedSessionId);
-      const acknowledgesTaskHandoff = isHomeTaskHandoffAcknowledgement(
-        message,
-        priorDirectTurns,
-        readHomeTaskHandoffs(storedSessionId),
-      );
-      const greetingReply = homeConversationGreetingReply(message);
-      const directConversationReply = acknowledgesTaskHandoff
-        ? t("agent.home.reply.gotIt")
-        : greetingReply;
-      commitHomeDirectTurns(storedSessionId, [...priorDirectTurns, userTurn]);
-      clearAgentSessionDraftRevision(storedSessionId, submittedHomeDraftRevision);
-      requestSubmittedMessageScroll();
-
-      if (directConversationReply && messageAttachments.length === 0) {
-        const assistantTurn: AgentChatTurn = {
-          id: `home:direct:assistant:${suffix}`,
-          role: "assistant",
-          createdAt: new Date().toISOString(),
-          status: "complete",
-          parts: [{ type: "text", text: directConversationReply, status: "complete" }],
-        };
-        const nextTurns = insertHomeDirectReply(storedSessionId, userTurn.id, assistantTurn);
-        homeDirectTurnsRef.current = nextTurns;
-        setHomeDirectTurns(nextTurns);
-        setError(undefined);
-        return;
-      }
-
-      // Attachments and commands need the full Clovy tool/runtime context. Home
-      // hands them to a focused session deterministically instead of running a
-      // second hidden agent turn and hoping it emits a legacy bridge tool.
-      if (messageAttachments.length > 0 || message.startsWith("/")) {
-        const toolCallId = `focused:${suffix}`;
-        const assistantTurn: AgentChatTurn = {
-          id: `home:direct:assistant:${suffix}`,
-          role: "assistant",
-          createdAt: new Date().toISOString(),
-          status: "complete",
-          parts: [
-            {
-              type: "tool",
-              id: toolCallId,
-              name: "clovy_home_start_task",
-              text: "",
-              status: "complete",
-            },
-          ],
-        };
-        const nextTurns = insertHomeDirectReply(storedSessionId, userTurn.id, assistantTurn);
-        homeDirectTurnsRef.current = nextTurns;
-        setHomeDirectTurns(nextTurns);
-        const conversation = homeConversationContextFromTurns([...turns, ...nextTurns]);
-        void startHomeTask(
-          { title: titleFromPrompt(message), prompt: message },
-          toolCallId,
-          conversation,
-          storedSessionId,
-          profile,
-          messageAttachments,
-          userTurn.id,
-        ).finally(() => inFlightAttachmentLeasesRef.current.delete(attachmentLeaseId));
-        setError(undefined);
-        return;
-      }
-
-      await enqueueHomeDirectChat(storedSessionId, async () => {
-        const currentTurns = readHomeDirectTurns(storedSessionId as string);
-        const userIndex = currentTurns.findIndex((turn) => turn.id === userTurn.id);
-        const contextTurns = userIndex < 0 ? currentTurns : currentTurns.slice(0, userIndex + 1);
-        const conversation = homeConversationContextFromTurns([...turns, ...contextTurns]);
-        const streamingTurnId = `home:direct:assistant:${suffix}`;
-        const streamingStartedAt = new Date().toISOString();
-        let streamedContent = "";
-        let acceptingDeltas = true;
-        const onDelta = (content: string) => {
-          if (!acceptingDeltas) return;
-          streamedContent += content;
-          setHomeStreamingReply({
-            id: `${streamingTurnId}:stream`,
-            role: "assistant",
-            createdAt: streamingStartedAt,
-            status: "running",
-            parts: [{ type: "text", text: streamedContent, status: "running" }],
-          });
-        };
-        let response: ClovyHomeChatResponse;
-        try {
-          response =
-            (await homeDemoReply(profile, onDelta)) ??
-            (await clovyHomeChat(conversation.recentMessages, {
-              profile,
-              ...(conversation.earlierContext
-                ? { historyContext: conversation.earlierContext }
-                : {}),
-              onDelta,
-            }));
-        } finally {
-          acceptingDeltas = false;
-        }
-        const latestHandoffs = readHomeTaskHandoffs(storedSessionId as string);
-        const rejectedStaleTask = Boolean(
-          response.task && isHomeTaskReplayWithoutNewIntent(response.task, message, latestHandoffs),
-        );
-        const responseTask =
-          rejectedStaleTask || !response.task
-            ? undefined
-            : {
-                ...response.task,
-                prompt: withClovyHomeLatestTaskIntent(response.task.prompt, message),
-              };
-        const toolCallId = responseTask ? `direct:${suffix}` : undefined;
-        const assistantTurn: AgentChatTurn =
-          responseTask && toolCallId
-            ? {
-                id: streamingTurnId,
-                role: "assistant",
-                createdAt: new Date().toISOString(),
-                status: "complete",
-                parts: [
-                  {
-                    type: "tool",
-                    id: toolCallId,
-                    name: "clovy_home_start_task",
-                    text: "",
-                    status: "complete",
-                  },
-                ],
-              }
-            : {
-                id: streamingTurnId,
-                role: "assistant",
-                createdAt: new Date().toISOString(),
-                status: "complete",
-                parts: [
-                  {
-                    type: "text",
-                    text: rejectedStaleTask
-                      ? t("agent.home.reply.imHereHelp")
-                      : response.content?.trim() ||
-                        streamedContent.trim() ||
-                        t("agent.home.reply.imHere"),
-                    status: "complete",
-                  },
-                ],
-              };
-        const nextTurns = insertHomeDirectReply(
-          storedSessionId as string,
-          userTurn.id,
-          assistantTurn,
-        );
-        homeDirectTurnsRef.current = nextTurns;
-        setHomeDirectTurns(nextTurns);
-        setHomeStreamingReply(null);
-        if (responseTask && toolCallId) {
-          void startHomeTask(
-            responseTask,
-            toolCallId,
-            conversation,
-            storedSessionId as string,
-            profile,
-            [],
-            userTurn.id,
-          );
-        }
-      });
-      setError(undefined);
-    } catch (cause) {
-      setHomeStreamingReply(null);
-      // The persisted user bubble is the durable retry record. Never remove it
-      // when a newer draft exists or when this workspace unmounted while the
-      // request was in flight. Restore the text only when the composer is free.
-      if (attachmentGenerationRef.current === messageAttachmentGeneration) {
-        if (draftHasContentRef.current || attachmentsRef.current.length > 0) {
-          setRecoverableHomeSubmission({
-            id: attachmentLeaseId,
-            prompt: message,
-            attachments: messageAttachments,
-          });
-        } else {
-          setComposerDraft(message);
-          setComposerAttachments(messageAttachments);
-        }
-      } else if (messageAttachments.length > 0) {
-        void discardStagedAgentAttachments(messageAttachments).catch(() => undefined);
-      }
-      inFlightAttachmentLeasesRef.current.delete(attachmentLeaseId);
-      setError(messageFromError(cause));
-    } finally {
-      setHomeDirectPendingCount((count) => Math.max(0, count - 1));
     }
   }
 
@@ -2409,8 +2040,6 @@ export function AgentWorkspace({
         ...attachmentsRef.current,
         ...Object.values(queuedFollowUpsRef.current).flatMap((followUp) => followUp.attachments),
         ...(recoverableSubmissionRef.current?.attachments ?? []),
-        ...(recoverableHomeSubmissionRef.current?.attachments ?? []),
-        ...readAllHomeTaskHandoffAttachments(),
         ...[...inFlightAttachmentLeasesRef.current.values()].flat(),
       ];
       await pruneStagedAgentAttachments([...new Set(protectedPaths)]);
@@ -2509,27 +2138,14 @@ export function AgentWorkspace({
               }
             : turn,
         ),
-        ...homeDirectTurns,
-        ...(homeStreamingReply ? [homeStreamingReply] : []),
+        ...homeTaskCards.map((card) => card.turn),
       ].sort(compareHomeTurnOrder),
-    [homeDirectTurns, homeStreamingReply, turns],
+    [homeTaskCards, turns],
   );
-  const homeHandoffsByTurnId = useMemo(() => {
-    const handoffs = new Map<string, HomeTaskHandoff>();
-    for (const turn of homeConversationTurns) {
-      const tool = turn.parts.find(
-        (part) =>
-          part.type === "tool" &&
-          homeTaskHandoffs.some((handoff) => handoff.id === `home-task-${part.id}`),
-      );
-      const handoff =
-        tool?.type === "tool"
-          ? homeTaskHandoffs.find((candidate) => candidate.id === `home-task-${tool.id}`)
-          : undefined;
-      if (handoff) handoffs.set(turn.id, handoff);
-    }
-    return handoffs;
-  }, [homeConversationTurns, homeTaskHandoffs]);
+  const homeHandoffsByTurnId = useMemo(
+    () => new Map(homeTaskCards.map((card) => [card.turn.id, card.handoff])),
+    [homeTaskCards],
+  );
   const homeUserRunEndIds = useMemo(() => {
     const ids = new Set<string>();
     homeConversationTurns.forEach((turn, index) => {
@@ -2627,43 +2243,6 @@ export function AgentWorkspace({
               () => undefined,
             );
             setRecoverableSubmission(undefined);
-          }}
-        >
-          <IconCrossSmall size={12} aria-hidden />
-        </button>
-      </span>
-    </div>
-  ) : null;
-  const recoverableHomeSubmissionRow = recoverableHomeSubmission ? (
-    <div className="agent-follow-up-row" role="status">
-      <span className="agent-follow-up-copy">
-        <span className="agent-follow-up-announcement">{t("agent.unsentHome.label")}</span>
-        <span className="agent-follow-up-text">{recoverableHomeSubmission.prompt}</span>
-      </span>
-      <span className="agent-follow-up-actions">
-        <button
-          type="button"
-          aria-label={t("agent.unsentHome.retry")}
-          disabled={
-            homeSessionCreating || Boolean(draftRef.current.trim()) || attachments.length > 0
-          }
-          onClick={() => {
-            setComposerDraft(recoverableHomeSubmission.prompt);
-            setComposerAttachments(recoverableHomeSubmission.attachments);
-            setRecoverableHomeSubmission(undefined);
-            setError(undefined);
-          }}
-        >
-          <IconArrowRotateClockwise size={12} aria-hidden />
-        </button>
-        <button
-          type="button"
-          aria-label={t("agent.unsentHome.discard")}
-          onClick={() => {
-            void discardStagedAgentAttachments(recoverableHomeSubmission.attachments).catch(
-              () => undefined,
-            );
-            setRecoverableHomeSubmission(undefined);
           }}
         >
           <IconCrossSmall size={12} aria-hidden />
@@ -2770,14 +2349,12 @@ export function AgentWorkspace({
       onRemoveAttachment={removeAttachment}
       onPickAttachments={pickAttachments}
       onDictate={startDictation}
-      onSubmit={homeMode ? submitHomeMessage : submit}
+      onSubmit={submit}
       onStop={stop}
       running={running}
       waiting={waiting}
       stopping={stoppingRunId === projection.run?.id}
-      submitting={
-        submitting || (homeMode && (homeSessionCreating || Boolean(recoverableHomeSubmission)))
-      }
+      submitting={submitting || (homeMode && homeSessionCreating)}
       attaching={attaching}
       disabledReason={textActionsDisabledReason}
       notice={!heroMode ? error : undefined}
@@ -2878,9 +2455,11 @@ export function AgentWorkspace({
                           void respondToSecret(part.runId, part.id, secret)
                         }
                         onOpenArtifact={openArtifact}
+                        onRetryUpstreamFailure={(turnId) => void retryFailure(turnId)}
+                        upstreamFailureRetryAttempted={Boolean(retryingFailureIds[turn.id])}
+                        upstreamFailureRetryDisabled={running || waiting || submitting}
                         homeTaskHandoff={homeHandoffsByTurnId.get(turn.id)}
                         onOpenHomeTaskSession={onOpenHomeTaskSession}
-                        onRetryHomeTask={retryHomeTask}
                         homeUserRunEnd={homeUserRunEndIds.has(turn.id)}
                       />
                     </Fragment>
@@ -2920,10 +2499,10 @@ export function AgentWorkspace({
                 ) : null}
                 <AgentThinking
                   variant="typing-bubble"
-                  visible={!homeStreamingReply && homeDirectPendingCount > 0}
+                  visible={(running || submitting) && homeConversationTurns.at(-1)?.role === "user"}
                 />
               </div>
-              {recoverableHomeSubmissionRow}
+              {recoverableSubmissionRow}
               {composer}
             </main>
           </div>

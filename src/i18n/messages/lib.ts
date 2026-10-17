@@ -45,12 +45,6 @@ export default defineMessages({
     "lib.errors.sharingUnavailable":
       "Sharing isn't available on this Clovy server yet. Try again after the next update.",
     "lib.errors.shareNotFound": "This share no longer exists. It may have been stopped.",
-    "lib.errors.homeChatFailed":
-      "Clovy couldn't reply just now. Your message is still here, so you can try again.",
-    "lib.errors.homeChatResearchRequired":
-      "Clovy couldn't start current research just now. Your message is still here, so you can try again.",
-    "lib.errors.homeChatEmpty": "Clovy returned an empty Home reply.",
-    "lib.errors.homeChatInvalid": "Clovy returned a Home reply it couldn't read.",
     "lib.errors.notSignedIn": "Not signed in.",
     "lib.errors.insufficientCredits": "Your balance is too low. Upgrade to continue.",
     "lib.errors.emptyResponse": "Clovy returned no data.",
@@ -98,8 +92,6 @@ export default defineMessages({
     "lib.errors.transcriptionSpanAlreadyRunning":
       "This saved-audio span is already being transcribed.",
     "lib.errors.noteCleanupTimeout": "Note transcript cleanup timed out.",
-    "lib.errors.homeMessageRequired": "A Home message is required.",
-    "lib.errors.homeMessageTooLarge": "Home messages must be 64,000 characters or less.",
     "lib.errors.localModelNotConfigured": "Configure a local model endpoint first.",
     "lib.errors.localModelIdNotConfigured": "Configure a local model endpoint and model ID first.",
     "lib.errors.localModelInvalid":
@@ -503,12 +495,6 @@ export default defineMessages({
       "O compartilhamento ainda não está disponível neste servidor do Clovy. Tente de novo após a próxima atualização.",
     "lib.errors.shareNotFound":
       "Este compartilhamento não existe mais. Ele pode ter sido interrompido.",
-    "lib.errors.homeChatFailed":
-      "O Clovy não conseguiu responder agora. Sua mensagem continua aqui, então você pode tentar de novo.",
-    "lib.errors.homeChatResearchRequired":
-      "O Clovy não conseguiu começar uma pesquisa atual agora. Sua mensagem continua aqui, então você pode tentar de novo.",
-    "lib.errors.homeChatEmpty": "O Clovy devolveu uma resposta vazia na Home.",
-    "lib.errors.homeChatInvalid": "O Clovy devolveu uma resposta da Home que não conseguiu ler.",
     "lib.errors.notSignedIn": "Você não entrou na sua conta.",
     "lib.errors.insufficientCredits": "Seu saldo está muito baixo. Faça upgrade para continuar.",
     "lib.errors.emptyResponse": "O Clovy não retornou dados.",
@@ -557,8 +543,6 @@ export default defineMessages({
     "lib.errors.transcriptionSpanAlreadyRunning":
       "Este trecho de áudio salvo já está sendo transcrito.",
     "lib.errors.noteCleanupTimeout": "A revisão da transcrição da nota demorou demais.",
-    "lib.errors.homeMessageRequired": "Escreva uma mensagem para a Home.",
-    "lib.errors.homeMessageTooLarge": "As mensagens da Home devem ter no máximo 64.000 caracteres.",
     "lib.errors.localModelNotConfigured": "Configure primeiro um endpoint de modelo local.",
     "lib.errors.localModelIdNotConfigured":
       "Configure primeiro um endpoint e o ID de um modelo local.",
