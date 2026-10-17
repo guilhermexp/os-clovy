@@ -36,7 +36,7 @@ Todas dependem de 0.8. Cada fatia: arquivo `src-tauri/src/mcp_server/tools/<grup
 
 ## 3. Prova de paridade (Main)
 
-- [ ] 3.1 `make verify` sem falhas e suíte de paridade completa.
+- [x] 3.1 `make verify` sem falhas e suíte de paridade completa. Feito em `aa6e6520` (2026-10-17, `CI=true NODE_OPTIONS=--no-experimental-webstorage make verify`, saída 0): Biome e `tsc` limpos; vitest 200 arquivos / 2018 testes, 0 falhas; `cargo fmt`/`clippy --all-targets -D warnings` limpos (src-tauri, companion, clovy-api); `cargo test` src-tauri + companion 2144 passados, 0 falhas (lib 1954, `mcp_server::tools` 67/67, `approval_broker` 17/17, `mcp_server_doc_catalog` 6/6, `mcp_server_stdio` 5/5); clovy-api 599, 0 falhas. Log: `.tmp/verify/cli-design/run-20261017-docs/make-verify.log`.
 - [ ] 3.2 Smoke nativo isolado (`AGENTS.md`, "Functional proof"): identificador próprio, perfil copiado sem socket vivo; turno real Claude e Codex em sessão `sandboxed` e `unrestricted`; uma ferramenta de cada grupo de escrita aprovada e uma negada; clarificação; timeout curto de teste; cancelamento com cartão pendente; rotina não assistida recusando escrita. Evidência em `.tmp/verify/cli-design/run-<id>/report.md`. Provedores pagos ou com credenciais só com autorização do dono; o que faltar fica declarado como não provado.
 - [ ] 3.3 Aceite do dono para o corte (critério de `native-agent-removal`).
 
