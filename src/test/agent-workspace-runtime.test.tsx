@@ -493,7 +493,6 @@ describe("AgentWorkspace runtime wiring", () => {
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
       if (command === "list_agent_sessions") return Promise.resolve([]);
       if (command === "create_agent_session") return pendingCreate;
-      if (command === "clovy_home_chat") return Promise.resolve({ reply: "Working on it." });
       return defaultInvoke?.(command, args);
     });
     const user = userEvent.setup();
@@ -779,10 +778,9 @@ describe("AgentWorkspace runtime wiring", () => {
     );
   });
 
-  it("protects live queued and Home handoff paths before staging a new drop", async () => {
+  it("protects live queued paths before staging a new drop", async () => {
     const currentPath = "/tmp/current.pdf";
     const queuedPath = "/tmp/clovy-agent-attachment-staging/queued/queued.pdf";
-    const homePath = "/tmp/clovy-agent-attachment-staging/home/handoff.pdf";
     const stagedPath = "/tmp/clovy-agent-attachment-staging/new/new.pdf";
     saveQueuedAgentFollowUps({
       [newSession.id]: {
@@ -793,20 +791,6 @@ describe("AgentWorkspace runtime wiring", () => {
         thinkingLevel: "medium",
       },
     });
-    window.localStorage.setItem(
-      "clovy:home:task-handoffs:v1",
-      JSON.stringify({
-        "home-other-session": [
-          {
-            id: "home-task-protected",
-            title: "Protected task",
-            prompt: "Use Home file",
-            status: "failed",
-            attachments: [homePath],
-          },
-        ],
-      }),
-    );
     mocks.openDialog.mockResolvedValue([currentPath]);
     const defaultInvoke = mocks.invoke.getMockImplementation();
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
@@ -827,7 +811,7 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("prune_staged_agent_attachments", {
         request: {
-          protectedPaths: expect.arrayContaining([currentPath, queuedPath, homePath]),
+          protectedPaths: expect.arrayContaining([currentPath, queuedPath]),
         },
       }),
     );
@@ -1017,101 +1001,6 @@ describe("AgentWorkspace runtime wiring", () => {
     });
   });
 
-  it("keeps an earlier unsent Home message while blocking another submission", async () => {
-    const firstPath = "/tmp/clovy-agent-attachment-staging/home-first/first.pdf";
-    const secondPath = "/tmp/clovy-agent-attachment-staging/home-second/second.pdf";
-    const thirdPath = "/tmp/clovy-agent-attachment-staging/home-third/third.pdf";
-    let rejectCreate!: (error: Error) => void;
-    const create = new Promise<AgentSessionDto>((_, reject) => {
-      rejectCreate = reject;
-    });
-    let stagedCount = 0;
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([]);
-      if (command === "stage_agent_attachment_bytes") {
-        stagedCount += 1;
-        return Promise.resolve(
-          stagedCount === 1 ? firstPath : stagedCount === 2 ? secondPath : thirdPath,
-        );
-      }
-      if (command === "create_agent_session") return create;
-      return defaultInvoke?.(command, args);
-    });
-    const user = userEvent.setup();
-    render(<AgentWorkspace homeMode />);
-    const form = document.querySelector<HTMLFormElement>(".agent-composer");
-    expect(form).not.toBeNull();
-
-    fireEvent.drop(form as HTMLFormElement, {
-      dataTransfer: { files: [new File(["first"], "first.pdf")] },
-    });
-    expect(await screen.findByText("first.pdf")).toBeVisible();
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "First request");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    fireEvent.drop(form as HTMLFormElement, {
-      dataTransfer: { files: [new File(["second"], "second.pdf")] },
-    });
-    expect(await screen.findByText("second.pdf")).toBeVisible();
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Second request");
-    fireEvent.submit(form as HTMLFormElement);
-
-    expect(
-      await screen.findByText("Wait for Home to finish starting, then send again."),
-    ).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "Second request",
-    );
-    expect(within(form as HTMLFormElement).getByText("second.pdf")).toBeVisible();
-
-    await act(async () => rejectCreate(new Error("Home session creation failed")));
-
-    expect(await screen.findByText("Unsent Home message")).toBeVisible();
-    expect(screen.getByText("First request")).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "Second request",
-    );
-    expect(within(form as HTMLFormElement).getByText("second.pdf")).toBeVisible();
-    expect(within(form as HTMLFormElement).queryByText("first.pdf")).not.toBeInTheDocument();
-
-    fireEvent.submit(form as HTMLFormElement);
-    expect(
-      await screen.findByText("Retry or discard the unsent Home message before sending another."),
-    ).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getByText("First request")).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "Second request",
-    );
-    expect(within(form as HTMLFormElement).getByText("second.pdf")).toBeVisible();
-
-    fireEvent.drop(form as HTMLFormElement, {
-      dataTransfer: { files: [new File(["third"], "third.pdf")] },
-    });
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("prune_staged_agent_attachments", {
-        request: { protectedPaths: expect.arrayContaining([firstPath, secondPath]) },
-      }),
-    );
-    expect(await screen.findByText("third.pdf")).toBeVisible();
-
-    await user.clear(screen.getByRole("textbox", { name: "Message Clovy" }));
-    await user.click(screen.getByRole("button", { name: "Remove second.pdf" }));
-    await user.click(screen.getByRole("button", { name: "Remove third.pdf" }));
-    const retry = screen.getByRole("button", { name: "Retry unsent Home message" });
-    expect(retry).toBeEnabled();
-    await user.click(retry);
-    expect(screen.queryByText("Unsent Home message")).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "First request",
-    );
-    expect(within(form as HTMLFormElement).getByText("first.pdf")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
-  });
-
   it("discards live composer paths and invalidates an in-flight drop on unmount", async () => {
     const currentPath = "/tmp/clovy-agent-attachment-staging/current/brief.pdf";
     const latePath = "/tmp/clovy-agent-attachment-staging/late/notes.pdf";
@@ -1152,218 +1041,6 @@ describe("AgentWorkspace runtime wiring", () => {
     );
   });
 
-  it("hands Home attachments to a focused Clovy runtime session with send-time profile", async () => {
-    const user = userEvent.setup();
-    const homeSession: AgentSessionDto = {
-      ...session,
-      id: "home-session",
-      title: "Home",
-      workspacePath: "/tmp/home-session",
-    };
-    const focusedSession: AgentSessionDto = {
-      ...newSession,
-      id: "focused-session",
-      title: "Summarize this file",
-      workspacePath: "/tmp/focused-session",
-    };
-    setCurrentDataPartitionName("work");
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "list_agent_sessions") return [homeSession, focusedSession];
-      if (command === "get_agent_session") return homeSession;
-      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_agent_skills") return [];
-      if (command === "list_provider_models") {
-        return {
-          mode: "generation",
-          selectedModel: "open-software/auto",
-          modelType: "text",
-          models: [],
-        };
-      }
-      if (command === "provider_model_settings") {
-        return {
-          settings: { costQuality: 20 },
-          effectiveSettings: {
-            providerApiKeysConfigured: {
-              groq: false,
-              openrouter: false,
-              fal: false,
-              tavily: false,
-            },
-          },
-        };
-      }
-      if (command === "create_agent_session") return focusedSession;
-      if (command === "start_agent_run") {
-        return {
-          id: "focused-run",
-          sessionId: focusedSession.id,
-          status: "running",
-          model: "fast",
-        };
-      }
-      return undefined;
-    });
-
-    render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
-    expect(screen.queryByRole("button", { name: /Model:/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    await waitFor(() => expect(screen.getByText("brief.pdf")).toBeVisible());
-    await user.type(composer, "Summarize this file");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
-        request: {
-          title: "Summarize this file",
-          model: "__june_auto_generation__:20",
-          safetyMode: "sandboxed",
-          profile: "work",
-        },
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          sessionId: "focused-session",
-          prompt: "Summarize this file",
-          model: "__june_auto_generation__:20",
-          reasoningEffort: "medium",
-          safetyMode: "sandboxed",
-          attachments: ["/tmp/brief.pdf"],
-        }),
-      }),
-    );
-    expect(await screen.findByRole("button", { name: "Open session" })).toBeVisible();
-  });
-
-  it("does not create another Home task for conversation after a handoff", async () => {
-    const user = userEvent.setup();
-    const homeSession: AgentSessionDto = {
-      ...session,
-      id: "home-ack-session",
-      title: "Home",
-      workspacePath: "/tmp/home-ack-session",
-    };
-    const focusedSession: AgentSessionDto = {
-      ...newSession,
-      id: "focused-wine-session",
-      title: "Wine research",
-      workspacePath: "/tmp/focused-wine-session",
-    };
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "list_agent_sessions") return [homeSession, focusedSession];
-      if (command === "get_agent_session") return homeSession;
-      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_agent_skills") return [];
-      if (command === "list_provider_models") {
-        return {
-          mode: "generation",
-          selectedModel: "open-software/auto",
-          modelType: "text",
-          models: [],
-        };
-      }
-      if (command === "provider_model_settings") {
-        return {
-          settings: { costQuality: 20 },
-          effectiveSettings: {
-            providerApiKeysConfigured: {
-              groq: false,
-              openrouter: false,
-              fal: false,
-              tavily: false,
-            },
-          },
-        };
-      }
-      if (command === "clovy_home_chat") {
-        return {
-          task: {
-            title: "Wine research",
-            prompt: "Research good wines near southern France.",
-          },
-        };
-      }
-      if (command === "create_agent_session") return focusedSession;
-      if (command === "start_agent_run") {
-        return {
-          id: "focused-run",
-          sessionId: focusedSession.id,
-          status: "running",
-          model: "fast",
-        };
-      }
-      return undefined;
-    });
-
-    render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Research good wines near southern France");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByRole("button", { name: "Open session" })).toBeVisible();
-    await waitFor(() =>
-      expect(
-        mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-      ).toHaveLength(1),
-    );
-
-    const nextComposer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(nextComposer, "ok");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByText("Got it.")).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "Open session" })).toHaveLength(1);
-
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Hey there, Clovy 👋");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByText("Hey! What can I help with?")).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "Open session" })).toHaveLength(1);
-
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Greetings, Clovy");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    await waitFor(() => expect(screen.getAllByText("Hey! What can I help with?")).toHaveLength(2));
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "Open session" })).toHaveLength(1);
-
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Plan a trip to Rome");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByText("I'm here. What can I help with?")).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(2);
-  });
-
   it("repairs a stale Home mapping when its Clovy-owned session is missing", async () => {
     writeClovyHomeStoredSessionId("default", "missing-home-session");
     mocks.invoke.mockImplementation(async (command: string) => {
@@ -1385,52 +1062,6 @@ describe("AgentWorkspace runtime wiring", () => {
 
     await waitFor(() => expect(readClovyHomeStoredSessionId("default")).toBeUndefined());
     expect(screen.queryByText("Session not found")).not.toBeInTheDocument();
-  });
-
-  it("keeps a failed Home message when the user has already drafted another", async () => {
-    const user = userEvent.setup();
-    const homeSession: AgentSessionDto = {
-      ...session,
-      id: "home-failure-session",
-      title: "Home",
-      workspacePath: "/tmp/home-failure-session",
-    };
-    let rejectHome: ((error: Error) => void) | undefined;
-    const pendingHome = new Promise((_, reject) => {
-      rejectHome = reject;
-    });
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "list_agent_sessions") return [homeSession];
-      if (command === "get_agent_session") return homeSession;
-      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_provider_models") {
-        return { mode: "generation", selectedModel: "fast", modelType: "text", models: [] };
-      }
-      if (command === "clovy_home_chat") return pendingHome;
-      return undefined;
-    });
-
-    render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "First message");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("clovy_home_chat", expect.anything()),
-    );
-    const activeComposer = screen.getByRole("textbox", { name: "Message Clovy" });
-    activeComposer.textContent = "New draft";
-    fireEvent.input(activeComposer);
-    expect(activeComposer).toHaveTextContent("New draft");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
-    rejectHome?.(new Error("Home is temporarily unavailable"));
-
-    expect(await screen.findByText("First message")).toBeVisible();
-    const errorNotice = await screen.findByRole("alert");
-    expect(errorNotice).toHaveTextContent("Home is temporarily unavailable");
-    expect(errorNotice.closest(".agent-composer")).not.toBeNull();
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent("New draft"),
-    );
   });
 
   it("hydrates history, shows an optimistic turn, and cancels", async () => {
@@ -3550,93 +3181,6 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
         request: expect.objectContaining({ model: engineModel }),
-      }),
-    );
-  });
-
-  it("hands a Home task to the default CLI engine", async () => {
-    const engineModel = "__clovy_cli_engine__:codex";
-    const user = userEvent.setup();
-    const homeSession: AgentSessionDto = {
-      ...session,
-      id: "home-session",
-      title: "Home",
-      workspacePath: "/tmp/home-session",
-    };
-    const focusedSession: AgentSessionDto = {
-      ...newSession,
-      id: "focused-session",
-      title: "Summarize this file",
-      model: engineModel,
-      workspacePath: "/tmp/focused-session",
-    };
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "chat_default_engine") {
-        return { modelId: engineModel, cli: "codex", legacyFallback: false };
-      }
-      if (command === "list_agent_sessions") return [homeSession, focusedSession];
-      if (command === "get_agent_session") return homeSession;
-      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_agent_skills") return [];
-      if (command === "list_provider_models") {
-        return {
-          mode: "generation",
-          selectedModel: "open-software/auto",
-          modelType: "text",
-          models: [],
-        };
-      }
-      if (command === "provider_model_settings") {
-        return {
-          settings: { costQuality: 20 },
-          effectiveSettings: {
-            providerApiKeysConfigured: {
-              groq: false,
-              openrouter: false,
-              fal: false,
-              tavily: false,
-            },
-          },
-        };
-      }
-      if (command === "create_agent_session") return focusedSession;
-      if (command === "start_agent_run") {
-        return {
-          id: "focused-run",
-          sessionId: focusedSession.id,
-          status: "running",
-          model: engineModel,
-        };
-      }
-      return undefined;
-    });
-
-    render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
-    await waitFor(() =>
-      expect(mocks.invoke.mock.calls.some(([command]) => command === "chat_default_engine")).toBe(
-        true,
-      ),
-    );
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    await waitFor(() => expect(screen.getByText("brief.pdf")).toBeVisible());
-    await user.type(composer, "Summarize this file");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
-        request: expect.objectContaining({ title: "Summarize this file", model: engineModel }),
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          sessionId: "focused-session",
-          model: engineModel,
-          attachments: ["/tmp/brief.pdf"],
-        }),
       }),
     );
   });

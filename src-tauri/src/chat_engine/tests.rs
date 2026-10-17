@@ -1589,3 +1589,111 @@ mod real {
         two_turns_on_real_cli(CliKind::Pi).await;
     }
 }
+
+/// Home (ADR-0064): an old Home session (`open-software/auto`, with the turns
+/// imported from local storage) answers on the default CLI. The first turn
+/// gets the imported conversation as earlier messages, the second resumes the
+/// CLI conversation, and Clovy API is never called.
+#[tokio::test]
+async fn chat_engine_home_session_runs_two_turns_on_the_cli_without_clovy_api() {
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_address = api.local_addr().unwrap();
+    let api_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = api_calls.clone();
+    let api_server = tokio::spawn(async move {
+        while let Ok((_stream, _)) = api.accept().await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    std::env::set_var("CLOVY_API_URL", format!("http://{api_address}"));
+
+    let kind = CliKind::Claude;
+    let mut harness = Harness::new(kind).await;
+    let home = harness
+        .repository
+        .create_session(
+            "Home",
+            "open-software/auto",
+            AgentSafetyMode::Sandboxed,
+            harness.workspace.path().to_str(),
+        )
+        .await
+        .unwrap();
+    harness.session_id = home.id.clone();
+    let imported = harness
+        .repository
+        .import_legacy_home_turns(
+            &home.id,
+            &[
+                json!({
+                    "id": "home:direct:user:1",
+                    "role": "user",
+                    "createdAt": "2026-10-01T09:00:00.000Z",
+                    "parts": [{ "type": "text", "text": "My name is Gui" }],
+                }),
+                json!({
+                    "id": "home:direct:assistant:1",
+                    "role": "assistant",
+                    "createdAt": "2026-10-01T09:00:02.000Z",
+                    "parts": [{ "type": "text", "text": "Nice to meet you, Gui." }],
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(imported.imported, 2);
+    // What start_agent_run does with the Home turn's model.
+    sqlx::query::query("UPDATE agent_sessions SET model = ? WHERE id = ?")
+        .bind(engine_model_id(kind))
+        .bind(&home.id)
+        .execute(&harness.repository.pool)
+        .await
+        .unwrap();
+    let program = harness.fake_cli(kind, FAKE_CLAUDE);
+
+    let (_, first) = harness.turn(kind, &program, "eae", None).await;
+    let (_, second) = harness.turn(kind, &program, "What is my name?", None).await;
+
+    for events in [&first, &second] {
+        assert_eq!(
+            events.last().map(|(method, _)| method.as_str()),
+            Some("run.completed"),
+            "{events:?}"
+        );
+    }
+    let first_prompt = harness.stdin(1);
+    assert!(
+        first_prompt.contains("User: My name is Gui"),
+        "{first_prompt}"
+    );
+    assert!(
+        first_prompt.contains("Assistant: Nice to meet you, Gui."),
+        "{first_prompt}"
+    );
+    assert!(first_prompt.ends_with("eae"), "{first_prompt}");
+    assert!(!harness.args(1).iter().any(|arg| arg == "--resume"));
+    assert_eq!(
+        argument_after(&harness.args(2), "--resume"),
+        Some("claude-conv-1")
+    );
+    assert_eq!(harness.stdin(2).trim(), "What is my name?");
+    let transcript = harness.transcript().await;
+    let messages = transcript
+        .iter()
+        .filter(|(kind, _)| kind == "user_message" || kind == "assistant_message")
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        vec![
+            "My name is Gui",
+            "Nice to meet you, Gui.",
+            "eae",
+            "Answer 1",
+            "What is my name?",
+            "Answer 2",
+        ]
+    );
+    assert_eq!(api_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    api_server.abort();
+}

@@ -127,13 +127,6 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   ],
   remote_model_invalid: "lib.errors.remoteModelInvalid",
   auto_resolved_model_invalid: "lib.errors.autoModelInvalid",
-  // Home conversation (src-tauri/src/clovy_api.rs)
-  home_chat_failed: "lib.errors.homeChatFailed",
-  home_chat_current_research_required: "lib.errors.homeChatResearchRequired",
-  home_chat_empty: "lib.errors.homeChatEmpty",
-  home_chat_invalid: "lib.errors.homeChatInvalid",
-  home_chat_message_required: "lib.errors.homeMessageRequired",
-  home_chat_message_too_large: "lib.errors.homeMessageTooLarge",
   // Note pipeline (src-tauri/src/domain/processing.rs)
   transcription_already_running: [
     {

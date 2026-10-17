@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod domain;
+pub mod home_import;
 pub mod host;
 pub mod migration;
 pub mod native_connectors;

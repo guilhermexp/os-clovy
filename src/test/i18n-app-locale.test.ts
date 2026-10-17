@@ -118,12 +118,10 @@ describe("native error codes", () => {
     expect(messageForErrorCode(undefined, "Native text.")).toBe("Native text.");
     expect(
       messageFromError({
-        code: "home_chat_failed",
-        message: "Clovy couldn't reply just now. Your message is still here, so you can try again.",
+        code: "remote_model_invalid",
+        message: "The model selected for this session is invalid. Choose the model again.",
       }),
-    ).toBe(
-      "O Clovy não conseguiu responder agora. Sua mensagem continua aqui, então você pode tentar de novo.",
-    );
+    ).toBe("O modelo escolhido para esta sessão é inválido. Escolha o modelo de novo.");
   });
 
   it("keeps English byte-identical to the native wording", () => {

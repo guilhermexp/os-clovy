@@ -191,8 +191,8 @@ streaming, and live steering, as on Clovy API); anything else is a Clovy model.
 New work starts on the default engine: `chat_default_engine` returns
 `{ modelId, cli, legacyFallback }` (`modelId` is the CLI engine id when chat
 is on a CLI, else `null` and the caller keeps its own default) without the
-network, and the desktop's new sessions, Home task handoffs
-([home-assistant.md](home-assistant.md)), note chat, and sessions started
+network, and the desktop's new sessions, Home's turns
+([home-assistant.md](home-assistant.md), ADR-0064), note chat, and sessions started
 from the companion ([companion-architecture.md](companion-architecture.md))
 create their session on it.
 The engine picker writes `__june_local_generation__:<model>@<endpoint id>`

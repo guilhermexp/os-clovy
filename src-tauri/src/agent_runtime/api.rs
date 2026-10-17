@@ -660,6 +660,34 @@ pub async fn list_agent_items(app: AppHandle, session_id: String) -> Result<Vec<
         .collect()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportLegacyHomeTurnsRequest {
+    pub session_id: String,
+    /// The turns old Home builds kept in local storage, as stored.
+    pub turns: Vec<Value>,
+}
+
+/// Imports, once, the Home conversation older builds kept only in local
+/// storage into the Home session (`super::home_import`, ADR-0064).
+#[tauri::command]
+pub async fn import_legacy_home_turns(
+    app: AppHandle,
+    request: ImportLegacyHomeTurnsRequest,
+) -> Result<super::home_import::LegacyHomeImport, AppError> {
+    let repository = repository(&app).await?;
+    let session = repository.get_session(&request.session_id).await?;
+    if matches!(session.status.as_str(), "running" | "waiting_for_user") {
+        return Err(AppError::new(
+            "agent_run_active",
+            "This session already has an active run.",
+        ));
+    }
+    Ok(repository
+        .import_legacy_home_turns(&session.id, &request.turns)
+        .await?)
+}
+
 #[tauri::command]
 pub async fn start_agent_run(
     app: AppHandle,

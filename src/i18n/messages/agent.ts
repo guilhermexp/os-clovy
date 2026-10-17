@@ -48,15 +48,8 @@ export default defineMessages({
     "agent.workspace.taskDetails": "Agent task details",
     "agent.home.conversationLabel": "Home conversation",
     "agent.home.suggestions": "Suggestions",
-    "agent.home.reply.gotIt": "Got it.",
-    "agent.home.reply.imHereHelp": "I'm here. What can I help with?",
-    "agent.home.reply.imHere": "I'm here.",
-    "agent.home.reply.greeting": "Hey! What can I help with?",
     "agent.home.handoffInterrupted": "Session creation was interrupted. Try again.",
-    "agent.home.error.unsentPending":
-      "Retry or discard the unsent Home message before sending another.",
     "agent.home.error.starting": "Wait for Home to finish starting, then send again.",
-    "agent.home.error.tooLong": "Home messages must be 64,000 characters or less.",
     "agent.error.waitForAttachments": "Wait for files to finish attaching, then send again.",
     "agent.error.dropBusy":
       "Wait for the current files to finish attaching, then drop these files again.",
@@ -80,9 +73,6 @@ export default defineMessages({
     "agent.unsent.label": "Unsent message",
     "agent.unsent.retry": "Retry unsent message",
     "agent.unsent.discard": "Discard unsent message",
-    "agent.unsentHome.label": "Unsent Home message",
-    "agent.unsentHome.retry": "Retry unsent Home message",
-    "agent.unsentHome.discard": "Discard unsent Home message",
 
     // Usage panel
     "agent.usage.title": "Usage",
@@ -274,15 +264,8 @@ export default defineMessages({
     "agent.workspace.taskDetails": "Detalhes da tarefa do agente",
     "agent.home.conversationLabel": "Conversa do Início",
     "agent.home.suggestions": "Sugestões",
-    "agent.home.reply.gotIt": "Entendi.",
-    "agent.home.reply.imHereHelp": "Estou aqui. Como posso ajudar?",
-    "agent.home.reply.imHere": "Estou aqui.",
-    "agent.home.reply.greeting": "Oi! Como posso ajudar?",
     "agent.home.handoffInterrupted": "A criação da sessão foi interrompida. Tente de novo.",
-    "agent.home.error.unsentPending":
-      "Tente de novo ou descarte a mensagem não enviada do Início antes de enviar outra.",
     "agent.home.error.starting": "Aguarde o Início terminar de carregar e envie de novo.",
-    "agent.home.error.tooLong": "As mensagens do Início devem ter no máximo 64.000 caracteres.",
     "agent.error.waitForAttachments": "Aguarde os arquivos terminarem de anexar e envie de novo.",
     "agent.error.dropBusy":
       "Aguarde os arquivos atuais terminarem de anexar e solte estes arquivos de novo.",
@@ -306,9 +289,6 @@ export default defineMessages({
     "agent.unsent.label": "Mensagem não enviada",
     "agent.unsent.retry": "Tentar enviar a mensagem de novo",
     "agent.unsent.discard": "Descartar mensagem não enviada",
-    "agent.unsentHome.label": "Mensagem do Início não enviada",
-    "agent.unsentHome.retry": "Tentar enviar a mensagem do Início de novo",
-    "agent.unsentHome.discard": "Descartar mensagem do Início não enviada",
 
     // Usage panel
     "agent.usage.title": "Uso",
