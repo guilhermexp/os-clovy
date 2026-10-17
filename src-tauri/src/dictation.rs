@@ -8766,6 +8766,10 @@ mod tests {
         peak_in_flight: std::sync::atomic::AtomicUsize,
         delay: Duration,
         fail_on: Option<String>,
+        /// Calls whose text contains it answer with empty text.
+        blank_on: Option<String>,
+        /// Answers without any sentence punctuation.
+        unpunctuated: bool,
     }
 
     impl DictationCleaner for FakeCleaner {
@@ -8783,6 +8787,16 @@ mod tests {
                 .is_some_and(|marker| call.text.contains(marker))
             {
                 return Err(AppError::new("clovy_request_failed", "upstream failed"));
+            }
+            if self
+                .blank_on
+                .as_deref()
+                .is_some_and(|marker| call.text.contains(marker))
+            {
+                return Ok(String::new());
+            }
+            if self.unpunctuated {
+                return Ok(call.text.to_uppercase());
             }
             Ok(format!("{}.", call.text.to_uppercase()))
         }
@@ -8977,6 +8991,55 @@ mod tests {
         let peak = cleaner.peak_in_flight.load(Ordering::SeqCst);
         assert!((2..=4).contains(&peak), "peak in flight {peak}");
         assert_eq!(pasted_text(&result), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn each_chunk_gets_exactly_one_cleanup_call() {
+        // D7: one chat completion per chunk, no content-quality retries.
+        let transcript = long_transcript(6, "word300");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        let cleaner = FakeCleaner {
+            unpunctuated: true,
+            ..FakeCleaner::default()
+        };
+        run_dictation_pipeline(
+            &FakeTranscriber::text(&transcript),
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
+    }
+
+    #[tokio::test]
+    async fn a_chunk_with_an_invalid_answer_pastes_the_whole_raw_transcript() {
+        let transcript = long_transcript(6, "blankme");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        let cleaner = FakeCleaner {
+            blank_on: Some("blankme".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &FakeTranscriber::text(&transcript),
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        let pasted = pasted_text(&result).unwrap();
+        assert!(!pasted.contains('.'), "no cleaned chunk survives: {pasted}");
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("provider_response_invalid")
+        );
+        assert!(cleaner.calls.lock().unwrap().len() <= chunks.len());
     }
 
     #[tokio::test]
