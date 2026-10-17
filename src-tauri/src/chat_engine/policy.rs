@@ -8,7 +8,7 @@
 //! |---|---|---|
 //! | attended, `sandboxed` | `--permission-mode default`; with Clovy's server `--allowedTools mcp__clovy__*` | `sandbox_mode="workspace-write"`, no network, `approval_policy="never"` |
 //! | attended, `unrestricted` | `--permission-mode acceptEdits` (edits in the workspace; shell still asks) | as `sandboxed` with network |
-//! | unattended (routines) | `--permission-mode default`, `--tools`/`--allowedTools` of the read-only set, `--strict-mcp-config` | `sandbox_mode="read-only"`, `approval_policy="never"` |
+//! | unattended (routines) | `--permission-mode default`, `--tools`/`--allowedTools` of the read-only set, `--strict-mcp-config`; with Clovy's server `--disallowedTools mcp__clovy__approve_action` | `sandbox_mode="read-only"`, `approval_policy="never"` |
 //!
 //! Every Codex turn gets `web_search="live"` (spike S5) and, with Clovy's
 //! server, `default_tools_approval_mode="approve"` for that server only (S2:
@@ -136,6 +136,9 @@ fn claude(permissions: TurnPermissions, interaction_tools: bool) -> TurnPolicy {
             UNATTENDED_CLAUDE_ALLOWED,
             "--strict-mcp-config",
         ]);
+        // The server lists `approve_action` to every claude turn; with no
+        // permission prompt to answer here, the model must not call it.
+        policy.mcp_args = strings(&["--disallowedTools", CLAUDE_PROMPT_TOOL]);
         return policy;
     }
     // Explicit, so a `defaultMode` in the user's own settings never decides.

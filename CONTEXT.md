@@ -900,10 +900,37 @@ The binary relays to the running app over an authenticated local socket and
 answers only while Clovy is open with the server on, which it is by default
 until the user turns it off (see [docs/mcp-server.md](docs/mcp-server.md)). It
 is independent of **activity capture**: with capture off it still serves notes,
-dictations, and memories, without activity. It is outbound only; the in-app
-agent keeps host tools.
+dictations, and memories, without activity. Clients outside a Clovy chat
+turn get read-only tools; a CLI chat turn connects with a **turn binding** and
+also gets Clovy's turn-bound tools, whose writes go through the **approval
+broker** ([ADR-0063](docs/adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)).
+The legacy Clovy agent keeps its host tools.
 _Avoid_: Clovy-managed MCP server (the retired in-loop `june_*` servers), MCP
 bridge, plugin.
+
+**Turn binding** (OpenSpec: _vínculo de turno_):
+The link between one Clovy MCP server connection and the CLI chat turn that
+opened it: a single-use **turn token** the app issues per run and passes to
+`clovy-mcp` as `--turn <token>`, bound to the session, run, CLI, safety mode,
+and whether the turn is attended (chat) or unattended (routines). Only a bound
+connection sees the turn-bound tools (`turn_required` otherwise); the token is
+revoked when the run ends, fails, or is cancelled (`turn_expired` after). It
+never replaces the installation secret. See
+[docs/mcp-server.md](docs/mcp-server.md#turn-binding).
+_Avoid_: session token, MCP session (the token lives one run, not one
+session), auth token (the installation secret authenticates).
+
+**Approval broker** (OpenSpec: _broker de aprovação_):
+The app service (`crate::approval_broker`) every Clovy write tool of a CLI
+turn asks before acting: it records an approval or clarification card in the
+session, waits up to 10 minutes for one decision, and turns denial, expiry,
+or cancellation into the tool's error (`user_denied`, `approval_timed_out`,
+`run_cancelled`). Unattended turns are refused without a card
+(`unattended_requires_approval`). Browser use keeps its own approval tray.
+See [docs/mcp-server.md](docs/mcp-server.md#approval-broker).
+_Avoid_: permission prompt (that is the CLI's own; claude's is routed to the
+broker through `approve_action`), interruption (the item the broker writes,
+not the broker), auto-approve (nothing pre-grants).
 
 **Coding agent**:
 A third-party AI coding tool the user runs on the Mac (Claude Code, Codex,
