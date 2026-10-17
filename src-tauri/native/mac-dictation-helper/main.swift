@@ -342,6 +342,14 @@ func audioDurationSeconds(at url: URL) -> Double? {
     return Double(file.length) / file.fileFormat.sampleRate
 }
 
+/// AAC 44.1 kHz mono, the default-input dictation format.
+let dictationRecorderSettings: [String: Any] = [
+    AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+    AVSampleRateKey: 44_100,
+    AVNumberOfChannelsKey: 1,
+    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+]
+
 /// Covers the gap between `record()` returning and the cue reaching the
 /// microphone, so the cue's tail is cut too.
 let startCueTrimMarginSeconds: TimeInterval = 0.03
@@ -1760,6 +1768,10 @@ private let escapeCancelHotKeyCallback: EventHandlerUPP = { _, eventRef, userInf
 
 final class DictationController {
     private var audioRecorder: AVAudioRecorder?
+    /// The next take's default-input recorder: file created and audio path
+    /// prepared, nothing recorded (ditado-rapido D4).
+    private var preparedRecorder: (recorder: AVAudioRecorder, url: URL)?
+    private var deviceObservers: [NSObjectProtocol] = []
     private var selectedDeviceRecorder: SelectedDeviceRecorder?
     private var autoDetectInputMeter: AutoDetectInputMeter?
     private var recordingURL: URL?
@@ -1813,6 +1825,8 @@ final class DictationController {
     func setMicrophone(id: String?, name: String?) {
         preferredMicrophoneID = id?.isEmpty == true ? nil : id
         preferredMicrophoneName = name?.isEmpty == true ? nil : name
+        discardPreparedRecorder()
+        prepareNextRecording()
         emit("microphone_selected", [
             "id": preferredMicrophoneID ?? "",
             "name": preferredMicrophoneName ?? "Auto-detect",
@@ -2045,8 +2059,66 @@ final class DictationController {
 
     func shutdown() {
         resetRecordingState()
+        discardPreparedRecorder()
         emit("shutdown_ack")
         exit(0)
+    }
+
+    /// Readies the next take's default-input recorder so a press only calls
+    /// `record()`. Never records, and does nothing without microphone access,
+    /// while capture runs, or when a pinned microphone uses the capture path.
+    func prepareNextRecording() {
+        observeInputDevicesOnce()
+        guard
+            preparedRecorder == nil,
+            !listening,
+            AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+            microphoneDevice(for: preferredMicrophoneID) == nil
+        else {
+            return
+        }
+        let url = temporaryRecordingURL()
+        guard let recorder = try? AVAudioRecorder(url: url, settings: dictationRecorderSettings) else {
+            return
+        }
+        recorder.isMeteringEnabled = true
+        guard recorder.prepareToRecord() else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        preparedRecorder = (recorder, url)
+    }
+
+    private func takePreparedRecorder() -> (recorder: AVAudioRecorder, url: URL)? {
+        let prepared = preparedRecorder
+        preparedRecorder = nil
+        return prepared
+    }
+
+    private func discardPreparedRecorder() {
+        guard let prepared = takePreparedRecorder() else {
+            return
+        }
+        prepared.recorder.deleteRecording()
+        try? FileManager.default.removeItem(at: prepared.url)
+    }
+
+    /// A recorder prepared for one input must not capture from another: a
+    /// device that comes or goes drops it, and the next one is prepared.
+    private func observeInputDevicesOnce() {
+        guard deviceObservers.isEmpty else {
+            return
+        }
+        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+            deviceObservers.append(NotificationCenter.default.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.discardPreparedRecorder()
+                self?.prepareNextRecording()
+            })
+        }
     }
 
     private func startRecording(purpose: RecordingPurpose, durationSeconds: Double?) {
@@ -2076,17 +2148,18 @@ final class DictationController {
             return
         }
 
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 44_100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-        ]
-
         do {
-            let recorder = try AVAudioRecorder(url: nextRecordingURL, settings: settings)
-            recorder.isMeteringEnabled = true
-            recorder.prepareToRecord()
+            let recorder: AVAudioRecorder
+            let recorderURL: URL
+            if purpose == .dictation, let prepared = takePreparedRecorder() {
+                recorder = prepared.recorder
+                recorderURL = prepared.url
+            } else {
+                recorder = try AVAudioRecorder(url: nextRecordingURL, settings: dictationRecorderSettings)
+                recorderURL = nextRecordingURL
+                recorder.isMeteringEnabled = true
+                recorder.prepareToRecord()
+            }
 
             guard recorder.record() else {
                 emit("error", takePayload([
@@ -2098,7 +2171,7 @@ final class DictationController {
             }
 
             audioRecorder = recorder
-            recordingURL = nextRecordingURL
+            recordingURL = recorderURL
             startAutoDetectMetering(recordingInstanceID: recordingInstanceID)
             markRecordingStarted(
                 microphone: preferredMicrophoneName ?? "Auto-detect",
@@ -2527,6 +2600,11 @@ final class DictationController {
         }
         recordingURL = nil
         recordingPurpose = .dictation
+        // Ready the next take once this turn of the run loop is done (a
+        // reset that starts a take records first, then this finds it busy).
+        DispatchQueue.main.async { [weak self] in
+            self?.prepareNextRecording()
+        }
     }
 }
 
@@ -2849,6 +2927,9 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
 emit("ready")
+// Cues decoded and the first recorder prepared before the first press.
+RecordingCuePlayer.preload()
+dictation.prepareNextRecording()
 ShortcutKeyMonitor.shared.start()
 FocusTargetController.shared.start()
 AccessibilityTrustMonitor.shared.start()
