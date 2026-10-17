@@ -430,18 +430,100 @@ pub struct HudPosition {
 #[derive(Default)]
 struct HudPositionState {
     saved: Option<(i32, i32)>,
+    drag_origin: Option<(i32, i32)>,
 }
 
 impl HudPositionState {
     fn begin_drag(&mut self, position: (i32, i32)) {
-        self.saved = Some(position);
+        self.drag_origin = Some(position);
     }
 
-    fn resized(&mut self, position: (i32, i32)) {
-        if self.saved.is_some() {
-            self.saved = Some(position);
+    fn observe_drag(&mut self, position: (i32, i32), mouse_down: bool) {
+        if mouse_down {
+            return;
+        }
+        if let Some(origin) = self.drag_origin.take() {
+            if position != origin {
+                self.saved = Some(position);
+            }
         }
     }
+
+    fn cancel_drag(&mut self) {
+        self.drag_origin = None;
+    }
+
+    fn reset(&mut self) {
+        self.cancel_drag();
+        self.saved = None;
+    }
+}
+
+/// Stop capture before any programmatic movement. A queued release sample
+/// must never mistake a resize, shake, or meeting prompt for a user's drag.
+fn cancel_hud_drag(hud: &WebviewWindow) {
+    if let Some(state) = hud.app_handle().try_state::<HudPosition>() {
+        if let Ok(mut position) = state.inner.lock() {
+            position.cancel_drag();
+        }
+    }
+}
+
+fn poll_hud_drag(app: &AppHandle, hud: &WebviewWindow) {
+    let dragging = app
+        .try_state::<HudPosition>()
+        .and_then(|state| {
+            state
+                .inner
+                .lock()
+                .ok()
+                .map(|position| position.drag_origin.is_some())
+        })
+        .unwrap_or(false);
+    if !dragging {
+        return;
+    }
+    let app_for_drag = app.clone();
+    let hud = hud.clone();
+    // Read the frame and button state together on the main thread. In
+    // particular, never hold the position mutex while waiting for a native
+    // frame getter on another thread.
+    let _ = app.run_on_main_thread(move || {
+        let Ok(position) = hud.outer_position() else {
+            return;
+        };
+        let mouse_down = hud_left_mouse_button_down();
+        if let Some(state) = app_for_drag.try_state::<HudPosition>() {
+            if let Ok(mut saved) = state.inner.lock() {
+                saved.observe_drag((position.x, position.y), mouse_down);
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn hud_left_mouse_button_down() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
+    }
+    // Combined session state, left button: AppKit need not deliver mouseUp
+    // to this process after performWindowDragWithEvent returns immediately.
+    unsafe { CGEventSourceButtonState(0, 0) }
+}
+
+#[cfg(target_os = "windows")]
+fn hud_left_mouse_button_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(v_key: i32) -> i16;
+    }
+    unsafe { GetAsyncKeyState(1) < 0 }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn hud_left_mouse_button_down() -> bool {
+    false
 }
 
 pub struct ShortcutActivationState {
@@ -1687,12 +1769,11 @@ pub fn set_dictation_hud_placement(
     })?;
     if let Some(position) = app.try_state::<HudPosition>() {
         if let Ok(mut saved) = position.inner.lock() {
-            saved.saved = None;
+            saved.reset();
         }
     }
-    if let Some(hud) = app.get_webview_window("hud") {
-        position_hud_window(&app, &hud);
-    }
+    // Apply on the next dictation show. The shared window may currently
+    // contain a top-anchored meeting prompt, not dictation content.
     Ok(settings)
 }
 
@@ -2179,8 +2260,9 @@ pub fn dictation_hud_set_size(app: AppHandle, width: f64, height: f64, animate: 
     animate_frame_to(&hud, new_size, animate);
 }
 
-/// Remember only an actual drag, never the Moved events emitted by resizing.
-/// On macOS the native drag runs a nested event loop until the mouse is released.
+/// Arm capture before handing the gesture to the native window server.
+/// macOS returns immediately and may not send mouseUp; the existing HUD
+/// poll commits the final frame once the session button state is released.
 #[tauri::command]
 pub fn dictation_hud_start_drag(app: AppHandle) {
     let Some(hud) = app.get_webview_window("hud") else {
@@ -2188,16 +2270,19 @@ pub fn dictation_hud_start_drag(app: AppHandle) {
     };
     let app_for_drag = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if hud.start_dragging().is_err() {
-            return;
-        }
-        if let (Ok(position), Some(state)) = (
+        let (Ok(position), Some(state)) = (
             hud.outer_position(),
             app_for_drag.try_state::<HudPosition>(),
-        ) {
-            if let Ok(mut saved) = state.inner.lock() {
-                saved.begin_drag((position.x, position.y));
-            }
+        ) else {
+            return;
+        };
+        let Ok(mut saved) = state.inner.lock() else {
+            return;
+        };
+        saved.begin_drag((position.x, position.y));
+        drop(saved);
+        if hud.start_dragging().is_err() {
+            cancel_hud_drag(&hud);
         }
     });
 }
@@ -2205,6 +2290,7 @@ pub fn dictation_hud_start_drag(app: AppHandle) {
 /// Ease the window to `new_size`, keeping the nearest vertical edge anchored.
 /// Hidden windows are positioned by show, not resized around their startup frame.
 fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: bool) {
+    cancel_hud_drag(hud);
     let (Ok(position), Ok(old_size)) = (hud.outer_position(), hud.outer_size()) else {
         return;
     };
@@ -2248,11 +2334,6 @@ fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: b
     }
     let _ = hud.set_size(new_size);
     let _ = hud.set_position(PhysicalPosition::new(target_x, target_y));
-    if let Some(state) = hud.app_handle().try_state::<HudPosition>() {
-        if let Ok(mut saved) = state.inner.lock() {
-            saved.resized((target_x, target_y));
-        }
-    }
 }
 
 fn dictation_hud_resized_origin(
@@ -2328,6 +2409,7 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     let Some(hud) = app.get_webview_window("hud") else {
         return false;
     };
+    cancel_hud_drag(&hud);
     // A window woken at alpha 0 (wake_hud_window) reports visible but the
     // user can't see it — that still counts as a fresh entrance.
     let entering = enter.unwrap_or(false);
@@ -2442,6 +2524,7 @@ pub fn dictation_hud_exit(app: AppHandle) {
     let Some(hud) = app.get_webview_window("hud") else {
         return;
     };
+    cancel_hud_drag(&hud);
     if !hud.is_visible().unwrap_or(false) {
         return;
     }
@@ -2489,6 +2572,7 @@ pub fn dictation_hud_shake(app: AppHandle) {
         // mid-wobble position as its anchor (and vice versa).
         let lock = app.try_state::<HudFrameLock>();
         let _guard = lock.as_ref().and_then(|lock| lock.0.lock().ok());
+        cancel_hud_drag(&hud);
         const DURATION_MS: f64 = 380.0;
         const FRAME_MS: u64 = 16;
         // (progress, logical x offset) — the old CSS keyframes.
@@ -2606,6 +2690,7 @@ fn spawn_hud_hover_thread(app: AppHandle) {
             let Some(hud) = app.get_webview_window("hud") else {
                 continue;
             };
+            poll_hud_drag(&app, &hud);
             let visible = hud.is_visible().unwrap_or(false);
 
             let stop_rect = hover_state.stop_bounds.lock().ok().and_then(|g| g.clone());
@@ -3997,7 +4082,7 @@ enum RecordAction {
 
 #[cfg(target_os = "macos")]
 fn helper_ownership_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok()
+    crate::app_paths::app_config_dir(app).ok()
 }
 
 /// This instance's own record path, keyed by our app pid so we never overwrite
@@ -7632,6 +7717,7 @@ fn schedule_hud_hide(app: &AppHandle, delay: Duration) {
 }
 
 fn position_hud_window(app: &AppHandle, hud: &WebviewWindow) {
+    cancel_hud_drag(hud);
     let Ok(window_size) = hud.outer_size() else {
         return;
     };
@@ -7643,7 +7729,7 @@ fn position_hud_window(app: &AppHandle, hud: &WebviewWindow) {
     if let Some(state) = app.try_state::<HudPosition>() {
         let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
-            if hud_position_is_visible(hud, x, y, window_size) {
+            if let Some((x, y)) = restored_hud_position(hud, x, y, window_size) {
                 let _ = hud.set_position(PhysicalPosition::new(x, y));
                 return;
             }
@@ -7671,7 +7757,7 @@ fn current_or_next_hud_position(
     if let Some(state) = app.try_state::<HudPosition>() {
         let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
-            if hud_position_is_visible(hud, x, y, window_size) {
+            if let Some((x, y)) = restored_hud_position(hud, x, y, window_size) {
                 return Some(PhysicalPosition::new(x, y));
             }
         }
@@ -7686,6 +7772,7 @@ fn current_or_next_hud_position(
 /// transient notifications, not the user's parked dictation pill, so the
 /// saved drag position doesn't apply to them.
 fn position_hud_window_top_center(hud: &WebviewWindow) {
+    cancel_hud_drag(hud);
     let Ok(window_size) = hud.outer_size() else {
         return;
     };
@@ -7737,22 +7824,19 @@ fn dictation_hud_origin(
     (x, y)
 }
 
-/// Treat a saved position as still usable as long as the pill overlaps a
-/// connected monitor by at least this many pixels on each axis. Guards
-/// against "I unplugged the external display" losing the HUD off-screen.
-fn hud_position_is_visible(
+/// Restore only onto a connected monitor, clamping the current window size
+/// without rewriting the manual anchor. A pill can grow after the drag.
+fn restored_hud_position(
     hud: &WebviewWindow,
     x: i32,
     y: i32,
     window_size: PhysicalSize<u32>,
-) -> bool {
+) -> Option<(i32, i32)> {
     const MIN_OVERLAP_PX: i32 = 24;
-    let Ok(monitors) = hud.available_monitors() else {
-        return false;
-    };
+    let monitors = hud.available_monitors().ok()?;
     let pill_w = window_size.width as i32;
     let pill_h = window_size.height as i32;
-    monitors.iter().any(|monitor| {
+    monitors.iter().find_map(|monitor| {
         let work = monitor.work_area();
         let mx = work.position.x;
         let my = work.position.y;
@@ -7760,7 +7844,15 @@ fn hud_position_is_visible(
         let mh = work.size.height as i32;
         let overlap_x = (x + pill_w).min(mx + mw) - x.max(mx);
         let overlap_y = (y + pill_h).min(my + mh) - y.max(my);
-        overlap_x >= MIN_OVERLAP_PX && overlap_y >= MIN_OVERLAP_PX
+        if overlap_x < MIN_OVERLAP_PX || overlap_y < MIN_OVERLAP_PX {
+            return None;
+        }
+        Some(dictation_hud_resized_origin(
+            *work,
+            PhysicalPosition::new(x, y),
+            window_size,
+            window_size,
+        ))
     })
 }
 
@@ -8163,6 +8255,7 @@ mod tests {
     fn dictation_hud_drag_start_does_not_replace_the_last_completed_drag() {
         let mut state = HudPositionState {
             saved: Some((500, 900)),
+            ..Default::default()
         };
         state.begin_drag((864, 1120));
         assert_eq!(state.saved, Some((500, 900)));
@@ -8172,9 +8265,59 @@ mod tests {
     fn dictation_hud_prompt_resize_does_not_replace_the_saved_dictation_drag() {
         let mut state = HudPositionState {
             saved: Some((500, 900)),
+            ..Default::default()
         };
-        state.resized((749, 42));
+        state.cancel_drag();
+        state.observe_drag((749, 42), false);
         assert_eq!(state.saved, Some((500, 900)));
+    }
+
+    #[test]
+    fn dictation_hud_drag_commits_the_release_position_not_the_start_or_last_held_sample() {
+        let mut state = HudPositionState::default();
+        state.begin_drag((864, 1120));
+        state.observe_drag((700, 1000), true);
+        assert_eq!(state.saved, None);
+        state.observe_drag((620, 940), false);
+        assert_eq!(state.saved, Some((620, 940)));
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_drag_release_without_movement_keeps_the_previous_anchor() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.observe_drag((864, 1120), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_automatic_motion_cancels_an_inflight_drag_without_saving_the_prompt() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.observe_drag((700, 1000), true);
+        state.cancel_drag();
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_preference_change_discards_the_drag_so_next_dictation_uses_the_new_edge() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.reset();
+        state.observe_drag((700, 1000), false);
+        assert_eq!(state.saved, None);
     }
 
     #[test]

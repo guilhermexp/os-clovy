@@ -69,15 +69,21 @@ or below the menu bar. Resizing preserves the nearest vertical edge so a
 bottom pill grows upward; error details and the native Esc hint use the
 available side (`above` at the bottom, `below` at the top).
 
-Only an explicit user drag is remembered for the current process. Native
-startup positioning and resize-generated `Moved` events are not drag state:
-remembering them used to restore AppKit's initial centered frame instead of
-the configured edge. Meeting-detection prompts in the dictation window keep
-their top anchor; the separate recording HUD is unchanged.
+Only the destination of an explicit user drag is remembered for the current
+process. AppKit returns from starting a drag immediately and may consume
+`mouseUp`; the existing 33 ms native poll samples the frame and left button
+on the main thread, committing the destination after release. Programmatic
+show, resize, shake and exit cancel any active capture and never overwrite
+the manual anchor. Restoration clamps the current size to the work area
+without changing that anchor.
 
-The settings path uses `app_paths::app_config_dir`, the same dev/release
-isolation as provider settings. Debug builds never import the release
-settings file into the dev profile.
+Preference changes apply on the next dictation show, not immediately to
+shared-window content. Meeting-detection prompts keep their top anchor;
+the separate recording HUD is unchanged.
+
+Both settings and helper-ownership records use `app_paths::app_config_dir`,
+the same dev/release isolation as provider settings. Debug builds never
+import release settings or scan release helper records.
 
 ## Warm-up
 
