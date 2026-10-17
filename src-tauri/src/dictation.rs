@@ -8900,6 +8900,63 @@ mod tests {
         assert!(result.cleanup_skipped.is_some());
     }
 
+    fn assert_visible_no_speech(result: &DictationPipelineResult) {
+        assert_eq!(
+            result.outcome.helper_command,
+            serde_json::json!({ "type": "discard_recording" })
+        );
+        assert!(result.outcome.transcript.is_none());
+        let mut event = result.outcome.event.clone().expect("no speech emits an event");
+        annotate_silent_error(&mut event);
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["message"], "No speech detected.");
+        // The user sees "No speech detected"; the HUD does not just vanish.
+        assert_eq!(event["payload"]["silent"], false);
+    }
+
+    #[tokio::test]
+    async fn an_empty_whisper_transcript_is_no_speech_whatever_the_audio_level() {
+        // The meter level is diagnostic only (design D5): loud, quiet, or
+        // unknown, an empty transcript means no speech, and nothing is cleaned.
+        for level in [Some(0.9), Some(0.001), None] {
+            for text in ["", "   ", " . , ? ", "…"] {
+                let transcriber = FakeTranscriber::text(text);
+                let cleaner = FakeCleaner::default();
+                let result = run_dictation_pipeline(
+                    &transcriber,
+                    &cleaner,
+                    pipeline_request(),
+                    &cleanup_config(true),
+                    DictationCleanupContext::default(),
+                    level,
+                )
+                .await;
+                assert_visible_no_speech(&result);
+                assert!(cleaner.calls.lock().unwrap().is_empty(), "{text:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clovy_apis_empty_dictation_answer_is_the_same_no_speech() {
+        for message in ["no_speech", "dictation_text_empty"] {
+            let transcriber = FakeTranscriber {
+                result: Err(AppError::new("clovy_request_failed", message)),
+                calls: Default::default(),
+            };
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner::default(),
+                pipeline_request(),
+                &cleanup_config(false),
+                DictationCleanupContext::default(),
+                Some(0.5),
+            )
+            .await;
+            assert_visible_no_speech(&result);
+        }
+    }
+
     #[test]
     fn legacy_settings_reset_to_defaults_and_preserve_microphone() {
         let settings: DictationSettings = serde_json::from_str(
