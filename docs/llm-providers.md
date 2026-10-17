@@ -276,7 +276,9 @@ One message on a CLI engine is one CLI process in the session workspace:
   other built-in exists in the turn),
   `--allowedTools Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*` (the only
   `--allowedTools` beyond Clovy's tools: the read-only set itself), and
-  `--strict-mcp-config` (Clovy's server only); codex gets
+  `--strict-mcp-config` (Clovy's server only), plus, with Clovy's server,
+  `--disallowedTools mcp__clovy__approve_action` (no permission prompt to
+  answer, so the model never sees that tool); codex gets
   `sandbox_mode="read-only"`, `approval_policy="never"`, and the same web
   search and server settings as an attended turn. Clovy's write tools reach
   the broker, which refuses them at once (`unattended_requires_approval`).

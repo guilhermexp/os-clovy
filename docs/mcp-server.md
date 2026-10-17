@@ -234,7 +234,9 @@ Every connection, bound or not, gets these read-only tools (`readOnlyHint`).
 
 Listed and callable only on a connection bound to a turn. "Listed to" says
 which turns see the tool: `every turn`, `attended turns` (chat; never
-routines), or `Claude turns`. "Broker" says what the call asks first: `yes`
+routines), or `Claude turns`. A `Claude turns` tool is listed for Claude Code
+itself, not for the model: every Claude turn with Clovy's server, attended or
+not, gets `--disallowedTools mcp__clovy__<tool>` (`chat_engine::policy`). "Broker" says what the call asks first: `yes`
 (an approval card for every call), `clarification` (a question card), `tray`
 (Browser use's own approval tray for consequential actions), or `no`. In an
 unattended turn every `yes` and `clarification` answers
@@ -276,7 +278,7 @@ unattended turn every `yes` and `clarification` answers
 | `stop_recording` | recorder | every turn | yes | none: stops the visible recording |
 | `recording_status` | recorder | every turn | no | none: whether Clovy is recording, with its metadata |
 | `request_clarification` | interaction | every turn | clarification | `question`, `choices`: the user's answer is the result |
-| `approve_action` | interaction | Claude turns | yes | `tool_name`, `input`, `tool_use_id`: Claude Code's `--permission-prompt-tool`; answers `{"behavior":"allow","updatedInput":...}` or `{"behavior":"deny","message":...}`; kept from the model by `--disallowedTools` in attended turns (an unattended Claude turn lists it too, and the broker refuses it there) |
+| `approve_action` | interaction | Claude turns | yes | `tool_name`, `input`, `tool_use_id`: Claude Code's `--permission-prompt-tool`; answers `{"behavior":"allow","updatedInput":...}` or `{"behavior":"deny","message":...}`; kept from the model by `--disallowedTools` in every Claude turn |
 
 Browser use and `computer_use` are not listed to unattended turns and refuse
 them with `unattended_requires_approval`. Browser use runs over the same

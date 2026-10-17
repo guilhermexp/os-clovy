@@ -1,7 +1,8 @@
 //! `docs/mcp-server.md` against what the server actually lists: the tool
 //! tables of the doc must match `tools/list` for an unbound client and for
 //! each kind of turn-bound connection (task 2.12 of the OpenSpec change
-//! `cli-substitui-agente-nativo`), and the doc's relative links and code
+//! `cli-substitui-agente-nativo`), Claude-only tools must stay out of the
+//! model's reach in every Claude turn, and the doc's relative links and code
 //! paths must exist. Removing, adding, or renaming a tool on either side
 //! without the other fails here.
 
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use chrono::{TimeZone, Utc};
 use clovy_lib::agent_runtime::domain::AgentSafetyMode;
 use clovy_lib::agent_runtime::native_connectors::routine_tool_allowed;
+use clovy_lib::chat_engine::policy::{turn_policy, TurnPermissions};
 use clovy_lib::connectors::notion::runtime_name_to_provider;
 use clovy_lib::connectors::policy::{
     JUNE_GCAL_ACTIONS_SERVER, JUNE_GCAL_SERVER, JUNE_GITHUB_ACTIONS_SERVER, JUNE_GITHUB_SERVER,
@@ -222,6 +224,55 @@ async fn turn_bound_table_is_the_bound_catalog_for_each_kind_of_turn() {
             turn.cli,
             turn.attended
         );
+    }
+}
+
+/// Every value given to `flag` in an argv (claude's list flags take several).
+fn values_of(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut taking = false;
+    for arg in args {
+        if arg.starts_with('-') && arg.len() > 1 {
+            taking = arg == flag;
+            continue;
+        }
+        if taking {
+            values.push(arg.clone());
+        }
+    }
+    values
+}
+
+#[test]
+fn claude_only_tools_are_kept_from_the_model_in_every_claude_turn() {
+    let doc = doc();
+    let lines = section(&doc, TURN_BOUND);
+    let audience = column(&lines, "Listed to");
+    let claude_only: Vec<String> = rows(&lines)
+        .into_iter()
+        .filter(|row| row.cells[audience] == "Claude turns")
+        .map(|row| format!("mcp__clovy__{}", row.tool))
+        .collect();
+    assert!(!claude_only.is_empty());
+    for safety_mode in [AgentSafetyMode::Sandboxed, AgentSafetyMode::Unrestricted] {
+        for attended in [true, false] {
+            let policy = turn_policy(
+                CliKind::Claude,
+                TurnPermissions {
+                    safety_mode,
+                    attended,
+                },
+            );
+            let mut args = policy.mcp_args.clone();
+            args.extend(policy.args);
+            let disallowed = values_of(&args, "--disallowedTools");
+            for tool in &claude_only {
+                assert!(
+                    disallowed.contains(tool),
+                    "{tool} reaches the model ({safety_mode:?}, attended {attended}): {args:?}"
+                );
+            }
+        }
     }
 }
 

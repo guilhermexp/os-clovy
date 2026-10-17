@@ -125,8 +125,45 @@ fn policy_claude_unattended_turns_keep_the_read_only_set_whatever_the_safety_mod
                     "--strict-mcp-config",
                 ])
             );
-            assert!(policy.mcp_args.is_empty());
+            assert_eq!(
+                policy.mcp_args,
+                strings(&["--disallowedTools", "mcp__clovy__approve_action"])
+            );
         }
+    }
+}
+
+/// The Clovy server lists `approve_action` to every claude turn, but only an
+/// attended turn has a permission prompt to answer: an unattended claude turn
+/// keeps the tool from the model too (the contract's "only for
+/// `--permission-prompt-tool`"), with no prompt tool.
+#[test]
+fn policy_claude_unattended_turns_keep_approve_action_from_the_model() {
+    let scratch = tempfile::tempdir().unwrap();
+    for mode in MODES {
+        let routine = turn_invocation(
+            CliKind::Claude,
+            "hello",
+            None,
+            Some(&launch()),
+            scratch.path(),
+            permissions(mode, false),
+            &[],
+        );
+        assert_eq!(
+            values_of(&routine.args, "--disallowedTools"),
+            [CLAUDE_PROMPT_TOOL]
+        );
+        assert!(values_of(&routine.args, "--permission-prompt-tool").is_empty());
+        assert!(!routine
+            .args
+            .contains(&"--permission-prompt-tool".to_string()));
+        // The list flag still ends before the read-only set's own flags.
+        assert_eq!(
+            values_of(&routine.args, "--allowedTools"),
+            ["Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*"]
+        );
+        assert_eq!(routine.stdin.as_deref(), Some("hello"));
     }
 }
 
