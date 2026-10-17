@@ -5852,7 +5852,7 @@ where
     let utterance_id = request.utterance_id.clone();
     let mut cleanup_skipped = None;
     let result = match transcriber.transcribe(request).await {
-        Ok(mut transcript) if cleanup.enabled && !transcript.text.trim().is_empty() => {
+        Ok(mut transcript) if cleanup.enabled && !is_blank_transcript(&transcript.text) => {
             let transcript_bytes = transcript.text.trim().len();
             tracing::info!(
                 model = %cleanup.model,
@@ -6567,6 +6567,14 @@ fn outcome_from_transcription_result(
     style: DictationStyle,
 ) -> DictationTranscriptionOutcome {
     match result {
+        // Whisper heard nothing (design D5): the only "no speech" signal.
+        // The meter level is logged for diagnosis and decides nothing.
+        Ok(transcript) if is_blank_transcript(&transcript.text) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Err(error) if is_whisper_no_speech_error(&error) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
         Ok(mut transcript) => {
             let had_speech_before_cleaning = !transcript.text.trim().is_empty();
             transcript.text = clean_dictation_fillers(&transcript.text, style);
@@ -6593,6 +6601,46 @@ fn outcome_from_transcription_result(
             }
         }
     }
+}
+
+/// No letter or digit in any script: empty, whitespace, or punctuation only.
+fn is_blank_transcript(text: &str) -> bool {
+    !text.chars().any(char::is_alphanumeric)
+}
+
+/// Clovy API answers an empty Groq transcript with a `no_speech` (or
+/// `dictation_text_empty`) failure rather than empty text.
+fn is_whisper_no_speech_error(error: &AppError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    error.code == "no_speech"
+        || message.contains("no_speech")
+        || message.contains("dictation_text_empty")
+}
+
+fn whisper_no_speech_outcome(observed_audio_level: Option<f32>) -> DictationTranscriptionOutcome {
+    tracing::info!(
+        observed_audio_level,
+        "dictation transcript was empty; reporting no speech"
+    );
+    DictationTranscriptionOutcome {
+        helper_command: serde_json::json!({ "type": "discard_recording" }),
+        event: Some(whisper_no_speech_event()),
+        transcript: None,
+        quarantine_transcript: None,
+    }
+}
+
+/// Shown to the user ("No speech detected."), unlike the silent no-speech
+/// dismissal of filler-only or quarantined captures.
+fn whisper_no_speech_event() -> serde_json::Value {
+    serde_json::json!({
+        "type": "error",
+        "payload": {
+            "code": "no_speech",
+            "message": "No speech detected.",
+            "silent": false,
+        },
+    })
 }
 
 fn silent_no_speech_outcome() -> DictationTranscriptionOutcome {
@@ -7287,7 +7335,10 @@ fn annotate_silent_error(event: &mut serde_json::Value) {
         .get_mut("payload")
         .and_then(serde_json::Value::as_object_mut)
     {
-        payload.insert("silent".to_string(), serde_json::Value::Bool(silent));
+        // An event that already decided (Whisper's visible no speech) keeps it.
+        payload
+            .entry("silent")
+            .or_insert(serde_json::Value::Bool(silent));
     }
 }
 
@@ -8906,7 +8957,11 @@ mod tests {
             serde_json::json!({ "type": "discard_recording" })
         );
         assert!(result.outcome.transcript.is_none());
-        let mut event = result.outcome.event.clone().expect("no speech emits an event");
+        let mut event = result
+            .outcome
+            .event
+            .clone()
+            .expect("no speech emits an event");
         annotate_silent_error(&mut event);
         assert_eq!(event["payload"]["code"], "no_speech");
         assert_eq!(event["payload"]["message"], "No speech detected.");
@@ -10463,7 +10518,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_transcription_discards_silently() {
+    fn empty_transcription_discards_with_a_visible_no_speech() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
@@ -10480,11 +10535,12 @@ mod tests {
         );
         assert!(outcome.transcript.is_none());
         let event = outcome.event.expect("empty capture emits an event");
-        assert!(is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]
-    fn empty_transcription_with_detected_audio_is_visible_error() {
+    fn empty_transcription_with_detected_audio_is_still_no_speech() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
@@ -10495,17 +10551,11 @@ mod tests {
             DictationStyle::Standard,
         );
 
+        // The level is diagnostic only (ditado-rapido D5).
         let event = outcome.event.expect("empty capture emits an event");
-        assert_eq!(event["payload"]["code"], "dictation_audio_without_text");
-        assert_eq!(
-            event["payload"]["message"],
-            "Dictation detected audio but produced no text. Try again."
-        );
-        let observed = event["payload"]["observedAudioLevel"]
-            .as_f64()
-            .expect("observed audio level");
-        assert!((observed - 0.04).abs() < 0.001);
-        assert!(!is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["message"], "No speech detected.");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]
@@ -11419,7 +11469,7 @@ mod tests {
     }
 
     #[test]
-    fn no_speech_error_with_detected_audio_is_visible_error() {
+    fn no_speech_error_with_detected_audio_is_visible_no_speech() {
         let outcome = outcome_from_transcription_result(
             Err(AppError::new("june_request_failed", "no_speech")),
             Some(0.2),
@@ -11427,10 +11477,8 @@ mod tests {
         );
 
         let event = outcome.event.expect("no speech emits an event");
-        assert_eq!(event["payload"]["code"], "dictation_audio_without_text");
-        assert_eq!(event["payload"]["underlyingCode"], "june_request_failed");
-        assert_eq!(event["payload"]["underlyingMessage"], "no_speech");
-        assert!(!is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]

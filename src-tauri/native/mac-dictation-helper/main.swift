@@ -5,7 +5,6 @@ import Carbon
 import CoreMedia
 import CoreGraphics
 import Darwin
-import SoundAnalysis
 
 struct HelperEvent: Encodable {
     let type: String
@@ -321,91 +320,6 @@ enum RecordingCuePlayer {
         }
         sounds[cue] = sound
         return sound
-    }
-}
-
-private final class SpeechActivityObserver: NSObject, SNResultsObserving {
-    private(set) var resultCount = 0
-    private(set) var maxSpeechConfidence = 0.0
-    private(set) var failed = false
-
-    func request(_ request: SNRequest, didProduce result: SNResult) {
-        guard let classification = result as? SNClassificationResult else {
-            return
-        }
-        resultCount += 1
-        // The request's knownClassifications is validated during setup, so a
-        // valid window that omits speech from its candidates is zero evidence
-        // for speech, not an analyzer failure.
-        let confidence = classification.classification(forIdentifier: "speech")?.confidence ?? 0
-        maxSpeechConfidence = max(maxSpeechConfidence, confidence)
-    }
-
-    func request(_ request: SNRequest, didFailWithError error: Error) {
-        failed = true
-    }
-
-    func requestDidComplete(_ request: SNRequest) {}
-}
-
-let speechAnalysisWindowDurationSeconds: Double = 0.5
-
-private enum SpeechConfidenceAnalysisError: Error {
-    case missingSpeechClassification
-}
-
-private final class SpeechConfidenceAnalysis {
-    private static let timeout: TimeInterval = 5
-
-    private let analyzer: SNAudioFileAnalyzer
-    private let observer = SpeechActivityObserver()
-    private var completion: ((Double?) -> Void)?
-
-    init(url: URL, completion: @escaping (Double?) -> Void) throws {
-        self.completion = completion
-        let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
-        guard request.knownClassifications.contains("speech") else {
-            throw SpeechConfidenceAnalysisError.missingSpeechClassification
-        }
-        request.windowDuration = CMTime(
-            seconds: speechAnalysisWindowDurationSeconds,
-            preferredTimescale: 16_000
-        )
-        request.overlapFactor = 0.5
-        analyzer = try SNAudioFileAnalyzer(url: url)
-        try analyzer.add(request, withObserver: observer)
-    }
-
-    func start() {
-        analyzer.analyze { success in
-            let confidence = success && !self.observer.failed && self.observer.resultCount > 0
-                ? self.observer.maxSpeechConfidence
-                : nil
-            runOnMain {
-                self.finish(confidence)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) {
-            self.finish(nil)
-        }
-    }
-
-    private func finish(_ confidence: Double?) {
-        guard let completion else {
-            return
-        }
-        self.completion = nil
-        analyzer.cancelAnalysis()
-        completion(confidence)
-    }
-}
-
-func analyzeSpeechConfidence(at url: URL, completion: @escaping (Double?) -> Void) {
-    do {
-        let analysis = try SpeechConfidenceAnalysis(url: url, completion: completion)
-        analysis.start()
-    } catch {
-        completion(nil)
     }
 }
 
@@ -1690,12 +1604,6 @@ enum RecordingPurpose {
 }
 
 let micTestCapturePaddingSeconds: Double = 0.35
-// Keep in sync with DICTATION_AUDIO_ACTIVITY_THRESHOLD in dictation.rs. The
-// trained classifier only affects complete-window captures below this
-// independent meter gate, so louder dictation should not pay for file analysis
-// during finalization. Sub-window captures are quarantined before this gate.
-let dictationAudioActivityThreshold: Float = 0.04
-
 private let escapeCancelHotKeySignature = OSType(0x4A_44_45_43) // "JDEC"
 
 final class DictationEscapeCancelMonitor {
@@ -2238,35 +2146,10 @@ final class DictationController {
         if let activeTakeID {
             basePayload["takeId"] = activeTakeID
         }
-        if let duration = audioDurationSeconds(at: recordingURL),
-           duration < speechAnalysisWindowDurationSeconds {
-            var payload = basePayload
-            payload["speechAnalysisStatus"] = "no_complete_window"
-            emit("recording_ready", payload)
-            return
-        }
-        guard observedAudioLevel < dictationAudioActivityThreshold else {
-            emit("recording_ready", basePayload)
-            return
-        }
-        analyzeSpeechConfidence(at: recordingURL) { [weak self] speechConfidence in
-            guard
-                let self,
-                self.recordingInstanceID == recordingInstanceID,
-                self.isFinalizing,
-                self.recordingURL == recordingURL
-            else {
-                return
-            }
-            var payload = basePayload
-            if let speechConfidence {
-                payload["speechConfidence"] = String(format: "%.4f", speechConfidence)
-                payload["speechAnalysisStatus"] = "ok"
-            } else {
-                payload["speechAnalysisStatus"] = "unavailable"
-            }
-            emit("recording_ready", payload)
-        }
+        // No speech analysis before the upload (ditado-rapido D5): Whisper's
+        // empty transcript is the only "no speech" signal, decided in Rust.
+        // The peak level travels along for diagnosis only.
+        emit("recording_ready", basePayload)
     }
 
     private func emitMicTestReady(url: URL) {

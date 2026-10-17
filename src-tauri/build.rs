@@ -690,7 +690,6 @@ fn build_dictation_helper() {
                 "Carbon",
                 "CoreMedia",
                 "CoreGraphics",
-                "SoundAnalysis",
             ],
         );
         if !built {
