@@ -5898,7 +5898,11 @@ where
         other => other,
     };
     DictationPipelineResult {
-        outcome: outcome_from_transcription_result(result, observed_audio_level, cleanup.style),
+        outcome: if cleanup.enabled {
+            outcome_from_transcription_result(result, observed_audio_level, cleanup.style)
+        } else {
+            outcome_from_raw_transcription_result(result, observed_audio_level)
+        },
         cleanup_skipped,
     }
 }
@@ -6588,18 +6592,42 @@ fn outcome_from_transcription_result(
             }
             outcome_from_clean_transcript(transcript, observed_audio_level)
         }
-        Err(error) => {
-            let event = promote_silent_error_if_audio_detected(
-                app_error_event(error),
-                observed_audio_level,
-            );
-            DictationTranscriptionOutcome {
-                helper_command: serde_json::json!({ "type": "discard_recording" }),
-                event: Some(event),
-                transcript: None,
-                quarantine_transcript: None,
-            }
+        Err(error) => transcription_error_outcome(error, observed_audio_level),
+    }
+}
+
+/// Cleanup off (spec "Limpeza desligada"): the Whisper text, only trimmed.
+/// No filler backstop and no style; an empty transcript is still no speech.
+fn outcome_from_raw_transcription_result(
+    result: Result<TranscriptionProviderResult, AppError>,
+    observed_audio_level: Option<f32>,
+) -> DictationTranscriptionOutcome {
+    match result {
+        Ok(transcript) if is_blank_transcript(&transcript.text) => {
+            whisper_no_speech_outcome(observed_audio_level)
         }
+        Err(error) if is_whisper_no_speech_error(&error) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Ok(mut transcript) => {
+            transcript.text = transcript.text.trim().to_string();
+            outcome_from_clean_transcript(transcript, observed_audio_level)
+        }
+        Err(error) => transcription_error_outcome(error, observed_audio_level),
+    }
+}
+
+fn transcription_error_outcome(
+    error: AppError,
+    observed_audio_level: Option<f32>,
+) -> DictationTranscriptionOutcome {
+    let event =
+        promote_silent_error_if_audio_detected(app_error_event(error), observed_audio_level);
+    DictationTranscriptionOutcome {
+        helper_command: serde_json::json!({ "type": "discard_recording" }),
+        event: Some(event),
+        transcript: None,
+        quarantine_transcript: None,
     }
 }
 
@@ -8814,7 +8842,7 @@ mod tests {
         assert_eq!(transcriber.calls.load(Ordering::SeqCst), 1);
         assert!(cleaner.calls.lock().unwrap().is_empty());
         assert!(result.cleanup_skipped.is_none());
-        // Only the deterministic filler backstop ran; no LLM.
+        // No LLM and no filler backstop: the Whisper text, trimmed.
         assert_eq!(pasted_text(&result), Some("send it to samir"));
     }
 

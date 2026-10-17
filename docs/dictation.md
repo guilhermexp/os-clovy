@@ -32,7 +32,8 @@ takes never deliver), and
 5. **No speech.** A transcript with no letters or digits (empty or only
    punctuation) ends the take with `no_speech` and nothing is pasted. The
    meter level is only logged.
-6. **Cleanup** (optional, off by default). With **Clean up dictation text** on
+6. **Cleanup** (optional, off by default). Off, the pasted text is Whisper's
+   transcript only trimmed: no filler removal and no style. With **Clean up dictation text** on
    in Settings > Style, the transcript goes to the chosen OpenRouter model in
    one chat completion (`clovy_api::dictate_cleanup`): straight to
    `openrouter.ai` with the user's own key, else Clovy API's
