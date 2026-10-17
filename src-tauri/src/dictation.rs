@@ -8777,6 +8777,7 @@ mod tests {
             &cleanup_config(false),
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         assert_eq!(transcriber.calls.load(Ordering::SeqCst), 1);
@@ -8800,6 +8801,7 @@ mod tests {
             },
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         assert_eq!(pasted_text(&result), Some("um, so Send it to Samir, uh"));
@@ -8826,6 +8828,7 @@ mod tests {
                 app_context: Some(APP_CONTEXT_EMAIL.to_string()),
             },
             Some(0.3),
+            None,
         )
         .await;
         let calls = cleaner.calls.lock().unwrap();
@@ -8853,6 +8856,7 @@ mod tests {
             &cleanup_config(true),
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         assert_eq!(pasted_text(&result), Some("send it to samir"));
@@ -8879,6 +8883,7 @@ mod tests {
             },
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         assert_eq!(pasted_text(&result), Some("send it to samir"));
@@ -8911,6 +8916,7 @@ mod tests {
             &cleanup_config(true),
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
@@ -8936,6 +8942,7 @@ mod tests {
             &cleanup_config(true),
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
@@ -8957,6 +8964,7 @@ mod tests {
             &cleanup_config(true),
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         let pasted = pasted_text(&result).unwrap();
@@ -8983,6 +8991,7 @@ mod tests {
             &cleanup_config(true),
             DictationCleanupContext::default(),
             Some(0.3),
+            None,
         )
         .await;
         let pasted = pasted_text(&result).unwrap();
@@ -9024,12 +9033,65 @@ mod tests {
                     &cleanup_config(true),
                     DictationCleanupContext::default(),
                     level,
+                    None,
                 )
                 .await;
                 assert_visible_no_speech(&result);
                 assert!(cleaner.calls.lock().unwrap().is_empty(), "{text:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_take_under_half_a_second_never_reaches_whisper() {
+        // R7a: Whisper invents text for near-empty audio; such a take is no
+        // speech without an upload. Unknown length (older helpers) uploads.
+        for (seconds, uploads) in [
+            (Some(0.2), false),
+            (Some(0.49), false),
+            (Some(0.5), true),
+            (Some(3.0), true),
+            (None, true),
+        ] {
+            let transcriber = FakeTranscriber::text("Thank you.");
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner::default(),
+                pipeline_request(),
+                &cleanup_config(false),
+                DictationCleanupContext::default(),
+                Some(0.3),
+                seconds,
+            )
+            .await;
+            assert_eq!(
+                transcriber.calls.load(Ordering::SeqCst) == 1,
+                uploads,
+                "{seconds:?}"
+            );
+            if !uploads {
+                assert_visible_no_speech(&result);
+            }
+        }
+    }
+
+    #[test]
+    fn recording_ready_info_reads_the_audio_length() {
+        let event = |value: serde_json::Value| {
+            serde_json::json!({
+                "type": "recording_ready",
+                "payload": { "path": "/tmp/take.m4a", "audioDurationSeconds": value },
+            })
+        };
+        let seconds = |value| {
+            recording_ready_info_from_event(&event(value))
+                .unwrap()
+                .audio_seconds
+        };
+        assert_eq!(seconds(serde_json::json!("0.4200")), Some(0.42));
+        assert_eq!(seconds(serde_json::json!(2.5)), Some(2.5));
+        assert_eq!(seconds(serde_json::json!("-1")), None);
+        assert_eq!(seconds(serde_json::json!("nope")), None);
     }
 
     #[tokio::test]
@@ -9046,6 +9108,7 @@ mod tests {
                 &cleanup_config(false),
                 DictationCleanupContext::default(),
                 Some(0.5),
+                None,
             )
             .await;
             assert_visible_no_speech(&result);

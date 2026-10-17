@@ -409,3 +409,72 @@ async fn a_changed_key_is_used_by_the_very_next_take() {
     record_keys(false, false);
     assert_eq!(dictation_user_key(BuiltinProvider::Groq).unwrap(), None);
 }
+
+async fn groq_answering(body: serde_json::Value) -> FakeServer {
+    test_server::start(Arc::new(move |_: &serde_json::Value| (200, body.clone()))).await
+}
+
+#[tokio::test]
+async fn direct_groq_drops_segments_whisper_marks_as_no_speech() {
+    // R7b: Whisper's classic silence hallucination ("Thank you.") comes back
+    // as a segment with a high no_speech_prob; it never reaches the paste.
+    let groq = groq_answering(serde_json::json!({
+        "text": " Send it to Samir. Thank you.",
+        "language": "en",
+        "segments": [
+            { "text": " Send it to Samir.", "no_speech_prob": 0.05 },
+            { "text": " Thank you.", "no_speech_prob": 0.6 },
+        ],
+    }))
+    .await;
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        groq_base: groq.base_url.clone(),
+        ..hosts.transport()
+    };
+    let directory = tempfile::tempdir().unwrap();
+
+    let result = dictate_transcribe_via(
+        &transport,
+        Some("gsk-user"),
+        "whisper-large-v3-turbo".to_string(),
+        take_request(&directory),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.text, "Send it to Samir.");
+    let body = groq.raw_bodies.lock().unwrap()[0].clone();
+    let format = body
+        .split("name=\"response_format\"")
+        .nth(1)
+        .expect("response_format part");
+    assert!(format.trim_start().starts_with("verbose_json"), "{format}");
+}
+
+#[tokio::test]
+async fn direct_groq_with_only_no_speech_segments_is_empty() {
+    let groq = groq_answering(serde_json::json!({
+        "text": " Thank you.",
+        "segments": [{ "text": " Thank you.", "no_speech_prob": 0.97 }],
+    }))
+    .await;
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        groq_base: groq.base_url.clone(),
+        ..hosts.transport()
+    };
+    let directory = tempfile::tempdir().unwrap();
+
+    let result = dictate_transcribe_via(
+        &transport,
+        Some("gsk-user"),
+        "whisper-large-v3-turbo".to_string(),
+        take_request(&directory),
+    )
+    .await
+    .unwrap();
+
+    // The pipeline turns an empty transcript into "No speech detected."
+    assert_eq!(result.text, "");
+}
