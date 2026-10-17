@@ -195,10 +195,10 @@ export default defineMessages({
       "Part of this work is known only by its hour: no session was tied to it, so there is no exact time.",
     "activity.grid.now": "Now",
     "activity.grid.noProvider":
-      "Workstreams need an activity provider. The captured sessions are below.",
+      "Workstreams need an activity provider. The captured sessions are under Sessions.",
     "activity.grid.chooseProvider": "Choose a provider",
     "activity.grid.pending":
-      "Workstreams appear after each hour ends and is summarized. The captured sessions are below.",
+      "Workstreams appear after each hour ends and is summarized. The captured sessions are under Sessions.",
     "activity.grid.loadError": "Could not load workstreams: {message}",
     "activity.workstream.details": "Workstream details",
     "activity.workstream.kicker": "Workstream",
@@ -409,10 +409,10 @@ export default defineMessages({
       "Parte deste trabalho é conhecida só pela hora: nenhuma sessão foi associada a ela, então não há horário exato.",
     "activity.grid.now": "Agora",
     "activity.grid.noProvider":
-      "As frentes de trabalho precisam de um provedor de atividade. As sessões capturadas estão abaixo.",
+      "As frentes de trabalho precisam de um provedor de atividade. As sessões capturadas estão em Sessões.",
     "activity.grid.chooseProvider": "Escolher provedor",
     "activity.grid.pending":
-      "As frentes de trabalho aparecem depois que cada hora termina e é resumida. As sessões capturadas estão abaixo.",
+      "As frentes de trabalho aparecem depois que cada hora termina e é resumida. As sessões capturadas estão em Sessões.",
     "activity.grid.loadError": "Não foi possível carregar as frentes de trabalho: {message}",
     "activity.workstream.details": "Detalhes da frente de trabalho",
     "activity.workstream.kicker": "Frente de trabalho",

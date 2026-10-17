@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   densityFor,
+  layoutEmptyTimeline,
   layoutWorkstreamTimeline,
   visibleNotes,
 } from "../components/activity-timeline/workstream-timeline-layout";
@@ -222,5 +223,66 @@ describe("Workstream timeline layout", () => {
     expect(visibleNotes(6, 152, 55)).toEqual({ shown: 4, more: 2 });
     // A wrapped meta line can leave no slot: then neither notes nor a count.
     expect(visibleNotes(6, 104, 90)).toEqual({ shown: 0, more: 0 });
+  });
+
+  describe("empty grid", () => {
+    const start = Date.parse("2026-06-15T04:00:00Z");
+    const end = Date.parse("2026-06-16T04:00:00Z");
+    const range = (from: string, to: string) => ({
+      startMs: Date.parse(`2026-06-15T${from}:00Z`),
+      endMs: Date.parse(`2026-06-15T${to}:00Z`),
+    });
+
+    it("draws the axis the grid would draw for the same captured time", () => {
+      const options = { dayStartMs: start, dayEndMs: end, timeZone: ZONE, canvasHeight: 600 };
+      const empty = layoutEmptyTimeline(
+        [range("13:05", "13:40"), range("15:10", "15:30")],
+        options,
+      );
+      const ws: WorkstreamDto = {
+        id: 1,
+        title: "W",
+        summary: "",
+        minutes: 55,
+        hours: [
+          {
+            hour: "2026-06-15T09",
+            minutes: 55,
+            note: "",
+            periods: [
+              { startedAt: "2026-06-15T13:05:00Z", endedAt: "2026-06-15T13:40:00Z" },
+              { startedAt: "2026-06-15T15:10:00Z", endedAt: "2026-06-15T15:30:00Z" },
+            ],
+            locatedMinutes: 55,
+          },
+        ],
+      };
+      const grid = layoutWorkstreamTimeline([ws], options);
+      expect(empty.cards).toHaveLength(0);
+      expect(empty.hours.map((hour) => hour.hour)).toEqual(grid.hours.map((hour) => hour.hour));
+      expect(empty.pxPerMin).toBe(grid.pxPerMin);
+      expect(empty.toPx(Date.parse("2026-06-15T15:10:00Z"))).toBe(
+        grid.toPx(Date.parse("2026-06-15T15:10:00Z")),
+      );
+    });
+
+    it("ends today's window at now when nothing was captured", () => {
+      const now = Date.parse("2026-06-15T14:30:00Z");
+      const layout = layoutEmptyTimeline([], {
+        dayStartMs: start,
+        dayEndMs: end,
+        nowMs: now,
+        timeZone: ZONE,
+      });
+      expect(layout.hours.at(-1)).toMatchObject({ hour: 10, current: true });
+      expect(layout.toPx(now)).toBeGreaterThan(0);
+      expect(layout.height).toBeGreaterThan(layout.toPx(now));
+    });
+
+    it("has nothing to anchor on a past day with nothing captured", () => {
+      const layout = layoutEmptyTimeline([], { dayStartMs: start, dayEndMs: end, timeZone: ZONE });
+      expect(layout.hours).toHaveLength(0);
+      expect(layout.height).toBe(0);
+    });
   });
 });
