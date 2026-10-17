@@ -34,7 +34,7 @@ const DEFAULT_SHARE_BASE_URL: &str = "https://june.link";
 // "make a list with" requests may still be listified (over-formatting, never
 // word loss) and the formal style sometimes skips contraction expansion. The
 // same model is now served through OpenRouter under its catalog id.
-const DEFAULT_DICTATION_CLEANUP_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b";
+pub(crate) const DEFAULT_DICTATION_CLEANUP_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b";
 // Mirrors Clovy API's authoritative 600-second request deadline.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(600);
 const BROWSER_TRANSPORT_POLICY_TIMEOUT: Duration = Duration::from_secs(10);

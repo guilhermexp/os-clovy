@@ -2,7 +2,7 @@
 use crate::audio::turns::normalize_wav_for_transcription;
 use crate::clovy_api::{
     cleanup_text, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
-    TranscriptionProviderResult,
+    TranscriptionProviderResult, DEFAULT_DICTATION_CLEANUP_MODEL,
 };
 use crate::domain::{
     processing::{build_transcription_dictionary, TranscriptionDictionary},
@@ -473,6 +473,13 @@ pub struct DictationSettings {
     pub microphone: DictationMicrophoneSetting,
     pub style: DictationStyle,
     pub language: Option<String>,
+    /// Off by default: the Whisper transcript is pasted with no LLM call.
+    pub cleanup_enabled: bool,
+    /// OpenRouter model id for the cleanup chat completion.
+    pub cleanup_model: String,
+    /// Records the one-time move to optional cleanup (ditado-rapido D1):
+    /// a file saved before it lacks the field and migrates to cleanup off.
+    pub cleanup_migrated: bool,
 }
 
 impl Default for DictationSettings {
@@ -483,7 +490,48 @@ impl Default for DictationSettings {
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
             language: None,
+            cleanup_enabled: false,
+            cleanup_model: DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
+            cleanup_migrated: true,
         }
+    }
+}
+
+const MAX_DICTATION_CLEANUP_MODEL_CHARS: usize = 200;
+
+/// One-time move to optional cleanup: settings saved before it (cleanup
+/// always ran, on Clovy API, an endpoint, or a CLI) start with cleanup off.
+/// Returns whether the settings changed and should be written back.
+fn migrate_dictation_cleanup(settings: &mut DictationSettings) -> bool {
+    if settings.cleanup_migrated {
+        return false;
+    }
+    settings.cleanup_enabled = false;
+    settings.cleanup_migrated = true;
+    true
+}
+
+/// Accepts an OpenRouter catalog id (`vendor/model`, optional `:variant`);
+/// CLI, endpoint, and internal option ids are refused.
+fn validate_dictation_cleanup_model(model: &str) -> Result<String, AppError> {
+    let model = model.trim();
+    let valid = model.chars().count() <= MAX_DICTATION_CLEANUP_MODEL_CHARS
+        && !model.starts_with("__")
+        && !model.chars().any(char::is_whitespace)
+        && model
+            .split_once('/')
+            .is_some_and(|(vendor, name)| !vendor.is_empty() && !name.is_empty())
+        && !model
+            .split('/')
+            .next()
+            .is_some_and(|vendor| vendor.contains(':'));
+    if valid {
+        Ok(model.to_string())
+    } else {
+        Err(AppError::new(
+            "dictation_cleanup_model_invalid",
+            "Choose an OpenRouter model for dictation cleanup.",
+        ))
     }
 }
 
@@ -500,6 +548,9 @@ impl<'de> Deserialize<'de> for DictationSettings {
             microphone: Option<DictationMicrophoneSetting>,
             style: Option<DictationStyle>,
             language: Option<String>,
+            cleanup_enabled: Option<bool>,
+            cleanup_model: Option<String>,
+            cleanup_migrated: Option<bool>,
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -531,6 +582,12 @@ impl<'de> Deserialize<'de> for DictationSettings {
             microphone: settings.microphone.unwrap_or(microphone),
             style: settings.style.unwrap_or_default(),
             language: normalize_language(settings.language),
+            cleanup_enabled: settings.cleanup_enabled.unwrap_or(false),
+            cleanup_model: settings
+                .cleanup_model
+                .and_then(|model| validate_dictation_cleanup_model(&model).ok())
+                .unwrap_or_else(|| DEFAULT_DICTATION_CLEANUP_MODEL.to_string()),
+            cleanup_migrated: settings.cleanup_migrated.unwrap_or(false),
         })
     }
 }
@@ -1586,6 +1643,24 @@ pub fn set_dictation_style(
 ) -> Result<DictationSettings, AppError> {
     update_settings(&state, |settings| {
         settings.style = style;
+    })
+}
+
+#[tauri::command]
+pub fn set_dictation_cleanup(
+    state: State<'_, DictationSettingsState>,
+    enabled: bool,
+    model: Option<String>,
+) -> Result<DictationSettings, AppError> {
+    let model = model
+        .as_deref()
+        .map(validate_dictation_cleanup_model)
+        .transpose()?;
+    update_settings(&state, |settings| {
+        settings.cleanup_enabled = enabled;
+        if let Some(model) = model {
+            settings.cleanup_model = model;
+        }
     })
 }
 
@@ -3529,12 +3604,19 @@ fn settings_path(app: &AppHandle) -> Option<PathBuf> {
 
 fn manage_settings(app: &AppHandle) {
     let path = settings_path(app).unwrap_or_else(|| PathBuf::from("dictation-settings.json"));
-    let settings = load_settings(app);
+    let mut settings = load_settings(app);
+    let migrated = migrate_dictation_cleanup(&mut settings);
     replace_current_settings(settings.clone());
-    app.manage(DictationSettingsState {
+    let state = DictationSettingsState {
         path,
-        settings: Mutex::new(settings),
-    });
+        settings: Mutex::new(settings.clone()),
+    };
+    if migrated {
+        if let Err(error) = save_settings(&state, &settings) {
+            tracing::warn!(code = %error.code, "dictation cleanup migration not saved; retries next launch");
+        }
+    }
+    app.manage(state);
 }
 
 fn load_settings(app: &AppHandle) -> DictationSettings {
@@ -8995,6 +9077,7 @@ mod tests {
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
             language: None,
+            ..DictationSettings::default()
         };
 
         assert!(validate_shortcut_update(

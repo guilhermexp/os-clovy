@@ -395,8 +395,10 @@ pub fn normalize(settings: &mut ProviderModelSettings) {
     ] {
         let current = settings.llm_usage.get(usage).clone();
         let valid = match &current {
-            ProviderRef::Endpoint { id } => settings.endpoint(id).is_some(),
             ProviderRef::Clovy => usage != LlmUsage::Activity,
+            // Dictation cleanup runs only on Clovy's OpenRouter route.
+            _ if usage == LlmUsage::DictationCleanup => false,
+            ProviderRef::Endpoint { id } => settings.endpoint(id).is_some(),
             ProviderRef::None => usage == LlmUsage::Activity,
             ProviderRef::Cli { .. } => true,
         };
@@ -435,6 +437,16 @@ pub fn set_usage(
 ) -> Result<(), AppError> {
     let registry = LlmRegistry::from(&*settings);
     match &provider {
+        // Dictation cleanup is a single OpenRouter chat completion (the model
+        // is chosen in the dictation settings), never a CLI or an endpoint.
+        ProviderRef::Endpoint { .. } | ProviderRef::Cli { .. } | ProviderRef::None
+            if usage == LlmUsage::DictationCleanup =>
+        {
+            return Err(AppError::new(
+                "llm_provider_not_allowed",
+                "Dictation cleanup runs only on an OpenRouter model. Choose it in the dictation settings.",
+            ));
+        }
         ProviderRef::Clovy if usage == LlmUsage::Activity => {
             return Err(AppError::new(
                 "llm_provider_not_allowed",
@@ -972,11 +984,7 @@ mod tests {
     #[test]
     fn llm_cli_that_keeps_tools_cannot_take_content_uses() {
         let mut settings = crate::providers::default_settings_for_tests();
-        for usage in [
-            LlmUsage::Notes,
-            LlmUsage::DictationCleanup,
-            LlmUsage::Activity,
-        ] {
+        for usage in [LlmUsage::Notes, LlmUsage::Activity] {
             let error = set_usage(
                 &mut settings,
                 usage,
