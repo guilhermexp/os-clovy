@@ -46,7 +46,8 @@ A third-party service Clovy API calls on the user's behalf: **Groq** for
 audio, **OpenRouter** for remote text, **fal** for images/video, and
 **Tavily** for web search/extraction. Service-managed keys belong to Clovy
 API, while an explicit **BYOK** key belongs to the user and is used only
-for that upstream provider's eligible actions.
+for that upstream provider's eligible actions (through Clovy API, or directly
+from the desktop for dictation, ADR-0065).
 _Avoid_: AI provider, model provider, vendor, "the LLM".
 
 **Model routing service**:
@@ -71,15 +72,24 @@ optional key kept in the Keychain). The legacy single "local model" is the
 endpoint `local`. Own providers never transcribe audio. See
 [docs/llm-providers.md](docs/llm-providers.md).
 _Avoid_: upstream provider (that is Clovy API's side), BYOK (that is an
-upstream key used through Clovy API), local model (unless the endpoint is
-on this machine).
+upstream key, used through Clovy API or sent directly to its provider for
+dictation), local model (unless the endpoint is on this machine).
 
 **Provider use (usage selection)**:
-Which provider serves each use: **chat**, **notes**, **dictation cleanup**, or
-**activity**. Clovy API is the default for the first three; activity defaults
-to **none**, never falls back to Clovy API, and requires a provider with
-`json_schema` structured output.
+Which provider serves each use: **chat**, **notes**, or **activity**. Clovy
+API is the default for the first two; activity defaults to **none**, never
+falls back to Clovy API, and requires a provider with `json_schema` structured
+output. The stored `dictationCleanup` slot stays on Clovy API: **dictation
+cleanup** never runs on an own provider.
 _Avoid_: default model, active provider (unqualified).
+
+**Dictation cleanup**:
+The optional pass that punctuates a **dictation** transcript and removes
+filler before it is pasted. Off by default; when on, it is one OpenRouter
+chat completion per chunk on the model chosen in the dictation settings,
+straight to OpenRouter with the user's **BYOK** key or through Clovy API
+without it. Never an agent CLI or endpoint.
+_Avoid_: dictation formatting, polish, rewrite (it keeps the speaker's words).
 
 **One-shot generation**:
 A single isolated prompt-to-answer call on an own provider (text, or JSON
@@ -220,7 +230,7 @@ _Avoid_: full correction context, instructions, previous transcript.
 
 **Correction context**:
 The authorized dictionary and prior same-source transcript used by the
-selected text engine to correct a note transcript; dictation cleanup
+notes text engine to correct a note transcript; dictation cleanup
 retains its own complete dictionary context. It is not an ASR hint and does
 not include another audio source's transcript.
 _Avoid_: ASR hint, recognition prompt, cross-source transcript.

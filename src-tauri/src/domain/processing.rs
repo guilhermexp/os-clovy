@@ -8916,7 +8916,7 @@ mod tests {
             .collect()
     }
 
-    /// Routes the correction engine (the cleanup usage) to an isolated fake
+    /// Routes the correction engine (the notes usage) to an isolated fake
     /// endpoint, never Clovy API. Callers hold `GLOBAL_SETTINGS_TEST_LOCK` and
     /// restore the default settings when done.
     async fn install_fake_correction_engine(
@@ -8934,7 +8934,8 @@ mod tests {
             structured_output: None,
             rpm_limit: None,
         });
-        settings.llm_usage.dictation_cleanup = ProviderRef::Endpoint {
+        // The correction runs on the notes engine (ditado-rapido R2).
+        settings.llm_usage.notes = ProviderRef::Endpoint {
             id: "cleanup".to_string(),
         };
         crate::providers::replace_current_settings_for_tests(settings);

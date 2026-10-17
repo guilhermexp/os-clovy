@@ -456,34 +456,8 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
             </div>
           </div>
 
-          {/* Dictation cleanup row */}
-          <div className="settings-row">
-            <div className="settings-row-info">
-              <h4 className="settings-row-title">
-                {t("settingsPanels.llm.usageDictationCleanup")}
-              </h4>
-              {usageErrors.dictationCleanup ? (
-                <p className="settings-row-error" role="alert">
-                  {usageErrors.dictationCleanup}
-                </p>
-              ) : null}
-            </div>
-            <div className="settings-row-control">
-              <select
-                className="dialog-input"
-                aria-label={t("settingsPanels.llm.usageDictationCleanup")}
-                value={providerRefKey(usage.dictationCleanup)}
-                disabled={busyUsage.dictationCleanup}
-                onChange={(e) => void handleUsageChange("dictationCleanup", e.target.value)}
-              >
-                {getOptionsForUsage("dictationCleanup").map((opt) => (
-                  <option key={opt.value} value={opt.value} disabled={opt.disabled}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
+          {/* Dictation cleanup is not here: it runs only on an OpenRouter
+              model, chosen in the dictation style settings. */}
 
           {/* Activity row */}
           <div className="settings-row">

@@ -460,7 +460,6 @@ export default defineMessages({
       "Choose which provider runs chat, note generation, dictation cleanup, and background activity.",
     "settingsPanels.llm.usageChat": "Chat",
     "settingsPanels.llm.usageNotes": "Notes",
-    "settingsPanels.llm.usageDictationCleanup": "Dictation cleanup",
     "settingsPanels.llm.usageActivity": "Activity",
     "settingsPanels.llm.usageActivityDescription":
       "Activity stays off when set to None. Nothing is sent anywhere.",
@@ -993,7 +992,6 @@ export default defineMessages({
       "Escolha qual provedor executa chat, notas, limpeza de ditado e atividade em segundo plano.",
     "settingsPanels.llm.usageChat": "Chat",
     "settingsPanels.llm.usageNotes": "Notas",
-    "settingsPanels.llm.usageDictationCleanup": "Limpeza de ditado",
     "settingsPanels.llm.usageActivity": "Atividade",
     "settingsPanels.llm.usageActivityDescription":
       "Os recursos de atividade ficam desativados quando definido como Nenhum. Nada é enviado para lugar algum.",

@@ -1,10 +1,9 @@
-# Spec Delta
+# dictation Specification
 
 ## Purpose
-
 Define como o ditado do Clovy começa, transcreve, opcionalmente limpa e entrega o texto, com metas de latência que o tornam tão ágil quanto colar o transcrito do Whisper direto.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Limpeza do ditado é opcional e desligada por padrão
 O ditado SHALL ter um controle de limpeza do texto em Configurações, desligado por padrão. Com a limpeza desligada, o texto colado MUST ser o transcrito do Whisper, sem nenhuma chamada de modelo de linguagem.
@@ -74,3 +73,16 @@ Com a limpeza desligada e chave própria do Groq, o texto de uma tomada de até 
 - **THEN** nada é colado e o usuário vê "nenhuma fala detectada"
 
 Test: manual — `dictation-events.log` com 10 tomadas; unit no helper — colagem sem espera quando o destino já está ativo.
+
+### Requirement: Posição do indicador do ditado
+O indicador do ditado (pílula do HUD) SHALL aparecer centralizado na horizontal, na base da área útil da tela (acima do Dock) por padrão. Configurações SHALL oferecer a escolha "Embaixo" ou "Em cima"; "Em cima" coloca o indicador logo abaixo da barra de menus. A posição MUST valer para a tela onde está o cursor e MUST NOT cair no meio da tela.
+
+#### Scenario: Padrão
+- **WHEN** o usuário aperta o atalho sem ter mudado a posição
+- **THEN** o indicador aparece centralizado, encostado na base da área útil com a margem padrão
+
+#### Scenario: Em cima
+- **WHEN** o usuário escolhe "Em cima" e dita
+- **THEN** o indicador aparece centralizado logo abaixo da barra de menus
+
+Test: unit — cálculo da origem para Embaixo/Em cima em telas com e sem Dock e com escala 1x/2x; manual — frame da janela `Clovy Dictation` lido por `CGWindowListCopyWindowInfo` no Mac do dono nas duas opções.

@@ -318,6 +318,16 @@ export default defineMessages({
     "settings.privacy.learnHow": "Learn how it works",
 
     "settings.style.title": "Style",
+    "settings.style.hudPlacement": "Indicator position",
+    "settings.style.hudPlacementDescription": "Where the dictation pill appears on screen.",
+    "settings.style.hudPlacementBottom": "Bottom",
+    "settings.style.hudPlacementTop": "Top",
+    "settings.style.cleanup": "Clean up dictation text",
+    "settings.style.cleanupDescription":
+      "Fixes punctuation and filler words with an OpenRouter model before pasting. Off pastes the transcript as is, which is faster.",
+    "settings.style.cleanupModel": "Cleanup model",
+    "settings.style.cleanupModelDescription":
+      "Runs as one request per dictation. Uses your OpenRouter key when you saved one.",
     "settings.style.outputStyle": "Output style",
     "settings.style.aria": "Dictation style",
     "settings.style.standard": "Standard",
@@ -685,6 +695,16 @@ export default defineMessages({
     "settings.privacy.learnHow": "Saiba como funciona",
 
     "settings.style.title": "Estilo",
+    "settings.style.hudPlacement": "Posição do indicador",
+    "settings.style.hudPlacementDescription": "Onde a pílula do ditado aparece na tela.",
+    "settings.style.hudPlacementBottom": "Embaixo",
+    "settings.style.hudPlacementTop": "Em cima",
+    "settings.style.cleanup": "Limpar texto do ditado",
+    "settings.style.cleanupDescription":
+      "Corrige pontuação e vícios de fala com um modelo da OpenRouter antes de colar. Desligado, cola o transcrito como veio, mais rápido.",
+    "settings.style.cleanupModel": "Modelo da limpeza",
+    "settings.style.cleanupModelDescription":
+      "Roda numa requisição por ditado. Usa a sua chave da OpenRouter quando ela está salva.",
     "settings.style.outputStyle": "Estilo de saída",
     "settings.style.aria": "Estilo do ditado",
     "settings.style.standard": "Padrão",

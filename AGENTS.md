@@ -271,8 +271,11 @@ build scripts in `pnpm-workspace.yaml` — live in
 - **Service-managed upstream provider keys live only in Clovy API, never in the desktop binary.**
   Keys for Groq, OpenRouter, fal and Tavily, and the OS Accounts App API key,
   belong to Clovy API. Explicit user BYOK credentials stay in the local
-  credential store and are forwarded through Clovy API only for their matching
-  eligible provider route; they are not credentials for another vendor.
+  credential store and go only to their own provider: forwarded through Clovy
+  API on that provider's eligible route, or, for dictation transcription and
+  dictation cleanup, sent from the desktop straight to that provider
+  ([ADR-0065](docs/adr/0065-dictation-calls-the-users-own-provider-directly.md)).
+  They are never credentials for another vendor.
 - **Clovy API must stay backward-compatible — no breaking changes.** Clovy ships
   and auto-updates in production, so installs in the wild keep calling older
   `/v1/*` contracts. Never remove or repurpose an existing endpoint, request
@@ -302,6 +305,10 @@ harness tickets, not `JUN-*`.
   use the isolated `co.opensoftware.june-dev` dirs; never set
   `OS_CLOVY_USE_PROD_DATA_DIR` in tests or verification. Keychain items created
   by dev builds must use a `-dev` service suffix.
+  Persisted Rust paths must use `app_paths::app_data_dir` or
+  `app_paths::app_config_dir`, not the raw Tauri resolver. A signed Dev bundle
+  alone does not isolate `app.path().app_config_dir()` or the frontend's
+  `appConfigDir()`; those can still resolve the release directory.
 - **Dev permissions:** `pnpm tauri:dev` runs `src-tauri/target/<profile>/Clovy Dev.app`
   (bundle id `<identifier>.dev`), signed with the single Apple Development
   identity or `CLOVY_DEV_SIGNING_IDENTITY`, and never resets TCC grants
@@ -381,8 +388,9 @@ For the **provider cutover**, exercise the actual desktop against the updated
 local Clovy API, not a deployed old backend. In an isolated copied profile,
 check migration without changing CLI/endpoints/history, configured/missing
 key states, remote model availability and actionable errors. Native dictation
-and notes require voice/audio actions; chat, note generation and cleanup require
-the selected text engine. Media proof includes generated/edited images,
+and notes require voice/audio actions; chat, note generation and note transcript
+cleanup require the selected text engine; dictation cleanup is optional and
+runs only on an OpenRouter model (`docs/dictation.md`). Media proof includes generated/edited images,
 non-square/oriented/extreme-ratio inputs, video generation and image animation
 through valid final assets; a recoverable BYOK poll must resume the same job
 without another submit. Search and extraction require real normalized results.

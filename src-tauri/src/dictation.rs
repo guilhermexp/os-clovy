@@ -1,8 +1,8 @@
 #[cfg(target_os = "windows")]
 use crate::audio::turns::normalize_wav_for_transcription;
 use crate::clovy_api::{
-    cleanup_text, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
-    TranscriptionProviderResult,
+    dictate_cleanup, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
+    TranscriptionProviderResult, DEFAULT_DICTATION_CLEANUP_MODEL,
 };
 use crate::domain::{
     processing::{build_transcription_dictionary, TranscriptionDictionary},
@@ -10,6 +10,7 @@ use crate::domain::{
 };
 use crate::providers::{configured_transcription_provider, PROVIDER_GROQ};
 use chrono::Utc;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fs,
@@ -24,9 +25,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
-};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
 
 /// Cleanup regenerates the whole transcript through the LLM, so its latency
 /// grows with dictation length. A flat budget silently degraded long
@@ -51,9 +50,10 @@ const DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS: u64 = 30_000;
 /// filler-heavy run-on speech reliably, while at 2 KB and beyond it degrades
 /// into echoing the transcript back with no punctuation at all.
 const DICTATION_CLEANUP_CHUNK_TARGET_BYTES: usize = 800;
-/// Below this input size a chunk plausibly is a single sentence, so a cleaned
-/// result without sentence punctuation is not evidence of the echo failure.
-const DICTATION_CLEANUP_RETRY_MIN_CHUNK_BYTES: usize = 300;
+/// Takes with less audio than this never reach Whisper (design D5).
+const DICTATION_MIN_UPLOAD_SECONDS: f32 = 0.5;
+/// Chunks of one long transcript cleaned at the same time (design D7).
+const DICTATION_CLEANUP_PARALLEL_CHUNKS: usize = 4;
 /// App-context slug sent with dictation cleanup when the paste target is a
 /// known kind of app, so the cleaned text is laid out for that surface.
 /// Email is the only recognized context today.
@@ -421,12 +421,109 @@ pub struct HotkeyStatus {
     event: Mutex<serde_json::Value>,
 }
 
-/// Position the HUD remembers between dictation sessions in the same process.
-/// Intentionally process-scoped, not disk-persisted: every fresh launch of
-/// Clovy should put the pill back at top-center, but within a single run
-/// the user's drag-to-corner choice should stick.
+/// Only an explicit user drag is remembered within this process. Resizes and
+/// native startup moves must never replace the configured screen-edge anchor.
 pub struct HudPosition {
-    inner: Mutex<Option<(i32, i32)>>,
+    inner: Mutex<HudPositionState>,
+}
+
+#[derive(Default)]
+struct HudPositionState {
+    saved: Option<(i32, i32)>,
+    drag_origin: Option<(i32, i32)>,
+}
+
+impl HudPositionState {
+    fn begin_drag(&mut self, position: (i32, i32)) {
+        self.drag_origin = Some(position);
+    }
+
+    fn observe_drag(&mut self, position: (i32, i32), mouse_down: bool) {
+        if mouse_down {
+            return;
+        }
+        if let Some(origin) = self.drag_origin.take() {
+            if position != origin {
+                self.saved = Some(position);
+            }
+        }
+    }
+
+    fn cancel_drag(&mut self) {
+        self.drag_origin = None;
+    }
+
+    fn reset(&mut self) {
+        self.cancel_drag();
+        self.saved = None;
+    }
+}
+
+/// Stop capture before any programmatic movement. A queued release sample
+/// must never mistake a resize, shake, or meeting prompt for a user's drag.
+fn cancel_hud_drag(hud: &WebviewWindow) {
+    if let Some(state) = hud.app_handle().try_state::<HudPosition>() {
+        if let Ok(mut position) = state.inner.lock() {
+            position.cancel_drag();
+        }
+    }
+}
+
+fn poll_hud_drag(app: &AppHandle, hud: &WebviewWindow) {
+    let dragging = app
+        .try_state::<HudPosition>()
+        .and_then(|state| {
+            state
+                .inner
+                .lock()
+                .ok()
+                .map(|position| position.drag_origin.is_some())
+        })
+        .unwrap_or(false);
+    if !dragging {
+        return;
+    }
+    let app_for_drag = app.clone();
+    let hud = hud.clone();
+    // Read the frame and button state together on the main thread. In
+    // particular, never hold the position mutex while waiting for a native
+    // frame getter on another thread.
+    let _ = app.run_on_main_thread(move || {
+        let Ok(position) = hud.outer_position() else {
+            return;
+        };
+        let mouse_down = hud_left_mouse_button_down();
+        if let Some(state) = app_for_drag.try_state::<HudPosition>() {
+            if let Ok(mut saved) = state.inner.lock() {
+                saved.observe_drag((position.x, position.y), mouse_down);
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn hud_left_mouse_button_down() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
+    }
+    // Combined session state, left button: AppKit need not deliver mouseUp
+    // to this process after performWindowDragWithEvent returns immediately.
+    unsafe { CGEventSourceButtonState(0, 0) }
+}
+
+#[cfg(target_os = "windows")]
+fn hud_left_mouse_button_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(v_key: i32) -> i16;
+    }
+    unsafe { GetAsyncKeyState(1) < 0 }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn hud_left_mouse_button_down() -> bool {
+    false
 }
 
 pub struct ShortcutActivationState {
@@ -465,6 +562,14 @@ pub fn configured_transcription_language() -> Option<String> {
         .and_then(|settings| settings.language.clone())
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DictationHudPlacement {
+    #[default]
+    Bottom,
+    Top,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationSettings {
@@ -472,7 +577,15 @@ pub struct DictationSettings {
     pub toggle_shortcut: DictationShortcutSetting,
     pub microphone: DictationMicrophoneSetting,
     pub style: DictationStyle,
+    pub hud_placement: DictationHudPlacement,
     pub language: Option<String>,
+    /// Off by default: the Whisper transcript is pasted with no LLM call.
+    pub cleanup_enabled: bool,
+    /// OpenRouter model id for the cleanup chat completion.
+    pub cleanup_model: String,
+    /// Records the one-time move to optional cleanup (ditado-rapido D1):
+    /// a file saved before it lacks the field and migrates to cleanup off.
+    pub cleanup_migrated: bool,
 }
 
 impl Default for DictationSettings {
@@ -482,8 +595,50 @@ impl Default for DictationSettings {
             toggle_shortcut: DictationShortcutSetting::control_option_t(),
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
+            hud_placement: DictationHudPlacement::default(),
             language: None,
+            cleanup_enabled: false,
+            cleanup_model: DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
+            cleanup_migrated: true,
         }
+    }
+}
+
+const MAX_DICTATION_CLEANUP_MODEL_CHARS: usize = 200;
+
+/// One-time move to optional cleanup: settings saved before it (cleanup
+/// always ran, on Clovy API, an endpoint, or a CLI) start with cleanup off.
+/// Returns whether the settings changed and should be written back.
+fn migrate_dictation_cleanup(settings: &mut DictationSettings) -> bool {
+    if settings.cleanup_migrated {
+        return false;
+    }
+    settings.cleanup_enabled = false;
+    settings.cleanup_migrated = true;
+    true
+}
+
+/// Accepts an OpenRouter catalog id (`vendor/model`, optional `:variant`);
+/// CLI, endpoint, and internal option ids are refused.
+fn validate_dictation_cleanup_model(model: &str) -> Result<String, AppError> {
+    let model = model.trim();
+    let valid = model.chars().count() <= MAX_DICTATION_CLEANUP_MODEL_CHARS
+        && !model.starts_with("__")
+        && !model.chars().any(char::is_whitespace)
+        && model
+            .split_once('/')
+            .is_some_and(|(vendor, name)| !vendor.is_empty() && !name.is_empty())
+        && !model
+            .split('/')
+            .next()
+            .is_some_and(|vendor| vendor.contains(':'));
+    if valid {
+        Ok(model.to_string())
+    } else {
+        Err(AppError::new(
+            "dictation_cleanup_model_invalid",
+            "Choose an OpenRouter model for dictation cleanup.",
+        ))
     }
 }
 
@@ -499,7 +654,11 @@ impl<'de> Deserialize<'de> for DictationSettings {
             toggle_shortcut: Option<DictationShortcutSetting>,
             microphone: Option<DictationMicrophoneSetting>,
             style: Option<DictationStyle>,
+            hud_placement: Option<DictationHudPlacement>,
             language: Option<String>,
+            cleanup_enabled: Option<bool>,
+            cleanup_model: Option<String>,
+            cleanup_migrated: Option<bool>,
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -530,7 +689,14 @@ impl<'de> Deserialize<'de> for DictationSettings {
                 .unwrap_or_else(DictationShortcutSetting::control_option_t),
             microphone: settings.microphone.unwrap_or(microphone),
             style: settings.style.unwrap_or_default(),
+            hud_placement: settings.hud_placement.unwrap_or_default(),
             language: normalize_language(settings.language),
+            cleanup_enabled: settings.cleanup_enabled.unwrap_or(false),
+            cleanup_model: settings
+                .cleanup_model
+                .and_then(|model| validate_dictation_cleanup_model(&model).ok())
+                .unwrap_or_else(|| DEFAULT_DICTATION_CLEANUP_MODEL.to_string()),
+            cleanup_migrated: settings.cleanup_migrated.unwrap_or(false),
         })
     }
 }
@@ -1362,7 +1528,7 @@ fn default_shortcut_for_kind(kind: DictationShortcutKind) -> DictationShortcutSe
 
 pub fn setup(app: &mut tauri::App) {
     app.manage(HudPosition {
-        inner: Mutex::new(None),
+        inner: Mutex::new(HudPositionState::default()),
     });
     app.manage(HudHoverState {
         stop_bounds: Mutex::new(None),
@@ -1380,6 +1546,9 @@ pub fn setup(app: &mut tauri::App) {
         tracing::warn!(%error, "failed to configure dictation HUD");
     }
     manage_settings(app.handle());
+    // Keys, token, and the transcription connection are ready before the
+    // first press (ditado-rapido D4).
+    crate::clovy_api::warm_dictation_route_if_idle();
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
     });
@@ -1586,6 +1755,43 @@ pub fn set_dictation_style(
 ) -> Result<DictationSettings, AppError> {
     update_settings(&state, |settings| {
         settings.style = style;
+    })
+}
+
+#[tauri::command]
+pub fn set_dictation_hud_placement(
+    app: AppHandle,
+    state: State<'_, DictationSettingsState>,
+    placement: DictationHudPlacement,
+) -> Result<DictationSettings, AppError> {
+    let settings = update_settings(&state, |settings| {
+        settings.hud_placement = placement;
+    })?;
+    if let Some(position) = app.try_state::<HudPosition>() {
+        if let Ok(mut saved) = position.inner.lock() {
+            saved.reset();
+        }
+    }
+    // Apply on the next dictation show. The shared window may currently
+    // contain a top-anchored meeting prompt, not dictation content.
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn set_dictation_cleanup(
+    state: State<'_, DictationSettingsState>,
+    enabled: bool,
+    model: Option<String>,
+) -> Result<DictationSettings, AppError> {
+    let model = model
+        .as_deref()
+        .map(validate_dictation_cleanup_model)
+        .transpose()?;
+    update_settings(&state, |settings| {
+        settings.cleanup_enabled = enabled;
+        if let Some(model) = model {
+            settings.cleanup_model = model;
+        }
     })
 }
 
@@ -2054,17 +2260,59 @@ pub fn dictation_hud_set_size(app: AppHandle, width: f64, height: f64, animate: 
     animate_frame_to(&hud, new_size, animate);
 }
 
-/// Ease the window to `new_size`, keeping its center anchored. Skips the
-/// animation (snaps) when the window is hidden or `animate` is false.
+/// Arm capture before handing the gesture to the native window server.
+/// macOS returns immediately and may not send mouseUp; the existing HUD
+/// poll commits the final frame once the session button state is released.
+#[tauri::command]
+pub fn dictation_hud_start_drag(app: AppHandle) {
+    let Some(hud) = app.get_webview_window("hud") else {
+        return;
+    };
+    let app_for_drag = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let (Ok(position), Some(state)) = (
+            hud.outer_position(),
+            app_for_drag.try_state::<HudPosition>(),
+        ) else {
+            return;
+        };
+        let Ok(mut saved) = state.inner.lock() else {
+            return;
+        };
+        saved.begin_drag((position.x, position.y));
+        drop(saved);
+        if hud.start_dragging().is_err() {
+            cancel_hud_drag(&hud);
+        }
+    });
+}
+
+/// Ease the window to `new_size`, keeping the nearest vertical edge anchored.
+/// Hidden windows are positioned by show, not resized around their startup frame.
 fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: bool) {
+    cancel_hud_drag(hud);
     let (Ok(position), Ok(old_size)) = (hud.outer_position(), hud.outer_size()) else {
         return;
     };
     if new_size == old_size {
         return;
     }
-    let target_x = position.x + (old_size.width as i32 - new_size.width as i32) / 2;
-    let target_y = position.y + (old_size.height as i32 - new_size.height as i32) / 2;
+    if !hud.is_visible().unwrap_or(false) {
+        // Before the first show, the OS chooses an arbitrary initial frame.
+        // Centering a resize there used to emit Moved and masquerade as a drag.
+        let _ = hud.set_size(new_size);
+        return;
+    }
+    let monitor = hud
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| hud.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let (target_x, target_y) =
+        dictation_hud_resized_origin(*monitor.work_area(), position, old_size, new_size);
 
     if animate && hud.is_visible().unwrap_or(false) {
         const STEPS: u32 = 12;
@@ -2086,6 +2334,29 @@ fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: b
     }
     let _ = hud.set_size(new_size);
     let _ = hud.set_position(PhysicalPosition::new(target_x, target_y));
+}
+
+fn dictation_hud_resized_origin(
+    work_area: tauri::PhysicalRect<i32, u32>,
+    position: PhysicalPosition<i32>,
+    old_size: PhysicalSize<u32>,
+    new_size: PhysicalSize<u32>,
+) -> (i32, i32) {
+    let x = position.x + (old_size.width as i32 - new_size.width as i32) / 2;
+    let below_middle = position.y + old_size.height as i32 / 2
+        > work_area.position.y + work_area.size.height as i32 / 2;
+    let y = if below_middle {
+        position.y + old_size.height as i32 - new_size.height as i32
+    } else {
+        position.y
+    };
+    let max_x = work_area.position.x + (work_area.size.width as i32 - new_size.width as i32).max(0);
+    let max_y =
+        work_area.position.y + (work_area.size.height as i32 - new_size.height as i32).max(0);
+    (
+        x.clamp(work_area.position.x, max_x),
+        y.clamp(work_area.position.y, max_y),
+    )
 }
 
 /// Set the native window alpha. The exit dissolve is driven from the webview
@@ -2138,12 +2409,13 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     let Some(hud) = app.get_webview_window("hud") else {
         return false;
     };
+    cancel_hud_drag(&hud);
     // A window woken at alpha 0 (wake_hud_window) reports visible but the
     // user can't see it — that still counts as a fresh entrance.
     let entering = enter.unwrap_or(false);
     let was_hidden = !hud.is_visible().unwrap_or(false)
         || HUD_WOKEN_FADED.load(std::sync::atomic::Ordering::Relaxed);
-    if !hud.is_visible().unwrap_or(false) && !entering {
+    if !entering {
         position_hud_window(&app, &hud);
     }
     HUD_WOKEN_FADED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -2165,7 +2437,7 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     let target = hud
         .outer_size()
         .ok()
-        .and_then(|size| default_hud_position(&hud, size));
+        .and_then(|size| hud_position_for_placement(&hud, size, DictationHudPlacement::Top));
     let Some((x, y)) = target else {
         let alpha_hud = hud.clone();
         let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 1.0));
@@ -2252,6 +2524,7 @@ pub fn dictation_hud_exit(app: AppHandle) {
     let Some(hud) = app.get_webview_window("hud") else {
         return;
     };
+    cancel_hud_drag(&hud);
     if !hud.is_visible().unwrap_or(false) {
         return;
     }
@@ -2299,6 +2572,7 @@ pub fn dictation_hud_shake(app: AppHandle) {
         // mid-wobble position as its anchor (and vice versa).
         let lock = app.try_state::<HudFrameLock>();
         let _guard = lock.as_ref().and_then(|lock| lock.0.lock().ok());
+        cancel_hud_drag(&hud);
         const DURATION_MS: f64 = 380.0;
         const FRAME_MS: u64 = 16;
         // (progress, logical x offset) — the old CSS keyframes.
@@ -2416,6 +2690,7 @@ fn spawn_hud_hover_thread(app: AppHandle) {
             let Some(hud) = app.get_webview_window("hud") else {
                 continue;
             };
+            poll_hud_drag(&app, &hud);
             let visible = hud.is_visible().unwrap_or(false);
 
             let stop_rect = hover_state.stop_bounds.lock().ok().and_then(|g| g.clone());
@@ -2821,6 +3096,11 @@ fn handle_shortcut_key_event(
         "fn_key_up" | "shortcut_key_up" => ShortcutKeyEdge::Up,
         _ => return,
     };
+    if edge == ShortcutKeyEdge::Down {
+        // A pooled connection idle for over a minute is reopened while the
+        // user speaks, not after release.
+        crate::clovy_api::warm_dictation_route_if_idle();
+    }
 
     let Some(kind) = shortcut_kind_from_event(event) else {
         reset_shortcut_activation(app);
@@ -3521,20 +3801,26 @@ fn focus_main_window(app: &AppHandle) {
 }
 
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
+    crate::app_paths::app_config_dir(app)
         .ok()
         .map(|directory| directory.join("dictation-settings.json"))
 }
 
 fn manage_settings(app: &AppHandle) {
     let path = settings_path(app).unwrap_or_else(|| PathBuf::from("dictation-settings.json"));
-    let settings = load_settings(app);
+    let mut settings = load_settings(app);
+    let migrated = migrate_dictation_cleanup(&mut settings);
     replace_current_settings(settings.clone());
-    app.manage(DictationSettingsState {
+    let state = DictationSettingsState {
         path,
-        settings: Mutex::new(settings),
-    });
+        settings: Mutex::new(settings.clone()),
+    };
+    if migrated {
+        if let Err(error) = save_settings(&state, &settings) {
+            tracing::warn!(code = %error.code, "dictation cleanup migration not saved; retries next launch");
+        }
+    }
+    app.manage(state);
 }
 
 fn load_settings(app: &AppHandle) -> DictationSettings {
@@ -3796,7 +4082,7 @@ enum RecordAction {
 
 #[cfg(target_os = "macos")]
 fn helper_ownership_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok()
+    crate::app_paths::app_config_dir(app).ok()
 }
 
 /// This instance's own record path, keyed by our app pid so we never overwrite
@@ -5315,7 +5601,7 @@ async fn transcribe_recording_ready_inner(
         }
     };
     let current_settings = current_dictation_settings(app).unwrap_or_default();
-    let style = current_settings.style;
+    let cleanup = DictationCleanupConfig::from_settings(&current_settings);
     let language = current_settings.language;
     let Some(dictionary) =
         run_dictation_take_step(take, transcription_dictionary_for_app(app)).await
@@ -5342,22 +5628,33 @@ async fn transcribe_recording_ready_inner(
             return;
         }
     };
-    let result = run_dictation_take_step(
+    let pipeline = run_dictation_take_step(
         take,
-        dictate_transcribe(DictateTranscribeRequest {
-            audio_path: transcription_audio.clone(),
-            // Whisper's prompt only steers spelling: it gets the short dictionary
-            // hint, and cleanup below gets the full dictionary.
-            context: dictionary
-                .as_ref()
-                .and_then(|dictionary| dictionary.asr_hint.clone()),
-            language,
-            session_id: session_id.clone(),
-            utterance_id: utterance_id.clone(),
-        }),
+        run_dictation_pipeline(
+            &ServiceDictationTranscriber,
+            &ServiceDictationCleaner,
+            DictateTranscribeRequest {
+                audio_path: transcription_audio.clone(),
+                // Whisper's prompt only steers spelling: it gets the short
+                // dictionary hint, and cleanup gets the full dictionary.
+                context: dictionary
+                    .as_ref()
+                    .and_then(|dictionary| dictionary.asr_hint.clone()),
+                language,
+                session_id,
+                utterance_id: utterance_id.clone(),
+            },
+            &cleanup,
+            DictationCleanupContext {
+                dictionary_context: dictionary.map(|dictionary| dictionary.context),
+                app_context,
+            },
+            recording.observed_audio_level,
+            recording.audio_seconds,
+        ),
     )
     .await;
-    let Some(result) = result else {
+    let Some(pipeline) = pipeline else {
         tracing::info!(
             take_id = take.id(),
             utterance_id,
@@ -5370,25 +5667,10 @@ async fn transcribe_recording_ready_inner(
         let _ = fs::remove_file(&transcription_audio);
     }
     remove_windows_dictation_audio(&recording.audio_path);
-    let result = run_dictation_take_step(
-        take,
-        maybe_cleanup_dictation_result(
-            app,
-            &provider,
-            result,
-            dictionary.map(|dictionary| dictionary.context),
-            app_context,
-            style,
-            session_id,
-            utterance_id,
-        ),
-    )
-    .await;
-    let Some(result) = result else {
-        remove_cancelled_dictation_audio(&audio_path, None);
-        return;
-    };
-    let outcome = outcome_from_transcription_result(result, recording.observed_audio_level, style);
+    if let Some(error) = pipeline.cleanup_skipped.as_ref() {
+        emit_dictation_cleanup_skipped(app, &provider, error);
+    }
+    let outcome = pipeline.outcome;
     let mut delivery_claim = None;
     let history_already_persisted = if low_speech_evidence {
         let recovery_transcript = outcome
@@ -5649,61 +5931,184 @@ async fn transcription_dictionary_for_app(app: &AppHandle) -> Option<Transcripti
     build_transcription_dictionary(&entries)
 }
 
-async fn maybe_cleanup_dictation_result(
-    app: &AppHandle,
-    provider: &str,
-    result: Result<TranscriptionProviderResult, AppError>,
+/// The cleanup choice one take reads once (ditado-rapido D1, D7).
+#[derive(Clone, Debug)]
+struct DictationCleanupConfig {
+    enabled: bool,
+    /// OpenRouter model id for the cleanup chat completion.
+    model: String,
+    style: DictationStyle,
+    /// Budget for the whole cleanup of a transcript of this many bytes.
+    timeout: fn(usize) -> Duration,
+}
+
+impl DictationCleanupConfig {
+    fn from_settings(settings: &DictationSettings) -> Self {
+        Self {
+            enabled: settings.cleanup_enabled,
+            model: settings.cleanup_model.clone(),
+            style: settings.style,
+            timeout: dictation_cleanup_timeout,
+        }
+    }
+}
+
+/// What the cleanup model gets besides the transcript.
+#[derive(Clone, Debug, Default)]
+struct DictationCleanupContext {
+    dictionary_context: Option<String>,
+    app_context: Option<String>,
+}
+
+/// One cleanup chat completion for one chunk of a transcript.
+#[derive(Clone, Debug)]
+struct DictationCleanupCall {
+    text: String,
     dictionary_context: Option<String>,
     app_context: Option<String>,
     style: DictationStyle,
+    model: String,
     session_id: String,
     utterance_id: String,
-) -> Result<TranscriptionProviderResult, AppError> {
-    let mut transcript = match result {
-        Ok(transcript) => transcript,
-        Err(error) => return Err(error),
-    };
-    let transcript_bytes = transcript.text.trim().len();
-    tracing::info!(
-        provider,
-        style = ?style,
-        app_context = app_context.as_deref(),
-        transcript_bytes,
-        timeout_ms = dictation_cleanup_timeout(transcript_bytes).as_millis() as u64,
-        "dictation cleanup starting",
-    );
-    let started_at = Instant::now();
-    match cleanup_dictation_text(
-        &transcript.text,
-        dictionary_context.as_deref(),
-        app_context,
-        style,
-        session_id,
-        utterance_id,
-    )
-    .await
-    {
-        Ok(cleaned) => {
-            if !cleaned.trim().is_empty() {
-                transcript.text = cleaned;
-                tracing::info!(
-                    provider,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "dictation cleanup applied",
-                );
-            }
-        }
-        Err(error) => {
-            emit_dictation_cleanup_skipped(
-                app,
-                provider,
-                &error,
-                transcript_bytes,
-                started_at.elapsed(),
-            );
-        }
+}
+
+/// Turns one finished recording into text (Groq Whisper).
+trait DictationTranscriber {
+    fn transcribe(
+        &self,
+        request: DictateTranscribeRequest,
+    ) -> impl Future<Output = Result<TranscriptionProviderResult, AppError>> + Send;
+}
+
+/// Cleans one chunk of a transcript with a single chat completion.
+trait DictationCleaner {
+    fn clean(
+        &self,
+        call: DictationCleanupCall,
+    ) -> impl Future<Output = Result<String, AppError>> + Send;
+}
+
+/// The production transcriber.
+struct ServiceDictationTranscriber;
+
+impl DictationTranscriber for ServiceDictationTranscriber {
+    fn transcribe(
+        &self,
+        request: DictateTranscribeRequest,
+    ) -> impl Future<Output = Result<TranscriptionProviderResult, AppError>> + Send {
+        dictate_transcribe(request)
     }
-    Ok(transcript)
+}
+
+/// The production cleaner: the chosen OpenRouter model through Clovy API.
+struct ServiceDictationCleaner;
+
+impl DictationCleaner for ServiceDictationCleaner {
+    fn clean(
+        &self,
+        call: DictationCleanupCall,
+    ) -> impl Future<Output = Result<String, AppError>> + Send {
+        dictate_cleanup(
+            DictateCleanupRequestParams {
+                text: call.text,
+                dictionary_context: call.dictionary_context,
+                app_context: call.app_context,
+                style: call.style.instruction().to_string(),
+                session_id: call.session_id,
+                utterance_id: call.utterance_id,
+            },
+            call.model,
+        )
+    }
+}
+
+struct DictationPipelineResult {
+    outcome: DictationTranscriptionOutcome,
+    /// Why cleanup was skipped; the raw transcript was used instead.
+    cleanup_skipped: Option<AppError>,
+}
+
+/// Transcribe one take and, only when cleanup is on, clean the transcript.
+/// A failed or timed-out cleanup keeps the whole raw transcript.
+async fn run_dictation_pipeline<T, C>(
+    transcriber: &T,
+    cleaner: &C,
+    request: DictateTranscribeRequest,
+    cleanup: &DictationCleanupConfig,
+    context: DictationCleanupContext,
+    observed_audio_level: Option<f32>,
+    audio_seconds: Option<f32>,
+) -> DictationPipelineResult
+where
+    T: DictationTranscriber + Sync,
+    C: DictationCleaner + Sync,
+{
+    if audio_seconds.is_some_and(|seconds| seconds < DICTATION_MIN_UPLOAD_SECONDS) {
+        // Whisper invents text ("Thank you.") for near-empty audio; such a
+        // take is no speech without an upload (design D5, R7).
+        tracing::info!(audio_seconds, "dictation take too short to transcribe");
+        return DictationPipelineResult {
+            outcome: whisper_no_speech_outcome(observed_audio_level),
+            cleanup_skipped: None,
+        };
+    }
+    let session_id = request.session_id.clone();
+    let utterance_id = request.utterance_id.clone();
+    let mut cleanup_skipped = None;
+    let result = match transcriber.transcribe(request).await {
+        Ok(mut transcript) if cleanup.enabled && !is_blank_transcript(&transcript.text) => {
+            let transcript_bytes = transcript.text.trim().len();
+            tracing::info!(
+                model = %cleanup.model,
+                style = ?cleanup.style,
+                app_context = context.app_context.as_deref(),
+                transcript_bytes,
+                timeout_ms = (cleanup.timeout)(transcript_bytes).as_millis() as u64,
+                "dictation cleanup starting",
+            );
+            let started_at = Instant::now();
+            match clean_dictation_transcript(
+                cleaner,
+                &transcript.text,
+                cleanup,
+                &context,
+                &session_id,
+                &utterance_id,
+            )
+            .await
+            {
+                Ok(cleaned) => {
+                    if !cleaned.trim().is_empty() {
+                        transcript.text = cleaned;
+                    }
+                    tracing::info!(
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "dictation cleanup applied",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        code = %error.code,
+                        message = %error.message,
+                        transcript_bytes,
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "dictation cleanup skipped; pasting raw transcript",
+                    );
+                    cleanup_skipped = Some(error);
+                }
+            }
+            Ok(transcript)
+        }
+        other => other,
+    };
+    DictationPipelineResult {
+        outcome: if cleanup.enabled {
+            outcome_from_transcription_result(result, observed_audio_level, cleanup.style)
+        } else {
+            outcome_from_raw_transcription_result(result, observed_audio_level)
+        },
+        cleanup_skipped,
+    }
 }
 
 /// Budget for one cleanup round-trip, scaled to the transcript so long
@@ -5716,153 +6121,67 @@ fn dictation_cleanup_timeout(text_bytes: usize) -> Duration {
     Duration::from_millis(scaled.min(DICTATION_CLEANUP_MAX_TIMEOUT_MS))
 }
 
-async fn cleanup_dictation_text(
+/// Clean a transcript within its budget. Long transcripts are cleaned a
+/// word-boundary chunk at a time, up to [`DICTATION_CLEANUP_PARALLEL_CHUNKS`]
+/// at once, and rejoined in order: the cleanup model reliably punctuates
+/// short passages but degrades into an unpunctuated verbatim echo on long
+/// run-on speech (JUN-212). Each chunk gets its own utterance id suffix so
+/// metering treats it as its own unit of work. Any chunk that fails or runs
+/// out of the budget fails the whole cleanup, so the caller pastes the raw
+/// transcript rather than a mix (ditado-rapido D7).
+async fn clean_dictation_transcript<C: DictationCleaner + Sync>(
+    cleaner: &C,
     text: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
+    config: &DictationCleanupConfig,
+    context: &DictationCleanupContext,
+    session_id: &str,
+    utterance_id: &str,
 ) -> Result<String, AppError> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(String::new());
     }
+    let call = |chunk: &str, utterance_id: String| DictationCleanupCall {
+        text: chunk.to_string(),
+        dictionary_context: context.dictionary_context.clone(),
+        app_context: context.app_context.clone(),
+        style: config.style,
+        model: config.model.clone(),
+        session_id: session_id.to_string(),
+        utterance_id,
+    };
     let chunks = split_dictation_cleanup_chunks(text, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
-    if chunks.len() == 1 {
-        return match tokio::time::timeout(
-            dictation_cleanup_timeout(text.len()).min(Duration::from_millis(
-                DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS,
-            )),
-            cleanup_dictation_call(
-                text,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                utterance_id,
-            ),
-        )
+    let work = async {
+        if chunks.len() == 1 {
+            let cleaned =
+                cleanup_dictation_call(cleaner, call(text, utterance_id.to_string())).await?;
+            return Ok(trim_cleaned_dictation(&cleaned));
+        }
+        // Built eagerly: a lazily mapped stream trips the higher-ranked
+        // `Send` check of the spawned take future.
+        let calls: Vec<_> = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                cleanup_dictation_call(cleaner, call(chunk, format!("{utterance_id}-c{index}")))
+            })
+            .collect();
+        let cleaned: Vec<String> = futures_util::stream::iter(calls)
+            .buffered(DICTATION_CLEANUP_PARALLEL_CHUNKS)
+            .map_ok(|cleaned| trim_cleaned_dictation_chunk(&cleaned))
+            .try_collect()
+            .await?;
+        tracing::info!(chunk_count = chunks.len(), "dictation cleanup ran chunked");
+        Ok(join_cleaned_dictation_chunks(&cleaned))
+    };
+    tokio::time::timeout((config.timeout)(text.len()), work)
         .await
-        {
-            Ok(result) => Ok(trim_cleaned_dictation(&result?)),
-            Err(_) => Err(AppError::new(
+        .unwrap_or_else(|_| {
+            Err(AppError::new(
                 "dictation_cleanup_timeout",
                 "Dictation cleanup timed out.",
-            )),
-        };
-    }
-    cleanup_dictation_chunks(
-        &chunks,
-        dictionary_context,
-        app_context,
-        style,
-        session_id,
-        utterance_id,
-    )
-    .await
-}
-
-/// Clean a long transcript through `/v1/dictate/cleanup` a word-boundary
-/// chunk at a time and rejoin the results. The cleanup model reliably
-/// punctuates short passages but degrades into an unpunctuated verbatim echo
-/// on long run-on speech (JUN-212). Each chunk gets its own utterance id
-/// suffix so metering treats it as its own unit of work.
-///
-/// Chunks that already cleaned up are never discarded: they were billed, so
-/// their output must reach the paste. Running out of the shared deadline or
-/// hitting a transport error mid-batch degrades the affected chunk and the
-/// rest to their raw text. Only an error before any chunk succeeds fails the
-/// whole cleanup (the caller's raw-transcript fallback, as before).
-async fn cleanup_dictation_chunks(
-    chunks: &[&str],
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
-) -> Result<String, AppError> {
-    let total_bytes: usize = chunks.iter().map(|chunk| chunk.len()).sum();
-    let deadline = Instant::now() + dictation_cleanup_timeout(total_bytes);
-    let chunk_count = chunks.len();
-    let mut cleaned_chunks: Vec<String> = Vec::with_capacity(chunk_count);
-    let mut raw_chunks = 0usize;
-    let mut any_cleaned = false;
-    for (index, chunk) in chunks.iter().enumerate() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            raw_chunks += 1;
-            cleaned_chunks.push((*chunk).to_string());
-            continue;
-        }
-        let chunk_utterance_id = format!("{utterance_id}-c{index}");
-        // Bounded by both the batch deadline and the per-request billing
-        // hold cap (the chunk budget covers at most two small requests).
-        let chunk_budget = remaining.min(Duration::from_millis(
-            DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS,
-        ));
-        match tokio::time::timeout(
-            chunk_budget,
-            cleanup_dictation_chunk_with_retry(
-                chunk,
-                dictionary_context,
-                app_context.clone(),
-                style,
-                session_id.clone(),
-                chunk_utterance_id,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(cleaned)) => {
-                any_cleaned = true;
-                cleaned_chunks.push(trim_cleaned_dictation_chunk(&cleaned));
-            }
-            Ok(Err(error)) => {
-                // Nothing cleaned yet: fail the whole cleanup so the caller
-                // emits the skip event and pastes the raw transcript.
-                if !any_cleaned {
-                    return Err(error);
-                }
-                // Mid-batch failure after billed successes: keep the cleaned
-                // chunks and degrade this one and the rest to raw. Retrying
-                // the remainder against a failing backend would only burn
-                // the deadline.
-                tracing::warn!(
-                    code = %error.code,
-                    chunk_index = index,
-                    "dictation cleanup chunk failed mid-batch; keeping raw for the rest",
-                );
-                for rest in &chunks[index..] {
-                    raw_chunks += 1;
-                    cleaned_chunks.push((*rest).to_string());
-                }
-                break;
-            }
-            Err(_) => {
-                // This chunk ran out of its budget (the batch deadline or the
-                // per-request cap): keep it raw and move on. Chunks that
-                // already cleaned up are preserved; later chunks still get
-                // whatever batch budget is left.
-                tracing::warn!(
-                    chunk_index = index,
-                    chunk_bytes = chunk.len(),
-                    "dictation cleanup chunk timed out; keeping raw chunk",
-                );
-                raw_chunks += 1;
-                cleaned_chunks.push((*chunk).to_string());
-            }
-        }
-    }
-    if raw_chunks > 0 {
-        tracing::warn!(
-            chunk_count,
-            raw_chunks,
-            "dictation cleanup degraded; some chunks pasted raw",
-        );
-    }
-    tracing::info!(chunk_count, raw_chunks, "dictation cleanup ran chunked");
-    Ok(join_cleaned_dictation_chunks(&cleaned_chunks))
+            ))
+        })
 }
 
 /// Trim a single-call cleanup result (the historical behavior).
@@ -5903,116 +6222,23 @@ fn join_cleaned_dictation_chunks(chunks: &[String]) -> String {
     joined
 }
 
-/// One chunk of a chunked cleanup. Transport errors propagate to the caller,
-/// which keeps any already-cleaned chunks and degrades the rest to raw.
-/// Content-quality failures get one retry — the provider is not deterministic
-/// even at temperature 0, and a retry usually punctuates a chunk the first
-/// attempt echoed — then degrade to the raw chunk so one bad chunk never
-/// costs the rest of the dictation its cleanup.
-async fn cleanup_dictation_chunk_with_retry(
-    chunk: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    chunk_utterance_id: String,
+/// One cleanup chat completion plus content-quality checks, capped at the
+/// per-request billing hold (`DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS`).
+async fn cleanup_dictation_call<C: DictationCleaner + Sync>(
+    cleaner: &C,
+    call: DictationCleanupCall,
 ) -> Result<String, AppError> {
-    let first = cleanup_dictation_call(
-        chunk,
-        dictionary_context,
-        app_context.clone(),
-        style,
-        session_id.clone(),
-        chunk_utterance_id.clone(),
+    let cleaned = tokio::time::timeout(
+        Duration::from_millis(DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS),
+        cleaner.clean(call),
     )
-    .await;
-    // A distinct utterance id: the retry wants a fresh model completion, so
-    // it must not share the first attempt's idempotency identity.
-    let retry_utterance_id = format!("{chunk_utterance_id}r");
-    match first {
-        Ok(cleaned) if !cleaned_chunk_lacks_sentence_punctuation(chunk, &cleaned) => Ok(cleaned),
-        Ok(unpunctuated) => {
-            match cleanup_dictation_call(
-                chunk,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                retry_utterance_id,
-            )
-            .await
-            {
-                Ok(retried) if !cleaned_chunk_lacks_sentence_punctuation(chunk, &retried) => {
-                    Ok(retried)
-                }
-                // Keep the first attempt: unpunctuated but still cleaned
-                // (fillers stripped) beats both raw text and failing the
-                // whole dictation's cleanup over one stubborn chunk.
-                _ => {
-                    tracing::warn!(
-                        chunk_bytes = chunk.len(),
-                        "dictation cleanup chunk still unpunctuated after retry",
-                    );
-                    Ok(unpunctuated)
-                }
-            }
-        }
-        Err(error)
-            if error.code == "provider_response_invalid"
-                || error.code == "dictation_cleanup_invalid" =>
-        {
-            match cleanup_dictation_call(
-                chunk,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                retry_utterance_id,
-            )
-            .await
-            {
-                Ok(retried) => Ok(retried),
-                Err(retry_error) => {
-                    if retry_error.code == "provider_response_invalid"
-                        || retry_error.code == "dictation_cleanup_invalid"
-                    {
-                        // The model refused this chunk twice; keep the
-                        // speaker's words raw rather than dropping them or
-                        // failing the whole dictation's cleanup.
-                        tracing::warn!(
-                            code = %retry_error.code,
-                            chunk_bytes = chunk.len(),
-                            "dictation cleanup chunk kept raw after retry",
-                        );
-                        Ok(chunk.to_string())
-                    } else {
-                        Err(retry_error)
-                    }
-                }
-            }
-        }
-        Err(error) => Err(error),
-    }
-}
-
-/// One `/v1/dictate/cleanup` round-trip plus content-quality checks.
-async fn cleanup_dictation_call(
-    text: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
-) -> Result<String, AppError> {
-    let cleaned = cleanup_text(DictateCleanupRequestParams {
-        text: text.to_string(),
-        dictionary_context: dictionary_context.map(str::to_string),
-        app_context,
-        style: style.instruction().to_string(),
-        session_id,
-        utterance_id,
-    })
-    .await?;
+    .await
+    .unwrap_or_else(|_| {
+        Err(AppError::new(
+            "dictation_cleanup_timeout",
+            "Dictation cleanup timed out.",
+        ))
+    })?;
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return Err(AppError::new(
@@ -6072,32 +6298,9 @@ fn character_width_at(text: &str, index: usize) -> usize {
     text[index..].chars().next().map_or(1, char::len_utf8)
 }
 
-/// Whether a cleaned chunk came back without any sentence punctuation at a
-/// size where some is clearly expected — the JUN-212 failure shape, where the
-/// model echoes long run-on speech verbatim instead of punctuating it.
-fn cleaned_chunk_lacks_sentence_punctuation(chunk_input: &str, cleaned: &str) -> bool {
-    chunk_input.len() >= DICTATION_CLEANUP_RETRY_MIN_CHUNK_BYTES
-        && !cleaned.contains(['.', '!', '?', ':', ';', '\n', '。', '！', '？'])
-}
-
-/// The paste falls back to the raw ASR transcript when cleanup fails, so this
-/// warn line (with the transcript size and how long the attempt ran) is the
-/// only trace that the pasted text skipped punctuation and filler cleanup.
-fn emit_dictation_cleanup_skipped(
-    app: &AppHandle,
-    provider: &str,
-    error: &AppError,
-    transcript_bytes: usize,
-    elapsed: Duration,
-) {
-    tracing::warn!(
-        provider,
-        code = %error.code,
-        message = %error.message,
-        transcript_bytes,
-        elapsed_ms = elapsed.as_millis() as u64,
-        "dictation cleanup skipped; pasting raw transcript",
-    );
+/// The paste fell back to the raw ASR transcript; the pipeline already
+/// logged why. This event lets the HUD show a discreet notice.
+fn emit_dictation_cleanup_skipped(app: &AppHandle, provider: &str, error: &AppError) {
     emit_dictation_event_value(
         app,
         serde_json::json!({
@@ -6362,6 +6565,8 @@ fn recording_ready_info_from_event(
         audio_path: PathBuf::from(path),
         take_id: dictation_take_id_from_event(event).map(str::to_string),
         observed_audio_level: observed_audio_level_from_event(event),
+        audio_seconds: finite_f32_from_event_payload(event, "audioDurationSeconds")
+            .filter(|seconds| *seconds >= 0.0),
         speech_confidence: speech_confidence_from_event(event),
         speech_analysis_status: speech_analysis_status_from_event(event),
         target_bundle_id: event
@@ -6435,6 +6640,8 @@ enum SpeechAnalysisStatus {
 #[derive(Debug)]
 struct RecordingReadyInfo {
     audio_path: PathBuf,
+    /// Length of the finished file. Missing from older helpers and Windows.
+    audio_seconds: Option<f32>,
     /// Opaque helper-generated identity for this capture. Older helper builds
     /// omit it and use the coordinator's single active legacy token.
     take_id: Option<String>,
@@ -6501,6 +6708,14 @@ fn outcome_from_transcription_result(
     style: DictationStyle,
 ) -> DictationTranscriptionOutcome {
     match result {
+        // Whisper heard nothing (design D5): the only "no speech" signal.
+        // The meter level is logged for diagnosis and decides nothing.
+        Ok(transcript) if is_blank_transcript(&transcript.text) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Err(error) if is_whisper_no_speech_error(&error) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
         Ok(mut transcript) => {
             let had_speech_before_cleaning = !transcript.text.trim().is_empty();
             transcript.text = clean_dictation_fillers(&transcript.text, style);
@@ -6514,19 +6729,83 @@ fn outcome_from_transcription_result(
             }
             outcome_from_clean_transcript(transcript, observed_audio_level)
         }
-        Err(error) => {
-            let event = promote_silent_error_if_audio_detected(
-                app_error_event(error),
-                observed_audio_level,
-            );
-            DictationTranscriptionOutcome {
-                helper_command: serde_json::json!({ "type": "discard_recording" }),
-                event: Some(event),
-                transcript: None,
-                quarantine_transcript: None,
-            }
-        }
+        Err(error) => transcription_error_outcome(error, observed_audio_level),
     }
+}
+
+/// Cleanup off (spec "Limpeza desligada"): the Whisper text, only trimmed.
+/// No filler backstop and no style; an empty transcript is still no speech.
+fn outcome_from_raw_transcription_result(
+    result: Result<TranscriptionProviderResult, AppError>,
+    observed_audio_level: Option<f32>,
+) -> DictationTranscriptionOutcome {
+    match result {
+        Ok(transcript) if is_blank_transcript(&transcript.text) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Err(error) if is_whisper_no_speech_error(&error) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Ok(mut transcript) => {
+            transcript.text = transcript.text.trim().to_string();
+            outcome_from_clean_transcript(transcript, observed_audio_level)
+        }
+        Err(error) => transcription_error_outcome(error, observed_audio_level),
+    }
+}
+
+fn transcription_error_outcome(
+    error: AppError,
+    observed_audio_level: Option<f32>,
+) -> DictationTranscriptionOutcome {
+    let event =
+        promote_silent_error_if_audio_detected(app_error_event(error), observed_audio_level);
+    DictationTranscriptionOutcome {
+        helper_command: serde_json::json!({ "type": "discard_recording" }),
+        event: Some(event),
+        transcript: None,
+        quarantine_transcript: None,
+    }
+}
+
+/// No letter or digit in any script: empty, whitespace, or punctuation only.
+fn is_blank_transcript(text: &str) -> bool {
+    !text.chars().any(char::is_alphanumeric)
+}
+
+/// Clovy API answers an empty Groq transcript with a `no_speech` (or
+/// `dictation_text_empty`) failure rather than empty text.
+fn is_whisper_no_speech_error(error: &AppError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    error.code == "no_speech"
+        || message.contains("no_speech")
+        || message.contains("dictation_text_empty")
+}
+
+fn whisper_no_speech_outcome(observed_audio_level: Option<f32>) -> DictationTranscriptionOutcome {
+    tracing::info!(
+        observed_audio_level,
+        "dictation transcript was empty; reporting no speech"
+    );
+    DictationTranscriptionOutcome {
+        helper_command: serde_json::json!({ "type": "discard_recording" }),
+        event: Some(whisper_no_speech_event()),
+        transcript: None,
+        quarantine_transcript: None,
+    }
+}
+
+/// Shown to the user ("No speech detected."), unlike the silent no-speech
+/// dismissal of filler-only or quarantined captures.
+fn whisper_no_speech_event() -> serde_json::Value {
+    serde_json::json!({
+        "type": "error",
+        "payload": {
+            "code": "no_speech",
+            "message": "No speech detected.",
+            "silent": false,
+        },
+    })
 }
 
 fn silent_no_speech_outcome() -> DictationTranscriptionOutcome {
@@ -7221,7 +7500,10 @@ fn annotate_silent_error(event: &mut serde_json::Value) {
         .get_mut("payload")
         .and_then(serde_json::Value::as_object_mut)
     {
-        payload.insert("silent".to_string(), serde_json::Value::Bool(silent));
+        // An event that already decided (Whisper's visible no speech) keeps it.
+        payload
+            .entry("silent")
+            .or_insert(serde_json::Value::Bool(silent));
     }
 }
 
@@ -7435,18 +7717,19 @@ fn schedule_hud_hide(app: &AppHandle, delay: Duration) {
 }
 
 fn position_hud_window(app: &AppHandle, hud: &WebviewWindow) {
+    cancel_hud_drag(hud);
     let Ok(window_size) = hud.outer_size() else {
         return;
     };
 
     // Restore the in-memory drag position if it's still on-screen. This
     // doesn't persist across app restarts — that's deliberate; quitting
-    // Clovy resets the HUD to top-center so it can't end up lost on a
+    // Clovy resets the HUD to the configured edge so it can't end up lost on a
     // monitor that's no longer connected.
     if let Some(state) = app.try_state::<HudPosition>() {
-        let saved = state.inner.lock().ok().and_then(|guard| *guard);
+        let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
-            if hud_position_is_visible(hud, x, y, window_size) {
+            if let Some((x, y)) = restored_hud_position(hud, x, y, window_size) {
                 let _ = hud.set_position(PhysicalPosition::new(x, y));
                 return;
             }
@@ -7472,9 +7755,9 @@ fn current_or_next_hud_position(
     }
 
     if let Some(state) = app.try_state::<HudPosition>() {
-        let saved = state.inner.lock().ok().and_then(|guard| *guard);
+        let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
-            if hud_position_is_visible(hud, x, y, window_size) {
+            if let Some((x, y)) = restored_hud_position(hud, x, y, window_size) {
                 return Some(PhysicalPosition::new(x, y));
             }
         }
@@ -7489,17 +7772,25 @@ fn current_or_next_hud_position(
 /// transient notifications, not the user's parked dictation pill, so the
 /// saved drag position doesn't apply to them.
 fn position_hud_window_top_center(hud: &WebviewWindow) {
+    cancel_hud_drag(hud);
     let Ok(window_size) = hud.outer_size() else {
         return;
     };
-    if let Some((x, y)) = default_hud_position(hud, window_size) {
+    if let Some((x, y)) = hud_position_for_placement(hud, window_size, DictationHudPlacement::Top) {
         let _ = hud.set_position(PhysicalPosition::new(x, y));
     }
 }
 
 fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> Option<(i32, i32)> {
-    const HUD_TOP_MARGIN: i32 = 12;
+    let placement = settings_store().lock().ok()?.hud_placement;
+    hud_position_for_placement(hud, window_size, placement)
+}
 
+fn hud_position_for_placement(
+    hud: &WebviewWindow,
+    window_size: PhysicalSize<u32>,
+    placement: DictationHudPlacement,
+) -> Option<(i32, i32)> {
     let monitor = hud
         .cursor_position()
         .ok()
@@ -7507,33 +7798,45 @@ fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> 
         .or_else(|| hud.current_monitor().ok().flatten())
         .or_else(|| hud.primary_monitor().ok().flatten())?;
 
-    let work_area = monitor.work_area();
-    let work_top = work_area.position.y;
-    let work_center_x = work_area.position.x + work_area.size.width as i32 / 2;
-
-    // The window is the pill plus its transparent shadow gutter. Anchor the
-    // full frame; the webview centers the pill inside it.
-    let x = work_center_x - window_size.width as i32 / 2;
-    let y = work_top + HUD_TOP_MARGIN;
-    Some((x, y))
+    Some(dictation_hud_origin(
+        *monitor.work_area(),
+        window_size,
+        monitor.scale_factor(),
+        placement,
+    ))
 }
 
-/// Treat a saved position as still usable as long as the pill overlaps a
-/// connected monitor by at least this many pixels on each axis. Guards
-/// against "I unplugged the external display" losing the HUD off-screen.
-fn hud_position_is_visible(
+fn dictation_hud_origin(
+    work_area: tauri::PhysicalRect<i32, u32>,
+    window_size: PhysicalSize<u32>,
+    scale: f64,
+    placement: DictationHudPlacement,
+) -> (i32, i32) {
+    let margin = (12.0 * scale).round() as i32;
+    let x = work_area.position.x + (work_area.size.width as i32 - window_size.width as i32) / 2;
+    let top = work_area.position.y + margin;
+    let bottom =
+        work_area.position.y + work_area.size.height as i32 - window_size.height as i32 - margin;
+    let y = match placement {
+        DictationHudPlacement::Bottom => bottom.max(top),
+        DictationHudPlacement::Top => top,
+    };
+    (x, y)
+}
+
+/// Restore only onto a connected monitor, clamping the current window size
+/// without rewriting the manual anchor. A pill can grow after the drag.
+fn restored_hud_position(
     hud: &WebviewWindow,
     x: i32,
     y: i32,
     window_size: PhysicalSize<u32>,
-) -> bool {
+) -> Option<(i32, i32)> {
     const MIN_OVERLAP_PX: i32 = 24;
-    let Ok(monitors) = hud.available_monitors() else {
-        return false;
-    };
+    let monitors = hud.available_monitors().ok()?;
     let pill_w = window_size.width as i32;
     let pill_h = window_size.height as i32;
-    monitors.iter().any(|monitor| {
+    monitors.iter().find_map(|monitor| {
         let work = monitor.work_area();
         let mx = work.position.x;
         let my = work.position.y;
@@ -7541,7 +7844,15 @@ fn hud_position_is_visible(
         let mh = work.size.height as i32;
         let overlap_x = (x + pill_w).min(mx + mw) - x.max(mx);
         let overlap_y = (y + pill_h).min(my + mh) - y.max(my);
-        overlap_x >= MIN_OVERLAP_PX && overlap_y >= MIN_OVERLAP_PX
+        if overlap_x < MIN_OVERLAP_PX || overlap_y < MIN_OVERLAP_PX {
+            return None;
+        }
+        Some(dictation_hud_resized_origin(
+            *work,
+            PhysicalPosition::new(x, y),
+            window_size,
+            window_size,
+        ))
     })
 }
 
@@ -7568,17 +7879,6 @@ fn configure_hud_window(app: &AppHandle) -> Result<(), String> {
                 tracing::warn!(%error, "failed to clear dictation HUD vibrancy");
             }
         }
-
-        let app_for_events = app.clone();
-        hud.on_window_event(move |event| {
-            if let WindowEvent::Moved(position) = event {
-                if let Some(state) = app_for_events.try_state::<HudPosition>() {
-                    if let Ok(mut guard) = state.inner.lock() {
-                        *guard = Some((position.x, position.y));
-                    }
-                }
-            }
-        });
     }
     Ok(())
 }
@@ -7950,6 +8250,196 @@ pub fn key_code_for_code(code: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictation_hud_drag_start_does_not_replace_the_last_completed_drag() {
+        let mut state = HudPositionState {
+            saved: Some((500, 900)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        assert_eq!(state.saved, Some((500, 900)));
+    }
+
+    #[test]
+    fn dictation_hud_prompt_resize_does_not_replace_the_saved_dictation_drag() {
+        let mut state = HudPositionState {
+            saved: Some((500, 900)),
+            ..Default::default()
+        };
+        state.cancel_drag();
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((500, 900)));
+    }
+
+    #[test]
+    fn dictation_hud_drag_commits_the_release_position_not_the_start_or_last_held_sample() {
+        let mut state = HudPositionState::default();
+        state.begin_drag((864, 1120));
+        state.observe_drag((700, 1000), true);
+        assert_eq!(state.saved, None);
+        state.observe_drag((620, 940), false);
+        assert_eq!(state.saved, Some((620, 940)));
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_drag_release_without_movement_keeps_the_previous_anchor() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.observe_drag((864, 1120), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_automatic_motion_cancels_an_inflight_drag_without_saving_the_prompt() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.observe_drag((700, 1000), true);
+        state.cancel_drag();
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_preference_change_discards_the_drag_so_next_dictation_uses_the_new_edge() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.reset();
+        state.observe_drag((700, 1000), false);
+        assert_eq!(state.saved, None);
+    }
+
+    #[test]
+    fn dictation_hud_origin_uses_the_selected_work_area_edge_at_each_scale() {
+        // Physical work areas: menu excluded, with bottom/side/no Dock and a
+        // secondary display to the left and above the primary one.
+        let cases = [
+            ((0, 30, 1920, 1170), (200, 68), 1.0, (860, 1120), (860, 42)),
+            ((0, 30, 1920, 1090), (200, 68), 1.0, (860, 1040), (860, 42)),
+            (
+                (0, 60, 3840, 2340),
+                (400, 136),
+                2.0,
+                (1720, 2240),
+                (1720, 84),
+            ),
+            (
+                (0, 60, 3840, 2180),
+                (400, 136),
+                2.0,
+                (1720, 2080),
+                (1720, 84),
+            ),
+            ((80, 30, 1840, 1170), (200, 68), 1.0, (900, 1120), (900, 42)),
+            (
+                (-2560, -1380, 2560, 1380),
+                (400, 136),
+                2.0,
+                (-1480, -160),
+                (-1480, -1356),
+            ),
+        ];
+        for ((x, y, width, height), (w, h), scale, bottom, top) in cases {
+            let work_area = tauri::PhysicalRect {
+                position: PhysicalPosition::new(x, y),
+                size: PhysicalSize::new(width, height),
+            };
+            for (placement, expected) in [("bottom", bottom), ("top", top)] {
+                let settings: DictationSettings =
+                    serde_json::from_value(serde_json::json!({"hudPlacement": placement})).unwrap();
+                assert_eq!(
+                    dictation_hud_origin(
+                        work_area,
+                        PhysicalSize::new(w, h),
+                        scale,
+                        settings.hud_placement
+                    ),
+                    expected,
+                    "{placement} at {scale}x in {work_area:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dictation_hud_origin_keeps_growing_pills_above_the_dock() {
+        let work_area = tauri::PhysicalRect {
+            position: PhysicalPosition::new(0, 60),
+            size: PhysicalSize::new(3840, 2180),
+        };
+        let settings: DictationSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            dictation_hud_origin(
+                work_area,
+                PhysicalSize::new(400, 136),
+                2.0,
+                settings.hud_placement
+            ),
+            (1720, 2080),
+        );
+        assert_eq!(
+            dictation_hud_origin(
+                work_area,
+                PhysicalSize::new(800, 400),
+                2.0,
+                settings.hud_placement
+            ),
+            (1520, 1816),
+        );
+    }
+
+    #[test]
+    fn dictation_hud_settings_preserve_the_anchor_across_save_and_reload() {
+        let legacy: DictationSettings = serde_json::from_str(r#"{"style":"formal"}"#).unwrap();
+        let old_json = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(old_json["hudPlacement"], "bottom");
+        for placement in ["top", "bottom"] {
+            let settings: DictationSettings = serde_json::from_value(serde_json::json!({
+                "style": "formal", "hudPlacement": placement
+            }))
+            .unwrap();
+            let reloaded: DictationSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&reloaded).unwrap()["hudPlacement"],
+                placement
+            );
+            assert_eq!(reloaded.style, DictationStyle::Formal);
+        }
+    }
+
+    #[test]
+    fn dictation_hud_resize_keeps_the_nearest_edge_and_clamps_dragged_pills() {
+        let work = tauri::PhysicalRect {
+            position: PhysicalPosition::new(-2560, -1380),
+            size: PhysicalSize::new(2560, 1380),
+        };
+        let short = PhysicalSize::new(400, 136);
+        let tall = PhysicalSize::new(800, 400);
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-1480, -160), short, tall),
+            (-1680, -424),
+        );
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-1480, -1356), short, tall),
+            (-1680, -1356),
+        );
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-300, -100), short, tall),
+            (-800, -400),
+        );
+    }
 
     #[test]
     fn cancel_tooltip_intent_has_independent_open_and_close_delays() {
@@ -8521,6 +9011,530 @@ mod tests {
     }
 
     #[test]
+    fn default_settings_leave_dictation_cleanup_off_on_the_default_openrouter_model() {
+        let settings = DictationSettings::default();
+        assert!(!settings.cleanup_enabled);
+        assert_eq!(settings.cleanup_model, DEFAULT_DICTATION_CLEANUP_MODEL);
+        assert!(settings.cleanup_migrated);
+    }
+
+    #[test]
+    fn settings_saved_before_optional_cleanup_migrate_to_off_once() {
+        // A file from before ditado-rapido: cleanup always ran (on the CLI,
+        // an endpoint, or Clovy API). It migrates to off, once.
+        let mut settings: DictationSettings = serde_json::from_str(
+            r#"{"pushToTalkShortcut":{"keyCode":0,"code":"Fn","modifiers":{"command":false,"control":false,"option":false,"shift":false,"function":true},"label":"Fn","pressCount":1},"style":"formal","cleanupEnabled":true}"#,
+        )
+        .expect("legacy settings should deserialize");
+        assert!(!settings.cleanup_migrated);
+        assert!(migrate_dictation_cleanup(&mut settings));
+        assert!(!settings.cleanup_enabled);
+        assert!(settings.cleanup_migrated);
+        assert_eq!(settings.style, DictationStyle::Formal);
+
+        // After the migration the user turns cleanup on; the next launch
+        // reads it back and the migration does not run again.
+        settings.cleanup_enabled = true;
+        let stored = serde_json::to_string(&settings).unwrap();
+        let mut reloaded: DictationSettings = serde_json::from_str(&stored).unwrap();
+        assert!(!migrate_dictation_cleanup(&mut reloaded));
+        assert!(reloaded.cleanup_enabled);
+        assert_eq!(reloaded.cleanup_model, DEFAULT_DICTATION_CLEANUP_MODEL);
+    }
+
+    #[test]
+    fn dictation_cleanup_model_accepts_only_openrouter_model_ids() {
+        assert_eq!(
+            validate_dictation_cleanup_model(" openai/gpt-5-mini ").unwrap(),
+            "openai/gpt-5-mini"
+        );
+        assert_eq!(
+            validate_dictation_cleanup_model("nvidia/nemotron-3-nano-30b-a3b:free").unwrap(),
+            "nvidia/nemotron-3-nano-30b-a3b:free"
+        );
+        for invalid in [
+            "",
+            "   ",
+            "claude",
+            "cli:claude",
+            "endpoint:ep",
+            "/model",
+            "vendor/",
+            "vendor/model name",
+            "__june_local_generation__:x/y",
+        ] {
+            assert_eq!(
+                validate_dictation_cleanup_model(invalid).unwrap_err().code,
+                "dictation_cleanup_model_invalid",
+                "{invalid:?}"
+            );
+        }
+        assert!(validate_dictation_cleanup_model(&format!("a/{}", "b".repeat(200))).is_err());
+    }
+
+    /// A transcriber that returns a fixed result and counts its calls.
+    struct FakeTranscriber {
+        result: Result<String, AppError>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeTranscriber {
+        fn text(text: &str) -> Self {
+            Self {
+                result: Ok(text.to_string()),
+                calls: Default::default(),
+            }
+        }
+    }
+
+    impl DictationTranscriber for FakeTranscriber {
+        async fn transcribe(
+            &self,
+            _request: DictateTranscribeRequest,
+        ) -> Result<TranscriptionProviderResult, AppError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone().map(|text| TranscriptionProviderResult {
+                text,
+                language: None,
+                provider: "groq".to_string(),
+            })
+        }
+    }
+
+    /// A cleaner that records every call and the peak number of calls in
+    /// flight. `fail_on` makes calls whose text contains it fail; `delay`
+    /// keeps each call open long enough to observe parallel chunks.
+    #[derive(Default)]
+    struct FakeCleaner {
+        calls: Mutex<Vec<DictationCleanupCall>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak_in_flight: std::sync::atomic::AtomicUsize,
+        delay: Duration,
+        fail_on: Option<String>,
+        /// Calls whose text contains it answer with empty text.
+        blank_on: Option<String>,
+        /// Answers without any sentence punctuation.
+        unpunctuated: bool,
+    }
+
+    impl DictationCleaner for FakeCleaner {
+        async fn clean(&self, call: DictationCleanupCall) -> Result<String, AppError> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+            self.calls.lock().unwrap().push(call.clone());
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            if self
+                .fail_on
+                .as_deref()
+                .is_some_and(|marker| call.text.contains(marker))
+            {
+                return Err(AppError::new("clovy_request_failed", "upstream failed"));
+            }
+            if self
+                .blank_on
+                .as_deref()
+                .is_some_and(|marker| call.text.contains(marker))
+            {
+                return Ok(String::new());
+            }
+            if self.unpunctuated {
+                return Ok(call.text.to_uppercase());
+            }
+            Ok(format!("{}.", call.text.to_uppercase()))
+        }
+    }
+
+    fn pipeline_request() -> DictateTranscribeRequest {
+        DictateTranscribeRequest {
+            audio_path: PathBuf::from("/tmp/take.m4a"),
+            context: None,
+            language: None,
+            session_id: "session".to_string(),
+            utterance_id: "utterance".to_string(),
+        }
+    }
+
+    fn cleanup_config(enabled: bool) -> DictationCleanupConfig {
+        DictationCleanupConfig {
+            enabled,
+            model: "openai/gpt-5-mini".to_string(),
+            style: DictationStyle::Standard,
+            timeout: dictation_cleanup_timeout,
+        }
+    }
+
+    fn pasted_text(result: &DictationPipelineResult) -> Option<&str> {
+        let command = &result.outcome.helper_command;
+        (command["type"] == "paste_text").then(|| command["text"].as_str().unwrap())
+    }
+
+    /// Words long enough that the transcript splits into several cleanup
+    /// chunks; `marker` tags the one word a failing cleaner trips on.
+    fn long_transcript(chunks: usize, marker: &str) -> String {
+        let mut words = Vec::new();
+        for index in 0..chunks * 100 {
+            if index == chunks * 50 {
+                words.push(marker.to_string());
+            } else {
+                words.push(format!("word{index}"));
+            }
+        }
+        words.join(" ")
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_off_pastes_the_transcript_without_calling_the_cleaner() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner::default();
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(false),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(transcriber.calls.load(Ordering::SeqCst), 1);
+        assert!(cleaner.calls.lock().unwrap().is_empty());
+        assert!(result.cleanup_skipped.is_none());
+        // No LLM and no filler backstop: the Whisper text, trimmed.
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_off_pastes_whisper_text_only_trimmed() {
+        // Spec "Limpeza desligada": no filler backstop, no style either.
+        let transcriber = FakeTranscriber::text("  um, so Send it to Samir, uh  ");
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &FakeCleaner::default(),
+            pipeline_request(),
+            &DictationCleanupConfig {
+                style: DictationStyle::CasualLowercase,
+                ..cleanup_config(false)
+            },
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("um, so Send it to Samir, uh"));
+        assert_eq!(
+            result.outcome.transcript.as_ref().map(|t| t.text.as_str()),
+            Some("um, so Send it to Samir, uh")
+        );
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_on_pastes_the_cleaned_text_from_the_chosen_model() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner::default();
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &DictationCleanupConfig {
+                style: DictationStyle::Formal,
+                ..cleanup_config(true)
+            },
+            DictationCleanupContext {
+                dictionary_context: Some("Samir".to_string()),
+                app_context: Some(APP_CONTEXT_EMAIL.to_string()),
+            },
+            Some(0.3),
+            None,
+        )
+        .await;
+        let calls = cleaner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].model, "openai/gpt-5-mini");
+        assert_eq!(calls[0].style, DictationStyle::Formal);
+        assert_eq!(calls[0].dictionary_context.as_deref(), Some("Samir"));
+        assert_eq!(calls[0].app_context.as_deref(), Some(APP_CONTEXT_EMAIL));
+        assert_eq!(calls[0].utterance_id, "utterance");
+        assert_eq!(pasted_text(&result), Some("SEND IT TO SAMIR."));
+        assert!(result.cleanup_skipped.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_cleanup_pastes_the_raw_transcript_and_reports_the_skip() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            fail_on: Some("samir".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("clovy_request_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_cleanup_pastes_the_raw_transcript() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            delay: Duration::from_millis(500),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &DictationCleanupConfig {
+                timeout: |_| Duration::from_millis(20),
+                ..cleanup_config(true)
+            },
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("dictation_cleanup_timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn long_dictation_cleans_chunks_in_parallel_up_to_four_and_keeps_their_order() {
+        let transcript = long_transcript(7, "word350");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        assert!(chunks.len() > 4, "{} chunks", chunks.len());
+        let expected = chunks
+            .iter()
+            .map(|chunk| format!("{}.", chunk.to_uppercase()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let transcriber = FakeTranscriber::text(&transcript);
+        let cleaner = FakeCleaner {
+            delay: Duration::from_millis(40),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
+        let peak = cleaner.peak_in_flight.load(Ordering::SeqCst);
+        assert!((2..=4).contains(&peak), "peak in flight {peak}");
+        assert_eq!(pasted_text(&result), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn each_chunk_gets_exactly_one_cleanup_call() {
+        // D7: one chat completion per chunk, no content-quality retries.
+        let transcript = long_transcript(6, "word300");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        let cleaner = FakeCleaner {
+            unpunctuated: true,
+            ..FakeCleaner::default()
+        };
+        run_dictation_pipeline(
+            &FakeTranscriber::text(&transcript),
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
+    }
+
+    #[tokio::test]
+    async fn a_chunk_with_an_invalid_answer_pastes_the_whole_raw_transcript() {
+        let transcript = long_transcript(6, "blankme");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        let cleaner = FakeCleaner {
+            blank_on: Some("blankme".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &FakeTranscriber::text(&transcript),
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        let pasted = pasted_text(&result).unwrap();
+        assert!(!pasted.contains('.'), "no cleaned chunk survives: {pasted}");
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("provider_response_invalid")
+        );
+        assert!(cleaner.calls.lock().unwrap().len() <= chunks.len());
+    }
+
+    #[tokio::test]
+    async fn one_failed_chunk_pastes_the_whole_raw_transcript() {
+        let transcript = long_transcript(6, "explode");
+        let transcriber = FakeTranscriber::text(&transcript);
+        let cleaner = FakeCleaner {
+            fail_on: Some("explode".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        let pasted = pasted_text(&result).unwrap();
+        assert!(!pasted.contains('.'), "no cleaned chunk survives: {pasted}");
+        assert!(pasted.contains("explode"));
+        assert!(result.cleanup_skipped.is_some());
+    }
+
+    fn assert_visible_no_speech(result: &DictationPipelineResult) {
+        assert_eq!(
+            result.outcome.helper_command,
+            serde_json::json!({ "type": "discard_recording" })
+        );
+        assert!(result.outcome.transcript.is_none());
+        let mut event = result
+            .outcome
+            .event
+            .clone()
+            .expect("no speech emits an event");
+        annotate_silent_error(&mut event);
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["message"], "No speech detected.");
+        // The user sees "No speech detected"; the HUD does not just vanish.
+        assert_eq!(event["payload"]["silent"], false);
+    }
+
+    #[tokio::test]
+    async fn an_empty_whisper_transcript_is_no_speech_whatever_the_audio_level() {
+        // The meter level is diagnostic only (design D5): loud, quiet, or
+        // unknown, an empty transcript means no speech, and nothing is cleaned.
+        for level in [Some(0.9), Some(0.001), None] {
+            for text in ["", "   ", " . , ? ", "…"] {
+                let transcriber = FakeTranscriber::text(text);
+                let cleaner = FakeCleaner::default();
+                let result = run_dictation_pipeline(
+                    &transcriber,
+                    &cleaner,
+                    pipeline_request(),
+                    &cleanup_config(true),
+                    DictationCleanupContext::default(),
+                    level,
+                    None,
+                )
+                .await;
+                assert_visible_no_speech(&result);
+                assert!(cleaner.calls.lock().unwrap().is_empty(), "{text:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_take_under_half_a_second_never_reaches_whisper() {
+        // R7a: Whisper invents text for near-empty audio; such a take is no
+        // speech without an upload. Unknown length (older helpers) uploads.
+        for (seconds, uploads) in [
+            (Some(0.2), false),
+            (Some(0.49), false),
+            (Some(0.5), true),
+            (Some(3.0), true),
+            (None, true),
+        ] {
+            let transcriber = FakeTranscriber::text("Thank you.");
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner::default(),
+                pipeline_request(),
+                &cleanup_config(false),
+                DictationCleanupContext::default(),
+                Some(0.3),
+                seconds,
+            )
+            .await;
+            assert_eq!(
+                transcriber.calls.load(Ordering::SeqCst) == 1,
+                uploads,
+                "{seconds:?}"
+            );
+            if !uploads {
+                assert_visible_no_speech(&result);
+            }
+        }
+    }
+
+    #[test]
+    fn recording_ready_info_reads_the_audio_length() {
+        let event = |value: serde_json::Value| {
+            serde_json::json!({
+                "type": "recording_ready",
+                "payload": { "path": "/tmp/take.m4a", "audioDurationSeconds": value },
+            })
+        };
+        let seconds = |value| {
+            recording_ready_info_from_event(&event(value))
+                .unwrap()
+                .audio_seconds
+        };
+        assert_eq!(seconds(serde_json::json!("0.4200")), Some(0.42));
+        assert_eq!(seconds(serde_json::json!(2.5)), Some(2.5));
+        assert_eq!(seconds(serde_json::json!("-1")), None);
+        assert_eq!(seconds(serde_json::json!("nope")), None);
+    }
+
+    #[tokio::test]
+    async fn clovy_apis_empty_dictation_answer_is_the_same_no_speech() {
+        for message in ["no_speech", "dictation_text_empty"] {
+            let transcriber = FakeTranscriber {
+                result: Err(AppError::new("clovy_request_failed", message)),
+                calls: Default::default(),
+            };
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner::default(),
+                pipeline_request(),
+                &cleanup_config(false),
+                DictationCleanupContext::default(),
+                Some(0.5),
+                None,
+            )
+            .await;
+            assert_visible_no_speech(&result);
+        }
+    }
+
+    #[test]
     fn legacy_settings_reset_to_defaults_and_preserve_microphone() {
         let settings: DictationSettings = serde_json::from_str(
             r#"{"shortcut":"control_option_space","activationMode":"toggle","microphone":{"id":"usb","name":"USB Mic"}}"#,
@@ -8933,6 +9947,7 @@ mod tests {
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
             language: None,
+            ..DictationSettings::default()
         };
 
         assert!(validate_shortcut_update(
@@ -10025,7 +11040,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_transcription_discards_silently() {
+    fn empty_transcription_discards_with_a_visible_no_speech() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
@@ -10042,11 +11057,12 @@ mod tests {
         );
         assert!(outcome.transcript.is_none());
         let event = outcome.event.expect("empty capture emits an event");
-        assert!(is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]
-    fn empty_transcription_with_detected_audio_is_visible_error() {
+    fn empty_transcription_with_detected_audio_is_still_no_speech() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
@@ -10057,17 +11073,11 @@ mod tests {
             DictationStyle::Standard,
         );
 
+        // The level is diagnostic only (ditado-rapido D5).
         let event = outcome.event.expect("empty capture emits an event");
-        assert_eq!(event["payload"]["code"], "dictation_audio_without_text");
-        assert_eq!(
-            event["payload"]["message"],
-            "Dictation detected audio but produced no text. Try again."
-        );
-        let observed = event["payload"]["observedAudioLevel"]
-            .as_f64()
-            .expect("observed audio level");
-        assert!((observed - 0.04).abs() < 0.001);
-        assert!(!is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["message"], "No speech detected.");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]
@@ -10654,6 +11664,7 @@ mod tests {
     fn low_speech_evidence_requires_both_low_audio_signals() {
         let info =
             |speech_confidence, speech_analysis_status, observed_audio_level| RecordingReadyInfo {
+                audio_seconds: None,
                 audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
                 take_id: None,
                 observed_audio_level,
@@ -10693,6 +11704,7 @@ mod tests {
     #[test]
     fn short_capture_is_quarantined_regardless_of_level_but_analysis_failure_fails_open() {
         let info = |status, speech_confidence| RecordingReadyInfo {
+            audio_seconds: None,
             audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
             take_id: None,
             observed_audio_level: Some(0.0305),
@@ -10707,6 +11719,7 @@ mod tests {
             None,
         )));
         let loud_short_capture = RecordingReadyInfo {
+            audio_seconds: None,
             audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
             take_id: None,
             observed_audio_level: Some(DICTATION_AUDIO_ACTIVITY_THRESHOLD),
@@ -10981,7 +11994,7 @@ mod tests {
     }
 
     #[test]
-    fn no_speech_error_with_detected_audio_is_visible_error() {
+    fn no_speech_error_with_detected_audio_is_visible_no_speech() {
         let outcome = outcome_from_transcription_result(
             Err(AppError::new("june_request_failed", "no_speech")),
             Some(0.2),
@@ -10989,10 +12002,8 @@ mod tests {
         );
 
         let event = outcome.event.expect("no speech emits an event");
-        assert_eq!(event["payload"]["code"], "dictation_audio_without_text");
-        assert_eq!(event["payload"]["underlyingCode"], "june_request_failed");
-        assert_eq!(event["payload"]["underlyingMessage"], "no_speech");
-        assert!(!is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]
@@ -11301,25 +12312,6 @@ mod tests {
             split_dictation_cleanup_chunks(&text, DICTATION_CLEANUP_CHUNK_TARGET_BYTES),
             vec![text.as_str()]
         );
-    }
-
-    #[test]
-    fn unpunctuated_echo_of_a_long_chunk_triggers_a_retry() {
-        let input = jun_212_style_transcript();
-        let chunk = &input[..500];
-
-        // The echo failure: same run-on words back, zero punctuation.
-        assert!(cleaned_chunk_lacks_sentence_punctuation(chunk, chunk));
-        // A punctuated cleaning passes.
-        assert!(!cleaned_chunk_lacks_sentence_punctuation(
-            chunk,
-            "The side nav looks really sharp. Meeting should be used sparingly."
-        ));
-        // A short chunk may legitimately be one unterminated sentence.
-        assert!(!cleaned_chunk_lacks_sentence_punctuation(
-            "add milk to the shopping list",
-            "add milk to the shopping list"
-        ));
     }
 
     #[test]

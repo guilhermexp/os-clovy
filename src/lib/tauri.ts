@@ -304,6 +304,7 @@ export type DictationMicrophoneSetting = {
 };
 
 export type DictationStyle = "standard" | "casualLowercase" | "formal";
+export type DictationHudPlacement = "bottom" | "top";
 
 export type DictationSettingsDto = {
   pushToTalkShortcut: DictationShortcutSetting;
@@ -311,6 +312,11 @@ export type DictationSettingsDto = {
   microphone: DictationMicrophoneSetting;
   style: DictationStyle;
   language?: string;
+  /** Off by default: the transcript is pasted with no LLM call. */
+  cleanupEnabled: boolean;
+  /** OpenRouter model id used when cleanup is on. */
+  cleanupModel: string;
+  hudPlacement: DictationHudPlacement;
 };
 
 export type DictationCapabilitiesDto = {
@@ -1571,6 +1577,18 @@ export async function setDictationMicrophone(id?: string, name?: string) {
 
 export async function setDictationStyle(style: DictationStyle) {
   return invoke<DictationSettingsDto>("set_dictation_style", { style });
+}
+
+export async function setDictationCleanup(enabled: boolean, model?: string) {
+  return invoke<DictationSettingsDto>(
+    "set_dictation_cleanup",
+    model === undefined ? { enabled } : { enabled, model },
+  );
+}
+export async function setDictationHudPlacement(placement: DictationHudPlacement) {
+  return invoke<DictationSettingsDto>("set_dictation_hud_placement", {
+    placement,
+  });
 }
 
 export async function setDictationLanguage(language?: string) {

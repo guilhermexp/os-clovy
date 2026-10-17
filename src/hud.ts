@@ -603,7 +603,11 @@ const retiredDictationTakeIds = new Set<string>();
 function retireDictationTake() {
   if (activeDictationTakeId) retiredDictationTakeIds.add(activeDictationTakeId);
   activeDictationTakeId = undefined;
+  cleanupSkipped = false;
 }
+/** Cleanup failed for the take being pasted: its raw transcript is pasted,
+ * and the paste status says so instead of raising an error. */
+let cleanupSkipped = false;
 let receivedLiveDictationEvent = false;
 
 function dictationTakeId(event: DictationHudEvent) {
@@ -1181,8 +1185,14 @@ async function handleDictationEventPayload(payload: unknown) {
     return;
   }
 
+  if (dictationEvent.type === "dictation_cleanup_skipped") {
+    cleanupSkipped = true;
+    return;
+  }
+
   if (dictationEvent.type === "listening_started") {
     if (eventTakeId !== activeDictationTakeId) retireDictationTake();
+    cleanupSkipped = false;
     resetTarget();
     targetActive = true;
     if (targetNode) targetNode.hidden = false;
@@ -1282,7 +1292,9 @@ async function handleDictationEventPayload(payload: unknown) {
     targetPinned = true;
     const app = dictationEvent.payload?.app;
     const transition = setHud("pasting", () =>
-      t("hud.status.pastingInto", { app: app || t("hud.status.previousApp") }),
+      t(cleanupSkipped ? "hud.status.pastingIntoUncleaned" : "hud.status.pastingInto", {
+        app: app || t("hud.status.previousApp"),
+      }),
     );
     await showHud(showOptionsForTransition(transition));
     return;
@@ -1509,7 +1521,7 @@ hud?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
   if (event.target instanceof Element && event.target.closest("button")) return;
   event.preventDefault();
-  void appWindow?.startDragging().catch(() => {});
+  void invoke("dictation_hud_start_drag").catch(() => {});
 });
 
 // While the collapse tween plays, window sizing is locked (syncWindowToPill

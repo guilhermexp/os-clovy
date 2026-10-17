@@ -287,6 +287,10 @@ pub(crate) mod test_server {
         pub base_url: String,
         pub requests: Arc<Mutex<Vec<Value>>>,
         pub authorizations: Arc<Mutex<Vec<Option<String>>>>,
+        /// Each request's line and headers, as received.
+        pub heads: Arc<Mutex<Vec<String>>>,
+        /// Each request body as text (multipart bodies are not JSON).
+        pub raw_bodies: Arc<Mutex<Vec<String>>>,
     }
 
     pub async fn start(handler: Handler) -> FakeServer {
@@ -296,6 +300,10 @@ pub(crate) mod test_server {
         let recorded = requests.clone();
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let recorded_auth = authorizations.clone();
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let recorded_heads = heads.clone();
+        let raw_bodies = Arc::new(Mutex::new(Vec::new()));
+        let recorded_raw_bodies = raw_bodies.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -304,6 +312,8 @@ pub(crate) mod test_server {
                 let handler = handler.clone();
                 let recorded = recorded.clone();
                 let recorded_auth = recorded_auth.clone();
+                let recorded_heads = recorded_heads.clone();
+                let recorded_raw_bodies = recorded_raw_bodies.clone();
                 tokio::spawn(async move {
                     let mut buffer = Vec::new();
                     let mut chunk = [0_u8; 8192];
@@ -337,6 +347,11 @@ pub(crate) mod test_server {
                             .then(|| value.trim().to_string())
                     });
                     recorded_auth.lock().unwrap().push(authorization);
+                    recorded_heads.lock().unwrap().push(head.clone());
+                    recorded_raw_bodies
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&body).to_string());
                     let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                     let (status, response) = handler(&request);
                     recorded.lock().unwrap().push(request);
@@ -353,6 +368,8 @@ pub(crate) mod test_server {
             base_url: format!("http://{address}/v1"),
             requests,
             authorizations,
+            heads,
+            raw_bodies,
         }
     }
 

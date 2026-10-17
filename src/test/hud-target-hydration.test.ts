@@ -119,4 +119,25 @@ describe("dictation target hydration after a missed stop event", () => {
     await emit("paste_target", { app: "Other", target: c });
     expectDestination(target?.app);
   });
+
+  it("says the paste skipped cleanup when cleanup failed for this take", async () => {
+    resolveSnapshot("");
+    await emit("listening_started", { target: a });
+    await emit("finalizing_transcript", { target: b });
+    await mocks.listeners.get("dictation-event")?.({
+      payload: {
+        type: "dictation_cleanup_skipped",
+        payload: { code: "dictation_cleanup_timeout" },
+      },
+    });
+    await flush();
+    await emit("paste_target", { app: "Terminal", target: b });
+    expect(document.querySelector("#hud")?.textContent).toContain(
+      "Pasting into Terminal without cleanup",
+    );
+    await emit("paste_completed");
+    await emit("listening_started", { takeId: "next", target: a });
+    await emit("paste_target", { takeId: "next", app: "Terminal", target: b });
+    expect(document.querySelector("#hud")?.textContent).not.toContain("without cleanup");
+  });
 });

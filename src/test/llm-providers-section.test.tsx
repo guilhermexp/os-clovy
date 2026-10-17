@@ -177,7 +177,9 @@ describe("LlmProvidersSection", () => {
         .getByRole("combobox", { name })
         .querySelector('option[value="cli:codex"]') as HTMLOptionElement;
     expect(option("Chat").disabled).toBe(false);
-    for (const name of ["Notes", "Dictation cleanup", "Activity"]) {
+    // Dictation cleanup never runs on a CLI or endpoint, so it has no row.
+    expect(screen.queryByRole("combobox", { name: "Dictation cleanup" })).toBeNull();
+    for (const name of ["Notes", "Activity"]) {
       expect(option(name).disabled, name).toBe(true);
       expect(option(name).textContent).toBe("Codex (tools can't be turned off)");
     }
