@@ -256,14 +256,23 @@ enum RecordingCuePlayer {
     private static var sounds: [RecordingCueSound: NSSound] = [:]
     private static var completions: [RecordingCueSound: RecordingCueCompletion] = [:]
 
-    static func play(_ cue: RecordingCueSound) {
+    /// Loads every cue up front so the first press does not decode an mp3.
+    static func preload() {
+        for cue in [RecordingCueSound.start, .stop] where sounds[cue] == nil {
+            _ = load(cue)
+        }
+    }
+
+    /// Plays `cue` and returns its length in seconds, or nil if it did not play.
+    @discardableResult
+    static func play(_ cue: RecordingCueSound) -> TimeInterval? {
         let sound = sounds[cue] ?? load(cue)
         guard let sound else {
-            return
+            return nil
         }
         sound.stop()
         sound.currentTime = 0
-        sound.play()
+        return sound.play() ? sound.duration : nil
     }
 
     static func play(_ cue: RecordingCueSound, completion: @escaping () -> Void) {
@@ -331,6 +340,44 @@ func audioDurationSeconds(at url: URL) -> Double? {
         return nil
     }
     return Double(file.length) / file.fileFormat.sampleRate
+}
+
+/// Covers the gap between `record()` returning and the cue reaching the
+/// microphone, so the cue's tail is cut too.
+let startCueTrimMarginSeconds: TimeInterval = 0.03
+
+/// Writes `url` without its first `seconds` to a sibling file and calls back
+/// on main with that file, or nil when nothing should be cut (the take is
+/// barely longer than the cut) or the cut failed. Passthrough keeps the AAC
+/// packets as they are, so the release path pays no re-encoding.
+func trimLeadingAudio(at url: URL, seconds: TimeInterval, completion: @escaping (URL?) -> Void) {
+    let asset = AVURLAsset(url: url)
+    let duration = asset.duration
+    let cut = CMTime(seconds: seconds, preferredTimescale: 44_100)
+    guard
+        duration.isNumeric,
+        CMTimeGetSeconds(duration) > seconds + 0.1,
+        let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough)
+    else {
+        completion(nil)
+        return
+    }
+    let outputURL = url.deletingPathExtension()
+        .appendingPathExtension("trimmed")
+        .appendingPathExtension("m4a")
+    try? FileManager.default.removeItem(at: outputURL)
+    export.outputURL = outputURL
+    export.outputFileType = .m4a
+    export.timeRange = CMTimeRange(start: cut, end: duration)
+    export.exportAsynchronously {
+        let completed = export.status == .completed
+        if !completed {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+        runOnMain {
+            completion(completed ? outputURL : nil)
+        }
+    }
 }
 
 func microphoneDevices() -> [[String: String]] {
@@ -1727,6 +1774,9 @@ final class DictationController {
     private var isFinalizing = false
     private var startPending = false
     private var maxObservedAudioLevel: Float = 0
+    /// Seconds at the start of the current take's file covered by the start
+    /// cue; cut before `recording_ready`. Zero when no cue played.
+    private var startCueTrimSeconds: TimeInterval = 0
     private var activeTakeID: String?
     private var cancelledTakeIDs = Set<String>()
     /// Identifies the recorder whose asynchronous callbacks may mutate the
@@ -1803,12 +1853,22 @@ final class DictationController {
             ?? UUID().uuidString.lowercased()
         dictationStartGeneration += 1
         let generation = dictationStartGeneration
+        // The common case: access was granted before, so capture starts on
+        // this main-thread turn with no permission callback (ditado-rapido D3).
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+            beginDictationCapture()
+            return
+        }
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] microphoneAllowed in
             // Hop to main: commands (including the discard that may have
             // cancelled this start) are handled there, so the generation
             // comparison is ordered against them.
             DispatchQueue.main.async {
-                guard let self, self.dictationStartGeneration == generation else {
+                guard
+                    let self,
+                    self.startPending,
+                    self.dictationStartGeneration == generation
+                else {
                     return
                 }
                 guard microphoneAllowed else {
@@ -1822,22 +1882,25 @@ final class DictationController {
                     emit("permission_status", permissionPayload())
                     return
                 }
-                let beginRecording = { [weak self] in
-                    guard
-                        let self,
-                        self.startPending,
-                        self.dictationStartGeneration == generation
-                    else {
-                        return
-                    }
-                    self.startPending = false
-                    self.startRecording(purpose: .dictation, durationSeconds: nil)
-                }
-                // The cue defines the start-speaking boundary and finishes
-                // before capture begins, keeping Clovy's own sound out of the
-                // recording while providing feedback for every start mode.
-                RecordingCuePlayer.play(.start, completion: beginRecording)
+                self.beginDictationCapture()
             }
+        }
+    }
+
+    /// Starts capture at once and plays the start cue alongside it. Capture
+    /// no longer waits for the cue (it cost the cue's whole length on every
+    /// press); instead the cue's span is cut from the file when the take
+    /// stops (`finishDictationRecording`), so Clovy's own sound never
+    /// reaches the transcript.
+    private func beginDictationCapture() {
+        startPending = false
+        startRecording(purpose: .dictation, durationSeconds: nil)
+        guard isListening, recordingPurpose == .dictation else {
+            return
+        }
+        let cueOffset = ProcessInfo.processInfo.systemUptime - recordingStartedAt
+        if let cueLength = RecordingCuePlayer.play(.start) {
+            startCueTrimSeconds = cueOffset + cueLength + startCueTrimMarginSeconds
         }
     }
 
@@ -2231,7 +2294,7 @@ final class DictationController {
                         self.fail(error)
                         return
                     }
-                    self.emitRecordingReady(recordingInstanceID: recordingInstanceID)
+                    self.finishDictationRecording(recordingInstanceID: recordingInstanceID)
                 }
             }
             return
@@ -2239,7 +2302,42 @@ final class DictationController {
 
         audioRecorder?.stop()
         RecordingCuePlayer.play(.stop)
-        emitRecordingReady(recordingInstanceID: recordingInstanceID)
+        finishDictationRecording(recordingInstanceID: recordingInstanceID)
+    }
+
+    /// Cuts the start cue's span from a dictation take, then hands the file
+    /// to Rust. A failed cut keeps the whole file: a cue in the audio beats
+    /// losing the take. Mic tests keep their cue (they are played back, not
+    /// transcribed).
+    private func finishDictationRecording(recordingInstanceID: UUID) {
+        let trimSeconds = startCueTrimSeconds
+        guard
+            recordingPurpose == .dictation,
+            trimSeconds > 0,
+            let recordingURL
+        else {
+            emitRecordingReady(recordingInstanceID: recordingInstanceID)
+            return
+        }
+        trimLeadingAudio(at: recordingURL, seconds: trimSeconds) { [weak self] trimmedURL in
+            guard
+                let self,
+                self.recordingInstanceID == recordingInstanceID,
+                self.isFinalizing,
+                self.recordingURL == recordingURL
+            else {
+                // Discarded while cutting: the original went with the take.
+                if let trimmedURL {
+                    try? FileManager.default.removeItem(at: trimmedURL)
+                }
+                return
+            }
+            if let trimmedURL {
+                try? FileManager.default.removeItem(at: recordingURL)
+                self.recordingURL = trimmedURL
+            }
+            self.emitRecordingReady(recordingInstanceID: recordingInstanceID)
+        }
     }
 
     private func scheduleMicTestStop(after seconds: Double) {
@@ -2415,6 +2513,7 @@ final class DictationController {
         recordingInstanceID = nil
         DictationEscapeCancelMonitor.shared.stop()
         maxObservedAudioLevel = 0
+        startCueTrimSeconds = 0
         recordingStartedAt = 0
         micTestStopWorkItem?.cancel()
         micTestStopWorkItem = nil
