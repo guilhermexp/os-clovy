@@ -8664,6 +8664,257 @@ mod tests {
         assert!(validate_dictation_cleanup_model(&format!("a/{}", "b".repeat(200))).is_err());
     }
 
+    /// A transcriber that returns a fixed result and counts its calls.
+    struct FakeTranscriber {
+        result: Result<String, AppError>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeTranscriber {
+        fn text(text: &str) -> Self {
+            Self {
+                result: Ok(text.to_string()),
+                calls: Default::default(),
+            }
+        }
+    }
+
+    impl DictationTranscriber for FakeTranscriber {
+        async fn transcribe(
+            &self,
+            _request: DictateTranscribeRequest,
+        ) -> Result<TranscriptionProviderResult, AppError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone().map(|text| TranscriptionProviderResult {
+                text,
+                language: None,
+                provider: "groq".to_string(),
+            })
+        }
+    }
+
+    /// A cleaner that records every call and the peak number of calls in
+    /// flight. `fail_on` makes calls whose text contains it fail; `delay`
+    /// keeps each call open long enough to observe parallel chunks.
+    #[derive(Default)]
+    struct FakeCleaner {
+        calls: Mutex<Vec<DictationCleanupCall>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak_in_flight: std::sync::atomic::AtomicUsize,
+        delay: Duration,
+        fail_on: Option<String>,
+    }
+
+    impl DictationCleaner for FakeCleaner {
+        async fn clean(&self, call: DictationCleanupCall) -> Result<String, AppError> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+            self.calls.lock().unwrap().push(call.clone());
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            if self
+                .fail_on
+                .as_deref()
+                .is_some_and(|marker| call.text.contains(marker))
+            {
+                return Err(AppError::new("clovy_request_failed", "upstream failed"));
+            }
+            Ok(format!("{}.", call.text.to_uppercase()))
+        }
+    }
+
+    fn pipeline_request() -> DictateTranscribeRequest {
+        DictateTranscribeRequest {
+            audio_path: PathBuf::from("/tmp/take.m4a"),
+            context: None,
+            language: None,
+            session_id: "session".to_string(),
+            utterance_id: "utterance".to_string(),
+        }
+    }
+
+    fn cleanup_config(enabled: bool) -> DictationCleanupConfig {
+        DictationCleanupConfig {
+            enabled,
+            model: "openai/gpt-5-mini".to_string(),
+            style: DictationStyle::Standard,
+            timeout: dictation_cleanup_timeout,
+        }
+    }
+
+    fn pasted_text(result: &DictationPipelineResult) -> Option<&str> {
+        let command = &result.outcome.helper_command;
+        (command["type"] == "paste_text").then(|| command["text"].as_str().unwrap())
+    }
+
+    /// Words long enough that the transcript splits into several cleanup
+    /// chunks; `marker` tags the one word a failing cleaner trips on.
+    fn long_transcript(chunks: usize, marker: &str) -> String {
+        let mut words = Vec::new();
+        for index in 0..chunks * 100 {
+            if index == chunks * 50 {
+                words.push(marker.to_string());
+            } else {
+                words.push(format!("word{index}"));
+            }
+        }
+        words.join(" ")
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_off_pastes_the_transcript_without_calling_the_cleaner() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner::default();
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(false),
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        assert_eq!(transcriber.calls.load(Ordering::SeqCst), 1);
+        assert!(cleaner.calls.lock().unwrap().is_empty());
+        assert!(result.cleanup_skipped.is_none());
+        // Only the deterministic filler backstop ran; no LLM.
+        assert_eq!(pasted_text(&result), Some("Send it to samir"));
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_on_pastes_the_cleaned_text_from_the_chosen_model() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner::default();
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &DictationCleanupConfig {
+                style: DictationStyle::Formal,
+                ..cleanup_config(true)
+            },
+            DictationCleanupContext {
+                dictionary_context: Some("Samir".to_string()),
+                app_context: Some(APP_CONTEXT_EMAIL.to_string()),
+            },
+            Some(0.3),
+        )
+        .await;
+        let calls = cleaner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].model, "openai/gpt-5-mini");
+        assert_eq!(calls[0].style, DictationStyle::Formal);
+        assert_eq!(calls[0].dictionary_context.as_deref(), Some("Samir"));
+        assert_eq!(calls[0].app_context.as_deref(), Some(APP_CONTEXT_EMAIL));
+        assert_eq!(calls[0].utterance_id, "utterance");
+        assert_eq!(pasted_text(&result), Some("SEND IT TO SAMIR."));
+        assert!(result.cleanup_skipped.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_cleanup_pastes_the_raw_transcript_and_reports_the_skip() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            fail_on: Some("samir".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("Send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("clovy_request_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_cleanup_pastes_the_raw_transcript() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            delay: Duration::from_millis(500),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &DictationCleanupConfig {
+                timeout: |_| Duration::from_millis(20),
+                ..cleanup_config(true)
+            },
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("Send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("dictation_cleanup_timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn long_dictation_cleans_chunks_in_parallel_up_to_four_and_keeps_their_order() {
+        let transcript = long_transcript(7, "word350");
+        let chunks = split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        assert!(chunks.len() > 4, "{} chunks", chunks.len());
+        let expected = chunks
+            .iter()
+            .map(|chunk| format!("{}.", chunk.to_uppercase()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let transcriber = FakeTranscriber::text(&transcript);
+        let cleaner = FakeCleaner {
+            delay: Duration::from_millis(40),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
+        let peak = cleaner.peak_in_flight.load(Ordering::SeqCst);
+        assert!((2..=4).contains(&peak), "peak in flight {peak}");
+        assert_eq!(pasted_text(&result), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn one_failed_chunk_pastes_the_whole_raw_transcript() {
+        let transcript = long_transcript(6, "explode");
+        let transcriber = FakeTranscriber::text(&transcript);
+        let cleaner = FakeCleaner {
+            fail_on: Some("explode".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+        )
+        .await;
+        let pasted = pasted_text(&result).unwrap();
+        assert!(!pasted.contains('.'), "no cleaned chunk survives: {pasted}");
+        assert!(pasted.contains("explode"));
+        assert!(result.cleanup_skipped.is_some());
+    }
+
     #[test]
     fn legacy_settings_reset_to_defaults_and_preserve_microphone() {
         let settings: DictationSettings = serde_json::from_str(
