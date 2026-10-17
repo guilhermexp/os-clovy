@@ -126,3 +126,27 @@ describe("dictation helper: reports the take's length (R7)", () => {
     );
   });
 });
+
+describe("dictation helper: the cue cut uses the file's own clock (R1)", () => {
+  it("measures the default recorder's cue offset with currentTime", () => {
+    const begin = code(body("private func beginDictationCapture()"));
+    expect(begin).toContain("audioRecorder.currentTime");
+    // recordingStartedAt is set before the recorder exists: not the file clock.
+    expect(begin).not.toContain("recordingStartedAt");
+  });
+
+  it("measures a pinned microphone's cue against its first sample", () => {
+    const capture = code(body("func captureOutput("));
+    expect(capture).toMatch(/firstSamplePresentationTime = /);
+    const begin = code(body("private func beginDictationCapture()"));
+    expect(begin).toContain("clockTime()");
+    const settle = code(body("private func settleSelectedDeviceCueTrim("));
+    expect(settle).toContain("CMTimeSubtract(cueEnd, firstSampleTime)");
+    // A cue that ended before the first sample leaves nothing to cut.
+    expect(settle).toMatch(/remaining > 0 \? remaining \+ startCueTrimMarginSeconds : 0/);
+    const stop = code(body("private func stopActiveRecording()"));
+    expect(stop.indexOf("settleSelectedDeviceCueTrim(")).toBeLessThan(
+      stop.indexOf("self.finishDictationRecording("),
+    );
+  });
+});
