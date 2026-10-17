@@ -1440,6 +1440,9 @@ pub fn setup(app: &mut tauri::App) {
         tracing::warn!(%error, "failed to configure dictation HUD");
     }
     manage_settings(app.handle());
+    // Keys, token, and the transcription connection are ready before the
+    // first press (ditado-rapido D4).
+    crate::clovy_api::warm_dictation_route_if_idle();
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
     });
@@ -2899,6 +2902,11 @@ fn handle_shortcut_key_event(
         "fn_key_up" | "shortcut_key_up" => ShortcutKeyEdge::Up,
         _ => return,
     };
+    if edge == ShortcutKeyEdge::Down {
+        // A pooled connection idle for over a minute is reopened while the
+        // user speaks, not after release.
+        crate::clovy_api::warm_dictation_route_if_idle();
+    }
 
     let Some(kind) = shortcut_kind_from_event(event) else {
         reset_shortcut_activation(app);
@@ -5401,7 +5409,6 @@ async fn transcribe_recording_ready_inner(
     };
     let current_settings = current_dictation_settings(app).unwrap_or_default();
     let cleanup = DictationCleanupConfig::from_settings(&current_settings);
-    let style = cleanup.style;
     let language = current_settings.language;
     let Some(dictionary) =
         run_dictation_take_step(take, transcription_dictionary_for_app(app)).await

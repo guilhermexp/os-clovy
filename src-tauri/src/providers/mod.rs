@@ -1331,6 +1331,7 @@ fn update_provider_credential(
     }
     *settings = candidate.clone();
     *published = candidate;
+    crate::clovy_api::forget_dictation_user_keys();
     Ok(ProviderModelSettingsDto::from(&*settings))
 }
 

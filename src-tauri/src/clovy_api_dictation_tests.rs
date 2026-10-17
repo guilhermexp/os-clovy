@@ -30,7 +30,10 @@ struct Hosts {
 impl Hosts {
     async fn start() -> Self {
         let groq = test_server::start(Arc::new(|_: &serde_json::Value| {
-            (200, serde_json::json!({ "text": "send it to samir", "language": "en" }))
+            (
+                200,
+                serde_json::json!({ "text": "send it to samir", "language": "en" }),
+            )
         }))
         .await;
         let openrouter = test_server::start(Arc::new(|_: &serde_json::Value| {
@@ -252,7 +255,10 @@ async fn cleanup_without_an_openrouter_key_goes_through_clovy_api_with_the_chose
 #[tokio::test]
 async fn a_rejected_groq_key_is_reported_as_the_users_key() {
     let groq = test_server::start(Arc::new(|_: &serde_json::Value| {
-        (401, serde_json::json!({ "error": { "message": "invalid key" } }))
+        (
+            401,
+            serde_json::json!({ "error": { "message": "invalid key" } }),
+        )
     }))
     .await;
     let hosts = Hosts::start().await;
