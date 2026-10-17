@@ -19,6 +19,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Mediç
 - [x] 3.2 Aquecimento na abertura e após cada tomada: sons carregados, gravador preparado, token e conexão prontos (D4). Verificar: teste do coordenador que a preparação acontece na abertura e não grava áudio.
 - [x] 3.3 "Nenhuma fala" só depois do Whisper vazio; análise de fala da Apple fora do caminho de envio (D5). Verificar: teste com transcritor falso devolvendo vazio → `no_speech`, sem colar.
 - [x] 3.4 Colagem sem espera fixa quando o destino já está ativo (D6). Verificar: teste do helper ou medição do intervalo `paste_target` → `paste_completed` < 50 ms com destino ativo.
+- [ ] 3.5 Indicador do ditado embaixo-centro por padrão, opção Em cima/Embaixo em Configurações, e causa raiz de hoje ele aparecer em y≈297 de 1200 em vez do topo (spec "Posição do indicador do ditado"). Verificar: testes unitários do cálculo da origem; frame da janela `Clovy Dictation` no Mac nas duas opções.
 
 ## 4. Prova
 
