@@ -71,3 +71,12 @@ Alternatives considered:
 - A prompt change in Clovy API must be copied to the desktop; the equality
   test fails until it is.
 - Extending the direct route to another feature needs its own decision.
+
+## Addendum (2026-10-17): verbose transcription on the direct route
+
+The direct Groq request differs from Clovy API's in one parameter: it asks
+for `response_format=verbose_json` and drops segments whose `no_speech_prob`
+is 0.6 or more, because Whisper invents text over near-silence and the
+helper's speech classifier no longer runs before upload. Takes under 0.5 s
+are not uploaded at all. The Clovy API route keeps `json` (v1 contract). See
+the `ditado-rapido` design, D5.
