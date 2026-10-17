@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
-import { dictationSettings, setDictationStyle } from "../../lib/tauri";
-import type { DictationStyle } from "../../lib/tauri";
+import {
+  dictationSettings,
+  listProviderModels,
+  setDictationCleanup,
+  setDictationStyle,
+} from "../../lib/tauri";
+import type { DictationStyle, ProviderModelDto } from "../../lib/tauri";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { Switch } from "../ui/Switch";
 import { type MessageKey, useT } from "../../i18n";
 
 const STYLE_OPTIONS = [
@@ -25,16 +31,37 @@ const SAMPLES: Record<DictationStyle, { description: MessageKey; sample: Message
   },
 };
 
+type CleanupModelOption = { id: string; name: string };
+
+/** Dictation cleanup is one OpenRouter chat completion: only catalog ids of
+ * the form `vendor/model` qualify, never Auto, a CLI, or an endpoint. */
+function cleanupModelOptions(models: ProviderModelDto[]): CleanupModelOption[] {
+  return models
+    .filter(
+      (model) =>
+        model.provider === "openrouter" &&
+        /^[^/\s:]+\/\S+$/.test(model.id) &&
+        !model.id.startsWith("__"),
+    )
+    .map((model) => ({ id: model.id, name: model.name.trim() || model.id }));
+}
+
 export function StyleSettingsSection() {
   const t = useT();
   const [style, setStyle] = useState<DictationStyle>("standard");
+  const [cleanupEnabled, setCleanupEnabled] = useState(false);
+  const [cleanupModel, setCleanupModel] = useState("");
+  const [models, setModels] = useState<CleanupModelOption[]>([]);
   const [error, setError] = useState<string>();
 
   useEffect(() => {
     let cancelled = false;
     dictationSettings()
       .then((response) => {
-        if (!cancelled) setStyle(response.settings.style);
+        if (cancelled) return;
+        setStyle(response.settings.style);
+        setCleanupEnabled(response.settings.cleanupEnabled ?? false);
+        setCleanupModel(response.settings.cleanupModel ?? "");
       })
       .catch((caught: unknown) => {
         if (!cancelled) setError(messageFromError(caught));
@@ -43,6 +70,48 @@ export function StyleSettingsSection() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!cleanupEnabled) return;
+    let cancelled = false;
+    listProviderModels("generation")
+      .then((response) => {
+        if (!cancelled) setModels(cleanupModelOptions(response.models));
+      })
+      .catch(() => {
+        // The current model stays selectable; the catalog is a convenience.
+        if (!cancelled) setModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cleanupEnabled]);
+
+  async function toggleCleanup(enabled: boolean) {
+    setCleanupEnabled(enabled);
+    try {
+      const next = await setDictationCleanup(enabled);
+      setCleanupEnabled(next.cleanupEnabled);
+      setCleanupModel(next.cleanupModel);
+      setError(undefined);
+    } catch (caught) {
+      setCleanupEnabled(!enabled);
+      setError(messageFromError(caught));
+    }
+  }
+
+  async function selectCleanupModel(model: string) {
+    const previous = cleanupModel;
+    setCleanupModel(model);
+    try {
+      const next = await setDictationCleanup(true, model);
+      setCleanupModel(next.cleanupModel);
+      setError(undefined);
+    } catch (caught) {
+      setCleanupModel(previous);
+      setError(messageFromError(caught));
+    }
+  }
 
   async function selectStyle(nextStyle: DictationStyle) {
     setStyle(nextStyle);
@@ -56,6 +125,10 @@ export function StyleSettingsSection() {
   }
 
   const current = SAMPLES[style];
+  const modelOptions =
+    cleanupModel && !models.some((model) => model.id === cleanupModel)
+      ? [{ id: cleanupModel, name: cleanupModel }, ...models]
+      : models;
 
   return (
     <section className="settings-group" aria-labelledby="style-heading">
@@ -66,26 +139,69 @@ export function StyleSettingsSection() {
         <div className="settings-rows">
           <div className="settings-row">
             <div className="settings-row-info">
-              <h3 className="settings-row-title">{t("settings.style.outputStyle")}</h3>
-              <p className="settings-row-description">{t(current.description)}</p>
+              <h3 id="dictation-cleanup-title" className="settings-row-title">
+                {t("settings.style.cleanup")}
+              </h3>
+              <p className="settings-row-description">{t("settings.style.cleanupDescription")}</p>
               {error ? <p className="settings-row-error">{error}</p> : null}
             </div>
             <div className="settings-row-control">
-              <SegmentedControl
-                value={style}
-                onValueChange={(value) => void selectStyle(value)}
-                options={STYLE_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: t(option.labelKey),
-                }))}
-                aria-label={t("settings.style.aria")}
+              <Switch
+                checked={cleanupEnabled}
+                onCheckedChange={(enabled) => void toggleCleanup(enabled)}
+                aria-labelledby="dictation-cleanup-title"
               />
             </div>
           </div>
+          {cleanupEnabled ? (
+            <>
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <h3 className="settings-row-title">{t("settings.style.cleanupModel")}</h3>
+                  <p className="settings-row-description">
+                    {t("settings.style.cleanupModelDescription")}
+                  </p>
+                </div>
+                <div className="settings-row-control">
+                  <select
+                    className="dialog-input"
+                    aria-label={t("settings.style.cleanupModel")}
+                    value={cleanupModel}
+                    onChange={(event) => void selectCleanupModel(event.target.value)}
+                  >
+                    {modelOptions.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <h3 className="settings-row-title">{t("settings.style.outputStyle")}</h3>
+                  <p className="settings-row-description">{t(current.description)}</p>
+                </div>
+                <div className="settings-row-control">
+                  <SegmentedControl
+                    value={style}
+                    onValueChange={(value) => void selectStyle(value)}
+                    options={STYLE_OPTIONS.map((option) => ({
+                      value: option.value,
+                      label: t(option.labelKey),
+                    }))}
+                    aria-label={t("settings.style.aria")}
+                  />
+                </div>
+              </div>
+            </>
+          ) : null}
         </div>
-        <div className="style-preview" aria-live="polite">
-          <p className="style-preview-text">{t(current.sample)}</p>
-        </div>
+        {cleanupEnabled ? (
+          <div className="style-preview" aria-live="polite">
+            <p className="style-preview-text">{t(current.sample)}</p>
+          </div>
+        ) : null}
       </div>
     </section>
   );

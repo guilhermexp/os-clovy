@@ -46,10 +46,12 @@ describe("dictation cleanup settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.dictationSettings.mockResolvedValue({ settings: settings(false) });
-    mocks.setDictationCleanup.mockImplementation(async (enabled: boolean, cleanupModel?: string) => ({
-      ...settings(enabled),
-      cleanupModel: cleanupModel ?? "nvidia/nemotron-3-nano-30b-a3b",
-    }));
+    mocks.setDictationCleanup.mockImplementation(
+      async (enabled: boolean, cleanupModel?: string) => ({
+        ...settings(enabled),
+        cleanupModel: cleanupModel ?? "nvidia/nemotron-3-nano-30b-a3b",
+      }),
+    );
     mocks.listProviderModels.mockResolvedValue({
       mode: "generation",
       modelType: "text",

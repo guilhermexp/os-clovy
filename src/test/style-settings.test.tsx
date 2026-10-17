@@ -22,6 +22,8 @@ vi.mock("../lib/tauri", () => ({
   }),
   dictationSettings: mocks.dictationSettings,
   setDictationStyle: mocks.setDictationStyle,
+  setDictationCleanup: vi.fn(),
+  listProviderModels: vi.fn().mockResolvedValue({ models: [] }),
 }));
 
 describe("StyleSettingsSection", () => {
@@ -55,6 +57,9 @@ describe("StyleSettingsSection", () => {
         },
         microphone: {},
         style: "casualLowercase",
+        // The style applies only while cleanup is on.
+        cleanupEnabled: true,
+        cleanupModel: "nvidia/nemotron-3-nano-30b-a3b",
       },
     });
     mocks.setDictationStyle.mockImplementation(async (style) => ({

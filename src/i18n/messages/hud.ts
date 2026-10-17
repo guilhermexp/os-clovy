@@ -16,6 +16,7 @@ export default defineMessages({
     "hud.status.stillTranscribing": "Still transcribing",
     "hud.status.pasting": "Pasting",
     "hud.status.pastingInto": "Pasting into {app}",
+    "hud.status.pastingIntoUncleaned": "Pasting into {app} without cleanup",
     "hud.status.previousApp": "previous app",
     "hud.status.dictationFailed": "Dictation failed.",
     // Dictation errors by stable code (src/lib/errors.ts); the native message
@@ -117,6 +118,7 @@ export default defineMessages({
     "hud.status.stillTranscribing": "Ainda transcrevendo",
     "hud.status.pasting": "Colando",
     "hud.status.pastingInto": "Colando em {app}",
+    "hud.status.pastingIntoUncleaned": "Colando em {app} sem limpeza",
     "hud.status.previousApp": "app anterior",
     "hud.status.dictationFailed": "Falha no ditado.",
     "hud.error.recordingStartBusy": "O ditado já está começando.",
