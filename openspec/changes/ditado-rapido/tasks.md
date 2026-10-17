@@ -23,7 +23,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Mediç
 
 ## 4. Prova
 
-- [ ] 4.1 `make verify` sem falhas.
+- [x] 4.1 `make verify` sem falhas.
 - [ ] 4.2 Medição no app de dev com chave Groq própria e limpeza desligada: 10 tomadas de 3-10 s; no `dictation-events.log`, `shortcut_key_down` → `listening_started` ≤ 150 ms (≤ 300 ms no primeiro aperto) e `shortcut_key_up` → `paste_completed` ≤ 1,5 s; mais 3 tomadas com limpeza ligada (OpenRouter) registrando o tempo. Evidência em `.tmp/verify/ditado-rapido/run-<id>/report.md` com a tabela antes/depois.
 
 ## Workflow follow-up
