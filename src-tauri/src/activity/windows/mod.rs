@@ -1,5 +1,7 @@
 //! Windows adapter for the shared text-only activity capture engine.
 
+pub(crate) mod window;
+
 use std::path::Path;
 
 use super::platform::{

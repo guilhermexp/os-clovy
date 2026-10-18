@@ -10,7 +10,7 @@
 
 ## 2. Janela, identidade e listas
 
-- [ ] 2.1 RED: testes unitários de identidade (nome do executável em minúsculas, `FileDescription`, AppUserModelID) e das listas Windows em `filter.rs`, `timeline/context.rs`, `timeline/categorize.rs` e `timeline/builder.rs` (`msedge.exe` é navegador, `code.exe` é editor, `lockapp.exe` nunca é útil); verificar que falham.
+- [x] 2.1 RED: testes unitários de identidade (nome do executável em minúsculas, `FileDescription`, AppUserModelID) e das listas Windows em `filter.rs`, `timeline/context.rs`, `timeline/categorize.rs` e `timeline/builder.rs` (`msedge.exe` é navegador, `code.exe` é editor, `lockapp.exe` nunca é útil); verificar que falham.
 - [ ] 2.2 GREEN: `focused_window` (D2) e listas; testes de 2.1 passam; no `cert`, quadros mostram app e título corretos no export de depuração.
 
 ## 3. Texto, URL e OCR
