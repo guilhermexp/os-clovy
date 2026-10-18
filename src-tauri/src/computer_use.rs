@@ -261,7 +261,7 @@ pub struct ComputerUseRunRequest {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PermissionProbe {
+pub(crate) struct PermissionProbe {
     accessibility: bool,
     screen_recording: bool,
 }
@@ -1817,6 +1817,40 @@ async fn macos_version() -> &'static str {
 
     let _ = MACOS_VERSION.set(version);
     MACOS_VERSION.get().map(String::as_str).unwrap_or("unknown")
+}
+
+/// What the bundled driver check found.
+pub(crate) enum DriverCheck {
+    Missing(String),
+    Mismatch(String),
+    Ready(String),
+}
+
+/// The local facts Computer use status depends on (D4: nothing remote).
+pub(crate) struct StatusChecks {
+    pub platform_supported: bool,
+    pub grant_enabled: bool,
+    pub driver: DriverCheck,
+    pub permissions: Option<Result<PermissionProbe, AppError>>,
+}
+
+#[allow(dead_code)]
+fn status_from_checks(checks: StatusChecks) -> ComputerUseStatus {
+    let _ = checks;
+    ComputerUseStatus {
+        platform_supported: false,
+        plan_eligible: false,
+        grant_enabled: false,
+        driver_available: false,
+        driver_version: None,
+        accessibility: false,
+        screen_recording: false,
+        model_supports_vision: false,
+        generation_model: String::new(),
+        ready: false,
+        state: "unsupported".to_string(),
+        error: None,
+    }
 }
 
 async fn status_inner(app: &AppHandle, computer_use: &ComputerUseState) -> ComputerUseStatus {
@@ -5662,6 +5696,74 @@ mod tests {
         let second = second.await.expect("second poller").expect("second result");
         assert_eq!(first, second);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn checks(grant_enabled: bool, driver: DriverCheck, granted: Option<bool>) -> StatusChecks {
+        StatusChecks {
+            platform_supported: true,
+            grant_enabled,
+            driver,
+            permissions: granted.map(|granted| {
+                Ok(PermissionProbe {
+                    accessibility: granted,
+                    screen_recording: granted,
+                })
+            }),
+        }
+    }
+
+    /// D4: ready needs only the grant, the pinned driver and the macOS
+    /// permissions; no plan, vision model or rollout answer is an input.
+    #[test]
+    fn status_is_ready_from_local_facts_alone() {
+        let status = status_from_checks(checks(
+            true,
+            DriverCheck::Ready("0.4.2".to_string()),
+            Some(true),
+        ));
+
+        assert!(status.ready);
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.driver_version.as_deref(), Some("0.4.2"));
+        let json = serde_json::to_value(&status).unwrap();
+        for gone in ["planEligible", "modelSupportsVision", "generationModel"] {
+            assert!(json.get(gone).is_none(), "{gone} is still reported");
+        }
+    }
+
+    #[test]
+    fn status_states_follow_grant_driver_and_permissions() {
+        let off = status_from_checks(checks(false, DriverCheck::Ready("0.4.2".into()), None));
+        assert_eq!((off.state.as_str(), off.ready), ("off", false));
+        assert!(off.driver_available);
+
+        let missing = status_from_checks(checks(true, DriverCheck::Missing("gone".into()), None));
+        assert_eq!(missing.state, "driver_missing");
+        assert_eq!(missing.error.as_deref(), Some("gone"));
+        let hidden = status_from_checks(checks(false, DriverCheck::Missing("gone".into()), None));
+        assert_eq!((hidden.state.as_str(), hidden.error), ("off", None));
+
+        let mismatch = status_from_checks(checks(true, DriverCheck::Mismatch("sig".into()), None));
+        assert_eq!(mismatch.state, "driver_mismatch");
+
+        let denied = status_from_checks(checks(
+            true,
+            DriverCheck::Ready("0.4.2".into()),
+            Some(false),
+        ));
+        assert_eq!(
+            (denied.state.as_str(), denied.ready),
+            ("permission_missing", false)
+        );
+
+        let unsupported = status_from_checks(StatusChecks {
+            platform_supported: false,
+            ..checks(true, DriverCheck::Ready("0.4.2".into()), Some(true))
+        });
+        assert_eq!(
+            (unsupported.state.as_str(), unsupported.ready),
+            ("unsupported", false)
+        );
     }
 
     #[test]

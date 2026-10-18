@@ -508,6 +508,47 @@ async fn a_cli_turn_needs_neither_the_clovy_plan_nor_a_native_vision_model() {
     assert_eq!(*cli.asked.lock().unwrap(), ["rollout", "grant", "driver"]);
 }
 
+/// D4: no plan, vision model or remote rollout answer is consulted.
+#[derive(Default)]
+struct LocalProbe {
+    asked: Mutex<Vec<&'static str>>,
+}
+
+impl EligibilityProbe for LocalProbe {
+    fn macos(&self) -> bool {
+        true
+    }
+    fn rollout_enabled(&self) -> BoxedBool<'_> {
+        self.asked.lock().unwrap().push("rollout");
+        Box::pin(async { false })
+    }
+    fn grant_enabled(&self) -> BoxedBool<'_> {
+        self.asked.lock().unwrap().push("grant");
+        Box::pin(async { true })
+    }
+    fn plan_eligible(&self) -> BoxedBool<'_> {
+        self.asked.lock().unwrap().push("plan");
+        Box::pin(async { false })
+    }
+    fn native_model_supports_vision(&self) -> BoxedBool<'_> {
+        self.asked.lock().unwrap().push("vision");
+        Box::pin(async { false })
+    }
+    fn driver(&self) -> Result<(), AppError> {
+        self.asked.lock().unwrap().push("driver");
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn eligibility_asks_only_the_grant_and_the_driver() {
+    let probe = LocalProbe::default();
+    check_eligibility(ActionOrigin::CliTurn, &probe)
+        .await
+        .unwrap();
+    assert_eq!(*probe.asked.lock().unwrap(), ["grant", "driver"]);
+}
+
 #[test]
 fn content_values_become_mcp_blocks_and_plain_values_stay_one_text_block() {
     let plain = json!({ "saved": true });
