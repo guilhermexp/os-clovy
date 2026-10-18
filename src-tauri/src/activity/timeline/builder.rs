@@ -254,8 +254,11 @@ pub fn push_frame(
     let previous = state.last_frame.as_ref();
     let window_changed = previous.map_or(true, |last| !last.same_window(frame));
     let text_changed = previous.map_or(true, |last| last.text_id != frame.text_id);
-    let useful =
-        !is_away_app(&frame.app_name) && (window_changed || text_changed || signals.input_near(at));
+    let system_input_near = frame
+        .input_idle_ms
+        .is_some_and(|idle| idle <= (FRAME_SPAN + INPUT_AFTER).num_milliseconds() as u64);
+    let useful = !is_away_app(&frame.app_name)
+        && (window_changed || text_changed || signals.input_near(at) || system_input_near);
     state.last_frame = Some(FrameMark::of(frame, at));
 
     if !useful {
