@@ -550,39 +550,8 @@ async fn authorized_account(
     scope: &str,
     teams: bool,
 ) -> Result<ConnectorAccount, AppError> {
-    let account = connectors::list_runtime_accounts(app)
-        .await?
-        .into_iter()
-        .find(|account| account.account_id == account_id && account.provider == provider)
-        .ok_or_else(|| {
-            AppError::new(
-                "connector_not_connected",
-                "This connector account is not connected.",
-            )
-        })?;
-    if account.status != ConnectorAccountStatus::Connected {
-        return Err(AppError::new(
-            "connector_reconnect_required",
-            "Reconnect this connector account in settings.",
-        ));
-    }
-    if !account
-        .scopes
-        .iter()
-        .any(|held| policy::scope_grants(held, scope))
-    {
-        return Err(AppError::new(
-            "connector_scope_missing",
-            "This connector account does not have the required permission.",
-        ));
-    }
-    if teams && account.selected_teams.is_empty() {
-        return Err(AppError::new(
-            "linear_teams_not_selected",
-            "Select at least one Linear team in settings.",
-        ));
-    }
-    Ok(account)
+    let accounts = connectors::list_runtime_accounts(app).await?;
+    connectors::check_account_grant(&accounts, account_id, provider, scope, teams)
 }
 
 fn json_error(error: serde_json::Error) -> AppError {
@@ -894,7 +863,11 @@ async fn calendar_respond_to_invite(app: &AppHandle, arguments: Value) -> Result
     )
 }
 
-async fn github_token(app: &AppHandle, arguments: &Value, scope: &str) -> Result<String, AppError> {
+async fn github_account(
+    app: &AppHandle,
+    arguments: &Value,
+    scope: &str,
+) -> Result<(ConnectorAccount, String), AppError> {
     let account = authorized_account(
         app,
         &account_id(arguments)?,
@@ -903,15 +876,21 @@ async fn github_token(app: &AppHandle, arguments: &Value, scope: &str) -> Result
         false,
     )
     .await?;
-    connectors::github_access_token(app, &account.account_id).await
+    let token = connectors::github_access_token(app, &account.account_id).await?;
+    Ok((account, token))
+}
+async fn github_token(app: &AppHandle, arguments: &Value, scope: &str) -> Result<String, AppError> {
+    Ok(github_account(app, arguments, scope).await?.1)
 }
 async fn github_list_repositories(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
-    let token = github_token(app, &arguments, GITHUB_READ).await?;
-    as_value(
-        crate::connectors::github::list_repositories(&token)
-            .await
-            .map_err(app_error)?,
-    )
+    let (account, token) = github_account(app, &arguments, GITHUB_READ).await?;
+    // A gh token is an OAuth token; the App installation endpoints refuse it.
+    let list = if account.via_gh {
+        crate::connectors::github::list_user_repositories(&token).await
+    } else {
+        crate::connectors::github::list_repositories(&token).await
+    };
+    as_value(list.map_err(app_error)?)
 }
 async fn github_get_pull_request(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
     let token = github_token(app, &arguments, GITHUB_READ).await?;

@@ -420,6 +420,8 @@ pub fn run() {
             connectors::commands::connectors_list,
             connectors::commands::connectors_connect,
             connectors::commands::connectors_cancel_connect,
+            connectors::commands::connectors_github_cli_detect,
+            connectors::commands::connectors_github_cli_connect,
             connectors::commands::connectors_disconnect,
             connectors::commands::connectors_linear_teams,
             connectors::commands::connectors_selected_teams_set,
@@ -521,6 +523,9 @@ pub fn run() {
             // Poll Google for the events routines subscribe to (email arrivals
             // and upcoming meetings) and wake the matching durable routine.
             connectors::triggers::start(app.handle());
+            // Connect GitHub through a signed-in GitHub CLI when there is no
+            // GitHub account yet (ADR-0068); off the startup path.
+            connectors::start_github_cli_detection(app.handle());
             meeting_hud::setup(app);
             os_accounts::setup_deep_link(app);
             #[cfg(target_os = "macos")]

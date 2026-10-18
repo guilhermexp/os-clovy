@@ -55,10 +55,19 @@ pub struct StoredConnectorTokens {
 }
 
 #[cfg(test)]
-pub fn reset_test_store_writes() {}
+thread_local! {
+    static TEST_STORE_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
+/// Tests count the token writes made on their own thread.
+#[cfg(test)]
+pub fn reset_test_store_writes() {
+    TEST_STORE_WRITES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
 pub fn test_store_writes() -> usize {
-    usize::MAX
+    TEST_STORE_WRITES.with(std::cell::Cell::get)
 }
 
 /// Write `tokens` to the keychain, keyed by `(provider, account_id)`.
@@ -69,6 +78,8 @@ pub async fn store_tokens(
     account_id: &str,
     tokens: &StoredConnectorTokens,
 ) -> Result<(), AppError> {
+    #[cfg(test)]
+    TEST_STORE_WRITES.with(|count| count.set(count.get() + 1));
     let json = serde_json::to_string(tokens)
         .map_err(|e| AppError::new("connector_token_serialize_failed", e.to_string()))?;
     let account_id = account_id.to_string();

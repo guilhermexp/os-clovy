@@ -106,6 +106,30 @@ pub async fn connectors_connect(
     Ok(account)
 }
 
+/// Connect "GitHub (via gh)" on its own when the GitHub CLI is signed in and
+/// no GitHub account exists. Runs when Plugins opens; never errors the page.
+#[tauri::command]
+pub async fn connectors_github_cli_detect(
+    app: tauri::AppHandle,
+) -> Result<Option<ConnectorAccount>, AppError> {
+    match super::connect_github_cli(&app, super::github_cli::ConnectMode::Automatic).await {
+        Ok(account) => Ok(account),
+        Err(error) => {
+            tracing::warn!(error_code = %error.code, "github cli detection failed");
+            Ok(None)
+        }
+    }
+}
+
+/// The "Connect with GitHub CLI" button: connects through gh and turns the
+/// automatic connection back on.
+#[tauri::command]
+pub async fn connectors_github_cli_connect(
+    app: tauri::AppHandle,
+) -> Result<Option<ConnectorAccount>, AppError> {
+    super::connect_github_cli(&app, super::github_cli::ConnectMode::Explicit).await
+}
+
 #[tauri::command]
 pub fn connectors_cancel_connect(flow: tauri::State<'_, ConnectFlow>) -> Result<(), AppError> {
     super::cancel_connect(&flow);

@@ -3,7 +3,7 @@
 //! the network, or the token store.
 
 use super::*;
-use crate::connectors::{policy, ConnectorAccountStatus, ConnectorProvider};
+use crate::connectors::{policy, store, ConnectorAccountStatus, ConnectorProvider};
 use crate::llm::shell_env::LoginEnv;
 use sqlx_sqlite::SqlitePoolOptions;
 use std::collections::BTreeMap;
@@ -28,14 +28,14 @@ impl FakeGh {
         std::fs::write(
             &script,
             r#"#!/bin/sh
-dir="$(dirname "$0")"
+dir="${0%/*}"
 echo "$*" >> "$dir/calls"
 case "$1 $2 $3 $4" in
   "auth status --hostname github.com")
     if [ -f "$dir/token" ]; then echo "Logged in to github.com account octo" >&2; exit 0; fi
     echo "You are not logged into any GitHub hosts." >&2; exit 1 ;;
   "auth token --hostname github.com")
-    if [ -f "$dir/token" ]; then cat "$dir/token"; echo; exit 0; fi
+    if [ -f "$dir/token" ]; then IFS= read -r token < "$dir/token"; printf '%s\n' "$token"; exit 0; fi
     echo "no oauth token found for github.com" >&2; exit 1 ;;
 esac
 exit 2
@@ -67,12 +67,11 @@ exit 2
     }
 }
 
+/// The login PATH is only `dir`, so the box's own `gh` is never found; the
+/// fake script uses shell builtins alone.
 fn login_env_with_path(dir: &Path) -> LoginEnv {
     let mut vars = BTreeMap::new();
-    vars.insert(
-        "PATH".to_string(),
-        format!("{}:/usr/bin:/bin", dir.display()),
-    );
+    vars.insert("PATH".to_string(), dir.display().to_string());
     vars.insert("HOME".to_string(), dir.display().to_string());
     LoginEnv::from_vars(vars)
 }
