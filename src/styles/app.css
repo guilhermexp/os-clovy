@@ -6801,6 +6801,27 @@ button.agent-user-attachment:hover {
 
 .agent-engine-popover {
   width: 260px;
+  /* Three short sections: when the position hook caps the height, the whole
+   * menu scrolls. Rows never shrink, so a two-line row (name over its reason)
+   * cannot collapse to one control height and spill onto the next row. */
+  overflow-y: auto;
+}
+
+.agent-engine-popover .agent-composer-model-menu {
+  flex: none;
+  overflow: visible;
+}
+
+.agent-engine-popover .agent-composer-model-row {
+  flex: none;
+}
+
+.agent-engine-popover .agent-composer-model-choice-copy {
+  flex: 1 1 auto;
+}
+
+.agent-engine-popover .agent-composer-model-choice-desc {
+  overflow-wrap: anywhere;
 }
 
 .agent-composer-model-row-copy {

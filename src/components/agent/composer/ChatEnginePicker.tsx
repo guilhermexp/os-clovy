@@ -13,6 +13,7 @@ import {
   defaultChatCliId,
   selectedChatEndpoint,
 } from "../../../lib/chat-engine";
+import { ClovyMark } from "../../brand/ClovyLogo";
 import { RuntimeLogo } from "../../brand/RuntimeLogo";
 import { useComposerModelPopoverPosition } from "./ModelPicker";
 
@@ -243,7 +244,10 @@ export function ChatEnginePicker({
                 <span className="agent-composer-model-row-name">{cli.name}</span>
                 {!cli.installed ? (
                   <span className="agent-composer-model-choice-desc">
-                    {cli.reason ?? t("chat.engine.notInstalled")}
+                    {/* The backend reason is English-only; detection only ever
+                        fails on a missing binary, so show the same translated
+                        line as Settings > Models. */}
+                    {t("settingsPanels.llm.notInstalledReason")}
                   </span>
                 ) : cli.id === defaultCliId ? (
                   <span className="agent-composer-model-choice-desc">
@@ -306,6 +310,9 @@ export function ChatEnginePicker({
           aria-checked={classification.kind === "clovy"}
           onClick={handleSelectClovy}
         >
+          <span className="agent-composer-model-row-logo" data-brand="clovy" aria-hidden>
+            <ClovyMark width={11} height={11} variant="mono" />
+          </span>
           <span className="agent-composer-model-choice-copy">
             <span className="agent-composer-model-row-name">{t("chat.engine.clovy")}</span>
             <span className="agent-composer-model-choice-desc">
