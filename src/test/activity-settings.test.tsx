@@ -17,6 +17,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 import { ActivitySettingsSection } from "../components/settings/ActivitySettingsSection";
 import {
+  AppSettings,
   appSettingsTabsForCompanionPairing,
   SETTINGS_TABS,
 } from "../components/settings/AppSettings";
@@ -103,7 +104,34 @@ describe("ActivitySettingsSection", () => {
           pauses: 2,
         };
       }
-      throw new Error(`Unhandled command: ${command}`);
+      if (command === "dictation_capabilities") {
+        return {
+          capabilities: {
+            available: false,
+            platform: "unsupported",
+            shortcuts: false,
+            paste: false,
+            microphoneSelection: false,
+            accessibilityPermission: false,
+            systemAudio: false,
+          },
+        };
+      }
+      if (command === "dictation_settings") {
+        return {
+          settings: {
+            language: "en",
+            microphone: {},
+            style: "standard",
+            pushToTalkShortcut: { modifiers: {} },
+            toggleShortcut: { modifiers: {} },
+          },
+        };
+      }
+      if (command === "autostart_supported" || command === "autostart_enabled") {
+        return false;
+      }
+      return undefined;
     });
   });
 
@@ -393,25 +421,195 @@ describe("ActivitySettingsSection", () => {
     expect(SETTINGS_TABS.find((tab) => tab.id === "activity")?.label).toBe("Atividade");
   });
 
-  it("hides activity tab on non-macOS platforms in settings-config and AppSettings helpers", () => {
+  it("hides permissions section on Windows (non-macOS) platform", async () => {
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
 
     try {
       Object.defineProperty(navigator, "platform", {
         configurable: true,
-        get: () => "Linux x86_64",
+        get: () => "Win32",
       });
       Object.defineProperty(navigator, "userAgent", {
         configurable: true,
-        get: () => "Mozilla/5.0 (X11; Linux x86_64)",
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
       });
 
-      const companionTabs = settingsTabsForCompanionPairing(true);
-      expect(companionTabs.some((t) => t.id === "activity")).toBe(false);
+      render(<ActivitySettingsSection />);
 
-      const appTabs = appSettingsTabsForCompanionPairing(true);
-      expect(appTabs.some((t) => t.id === "activity")).toBe(false);
+      await waitFor(() => {
+        expect(screen.getByRole("switch", { name: "Capture activity" })).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("heading", { name: "Permissions" })).not.toBeInTheDocument();
+      expect(screen.queryByText("Accessibility")).not.toBeInTheDocument();
+      expect(screen.queryByText("Screen recording")).not.toBeInTheDocument();
+      expect(screen.queryByText("Input monitoring")).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
+  });
+
+  it("renders permissions section on macOS platform", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "MacIntel",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+      });
+
+      render(<ActivitySettingsSection />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("switch", { name: "Capture activity" })).toBeInTheDocument();
+      });
+
+      expect(screen.getByRole("heading", { name: "Permissions" })).toBeInTheDocument();
+      expect(screen.getByText("Accessibility")).toBeInTheDocument();
+      expect(screen.getByText("Screen recording")).toBeInTheDocument();
+      expect(screen.getByText("Input monitoring")).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
+  });
+
+  it("shows Activity tab in AppSettings on Windows when activity is supported", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "Win32",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+
+      currentStatus = { ...currentStatus, supported: true };
+
+      render(
+        <AppSettings
+          account={{ signedIn: false, configured: false }}
+          accountLoading={false}
+          sourceMode="microphoneOnly"
+          checkingSourceReadiness={false}
+          onAccountChanged={() => {}}
+          onAccountRefresh={async () => undefined}
+          onSourceModeChange={() => {}}
+          onEnableSystemAudio={() => {}}
+          activeTab="general"
+          onTabChange={() => {}}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
+      });
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
+  });
+
+  it("hides Activity tab in AppSettings when activity is unsupported", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "Win32",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+
+      currentStatus = { ...currentStatus, supported: false };
+
+      render(
+        <AppSettings
+          account={{ signedIn: false, configured: false }}
+          accountLoading={false}
+          sourceMode="microphoneOnly"
+          checkingSourceReadiness={false}
+          onAccountChanged={() => {}}
+          onAccountRefresh={async () => undefined}
+          onSourceModeChange={() => {}}
+          onEnableSystemAudio={() => {}}
+          activeTab="general"
+          onTabChange={() => {}}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.queryByRole("tab", { name: "Activity" })).not.toBeInTheDocument();
+      });
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
+  });
+
+  it("filters activity tab by supported status instead of isMacLikePlatform", () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "Win32",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+
+      const companionTabsSupported = settingsTabsForCompanionPairing(true, true);
+      expect(companionTabsSupported.some((t) => t.id === "activity")).toBe(true);
+
+      const appTabsSupported = appSettingsTabsForCompanionPairing(true, true);
+      expect(appTabsSupported.some((t) => t.id === "activity")).toBe(true);
+
+      const companionTabsUnsupported = settingsTabsForCompanionPairing(true, false);
+      expect(companionTabsUnsupported.some((t) => t.id === "activity")).toBe(false);
+
+      const appTabsUnsupported = appSettingsTabsForCompanionPairing(true, false);
+      expect(appTabsUnsupported.some((t) => t.id === "activity")).toBe(false);
     } finally {
       Object.defineProperty(navigator, "platform", {
         configurable: true,
