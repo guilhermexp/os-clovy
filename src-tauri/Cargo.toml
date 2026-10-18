@@ -57,6 +57,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cpal = "0.15"
+dirs = "6"
 dotenvy = "0.15"
 futures-util = { version = "0.3", features = ["sink"] }
 hound = "3.5"
@@ -164,8 +165,8 @@ security-framework = "3.7"
 # unifies features into the single libsqlite3-sys that sqlx-sqlite links, so
 # this swaps the SQLite library for the whole macOS binary: the main
 # notes.sqlite3 keeps opening without `PRAGMA key` (SQLCipher without a key
-# behaves like plain SQLite). macOS only: activity capture is a macOS feature
-# and vendored OpenSSL would add perl/nasm to the Windows build lane.
+# behaves like plain SQLite). Windows enables the same feature below and
+# requires Strawberry Perl and NASM for the vendored OpenSSL build.
 libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 # Day intelligence: on-device sentence embeddings (BGE small, BERT) for the
 # distiller's semantic dedup, in pure Rust with Accelerate for the matmuls.
@@ -178,17 +179,44 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 windows = { version = "0.61", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
