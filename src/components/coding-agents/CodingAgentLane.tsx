@@ -9,6 +9,7 @@ import {
 import type { TimelineLane, TimelineLaneProps } from "../activity-timeline/lanes";
 import { formatTime } from "../activity-timeline/timeline-utils";
 import { HoverTip } from "../ui/HoverTip";
+import { RuntimeLogo } from "../brand/RuntimeLogo";
 
 /** Narrowest drawn block, as a fraction of the day, so short blocks stay hoverable. */
 const MIN_BLOCK_FRACTION = 0.0025;
@@ -75,7 +76,10 @@ export function CodingAgentLane({ from, to, xForTime }: TimelineLaneProps) {
               tip={
                 <div className="coding-agent-lane-tip">
                   <div className="coding-agent-lane-tip-meta">
-                    <span className="coding-agent-lane-tip-agent">{agent}</span>
+                    <span className="coding-agent-lane-tip-agent">
+                      <RuntimeLogo id={block.source} name={agent} size={14} decorative />
+                      {agent}
+                    </span>
                     <span>{project}</span>
                     <span>{time}</span>
                     <span>{t("codingAgents.lane.prompts", { count: block.promptCount })}</span>

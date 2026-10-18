@@ -6,7 +6,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Fronte
 
 - [x] 1.1 Remover o rodapé de privacidade do início e o aviso de motor do composer e do seletor, com chaves i18n e testes que só fixavam o texto (design D1). Verificar: testes de componente sem `.agent-hero-footnote` e sem `.agent-composer-notice` nos três estados de ferramentas.
 - [x] 1.2 SVGs de marca vendorizados com `LICENSES.md` e componente de logo cobrindo `claude`, `codex`, `copilot`, `cursor-agent`, `agy`, `pi`, `openrouter` e monograma de reserva (D2). Verificar: teste unitário do mapeamento id → SVG/monograma.
-- [ ] 1.3 Aplicar o logo em todos os pontos listados no design (seletor de motor, provedores, MCP, fontes e faixa de agentes de código, importação do Claude Code, cartões que citam runtime, seletores de modelo). Verificar: teste de render do seletor de motor com ícone por item; captura de tela do app de dev de cada tela tocada.
+- [x] 1.3 Aplicar o logo em todos os pontos listados no design (seletor de motor, provedores, MCP, fontes e faixa de agentes de código, importação do Claude Code, cartões que citam runtime, seletores de modelo). Verificar: teste de render do seletor de motor com ícone por item; captura de tela do app de dev de cada tela tocada.
 
 ## 2. GitHub pelo gh
 

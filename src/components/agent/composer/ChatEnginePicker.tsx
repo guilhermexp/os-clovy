@@ -13,6 +13,7 @@ import {
   defaultChatCliId,
   selectedChatEndpoint,
 } from "../../../lib/chat-engine";
+import { RuntimeLogo } from "../../brand/RuntimeLogo";
 import { useComposerModelPopoverPosition } from "./ModelPicker";
 
 const DEFAULT_CLIS: ChatEngineCliStatus[] = [
@@ -181,11 +182,14 @@ export function ChatEnginePicker({
   const activeEndpoint = selectedChatEndpoint(model, activeCatalog, clovyModels);
 
   let activeEngineLabel = t("chat.engine.clovy");
+  let activeEngineLogoId: string | null = null;
   if (classification.kind === "cli") {
+    activeEngineLogoId = classification.cli;
     const activeCli = clis.find((item) => item.id === classification.cli);
     activeEngineLabel = activeCli?.name ?? fallbackCliName(classification.cli);
   } else if (classification.kind === "endpoint") {
     activeEngineLabel = activeEndpoint?.name ?? classification.modelId;
+    activeEngineLogoId = activeEndpoint?.id ?? classification.modelId;
   }
 
   const handleSelectClovy = () => {
@@ -232,6 +236,9 @@ export function ChatEnginePicker({
               aria-disabled={!cli.installed}
               onClick={() => handleSelectCli(cli)}
             >
+              <span className="agent-composer-model-row-logo" aria-hidden>
+                <RuntimeLogo id={cli.id} name={cli.name} size={14} />
+              </span>
               <span className="agent-composer-model-choice-copy">
                 <span className="agent-composer-model-row-name">{cli.name}</span>
                 {!cli.installed ? (
@@ -270,6 +277,9 @@ export function ChatEnginePicker({
                   aria-checked={isSelected}
                   onClick={() => handleSelectEndpoint(ep)}
                 >
+                  <span className="agent-composer-model-row-logo" aria-hidden>
+                    <RuntimeLogo id={ep.id} name={ep.name} size={14} />
+                  </span>
                   <span className="agent-composer-model-choice-copy">
                     <span className="agent-composer-model-row-name">{ep.name}</span>
                   </span>
@@ -331,6 +341,9 @@ export function ChatEnginePicker({
             }
           }}
         >
+          {activeEngineLogoId ? (
+            <RuntimeLogo id={activeEngineLogoId} name={activeEngineLabel} size={14} decorative />
+          ) : null}
           <span className="agent-composer-model-trigger-name">{activeEngineLabel}</span>
           <IconChevronDownSmall size={12} aria-hidden />
         </button>

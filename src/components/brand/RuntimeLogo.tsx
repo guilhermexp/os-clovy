@@ -30,12 +30,23 @@ type RuntimeLogoProps = {
   /** Display name, used for the monogram when no mark exists. */
   name?: string;
   size?: number;
+  /** Beside a visible name: hidden from assistive tech so it is not read twice. */
+  decorative?: boolean;
 };
 
 /** Brand mark of an agent runtime or provider; anything else falls back to
  * the provider marks and then to a monogram. */
-export function RuntimeLogo({ id, name = "", size = 18 }: RuntimeLogoProps) {
+export function RuntimeLogo({ id, name = "", size = 18, decorative = false }: RuntimeLogoProps) {
   const brand = runtimeBrand(id);
-  if (brand) return <BrandMark brand={brand} size={size} />;
-  return <ProviderLogo provider={id} id={id} name={name} size={size} />;
+  const logo = brand ? (
+    <BrandMark brand={brand} size={size} />
+  ) : (
+    <ProviderLogo provider={id} id={id} name={name} size={size} />
+  );
+  if (!decorative) return logo;
+  return (
+    <span className="runtime-logo" aria-hidden>
+      {logo}
+    </span>
+  );
 }

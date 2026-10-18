@@ -9,6 +9,7 @@ import {
   onCodingAgentsUpdated,
 } from "../../lib/coding-agents";
 import { Switch } from "../ui/Switch";
+import { RuntimeLogo } from "../brand/RuntimeLogo";
 
 const STATUS_REFRESH_MS = 5_000;
 
@@ -81,7 +82,10 @@ export function CodingAgentSourcesSection({
             return (
               <div key={id} className="settings-row">
                 <div className="settings-row-info">
-                  <h3 className="settings-row-title">{name}</h3>
+                  <h3 className="settings-row-title settings-row-title-with-mark">
+                    <RuntimeLogo id={id} name={name} size={16} decorative />
+                    {name}
+                  </h3>
                   {present === undefined ? null : (
                     <p className="settings-row-description">
                       {present
