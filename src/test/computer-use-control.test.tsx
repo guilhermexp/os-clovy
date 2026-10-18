@@ -481,4 +481,65 @@ describe("ComputerUseControl", () => {
     expect(screen.queryByText("Pro")).not.toBeInTheDocument();
     expect(SETTINGS_TABS).toContainEqual({ id: "connectors", label: "Plugins" });
   });
+
+  describe("without plan, vision model or rollout (ADR-0067)", () => {
+    // What the backend reports now: only local facts.
+    const local = (overrides: Record<string, unknown> = {}) =>
+      ({
+        platformSupported: true,
+        grantEnabled: true,
+        driverAvailable: true,
+        driverVersion: "0.5.0",
+        accessibility: true,
+        screenRecording: true,
+        ready: true,
+        state: "ready",
+        ...overrides,
+      }) as unknown as ComputerUseStatusDto;
+
+    it("is Ready from the grant, the driver and macOS access alone", async () => {
+      tauriMocks.computerUseStatus.mockResolvedValue(local());
+      render(<ComputerUseControl />);
+
+      expect(await screen.findByText("Ready")).toBeInTheDocument();
+      expect(screen.queryByText("Vision-capable model")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Choose model" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "View plans" })).not.toBeInTheDocument();
+    });
+
+    it("lets the user turn it on with no Clovy account state", async () => {
+      tauriMocks.computerUseStatus.mockResolvedValue(
+        local({
+          grantEnabled: false,
+          ready: false,
+          accessibility: false,
+          screenRecording: false,
+          state: "off",
+        }),
+      );
+      render(<ComputerUseControl />);
+
+      const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
+      await waitFor(() => expect(toggle).toBeEnabled());
+      for (const gone of [
+        "Pro plan required",
+        "Needs a vision model",
+        "Temporarily unavailable",
+        "Pro feature",
+      ]) {
+        expect(screen.queryByText(gone)).not.toBeInTheDocument();
+      }
+    });
+
+    it("says captures go to the agent CLI running the turn", async () => {
+      tauriMocks.computerUseStatus.mockResolvedValue(local());
+      render(<ComputerUseControl />);
+
+      await userEvent.hover(
+        await screen.findByRole("button", { name: "Computer use privacy and permissions" }),
+      );
+      expect(await screen.findByText(/agent CLI running the turn/)).toBeInTheDocument();
+      expect(screen.queryByText(/your selected model/)).not.toBeInTheDocument();
+    });
+  });
 });
