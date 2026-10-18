@@ -3489,12 +3489,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
         for cli in clis {
-            let name = if cfg!(windows) {
-                format!("{cli}.exe")
-            } else {
-                (*cli).to_string()
-            };
-            let path = bin.path().join(name);
+            let path = bin.path().join(cli);
             fs::write(&path, "#!/bin/sh\n").unwrap();
             #[cfg(unix)]
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
