@@ -2455,7 +2455,8 @@ pub(crate) fn resumable_run_config(params: &Value) -> Value {
 }
 
 /// The native agent's built-in tools (before activity, MCP and connector
-/// tools are added).
+/// tools are added). Computer use is not one of them: it is offered only to
+/// CLI turns through `clovy-mcp` (ADR-0067).
 fn native_tool_catalog() -> Value {
     let mut tools = json!([
         { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations. Returns each match's id with an excerpt around the match; call get_note with a note id or get_dictation with a dictation id to read it whole.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
@@ -2496,10 +2497,6 @@ fn native_tool_catalog() -> Value {
         .as_array_mut()
         .expect("tool descriptor catalog is an array")
         .extend(crate::mcp_server::tools::browser::runtime_descriptors());
-    tools
-        .as_array_mut()
-        .expect("tool descriptor catalog is an array")
-        .push(crate::mcp_server::tools::computer_use::runtime_descriptor());
     tools
 }
 

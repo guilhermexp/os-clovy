@@ -83,10 +83,8 @@ const TAVILY_API_KEY_HEADER: &str = "x-tavily-api-key";
 // tells them apart. src-tauri/Cargo.toml stays in lockstep with
 // tauri.conf.json (asserted by app_version_matches_tauri_conf below).
 const CLOVY_APP_VERSION_HEADER: &str = "x-clovy-app-version";
-const CLOVY_MACOS_VERSION_HEADER: &str = "x-clovy-macos-version";
 const LEGACY_APP_VERSION_HEADER: &str = "x-june-app-version";
 const REQUEST_FAILED_CODE: &str = "clovy_request_failed";
-const LEGACY_MACOS_VERSION_HEADER: &str = "x-june-macos-version";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const ERR_INSUFFICIENT_CREDITS: i64 = 4301;
 const ERR_TOKEN_EXPIRED: i64 = 3001;
@@ -301,14 +299,6 @@ pub struct ModelDto {
     /// Absent (older Clovy API) is unknown; never infer media availability.
     #[serde(default)]
     pub service_available: Option<bool>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ComputerUseRolloutDto {
-    pub enabled: bool,
-    pub reason: Option<String>,
-    pub cache_ttl_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -1084,19 +1074,6 @@ pub async fn fetch_browser_transport_policy() -> Result<Option<BrowserTransportP
         return Ok(None);
     }
     parse_response(path, response).await.map(Some)
-}
-
-pub async fn computer_use_rollout(macos_version: &str) -> Result<ComputerUseRolloutDto, AppError> {
-    let url = format!("{}/v1/computer-use/rollout", clovy_api_url());
-    let response = http_client()
-        .get(url)
-        .header(CLOVY_MACOS_VERSION_HEADER, macos_version)
-        .header(LEGACY_MACOS_VERSION_HEADER, macos_version)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(network_error)?;
-    parse_response("/v1/computer-use/rollout", response).await
 }
 
 // ---- Private sharing (JUN-308) -------------------------------------------

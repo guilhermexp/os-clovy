@@ -683,23 +683,6 @@ pub struct ClovyModelRuntimeCapabilities {
     pub supports_vision: bool,
 }
 
-/// Whether the configured generation model reports vision (image input) support
-/// in the Clovy API catalog. The agent runtime uses this to decide whether an
-/// image can be attached directly to model context. Returns `false`
-/// when the catalog is unreachable (offline, signed out) or the model reports no
-/// vision capability. In local dev, a persisted Auto selection can use the same
-/// catalog-backed capability fallback as Clovy API when Auto is absent. The
-/// conservative default keeps image attachment fail-closed.
-pub async fn generation_model_supports_vision() -> bool {
-    if generation_provider() == PROVIDER_LOCAL {
-        return false;
-    }
-    let model_id = generation_model();
-    clovy_model_runtime_capabilities(&model_id)
-        .await
-        .supports_vision
-}
-
 /// Resolves the model-specific limits needed by an agent run. Agent sessions
 /// can select a model independently of the global generation setting, so this
 /// cache is keyed by the run model and shared across turns.
