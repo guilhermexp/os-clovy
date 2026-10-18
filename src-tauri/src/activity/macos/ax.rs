@@ -9,6 +9,7 @@ use core_foundation::string::{CFString, CFStringRef};
 use core_foundation::url::CFURLRef;
 use objc2_app_kit::NSWorkspace;
 
+use crate::activity::filter::{has_private_window_marker, normalize_browser_url};
 use crate::activity::macos::screens::{active_displays, display_id_for_rect, main_display_id};
 use crate::activity::platform::WindowDescriptor;
 use platform_macos::ax::bindings::{
@@ -70,87 +71,6 @@ pub(crate) fn take_window(
 ) -> Option<AutoAxElement> {
     let owned: Vec<AutoAxElement> = retained.into_iter().map(AutoAxElement).collect();
     owned.into_iter().find(|window| wanted(window))
-}
-
-/// Normalizes browser URL strings from AXURL attributes or address fields.
-pub fn normalize_browser_url(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    // Supported schemes
-    let allowed_schemes = [
-        "http://",
-        "https://",
-        "file://",
-        "about:",
-        "chrome://",
-        "chrome-extension://",
-        "edge://",
-        "brave://",
-        "arc://",
-        "safari://",
-    ];
-
-    for scheme in &allowed_schemes {
-        if trimmed.starts_with(scheme) {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    // Domain-like pattern without scheme: e.g. "github.com/repo" or "news.ycombinator.com"
-    if !trimmed.contains(' ') && (trimmed.contains('.') || trimmed.starts_with("localhost")) {
-        return Some(format!("https://{trimmed}"));
-    }
-
-    None
-}
-
-/// Checks window title for private/incognito browsing indicators across
-/// Chrome-family, Safari, and other browsers in multiple locales (en, pt-BR, es, fr, de).
-pub fn has_private_window_marker(title: &str) -> bool {
-    let lower = title.to_lowercase();
-    let markers = [
-        "incognito",
-        "inprivate",
-        "private browsing",
-        "(private)",
-        "[private]",
-        "navegação privada",
-        "navegacao privada",
-        // Firefox pt-BR: "… — Navegação privativa do Mozilla Firefox".
-        "navegação privativa",
-        "navegacao privativa",
-        "janela privativa",
-        "janela privada",
-        "aba privada",
-        "guia privada",
-        "anônima",
-        // Chrome pt-BR incognito window titles end in "(Modo anônimo)"
-        // (observed live on Chrome with a pt-BR UI).
-        "anônimo",
-        "anonimo",
-        "anonima",
-        "janela anônima",
-        "janela anonima",
-        "guia anônima",
-        "guia anonima",
-        "navegação anônima",
-        "navegacao anonima",
-        "incógnito",
-        "navegación privada",
-        "navegacion privada",
-        "ventana privada",
-        "navigation privée",
-        "navigation privee",
-        "fenêtre privée",
-        "fenetre privee",
-        "privates surfen",
-        "inkognito",
-    ];
-
-    markers.iter().any(|&m| lower.contains(m))
 }
 
 /// Determines whether a window is an incognito or private browsing window.

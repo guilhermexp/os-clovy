@@ -22,7 +22,9 @@ pub const FRAME_SPAN: Duration = Duration::seconds(2);
 const INPUT_BEFORE: Duration = Duration::seconds(3);
 const INPUT_AFTER: Duration = Duration::seconds(1);
 /// Lock screen and screen saver: never a session, never useful.
-const AWAY_APPS: &[&str] = &["loginwindow", "screensaverengine"];
+const AWAY_APPS: &[&str] = &[
+    "loginwindow", "screensaverengine", "lockapp", "lockapp.exe", "logonui", "logonui.exe",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,9 +169,11 @@ impl BatchSignals {
     }
 }
 
-fn is_away_app(app_name: &str) -> bool {
-    let app = app_name.trim().to_lowercase();
-    AWAY_APPS.contains(&app.as_str())
+fn is_away_app(frame: &StoredFrame) -> bool {
+    AWAY_APPS.iter().any(|app| {
+        frame.app_name.trim().eq_ignore_ascii_case(app)
+            || frame.bundle_id.as_deref().is_some_and(|id| id.eq_ignore_ascii_case(app))
+    })
 }
 
 /// Classifies `[from, to)`: a capture pause covering at least half of it,
@@ -255,7 +259,7 @@ pub fn push_frame(
     let window_changed = previous.map_or(true, |last| !last.same_window(frame));
     let text_changed = previous.map_or(true, |last| last.text_id != frame.text_id);
     let useful =
-        !is_away_app(&frame.app_name) && (window_changed || text_changed || signals.input_near(at));
+        !is_away_app(frame) && (window_changed || text_changed || signals.input_near(at));
     state.last_frame = Some(FrameMark::of(frame, at));
 
     if !useful {

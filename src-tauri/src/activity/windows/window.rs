@@ -131,9 +131,25 @@ pub(crate) fn executable_path(bundle_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// Expands `%VAR%` environment variable references within a string.
+fn expand_environment_variables(input: &str) -> Option<String> {
+    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+
+    let source: Vec<u16> = input.encode_utf16().chain(std::iter::once(0)).collect();
+    let source = windows::core::PCWSTR(source.as_ptr());
+    let required = unsafe { ExpandEnvironmentStringsW(source, None) };
+    if required == 0 {
+        return None;
+    }
+    let mut expanded = vec![0u16; required as usize];
+    let written = unsafe { ExpandEnvironmentStringsW(source, Some(&mut expanded)) };
+    if written == 0 || written > required {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&expanded[..written as usize - 1]))
+}
+
 /// Decodes and validates an executable path from an `App Paths` registry value.
-///
-/// Note: In RED state, REG_EXPAND_SZ is accepted but environment variables are NOT yet expanded.
 fn decode_app_paths_registry_value(
     val_type: windows::Win32::System::Registry::REG_VALUE_TYPE,
     buf: &[u16],
@@ -145,8 +161,12 @@ fn decode_app_paths_registry_value(
         let raw_str = String::from_utf16_lossy(&buf[..char_len]);
         let trimmed = raw_str.trim().trim_matches('"');
         if !trimmed.is_empty() {
-            // Unexpanded path: fails for REG_EXPAND_SZ with env vars (RED state)
-            let p = PathBuf::from(trimmed);
+            let resolved_str = if val_type == REG_EXPAND_SZ {
+                expand_environment_variables(trimmed)?
+            } else {
+                trimmed.to_string()
+            };
+            let p = PathBuf::from(resolved_str);
             if p.is_file() {
                 return Some(p);
             }
@@ -531,8 +551,8 @@ fn get_monitor_index(target_hmon: HMONITOR) -> u32 {
 
 /// Evaluates whether a window handle qualifies as a candidate for topmost window on a secondary monitor (D6).
 pub(crate) fn is_secondary_window_candidate(
-    _hwnd: HWND,
-    _focused_hwnd: Option<HWND>,
+    hwnd: HWND,
+    focused_hwnd: Option<HWND>,
     is_visible: bool,
     is_iconic: bool,
     ex_style: u32,
@@ -558,9 +578,10 @@ pub(crate) fn is_secondary_window_candidate(
         return false;
     }
 
-    // RED state: misses excluding focused window handle!
-    // Stage 2 will add:
-    // if Some(_hwnd) == _focused_hwnd { return false; }
+    // Exclude the currently focused window so it is not captured twice
+    if Some(hwnd) == focused_hwnd {
+        return false;
+    }
 
     true
 }

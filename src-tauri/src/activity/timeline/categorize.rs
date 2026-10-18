@@ -172,6 +172,24 @@ const TERMINALS: &[&str] = &[
     "hyper",
 ];
 
+// Feed executable identities into the same priors as their macOS/name
+// equivalents, so localized FileDescription values do not change categories.
+const WINDOWS_APP_NAMES: &[(&str, &str)] = &[
+    ("code.exe", "code"),
+    ("code-insiders.exe", "code"),
+    ("devenv.exe", "code"),
+    ("notepad++.exe", "code"),
+    ("sublime_text.exe", "sublime text"),
+    ("windowsterminal.exe", "terminal"),
+    ("cmd.exe", "terminal"),
+    ("powershell.exe", "terminal"),
+    ("pwsh.exe", "terminal"),
+    ("winword.exe", "microsoft word"),
+    ("teams.exe", "microsoft teams"),
+    ("ms-teams.exe", "microsoft teams"),
+    ("explorer.exe", "finder"),
+];
+
 const MEETING_AUDIO_APPS: &[&str] = &[
     "zoom",
     "webex",
@@ -350,7 +368,10 @@ impl Scores {
 }
 
 fn score_app(evidence: &SessionEvidence<'_>, scores: &mut Scores) {
-    let app = evidence.app_name.trim().to_lowercase();
+    let name = evidence.bundle_id
+        .and_then(|id| WINDOWS_APP_NAMES.iter().find(|(exe, _)| id.eq_ignore_ascii_case(exe)))
+        .map_or(evidence.app_name, |(_, name)| *name);
+    let app = name.trim().to_lowercase();
     if TERMINALS.iter().any(|name| app.contains(name)) {
         scores.add(Category::Coding, 10.0);
         return;
