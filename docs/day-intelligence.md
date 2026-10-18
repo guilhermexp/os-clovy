@@ -185,7 +185,10 @@ uses this read API over `ActivityStore` to return the stored day summary,
 workstreams, and hour reports; `get_day_panels` calls `day_view` with its own
 `DaySources` (meetings of the open data partition through
 `sources::meetings_between`, the query `AppSources` runs too, and coding-agent
-blocks from the retention floor on) and returns the panels in minutes;
+blocks from the retention floor on) and returns the panels in minutes, with
+exact `seconds` alongside `minutes` for workstreams. `get_day_summary` likewise
+preserves seconds for activities, workstreams and their hours, including
+`locatedSeconds`; legacy data falls back to `minutes * 60`.
 `get_day_schedule` returns the settings below.
 
 ## Commands and event (frontend contract)
