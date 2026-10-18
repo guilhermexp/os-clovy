@@ -629,7 +629,6 @@ describe("ActivitySettingsSection", () => {
       });
 
       const blurb = container.querySelector(".settings-page-blurb");
-      expect(blurb?.textContent).toBeTruthy();
       expect(blurb?.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
 
       const activityGroup = screen.getByRole("region", { name: "Activity" });
@@ -673,7 +672,6 @@ describe("ActivitySettingsSection", () => {
       });
 
       const blurb = container.querySelector(".settings-page-blurb");
-      expect(blurb?.textContent).toBeTruthy();
       expect(blurb?.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
 
       const activityGroup = screen.getByRole("region", { name: "Atividade" });

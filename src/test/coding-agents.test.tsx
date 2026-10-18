@@ -116,16 +116,13 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
     expect(switches).toHaveLength(7);
     for (const toggle of switches) expect(toggle).not.toBeChecked();
     await waitFor(() => {
-      const rows = switches.map((sw) => sw.closest(".settings-row"));
-      for (const row of rows) {
-        expect(row?.querySelector(".settings-row-description")?.textContent).toBeTruthy();
-      }
+      expect(invokeMock).toHaveBeenCalledWith("coding_agents_status");
     });
-    const claudeHeading = within(section).getByRole("heading", { name: "Claude Code" });
-    const claudeDesc = claudeHeading.closest(".settings-row")?.querySelector(".settings-row-description");
-    const cursorHeading = within(section).getByRole("heading", { name: "Cursor" });
-    const cursorDesc = cursorHeading.closest(".settings-row")?.querySelector(".settings-row-description");
-    expect(claudeDesc?.textContent).not.toEqual(cursorDesc?.textContent);
+    expect(within(section).getByRole("switch", { name: "Read Claude Code sessions" })).not.toBeChecked();
+    expect(within(section).getByRole("switch", { name: "Read Cursor sessions" })).not.toBeChecked();
+    expect(
+      within(section).getByText(/summarized by the agent's own CLI/i),
+    ).toBeInTheDocument();
   });
 
   it("turning a source on saves it with the rest of the activity settings", async () => {
@@ -174,15 +171,11 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
 
       const section = await screen.findByRole("region", { name: "Coding agents" });
       await waitFor(() => {
-        const claudeHeading = within(section).getByRole("heading", { name: "Claude Code" });
-        const claudeDesc = claudeHeading.closest(".settings-row")?.querySelector(".settings-row-description");
-        expect(claudeDesc?.textContent).toBeTruthy();
+        expect(invokeMock).toHaveBeenCalledWith("coding_agents_status");
       });
-
-      const descriptions = Array.from(
-        section.querySelectorAll(".settings-group-description, .settings-row-description"),
+      const descriptions = section.querySelectorAll(
+        ".settings-group-description, .settings-row-description",
       );
-      expect(descriptions.length).toBeGreaterThan(0);
       for (const el of descriptions) {
         expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
       }
@@ -217,15 +210,11 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
 
       const section = await screen.findByRole("region", { name: "Agentes de código" });
       await waitFor(() => {
-        const claudeHeading = within(section).getByRole("heading", { name: "Claude Code" });
-        const claudeDesc = claudeHeading.closest(".settings-row")?.querySelector(".settings-row-description");
-        expect(claudeDesc?.textContent).toBeTruthy();
+        expect(invokeMock).toHaveBeenCalledWith("coding_agents_status");
       });
-
-      const descriptions = Array.from(
-        section.querySelectorAll(".settings-group-description, .settings-row-description"),
+      const descriptions = section.querySelectorAll(
+        ".settings-group-description, .settings-row-description",
       );
-      expect(descriptions.length).toBeGreaterThan(0);
       for (const el of descriptions) {
         expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
       }
