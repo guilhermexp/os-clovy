@@ -330,6 +330,24 @@ mod tests {
     }
 
     #[test]
+    fn windows_browser_executables_apply_domain_privacy_rules() {
+        for executable in ["msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"] {
+            let browser = WindowDescriptor {
+                pid: 42,
+                app_name: "Localized browser description".into(),
+                bundle_id: Some(executable.into()),
+                ..WindowDescriptor::default()
+            };
+            assert_eq!(
+                skip_reason(&browser, &settings(), 1),
+                Some(SkipReason::UnknownBrowserUrl),
+                "{executable}"
+            );
+        }
+        assert!(!is_browser("Document", Some("msedge.exe.backup")));
+    }
+
+    #[test]
     fn browser_without_a_known_url_is_skipped_only_when_domains_are_ignored() {
         let chrome_without_url = window("Google Chrome", None);
         assert_eq!(

@@ -184,6 +184,25 @@ mod tests {
     }
 
     #[test]
+    fn windows_editor_identity_extracts_the_workspace_without_english_app_names() {
+        for executable in ["code.exe", "cursor.exe", "windsurf.exe", "vscodium.exe", "antigravity.exe"] {
+            assert_eq!(
+                editor_workspace("Localized editor", Some(executable), "main.rs - billing").as_deref(),
+                Some("billing"),
+                "{executable}"
+            );
+        }
+        assert_eq!(
+            editor_workspace("Localized editor", Some("zed.exe"), "billing - main.rs").as_deref(),
+            Some("billing")
+        );
+        assert_eq!(
+            editor_workspace("Document", Some("code.exe.backup"), "main.rs - billing"),
+            None
+        );
+    }
+
+    #[test]
     fn zed_xcode_and_jetbrains_titles_start_with_the_workspace() {
         assert_eq!(
             editor_workspace("Zed", Some("dev.zed.Zed"), "os-clovy \u{2014} src/main.rs")

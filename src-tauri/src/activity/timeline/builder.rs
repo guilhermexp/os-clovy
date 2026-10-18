@@ -605,6 +605,24 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn windows_lock_and_logon_frames_never_become_work_even_with_input() {
+        for app in ["LockApp", "lockapp.exe", "LogonUI", "logonui.exe"] {
+            let frames = [
+                frame(1, at(10, 0, 0), app, "Locked", None, 1),
+                frame(2, at(10, 0, 2), app, "Sign in", None, 2),
+            ];
+            let signals = BatchSignals {
+                input_times: vec![at(10, 0, 0), at(10, 0, 2)],
+                pauses: Vec::new(),
+            };
+            let (state, events) = feed(&frames, &signals);
+            assert!(state.open.is_none(), "{app} must not open a work session");
+            assert!(state.last_useful_at.is_none(), "{app} is never useful");
+            assert!(closed(&events).is_empty(), "{app} must not record work");
+        }
+    }
+
+    #[test]
     fn a_manual_pause_classifies_the_gap_with_its_reason() {
         let pauses = [PauseSpan {
             started_at: at(14, 0, 30),

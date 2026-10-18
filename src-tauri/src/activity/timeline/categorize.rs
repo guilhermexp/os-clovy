@@ -512,6 +512,24 @@ mod tests {
     }
 
     #[test]
+    fn windows_executable_identity_categorizes_localized_apps() {
+        for (executable, expected) in [
+            ("code.exe", Category::Coding),
+            ("devenv.exe", Category::Coding),
+            ("windowsterminal.exe", Category::Coding),
+            ("winword.exe", Category::Documentation),
+            ("ms-teams.exe", Category::Communication),
+            ("explorer.exe", Category::IdlePersonal),
+        ] {
+            assert_eq!(
+                classify("Localized application", Some(executable), &[], "", false),
+                expected,
+                "{executable}"
+            );
+        }
+    }
+
+    #[test]
     fn one_sample_per_category() {
         let samples: Vec<(Category, Category)> = vec![
             (
