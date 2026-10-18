@@ -606,6 +606,91 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn scrolling_keeps_ten_minutes_of_unchanged_frames_focused() {
+        let frames: Vec<_> = (0..=300)
+            .map(|index| StoredFrame {
+                input_idle_ms: Some(1000),
+                ..frame(
+                    index + 1,
+                    at(10, 0, 0) + Duration::seconds(index * 2),
+                    "Preview",
+                    "doc.pdf",
+                    None,
+                    1,
+                )
+            })
+            .collect();
+        let (state, events) = feed(&frames, &BatchSignals::default());
+        assert!(gaps(&events).is_empty());
+        let session = state.open.expect("scrolling keeps the session open");
+        assert_eq!(session.duration(), Duration::seconds(602));
+        assert_eq!(session.idle_frame_count, 0);
+    }
+
+    #[test]
+    fn growing_idle_and_legacy_frames_still_make_an_idle_gap() {
+        for legacy in [false, true] {
+            let mut frames: Vec<_> = (0..=180)
+                .map(|index| StoredFrame {
+                    input_idle_ms: (!legacy).then_some(4000 + index as u64 * 2000),
+                    ..frame(
+                        index + 1,
+                        at(10, 0, 0) + Duration::seconds(index * 2),
+                        "Preview",
+                        "doc.pdf",
+                        None,
+                        1,
+                    )
+                })
+                .collect();
+            frames.push(frame(182, at(10, 6, 2), "Zed", "main.rs", None, 2));
+            let (_, events) = feed(&frames, &BatchSignals::default());
+            let gaps = gaps(&events);
+            assert_eq!(gaps.len(), 1, "legacy={legacy}");
+            assert_eq!(gaps[0].kind, GapKind::Idle);
+            assert_eq!(gaps[0].started_at, at(10, 0, 2));
+            assert_eq!(gaps[0].ended_at, at(10, 6, 2));
+        }
+    }
+
+    #[test]
+    fn system_idle_boundary_is_inclusive_at_three_seconds() {
+        for (idle, expected_seconds) in [(Some(3000), 4), (Some(3001), 2), (None, 2)] {
+            let frames = [
+                frame(1, at(10, 0, 0), "Preview", "doc.pdf", None, 1),
+                StoredFrame {
+                    input_idle_ms: idle,
+                    ..frame(2, at(10, 0, 2), "Preview", "doc.pdf", None, 1)
+                },
+            ];
+            let (state, _) = feed(&frames, &BatchSignals::default());
+            assert_eq!(
+                state.open.unwrap().duration(),
+                Duration::seconds(expected_seconds),
+                "input_idle_ms={idle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_screen_input_never_starts_a_work_session() {
+        for app in ["loginwindow", "ScreenSaverEngine"] {
+            let frames = [StoredFrame {
+                input_idle_ms: Some(0),
+                ..frame(1, at(10, 0, 0), app, "Unlock", None, 1)
+            }];
+            let signals = BatchSignals {
+                input_times: vec![at(10, 0, 0)],
+                pauses: Vec::new(),
+            };
+            let (state, events) = feed(&frames, &signals);
+            assert!(state.open.is_none(), "{app}");
+            assert!(state.last_useful_at.is_none(), "{app}");
+            assert!(events.is_empty(), "{app}");
+        }
+    }
+
+    #[test]
     fn a_manual_pause_classifies_the_gap_with_its_reason() {
         let pauses = [PauseSpan {
             started_at: at(14, 0, 30),
