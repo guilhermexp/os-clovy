@@ -349,16 +349,22 @@ pub async fn activity_debug_export(
 /// the Activity tab shows live permission state.
 pub fn setup(app: &mut tauri::App) {
     #[cfg(target_os = "macos")]
-    {
-        match start(app.handle()) {
-            Ok(runtime) => {
-                app.manage(ActivityState(Some(runtime)));
-                return;
-            }
-            Err(error) => tracing::warn!(%error, "activity capture unavailable"),
-        }
+    let state = setup_state(|| start(app.handle()).map_err(|error| error.to_string()));
+    #[cfg(not(target_os = "macos"))]
+    let state = ActivityState::default();
+    app.manage(state);
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn setup_state(start: impl FnOnce() -> Result<ActivityRuntime, String>) -> ActivityState {
+    #[cfg(target_os = "macos")]
+    match start() {
+        Ok(runtime) => return ActivityState(Some(runtime)),
+        Err(error) => tracing::warn!(%error, "activity capture unavailable"),
     }
-    app.manage(ActivityState::default());
+    #[cfg(not(target_os = "macos"))]
+    let _ = start;
+    ActivityState::default()
 }
 
 #[cfg(target_os = "macos")]
@@ -402,4 +408,47 @@ fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
         settings_path,
         data_dir,
     })
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_setup_tests {
+    use super::*;
+    use crate::activity::engine::{tests::FakePlatform, CaptureEngine, SystemClock};
+    use crate::activity::key::MemoryKeyStore;
+
+    #[tokio::test]
+    async fn windows_setup_keeps_a_runtime_that_captures_with_an_injected_platform_and_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryKeyStore::default());
+        let state = setup_state(|| {
+            Ok(ActivityRuntime {
+                shared: Arc::new(ActivityShared::new(ActivitySettings {
+                    enabled: true,
+                    ..ActivitySettings::default()
+                })),
+                keys: keys.clone(),
+                db_path: dir.path().join(ACTIVITY_DB_FILE),
+                settings_path: dir.path().join("activity-settings.json"),
+                data_dir: dir.path().to_path_buf(),
+            })
+        });
+        let runtime = state.0.as_ref().expect("Windows setup must keep the runtime");
+        let mut engine = CaptureEngine::new(
+            FakePlatform::granted(),
+            runtime.shared.clone(),
+            runtime.keys.clone(),
+            runtime.db_path.clone(),
+            Box::new(SystemClock),
+            1,
+        );
+        engine.tick().await;
+        assert!(status_of(state.0.as_ref()).supported);
+        assert_eq!(runtime.shared.state(), CaptureState::Active);
+        let store = runtime.shared.store().expect("capture must open its store");
+        let frames = store.frames_after(0, 10).await.unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].app_name, "Zed");
+        assert!(keys.current().is_some(), "the injected vault must receive a key");
+        store.close().await;
+    }
 }
