@@ -28,6 +28,8 @@ pub mod schedule;
 pub mod settings;
 pub mod store;
 pub mod timeline;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -348,26 +350,28 @@ pub async fn activity_debug_export(
 /// thread ticks while capture is off too (only permissions are read then), so
 /// the Activity tab shows live permission state.
 pub fn setup(app: &mut tauri::App) {
-    #[cfg(target_os = "macos")]
-    let state = setup_state(|| start(app.handle()).map_err(|error| error.to_string()));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let state = setup_state(|| start(app.handle()));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let state = ActivityState::default();
     app.manage(state);
 }
 
-#[cfg(any(test, target_os = "macos"))]
-fn setup_state(start: impl FnOnce() -> Result<ActivityRuntime, String>) -> ActivityState {
-    #[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+fn setup_state<E: std::fmt::Display>(
+    start: impl FnOnce() -> Result<ActivityRuntime, E>,
+) -> ActivityState {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     match start() {
         Ok(runtime) => return ActivityState(Some(runtime)),
         Err(error) => tracing::warn!(%error, "activity capture unavailable"),
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = start;
     ActivityState::default()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
     let data_dir = crate::app_paths::app_data_dir(app)?;
     let config_dir = crate::app_paths::app_config_dir(app)?;
@@ -386,8 +390,12 @@ fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
     std::thread::Builder::new()
         .name("clovy-activity-capture".into())
         .spawn(move || {
+            #[cfg(target_os = "macos")]
+            let platform = macos::MacActivityPlatform::new();
+            #[cfg(target_os = "windows")]
+            let platform = windows::WinActivityPlatform::new();
             let engine = engine::CaptureEngine::new(
-                macos::MacActivityPlatform::new(),
+                platform,
                 thread_shared,
                 thread_keys,
                 thread_db,
@@ -421,7 +429,7 @@ mod windows_setup_tests {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(MemoryKeyStore::default());
         let state = setup_state(|| {
-            Ok(ActivityRuntime {
+            Ok::<_, std::convert::Infallible>(ActivityRuntime {
                 shared: Arc::new(ActivityShared::new(ActivitySettings {
                     enabled: true,
                     ..ActivitySettings::default()
