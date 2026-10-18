@@ -63,7 +63,7 @@ export default defineMessages({
       "Clovy turns your activity into hour reports, workstreams, and a summary of the day with your activity provider.",
     "dayIntelligence.settings.time": "Summary time",
     "dayIntelligence.settings.timeDescription":
-      "Generated once a day at this time, or as soon as the Mac wakes up after it.",
+      "Generated once a day at this time, or as soon as this device wakes up afterward.",
     "dayIntelligence.settings.notifications": "Notifications",
     "dayIntelligence.settings.notificationsDescription":
       "Notify when the day summary is ready or activity stops working.",
@@ -136,7 +136,7 @@ export default defineMessages({
       "O Clovy transforma sua atividade em relatórios por hora, frentes de trabalho e um resumo do dia com o seu provedor de atividade.",
     "dayIntelligence.settings.time": "Horário do resumo",
     "dayIntelligence.settings.timeDescription":
-      "Gerado uma vez por dia neste horário, ou assim que o Mac acordar depois dele.",
+      "Gerado uma vez por dia neste horário, ou assim que o dispositivo voltar da suspensão após esse horário.",
     "dayIntelligence.settings.notifications": "Notificações",
     "dayIntelligence.settings.notificationsDescription":
       "Avisar quando o resumo do dia estiver pronto ou a atividade parar de funcionar.",
