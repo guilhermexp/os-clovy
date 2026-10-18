@@ -6,7 +6,7 @@
 - [x] 1.2 RED: teste de integração do store que abre o banco cifrado e confirma que SQLite comum não lê o arquivo, rodando no Windows; verificar que falha no `cert` com `CipherUnavailable`.
 - [x] 1.3 GREEN: SQLCipher vendored no alvo Windows (`Cargo.toml`), checagem de Perl/NASM em `scripts/build-windows.ps1`, instalação no job `windows-rust` de `.github/workflows/desktop.yml` com `cargo test` do módulo `activity`; teste de 1.2 passa no `cert`. Sintaxe YAML/PowerShell validada; `workflow_dispatch` pendente da integração pelo dono, conforme exceção deste mandato.
 - [x] 1.4 RED: teste de setup que espera runtime de atividade no Windows com plataforma falsa e chave em cofre simulado; verificar que falha.
-- [ ] 1.5 GREEN: esqueleto `activity/windows/` com `WinActivityPlatform` (permissões `Granted`, demais métodos devolvendo vazio), `setup`/`start` no Windows com `KeychainKeyStore`; teste de 1.4 passa e o app de desenvolvimento no `cert` mostra captura ligada sem quadros.
+- [x] 1.5 GREEN: esqueleto `activity/windows/` com `WinActivityPlatform` (permissões `Granted`, demais métodos devolvendo vazio), `setup`/`start` no Windows com `KeychainKeyStore`; teste de 1.4 passa e o app de desenvolvimento no `cert` mostra captura ligada sem quadros.
 
 ## 2. Janela, identidade e listas
 
