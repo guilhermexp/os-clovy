@@ -19,6 +19,14 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         link_swift_runtime();
     }
+    if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("windows") {
+        // Library test executables do not inherit Tauri's app resources.
+        // rfd imports TaskDialogIndirect, which needs Common Controls v6.
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
+    }
     build_system_audio_helper();
     build_dictation_helper();
     prepare_computer_use_driver();

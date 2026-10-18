@@ -155,7 +155,7 @@ async fn read_capped(mut pipe: impl AsyncRead + Unpin, captured: Captured) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::time::Instant;

@@ -3485,11 +3485,18 @@ mod tests {
     }
 
     fn login_path_with(clis: &[&str]) -> tempfile::TempDir {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
         for cli in clis {
-            let path = bin.path().join(cli);
+            let name = if cfg!(windows) {
+                format!("{cli}.exe")
+            } else {
+                (*cli).to_string()
+            };
+            let path = bin.path().join(name);
             fs::write(&path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         crate::llm::shell_env::set_login_env_for_tests(Some(

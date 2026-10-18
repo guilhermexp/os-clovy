@@ -10,6 +10,7 @@ use crate::mcp_server::McpLaunch;
 use serde_json::{json, Value};
 use sqlx_sqlite::SqlitePoolOptions;
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
@@ -74,6 +75,7 @@ impl Harness {
 
     /// Writes an executable fake CLI. The prelude numbers each call and logs
     /// its argv (one per line) and stdin to `<log>/<n>.args` / `<n>.stdin`.
+    #[cfg(unix)]
     pub fn fake_cli(&self, kind: CliKind, body: &str) -> PathBuf {
         let path = self.bin.path().join(kind.id());
         let script = format!(
@@ -204,6 +206,7 @@ impl Harness {
 
 /// A fake claude that requires `--resume claude-conv-1` after its first call
 /// and answers "Answer <n>" with reasoning and one tool call.
+#[cfg(unix)]
 pub(super) const FAKE_CLAUDE: &str = r#"
 if [ "$n" -gt 1 ] && ! grep -qx -- 'claude-conv-1' "$LOG/$n.args"; then echo 'No conversation found to resume' >&2; exit 3; fi
 echo '{"type":"system","subtype":"init","session_id":"claude-conv-1"}'
@@ -226,6 +229,7 @@ fn argument_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 
 /// Fake stream for each CLI: answers "Answer <n>" and enforces the resume
 /// argument from the second call on; `check` is a shell test on the args.
+#[cfg(unix)]
 fn fake_two_turn_script(kind: CliKind) -> (&'static str, String) {
     match kind {
         CliKind::Claude => ("claude-conv-1", FAKE_CLAUDE.to_string()),
@@ -315,6 +319,7 @@ echo '{"type":"result","exitCode":0}'
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_two_turns_resume_the_cli_conversation_for_every_cli() {
     for kind in CliKind::ALL {
         let harness = Harness::new(kind).await;
@@ -427,6 +432,7 @@ async fn chat_engine_two_turns_resume_the_cli_conversation_for_every_cli() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_cancel_stops_the_cli_process_group_without_orphans() {
     struct PartialAnswerSink<'a> {
         inner: &'a TestSink,
@@ -538,6 +544,7 @@ sleep 300
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_message_sent_during_a_run_becomes_the_next_turn() {
     // While a CLI turn runs, the composer's message is not steered into it
     // (`steer_agent_run` answers `cli_engine`); it is sent when the turn
@@ -597,6 +604,7 @@ async fn chat_engine_message_sent_during_a_run_becomes_the_next_turn() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_hands_clovy_mcp_server_only_to_clis_that_accept_it() {
     let launch = McpLaunch {
         command: PathBuf::from("/Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp"),
@@ -684,6 +692,7 @@ echo '{"type":"turn.completed"}'"#,
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_shows_actions_the_cli_refused_for_lack_of_approval() {
     let kind = CliKind::Claude;
     let harness = Harness::new(kind).await;
@@ -713,6 +722,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"The write 
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_failures_end_the_run_with_the_cli_error() {
     let kind = CliKind::Codex;
     let harness = Harness::new(kind).await;
@@ -746,6 +756,7 @@ echo '{"type":"turn.completed"}'"#,
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_new_cli_conversation_gets_earlier_messages_of_the_session() {
     let kind = CliKind::Claude;
     let harness = Harness::new(kind).await;
@@ -1275,6 +1286,7 @@ async fn chat_engine_endpoint_choice_keeps_its_identity_when_endpoints_share_a_m
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_app_shutdown_stops_and_awaits_running_cli_turns() {
     let kind = CliKind::Claude;
     let harness = Harness::new(kind).await;
@@ -1340,6 +1352,7 @@ sleep 300
     assert!(host.register("late-run").is_err());
 }
 
+#[cfg(unix)]
 fn read_pid(path: &Path) -> i32 {
     std::fs::read_to_string(path)
         .unwrap()
@@ -1348,6 +1361,7 @@ fn read_pid(path: &Path) -> i32 {
         .unwrap()
 }
 
+#[cfg(unix)]
 async fn assert_process_gone(pid: i32) {
     for _ in 0..100 {
         // SAFETY: signal 0 only checks that the process exists.
@@ -1360,6 +1374,7 @@ async fn assert_process_gone(pid: i32) {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_cli_exit_ends_the_turn_even_if_a_helper_keeps_stdout_open() {
     let kind = CliKind::Claude;
     let harness = Harness::new(kind).await;
@@ -1399,6 +1414,7 @@ exit 0
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_cli_environment_keeps_the_profile_but_not_clovy_credentials() {
     let kind = CliKind::Pi;
     let harness = Harness::new(kind).await;
@@ -1595,6 +1611,7 @@ mod real {
 /// gets the imported conversation as earlier messages, the second resumes the
 /// CLI conversation, and Clovy API is never called.
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_engine_home_session_runs_two_turns_on_the_cli_without_clovy_api() {
     let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_address = api.local_addr().unwrap();

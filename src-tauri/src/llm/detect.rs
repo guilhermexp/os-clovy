@@ -89,9 +89,13 @@ async fn read_version(path: &std::path::Path, env: &LoginEnv) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::llm::shell_env::resolve_login_env;
-    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::Path};
+    use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::{os::unix::fs::PermissionsExt, path::Path};
 
+    #[cfg(unix)]
     fn write_script(path: &Path, body: &str) {
         std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -99,6 +103,7 @@ mod tests {
 
     /// A fake login shell: like a profile, it prepends `extra_dir` to PATH
     /// and exports a profile variable, then runs the `-c` script.
+    #[cfg(unix)]
     fn fake_login_shell(dir: &Path, extra_dir: &Path) -> std::path::PathBuf {
         let shell = dir.join("fake-shell");
         write_script(
@@ -111,6 +116,7 @@ mod tests {
         shell
     }
 
+    #[cfg(unix)]
     fn gui_app_env(home: &Path) -> BTreeMap<String, String> {
         BTreeMap::from([
             ("PATH".to_string(), "/usr/bin:/bin".to_string()),
@@ -119,6 +125,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_found_only_through_the_login_shell_path() {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("local-bin");
@@ -178,6 +185,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_broken_login_shell_falls_back_to_the_app_environment() {
         let root = tempfile::tempdir().unwrap();
         let shell = root.path().join("broken-shell");

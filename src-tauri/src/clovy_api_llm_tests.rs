@@ -4,12 +4,16 @@
 //! the test source.
 
 use super::*;
+#[cfg(unix)]
 use crate::db::repositories::Repositories;
 use crate::llm::{
     cli::CliKind,
     registry::ProviderRef,
-    shell_env::{set_login_env_for_tests, LoginEnv},
+    shell_env::set_login_env_for_tests,
 };
+#[cfg(unix)]
+use crate::llm::shell_env::LoginEnv;
+#[cfg(unix)]
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
 
 /// Restores the process-wide settings and login environment on drop.
@@ -25,6 +29,7 @@ impl Drop for Restore {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn llm_note_generated_by_fake_cli_is_persisted_like_a_clovy_note() {
     let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
     let _restore = Restore;
@@ -132,6 +137,7 @@ async fn llm_note_generated_by_fake_cli_is_persisted_like_a_clovy_note() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn note_transcript_correction_runs_on_the_notes_cli_not_clovy_api() {
     // ditado-rapido R2: dictation cleanup left the registry, so the note
     // transcript correction follows the engine that writes the note.

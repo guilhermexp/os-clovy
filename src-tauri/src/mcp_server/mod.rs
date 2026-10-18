@@ -13,7 +13,7 @@
 
 pub mod channel;
 pub mod protocol;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "red_tests.rs"]
 mod red_tests;
 pub mod stdio;
