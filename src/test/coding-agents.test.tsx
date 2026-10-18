@@ -121,6 +121,24 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
     expect(within(section).getAllByText("Not found on this Mac")).toHaveLength(5);
   });
 
+  it("shows each source with its brand mark", async () => {
+    render(<ActivitySettingsSection />);
+
+    const section = await screen.findByRole("region", { name: "Coding agents" });
+    for (const [name, brand] of [
+      ["Claude Code", "claudecode"],
+      ["Codex", "codex"],
+      ["Copilot CLI", "githubcopilot"],
+      ["Copilot in VS Code", "githubcopilot"],
+      ["Cursor", "cursor"],
+      ["Cursor CLI", "cursor"],
+      ["Antigravity", "antigravity"],
+    ]) {
+      const title = within(section).getByRole("heading", { name });
+      expect(title.querySelector(`[data-brand="${brand}"]`), name).not.toBeNull();
+    }
+  });
+
   it("turning a source on saves it with the rest of the activity settings", async () => {
     const user = userEvent.setup();
     render(<ActivitySettingsSection />);

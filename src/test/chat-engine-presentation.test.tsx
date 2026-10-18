@@ -139,4 +139,63 @@ describe("chat engine presentation", () => {
     expect(document.querySelector(".agent-composer-notice")).toBeNull();
     expect(screen.queryByText(/Clovy tools|Clovy's tools/i)).not.toBeInTheDocument();
   });
+
+  it("draws each engine row with its brand mark and keeps the row name first", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatEnginePicker
+        model="__clovy_cli_engine__:claude"
+        setModel={vi.fn()}
+        catalog={{
+          ...catalog,
+          clis: [
+            ...catalog.clis,
+            {
+              id: "agy",
+              name: "Antigravity",
+              installed: false,
+              reason: null,
+              modelId: "__clovy_cli_engine__:agy",
+            },
+            {
+              id: "cursor-agent",
+              name: "Cursor Agent",
+              installed: false,
+              reason: null,
+              modelId: "__clovy_cli_engine__:cursor-agent",
+            },
+            {
+              id: "copilot",
+              name: "GitHub Copilot",
+              installed: false,
+              reason: null,
+              modelId: "__clovy_cli_engine__:copilot",
+            },
+          ],
+          endpoints: [
+            {
+              id: "lab",
+              name: "Lab server",
+              modelId: "qwen3",
+              optionId: "__june_local_generation__:qwen3@lab",
+            },
+          ],
+        }}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
+
+    for (const [name, brand] of [
+      ["Claude Code", "claudecode"],
+      ["Codex", "codex"],
+      ["Pi", "pi"],
+      ["Antigravity", "antigravity"],
+      ["Cursor Agent", "cursor"],
+      ["GitHub Copilot", "githubcopilot"],
+      ["Lab server", "monogram"],
+    ]) {
+      const row = screen.getByRole("menuitemradio", { name: new RegExp(`^${name}`) });
+      expect(row.querySelector(`[data-brand="${brand}"]`), name).not.toBeNull();
+    }
+  });
 });

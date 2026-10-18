@@ -99,6 +99,17 @@ describe("McpServerSection", () => {
     expect(mocks.writeClipboardText).toHaveBeenLastCalledWith(current.claudeCodeCommand);
   });
 
+  it("marks the Claude Code and Cursor client rows with their brands", async () => {
+    const user = userEvent.setup();
+    render(<McpServerSection />);
+
+    await user.click(await screen.findByRole("switch", { name: "Clovy MCP server" }));
+    const claude = await screen.findByRole("heading", { name: "Claude Code" });
+    expect(claude.querySelector('[data-brand="claudecode"]')).not.toBeNull();
+    const cursor = screen.getByRole("heading", { name: "Cursor" });
+    expect(cursor.querySelector('[data-brand="cursor"]')).not.toBeNull();
+  });
+
   it("turns the server off again", async () => {
     current = status({ enabled: true, running: true });
     const user = userEvent.setup();
