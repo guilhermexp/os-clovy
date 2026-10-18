@@ -1335,6 +1335,26 @@ describe("GitHub through the GitHub CLI", () => {
     await waitFor(() => expect(within(githubRow()).getByText("via gh")).toBeInTheDocument());
   });
 
+  it("shows the account mismatch when gh is signed in as someone else", async () => {
+    const user = userEvent.setup();
+    mocks.connectorsList.mockResolvedValue([ghAccount({ status: "reconnect_required" })]);
+    mocks.connectorsGithubCliConnect.mockRejectedValue({
+      code: "connector_account_mismatch",
+      message:
+        "GitHub CLI is signed in as hubot, not octo. Switch back with gh auth switch, or disconnect GitHub in Clovy first.",
+    });
+    render(<ConnectorsSection />);
+
+    await screen.findByText("GitHub", { selector: ".connector-name" });
+    await user.click(await within(githubRow()).findByRole("button", { name: /Reconnect/ }));
+
+    await waitFor(() =>
+      expect(mocks.toastError).toHaveBeenCalledWith(expect.stringContaining("gh auth switch")),
+    );
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    expect(within(githubRow()).getByRole("button", { name: /Reconnect/ })).toBeEnabled();
+  });
+
   it("reconnects a gh account through gh, not the device flow", async () => {
     const user = userEvent.setup();
     mocks.connectorsList.mockResolvedValue([ghAccount({ status: "reconnect_required" })]);

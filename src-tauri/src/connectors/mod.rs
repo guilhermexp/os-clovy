@@ -16,6 +16,8 @@ pub mod approvals;
 pub mod commands;
 pub mod github;
 pub mod github_cli;
+#[cfg(test)]
+pub(crate) mod github_cli_fixtures;
 pub mod google;
 pub mod linear;
 pub mod notion;

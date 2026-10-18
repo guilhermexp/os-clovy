@@ -1,168 +1,10 @@
-//! GitHub via the GitHub CLI: a fake `gh` on a login PATH and a fake HTTP
-//! server in place of `api.github.com`. Nothing here touches the real `gh`,
-//! the network, or the token store.
+//! GitHub via the GitHub CLI, with the fake `gh` and fake `api.github.com`
+//! of [`super::super::github_cli_fixtures`].
 
 use super::*;
+use crate::connectors::github_cli_fixtures::*;
 use crate::connectors::{policy, store, ConnectorAccountStatus, ConnectorProvider};
-use crate::llm::shell_env::LoginEnv;
-use sqlx_sqlite::SqlitePoolOptions;
-use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-const TOKEN: &str = "gho_fake_cli_token_0123456789";
-const USER_ID: &str = "4242";
-
-/// A fake `gh`: logged in while `<dir>/token` exists (its content is the
-/// token), and every invocation is appended to `<dir>/calls`.
-struct FakeGh {
-    dir: tempfile::TempDir,
-}
-
-impl FakeGh {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("gh");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
-dir="${0%/*}"
-echo "$*" >> "$dir/calls"
-case "$1 $2 $3 $4" in
-  "auth status --hostname github.com")
-    if [ -f "$dir/token" ]; then echo "Logged in to github.com account octo" >&2; exit 0; fi
-    echo "You are not logged into any GitHub hosts." >&2; exit 1 ;;
-  "auth token --hostname github.com")
-    if [ -f "$dir/token" ]; then IFS= read -r token < "$dir/token"; printf '%s\n' "$token"; exit 0; fi
-    echo "no oauth token found for github.com" >&2; exit 1 ;;
-esac
-exit 2
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
-    }
-
-    fn log_in(&self) {
-        std::fs::write(self.dir.path().join("token"), TOKEN).unwrap();
-    }
-
-    fn log_out(&self) {
-        let _ = std::fs::remove_file(self.dir.path().join("token"));
-    }
-
-    fn calls(&self, subcommand: &str) -> usize {
-        std::fs::read_to_string(self.dir.path().join("calls"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.starts_with(subcommand))
-            .count()
-    }
-
-    fn env(&self) -> LoginEnv {
-        login_env_with_path(self.dir.path())
-    }
-}
-
-/// The login PATH is only `dir`, so the box's own `gh` is never found; the
-/// fake script uses shell builtins alone.
-fn login_env_with_path(dir: &Path) -> LoginEnv {
-    let mut vars = BTreeMap::new();
-    vars.insert("PATH".to_string(), dir.display().to_string());
-    vars.insert("HOME".to_string(), dir.display().to_string());
-    LoginEnv::from_vars(vars)
-}
-
-/// A fake `api.github.com`: answers `/user` and `/user/repos` only for the
-/// fake token, and records the paths it was asked for.
-struct FakeGithub {
-    paths: Arc<Mutex<Vec<String>>>,
-    _server: tokio::task::JoinHandle<()>,
-}
-
-impl FakeGithub {
-    async fn start() -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        github::set_test_api_base(Some(base));
-        let paths = Arc::new(Mutex::new(Vec::new()));
-        let recorded = paths.clone();
-        let server = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let recorded = recorded.clone();
-                tokio::spawn(async move {
-                    let mut buffer = vec![0u8; 16 * 1024];
-                    let read = stream.read(&mut buffer).await.unwrap_or(0);
-                    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-                    let path = request
-                        .lines()
-                        .next()
-                        .and_then(|line| line.split_whitespace().nth(1))
-                        .unwrap_or_default()
-                        .to_string();
-                    let authorized = request.lines().any(|line| {
-                        line.eq_ignore_ascii_case(&format!("authorization: Bearer {TOKEN}"))
-                    });
-                    recorded.lock().unwrap().push(path.clone());
-                    let (status, body) = if !authorized {
-                        (
-                            "401 Unauthorized",
-                            r#"{"message":"Bad credentials"}"#.to_string(),
-                        )
-                    } else if path == "/user" {
-                        (
-                            "200 OK",
-                            format!(r#"{{"id":{USER_ID},"login":"octo","name":"Octo Cat"}}"#),
-                        )
-                    } else if path.starts_with("/user/repos") {
-                        (
-                            "200 OK",
-                            r#"[{"id":1,"name":"hello","full_name":"octo/hello","private":false,"html_url":"https://github.com/octo/hello","description":null,"default_branch":"main","owner":{"login":"octo"}}]"#
-                                .to_string(),
-                        )
-                    } else {
-                        ("404 Not Found", r#"{"message":"Not Found"}"#.to_string())
-                    };
-                    let response = format!(
-                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    let _ = stream.shutdown().await;
-                });
-            }
-        });
-        Self {
-            paths,
-            _server: server,
-        }
-    }
-
-    fn paths(&self) -> Vec<String> {
-        self.paths.lock().unwrap().clone()
-    }
-}
-
-impl Drop for FakeGithub {
-    fn drop(&mut self) {
-        github::set_test_api_base(None);
-    }
-}
-
-async fn repositories() -> crate::db::repositories::Repositories {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("sqlite memory");
-    crate::db::migrations::run_migrations(&pool)
-        .await
-        .expect("migrations");
-    crate::db::repositories::Repositories::new(pool)
-}
+use std::path::PathBuf;
 
 fn prefs_dir() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -426,4 +268,188 @@ async fn lists_repositories_of_a_gh_account_from_the_user_repos_endpoint() {
         .paths()
         .iter()
         .all(|path| path.starts_with("/user/repos")));
+}
+
+#[tokio::test]
+async fn refuses_a_gh_token_that_belongs_to_another_github_user() {
+    let gh = FakeGh::new();
+    gh.log_in();
+    let _api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let (_keep, prefs) = prefs_dir();
+    detect_and_connect(&repos, &gh.env(), &prefs, ConnectMode::Automatic)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // gh auth switch to another account.
+    gh.log_in_with(OTHER_TOKEN);
+    let error = access_token(&repos, &gh.env(), USER_ID).await.unwrap_err();
+
+    assert_eq!(error.code, "connector_account_mismatch");
+    assert!(!error.message.contains(OTHER_TOKEN));
+    let record = repos.get_connector_account(USER_ID).await.unwrap().unwrap();
+    assert_eq!(
+        record.status,
+        ConnectorAccountStatus::ReconnectRequired.as_str()
+    );
+}
+
+#[tokio::test]
+async fn confirms_the_token_owner_at_most_once_per_minute() {
+    let gh = FakeGh::new();
+    gh.log_in();
+    let api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let (_keep, prefs) = prefs_dir();
+    detect_and_connect(&repos, &gh.env(), &prefs, ConnectMode::Automatic)
+        .await
+        .unwrap()
+        .unwrap();
+    let users = |api: &FakeGithub| api.paths().iter().filter(|path| *path == "/user").count();
+    let before = users(&api);
+
+    for _ in 0..3 {
+        assert_eq!(
+            access_token(&repos, &gh.env(), USER_ID).await.unwrap(),
+            TOKEN
+        );
+    }
+
+    assert!(users(&api) - before <= 1, "{:?}", api.paths());
+}
+
+#[tokio::test]
+async fn explicit_reconnect_with_another_gh_user_reports_the_mismatch() {
+    let gh = FakeGh::new();
+    gh.log_in();
+    let _api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let (_keep, prefs) = prefs_dir();
+    detect_and_connect(&repos, &gh.env(), &prefs, ConnectMode::Automatic)
+        .await
+        .unwrap()
+        .unwrap();
+    gh.log_out();
+    let _ = access_token(&repos, &gh.env(), USER_ID).await.unwrap_err();
+    gh.log_in_with(OTHER_TOKEN);
+
+    let error = detect_and_connect(&repos, &gh.env(), &prefs, ConnectMode::Explicit)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "connector_account_mismatch");
+    assert!(
+        error.message.contains("gh auth switch"),
+        "{}",
+        error.message
+    );
+
+    // The automatic detection stays silent and changes nothing.
+    let automatic = detect_and_connect(&repos, &gh.env(), &prefs, ConnectMode::Automatic)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(automatic.account_id, USER_ID);
+    assert_eq!(automatic.status, ConnectorAccountStatus::ReconnectRequired);
+    assert_eq!(repos.list_connector_accounts().await.unwrap().len(), 1);
+}
+
+// U2: the slow gh/HTTP probe runs first; a competing change lands before the
+// commit, which must decide on the accounts as they are then.
+
+#[tokio::test]
+async fn a_pending_detection_does_not_recreate_a_disconnected_account() {
+    let gh = FakeGh::new();
+    gh.log_in();
+    let _api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let (_keep, prefs) = prefs_dir();
+    detect_and_connect(&repos, &gh.env(), &prefs, ConnectMode::Automatic)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let pending = probe_gh(&gh.env()).await;
+    disconnect(&repos, &prefs, USER_ID).await.unwrap();
+    let outcome = commit(&repos, &prefs, ConnectMode::Automatic, pending)
+        .await
+        .unwrap();
+
+    assert!(outcome.is_none());
+    assert!(repos.list_connector_accounts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_pending_detection_does_not_add_a_second_account_after_an_app_connect() {
+    let gh = FakeGh::new();
+    gh.log_in();
+    let _api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let (_keep, prefs) = prefs_dir();
+
+    let pending = probe_gh(&gh.env()).await;
+    app_account(&repos).await;
+    let outcome = commit(&repos, &prefs, ConnectMode::Automatic, pending)
+        .await
+        .unwrap();
+
+    assert!(outcome.is_none());
+    let accounts = repos.list_connector_accounts().await.unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].account_id, "999");
+}
+
+#[tokio::test]
+async fn a_pending_detection_does_not_downgrade_a_write_grant() {
+    let gh = FakeGh::new();
+    gh.log_in();
+    let _api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let (_keep, prefs) = prefs_dir();
+
+    let pending = probe_gh(&gh.env()).await;
+    detect_and_connect(&repos, &gh.env(), &prefs, ConnectMode::Automatic)
+        .await
+        .unwrap()
+        .unwrap();
+    let write = policy::ScopeBundle::from_name("github_write").unwrap();
+    grant_bundles(&repos, USER_ID, &[write]).await.unwrap();
+    commit(&repos, &prefs, ConnectMode::Automatic, pending)
+        .await
+        .unwrap();
+
+    let record = repos.get_connector_account(USER_ID).await.unwrap().unwrap();
+    assert!(
+        record.scopes.contains(&policy::GITHUB_WRITE.to_string()),
+        "{:?}",
+        record.scopes
+    );
+}
+
+#[tokio::test]
+async fn the_commit_waits_for_the_github_account_lifecycle_lock() {
+    let gh = FakeGh::new();
+    gh.log_in();
+    let _api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let (keep, prefs) = prefs_dir();
+    let pending = probe_gh(&gh.env()).await;
+
+    let guard = github_accounts_lock().lock().await;
+    let committing = {
+        let repos = repos.clone();
+        tokio::spawn(async move {
+            let _keep = keep;
+            commit(&repos, &prefs, ConnectMode::Automatic, pending).await
+        })
+    };
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!committing.is_finished());
+    assert!(repos.list_connector_accounts().await.unwrap().is_empty());
+
+    drop(guard);
+    let account = committing.await.unwrap().unwrap().unwrap();
+    assert_eq!(account.account_id, USER_ID);
 }

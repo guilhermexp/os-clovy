@@ -520,3 +520,117 @@ async fn connector_timeout_and_cancellation_never_dispatch() {
     assert_eq!(result.unwrap_err().code, "run_cancelled");
     assert_eq!(http.tool_calls(), 0);
 }
+
+/// U4: a "via gh" account's write goes through the real broker and the real
+/// GitHub dispatch, with the token from the fake `gh`.
+struct GhAccess {
+    repos: crate::db::repositories::Repositories,
+    env: crate::llm::shell_env::LoginEnv,
+}
+impl crate::agent_runtime::native_connectors::GithubAccess for GhAccess {
+    fn accounts(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<crate::connectors::ConnectorAccount>, AppError>> {
+        Box::pin(async move {
+            Ok(self
+                .repos
+                .list_connector_accounts()
+                .await?
+                .into_iter()
+                .map(crate::connectors::github_cli::account_from_record)
+                .collect())
+        })
+    }
+    fn token<'a>(&'a self, account_id: &'a str) -> BoxFuture<'a, Result<String, AppError>> {
+        Box::pin(crate::connectors::github_cli::access_token(
+            &self.repos,
+            &self.env,
+            account_id,
+        ))
+    }
+}
+struct GhDriver(GhAccess);
+impl ConnectorDriver for GhDriver {
+    fn catalog<'a>(&'a self, _ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn invoke<'a>(
+        &'a self,
+        _ctx: &'a ToolCtx<'a>,
+        call: PreparedCall,
+        _approval_id: Option<String>,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(async move {
+            crate::agent_runtime::native_connectors::dispatch_github(
+                &self.0,
+                &call.name,
+                call.arguments,
+            )
+            .await
+            .unwrap_or_else(|| Err(AppError::new("mcp_tool_unknown", "Unknown connector tool.")))
+        })
+    }
+}
+
+#[tokio::test]
+async fn gh_account_write_needs_the_bundle_and_an_approval_before_it_reaches_github() {
+    use crate::connectors::github_cli::{self, ConnectMode};
+    use crate::connectors::github_cli_fixtures::*;
+    let gh = FakeGh::new();
+    gh.log_in();
+    let api = FakeGithub::start().await;
+    let repos = repositories().await;
+    let prefs = tempfile::tempdir().unwrap();
+    github_cli::detect_and_connect(&repos, &gh.env(), prefs.path(), ConnectMode::Automatic)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let broker = TestBroker::new([Scripted::Approve, Scripted::Approve]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let data = data(&broker);
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+    };
+    let group = ConnectorTools::new(GhDriver(GhAccess {
+        repos: repos.clone(),
+        env: gh.env(),
+    }));
+    let args = json!({
+        "accountId": USER_ID,
+        "provider": "github",
+        "owner": "octo",
+        "repo": "hello",
+        "title": "Fixture issue",
+    });
+    let posts = |api: &FakeGithub| {
+        api.requests()
+            .iter()
+            .filter(|request| request.starts_with("POST "))
+            .count()
+    };
+
+    let refused = group.call(&ctx, "create_issue", &args).await.unwrap_err();
+    assert_eq!(refused.code, "connector_scope_missing");
+    assert_eq!(broker.requests().len(), 1, "the approval is asked first");
+    assert_eq!(posts(&api), 0);
+
+    let write = crate::connectors::policy::ScopeBundle::from_name("github_write").unwrap();
+    github_cli::grant_bundles(&repos, USER_ID, &[write])
+        .await
+        .unwrap();
+    let created = group.call(&ctx, "create_issue", &args).await.unwrap();
+
+    assert_eq!(created["number"], 7);
+    assert_eq!(broker.requests().len(), 2);
+    assert_eq!(
+        api.requests()
+            .iter()
+            .filter(|request| *request == "POST /repos/octo/hello/issues")
+            .count(),
+        1
+    );
+}

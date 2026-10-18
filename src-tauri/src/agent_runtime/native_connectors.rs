@@ -509,6 +509,25 @@ fn descriptor(
     })
 }
 
+/// Where the GitHub tools get accounts and tokens. Not implemented yet.
+pub(crate) trait GithubAccess: Send + Sync {
+    fn accounts(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<ConnectorAccount>, AppError>>;
+    fn token<'a>(
+        &'a self,
+        account_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<String, AppError>>;
+}
+
+pub(crate) async fn dispatch_github(
+    _access: &dyn GithubAccess,
+    _name: &str,
+    _arguments: Value,
+) -> Option<Result<Value, AppError>> {
+    None
+}
+
 /// Returns `Ok(None)` for a non-connector tool. A matching native tool is
 /// always re-authorized from live account state rather than trusting the
 /// descriptor emitted at run start.

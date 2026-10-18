@@ -301,6 +301,27 @@ pub async fn detect_and_connect(
     stored(repos, &identity.user_id).await.map(Some)
 }
 
+/// What `gh` said, gathered outside the account lock. Not implemented yet.
+pub(crate) struct GhProbe(());
+
+pub(crate) async fn probe_gh(_env: &LoginEnv) -> GhProbe {
+    GhProbe(())
+}
+
+pub(crate) async fn commit(
+    _repos: &Repositories,
+    _prefs_dir: &Path,
+    _mode: ConnectMode,
+    _probe: GhProbe,
+) -> Result<Option<ConnectorAccount>, AppError> {
+    Err(AppError::new("not_implemented", "not implemented"))
+}
+
+pub(crate) fn github_accounts_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
+}
+
 /// The `gh` token for one call. When `gh` no longer yields one the account
 /// turns `reconnect_required` and the call fails with that code.
 pub async fn access_token(
