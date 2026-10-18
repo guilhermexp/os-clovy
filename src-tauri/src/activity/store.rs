@@ -1226,6 +1226,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_6_adds_nullable_idle_time_and_preserves_old_frames() {
+        let (_dir, path) = temp_db();
+        let keys = MemoryKeyStore::default();
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        store.insert_frame(&frame(at(1, 10), "kept")).await.unwrap();
+        // Reconstruct the released v5 shape without rewriting catalog entries.
+        let columns = query("PRAGMA table_info(frames)")
+            .fetch_all(store.pool()).await.unwrap();
+        if columns.iter().any(|row| row.get::<&str, _>("name") == "input_idle_ms") {
+            query("ALTER TABLE frames DROP COLUMN input_idle_ms")
+                .execute(store.pool()).await.unwrap();
+        }
+        query("DELETE FROM schema_migrations WHERE version >= 6")
+            .execute(store.pool()).await.unwrap();
+        store.close().await;
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        let idle: Option<i64> = query("SELECT input_idle_ms FROM frames")
+            .fetch_one(store.pool()).await.expect("migration 6 adds the idle column").get(0);
+        assert_eq!(idle, None, "old frames have no invented presence signal");
+        let versions: Vec<i64> = query(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetch_all(store.pool()).await.unwrap().iter().map(|row| row.get(0)).collect();
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(store.frames_after(0, 10).await.unwrap()[0].text.as_deref(), Some("kept"));
+    }
+
+    #[tokio::test]
     async fn missing_key_with_existing_file_refuses_to_open_and_keeps_the_file() {
         let (_dir, path) = temp_db();
         let keys = MemoryKeyStore::default();

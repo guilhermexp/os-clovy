@@ -642,6 +642,7 @@ pub(super) mod tests {
         clipboard: VecDeque<String>,
         input: Vec<RawInputEvent>,
         free_disk: Option<u64>,
+        input_idle_ms: Option<u64>,
         calls: Arc<Mutex<Calls>>,
         input_capture: Arc<AtomicBool>,
         /// Scripted `focused_window` results, consumed before `focused`.
@@ -665,6 +666,7 @@ pub(super) mod tests {
                 clipboard: VecDeque::new(),
                 input: Vec::new(),
                 free_disk: Some(100 << 30),
+                input_idle_ms: None,
                 calls: Arc::default(),
                 input_capture: Arc::default(),
                 focused_reads: VecDeque::new(),
@@ -862,6 +864,34 @@ pub(super) mod tests {
             "no OCR when AX has text"
         );
         assert!(harness.shared.last_frame_at().is_some());
+    }
+
+    #[tokio::test]
+    async fn tick_persists_system_idle_without_input_monitoring() {
+        let mut platform = FakePlatform::granted();
+        platform.permissions.input_monitoring = PermissionState::Denied;
+        platform.input_idle_ms = Some(500);
+        let mut harness = Harness::new(platform, enabled_settings());
+        harness.engine.tick().await;
+        let frames = harness.frames().await;
+        assert_eq!(frames.len(), 1);
+        let exported = serde_json::to_value(&frames[0]).unwrap();
+        assert_eq!(exported["inputIdleMs"], serde_json::json!(500));
+        assert!(!harness.engine.input_capture_on);
+        assert!(harness.events().await.iter().all(|event| {
+            !matches!(event.kind, InputEventKind::Click | InputEventKind::Key)
+        }));
+    }
+
+    #[tokio::test]
+    async fn tick_keeps_capturing_when_system_idle_is_unavailable() {
+        let mut harness = Harness::new(FakePlatform::granted(), enabled_settings());
+        harness.engine.tick().await;
+        let frames = harness.frames().await;
+        assert_eq!(frames.len(), 1);
+        let exported = serde_json::to_value(&frames[0]).unwrap();
+        assert_eq!(exported["inputIdleMs"], serde_json::Value::Null);
+        assert_eq!(frames[0].app_name, "Zed");
     }
 
     #[tokio::test]
