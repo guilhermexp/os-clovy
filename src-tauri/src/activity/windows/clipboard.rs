@@ -1,8 +1,8 @@
 //! Clipboard monitoring on Windows with password manager concealment detection.
 
-use std::sync::LazyLock;
+use std::{ptr::NonNull, sync::LazyLock};
 use windows::core::w;
-use windows::Win32::Foundation::{HGLOBAL, HWND};
+use windows::Win32::Foundation::HGLOBAL;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, GetClipboardData, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
@@ -25,6 +25,56 @@ impl Drop for ClipboardGuard {
     fn drop(&mut self) {
         unsafe {
             let _ = CloseClipboard();
+        }
+    }
+}
+
+struct LockedClipboardData<'a> {
+    memory: HGLOBAL,
+    pointer: NonNull<u8>,
+    length: usize,
+    _clipboard: &'a ClipboardGuard,
+}
+
+impl<'a> LockedClipboardData<'a> {
+    fn new(format: u32, clipboard: &'a ClipboardGuard) -> Option<Self> {
+        let handle = unsafe { GetClipboardData(format) }.ok()?;
+        if handle.is_invalid() {
+            return None;
+        }
+        let memory = HGLOBAL(handle.0);
+        let length = unsafe { GlobalSize(memory) };
+        if length == 0 || length > isize::MAX as usize {
+            return None;
+        }
+        let pointer = NonNull::new(unsafe { GlobalLock(memory) }.cast::<u8>())?;
+        Some(Self {
+            memory,
+            pointer,
+            length,
+            _clipboard: clipboard,
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // GlobalSize bounds the allocation; the lock and clipboard guard
+        // remain alive for the entire borrowed slice.
+        unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.length) }
+    }
+
+    fn utf16(&self) -> Option<&[u16]> {
+        let pointer = self.pointer.as_ptr().cast::<u16>();
+        if !pointer.is_aligned() {
+            return None;
+        }
+        Some(unsafe { std::slice::from_raw_parts(pointer, self.length / 2) })
+    }
+}
+
+impl Drop for LockedClipboardData<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = GlobalUnlock(self.memory);
         }
     }
 }
@@ -54,30 +104,17 @@ where
     }
 }
 
-fn history_allows_text(_format_present: bool, value: Option<u32>) -> bool {
-    value != Some(0)
+fn history_allows_text(format_present: bool, value: Option<u32>) -> bool {
+    !format_present || value.is_some_and(|value| value != 0)
 }
 
-/// Safely extracts a null-terminated UTF-16 string from raw memory bounded by `max_bytes`.
-/// If no null terminator exists within `max_bytes`, returns None (avoids reading out of bounds).
-pub(crate) fn parse_utf16_bounded(ptr: *const u16, max_bytes: usize) -> Option<String> {
-    if ptr.is_null() || max_bytes < 2 {
-        return None;
-    }
-    let max_units = max_bytes / 2;
-    let slice = unsafe { std::slice::from_raw_parts(ptr, max_units) };
-    let term_idx = slice.iter().position(|&c| c == 0)?;
-    let text = String::from_utf16_lossy(&slice[..term_idx]);
-    Some(text)
+fn parse_utf16_slice(units: &[u16]) -> Option<String> {
+    let terminator = units.iter().position(|&unit| unit == 0)?;
+    Some(String::from_utf16_lossy(&units[..terminator]))
 }
 
-/// Safely parses a 32-bit DWORD from memory if `size >= 4`.
-pub(crate) fn parse_history_dword_bounded(ptr: *const u8, size: usize) -> Option<u32> {
-    if ptr.is_null() || size < 4 {
-        return None;
-    }
-    let val = unsafe { std::ptr::read_unaligned(ptr as *const u32) };
-    Some(val)
+fn parse_history_dword_slice(bytes: &[u8]) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
 }
 
 /// Pure sequence-state policy for tracking clipboard updates across ticks.
@@ -139,64 +176,38 @@ impl Clipboard {
         let _guard = ClipboardGuard;
 
         let exclude_fmt = *FORMAT_EXCLUDE;
-        let exclude_available =
-            exclude_fmt != 0 && unsafe { IsClipboardFormatAvailable(exclude_fmt).is_ok() };
-
         let history_fmt = *FORMAT_HISTORY;
+        if exclude_fmt == 0 || history_fmt == 0 {
+            self.sequence_state
+                .mark_completed(unsafe { GetClipboardSequenceNumber() });
+            return None;
+        }
+        let exclude_available =
+            unsafe { IsClipboardFormatAvailable(exclude_fmt).is_ok() };
         let history_available =
-            history_fmt != 0 && unsafe { IsClipboardFormatAvailable(history_fmt).is_ok() };
-        let can_include_in_history =
-            if history_available {
-                if let Ok(handle) = unsafe { GetClipboardData(history_fmt) } {
-                    if !handle.is_invalid() {
-                        let hmem = HGLOBAL(handle.0);
-                        let size = unsafe { GlobalSize(hmem) };
-                        let ptr = unsafe { GlobalLock(hmem) };
-                        if !ptr.is_null() {
-                            let parsed = parse_history_dword_bounded(ptr as *const u8, size);
-                            unsafe {
-                                let _ = GlobalUnlock(hmem);
-                            }
-                            parsed
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
+            unsafe { IsClipboardFormatAvailable(history_fmt).is_ok() };
+        let history_value = if !exclude_available && history_available {
+            LockedClipboardData::new(history_fmt, &_guard)
+                .and_then(|data| parse_history_dword_slice(data.bytes()))
+        } else {
+            None
+        };
+        let result = read_clipboard_content_with(
+            exclude_available,
+            history_allows_text(history_available, history_value),
+            || {
+                if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() } {
+                    return None;
                 }
-            } else {
-                None
-            };
-
-        // Pre-read concealment check: lazy reader MUST NOT be invoked when hidden
-        let res = read_clipboard_content_with(exclude_available, history_allows_text(history_available, can_include_in_history), || {
-            if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() } {
-                return None;
-            }
-            let handle = unsafe { GetClipboardData(CF_UNICODETEXT) }.ok()?;
-            if handle.is_invalid() {
-                return None;
-            }
-            let hmem = HGLOBAL(handle.0);
-            let size_bytes = unsafe { GlobalSize(hmem) };
-            let ptr = unsafe { GlobalLock(hmem) as *const u16 };
-            if ptr.is_null() {
-                return None;
-            }
-            let text = parse_utf16_bounded(ptr, size_bytes);
-            unsafe {
-                let _ = GlobalUnlock(hmem);
-            }
-            text
-        });
-
-        // Mark completed only after inspection decision is reached
-        self.sequence_state.mark_completed(current_seq);
-
-        res
+                let data = LockedClipboardData::new(CF_UNICODETEXT, &_guard)?;
+                parse_utf16_slice(data.utf16()?)
+            },
+        );
+        // Associate the decision with the sequence inspected under the lock,
+        // not the earlier optimistic check before OpenClipboard.
+        self.sequence_state
+            .mark_completed(unsafe { GetClipboardSequenceNumber() });
+        result
     }
 }
 
@@ -255,21 +266,21 @@ mod tests {
     #[test]
     fn test_clipboard_bounded_utf16_unterminated_and_short_dword() {
         // 1. Unterminated UTF-16: no null terminator in allocation
-        let unterminated: Vec<u16> = vec![b'H' as u16, b'i' as u16, b'!' as u16];
-        let parsed = parse_utf16_bounded(unterminated.as_ptr(), unterminated.len() * 2);
+        let unterminated = [b'H' as u16, b'i' as u16, b'!' as u16];
+        let parsed = parse_utf16_slice(&unterminated);
         assert_eq!(
             parsed, None,
             "Unterminated UTF-16 allocation must be rejected (return None) to prevent reading out of bounds"
         );
 
         // 2. Properly terminated UTF-16
-        let terminated: Vec<u16> = vec![b'H' as u16, b'i' as u16, 0, b'X' as u16];
-        let parsed_ok = parse_utf16_bounded(terminated.as_ptr(), terminated.len() * 2);
+        let terminated = [b'H' as u16, b'i' as u16, 0, b'X' as u16];
+        let parsed_ok = parse_utf16_slice(&terminated);
         assert_eq!(parsed_ok, Some("Hi".to_string()));
 
         // 3. Short allocation for history DWORD: size < 4 bytes
         let short_dword: [u8; 3] = [1, 0, 0];
-        let parsed_dword = parse_history_dword_bounded(short_dword.as_ptr(), short_dword.len());
+        let parsed_dword = parse_history_dword_slice(&short_dword);
         assert_eq!(
             parsed_dword, None,
             "History allocation smaller than 4 bytes must be rejected (return None)"
@@ -277,7 +288,7 @@ mod tests {
 
         // 4. Valid 4-byte history DWORD
         let valid_dword: [u8; 4] = [1, 0, 0, 0];
-        let parsed_valid = parse_history_dword_bounded(valid_dword.as_ptr(), valid_dword.len());
+        let parsed_valid = parse_history_dword_slice(&valid_dword);
         assert_eq!(parsed_valid, Some(1));
     }
 
