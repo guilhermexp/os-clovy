@@ -290,12 +290,15 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
             self.low_disk = low_disk_next(self.low_disk, self.platform.free_disk_bytes(&directory));
         }
         let focused = if observing {
-            self.platform.focused_window()
+            let input_idle_ms = self.platform.system_idle_ms();
+            self.platform
+                .focused_window()
+                .map(|window| (window, input_idle_ms))
         } else {
             None
         };
         let protected_video = settings.pause_on_protected_video
-            && focused.as_ref().is_some_and(|window| {
+            && focused.as_ref().is_some_and(|(window, _)| {
                 is_protected_video(&window.app_name, window.browser_url.as_deref())
             });
 
@@ -447,11 +450,12 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
         &mut self,
         store: &ActivityStore,
         settings: &ActivitySettings,
-        window: WindowDescriptor,
+        focused: (WindowDescriptor, Option<u64>),
         now: DateTime<Utc>,
         raw_input: &[RawInputEvent],
         clipboard: Option<String>,
     ) -> usize {
+        let (window, input_idle_ms) = focused;
         if skip_reason(&window, settings, self.own_pid).is_some() {
             // Excluded: no text read, no frame, and the tick's input and
             // clipboard are discarded with it.
@@ -482,6 +486,7 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
             browser_url: window.browser_url.clone(),
             text_source,
             text,
+            input_idle_ms,
         };
         let stored = match store.insert_frame(&frame).await {
             Ok(_) => {
@@ -685,6 +690,9 @@ pub(super) mod tests {
                 .pop_front()
                 .unwrap_or_else(|| self.focused.clone())
         }
+        fn system_idle_ms(&self) -> Option<u64> {
+            self.input_idle_ms
+        }
         fn secondary_windows(&mut self) -> Vec<WindowDescriptor> {
             self.secondary_reads
                 .pop_front()
@@ -878,9 +886,11 @@ pub(super) mod tests {
         let exported = serde_json::to_value(&frames[0]).unwrap();
         assert_eq!(exported["inputIdleMs"], serde_json::json!(500));
         assert!(!harness.engine.input_capture_on);
-        assert!(harness.events().await.iter().all(|event| {
-            !matches!(event.kind, InputEventKind::Click | InputEventKind::Key)
-        }));
+        assert!(harness
+            .events()
+            .await
+            .iter()
+            .all(|event| { !matches!(event.kind, InputEventKind::Click | InputEventKind::Key) }));
     }
 
     #[tokio::test]

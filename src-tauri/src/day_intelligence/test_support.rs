@@ -79,6 +79,7 @@ pub async fn work(
                 browser_url: None,
                 text_source: TextSource::Accessibility,
                 text: Some(text),
+                input_idle_ms: None,
             })
             .await
             .unwrap();

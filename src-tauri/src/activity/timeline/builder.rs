@@ -400,6 +400,7 @@ pub(super) mod tests {
             text_source: TextSource::Accessibility,
             text_id: Some(text_id),
             text: Some(format!("text {text_id}")),
+            input_idle_ms: None,
         }
     }
 

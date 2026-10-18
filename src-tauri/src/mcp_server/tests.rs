@@ -152,6 +152,7 @@ pub(super) async fn activity_store() -> (tempfile::TempDir, ActivityStore) {
                     browser_url: url.map(str::to_string),
                     text_source: TextSource::Accessibility,
                     text: Some(format!("{text} {index}")),
+                    input_idle_ms: None,
                 })
                 .await
                 .unwrap();
