@@ -97,19 +97,10 @@ impl SourceRoots {
     pub fn app_support(&self, app: &str) -> PathBuf {
         if let Some(dir) = &self.app_support_dir {
             dir.join(app)
-        } else if cfg!(target_os = "macos") {
+        } else {
             self.home
                 .join("Library")
                 .join("Application Support")
-                .join(app)
-        } else {
-            dirs::config_dir()
-                .or_else(|| {
-                    std::env::var_os("APPDATA")
-                        .filter(|appdata| !appdata.is_empty())
-                        .map(PathBuf::from)
-                })
-                .unwrap_or_else(|| self.home.join("AppData").join("Roaming"))
                 .join(app)
         }
     }
