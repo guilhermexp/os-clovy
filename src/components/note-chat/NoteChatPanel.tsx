@@ -601,7 +601,6 @@ export function NoteChatPanel({
                   catalog={engineCatalog}
                   anchorRef={footerRef}
                   clovyModels={models}
-                  showNotice={false}
                 />
                 {activeEngine.kind === "clovy" ? (
                   <ComposerModelPicker

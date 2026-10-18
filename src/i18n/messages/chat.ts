@@ -153,11 +153,6 @@ export default defineMessages({
     "chat.engine.defaultEngine": "Default",
     "chat.engine.sectionLegacy": "Legacy",
     "chat.engine.clovyLegacyDescription": "Built-in agent, kept while its tools move to the CLIs",
-    "chat.engine.notice.available": "{name} runs on this Mac with Clovy's tools.",
-    "chat.engine.notice.serverOff":
-      "No Clovy tools in this session. Turn on the Clovy MCP server in Settings, Agent to give {name} your notes and activity.",
-    "chat.engine.notice.unsupported":
-      "No Clovy tools in this session: {name} can't receive Clovy's MCP server.",
     "chat.model.preferenceSentence": "Preference: {detail}.",
     "chat.model.effortSentence": "Effort: {effort}.",
     "chat.model.modelSentence": "Model: {name}.",
@@ -180,11 +175,7 @@ export default defineMessages({
     "chat.model.noPrivateMatches": "No private models match your search.",
     "chat.model.noPrivateAvailable": "No private models available.",
     "chat.model.noMatches": "No models match your search.",
-    "chat.privacy.runsLocally": "Clovy runs locally.",
     "chat.privacy.e2ee": "Clovy runs locally. Calls to {name} are end-to-end encrypted.",
-    "chat.privacy.private": "Clovy runs locally. Calls to {name} are private.",
-    "chat.privacy.anonymous": "Clovy runs locally. Calls to {name} are anonymized.",
-    "chat.privacy.running": "Clovy runs locally. You're running {name}.",
     "chat.sandbox.unrestricted": "Unrestricted",
     "chat.sandbox.unrestrictedAria": "Unrestricted - {description}",
     "chat.sandbox.unrestrictedDescription":
@@ -362,11 +353,6 @@ export default defineMessages({
     "chat.engine.sectionLegacy": "Legado",
     "chat.engine.clovyLegacyDescription":
       "Agente embutido, mantido enquanto suas ferramentas passam para as CLIs",
-    "chat.engine.notice.available": "{name} executa neste Mac com as ferramentas do Clovy.",
-    "chat.engine.notice.serverOff":
-      "Nenhuma ferramenta do Clovy nesta sessão. Ative o servidor MCP do Clovy em Configurações, Agente para dar a {name} suas notas e atividade.",
-    "chat.engine.notice.unsupported":
-      "Nenhuma ferramenta do Clovy nesta sessão: {name} não pode receber o servidor MCP do Clovy.",
     "chat.model.preferenceSentence": "Preferência: {detail}.",
     "chat.model.effortSentence": "Esforço: {effort}.",
     "chat.model.modelSentence": "Modelo: {name}.",
@@ -389,12 +375,8 @@ export default defineMessages({
     "chat.model.noPrivateMatches": "Nenhum modelo privado corresponde à sua busca.",
     "chat.model.noPrivateAvailable": "Nenhum modelo privado disponível.",
     "chat.model.noMatches": "Nenhum modelo corresponde à sua busca.",
-    "chat.privacy.runsLocally": "O Clovy roda localmente.",
     "chat.privacy.e2ee":
       "O Clovy roda localmente. As chamadas para {name} têm criptografia de ponta a ponta.",
-    "chat.privacy.private": "O Clovy roda localmente. As chamadas para {name} são privadas.",
-    "chat.privacy.anonymous": "O Clovy roda localmente. As chamadas para {name} são anonimizadas.",
-    "chat.privacy.running": "O Clovy roda localmente. Você está usando {name}.",
     "chat.sandbox.unrestricted": "Sem restrições",
     "chat.sandbox.unrestrictedAria": "Sem restrições - {description}",
     "chat.sandbox.unrestrictedDescription":

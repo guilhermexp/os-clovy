@@ -14,7 +14,6 @@ function cliEngine(id: string, name: string, installed = true): ChatEngineCliSta
     installed,
     reason: installed ? null : "Not found in PATH",
     modelId: `__clovy_cli_engine__:${id}`,
-    clovyTools: "available",
   };
 }
 

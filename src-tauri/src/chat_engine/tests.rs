@@ -675,12 +675,6 @@ echo '{"type":"turn.completed"}'"#,
             }
         }
     }
-    // What the session shows about Clovy's tools.
-    assert_eq!(clovy_tools(CliKind::Claude, true), ClovyTools::Available);
-    assert_eq!(clovy_tools(CliKind::Codex, false), ClovyTools::ServerOff);
-    for kind in [CliKind::Pi, CliKind::Agy, CliKind::CursorAgent] {
-        assert_eq!(clovy_tools(kind, true), ClovyTools::Unsupported, "{kind:?}");
-    }
 }
 
 #[tokio::test]

@@ -317,26 +317,6 @@ pub async fn start_cli_turn(
     Ok(())
 }
 
-/// Whether a CLI engine session gets Clovy's tools.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClovyTools {
-    /// The CLI takes Clovy's MCP server per run and the server is on.
-    Available,
-    /// The CLI takes it, but the server is off in Settings, Agent.
-    ServerOff,
-    /// The CLI cannot receive it without changing its own configuration.
-    Unsupported,
-}
-
-pub fn clovy_tools(kind: CliKind, server_on: bool) -> ClovyTools {
-    match (cli::accepts_mcp(kind), server_on) {
-        (false, _) => ClovyTools::Unsupported,
-        (true, true) => ClovyTools::Available,
-        (true, false) => ClovyTools::ServerOff,
-    }
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliEngineDto {
@@ -345,7 +325,6 @@ pub struct CliEngineDto {
     pub installed: bool,
     pub reason: Option<String>,
     pub model_id: String,
-    pub clovy_tools: ClovyTools,
 }
 
 #[derive(Debug, Serialize)]
@@ -405,12 +384,10 @@ pub async fn chat_default_engine(
     )?))
 }
 
-/// The engines a chat session can use: the six CLIs (installed or not, and
-/// whether they get Clovy's tools) and the registered endpoints.
+/// The engines a chat session can use: the six CLIs (installed or not) and
+/// the registered endpoints.
 #[tauri::command]
-pub async fn chat_engine_catalog(app: AppHandle) -> Result<ChatEngineCatalogDto, AppError> {
-    let server_on = crate::activity::mcp_server_enabled(&app)
-        && crate::mcp_server::child_process_launch(&app).is_ok();
+pub async fn chat_engine_catalog() -> Result<ChatEngineCatalogDto, AppError> {
     let env = crate::llm::shell_env::login_env().await;
     let detected = crate::llm::detect::detect_all(&env).await;
     let clis = detected
@@ -421,7 +398,6 @@ pub async fn chat_engine_catalog(app: AppHandle) -> Result<ChatEngineCatalogDto,
             installed: cli.installed,
             reason: cli.reason,
             model_id: engine_model_id(cli.id),
-            clovy_tools: clovy_tools(cli.id, server_on),
         })
         .collect();
     Ok(ChatEngineCatalogDto {

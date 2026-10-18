@@ -10,7 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: mocks.invoke,
 }));
 
-import { ChatEngineNotice, ChatEnginePicker } from "../components/agent/composer/ChatEnginePicker";
+import { ChatEnginePicker } from "../components/agent/composer/ChatEnginePicker";
 import { applyInterfaceLocale, resetInterfaceLocaleForTests } from "../i18n/locale";
 import type { ChatEngineCatalog } from "../lib/chat-engine";
 
@@ -22,7 +22,6 @@ const sampleCatalog: ChatEngineCatalog = {
       installed: true,
       reason: null,
       modelId: "__clovy_cli_engine__:claude",
-      clovyTools: "available",
     },
     {
       id: "codex",
@@ -30,7 +29,6 @@ const sampleCatalog: ChatEngineCatalog = {
       installed: true,
       reason: null,
       modelId: "__clovy_cli_engine__:codex",
-      clovyTools: "server_off",
     },
     {
       id: "pi",
@@ -38,7 +36,6 @@ const sampleCatalog: ChatEngineCatalog = {
       installed: false,
       reason: "Not found in PATH",
       modelId: "__clovy_cli_engine__:pi",
-      clovyTools: "unsupported",
     },
   ],
   endpoints: [
@@ -51,7 +48,7 @@ const sampleCatalog: ChatEngineCatalog = {
   ],
 };
 
-describe("ChatEnginePicker and ChatEngineNotice", () => {
+describe("ChatEnginePicker", () => {
   beforeEach(() => {
     resetInterfaceLocaleForTests();
     applyInterfaceLocale("en");
@@ -74,14 +71,7 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
     const user = userEvent.setup();
     const setModel = vi.fn();
 
-    render(
-      <ChatEnginePicker
-        model="auto"
-        setModel={setModel}
-        catalog={sampleCatalog}
-        showNotice={false}
-      />,
-    );
+    render(<ChatEnginePicker model="auto" setModel={setModel} catalog={sampleCatalog} />);
 
     const trigger = screen.getByRole("button", { name: /Chat engine/i });
     expect(trigger).toHaveTextContent("Clovy");
@@ -103,7 +93,6 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
         model="__clovy_cli_engine__:claude"
         setModel={vi.fn()}
         catalog={sampleCatalog}
-        showNotice={false}
       />,
     );
 
@@ -127,9 +116,7 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
         cli.id === "claude" ? { ...cli, installed: false, reason: "Not found in PATH" } : cli,
       ),
     };
-    render(
-      <ChatEnginePicker model="auto" setModel={vi.fn()} catalog={catalog} showNotice={false} />,
-    );
+    render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={catalog} />);
 
     await user.click(screen.getByRole("button", { name: /Chat engine/i }));
     expect(screen.getByRole("menuitemradio", { name: /^Codex/ })).toHaveTextContent("Default");
@@ -142,14 +129,7 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
     const user = userEvent.setup();
     const setModel = vi.fn();
 
-    render(
-      <ChatEnginePicker
-        model="auto"
-        setModel={setModel}
-        catalog={sampleCatalog}
-        showNotice={false}
-      />,
-    );
+    render(<ChatEnginePicker model="auto" setModel={setModel} catalog={sampleCatalog} />);
 
     await user.click(screen.getByRole("button", { name: /Chat engine/i }));
 
@@ -162,14 +142,7 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
     const user = userEvent.setup();
     const setModel = vi.fn();
 
-    render(
-      <ChatEnginePicker
-        model="auto"
-        setModel={setModel}
-        catalog={sampleCatalog}
-        showNotice={false}
-      />,
-    );
+    render(<ChatEnginePicker model="auto" setModel={setModel} catalog={sampleCatalog} />);
 
     await user.click(screen.getByRole("button", { name: /Chat engine/i }));
     await user.click(screen.getByRole("menuitemradio", { name: /^Claude Code/ }));
@@ -181,14 +154,7 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
     const user = userEvent.setup();
     const setModel = vi.fn();
 
-    render(
-      <ChatEnginePicker
-        model="auto"
-        setModel={setModel}
-        catalog={sampleCatalog}
-        showNotice={false}
-      />,
-    );
+    render(<ChatEnginePicker model="auto" setModel={setModel} catalog={sampleCatalog} />);
 
     await user.click(screen.getByRole("button", { name: /Chat engine/i }));
     await user.click(screen.getByRole("menuitemradio", { name: /^Local Ollama/ }));
@@ -222,7 +188,6 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
         model="__june_local_generation__:qwen3@lab"
         setModel={setModel}
         catalog={catalog}
-        showNotice={false}
       />,
     );
 
@@ -238,39 +203,5 @@ describe("ChatEnginePicker and ChatEngineNotice", () => {
     );
     await user.click(screen.getByRole("menuitemradio", { name: /^Home server/ }));
     expect(setModel).toHaveBeenCalledWith("__june_local_generation__:qwen3@home");
-  });
-
-  it("shows the no-tools notice for unsupported and server_off, and not for available", () => {
-    const { rerender } = render(
-      <ChatEngineNotice catalog={sampleCatalog} model="__clovy_cli_engine__:claude" />,
-    );
-
-    expect(
-      screen.getByText("Claude Code runs on this Mac with Clovy's tools."),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/No Clovy tools/i)).not.toBeInTheDocument();
-
-    rerender(<ChatEngineNotice catalog={sampleCatalog} model="__clovy_cli_engine__:codex" />);
-    expect(
-      screen.getByText(
-        "No Clovy tools in this session. Turn on the Clovy MCP server in Settings, Agent to give Codex your notes and activity.",
-      ),
-    ).toBeInTheDocument();
-
-    rerender(<ChatEngineNotice catalog={sampleCatalog} model="__clovy_cli_engine__:pi" />);
-    expect(
-      screen.getByText("No Clovy tools in this session: Pi can't receive Clovy's MCP server."),
-    ).toBeInTheDocument();
-  });
-
-  it("renders labels and notices in pt-BR when locale is set to pt-BR", () => {
-    applyInterfaceLocale("pt-BR");
-
-    render(<ChatEngineNotice catalog={sampleCatalog} model="__clovy_cli_engine__:pi" />);
-    expect(
-      screen.getByText(
-        "Nenhuma ferramenta do Clovy nesta sessão: Pi não pode receber o servidor MCP do Clovy.",
-      ),
-    ).toBeInTheDocument();
   });
 });

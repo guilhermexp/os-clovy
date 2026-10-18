@@ -6,7 +6,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import type { RefObject } from "react";
 import { createPortal } from "react-dom";
 
-import { t as translate, useT } from "../../../i18n";
+import { useT } from "../../../i18n";
 import {
   BUILTIN_PROVIDER_NAME_KEYS,
   modelIsPrivate,
@@ -876,29 +876,6 @@ export function ComposerModelPopover({
         : null}
     </div>
   );
-}
-
-// Footnote under the hero composer. Clovy's agent runs on the user's Mac, but
-// model calls go out to the provider, so the privacy claim has to match the
-// active model: encrypted into the enclave (E2EE), private (zero retention),
-// or anonymized (identity stripped, prompts may be retained). Name the model
-// so it's clear what's running; fall back to the plain line when none is known.
-export function heroPrivacyFootnote(
-  model: ProviderModelDto | undefined,
-  badge: ModelPrivacyBadge | undefined,
-): string {
-  if (!model) return translate("chat.privacy.runsLocally");
-  const name = model.name;
-  switch (badge?.mode) {
-    case "e2ee":
-      return translate("chat.privacy.e2ee", { name });
-    case "private":
-      return translate("chat.privacy.private", { name });
-    case "anonymous":
-      return translate("chat.privacy.anonymous", { name });
-    default:
-      return translate("chat.privacy.running", { name });
-  }
 }
 
 // Name-only rows: the composer popover is for quick switching, so pricing,

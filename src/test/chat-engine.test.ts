@@ -27,7 +27,6 @@ describe("chat-engine helpers", () => {
         installed: true,
         reason: null,
         modelId: "__clovy_cli_engine__:claude",
-        clovyTools: "available",
       },
       {
         id: "pi",
@@ -35,7 +34,6 @@ describe("chat-engine helpers", () => {
         installed: false,
         reason: "Executable not found",
         modelId: "__clovy_cli_engine__:pi",
-        clovyTools: "unsupported",
       },
     ],
     endpoints: [

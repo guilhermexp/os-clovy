@@ -22,7 +22,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:claude",
-    clovyTools: "available",
   },
   {
     id: "codex",
@@ -30,7 +29,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:codex",
-    clovyTools: "available",
   },
   {
     id: "pi",
@@ -38,7 +36,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:pi",
-    clovyTools: "unsupported",
   },
   {
     id: "agy",
@@ -46,7 +43,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:agy",
-    clovyTools: "unsupported",
   },
   {
     id: "cursor-agent",
@@ -54,7 +50,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:cursor-agent",
-    clovyTools: "unsupported",
   },
   {
     id: "copilot",
@@ -62,7 +57,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:copilot",
-    clovyTools: "available",
   },
 ];
 
@@ -85,48 +79,6 @@ function fallbackCliName(id: string): string {
   }
 }
 
-export function ChatEngineNotice({
-  catalog,
-  model,
-}: {
-  catalog?: ChatEngineCatalog | null;
-  model?: string;
-}) {
-  const t = useT();
-  const classification = classifyChatEngineModel(model, catalog);
-  if (classification.kind !== "cli") return null;
-
-  const cli =
-    catalog?.clis.find((item) => item.id === classification.cli) ??
-    DEFAULT_CLIS.find((item) => item.id === classification.cli);
-
-  const cliName = cli?.name ?? fallbackCliName(classification.cli);
-  const toolsStatus = cli?.clovyTools ?? "unsupported";
-
-  let messageKey:
-    | "chat.engine.notice.available"
-    | "chat.engine.notice.serverOff"
-    | "chat.engine.notice.unsupported";
-
-  switch (toolsStatus) {
-    case "available":
-      messageKey = "chat.engine.notice.available";
-      break;
-    case "server_off":
-      messageKey = "chat.engine.notice.serverOff";
-      break;
-    case "unsupported":
-      messageKey = "chat.engine.notice.unsupported";
-      break;
-  }
-
-  return (
-    <div className="agent-composer-notice" role="status">
-      {t(messageKey, { name: cliName })}
-    </div>
-  );
-}
-
 export type ChatEnginePickerProps = {
   model?: string;
   setModel: (modelId: string) => void;
@@ -135,7 +87,6 @@ export type ChatEnginePickerProps = {
   anchorRef?: RefObject<HTMLElement | null>;
   clovyModels?: ReadonlyArray<{ id: string }> | null;
   readOnly?: boolean;
-  showNotice?: boolean;
 };
 
 export function ChatEnginePicker({
@@ -146,7 +97,6 @@ export function ChatEnginePicker({
   anchorRef,
   clovyModels,
   readOnly = false,
-  showNotice = true,
 }: ChatEnginePickerProps) {
   const t = useT();
   const menuTitleId = useId();
@@ -362,7 +312,6 @@ export function ChatEnginePicker({
 
   return (
     <>
-      {showNotice ? <ChatEngineNotice catalog={activeCatalog} model={model} /> : null}
       <div className="agent-composer-model" data-engine-picker="true" data-open={open || undefined}>
         <button
           ref={triggerRef}

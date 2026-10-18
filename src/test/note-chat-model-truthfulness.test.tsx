@@ -96,7 +96,6 @@ describe("note chat model truthfulness", () => {
                 installed: true,
                 reason: null,
                 modelId: "__clovy_cli_engine__:claude",
-                clovyTools: "available",
               },
             ],
             endpoints: [],
