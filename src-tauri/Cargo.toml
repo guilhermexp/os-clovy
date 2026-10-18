@@ -171,15 +171,21 @@ libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-o
 # Day intelligence: on-device sentence embeddings (BGE small, BERT) for the
 # distiller's semantic dedup, in pure Rust with Accelerate for the matmuls.
 # Weights are downloaded once into the app data dir (`day_intelligence::embedder`).
-# macOS only, like activity capture; `fancy-regex` keeps tokenizers free of C (onig).
+# Windows enables the CPU-only build below; `fancy-regex` avoids onig's C dependency.
 candle-core = { version = "0.10", features = ["accelerate"] }
 candle-nn = { version = "0.10", features = ["accelerate"] }
 candle-transformers = { version = "0.10", features = ["accelerate"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# BGE CPU backend; Apple acceleration stays confined to the macOS target.
+candle-core = "0.10"
+candle-nn = "0.10"
+candle-transformers = "0.10"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 keyring = { version = "3", features = ["windows-native"] }
 libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
+windows-future = "0.2"
 windows = { version = "0.61", features = [
     "Foundation",
     "Graphics_Capture",

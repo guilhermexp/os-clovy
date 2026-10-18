@@ -911,6 +911,7 @@ dependencies = [
  "uuid",
  "window-vibrancy",
  "windows 0.61.3",
+ "windows-future",
  "zeroize",
  "zip 4.2.0",
 ]

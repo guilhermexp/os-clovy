@@ -269,7 +269,7 @@ async fn prepare(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod bert {
     use std::path::Path;
 
@@ -344,7 +344,7 @@ mod bert {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod bert {
     pub fn embed(_dir: &std::path::Path, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         Err("local embeddings are available on macOS only".into())
