@@ -1,21 +1,20 @@
 //! The day-intelligence spec scenarios that are unit-level, as written in
 //! the OpenSpec change `add-activity-intelligence` (spec `day-intelligence`).
 
-use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
-use serde_json::{json, Value};
-use sqlx::query::query;
-use sqlx::row::Row;
 use super::db;
 use super::distill::{distill, SessionText};
 use super::embedder::NoEmbedder;
 use super::hour::{
-    assemble, normalize_minutes, parse_answer, AnswerActivity, HourActivity, HourAnswer,
+    assemble, normalize_seconds, parse_answer, AnswerActivity, HourActivity, HourAnswer,
 };
 use super::notify::{NoticeKind, NoticeQueue};
 use super::schedule::{auto_summary_due, FixedZone, LocalZone, RunOutcome, RunRecord};
 use super::test_support;
 use super::workstreams::{plan_fold, Append, Placement, WorkstreamDto, WorkstreamHourDto};
 use crate::activity::settings::{ActivityNotificationSettings, QuietHours};
+use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
+use serde_json::{json, Value};
+use sqlx::query::query;
 
 fn zone() -> FixedZone {
     FixedZone(chrono::FixedOffset::west_opt(3 * 3600).unwrap())
@@ -32,7 +31,16 @@ fn local(day: u32, hour: u32, minute: u32) -> NaiveDateTime {
 /// 30 and 30 → the report shows 21 and 21.
 #[test]
 fn reported_minutes_are_the_measured_minutes_split_by_the_model_weights() {
-    assert_eq!(normalize_minutes(42, &[30.0, 30.0]), vec![21, 21]);
+    assert_eq!(
+        normalize_seconds(42 * 60, &[30.0, 30.0]),
+        vec![21 * 60, 21 * 60]
+    );
+    assert_eq!(normalize_seconds(120, &[10.0, 1.0, 1.0]), vec![98, 11, 11]);
+    assert_eq!(normalize_seconds(0, &[5.0]), vec![0]);
+    assert_eq!(normalize_seconds(-10, &[5.0, 5.0]), vec![0, 0]);
+    assert_eq!(normalize_seconds(9, &[0.0, -3.0, f64::NAN]), vec![3, 3, 3]);
+    assert_eq!(normalize_seconds(10, &[1e308, 1e308]), vec![5, 5]);
+    assert_eq!(normalize_seconds(2, &[1.0, 1.0, 1.0]), vec![1, 1, 0]);
     let answer = HourAnswer {
         summary: "s".into(),
         activities: ["Fixed the login bug", "Reviewed a PR"]
@@ -44,11 +52,14 @@ fn reported_minutes_are_the_measured_minutes_split_by_the_model_weights() {
             })
             .collect(),
     };
-    let minutes: Vec<i64> = assemble(&answer, 42, &[])
-        .iter()
-        .map(|activity| activity.minutes)
-        .collect();
+    let activities = assemble(&answer, 42 * 60, &[]);
+    let minutes: Vec<i64> = activities.iter().map(|activity| activity.minutes).collect();
     assert_eq!(minutes, vec![21, 21]);
+    let seconds: Vec<i64> = activities
+        .iter()
+        .map(|activity| activity.seconds.unwrap_or(0))
+        .collect();
+    assert_eq!(seconds, vec![1260, 1260]);
 }
 
 /// Scenario "Entidades preservadas": repeated interface lines go, the
@@ -89,12 +100,15 @@ fn an_hour_continuing_a_workstream_is_appended_to_it_only() {
             title: "Corrigir bug de login".into(),
             summary: "Investigou o redirecionamento.".into(),
             minutes: 35,
+            seconds: 35 * 60,
             hours: vec![WorkstreamHourDto {
                 hour: "2026-10-04T13".into(),
                 minutes: 35,
+                seconds: 35 * 60,
                 note: "Investigou".into(),
                 periods: None,
                 located_minutes: 0,
+                located_seconds: 0,
             }],
         },
         WorkstreamDto {
@@ -102,6 +116,7 @@ fn an_hour_continuing_a_workstream_is_appended_to_it_only() {
             title: "Planejamento".into(),
             summary: "Revisou o quadro.".into(),
             minutes: 10,
+            seconds: 10 * 60,
             hours: Vec::new(),
         },
     ];
@@ -114,7 +129,7 @@ fn an_hour_continuing_a_workstream_is_appended_to_it_only() {
                 sessions: Vec::new(),
             }],
         },
-        40,
+        40 * 60,
         &[],
     );
     let plan = plan_fold(
@@ -133,10 +148,12 @@ fn an_hour_continuing_a_workstream_is_appended_to_it_only() {
         vec![Append {
             workstream_id: 7,
             minutes: 40,
+            seconds: 40 * 60,
             note: "Corrigiu o redirecionamento".into(),
             summary: Some("Investigou e corrigiu o redirecionamento.".into()),
             periods: None,
             located_minutes: 0,
+            located_seconds: 0,
         }]
     );
 }
@@ -205,7 +222,8 @@ fn a_summary_ready_in_quiet_hours_is_delivered_when_they_end() {
 /// HourActivity deve serializar `seconds` e tolerar ausência em JSON legado.
 #[test]
 fn hour_activity_serde_preserves_seconds_and_handles_legacy_without_seconds() {
-    let legacy = serde_json::from_str::<HourActivity>(r#"{"description": "Old", "minutes": 42}"#).unwrap();
+    let legacy =
+        serde_json::from_str::<HourActivity>(r#"{"description": "Old", "minutes": 42}"#).unwrap();
     assert_eq!(legacy.minutes, 42);
     let legacy_val = serde_json::to_value(&legacy).unwrap();
     assert!(
@@ -241,17 +259,29 @@ fn assemble_activities_expose_seconds_via_json() {
             })
             .collect(),
     };
-    let activities = assemble(&answer, 2, &[]);
+    let activities = assemble(&answer, 120, &[]);
     let act_json = serde_json::to_value(&activities).unwrap();
     assert!(
         act_json[0].get("seconds").is_some() && !act_json[0]["seconds"].is_null(),
         "HourActivity deve serializar seconds: {}",
         act_json[0]
     );
-    let s1 = act_json[0].get("seconds").and_then(Value::as_i64).unwrap_or(0);
-    let s2 = act_json[1].get("seconds").and_then(Value::as_i64).unwrap_or(0);
-    let s3 = act_json[2].get("seconds").and_then(Value::as_i64).unwrap_or(0);
-    assert!(s1 > 0 && s2 > 0 && s3 > 0, "Todas as partes devem ser > 0: {s1}, {s2}, {s3}");
+    let s1 = act_json[0]
+        .get("seconds")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let s2 = act_json[1]
+        .get("seconds")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let s3 = act_json[2]
+        .get("seconds")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    assert!(
+        s1 > 0 && s2 > 0 && s3 > 0,
+        "Todas as partes devem ser > 0: {s1}, {s2}, {s3}"
+    );
     assert_eq!(s1 + s2 + s3, 120);
 }
 
@@ -271,11 +301,14 @@ fn assemble_handles_invalid_weights_with_positive_seconds() {
             })
             .collect(),
     };
-    let activities = assemble(&answer, 5, &[]);
+    let activities = assemble(&answer, 300, &[]);
     let act_json = serde_json::to_value(&activities).unwrap();
     for (i, act) in act_json.as_array().unwrap().iter().enumerate() {
         let sec = act.get("seconds").and_then(Value::as_i64).unwrap_or(0);
-        assert!(sec > 0, "Activity {i} should receive positive seconds, got {sec}: {act}");
+        assert!(
+            sec > 0,
+            "Activity {i} should receive positive seconds, got {sec}: {act}"
+        );
     }
     let total: i64 = act_json
         .as_array()
@@ -319,7 +352,7 @@ fn assemble_handles_active_time_smaller_than_activity_count() {
         assert!(sec >= 0, "Seconds must be non-negative: {sec}");
     }
     let sum: i64 = seconds.iter().sum();
-    assert_eq!(sum, 120, "Sum of seconds must equal active total (120s)");
+    assert_eq!(sum, 2, "Sum of seconds must equal active total (2s)");
 }
 
 /// Scenario "parse_answer trata minutos ausentes como 0.0 e assemble distribui segundos positivos":
@@ -337,11 +370,20 @@ fn parse_answer_and_assemble_handle_missing_minutes() {
     assert_eq!(parsed.activities[0].minutes, 10.0);
     assert_eq!(parsed.activities[1].minutes, 0.0);
 
-    let activities = assemble(&parsed, 2, &[]);
+    let activities = assemble(&parsed, 120, &[]);
     let act_json = serde_json::to_value(&activities).unwrap();
-    let s1 = act_json[0].get("seconds").and_then(Value::as_i64).unwrap_or(0);
-    let s2 = act_json[1].get("seconds").and_then(Value::as_i64).unwrap_or(0);
-    assert!(s1 > 0 && s2 > 0, "Missing minutes activity must get positive seconds: s1={s1}, s2={s2}");
+    let s1 = act_json[0]
+        .get("seconds")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let s2 = act_json[1]
+        .get("seconds")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    assert!(
+        s1 > 0 && s2 > 0,
+        "Missing minutes activity must get positive seconds: s1={s1}, s2={s2}"
+    );
     assert_eq!(s1 + s2, 120);
 }
 
@@ -454,7 +496,8 @@ async fn workstreams_read_preserves_explicit_zero_seconds_without_fallback() {
 
 /// Scenario "apply_fold grava envelope com seconds mesmo sem periods e totaliza literal":
 #[tokio::test]
-async fn apply_fold_stores_seconds_in_envelope_even_without_periods_and_workstreams_read_totals_literal() {
+async fn apply_fold_stores_seconds_in_envelope_even_without_periods_and_workstreams_read_totals_literal(
+) {
     let (_dir, store) = test_support::store().await;
     let day = "2026-10-04";
     let hour = "2026-10-04T14";
@@ -504,7 +547,9 @@ async fn apply_fold_stores_seconds_in_envelope_even_without_periods_and_workstre
         }],
     );
 
-    let folded = db::apply_fold(&store, day, hour, &plan, Utc::now()).await.unwrap();
+    let folded = db::apply_fold(&store, day, hour, &plan, Utc::now())
+        .await
+        .unwrap();
     assert!(folded);
 
     let workstreams = db::workstreams_of_day(&store, day).await.unwrap();
@@ -517,7 +562,12 @@ async fn apply_fold_stores_seconds_in_envelope_even_without_periods_and_workstre
         "Totalização literal da frente deve ser 640s (600s legado + 40s da nova hora sem periods)"
     );
 
-    let hour14 = ws_val["hours"].as_array().unwrap().iter().find(|h| h["hour"] == hour).unwrap();
+    let hour14 = ws_val["hours"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["hour"] == hour)
+        .unwrap();
     assert_eq!(
         hour14.get("seconds"),
         Some(&json!(40)),
@@ -529,4 +579,3 @@ async fn apply_fold_stores_seconds_in_envelope_even_without_periods_and_workstre
         "Sem periods, locatedSeconds deve ser 0"
     );
 }
-

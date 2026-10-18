@@ -120,26 +120,39 @@ pub async fn unfolded_reports(
     .collect())
 }
 
-/// `day_workstream_hours.periods_json`: where an hour's work was located and
-/// how many of its minutes that covers. NULL: only the hour is known.
+/// `day_workstream_hours.periods_json`: where an hour's work was located,
+/// its seconds and located_seconds, and how many minutes that covers. NULL: only
+/// the hour is known.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredLocation {
-    periods: Vec<ActivityPeriod>,
-    located_minutes: i64,
+    #[serde(default)]
+    pub seconds: Option<i64>,
+    #[serde(default)]
+    pub located_seconds: Option<i64>,
+    #[serde(default)]
+    pub located_minutes: Option<i64>,
+    #[serde(default)]
+    pub periods: Option<Vec<ActivityPeriod>>,
 }
 
-fn location_json(periods: &Option<Vec<ActivityPeriod>>, located_minutes: i64) -> Option<String> {
-    let periods = periods.clone()?;
+fn location_json(
+    seconds: i64,
+    located_seconds: i64,
+    located_minutes: i64,
+    periods: &Option<Vec<ActivityPeriod>>,
+) -> Option<String> {
     serde_json::to_string(&StoredLocation {
-        periods,
-        located_minutes,
+        seconds: Some(seconds),
+        located_seconds: Some(located_seconds),
+        located_minutes: Some(located_minutes),
+        periods: periods.clone(),
     })
     .ok()
 }
 
-/// The day's workstreams (oldest first) with their hours; minutes are the
-/// sum of the hours' measured minutes. An hour stored without periods (or
+/// The day's workstreams (oldest first) with their hours; seconds and minutes are the
+/// sum of the hours' measured active times. An hour stored without periods (or
 /// with an unreadable location) reads as `periods: None`, known by hour only.
 pub async fn workstreams_of_day(
     store: &ActivityStore,
@@ -163,6 +176,7 @@ pub async fn workstreams_of_day(
                 title: row.get(1),
                 summary: row.get(2),
                 minutes: 0,
+                seconds: 0,
                 hours: Vec::new(),
             });
         }
@@ -175,13 +189,28 @@ pub async fn workstreams_of_day(
             .get::<Option<&str>, _>(6)
             .and_then(|json| serde_json::from_str(json).ok());
         let minutes: i64 = row.get(4);
+        let seconds: i64 = location
+            .as_ref()
+            .and_then(|found| found.seconds)
+            .unwrap_or(minutes * 60);
+        let located_minutes: i64 = location
+            .as_ref()
+            .and_then(|found| found.located_minutes)
+            .unwrap_or(0);
+        let located_seconds: i64 = location
+            .as_ref()
+            .and_then(|found| found.located_seconds)
+            .unwrap_or(located_minutes * 60);
         workstream.minutes += minutes;
+        workstream.seconds += seconds;
         workstream.hours.push(WorkstreamHourDto {
             hour,
             minutes,
+            seconds,
             note: row.get(5),
-            located_minutes: location.as_ref().map_or(0, |found| found.located_minutes),
-            periods: location.map(|found| found.periods),
+            located_minutes,
+            located_seconds,
+            periods: location.and_then(|found| found.periods),
         });
     }
     Ok(workstreams)
@@ -218,7 +247,12 @@ pub async fn apply_fold(
         .bind(hour)
         .bind(append.minutes)
         .bind(&append.note)
-        .bind(location_json(&append.periods, append.located_minutes))
+        .bind(location_json(
+            append.seconds,
+            append.located_seconds,
+            append.located_minutes,
+            &append.periods,
+        ))
         .bind(append.workstream_id)
         .bind(day)
         .execute(&mut *tx)
@@ -262,7 +296,12 @@ pub async fn apply_fold(
         .bind(hour)
         .bind(create.minutes)
         .bind(&create.note)
-        .bind(location_json(&create.periods, create.located_minutes))
+        .bind(location_json(
+            create.seconds,
+            create.located_seconds,
+            create.located_minutes,
+            &create.periods,
+        ))
         .execute(&mut *tx)
         .await?;
     }

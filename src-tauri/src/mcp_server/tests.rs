@@ -1080,6 +1080,7 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
                 HourActivity {
                     description: "Coding Zephyr".into(),
                     minutes: 40,
+                    seconds: Some(2400),
                     periods: Some(vec![ActivityPeriod {
                         started_at: "2026-10-01T09:05:00.000000Z".into(),
                         ended_at: "2026-10-01T09:45:00.000000Z".into(),
@@ -1088,6 +1089,7 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
                 HourActivity {
                     description: "Reading mail".into(),
                     minutes: 5,
+                    seconds: Some(300),
                     periods: None,
                 },
             ],
@@ -1111,12 +1113,14 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
                 title: "Zephyr importer".into(),
                 summary: "Scaffolding importer".into(),
                 minutes: 45,
+                seconds: 2700,
                 note: "Initial scaffold".into(),
                 periods: Some(vec![ActivityPeriod {
                     started_at: "2026-10-01T09:05:00.000000Z".into(),
                     ended_at: "2026-10-01T09:50:00.000000Z".into(),
                 }]),
                 located_minutes: 30,
+                located_seconds: 1800,
             }],
             appends: vec![],
         },
@@ -1359,9 +1363,11 @@ async fn day_panels_draw_the_day_from_filtered_activity_meetings_and_coding_agen
                 title: "Zephyr importer".into(),
                 summary: "Scaffolding importer".into(),
                 minutes: 7,
+                seconds: 7 * 60,
                 note: "Initial scaffold".into(),
                 periods: None,
                 located_minutes: 0,
+                located_seconds: 0,
             }],
             appends: vec![],
         },
