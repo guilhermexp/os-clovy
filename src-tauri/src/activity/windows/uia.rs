@@ -469,11 +469,11 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
 
     // Check root node
     if !root.is_password() {
-        let is_chrome = matches!(
+        let is_content = matches!(
             root.control_type(),
-            UiaControlType::Button | UiaControlType::Toolbar
+            UiaControlType::Document | UiaControlType::Edit | UiaControlType::Text
         );
-        if !is_chrome {
+        if is_content {
             let extracted = root
                 .text_content(MAX_CHARS.saturating_sub(total_chars))
                 .or_else(|| {
@@ -483,7 +483,13 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
                         None
                     }
                 })
-                .or_else(|| root.name());
+                .or_else(|| {
+                    if root.control_type() == UiaControlType::Text {
+                        root.name()
+                    } else {
+                        None
+                    }
+                });
 
             if let Some(text) = extracted {
                 let trimmed = text.trim();
@@ -522,7 +528,12 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
             UiaControlType::Button | UiaControlType::Toolbar
         );
 
-        if !is_chrome {
+        let is_content = matches!(
+            node.control_type(),
+            UiaControlType::Document | UiaControlType::Edit | UiaControlType::Text
+        );
+
+        if is_content {
             let extracted = node
                 .text_content(MAX_CHARS.saturating_sub(total_chars))
                 .or_else(|| {
@@ -532,7 +543,13 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
                         None
                     }
                 })
-                .or_else(|| node.name());
+                .or_else(|| {
+                    if node.control_type() == UiaControlType::Text {
+                        node.name()
+                    } else {
+                        None
+                    }
+                });
 
             if let Some(text) = extracted {
                 let trimmed = text.trim();
@@ -543,7 +560,8 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
             }
         }
 
-        if depth < MAX_DEPTH {
+        // Chrome subtrees (toolbars, buttons) do not contain document text
+        if depth < MAX_DEPTH && !is_chrome {
             if let Some(child) = node.first_child() {
                 queue.push_back((Some(child), depth + 1));
             }
@@ -582,7 +600,13 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
         if chunk.len() <= remaining {
             result.push_str(&chunk);
         } else {
-            result.push_str(&chunk[..remaining]);
+            let mut end = remaining;
+            while end > 0 && !chunk.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end > 0 {
+                result.push_str(&chunk[..end]);
+            }
             break;
         }
     }
@@ -1116,10 +1140,14 @@ mod tests {
         );
 
         let text = extract_uia_text(&tree).expect("text extracted without panic");
-        assert!(text.contains('€'));
-        assert!(text.chars().count() <= 20_000);
+        // 7,000 characters is well within the MAX_CHARS (20,000 characters) budget.
+        // It must NOT be truncated down to 6,666 characters.
+        assert_eq!(
+            text.chars().count(),
+            7000,
+            "7000 characters must be fully preserved within the 20k character budget"
+        );
     }
-
     #[test]
     fn test_uia_fake_tree_window_and_toolbar_only_text_returns_none_for_ocr() {
         let button = FakeUiaNode::leaf(
@@ -1148,6 +1176,34 @@ mod tests {
         assert_eq!(
             text, None,
             "window title and toolbar chrome alone must not count as accessible document text"
+        );
+    }
+
+    #[test]
+    fn test_uia_fake_tree_unicode_exceeding_20k_chars_is_capped_at_20k_characters() {
+        let large_euro_body: String = "€".repeat(25000);
+        let doc = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            Some("Large Euro document"),
+            None,
+            Some(&large_euro_body),
+            None,
+            false,
+            None,
+        );
+        let tree = FakeUiaNode::with_children(
+            UiaControlType::Window,
+            Some("Window"),
+            false,
+            vec![doc],
+        );
+
+        let text = extract_uia_text(&tree).expect("text extracted without panic");
+        // When exceeding 20,000 characters, it must be capped at 20,000 characters (not bytes).
+        assert_eq!(
+            text.chars().count(),
+            20_000,
+            "document text exceeding 20k characters must be capped at exactly 20,000 characters"
         );
     }
 }

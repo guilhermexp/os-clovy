@@ -94,7 +94,7 @@ fn is_safe_bundle_id(bundle_id: &str) -> bool {
         && !bundle_id.contains("..")
         && !bundle_id.contains('/')
         && !bundle_id.contains('\\')
-        && bundle_id.chars().all(|c| c.is_ascii_graphic())
+        && bundle_id.chars().all(|c| !c.is_control())
 }
 
 /// Resolves the executable path on disk for a given `bundle_id` (executable name or AUMID).
@@ -131,11 +131,35 @@ pub(crate) fn executable_path(bundle_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// Decodes and validates an executable path from an `App Paths` registry value.
+///
+/// Note: In RED state, REG_EXPAND_SZ is accepted but environment variables are NOT yet expanded.
+fn decode_app_paths_registry_value(
+    val_type: windows::Win32::System::Registry::REG_VALUE_TYPE,
+    buf: &[u16],
+) -> Option<PathBuf> {
+    use windows::Win32::System::Registry::{REG_EXPAND_SZ, REG_SZ};
+
+    if (val_type == REG_SZ || val_type == REG_EXPAND_SZ) && !buf.is_empty() {
+        let char_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let raw_str = String::from_utf16_lossy(&buf[..char_len]);
+        let trimmed = raw_str.trim().trim_matches('"');
+        if !trimmed.is_empty() {
+            // Unexpanded path: fails for REG_EXPAND_SZ with env vars (RED state)
+            let p = PathBuf::from(trimmed);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// Fallback resolver via Windows Registry `App Paths`.
 fn resolve_from_app_paths(bundle_id: &str) -> Option<PathBuf> {
     use windows::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-        KEY_READ, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+        KEY_READ, REG_VALUE_TYPE,
     };
 
     let subkey = format!(
@@ -172,15 +196,10 @@ fn resolve_from_app_paths(bundle_id: &str) -> Option<PathBuf> {
             unsafe {
                 let _ = RegCloseKey(hkey);
             };
-            if query.is_ok() && (val_type == REG_SZ || val_type == REG_EXPAND_SZ) && size > 2 {
-                let char_len = (size as usize / 2).saturating_sub(1);
-                let raw_str = String::from_utf16_lossy(&buf[..char_len]);
-                let trimmed = raw_str.trim().trim_matches('"');
-                if !trimmed.is_empty() {
-                    let p = PathBuf::from(trimmed);
-                    if p.is_file() {
-                        return Some(p);
-                    }
+            if query.is_ok() && size > 2 {
+                let char_len = size as usize / 2;
+                if let Some(p) = decode_app_paths_registry_value(val_type, &buf[..char_len]) {
+                    return Some(p);
                 }
             }
         }
@@ -510,6 +529,42 @@ fn get_monitor_index(target_hmon: HMONITOR) -> u32 {
         .unwrap_or(0)
 }
 
+/// Evaluates whether a window handle qualifies as a candidate for topmost window on a secondary monitor (D6).
+pub(crate) fn is_secondary_window_candidate(
+    _hwnd: HWND,
+    _focused_hwnd: Option<HWND>,
+    is_visible: bool,
+    is_iconic: bool,
+    ex_style: u32,
+    rect: windows::Win32::Foundation::RECT,
+    win_monitor: HMONITOR,
+    sec_monitor: HMONITOR,
+    pid: u32,
+    own_pid: u32,
+) -> bool {
+    if !is_visible || is_iconic {
+        return false;
+    }
+    if (ex_style & windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW.0) != 0 {
+        return false;
+    }
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return false;
+    }
+    if win_monitor != sec_monitor {
+        return false;
+    }
+    if pid == 0 || pid == own_pid {
+        return false;
+    }
+
+    // RED state: misses excluding focused window handle!
+    // Stage 2 will add:
+    // if Some(_hwnd) == _focused_hwnd { return false; }
+
+    true
+}
+
 /// Returns the topmost visible window on each secondary monitor (D6).
 ///
 /// Enumerates monitors via `EnumDisplayMonitors` and finds the topmost window in Z-order
@@ -519,8 +574,8 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
     use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-        IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+        EnumWindows, GetForegroundWindow, GetWindowLongW, GetWindowRect,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE,
     };
 
     let monitors = enumerate_display_monitors();
@@ -528,6 +583,15 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
     if secondary_monitors.is_empty() {
         return Vec::new();
     }
+
+    let focused_hwnd = {
+        let h = unsafe { GetForegroundWindow() };
+        if h.0.is_null() {
+            None
+        } else {
+            Some(h)
+        }
+    };
 
     // Collect top-level windows in Z-order
     extern "system" fn enum_win_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -544,35 +608,29 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
 
     for sec in secondary_monitors {
         for &hwnd in &z_windows {
-            if !unsafe { IsWindowVisible(hwnd) }.as_bool() || unsafe { IsIconic(hwnd) }.as_bool() {
-                continue;
-            }
-
-            // Exclude tool windows
-            let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
-            if (ex_style as u32 & WS_EX_TOOLWINDOW.0) != 0 {
-                continue;
-            }
-
-            // Verify non-zero area
+            let is_visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+            let is_iconic = unsafe { IsIconic(hwnd) }.as_bool();
+            let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
             let mut rect = RECT::default();
             if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
                 continue;
             }
-            if rect.right <= rect.left || rect.bottom <= rect.top {
-                continue;
-            }
-
-            // Check if window is on this secondary monitor
             let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
-            if hmon != sec.hmonitor {
-                continue;
-            }
-
-            // Check PID
             let mut pid = 0u32;
             unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-            if pid == 0 || pid == own_pid {
+
+            if !is_secondary_window_candidate(
+                hwnd,
+                focused_hwnd,
+                is_visible,
+                is_iconic,
+                ex_style,
+                rect,
+                hmon,
+                sec.hmonitor,
+                pid,
+                own_pid,
+            ) {
                 continue;
             }
 
@@ -690,5 +748,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_registry_app_paths_decoding_expands_environment_strings() {
+        use windows::Win32::System::Registry::REG_EXPAND_SZ;
+
+        let raw_val = r"%SystemRoot%\notepad.exe";
+        let wide: Vec<u16> = raw_val.encode_utf16().chain(Some(0)).collect();
+
+        let decoded = decode_app_paths_registry_value(REG_EXPAND_SZ, &wide);
+
+        // Before expansion fix, decode_app_paths_registry_value tests is_file() on unexpanded
+        // "%SystemRoot%\notepad.exe", which fails and returns None.
+        assert!(
+            decoded.is_some(),
+            "REG_EXPAND_SZ must expand environment strings to resolve installed executable"
+        );
+        let path = decoded.unwrap();
+        assert!(path.is_file(), "expanded path must point to an actual file");
+    }
+
+    #[test]
+    fn test_secondary_window_selection_policy_excludes_focused_window() {
+        use windows::Win32::Foundation::RECT;
+
+        let secondary_hmon = HMONITOR(0x1000 as *mut _);
+        let focused_hwnd = HWND(0x2000 as *mut _);
+
+        let is_candidate = is_secondary_window_candidate(
+            focused_hwnd, // Candidate window IS the currently focused window on this secondary monitor
+            Some(focused_hwnd),
+            true, // is_visible
+            false, // is_iconic
+            0, // ex_style
+            RECT { left: 0, top: 0, right: 800, bottom: 600 },
+            secondary_hmon,
+            secondary_hmon,
+            1234, // pid
+            9999, // own_pid
+        );
+
+        // Before fix, is_secondary_window_candidate does NOT exclude focused_hwnd, returning true.
+        // The policy requires that the focused window must be excluded from secondary capture.
+        assert!(
+            !is_candidate,
+            "secondary window candidate selection must exclude the currently focused window"
+        );
     }
 }
