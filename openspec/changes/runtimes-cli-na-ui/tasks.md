@@ -12,7 +12,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Fronte
 
 - [x] 2.1 Fonte de token `gh` e conta `github_cli`: detecção, conexão automática só sem conta existente, leitura ativa e escrita desligada, token lido a cada chamada e nunca persistido (D3). Verificar: testes de integração com `gh` falso no PATH e servidor HTTP falso no lugar de `api.github.com` (conecta; não conecta com conta da App; não conecta sem `gh`; nenhuma escrita no armazenamento de tokens).
 - [x] 2.2 Desconectar grava `githubCliAutoConnect = false`; botão "Conectar pelo GitHub CLI"; `gh auth logout` vira `reconnect_required`; pacotes e aprovação de escrita como na conta da App. Verificar: testes de integração dos cenários da spec `github-cli-connection`.
-- [ ] 2.3 UI de Plugins mostra "via gh" e o botão (impeccable), i18n pt-BR/en; ADR nova (adendo à ADR-0036) e doc do conector. Verificar: teste de componente da linha do GitHub nos estados conectado via gh e desconectado com botão.
+- [x] 2.3 UI de Plugins mostra "via gh" e o botão (impeccable), i18n pt-BR/en; ADR nova (adendo à ADR-0036) e doc do conector. Verificar: teste de componente da linha do GitHub nos estados conectado via gh e desconectado com botão.
 
 ## 3. Uso do computador local
 

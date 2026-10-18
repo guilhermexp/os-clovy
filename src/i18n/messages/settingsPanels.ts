@@ -201,6 +201,14 @@ export default defineMessages({
     "settingsPanels.connectors.disconnectDescription":
       "Clovy stops using this account and removes its tokens from your Keychain. Routines that rely on it will fail until you reconnect.",
     "settingsPanels.connectors.revokeWith": "Also revoke Clovy's access with {provider}",
+    "settingsPanels.connectors.viaGh": "via gh",
+    "settingsPanels.connectors.viaGhTip":
+      "Uses your GitHub CLI login on this Mac. Clovy reads the token from gh for each call and never stores it.",
+    "settingsPanels.connectors.connectWithGh": "Connect with GitHub CLI",
+    "settingsPanels.connectors.connectWithGhName": "Connect {name} with GitHub CLI",
+    "settingsPanels.connectors.ghConnected": "GitHub connected through GitHub CLI",
+    "settingsPanels.connectors.disconnectGhDescription":
+      "Clovy stops using your GitHub CLI login and stops connecting through it on its own. gh itself stays signed in.",
     "settingsPanels.connectors.revokeWithProvider": "Also revoke Clovy's access with the provider",
     "settingsPanels.devices.cap.notesRead": "Read notes",
     "settingsPanels.devices.cap.notesEdit": "Edit notes",
@@ -723,6 +731,14 @@ export default defineMessages({
     "settingsPanels.connectors.disconnectDescription":
       "O Clovy deixa de usar esta conta e remove os tokens dela das suas Chaves. As rotinas que dependem dela vão falhar até você reconectar.",
     "settingsPanels.connectors.revokeWith": "Também revogar o acesso do Clovy no {provider}",
+    "settingsPanels.connectors.viaGh": "via gh",
+    "settingsPanels.connectors.viaGhTip":
+      "Usa o login do GitHub CLI neste Mac. O Clovy lê o token do gh a cada chamada e nunca o guarda.",
+    "settingsPanels.connectors.connectWithGh": "Conectar pelo GitHub CLI",
+    "settingsPanels.connectors.connectWithGhName": "Conectar {name} pelo GitHub CLI",
+    "settingsPanels.connectors.ghConnected": "GitHub conectado pelo GitHub CLI",
+    "settingsPanels.connectors.disconnectGhDescription":
+      "O Clovy deixa de usar o login do GitHub CLI e não conecta mais por ele sozinho. O gh continua logado.",
     "settingsPanels.connectors.revokeWithProvider": "Também revogar o acesso do Clovy no provedor",
     "settingsPanels.devices.cap.notesRead": "Ler notas",
     "settingsPanels.devices.cap.notesEdit": "Editar notas",

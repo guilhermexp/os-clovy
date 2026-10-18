@@ -524,7 +524,7 @@ pub fn run() {
             // and upcoming meetings) and wake the matching durable routine.
             connectors::triggers::start(app.handle());
             // Connect GitHub through a signed-in GitHub CLI when there is no
-            // GitHub account yet (ADR-0068); off the startup path.
+            // GitHub account yet (ADR-0066); off the startup path.
             connectors::start_github_cli_detection(app.handle());
             meeting_hud::setup(app);
             os_accounts::setup_deep_link(app);

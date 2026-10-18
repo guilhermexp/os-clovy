@@ -1,4 +1,4 @@
-//! GitHub through the GitHub CLI's own login (ADR-0068).
+//! GitHub through the GitHub CLI's own login (ADR-0066).
 //!
 //! When the user is signed in to `gh` on `github.com` and has no GitHub
 //! account in Clovy, Clovy connects one marked "via gh". Its credential is

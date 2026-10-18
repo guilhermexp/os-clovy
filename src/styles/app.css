@@ -28507,6 +28507,13 @@ button.memory-project:hover {
   gap: var(--sp-2);
 }
 
+/* Where a connector's credential comes from ("via gh"): a quiet note beside
+ * the name, not a status. */
+.connector-source-tag {
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
 .connectors-notion-disclosures {
   display: flex;
   flex-direction: column;

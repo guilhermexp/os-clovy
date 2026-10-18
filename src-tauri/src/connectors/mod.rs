@@ -732,7 +732,7 @@ pub async fn github_access_token(
     account_id: &str,
 ) -> Result<String, AppError> {
     // A "via gh" account has no Clovy custody: its token comes from `gh` on
-    // every call (ADR-0068).
+    // every call (ADR-0066).
     let repos = crate::commands::repositories(app).await?;
     if let Some(record) = repos.get_connector_account(account_id).await? {
         if github_cli::is_gh_account(&record.metadata) {
@@ -1726,7 +1726,7 @@ pub async fn begin_connect_github(
         .filter(|id| !id.is_empty());
 
     // A "via gh" account rides on the GitHub CLI's login: adding a bundle is
-    // a Clovy-side grant, never a device flow (ADR-0068).
+    // a Clovy-side grant, never a device flow (ADR-0066).
     if let Some(account_id) = reconnect_account_id {
         if let Some(record) = repos.get_connector_account(account_id).await? {
             if record.provider == ConnectorProvider::Github.as_str()
