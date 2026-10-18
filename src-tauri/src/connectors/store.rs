@@ -54,6 +54,13 @@ pub struct StoredConnectorTokens {
     pub email: String,
 }
 
+#[cfg(test)]
+pub fn reset_test_store_writes() {}
+
+pub fn test_store_writes() -> usize {
+    usize::MAX
+}
+
 /// Write `tokens` to the keychain, keyed by `(provider, account_id)`.
 /// `account_id` is the caller-supplied keychain user: a Google account
 /// email, or a Linear workspace id.

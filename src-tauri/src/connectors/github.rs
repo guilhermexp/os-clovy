@@ -490,6 +490,15 @@ fn classify_refresh_failure(status: u16, error_code: Option<&str>) -> GithubRefr
 /// Shared GitHub API request builder: Bearer auth, required Accept and
 /// X-GitHub-Api-Version headers, and the required User-Agent. GitHub requires
 /// a User-Agent on every call; absent one returns 403.
+#[cfg(test)]
+pub fn set_test_api_base(_base: Option<String>) {}
+
+pub async fn list_user_repositories(
+    _access_token: &str,
+) -> Result<GithubRepositoryList, GithubApiError> {
+    Err(GithubApiError::Network("not implemented".to_string()))
+}
+
 fn github_api_request(
     access_token: &str,
     method: reqwest::Method,

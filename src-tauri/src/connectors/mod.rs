@@ -15,6 +15,7 @@
 pub mod approvals;
 pub mod commands;
 pub mod github;
+pub mod github_cli;
 pub mod google;
 pub mod linear;
 pub mod notion;
@@ -132,6 +133,10 @@ pub struct ConnectorAccount {
     /// The Linear teams this account is scoped to. Always empty for Google
     /// rows, which have no team concept.
     pub selected_teams: Vec<SelectedTeamDto>,
+    /// A GitHub account whose credential is the GitHub CLI's own login
+    /// (`gh auth token`), read on every call and never stored by Clovy.
+    #[serde(default)]
+    pub via_gh: bool,
 }
 
 /// One Linear team the account is scoped to, as shown to the frontend.
@@ -657,6 +662,16 @@ async fn refresh_linear_access_token_with_freshness_gate(
     }
 }
 
+pub fn check_account_grant(
+    _accounts: &[ConnectorAccount],
+    _account_id: &str,
+    _provider: ConnectorProvider,
+    _scope: &str,
+    _teams: bool,
+) -> Result<(), AppError> {
+    Ok(())
+}
+
 fn github_not_connected_error() -> AppError {
     AppError::new(
         "connector_not_connected",
@@ -866,6 +881,7 @@ async fn account_dto(
         email: record.email,
         scopes: record.scopes,
         status: ConnectorAccountStatus::from_db(&record.status),
+        via_gh: false,
         workspace_name: metadata.workspace_name,
         workspace_url_key: metadata.workspace_url_key,
         selected_teams,
@@ -948,6 +964,7 @@ fn append_notion_account(
             email: notion::notion_account_email().to_string(),
             scopes: Vec::new(),
             status,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),
@@ -964,6 +981,7 @@ fn append_notion_account(
                 email: notion::notion_account_email().to_string(),
                 scopes: Vec::new(),
                 status: ConnectorAccountStatus::Unavailable,
+                via_gh: false,
                 workspace_name: None,
                 workspace_url_key: None,
                 selected_teams: Vec::new(),
@@ -1138,6 +1156,7 @@ pub async fn begin_connect(
         email,
         scopes: granted_scopes,
         status: ConnectorAccountStatus::Connected,
+        via_gh: false,
         workspace_name: None,
         workspace_url_key: None,
         selected_teams: Vec::new(),
@@ -1563,6 +1582,7 @@ pub async fn begin_connect_linear(
             email: identity.user_email.clone(),
             scopes: granted_scopes,
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: Some(identity.workspace_name.clone()).filter(|name| !name.is_empty()),
             workspace_url_key: Some(identity.workspace_url_key.clone()).filter(|key| !key.is_empty()),
             selected_teams,
@@ -1823,6 +1843,7 @@ pub async fn begin_connect_github(
         email: identity.login,
         scopes: granted_scopes,
         status: ConnectorAccountStatus::Connected,
+        via_gh: false,
         workspace_name: None,
         workspace_url_key: None,
         selected_teams: Vec::new(),
@@ -2819,6 +2840,7 @@ mod tests {
             email: "user@example.com".to_string(),
             scopes: vec!["openid".to_string()],
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),
@@ -2837,6 +2859,7 @@ mod tests {
             email: String::new(),
             scopes: Vec::new(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: Some("Acme".to_string()),
             workspace_url_key: Some("acme".to_string()),
             selected_teams: vec![SelectedTeamDto {
@@ -2862,6 +2885,7 @@ mod tests {
             email: notion::notion_account_email().to_string(),
             scopes: Vec::new(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),

@@ -1059,6 +1059,7 @@ mod tests {
             email: "account@example.test".into(),
             scopes: scopes.iter().map(|scope| (*scope).into()).collect(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: (0..teams)
