@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { ChatEnginePicker } from "../components/agent/composer/ChatEnginePicker";
+import appCss from "../styles/app.css?raw";
 import { applyInterfaceLocale, resetInterfaceLocaleForTests } from "../i18n/locale";
 import type { ChatEngineCatalog } from "../lib/chat-engine";
 
@@ -98,10 +99,12 @@ describe("ChatEnginePicker", () => {
 
     await user.click(screen.getByRole("button", { name: /Chat engine/i }));
     const rows = screen.getAllByRole("menuitemradio");
-    expect(rows.map((row) => row.textContent)).toEqual([
+    expect(
+      rows.map((row) => row.querySelector(".agent-composer-model-choice-copy")?.textContent),
+    ).toEqual([
       "Claude CodeDefault",
       "Codex",
-      "PiNot found in PATH",
+      "PiNot found in your login shell PATH.",
       "Local Ollama",
       "ClovyBuilt-in agent, kept while its tools move to the CLIs",
     ]);
@@ -135,7 +138,8 @@ describe("ChatEnginePicker", () => {
 
     const piOption = screen.getByRole("menuitemradio", { name: /Pi/ });
     expect(piOption).toBeDisabled();
-    expect(piOption).toHaveTextContent("Not found in PATH");
+    expect(piOption).toHaveTextContent("Not found in your login shell PATH.");
+    expect(piOption).not.toHaveTextContent("Not found in PATH");
   });
 
   it("choosing a CLI calls setModel with __clovy_cli_engine__:<id>", async () => {
@@ -203,5 +207,100 @@ describe("ChatEnginePicker", () => {
     );
     await user.click(screen.getByRole("menuitemradio", { name: /^Home server/ }));
     expect(setModel).toHaveBeenCalledWith("__june_local_generation__:qwen3@home");
+  });
+
+  it("keeps an unavailable CLI's logo, name and reason on its own row", async () => {
+    const user = userEvent.setup();
+    const reason = (bin: string) => `\`${bin}\` was not found in your login shell PATH.`;
+    const catalog: ChatEngineCatalog = {
+      clis: [
+        ...sampleCatalog.clis,
+        {
+          id: "cursor-agent",
+          name: "Cursor Agent",
+          installed: false,
+          reason: reason("cursor-agent"),
+          modelId: "__clovy_cli_engine__:cursor-agent",
+        },
+        {
+          id: "copilot",
+          name: "GitHub Copilot",
+          installed: false,
+          reason: reason("copilot"),
+          modelId: "__clovy_cli_engine__:copilot",
+        },
+      ],
+      endpoints: [],
+    };
+    render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={catalog} />);
+    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
+
+    const cursor = screen.getByRole("menuitemradio", { name: /^Cursor Agent/ });
+    const copilot = screen.getByRole("menuitemradio", { name: /^GitHub Copilot/ });
+    expect(cursor).not.toContainElement(copilot);
+    expect(cursor).not.toHaveTextContent("GitHub Copilot");
+    for (const [row, name] of [
+      [cursor, "Cursor Agent"],
+      [copilot, "GitHub Copilot"],
+    ] as const) {
+      expect(row.querySelector(".agent-composer-model-row-logo svg")).not.toBeNull();
+      expect(row.querySelector(".agent-composer-model-row-name")).toHaveTextContent(name);
+      expect(row.querySelector(".agent-composer-model-choice-desc")).toHaveTextContent(
+        "Not found in your login shell PATH.",
+      );
+    }
+
+    // jsdom has no layout: the stylesheet carries the contract. Engine rows
+    // keep their natural height (a capped popover scrolls instead of
+    // squeezing two-line rows into one), the copy takes the free width and
+    // the reason wraps inside it.
+    const rule = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(appCss);
+      return match?.[1] ?? "";
+    };
+    expect(rule(".agent-engine-popover")).toContain("overflow-y: auto;");
+    expect(rule(".agent-engine-popover .agent-composer-model-menu")).toContain("flex: none;");
+    expect(rule(".agent-engine-popover .agent-composer-model-row")).toContain("flex: none;");
+    expect(rule(".agent-engine-popover .agent-composer-model-choice-copy")).toContain(
+      "flex: 1 1 auto;",
+    );
+    expect(rule(".agent-engine-popover .agent-composer-model-choice-desc")).toContain(
+      "overflow-wrap: anywhere;",
+    );
+  });
+
+  it("shows the translated not-found reason instead of the backend text", async () => {
+    applyInterfaceLocale("pt-BR");
+    const user = userEvent.setup();
+    const catalog: ChatEngineCatalog = {
+      clis: [
+        {
+          id: "copilot",
+          name: "GitHub Copilot",
+          installed: false,
+          reason: "`copilot` was not found in your login shell PATH.",
+          modelId: "__clovy_cli_engine__:copilot",
+        },
+      ],
+      endpoints: [],
+    };
+    render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={catalog} />);
+    await user.click(screen.getByRole("button"));
+
+    const copilot = screen.getByRole("menuitemradio", { name: /^GitHub Copilot/ });
+    expect(copilot).toHaveTextContent("Não encontrado no PATH da sua sessão.");
+    expect(copilot).not.toHaveTextContent("was not found");
+  });
+
+  it("gives the legacy Clovy row the Clovy mark like the other rows", async () => {
+    const user = userEvent.setup();
+    render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={sampleCatalog} />);
+    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
+
+    const clovy = screen.getByRole("menuitemradio", { name: /^Clovy/ });
+    const logo = clovy.querySelector(".agent-composer-model-row-logo");
+    expect(logo).toHaveAttribute("data-brand", "clovy");
+    expect(logo?.querySelector("svg")).not.toBeNull();
   });
 });
