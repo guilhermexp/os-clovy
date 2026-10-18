@@ -1,5 +1,8 @@
 //! Windows adapter for the shared text-only activity capture engine.
 
+mod clipboard;
+mod disk;
+mod input;
 mod ocr;
 mod uia;
 pub(crate) mod window;

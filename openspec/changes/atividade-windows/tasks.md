@@ -22,7 +22,7 @@
 
 ## 4. Entrada, área de transferência, telas, disco e ociosidade
 
-- [ ] 4.1 RED: testes de normalização do Raw Input (só instantes de mouse down e key down, sem código de tecla), do filtro de formatos ocultos da área de transferência e de `system_idle_ms`; verificar que falham.
+- [x] 4.1 RED: testes de normalização do Raw Input (só instantes de mouse down e key down, sem código de tecla) e do filtro de formatos ocultos da área de transferência; verificar que falham. `system_idle_ms` excluído desta rodada pelo limite registrado em 4.2.
 - [ ] 4.2 GREEN: `set_input_capture`/`drain_input_events` (D5), `clipboard_text_if_changed`, `secondary_windows`, `free_disk_bytes` (D6) e `system_idle_ms`; testes de 4.1 passam; no `cert`, cliques, teclas e cópia aparecem em `input_events` sem conteúdo digitado.
   - Limite desta rodada: falta system_idle_ms, depende da outra change. Não adicionar `frames.input_idle_ms` nem migração 6.
 - [ ] 4.3 Atualizar `docs/activity-capture.md` e `docs/activity-timeline.md` com o adaptador Windows, o banco cifrado no Windows e os nomes de tela bloqueada; conferir com o código.
