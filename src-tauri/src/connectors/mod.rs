@@ -1808,6 +1808,9 @@ pub async fn begin_connect_github(
     }
 
     // Same single-account rationale as Google and Linear, scoped to GitHub.
+    // The check and the writes below run under the GitHub account lifecycle
+    // lock so a concurrent "via gh" detection cannot add a second account.
+    let _lifecycle = github_cli::github_accounts_lock().lock().await;
     let existing_accounts = repos.list_connector_accounts().await?;
     if let Some(existing_id) = conflicting_existing_account(
         existing_accounts

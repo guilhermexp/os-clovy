@@ -175,7 +175,6 @@ export default defineMessages({
     "chat.model.noPrivateMatches": "No private models match your search.",
     "chat.model.noPrivateAvailable": "No private models available.",
     "chat.model.noMatches": "No models match your search.",
-    "chat.privacy.e2ee": "Clovy runs locally. Calls to {name} are end-to-end encrypted.",
     "chat.sandbox.unrestricted": "Unrestricted",
     "chat.sandbox.unrestrictedAria": "Unrestricted - {description}",
     "chat.sandbox.unrestrictedDescription":
@@ -375,8 +374,6 @@ export default defineMessages({
     "chat.model.noPrivateMatches": "Nenhum modelo privado corresponde à sua busca.",
     "chat.model.noPrivateAvailable": "Nenhum modelo privado disponível.",
     "chat.model.noMatches": "Nenhum modelo corresponde à sua busca.",
-    "chat.privacy.e2ee":
-      "O Clovy roda localmente. As chamadas para {name} têm criptografia de ponta a ponta.",
     "chat.sandbox.unrestricted": "Sem restrições",
     "chat.sandbox.unrestrictedAria": "Sem restrições - {description}",
     "chat.sandbox.unrestrictedDescription":

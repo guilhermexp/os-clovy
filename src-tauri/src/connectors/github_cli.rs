@@ -17,10 +17,12 @@ use crate::db::repositories::{ConnectorAccountRecord, Repositories};
 use crate::domain::types::AppError;
 use crate::llm::shell_env::LoginEnv;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -207,6 +209,77 @@ async fn stored(repos: &Repositories, account_id: &str) -> Result<ConnectorAccou
         })
 }
 
+/// Serializes every write to GitHub account rows: the detection commit,
+/// disconnect, bundle grants and the GitHub App connect. Holders reread the
+/// accounts and the preference inside it, so a slow probe never decides on
+/// a stale snapshot.
+pub(crate) fn github_accounts_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
+}
+
+/// What `gh` and `GET /user` said, gathered outside the account lock.
+pub(crate) enum GhProbe {
+    Missing,
+    SignedOut,
+    Failed(AppError),
+    Identity(github::GithubIdentity),
+}
+
+pub(crate) async fn probe_gh(env: &LoginEnv) -> GhProbe {
+    let Some(gh) = Gh::find(env) else {
+        return GhProbe::Missing;
+    };
+    let token = if gh.signed_in().await {
+        gh.token().await
+    } else {
+        None
+    };
+    let Some(token) = token else {
+        return GhProbe::SignedOut;
+    };
+    match github::fetch_identity(&token).await {
+        Ok(identity) => {
+            remember_owner(&token, &identity.user_id);
+            GhProbe::Identity(identity)
+        }
+        Err(error) => GhProbe::Failed(error),
+    }
+}
+
+async fn github_record(repos: &Repositories) -> Result<Option<ConnectorAccountRecord>, AppError> {
+    Ok(repos
+        .list_connector_accounts()
+        .await?
+        .into_iter()
+        .find(|record| record.provider == ConnectorProvider::Github.as_str()))
+}
+
+fn app_account_present(
+    explicit: bool,
+    record: &ConnectorAccountRecord,
+) -> Result<Option<ConnectorAccount>, AppError> {
+    if explicit {
+        return Err(AppError::new(
+            "connector_single_account_only",
+            format!(
+                "Clovy local mode uses one GitHub account at a time. Disconnect {} before connecting another.",
+                record.email
+            ),
+        ));
+    }
+    Ok(None)
+}
+
+fn account_mismatch_error(gh_login: &str, account_login: &str) -> AppError {
+    AppError::new(
+        "connector_account_mismatch",
+        format!(
+            "GitHub CLI is signed in as {gh_login}, not {account_login}. Switch back with gh auth switch, or disconnect GitHub in Clovy first."
+        ),
+    )
+}
+
 /// Connect "GitHub (via gh)" when there is no GitHub account yet, and heal a
 /// "via gh" account that went `reconnect_required` once `gh` is signed in
 /// again as the same user. An account connected through the GitHub App is
@@ -218,70 +291,66 @@ pub async fn detect_and_connect(
     mode: ConnectMode,
 ) -> Result<Option<ConnectorAccount>, AppError> {
     let explicit = mode == ConnectMode::Explicit;
+    // Cheap early exits before spawning gh; `commit` checks again under the lock.
     if !explicit && !auto_connect_enabled(prefs_dir) {
         return Ok(None);
     }
-    let existing = repos
-        .list_connector_accounts()
-        .await?
-        .into_iter()
-        .find(|record| record.provider == ConnectorProvider::Github.as_str());
-    if let Some(record) = existing.as_ref() {
+    if let Some(record) = github_record(repos).await? {
         if !is_gh_account(&record.metadata) {
-            if explicit {
-                return Err(AppError::new(
-                    "connector_single_account_only",
-                    format!(
-                        "Clovy local mode uses one GitHub account at a time. Disconnect {} before connecting another.",
-                        record.email
-                    ),
-                ));
-            }
-            return Ok(None);
+            return app_account_present(explicit, &record);
         }
     }
+    let probe = probe_gh(env).await;
+    commit(repos, prefs_dir, mode, probe).await
+}
 
-    let Some(gh) = Gh::find(env) else {
-        return if explicit {
-            Err(cli_missing_error())
-        } else {
-            Ok(None)
-        };
-    };
-    let token = if gh.signed_in().await {
-        gh.token().await
-    } else {
-        None
-    };
-    let Some(token) = token else {
-        return if explicit {
-            Err(cli_signed_out_error())
-        } else {
-            Ok(existing.map(account_from_record))
-        };
-    };
-    let identity = match github::fetch_identity(&token).await {
-        Ok(identity) => identity,
-        Err(error) if explicit => return Err(error),
-        Err(error) => {
+/// Decide and write on the accounts as they are now, under the lifecycle lock.
+pub(crate) async fn commit(
+    repos: &Repositories,
+    prefs_dir: &Path,
+    mode: ConnectMode,
+    probe: GhProbe,
+) -> Result<Option<ConnectorAccount>, AppError> {
+    let explicit = mode == ConnectMode::Explicit;
+    let _lifecycle = github_accounts_lock().lock().await;
+    if !explicit && !auto_connect_enabled(prefs_dir) {
+        return Ok(None);
+    }
+    let existing = github_record(repos).await?;
+    if let Some(record) = existing.as_ref() {
+        if !is_gh_account(&record.metadata) {
+            return app_account_present(explicit, record);
+        }
+    }
+    let identity = match probe {
+        GhProbe::Identity(identity) => identity,
+        GhProbe::Missing if explicit => return Err(cli_missing_error()),
+        GhProbe::SignedOut if explicit => return Err(cli_signed_out_error()),
+        GhProbe::Failed(error) if explicit => return Err(error),
+        GhProbe::Failed(error) => {
             tracing::warn!(error_code = %error.code, "github cli identity check failed");
             return Ok(existing.map(account_from_record));
         }
+        GhProbe::Missing | GhProbe::SignedOut => return Ok(existing.map(account_from_record)),
     };
-    drop(token);
 
     if let Some(record) = existing {
         // Heal only the same GitHub user; a different gh login needs the
-        // user to disconnect first, like any account switch.
+        // user to switch gh back or disconnect first, like any account switch.
         if !record.account_id.eq_ignore_ascii_case(&identity.user_id) {
+            if explicit {
+                return Err(account_mismatch_error(&identity.login, &record.email));
+            }
             return Ok(Some(account_from_record(record)));
         }
-        repos
-            .set_connector_account_status(
-                &record.account_id,
-                ConnectorAccountStatus::Connected.as_str(),
-            )
-            .await?;
+        if record.status != ConnectorAccountStatus::Connected.as_str() {
+            repos
+                .set_connector_account_status(
+                    &record.account_id,
+                    ConnectorAccountStatus::Connected.as_str(),
+                )
+                .await?;
+        }
     } else {
         let scopes = vec![policy::GITHUB_READ.to_string()];
         repos
@@ -301,46 +370,88 @@ pub async fn detect_and_connect(
     stored(repos, &identity.user_id).await.map(Some)
 }
 
-/// What `gh` said, gathered outside the account lock. Not implemented yet.
-pub(crate) struct GhProbe(());
+// ----- token owner -----------------------------------------------------------------
 
-pub(crate) async fn probe_gh(_env: &LoginEnv) -> GhProbe {
-    GhProbe(())
+/// How long a confirmed "token → GitHub user" pairing is trusted.
+const OWNER_CONFIRMATION_TTL: Duration = Duration::from_secs(60);
+
+type TokenDigest = [u8; 32];
+
+/// In memory only, and only the SHA-256 of the token: never the token itself,
+/// never on disk.
+fn owner_confirmations() -> &'static std::sync::Mutex<HashMap<TokenDigest, (String, Instant)>> {
+    static CONFIRMED: OnceLock<std::sync::Mutex<HashMap<TokenDigest, (String, Instant)>>> =
+        OnceLock::new();
+    CONFIRMED.get_or_init(Default::default)
 }
 
-pub(crate) async fn commit(
-    _repos: &Repositories,
-    _prefs_dir: &Path,
-    _mode: ConnectMode,
-    _probe: GhProbe,
-) -> Result<Option<ConnectorAccount>, AppError> {
-    Err(AppError::new("not_implemented", "not implemented"))
+fn token_digest(token: &str) -> TokenDigest {
+    Sha256::digest(token.as_bytes()).into()
 }
 
-pub(crate) fn github_accounts_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    &LOCK
+fn remember_owner(token: &str, user_id: &str) {
+    if let Ok(mut confirmed) = owner_confirmations().lock() {
+        confirmed.retain(|_, (_, at)| at.elapsed() < OWNER_CONFIRMATION_TTL);
+        confirmed.insert(token_digest(token), (user_id.to_string(), Instant::now()));
+    }
 }
 
-/// The `gh` token for one call. When `gh` no longer yields one the account
-/// turns `reconnect_required` and the call fails with that code.
+fn confirmed_owner(token: &str) -> Option<String> {
+    let confirmed = owner_confirmations().lock().ok()?;
+    confirmed
+        .get(&token_digest(token))
+        .filter(|(_, at)| at.elapsed() < OWNER_CONFIRMATION_TTL)
+        .map(|(user_id, _)| user_id.clone())
+}
+
+/// The `gh` token for one call, only when it belongs to `account_id`. When
+/// `gh` no longer yields one, or yields another user's (after
+/// `gh auth switch`), the account turns `reconnect_required` and the call
+/// fails closed.
 pub async fn access_token(
     repos: &Repositories,
     env: &LoginEnv,
     account_id: &str,
 ) -> Result<String, AppError> {
-    if let Some(gh) = Gh::find(env) {
-        if let Some(token) = gh.token().await {
-            return Ok(token.as_str().to_string());
+    let token = match Gh::find(env) {
+        Some(gh) => gh.token().await,
+        None => None,
+    };
+    let Some(token) = token else {
+        mark_reconnect_required(repos, account_id).await?;
+        return Err(reconnect_required_error());
+    };
+    let owner = match confirmed_owner(&token) {
+        Some(owner) => owner,
+        None => {
+            let identity = github::fetch_identity(&token).await?;
+            remember_owner(&token, &identity.user_id);
+            identity.user_id
         }
+    };
+    if !owner.eq_ignore_ascii_case(account_id) {
+        mark_reconnect_required(repos, account_id).await?;
+        let account_login = repos
+            .get_connector_account(account_id)
+            .await?
+            .map(|record| record.email)
+            .unwrap_or_else(|| account_id.to_string());
+        return Err(account_mismatch_error(
+            "another GitHub user",
+            &account_login,
+        ));
     }
+    Ok(token.as_str().to_string())
+}
+
+async fn mark_reconnect_required(repos: &Repositories, account_id: &str) -> Result<(), AppError> {
     repos
         .set_connector_account_status(
             account_id,
             ConnectorAccountStatus::ReconnectRequired.as_str(),
         )
         .await?;
-    Err(reconnect_required_error())
+    Ok(())
 }
 
 /// Disconnect a "via gh" account: drop the row (there is no Clovy-held
@@ -350,6 +461,7 @@ pub async fn disconnect(
     prefs_dir: &Path,
     account_id: &str,
 ) -> Result<(), AppError> {
+    let _lifecycle = github_accounts_lock().lock().await;
     set_auto_connect(prefs_dir, false)?;
     repos.delete_connector_account(account_id).await?;
     Ok(())
@@ -362,6 +474,7 @@ pub async fn grant_bundles(
     account_id: &str,
     bundles: &[policy::ScopeBundle],
 ) -> Result<ConnectorAccount, AppError> {
+    let _lifecycle = github_accounts_lock().lock().await;
     let record = repos
         .get_connector_account(account_id)
         .await?
