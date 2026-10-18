@@ -403,13 +403,10 @@ export default defineMessages({
     "settingsPanels.approvals.approve": "Approve",
     "settingsPanels.computerUse.status.checking": "Checking",
     "settingsPanels.computerUse.status.unavailable": "Unavailable",
-    "settingsPanels.computerUse.status.temporarilyUnavailable": "Temporarily unavailable",
-    "settingsPanels.computerUse.status.proRequired": "Pro plan required",
     "settingsPanels.computerUse.status.driverUnavailable": "Driver unavailable",
     "settingsPanels.computerUse.status.off": "Off",
     "settingsPanels.computerUse.status.ready": "Ready",
     "settingsPanels.computerUse.status.needsMacosAccess": "Needs macOS access",
-    "settingsPanels.computerUse.status.needsVision": "Needs a vision model",
     "settingsPanels.computerUse.requiredWhenEnabled": "Required when enabled",
     "settingsPanels.computerUse.allowed": "Allowed",
     "settingsPanels.computerUse.notAllowed": "Not allowed",
@@ -419,19 +416,13 @@ export default defineMessages({
       "Computer use stopped. The grant stays on for your next attended task.",
     "settingsPanels.computerUse.name": "Computer use",
     "settingsPanels.computerUse.privacyTip":
-      "macOS will ask for Accessibility so Clovy can inspect and operate the target app, and Screen Recording so Clovy can understand what is visible. Clovy sends only captures needed for the current task to your selected model. Captures are never analytics.",
+      "macOS will ask for Accessibility so Clovy can inspect and operate the target app, and Screen Recording so Clovy can understand what is visible. Captures needed for the current task go only to the agent CLI running the turn, through Clovy's MCP server, and each action asks for your approval. Captures are never analytics.",
     "settingsPanels.computerUse.privacyAria": "Computer use privacy and permissions",
     "settingsPanels.computerUse.subtitle":
       "Operate supported Mac apps during attended tasks. Every action waits for your approval.",
     "settingsPanels.computerUse.enableAria": "Enable Computer use",
     "settingsPanels.computerUse.macosOnly":
       "Computer use is available on macOS only. Windows support is not part of this release.",
-    "settingsPanels.computerUse.proFeature": "Pro feature",
-    "settingsPanels.computerUse.proBody":
-      "Computer use requires an active Pro or Max plan. Permission education and revocation remain available without a plan.",
-    "settingsPanels.computerUse.viewPlans": "View plans",
-    "settingsPanels.computerUse.pausedBody":
-      "Computer use is paused for this Clovy or macOS version.",
     "settingsPanels.computerUse.driverUnavailableTitle": "Bundled driver unavailable",
     "settingsPanels.computerUse.driverUnavailableBody":
       "This build does not contain the pinned Computer use driver. Reinstall or update Clovy.",
@@ -455,9 +446,6 @@ export default defineMessages({
     "settingsPanels.computerUse.setupProgress": "Setup progress",
     "settingsPanels.computerUse.accessibility": "Accessibility",
     "settingsPanels.computerUse.screenRecording": "Screen recording",
-    "settingsPanels.computerUse.visionModel": "Vision-capable model",
-    "settingsPanels.computerUse.noModel": "No model selected",
-    "settingsPanels.computerUse.chooseModel": "Choose model",
     "settingsPanels.computerUse.stopTask": "Stop current task",
 
     "settingsPanels.llm.heading": "LLM providers",
@@ -942,13 +930,10 @@ export default defineMessages({
     "settingsPanels.approvals.approve": "Aprovar",
     "settingsPanels.computerUse.status.checking": "Verificando",
     "settingsPanels.computerUse.status.unavailable": "Indisponível",
-    "settingsPanels.computerUse.status.temporarilyUnavailable": "Temporariamente indisponível",
-    "settingsPanels.computerUse.status.proRequired": "Requer plano Pro",
     "settingsPanels.computerUse.status.driverUnavailable": "Driver indisponível",
     "settingsPanels.computerUse.status.off": "Desativado",
     "settingsPanels.computerUse.status.ready": "Pronto",
     "settingsPanels.computerUse.status.needsMacosAccess": "Precisa de acesso no macOS",
-    "settingsPanels.computerUse.status.needsVision": "Precisa de um modelo com visão",
     "settingsPanels.computerUse.requiredWhenEnabled": "Necessário quando ativado",
     "settingsPanels.computerUse.allowed": "Permitido",
     "settingsPanels.computerUse.notAllowed": "Não permitido",
@@ -958,19 +943,13 @@ export default defineMessages({
       "O uso do computador foi interrompido. A permissão continua ativa para a sua próxima tarefa acompanhada.",
     "settingsPanels.computerUse.name": "Uso do computador",
     "settingsPanels.computerUse.privacyTip":
-      "O macOS vai pedir Acessibilidade para que o Clovy possa inspecionar e operar o app de destino, e Gravação de tela para que o Clovy entenda o que está visível. O Clovy envia ao modelo selecionado apenas as capturas necessárias para a tarefa atual. As capturas nunca são usadas para análises.",
+      "O macOS vai pedir Acessibilidade para que o Clovy possa inspecionar e operar o app de destino, e Gravação de tela para que o Clovy entenda o que está visível. As capturas necessárias para a tarefa atual vão só para o CLI de agente que roda o turno, pelo servidor MCP do Clovy, e cada ação pede a sua aprovação. As capturas nunca são usadas para análises.",
     "settingsPanels.computerUse.privacyAria": "Privacidade e permissões do uso do computador",
     "settingsPanels.computerUse.subtitle":
       "Opera apps compatíveis do Mac durante tarefas acompanhadas. Cada ação aguarda a sua aprovação.",
     "settingsPanels.computerUse.enableAria": "Ativar uso do computador",
     "settingsPanels.computerUse.macosOnly":
       "O uso do computador está disponível apenas no macOS. O suporte ao Windows não faz parte desta versão.",
-    "settingsPanels.computerUse.proFeature": "Recurso Pro",
-    "settingsPanels.computerUse.proBody":
-      "O uso do computador exige um plano Pro ou Max ativo. As orientações sobre permissões e a revogação continuam disponíveis sem plano.",
-    "settingsPanels.computerUse.viewPlans": "Ver planos",
-    "settingsPanels.computerUse.pausedBody":
-      "O uso do computador está pausado para esta versão do Clovy ou do macOS.",
     "settingsPanels.computerUse.driverUnavailableTitle": "Driver incluído indisponível",
     "settingsPanels.computerUse.driverUnavailableBody":
       "Esta versão não contém o driver fixado do uso do computador. Reinstale ou atualize o Clovy.",
@@ -995,9 +974,6 @@ export default defineMessages({
     "settingsPanels.computerUse.setupProgress": "Progresso da configuração",
     "settingsPanels.computerUse.accessibility": "Acessibilidade",
     "settingsPanels.computerUse.screenRecording": "Gravação de tela",
-    "settingsPanels.computerUse.visionModel": "Modelo com visão",
-    "settingsPanels.computerUse.noModel": "Nenhum modelo selecionado",
-    "settingsPanels.computerUse.chooseModel": "Escolher modelo",
     "settingsPanels.computerUse.stopTask": "Parar tarefa atual",
 
     "settingsPanels.llm.heading": "Provedores de LLM",

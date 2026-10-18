@@ -2371,10 +2371,7 @@ export function AppSettings({
 
         {activeTab === "connectors" ? (
           <>
-            <ConnectorsSection
-              onOpenModels={() => setActiveTab("models")}
-              onOpenBilling={() => setActiveTab("billing")}
-            />
+            <ConnectorsSection />
             <AgentMcpServersSection />
           </>
         ) : null}

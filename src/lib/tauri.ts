@@ -1829,27 +1829,23 @@ export type PendingBrowserApproval = {
   requestedAtMs: number;
 };
 
+/** Local facts only: the grant, the bundled driver and macOS access
+ * (ADR-0067). No plan, vision model or remote rollout. */
 export type ComputerUseStatusDto = {
   platformSupported: boolean;
-  planEligible: boolean;
   grantEnabled: boolean;
   driverAvailable: boolean;
   driverVersion?: string;
   accessibility: boolean;
   screenRecording: boolean;
-  modelSupportsVision: boolean;
-  generationModel: string;
   ready: boolean;
   state:
     | "off"
     | "permission_missing"
-    | "model_unsupported"
-    | "plan_required"
     | "ready"
     | "unsupported"
     | "driver_missing"
     | "driver_mismatch"
-    | "rollout_disabled"
     | "error"
     | (string & {});
   error?: string;

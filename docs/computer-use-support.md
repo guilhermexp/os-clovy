@@ -1,9 +1,10 @@
 # Computer use support runbook
 
-Computer use has independent gates: Clovy's stored grant, the Clovy API rollout
-decision, macOS access for the signed helper, an active plan, a vision-capable
-model, and a visible attended turn. Do not treat one as proof that the others
-are enabled.
+Computer use has independent local gates: Clovy's stored grant, the pinned
+signed helper, macOS access for it, and a visible attended CLI turn
+([ADR-0067](adr/0067-computer-use-depends-only-on-local-gates.md): no plan,
+Clovy vision model or remote rollout). Do not treat one as proof that the
+others are enabled.
 
 The shipped helper bundle names and development executable aliases documented
 below retain their June-era technical identities under
@@ -14,14 +15,11 @@ below retain their June-era technical identities under
 | State | Meaning | Action |
 | --- | --- | --- |
 | `unsupported` | This is not macOS. | Computer use is not shipped on Windows. |
-| `rollout_disabled` | Clovy API disabled this app/macOS version, or the first safety decision could not be fetched. | Keep the grant revocable, check connectivity, then inspect Clovy API's `[computer_use]` config. Do not bypass the gate. |
-| `plan_required` | No active Pro/Max or compatible legacy paid subscription is cached. | Refresh the account or open View plans. An existing Clovy grant can still be revoked. |
 | `off` | The Clovy grant is off. The helper may still have macOS grants. | Enable from Plugins after reading the permission explanation. |
 | `driver_missing` | The signed app does not contain the pinned helper/stamp. | Reinstall or update Clovy. Do not run an upstream installer. |
 | `driver_mismatch` | The helper version does not match the repo pin. | Stop rollout and inspect the build provenance/SBOM. |
 | `permission_missing` | Accessibility, Screen Recording, or the live capture probe is absent. | Use Continue to macOS access, then the separate Open settings links. |
-| `model_unsupported` | The selected generation model lacks authoritative vision capability. | Choose a vision-capable model. |
-| `ready` | Every runtime gate is satisfied. | Start an attended agent task. |
+| `ready` | Every local gate is satisfied. | Start an attended task on an agent CLI with Clovy's MCP server. |
 | `error` | The helper could not start, handshake, or probe. | Stop the task, inspect logs and signature, then run the self-test. |
 
 ## User recovery
@@ -149,6 +147,9 @@ release runner or diagnosing a signed-build regression.
   regresses, hold the promotion and keep the previous release live.
 
 ## Emergency rollout
+
+Since ADR-0067 the desktop no longer reads this decision; the section below
+documents the Clovy API route kept for older clients.
 
 Clovy API's `[computer_use]` section supports:
 

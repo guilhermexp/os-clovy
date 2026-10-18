@@ -17,7 +17,7 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Fronte
 ## 3. Uso do computador local
 
 - [x] 3.1 Remover os gates de plano, visão e rollout do status e da ativação; remover a ferramenta do catálogo nativo e o código que ficar sem chamador (D4). Verificar: teste de integração de `status_inner` pronto sem plano, sem visão e com rollout inacessível; catálogo nativo sem `computer_use`; testes de `computer_use_tests` verdes.
-- [ ] 3.2 UI e textos: estados removidos do `ComputerUseControl`, privacy tip diz que a captura vai ao CLI do turno; ADR nova (adendo à ADR-0028). Verificar: teste de componente sem os estados `pro`/`needs_vision`/`rollout_disabled`.
+- [x] 3.2 UI e textos: estados removidos do `ComputerUseControl`, privacy tip diz que a captura vai ao CLI do turno; ADR nova (adendo à ADR-0028). Verificar: teste de componente sem os estados `pro`/`needs_vision`/`rollout_disabled`.
 
 ## 4. Prova
 

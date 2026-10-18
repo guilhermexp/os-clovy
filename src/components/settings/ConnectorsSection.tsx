@@ -418,13 +418,7 @@ function connectDescription(
  * pairing have no account, email, or scopes. Local mode only: tokens live in
  * the Mac's Keychain and provider calls originate on this device.
  */
-export function ConnectorsSection({
-  onOpenModels = () => {},
-  onOpenBilling = () => {},
-}: {
-  onOpenModels?: () => void;
-  onOpenBilling?: () => void;
-}) {
+export function ConnectorsSection() {
   const t = useT();
   const { policy, error: policyError } = useConnectorPolicy();
   const oauthProviders =
@@ -1150,9 +1144,7 @@ export function ConnectorsSection({
               />
             </button>
           </li>
-          {advancedOpen ? (
-            <ComputerUseControl onOpenModels={onOpenModels} onOpenBilling={onOpenBilling} />
-          ) : null}
+          {advancedOpen ? <ComputerUseControl /> : null}
         </ul>
       </div>
 
