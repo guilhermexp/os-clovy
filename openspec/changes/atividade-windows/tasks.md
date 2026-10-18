@@ -32,6 +32,7 @@
 - [x] 5.1 RED: testes de `SourceRoots` no Windows (perfil e `%APPDATA%`) e da recusa de ponto de reparo ao abrir arquivos; verificar que falham.
 - [ ] 5.2 GREEN: raízes e abertura segura no Windows (D10); testes de 5.1 passam; no `cert`, uma sessão real de Claude Code ou Codex aparece na faixa de agentes. Atualizar `docs/coding-agent-sessions.md`.
 - [ ] 5.3 Candle e tokenizers no alvo Windows (D9); teste do embedder BGE passa no `cert`; tempo de embedding de uma hora medido e registrado. Se inaceitável, parar e voltar ao dono. Atualizar `docs/day-intelligence.md`.
+  - RED do teste existente com o modelo real observado no `cert`: preparo chegou a `Ready`, mas `embed` retornou `None` e a asserção `vectors` falhou; 1 falha, 13,39 s de teste. Log `5.3-bge-real-model-red.log`.
 
 ## 6. Interface
 
