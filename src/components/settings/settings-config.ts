@@ -1,4 +1,3 @@
-import { isMacLikePlatform } from "../../lib/platform";
 import { type MessageKey, t } from "../../i18n";
 
 export type SettingsTab =
@@ -58,10 +57,13 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   settingsTab("about"),
 ];
 
-export function settingsTabsForCompanionPairing(companionPairingEnabled: boolean) {
-  const mac = isMacLikePlatform();
+export function settingsTabsForCompanionPairing(
+  companionPairingEnabled: boolean,
+  activitySupported: boolean,
+) {
   return SETTINGS_TABS.filter(
     (tab) =>
-      (companionPairingEnabled || tab.id !== "linked-devices") && (mac || tab.id !== "activity"),
+      (companionPairingEnabled || tab.id !== "linked-devices") &&
+      (activitySupported || tab.id !== "activity"),
   );
 }

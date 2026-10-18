@@ -19,6 +19,7 @@ import {
   type ActivityStatusDto,
 } from "../../lib/activity-capture";
 import { openPrivacySettings } from "../../lib/tauri";
+import { isMacLikePlatform } from "../../lib/platform";
 import { formatDate, type MessageKey, useT } from "../../i18n";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Switch } from "../ui/Switch";
@@ -310,43 +311,45 @@ export function ActivitySettingsSection() {
         </section>
       ) : null}
 
-      <section className="settings-group" aria-labelledby="activity-permissions-heading">
-        <h2 id="activity-permissions-heading" className="settings-group-heading">
-          {t("activity.permissions.title")}
-        </h2>
-        <p className="settings-group-description">{t("activity.permissions.description")}</p>
-        <div className="settings-card">
-          <div className="settings-rows">
-            <PermissionItemRow
-              title={t("activity.permissions.accessibility.title")}
-              description={t("activity.permissions.accessibility.description")}
-              state={permissions.accessibility}
-              required
-              prominent={settings.enabled && missingRequiredList.includes("accessibility")}
-              onRequest={() => handleRequestPermission("accessibility")}
-              onOpenSettings={() => handleOpenSettings("accessibility")}
-            />
-            <PermissionItemRow
-              title={t("activity.permissions.screenRecording.title")}
-              description={t("activity.permissions.screenRecording.description")}
-              state={permissions.screenRecording}
-              required
-              prominent={settings.enabled && missingRequiredList.includes("screenRecording")}
-              onRequest={() => handleRequestPermission("screenRecording")}
-              onOpenSettings={() => handleOpenSettings("screenRecording")}
-            />
-            <PermissionItemRow
-              title={t("activity.permissions.inputMonitoring.title")}
-              description={t("activity.permissions.inputMonitoring.description")}
-              state={permissions.inputMonitoring}
-              required={false}
-              prominent={false}
-              onRequest={() => handleRequestPermission("inputMonitoring")}
-              onOpenSettings={() => handleOpenSettings("inputMonitoring")}
-            />
+      {isMacLikePlatform() ? (
+        <section className="settings-group" aria-labelledby="activity-permissions-heading">
+          <h2 id="activity-permissions-heading" className="settings-group-heading">
+            {t("activity.permissions.title")}
+          </h2>
+          <p className="settings-group-description">{t("activity.permissions.description")}</p>
+          <div className="settings-card">
+            <div className="settings-rows">
+              <PermissionItemRow
+                title={t("activity.permissions.accessibility.title")}
+                description={t("activity.permissions.accessibility.description")}
+                state={permissions.accessibility}
+                required
+                prominent={settings.enabled && missingRequiredList.includes("accessibility")}
+                onRequest={() => handleRequestPermission("accessibility")}
+                onOpenSettings={() => handleOpenSettings("accessibility")}
+              />
+              <PermissionItemRow
+                title={t("activity.permissions.screenRecording.title")}
+                description={t("activity.permissions.screenRecording.description")}
+                state={permissions.screenRecording}
+                required
+                prominent={settings.enabled && missingRequiredList.includes("screenRecording")}
+                onRequest={() => handleRequestPermission("screenRecording")}
+                onOpenSettings={() => handleOpenSettings("screenRecording")}
+              />
+              <PermissionItemRow
+                title={t("activity.permissions.inputMonitoring.title")}
+                description={t("activity.permissions.inputMonitoring.description")}
+                state={permissions.inputMonitoring}
+                required={false}
+                prominent={false}
+                onRequest={() => handleRequestPermission("inputMonitoring")}
+                onOpenSettings={() => handleOpenSettings("inputMonitoring")}
+              />
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      ) : null}
 
       <section className="settings-group" aria-labelledby="activity-exclusions-heading">
         <h2 id="activity-exclusions-heading" className="settings-group-heading">

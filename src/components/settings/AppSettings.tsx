@@ -96,6 +96,7 @@ import {
   fallbackDictationCapabilities,
   isMacLikePlatform,
   isSystemAudioSupportedPlatform,
+  isWindowsPlatform,
   useDictationCapabilities,
 } from "../../lib/platform";
 import { systemAudioAvailability } from "../../lib/source-readiness";
@@ -140,7 +141,12 @@ import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
 import { PrivacySettingsSection } from "./PrivacySettingsSection";
 import { ActivitySettingsSection } from "./ActivitySettingsSection";
-import { SETTINGS_TABS, type SettingsTab } from "./settings-config";
+import { activityStatus } from "../../lib/activity-capture";
+import {
+  SETTINGS_TABS,
+  settingsTabsForCompanionPairing,
+  type SettingsTab,
+} from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
 import {
   getStoredDateFormat,
@@ -340,14 +346,6 @@ export type { SettingsTab };
 // Same list (and translated `label` getters) as the sidebar's settings nav.
 export { SETTINGS_TABS };
 
-export function appSettingsTabsForCompanionPairing(companionPairingEnabled: boolean) {
-  const mac = isMacLikePlatform();
-  return SETTINGS_TABS.filter(
-    (tab) =>
-      (companionPairingEnabled || tab.id !== "linked-devices") && (mac || tab.id !== "activity"),
-  );
-}
-
 /**
  * The shared settings page header (Codex-app style): a large serif page title
  * with one muted one-line blurb beneath, and generous space before the content.
@@ -421,6 +419,7 @@ type AppSettingsProps = {
   onReportIssue?: (category: ReportCategory) => void;
   // Opens a new agent session that runs a skill bundle's slash command.
   onStartBundleChat?: (prompt: string) => void;
+  activitySupported?: boolean;
 };
 
 export function AppSettings({
@@ -450,6 +449,7 @@ export function AppSettings({
   onReconcileToStable,
   onReportIssue,
   onStartBundleChat,
+  activitySupported: activitySupportedProp,
 }: AppSettingsProps) {
   const [settings, setSettings] = useState<DictationSettingsDto>(DEFAULT_SETTINGS);
   const [providerSettings, setProviderSettings] =
@@ -554,8 +554,25 @@ export function AppSettings({
   }, [detailPinned, onDetailPinnedChange]);
   // Never leave the host thinking a detail scroller is active after unmount.
   useEffect(() => () => onDetailPinnedChange?.(false), [onDetailPinnedChange]);
-  const settingsTabs = appSettingsTabsForCompanionPairing(
+  const [internalActivitySupported, setInternalActivitySupported] = useState(
+    () => isMacLikePlatform() || isWindowsPlatform(),
+  );
+  useEffect(() => {
+    if (activitySupportedProp !== undefined) return;
+    let active = true;
+    void activityStatus()
+      .then((status) => {
+        if (active) setInternalActivitySupported(status.supported);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [activitySupportedProp]);
+  const effectiveActivitySupported = activitySupportedProp ?? internalActivitySupported;
+  const settingsTabs = settingsTabsForCompanionPairing(
     experimentalFlags.companionPairingEnabled,
+    effectiveActivitySupported,
   ).filter((tab) => !(account.localDev && tab.id === "billing"));
   const capabilities = useDictationCapabilities();
   const systemAudioSupportedPlatform = capabilities.systemAudio || isSystemAudioSupportedPlatform();
