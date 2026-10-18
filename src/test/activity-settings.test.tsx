@@ -607,4 +607,91 @@ describe("ActivitySettingsSection", () => {
       });
     }
   });
+
+  it("preserves OS-context invariant on Windows for activity settings in English", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "Win32",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+
+      const { container } = render(<ActivitySettingsSection />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("switch", { name: "Capture activity" })).toBeInTheDocument();
+      });
+
+      const blurb = container.querySelector(".settings-page-blurb");
+      expect(blurb?.textContent).toBeTruthy();
+      expect(blurb?.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
+
+      const activityGroup = screen.getByRole("region", { name: "Activity" });
+      const descriptions = Array.from(
+        activityGroup.querySelectorAll(".settings-row-description, .settings-status"),
+      );
+      for (const el of descriptions) {
+        expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
+      }
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
+  });
+
+  it("preserves OS-context invariant on Windows for activity settings in Portuguese", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "Win32",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+
+      applyInterfaceLocale("pt-BR");
+      const { container } = render(<ActivitySettingsSection />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("switch", { name: "Capturar atividade" })).toBeInTheDocument();
+      });
+
+      const blurb = container.querySelector(".settings-page-blurb");
+      expect(blurb?.textContent).toBeTruthy();
+      expect(blurb?.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
+
+      const activityGroup = screen.getByRole("region", { name: "Atividade" });
+      const descriptions = Array.from(
+        activityGroup.querySelectorAll(".settings-row-description, .settings-status"),
+      );
+      for (const el of descriptions) {
+        expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
+      }
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
+  });
 });
