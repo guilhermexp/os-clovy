@@ -628,16 +628,7 @@ describe("ActivitySettingsSection", () => {
         expect(screen.getByRole("switch", { name: "Capture activity" })).toBeInTheDocument();
       });
 
-      const blurb = container.querySelector(".settings-page-blurb");
-      expect(blurb?.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
-
-      const activityGroup = screen.getByRole("region", { name: "Activity" });
-      const descriptions = Array.from(
-        activityGroup.querySelectorAll(".settings-row-description, .settings-status"),
-      );
-      for (const el of descriptions) {
-        expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
-      }
+      expect(container.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
     } finally {
       Object.defineProperty(navigator, "platform", {
         configurable: true,
@@ -671,16 +662,7 @@ describe("ActivitySettingsSection", () => {
         expect(screen.getByRole("switch", { name: "Capturar atividade" })).toBeInTheDocument();
       });
 
-      const blurb = container.querySelector(".settings-page-blurb");
-      expect(blurb?.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
-
-      const activityGroup = screen.getByRole("region", { name: "Atividade" });
-      const descriptions = Array.from(
-        activityGroup.querySelectorAll(".settings-row-description, .settings-status"),
-      );
-      for (const el of descriptions) {
-        expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
-      }
+      expect(container.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
     } finally {
       Object.defineProperty(navigator, "platform", {
         configurable: true,
