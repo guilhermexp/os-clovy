@@ -494,7 +494,7 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
             if let Some(text) = extracted {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    total_chars += trimmed.len();
+                    total_chars += trimmed.chars().count();
                     chunks.push(trimmed.to_string());
                 }
             }
@@ -554,7 +554,7 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
             if let Some(text) = extracted {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    total_chars += trimmed.len();
+                    total_chars += trimmed.chars().count();
                     chunks.push(trimmed.to_string());
                 }
             }
@@ -589,23 +589,23 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
     }
 
     let mut result = String::new();
+    let mut current_chars = 0usize;
     for chunk in deduped {
         if !result.is_empty() {
-            if result.len() + 1 >= MAX_CHARS {
+            if current_chars + 1 >= MAX_CHARS {
                 break;
             }
             result.push(' ');
+            current_chars += 1;
         }
-        let remaining = MAX_CHARS.saturating_sub(result.len());
-        if chunk.len() <= remaining {
+        let remaining_chars = MAX_CHARS.saturating_sub(current_chars);
+        let chunk_chars = chunk.chars().count();
+        if chunk_chars <= remaining_chars {
             result.push_str(&chunk);
+            current_chars += chunk_chars;
         } else {
-            let mut end = remaining;
-            while end > 0 && !chunk.is_char_boundary(end) {
-                end -= 1;
-            }
-            if end > 0 {
-                result.push_str(&chunk[..end]);
+            for c in chunk.chars().take(remaining_chars) {
+                result.push(c);
             }
             break;
         }
