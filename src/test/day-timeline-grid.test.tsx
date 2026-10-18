@@ -437,8 +437,67 @@ describe("Today grid of workstreams", () => {
     expect(within(removed).getByText("Removed App")).toBeInTheDocument();
     expect(within(removed).getByText(formatDuration(20 * 60_000, "en"))).toBeInTheDocument();
   });
-});
 
+  it("shows '< 1 min' for a 40s workstream and includes exact seconds in the total (40s + 40s = 1 min)", async () => {
+    applyInterfaceLocale("pt-BR");
+    const ws1: WorkstreamDto = {
+      id: 10,
+      title: "Tarefa curta A",
+      summary: "Primeira tarefa",
+      minutes: 0,
+      seconds: 40,
+      hours: [
+        {
+          hour: hourKey(10),
+          minutes: 0,
+          seconds: 40,
+          locatedMinutes: 0,
+          locatedSeconds: 40,
+          note: "A",
+          periods: [{ startedAt: iso(10, 0), endedAt: iso(10, 1) }],
+        },
+      ],
+    };
+    const ws2: WorkstreamDto = {
+      id: 11,
+      title: "Tarefa curta B",
+      summary: "Segunda tarefa",
+      minutes: 0,
+      seconds: 40,
+      hours: [
+        {
+          hour: hourKey(10),
+          minutes: 0,
+          seconds: 40,
+          locatedMinutes: 0,
+          locatedSeconds: 40,
+          note: "B",
+          periods: [{ startedAt: iso(10, 5), endedAt: iso(10, 6) }],
+        },
+      ],
+    };
+    serve({ [dayKey(today)]: [ws1, ws2] });
+    render(<ActivityTimelineView />);
+
+    const cardA = await card("Tarefa curta A");
+    const cardB = await card("Tarefa curta B");
+
+    // Both cards include "< 1 min ativos" in aria-label, never "0 min"
+    expect(cardA.getAttribute("aria-label")).toContain("< 1 min ativos");
+    expect(cardB.getAttribute("aria-label")).toContain("< 1 min ativos");
+    expect(cardA.getAttribute("aria-label")).not.toContain("0 min");
+    expect(cardB.getAttribute("aria-label")).not.toContain("0 min");
+
+    // Opening detail displays the visible duration "< 1 min ativos", never "0 min"
+    fireEvent.click(cardA);
+    const detail = screen.getByRole("region", { name: "Detalhes da frente" });
+    expect(within(detail).getByText("< 1 min ativos")).toBeVisible();
+    expect(within(detail).queryByText("0 min")).not.toBeInTheDocument();
+
+    // Total combines 40s + 40s = 80s -> rounds to 1 min ("1 min ativos"), not "0 min"
+    expect(screen.getByText("1 min ativos")).toBeInTheDocument();
+  });
+});
 // A day with captured sessions and no workstream yet keeps the grid's hour
 // rail, empty, under the notice that says why; the session list stays under
 // Sessions.

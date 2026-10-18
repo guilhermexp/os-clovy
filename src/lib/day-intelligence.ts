@@ -16,6 +16,7 @@ export type ActivityPeriodDto = { startedAt: string; endedAt: string };
 export type HourActivityDto = {
   description: string;
   minutes: number;
+  seconds?: number | null;
   /** Measured sessions the activity happened in; null when only the hour is known. */
   periods: ActivityPeriodDto[] | null;
 };
@@ -34,6 +35,7 @@ export type HourReportDto = {
 export type WorkstreamHourDto = {
   hour: string; // local "YYYY-MM-DDTHH"
   minutes: number;
+  seconds?: number;
   note: string;
   /**
    * Bounds of the measured sessions the hour's work was located in: where,
@@ -43,6 +45,7 @@ export type WorkstreamHourDto = {
   periods: ActivityPeriodDto[] | null;
   /** Of `minutes`, those located in `periods`; the rest is known only by hour. */
   locatedMinutes: number;
+  locatedSeconds?: number;
 };
 
 export type WorkstreamDto = {
@@ -50,6 +53,7 @@ export type WorkstreamDto = {
   title: string;
   summary: string;
   minutes: number;
+  seconds?: number;
   hours: WorkstreamHourDto[];
 };
 
@@ -75,7 +79,7 @@ export type DayPanelsDto = {
   categories: { category: ActivityCategory; durationMs: number }[];
   topApps: { appName: string; bundleId: string | null; durationMs: number }[];
   hours: { hour: string; focusedMs: number }[];
-  workstreams: { id: number; title: string; minutes: number }[];
+  workstreams: { id: number; title: string; minutes: number; seconds?: number }[];
   meetingCount: number;
   meetingMs: number;
   codingAgentBlocks: number;

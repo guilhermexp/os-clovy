@@ -331,6 +331,79 @@ describe("Day summary", () => {
       "true",
     );
   });
+
+  it("shows '< 1 min' for a 40s activity and never '0 min' in DaySummaryPanel", async () => {
+    applyInterfaceLocale("pt-BR");
+    const dayWithShortActivity: DayIntelligenceDto = {
+      ...readyDay,
+      day: DAY,
+      workstreams: [
+        {
+          id: 1,
+          title: "Frente rápida",
+          summary: "Ajuste rápido",
+          minutes: 0,
+          seconds: 40,
+          hours: [
+            {
+              hour: "2026-10-04T15",
+              minutes: 0,
+              seconds: 40,
+              note: "40s de trabalho",
+              periods: null,
+              locatedMinutes: 0,
+              locatedSeconds: 0,
+            },
+          ],
+        },
+      ],
+      hourReports: [
+        {
+          hour: "2026-10-04T15",
+          startedAt: "2026-10-04T18:00:00.000000Z",
+          endedAt: "2026-10-04T19:00:00.000000Z",
+          activeMinutes: 1,
+          summary: "Ajuste rápido em segundos.",
+          activities: [
+            {
+              description: "Ajuste de 40 segundos",
+              minutes: 0,
+              seconds: 40,
+              periods: null,
+            },
+          ],
+          provider: "cli:claude",
+          generatedAt: "2026-10-04T19:01:00.000000Z",
+        },
+      ],
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "day_intelligence_day") return dayWithShortActivity;
+      if (command === "activity_timeline") return emptyTimeline;
+      if (command === "coding_agents_blocks") return [];
+      return undefined;
+    });
+
+    render(<DaySummaryPanel day={DAY} />);
+
+    const report = (await screen.findByText("Ajuste rápido em segundos.")).closest(
+      ".day-hour-report",
+    ) as HTMLElement;
+    expect(report).toBeInTheDocument();
+
+    // The activity with 40s displays "< 1 min" and NEVER "0 min"
+    const activityMinutes = report.querySelector(".day-hour-activity-minutes") as HTMLElement;
+    expect(activityMinutes).toHaveTextContent("< 1 min");
+    expect(report).not.toHaveTextContent("0 min");
+
+    // Both the workstream duration and its hour display "< 1 min", never "0 min"
+    const ws = screen.getByText("Frente rápida").closest(".day-workstream") as HTMLElement;
+    const wsMinutes = ws.querySelector(".day-workstream-minutes") as HTMLElement;
+    const wsHour = ws.querySelector(".day-workstream-hour") as HTMLElement;
+    expect(wsMinutes).toHaveTextContent("< 1 min");
+    expect(wsHour).toHaveTextContent("< 1 min");
+    expect(ws).not.toHaveTextContent("0 min");
+  });
 });
 
 describe("Day summary settings", () => {
