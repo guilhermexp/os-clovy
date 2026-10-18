@@ -1,8 +1,8 @@
-//! The real icons of the apps in "Top apps": resolved on this Mac by bundle
-//! id through Launch Services (`NSWorkspace`), drawn at 64x64 px, and returned
-//! as a PNG data URL. Never by app name (two apps can share one) and never
-//! over the network. Answers, including "no icon" for an app that is gone,
-//! are cached per bundle id for the life of the process, so a render or a
+//! The real icons of "Top apps": resolved by bundle id through Launch Services
+//! on macOS, or by executable/AUMID on Windows, drawn at 64x64 px, and returned
+//! as PNG data URLs. Never by app name (two apps can share one) and never from
+//! a remote icon service. Answers, including "no icon" for an app that is gone,
+//! are cached per identity for the life of the process, so a render or a
 //! timeline refresh never looks an app up again.
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use serde::Deserialize;
 use crate::domain::types::AppError;
 
 /// Pixel size of the drawn icon (32 pt at 2x).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 const ICON_PX: isize = 64;
 /// A PNG above this size is refused rather than sent to the webview.
 const MAX_PNG_BYTES: usize = 64 * 1024;
@@ -29,14 +29,17 @@ pub struct AppIconRequest {
     pub bundle_id: String,
 }
 
-/// A bundle identifier as macOS writes them (reverse DNS); anything else is
-/// not looked up.
+/// An OS app identity, not an arbitrary path. Windows AUMIDs also contain `!`.
 fn plausible_bundle_id(bundle_id: &str) -> bool {
     !bundle_id.is_empty()
         && bundle_id.len() <= 255
         && bundle_id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '-' | '_')
+                    || (cfg!(windows) && (c == '!' || c == ' ' || c.is_alphanumeric()))
+            })
 }
 
 /// The app's icon as a PNG data URL, or `None` when the app is not installed,
@@ -130,9 +133,134 @@ fn icon_png(bundle_id: &str) -> Option<Vec<u8>> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn icon_png(_bundle_id: &str) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(windows)]
+use windows_icon::icon_png;
+
+#[cfg(windows)]
+mod windows_icon {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HGLOBAL, RPC_E_CHANGED_MODE};
+    use windows::Win32::Graphics::Imaging::{
+        CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA,
+        IWICImagingFactory, WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant,
+    };
+    use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+    use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, IPropertyBag2};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_MULTITHREADED, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET,
+    };
+    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
+
+    use super::{ICON_PX, MAX_PNG_BYTES};
+    use crate::activity::windows::window::executable_path;
+
+    struct ComApartment(bool);
+
+    impl ComApartment {
+        fn enter() -> Option<Self> {
+            let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            if result.is_ok() {
+                Some(Self(true))
+            } else if result == RPC_E_CHANGED_MODE {
+                // WIC also works in the caller's existing STA; we did not add a COM reference.
+                Some(Self(false))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    struct OwnedIcon(HICON);
+
+    impl Drop for OwnedIcon {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyIcon(self.0) };
+        }
+    }
+
+    pub(super) fn icon_png(identity: &str) -> Option<Vec<u8>> {
+        let path = executable_path(identity)?;
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let _apartment = ComApartment::enter()?;
+        let mut info = SHFILEINFOW::default();
+        if unsafe {
+            SHGetFileInfoW(
+                PCWSTR(path.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                Some(&mut info),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON,
+            )
+        } == 0
+            || info.hIcon.0.is_null()
+        {
+            return None;
+        }
+        let icon = OwnedIcon(info.hIcon);
+        let factory: IWICImagingFactory =
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }.ok()?;
+        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }.ok()?;
+        let scaler = unsafe { factory.CreateBitmapScaler() }.ok()?;
+        unsafe {
+            scaler.Initialize(
+                &bitmap,
+                ICON_PX as u32,
+                ICON_PX as u32,
+                WICBitmapInterpolationModeFant,
+            )
+        }
+        .ok()?;
+        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }.ok()?;
+        let encoder =
+            unsafe { factory.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null()) }.ok()?;
+        unsafe { encoder.Initialize(&stream, WICBitmapEncoderNoCache) }.ok()?;
+        let mut frame = None;
+        unsafe { encoder.CreateNewFrame(&mut frame, std::ptr::null_mut()) }.ok()?;
+        let frame = frame?;
+        unsafe { frame.Initialize(None::<&IPropertyBag2>) }.ok()?;
+        unsafe { frame.SetSize(ICON_PX as u32, ICON_PX as u32) }.ok()?;
+        let mut pixel_format = GUID_WICPixelFormat32bppBGRA;
+        unsafe { frame.SetPixelFormat(&mut pixel_format) }.ok()?;
+        unsafe { frame.WriteSource(&scaler, std::ptr::null()) }.ok()?;
+        unsafe { frame.Commit() }.ok()?;
+        unsafe { encoder.Commit() }.ok()?;
+
+        let mut stat = STATSTG::default();
+        unsafe { stream.Stat(&mut stat, STATFLAG_NONAME) }.ok()?;
+        let len = usize::try_from(stat.cbSize).ok()?;
+        if len == 0 || len > MAX_PNG_BYTES {
+            return None;
+        }
+        unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }.ok()?;
+        let mut png = Vec::<u8>::with_capacity(len);
+        let mut read = 0;
+        unsafe { stream.Read(png.as_mut_ptr().cast(), len as u32, Some(&mut read)) }
+            .ok()
+            .ok()?;
+        if read as usize != len {
+            return None;
+        }
+        // IStream initialized exactly `read` bytes in the reserved allocation above.
+        unsafe { png.set_len(len) };
+        Some(png)
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
