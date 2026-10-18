@@ -169,3 +169,30 @@ mod tests {
         assert_eq!(app_icon_data_url(""), None);
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn windows_executables_have_distinct_bounded_png_icons() {
+        let icons: Vec<Vec<u8>> = ["cmd.exe", "explorer.exe"]
+            .into_iter()
+            .map(|executable| {
+                let url = app_icon_data_url(executable).expect("installed Windows app icon");
+                let payload = url.strip_prefix("data:image/png;base64,").expect("PNG URL");
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .unwrap();
+                let dimensions = imagesize::blob_size(&png).unwrap();
+                assert_eq!((dimensions.width, dimensions.height), (64, 64));
+                assert!(png.len() <= MAX_PNG_BYTES);
+                png
+            })
+            .collect();
+        assert_ne!(icons[0], icons[1], "each executable must show its own icon");
+        assert_eq!(app_icon_data_url("../../Windows/explorer.exe"), None);
+        assert_eq!(app_icon_data_url("clovy-never-installed.exe"), None);
+    }
+}
