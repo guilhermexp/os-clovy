@@ -1,47 +1,39 @@
 //! Windows window identity and enumeration (D2, D6).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::Win32::Graphics::Gdi::{HMONITOR, HDC};
 
 use crate::activity::platform::WindowDescriptor;
 
-/// Returns the focused window descriptor on the main display, or `None` if
-/// no foreign window is focused.
-#[cfg(target_os = "windows")]
-pub(crate) fn focused_window() -> Option<WindowDescriptor> {
-    // Stub implementation for 1.5; real Win32 implementation in 2.2 GREEN
-    None
-}
+const EXEC_PATH_CACHE_LIMIT: usize = 256;
 
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn focused_window() -> Option<WindowDescriptor> {
-    None
-}
+static EXEC_PATH_CACHE: LazyLock<Mutex<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Returns the topmost visible window on each secondary monitor.
-#[cfg(target_os = "windows")]
-pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
-    // Stub implementation for 1.5; real Win32 implementation in 4.2 / 2.2
-    Vec::new()
-}
+/// RAII wrapper for Win32 `HANDLE` ensuring `CloseHandle` is called on drop.
+struct AutoHandle(HANDLE);
 
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
-    Vec::new()
-}
-
-/// Resolves the executable path on disk for a given `bundle_id` (executable name or AUMID).
-///
-/// Bounded cache of observed identities -> paths, with fallback to SearchPath / App Paths.
-/// NEVER executes the file.
-pub(crate) fn executable_path(_bundle_id: &str) -> Option<PathBuf> {
-    // Stub implementation for 1.5; real implementation in 2.2 GREEN
-    None
+impl Drop for AutoHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() && !self.0.0.is_null() {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
 }
 
 /// Normalizes executable path to a lowercase filename (e.g. `chrome.exe`).
-pub(crate) fn normalize_executable_name(_path: &Path) -> String {
-    // Stub implementation for 1.5; real implementation in 2.2 GREEN
-    String::new()
+pub(crate) fn normalize_executable_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|f| f.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// Resolves `(app_name, bundle_id)` from observed process image path, FileDescription,
@@ -51,12 +43,548 @@ pub(crate) fn normalize_executable_name(_path: &Path) -> String {
 /// - `bundle_id`: AUMID preferred for packaged apps (UWP/MSIX); lowercase executable name otherwise.
 /// - `app_name`: `FileDescription` from executable version info; fallback to file stem without extension.
 pub(crate) fn resolve_identity(
-    _image_path: Option<&Path>,
-    _file_description: Option<&str>,
-    _aumid: Option<&str>,
+    image_path: Option<&Path>,
+    file_description: Option<&str>,
+    aumid: Option<&str>,
 ) -> (String, Option<String>) {
-    // Stub implementation for 1.5; real implementation in 2.2 GREEN
-    (String::new(), None)
+    let bundle_id = if let Some(aumid) = aumid.filter(|s| !s.trim().is_empty()) {
+        Some(aumid.trim().to_string())
+    } else if let Some(path) = image_path {
+        let norm = normalize_executable_name(path);
+        if norm.is_empty() {
+            None
+        } else {
+            Some(norm)
+        }
+    } else {
+        None
+    };
+
+    let app_name = if let Some(desc) = file_description.filter(|s| !s.trim().is_empty()) {
+        desc.trim().to_string()
+    } else if let Some(path) = image_path {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
+    } else {
+        "Unknown".to_string()
+    };
+
+    (app_name, bundle_id)
+}
+
+/// Records an observed mapping from `bundle_id` to executable `path` in the bounded cache.
+pub(crate) fn record_executable_path(bundle_id: &str, path: PathBuf) {
+    if bundle_id.is_empty() || !path.is_file() {
+        return;
+    }
+    if let Ok(mut cache) = EXEC_PATH_CACHE.lock() {
+        if cache.len() >= EXEC_PATH_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(bundle_id.to_string(), path);
+    }
+}
+
+/// Validates that a bundle_id string is safe for lookup and contains no path traversal elements.
+fn is_safe_bundle_id(bundle_id: &str) -> bool {
+    !bundle_id.is_empty()
+        && bundle_id.len() <= 255
+        && !bundle_id.contains("..")
+        && !bundle_id.contains('/')
+        && !bundle_id.contains('\\')
+        && bundle_id.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// Resolves the executable path on disk for a given `bundle_id` (executable name or AUMID).
+///
+/// Bounded cache of observed identities -> paths, with fallback to SearchPath / App Paths.
+/// NEVER executes the file.
+pub(crate) fn executable_path(bundle_id: &str) -> Option<PathBuf> {
+    if !is_safe_bundle_id(bundle_id) {
+        return None;
+    }
+
+    if let Ok(cache) = EXEC_PATH_CACHE.lock() {
+        if let Some(path) = cache.get(bundle_id) {
+            return Some(path.clone());
+        }
+    }
+
+    // Fallback 1: App Paths registry lookup (HKLM and HKCU)
+    if let Some(path) = resolve_from_app_paths(bundle_id) {
+        if path.is_file() {
+            record_executable_path(bundle_id, path.clone());
+            return Some(path);
+        }
+    }
+
+    // Fallback 2: SearchPathW
+    if let Some(path) = resolve_from_search_path(bundle_id) {
+        if path.is_file() {
+            record_executable_path(bundle_id, path.clone());
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Fallback resolver via Windows Registry `App Paths`.
+fn resolve_from_app_paths(bundle_id: &str) -> Option<PathBuf> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+        KEY_READ, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+    };
+
+    let subkey = format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{}\0",
+        bundle_id
+    );
+    let wide_subkey: Vec<u16> = subkey.encode_utf16().collect();
+
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let mut hkey = HKEY::default();
+        let status = unsafe {
+            RegOpenKeyExW(
+                root,
+                PCWSTR(wide_subkey.as_ptr()),
+                None,
+                KEY_READ,
+                &mut hkey,
+            )
+        };
+        if status.is_ok() {
+            let mut buf = [0u16; 1024];
+            let mut size = (buf.len() * 2) as u32;
+            let mut val_type = REG_VALUE_TYPE::default();
+            let query = unsafe {
+                RegQueryValueExW(
+                    hkey,
+                    PCWSTR::null(),
+                    None,
+                    Some(&mut val_type),
+                    Some(buf.as_mut_ptr() as *mut u8),
+                    Some(&mut size),
+                )
+            };
+            unsafe {
+                let _ = RegCloseKey(hkey);
+            };
+            if query.is_ok() && (val_type == REG_SZ || val_type == REG_EXPAND_SZ) && size > 2 {
+                let char_len = (size as usize / 2).saturating_sub(1);
+                let raw_str = String::from_utf16_lossy(&buf[..char_len]);
+                let trimmed = raw_str.trim().trim_matches('"');
+                if !trimmed.is_empty() {
+                    let p = PathBuf::from(trimmed);
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Fallback resolver via `SearchPathW`.
+fn resolve_from_search_path(bundle_id: &str) -> Option<PathBuf> {
+    use windows::Win32::Storage::FileSystem::SearchPathW;
+
+    let wide_name: Vec<u16> = bundle_id.encode_utf16().chain(Some(0)).collect();
+    let wide_ext: Vec<u16> = if bundle_id.ends_with(".exe") {
+        Vec::new()
+    } else {
+        ".exe\0".encode_utf16().collect()
+    };
+    let ext_ptr = if wide_ext.is_empty() {
+        PCWSTR::null()
+    } else {
+        PCWSTR(wide_ext.as_ptr())
+    };
+
+    let mut buffer = [0u16; 1024];
+    let len = unsafe {
+        SearchPathW(
+            PCWSTR::null(),
+            PCWSTR(wide_name.as_ptr()),
+            ext_ptr,
+            Some(&mut buffer),
+            None,
+        )
+    };
+    if len > 0 && (len as usize) < buffer.len() {
+        let found = String::from_utf16_lossy(&buffer[..len as usize]);
+        let p = PathBuf::from(found);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Returns the focused window descriptor on the main display, or `None` if
+/// no foreign window is focused.
+pub(crate) fn focused_window() -> Option<WindowDescriptor> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null()
+        || !unsafe { IsWindow(Some(hwnd)) }.as_bool()
+        || !unsafe { IsWindowVisible(hwnd) }.as_bool()
+    {
+        return None;
+    }
+
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 || pid == std::process::id() {
+        return None;
+    }
+
+    describe_window_handle(hwnd, pid)
+}
+
+/// Inspects a window handle and process ID to produce a `WindowDescriptor`.
+fn describe_window_handle(hwnd: HWND, pid: u32) -> Option<WindowDescriptor> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW};
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let _process_guard = AutoHandle(process);
+
+    // Process image path
+    let mut image_buf = [0u16; 1024];
+    let mut image_len = image_buf.len() as u32;
+    let image_path = if unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(image_buf.as_mut_ptr()),
+            &mut image_len,
+        )
+    }
+    .is_ok()
+        && image_len > 0
+    {
+        Some(PathBuf::from(String::from_utf16_lossy(
+            &image_buf[..image_len as usize],
+        )))
+    } else {
+        None
+    };
+
+    // AUMID (AppUserModelID)
+    let aumid = get_process_aumid(process);
+
+    // FileDescription from executable version info
+    let file_desc = image_path.as_deref().and_then(get_file_description);
+
+    // Identity resolution
+    let (app_name, bundle_id) =
+        resolve_identity(image_path.as_deref(), file_desc.as_deref(), aumid.as_deref());
+
+    // Record in executable_path cache if both identity and path are available
+    if let (Some(bid), Some(path)) = (&bundle_id, &image_path) {
+        record_executable_path(bid, path.clone());
+    }
+
+    // Window title
+    let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+    let window_title = if title_len > 0 {
+        let mut title_buf = vec![0u16; (title_len + 1) as usize];
+        let read = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
+        if read > 0 {
+            let t = String::from_utf16_lossy(&title_buf[..read as usize]);
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Window ID: HWND converted to u32 (low 32 bits, restored with sign extension)
+    let window_id = (hwnd.0 as isize) as u32;
+
+    // Display ID: monitor index
+    let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let display_id = get_monitor_index(hmon);
+
+    Some(WindowDescriptor {
+        pid: pid as i32,
+        app_name,
+        bundle_id,
+        window_title,
+        browser_url: None,
+        private_window: false,
+        window_id: Some(window_id),
+        display_id: Some(display_id),
+    })
+}
+
+/// Reads AppUserModelID (AUMID) for packaged Windows store / UWP apps.
+fn get_process_aumid(process: HANDLE) -> Option<String> {
+    use windows::Win32::Foundation::WIN32_ERROR;
+    use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+
+    let mut len: u32 = 0;
+    let err = unsafe { GetApplicationUserModelId(process, &mut len, None) };
+    // ERROR_INSUFFICIENT_BUFFER is 122
+    if err == WIN32_ERROR(122) && len > 0 {
+        let mut buf = vec![0u16; len as usize];
+        let err2 = unsafe {
+            GetApplicationUserModelId(process, &mut len, Some(PWSTR(buf.as_mut_ptr())))
+        };
+        if err2 == WIN32_ERROR(0) {
+            let null_pos = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let s = String::from_utf16_lossy(&buf[..null_pos]);
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Reads localized `FileDescription` from an executable file's version resource block.
+fn get_file_description(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(wide_path.as_ptr()), None) };
+    if size == 0 {
+        return None;
+    }
+
+    let mut data = vec![0u8; size as usize];
+    if unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(wide_path.as_ptr()),
+            Some(0),
+            size,
+            data.as_mut_ptr() as *mut _,
+        )
+    }
+    .is_err()
+    {
+        return None;
+    }
+
+    // Query \VarFileInfo\Translation to find lang-codepage pairs
+    let mut trans_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut trans_len: u32 = 0;
+    let trans_subblock: Vec<u16> = "\\VarFileInfo\\Translation\0".encode_utf16().collect();
+    let has_trans = unsafe {
+        VerQueryValueW(
+            data.as_ptr() as *const _,
+            PCWSTR(trans_subblock.as_ptr()),
+            &mut trans_ptr,
+            &mut trans_len,
+        )
+    };
+
+    let mut lang_codepage_pairs = Vec::new();
+    if has_trans.as_bool() && trans_len >= 4 && !trans_ptr.is_null() {
+        let count = (trans_len as usize) / 4;
+        let slice = unsafe { std::slice::from_raw_parts(trans_ptr as *const u16, count * 2) };
+        for i in 0..count {
+            let lang = slice[i * 2];
+            let codepage = slice[i * 2 + 1];
+            lang_codepage_pairs.push(format!("{:04x}{:04x}", lang, codepage));
+        }
+    }
+    // Fallback standard pairs:
+    lang_codepage_pairs.push("040904b0".to_string()); // US English Unicode
+    lang_codepage_pairs.push("040904e4".to_string()); // US English Windows Multilingual
+    lang_codepage_pairs.push("000004b0".to_string()); // Neutral Unicode
+
+    for pair in lang_codepage_pairs {
+        let subblock: Vec<u16> = format!("\\StringFileInfo\\{}\\FileDescription\0", pair)
+            .encode_utf16()
+            .collect();
+        let mut desc_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut desc_len: u32 = 0;
+        let ok = unsafe {
+            VerQueryValueW(
+                data.as_ptr() as *const _,
+                PCWSTR(subblock.as_ptr()),
+                &mut desc_ptr,
+                &mut desc_len,
+            )
+        };
+        if ok.as_bool() && desc_len > 0 && !desc_ptr.is_null() {
+            let slice =
+                unsafe { std::slice::from_raw_parts(desc_ptr as *const u16, desc_len as usize) };
+            let null_pos = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+            let text = String::from_utf16_lossy(&slice[..null_pos]);
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+struct DisplayMonitor {
+    hmonitor: HMONITOR,
+    index: u32,
+    is_primary: bool,
+}
+
+/// Enumerates display monitors via Win32 `EnumDisplayMonitors`.
+fn enumerate_display_monitors() -> Vec<DisplayMonitor> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO,
+    };
+
+    extern "system" fn enum_mon_proc(
+        hmon: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let monitors = unsafe { &mut *(lparam.0 as *mut Vec<HMONITOR>) };
+        monitors.push(hmon);
+        BOOL(1)
+    }
+
+    let mut raw_monitors = Vec::new();
+    let _ = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_mon_proc),
+            LPARAM(&mut raw_monitors as *mut _ as isize),
+        )
+    };
+
+    let mut result = Vec::new();
+    for (i, &hmon) in raw_monitors.iter().enumerate() {
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let is_primary = if unsafe { GetMonitorInfoW(hmon, &mut mi) }.as_bool() {
+            // MONITORINFOF_PRIMARY is 0x00000001
+            (mi.dwFlags & 1) != 0
+        } else {
+            i == 0
+        };
+        result.push(DisplayMonitor {
+            hmonitor: hmon,
+            index: i as u32,
+            is_primary,
+        });
+    }
+    result
+}
+
+/// Finds the index of a given monitor among active displays.
+fn get_monitor_index(target_hmon: HMONITOR) -> u32 {
+    let monitors = enumerate_display_monitors();
+    monitors
+        .iter()
+        .find(|m| m.hmonitor == target_hmon)
+        .map(|m| m.index)
+        .unwrap_or(0)
+}
+
+/// Returns the topmost visible window on each secondary monitor (D6).
+///
+/// Enumerates monitors via `EnumDisplayMonitors` and finds the topmost window in Z-order
+/// via `EnumWindows`.
+pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    };
+
+    let monitors = enumerate_display_monitors();
+    let secondary_monitors: Vec<_> = monitors.into_iter().filter(|m| !m.is_primary).collect();
+    if secondary_monitors.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect top-level windows in Z-order
+    extern "system" fn enum_win_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+        list.push(hwnd);
+        BOOL(1)
+    }
+
+    let mut z_windows = Vec::new();
+    let _ = unsafe { EnumWindows(Some(enum_win_proc), LPARAM(&mut z_windows as *mut _ as isize)) };
+
+    let own_pid = std::process::id();
+    let mut descriptors = Vec::new();
+
+    for sec in secondary_monitors {
+        for &hwnd in &z_windows {
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() || unsafe { IsIconic(hwnd) }.as_bool() {
+                continue;
+            }
+
+            // Exclude tool windows
+            let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
+            if (ex_style as u32 & WS_EX_TOOLWINDOW.0) != 0 {
+                continue;
+            }
+
+            // Verify non-zero area
+            let mut rect = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+                continue;
+            }
+            if rect.right <= rect.left || rect.bottom <= rect.top {
+                continue;
+            }
+
+            // Check if window is on this secondary monitor
+            let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
+            if hmon != sec.hmonitor {
+                continue;
+            }
+
+            // Check PID
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid == 0 || pid == own_pid {
+                continue;
+            }
+
+            // Found topmost candidate on this monitor
+            if let Some(desc) = describe_window_handle(hwnd, pid) {
+                descriptors.push(desc);
+                break; // One topmost window per secondary monitor
+            }
+        }
+    }
+
+    descriptors
 }
 
 #[cfg(test)]
@@ -123,5 +651,44 @@ mod tests {
         assert_eq!(executable_path("non_existent_app_12345.exe"), None);
         assert_eq!(executable_path("../../Windows/explorer.exe"), None);
         assert_eq!(executable_path(""), None);
+
+        // Recording in cache and retrieving
+        let dummy_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dummy.exe"));
+        if dummy_path.is_file() {
+            record_executable_path("my_dummy_app.exe", dummy_path.clone());
+            assert_eq!(executable_path("my_dummy_app.exe"), Some(dummy_path));
+        }
+    }
+
+    #[test]
+    fn test_observed_valid_unicode_and_spaced_exe_resolves_executable_path_and_icon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spaced_exe = dir.path().join("my spaced ápp.exe");
+        std::fs::write(&spaced_exe, b"MZ").expect("write temp file");
+
+        let bundle_id = "my spaced ápp.exe";
+        record_executable_path(bundle_id, spaced_exe.clone());
+
+        assert_eq!(
+            executable_path(bundle_id),
+            Some(spaced_exe),
+            "observed executable with space and Unicode must resolve in executable_path"
+        );
+
+        #[cfg(target_os = "windows")]
+        {
+            let sys_cmd = Path::new(r"C:\Windows\System32\cmd.exe");
+            if sys_cmd.is_file() {
+                let real_spaced_exe = dir.path().join("cmd spaced ápp.exe");
+                let _ = std::fs::copy(sys_cmd, &real_spaced_exe);
+                let real_bundle = "cmd spaced ápp.exe";
+                record_executable_path(real_bundle, real_spaced_exe);
+                let icon = crate::activity::app_icon::app_icon_data_url(real_bundle);
+                assert!(
+                    icon.is_some(),
+                    "app_icon_data_url must resolve icon for valid spaced/unicode observed exe"
+                );
+            }
+        }
     }
 }
