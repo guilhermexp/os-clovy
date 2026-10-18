@@ -55,6 +55,9 @@ impl SourceRoots {
     pub fn from_home(home: impl Into<PathBuf>) -> Self {
         Self { home: home.into() }
     }
+    pub fn from_windows(profile: impl Into<PathBuf>, _appdata: impl Into<PathBuf>) -> Self {
+        Self::from_home(profile)
+    }
 
     pub fn current() -> Option<Self> {
         std::env::var_os("HOME")
@@ -530,5 +533,93 @@ mod tests {
         let elsewhere = tempfile::NamedTempFile::new().unwrap();
         symlink(elsewhere.path(), dir.path().join("store.db-wal")).unwrap();
         assert!(candidate(SourceId::CursorCli, dir.path(), db, SystemTime::UNIX_EPOCH).is_none());
+    }
+
+    #[test]
+    fn windows_source_roots_resolve_cursor_and_copilot_from_appdata_and_cli_from_profile() {
+        let profile = PathBuf::from(r"C:\Users\tester");
+        let appdata = PathBuf::from(r"C:\Users\tester\AppData\Roaming");
+        let roots = SourceRoots::from_windows(&profile, &appdata);
+        assert_eq!(
+            cursor::root(&roots),
+            appdata.join("Cursor").join("User").join("globalStorage")
+        );
+        assert_eq!(
+            copilot_vscode::user_dir(&roots),
+            appdata.join("Code").join("User")
+        );
+        assert_eq!(
+            claude::root(&roots),
+            profile.join(".claude").join("projects")
+        );
+        assert_eq!(
+            codex::root(&roots),
+            profile.join(".codex").join("sessions")
+        );
+        assert_eq!(
+            copilot_cli::root(&roots),
+            profile.join(".copilot").join("session-state")
+        );
+        assert_eq!(
+            cursor_cli::root(&roots),
+            profile.join(".cursor").join("chats")
+        );
+        assert_eq!(
+            antigravity::cli_root(&roots),
+            profile.join(".gemini").join("antigravity-cli")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_source_roots_current_resolves_without_home() {
+        const SENTINEL: &str = "CLOVY_TEST_WINDOWS_SOURCE_ROOTS_CURRENT_CHILD";
+        if std::env::var_os(SENTINEL).is_some() {
+            let roots =
+                SourceRoots::current().expect("SourceRoots::current() must resolve on Windows");
+            let userprofile = std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .expect("USERPROFILE must be set on Windows");
+            let appdata = std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .expect("APPDATA must be set on Windows");
+            assert_eq!(roots.home, userprofile);
+            assert_eq!(roots.app_support("Cursor"), appdata.join("Cursor"));
+            return;
+        }
+
+        let current_exe = std::env::current_exe().expect("current_exe");
+        let status = std::process::Command::new(current_exe)
+            .arg("coding_agents::sources::tests::windows_source_roots_current_resolves_without_home")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(SENTINEL, "1")
+            .env_remove("HOME")
+            .status()
+            .expect("child process failed to start");
+        assert!(status.success(), "child process failed: {status:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_open_regular_refuses_reparse_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.jsonl");
+        fs::write(&target, "{}\n").unwrap();
+        let link = dir.path().join("link.jsonl");
+        match std::os::windows::fs::symlink_file(&target, &link) {
+            Ok(()) => {
+                assert!(
+                    open_regular(&link).is_err(),
+                    "open_regular must refuse reparse points on Windows"
+                );
+            }
+            Err(error) => {
+                panic!(
+                    "failed to create symlink for reparse point test: {error} (os error {:?})",
+                    error.raw_os_error()
+                );
+            }
+        }
     }
 }
