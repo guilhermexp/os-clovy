@@ -15,7 +15,7 @@
 
 ## 3. Texto, URL e OCR
 
-- [ ] 3.1 RED: testes do extrator UIA com árvore simulada (orçamento de nós e tempo, URL do controle de endereço, janela privada); verificar que falham.
+- [x] 3.1 RED: testes do extrator UIA com árvore simulada (orçamento de nós e tempo, URL do controle de endereço, janela privada); verificar que falham.
 - [ ] 3.2 GREEN: `accessibility_text` e URL por UI Automation (D3); testes de 3.1 passam; no `cert`, quadro do Edge com URL e texto e origem "acessibilidade".
 - [ ] 3.3 RED: teste de integração do OCR com imagem de teste reconhecida pelo `Windows.Media.Ocr`, rodando no `cert`; verificar que falha.
 - [ ] 3.4 GREEN: `ocr_text` com Windows Graphics Capture e `Windows.Media.Ocr` (D4), sem arquivo em disco; teste de 3.3 passa; no `cert`, janela sem árvore UIA gera quadro com origem "OCR" e nenhum arquivo de imagem novo.

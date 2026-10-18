@@ -1,5 +1,6 @@
 //! Windows adapter for the shared text-only activity capture engine.
 
+mod uia;
 pub(crate) mod window;
 
 use std::path::Path;
