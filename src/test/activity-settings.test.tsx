@@ -1,3 +1,4 @@
+import type * as TauriCore from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const invokeMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+  ...(await importOriginal<typeof TauriCore>()),
   invoke: (command: string, args?: unknown) =>
     args !== undefined ? invokeMock(command, args) : invokeMock(command),
 }));
@@ -16,11 +17,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { ActivitySettingsSection } from "../components/settings/ActivitySettingsSection";
-import {
-  AppSettings,
-  appSettingsTabsForCompanionPairing,
-  SETTINGS_TABS,
-} from "../components/settings/AppSettings";
+import { AppSettings, SETTINGS_TABS } from "../components/settings/AppSettings";
 import { settingsTabsForCompanionPairing } from "../components/settings/settings-config";
 import { applyInterfaceLocale } from "../i18n/locale";
 import type { ActivitySettingsDto, ActivityStatusDto } from "../lib/activity-capture";
@@ -519,8 +516,6 @@ describe("ActivitySettingsSection", () => {
           onAccountRefresh={async () => undefined}
           onSourceModeChange={() => {}}
           onEnableSystemAudio={() => {}}
-          activeTab="general"
-          onTabChange={() => {}}
         />,
       );
 
@@ -565,8 +560,6 @@ describe("ActivitySettingsSection", () => {
           onAccountRefresh={async () => undefined}
           onSourceModeChange={() => {}}
           onEnableSystemAudio={() => {}}
-          activeTab="general"
-          onTabChange={() => {}}
         />,
       );
 
@@ -601,15 +594,8 @@ describe("ActivitySettingsSection", () => {
 
       const companionTabsSupported = settingsTabsForCompanionPairing(true, true);
       expect(companionTabsSupported.some((t) => t.id === "activity")).toBe(true);
-
-      const appTabsSupported = appSettingsTabsForCompanionPairing(true, true);
-      expect(appTabsSupported.some((t) => t.id === "activity")).toBe(true);
-
       const companionTabsUnsupported = settingsTabsForCompanionPairing(true, false);
       expect(companionTabsUnsupported.some((t) => t.id === "activity")).toBe(false);
-
-      const appTabsUnsupported = appSettingsTabsForCompanionPairing(true, false);
-      expect(appTabsUnsupported.some((t) => t.id === "activity")).toBe(false);
     } finally {
       Object.defineProperty(navigator, "platform", {
         configurable: true,
