@@ -623,6 +623,20 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn windows_locked_executable_is_away_even_with_a_localized_description() {
+        let mut locked = frame(1, at(10, 0, 0), "Tela de bloqueio do Windows", "Entrar", None, 1);
+        locked.bundle_id = Some("lockapp.exe".into());
+        let signals = BatchSignals {
+            input_times: vec![at(10, 0, 0)],
+            pauses: Vec::new(),
+        };
+        let (state, events) = feed(&[locked], &signals);
+        assert!(state.open.is_none());
+        assert!(state.last_useful_at.is_none());
+        assert!(closed(&events).is_empty());
+    }
+
+    #[test]
     fn a_manual_pause_classifies_the_gap_with_its_reason() {
         let pauses = [PauseSpan {
             started_at: at(14, 0, 30),

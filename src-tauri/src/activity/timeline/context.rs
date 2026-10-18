@@ -203,6 +203,22 @@ mod tests {
     }
 
     #[test]
+    fn windows_editor_titles_do_not_use_product_branding_as_the_workspace() {
+        assert_eq!(
+            editor_workspace(
+                "Visual Studio Code",
+                Some("code.exe"),
+                "main.rs - billing - Visual Studio Code",
+            ).as_deref(),
+            Some("billing")
+        );
+        assert_eq!(
+            editor_workspace("Cursor", Some("cursor.exe"), "main.rs - billing - Cursor").as_deref(),
+            Some("billing")
+        );
+    }
+
+    #[test]
     fn zed_xcode_and_jetbrains_titles_start_with_the_workspace() {
         assert_eq!(
             editor_workspace("Zed", Some("dev.zed.Zed"), "os-clovy \u{2014} src/main.rs")
