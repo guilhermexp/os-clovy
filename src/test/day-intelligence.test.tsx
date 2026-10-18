@@ -156,9 +156,9 @@ describe("Day summary", () => {
     expect(within(agents).getByText("2 sessions")).toBeInTheDocument();
 
     const report = document.querySelector('[data-hour="2026-10-04T14"]') as HTMLElement;
-    expect(within(report).getByText("42 min")).toBeInTheDocument();
-    expect(within(report).getAllByText("21 min")).toHaveLength(2);
-    expect(screen.getByText("13:00 · 30 min")).toBeInTheDocument();
+    expect(within(report).getByText("42m")).toBeInTheDocument();
+    expect(within(report).getAllByText("21m")).toHaveLength(2);
+    expect(screen.getByText("13:00 · 30m")).toBeInTheDocument();
   });
 
   it("copies the standup as bullet lists in one click", async () => {
@@ -297,6 +297,10 @@ describe("Day summary", () => {
     expect(await screen.findByRole("heading", { name: "Resumo do dia" })).toBeInTheDocument();
     expect(screen.getByText("Em andamento")).toBeInTheDocument();
     expect(screen.getByText("Frentes de trabalho")).toBeInTheDocument();
+    const report = document.querySelector('[data-hour="2026-10-04T14"]') as HTMLElement;
+    expect(within(report).getByText("42 min")).toBeInTheDocument();
+    expect(within(report).getAllByText("21 min")).toHaveLength(2);
+    expect(screen.getByText("13:00 · 30 min")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Copiar standup" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     const copied = (writeText.mock.calls[0] as unknown as [string])[0];

@@ -490,7 +490,7 @@ describe("Today grid of workstreams", () => {
 
     // Opening detail displays the visible duration "< 1 min ativos", never "0 min"
     fireEvent.click(cardA);
-    const detail = screen.getByRole("region", { name: "Detalhes da frente" });
+    const detail = screen.getByRole("region", { name: /Detalhes da frente/ });
     expect(within(detail).getByText("< 1 min ativos")).toBeVisible();
     expect(within(detail).queryByText("0 min")).not.toBeInTheDocument();
 

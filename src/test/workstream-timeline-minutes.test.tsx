@@ -131,8 +131,10 @@ describe("Active minutes of the cards of a split workstream", () => {
         },
       ],
     };
-    // 7 x 3/5 = 4.2 and 7 x 2/5 = 2.8: whole minutes by largest remainder.
-    expect(summary([uneven]).map((card) => card.minutes)).toEqual([4, 3]);
+    // 7 x 3/5 = 4.2 min (252 s) and 7 x 2/5 = 2.8 min (168 s): exact seconds partitioned.
+    expect(summary([uneven]).map((card) => card.minutes)).toEqual([4.2, 2.8]);
+    const cards = layout([uneven]).cards;
+    expect(cards.reduce((sum, card) => sum + card.activeMs, 0)).toBe(7 * MINUTE);
   });
 
   it("splits a resumed workstream with locatedSeconds into cards summing exactly to total seconds", () => {
