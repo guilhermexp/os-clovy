@@ -12,10 +12,11 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Graphics::Imaging::{
-    BitmapBufferAccessMode, BitmapDecoder, BitmapPixelFormat, SoftwareBitmap,
-};
+use windows::Graphics::Imaging::{BitmapBufferAccessMode, BitmapPixelFormat, SoftwareBitmap};
+#[cfg(test)]
+use windows::Graphics::Imaging::BitmapDecoder;
 use windows::Media::Ocr::{OcrEngine, OcrResult};
+#[cfg(test)]
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -189,7 +190,14 @@ fn await_operation<T: RuntimeType + 'static>(
     deadline: Instant,
 ) -> Option<T> {
     loop {
-        match operation.Status().ok()? {
+        let status = match operation.Status() {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = operation.Cancel();
+                return None;
+            }
+        };
+        match status {
             windows_future::AsyncStatus::Completed => return operation.GetResults().ok(),
             windows_future::AsyncStatus::Started => {
                 let Some(remaining) = remaining_time(deadline) else {
@@ -487,6 +495,7 @@ mod tests {
 
     #[test]
     fn test_resize_software_bitmap_preserves_far_right_content() {
+        let _runtime = RoInitGuard::new();
         // Create an actual source SoftwareBitmap: 4000 x 100
         let src_w = 4000;
         let src_h = 100;
@@ -497,7 +506,8 @@ mod tests {
         )
         .expect("create source bitmap");
 
-        // Paint background black and place a distinct red marker on the far-right region (x = 3990..4000, y = 50)
+        // A visible red region at the right edge, not a one-pixel scanline
+        // that a valid downsampling grid may skip.
         {
             let buffer = bitmap
                 .LockBuffer(BitmapBufferAccessMode::Write)
@@ -531,14 +541,16 @@ mod tests {
             }
 
             // Distinct red marker on far-right pixels
-            for x in 3990..(src_w as usize) {
-                let off = start + 50 * stride + x * 4;
-                if off + 4 <= capacity as usize {
-                    unsafe {
-                        *ptr.add(off) = 0; // B
-                        *ptr.add(off + 1) = 0; // G
-                        *ptr.add(off + 2) = 255; // R = 255
-                        *ptr.add(off + 3) = 255;
+            for y in 40..60 {
+                for x in 3990..(src_w as usize) {
+                    let off = start + y * stride + x * 4;
+                    if off + 4 <= capacity as usize {
+                        unsafe {
+                            *ptr.add(off) = 0;
+                            *ptr.add(off + 1) = 0;
+                            *ptr.add(off + 2) = 255;
+                            *ptr.add(off + 3) = 255;
+                        }
                     }
                 }
             }
