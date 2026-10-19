@@ -595,7 +595,7 @@ async fn ensure_cipher_available() -> Result<(), StoreError> {
         .fetch_optional(&pool)
         .await?
         .map(|row| row.get::<String, _>(0));
-    pool.close().await;
+    crate::db::close_sqlite_pool(&pool).await;
     match version {
         Some(version) if !version.trim().is_empty() => Ok(()),
         _ => Err(StoreError::CipherUnavailable),
@@ -661,14 +661,14 @@ impl ActivityStore {
             .await
             .map_err(classify)?;
         if let Err(error) = migrate(&pool).await {
-            pool.close().await;
+            crate::db::close_sqlite_pool(&pool).await;
             return Err(error);
         }
         Ok(Self { pool })
     }
 
     pub async fn close(&self) {
-        self.pool.close().await;
+        crate::db::close_sqlite_pool(&self.pool).await;
     }
 
     /// For the slices that keep their own tables in this database: the
