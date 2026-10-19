@@ -549,8 +549,15 @@ fn get_monitor_index(target_hmon: HMONITOR) -> u32 {
         .unwrap_or(0)
 }
 
-/// Evaluates whether a window handle qualifies as a candidate for topmost window on a secondary monitor (D6).
-pub(crate) fn is_secondary_window_candidate(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecondaryWindowAction {
+    Skip,
+    Stop,
+    Capture,
+}
+
+/// Distinguishes an irrelevant window from one that already covers this monitor.
+fn secondary_window_action(
     hwnd: HWND,
     focused_hwnd: Option<HWND>,
     is_visible: bool,
@@ -561,29 +568,29 @@ pub(crate) fn is_secondary_window_candidate(
     sec_monitor: HMONITOR,
     pid: u32,
     own_pid: u32,
-) -> bool {
+) -> SecondaryWindowAction {
     if !is_visible || is_iconic {
-        return false;
+        return SecondaryWindowAction::Skip;
     }
     if (ex_style & windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW.0) != 0 {
-        return false;
+        return SecondaryWindowAction::Skip;
     }
     if rect.right <= rect.left || rect.bottom <= rect.top {
-        return false;
+        return SecondaryWindowAction::Skip;
     }
     if win_monitor != sec_monitor {
-        return false;
+        return SecondaryWindowAction::Skip;
     }
     if pid == 0 || pid == own_pid {
-        return false;
+        return SecondaryWindowAction::Skip;
     }
 
     // Exclude the currently focused window so it is not captured twice
     if Some(hwnd) == focused_hwnd {
-        return false;
+        return SecondaryWindowAction::Skip;
     }
 
-    true
+    SecondaryWindowAction::Capture
 }
 
 /// Returns the topmost visible window on each secondary monitor (D6).
@@ -645,7 +652,7 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
             let mut pid = 0u32;
             unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
 
-            if !is_secondary_window_candidate(
+            match secondary_window_action(
                 hwnd,
                 focused_hwnd,
                 is_visible,
@@ -657,7 +664,9 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
                 pid,
                 own_pid,
             ) {
-                continue;
+                SecondaryWindowAction::Skip => continue,
+                SecondaryWindowAction::Stop => break,
+                SecondaryWindowAction::Capture => {}
             }
 
             // Found topmost candidate on this monitor
@@ -798,13 +807,13 @@ mod tests {
     }
 
     #[test]
-    fn test_secondary_window_selection_policy_excludes_focused_window() {
+    fn test_secondary_window_selection_stops_at_focused_window() {
         use windows::Win32::Foundation::RECT;
 
         let secondary_hmon = HMONITOR(0x1000 as *mut _);
         let focused_hwnd = HWND(0x2000 as *mut _);
 
-        let is_candidate = is_secondary_window_candidate(
+        let action = secondary_window_action(
             focused_hwnd, // Candidate window IS the currently focused window on this secondary monitor
             Some(focused_hwnd),
             true,  // is_visible
@@ -822,11 +831,11 @@ mod tests {
             9999, // own_pid
         );
 
-        // Before fix, is_secondary_window_candidate does NOT exclude focused_hwnd, returning true.
-        // The policy requires that the focused window must be excluded from secondary capture.
-        assert!(
-            !is_candidate,
-            "secondary window candidate selection must exclude the currently focused window"
+        // Skipping would continue down the Z-order into a covered window.
+        assert_eq!(
+            action,
+            SecondaryWindowAction::Stop,
+            "a monitor already covered by the focused window must not sample behind it"
         );
     }
 }
