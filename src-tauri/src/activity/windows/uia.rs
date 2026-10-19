@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::activity::filter::{has_private_window_marker, normalize_browser_url};
+use crate::activity::filter::has_private_window_marker;
 use crate::activity::platform::WindowDescriptor;
 
 /// Description extracted from a window via UI Automation (URL and privacy state).
@@ -37,8 +37,10 @@ pub(crate) trait UiaNode: Sized {
     fn is_password(&self) -> bool;
     fn name(&self) -> Option<String>;
     fn value(&self) -> Option<String>;
+    /// URI metadata of a document, never its text or an editable address.
+    fn document_url(&self) -> Option<String>;
+    fn is_offscreen(&self) -> Option<bool>;
     fn text_content(&self, max_chars: usize) -> Option<String>;
-    fn automation_id(&self) -> Option<String>;
     fn first_child(&self) -> Option<Self>;
     fn next_sibling(&self) -> Option<Self>;
 }
@@ -218,7 +220,7 @@ impl UiaNode for ComUiaNode {
     fn is_password(&self) -> bool {
         unsafe { self.element.CurrentIsPassword() }
             .map(|b| b.as_bool())
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     fn name(&self) -> Option<String> {
@@ -263,15 +265,29 @@ impl UiaNode for ComUiaNode {
         }
     }
 
-    fn automation_id(&self) -> Option<String> {
-        let bstr = unsafe { self.element.CurrentAutomationId() }.ok()?;
-        let s = bstr.to_string();
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
+    fn document_url(&self) -> Option<String> {
+        use windows::Win32::UI::Accessibility::{
+            IUIAutomationLegacyIAccessiblePattern, UIA_LegacyIAccessiblePatternId,
+            ROLE_SYSTEM_DOCUMENT,
+        };
+
+        let document: IUIAutomationLegacyIAccessiblePattern = unsafe {
+            self.element
+                .GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId)
         }
+        .ok()?;
+        if unsafe { document.CurrentRole() }.ok()? != ROLE_SYSTEM_DOCUMENT {
+            return None;
+        }
+        unsafe { document.CurrentValue() }
+            .ok()
+            .map(|value| value.to_string())
+    }
+
+    fn is_offscreen(&self) -> Option<bool> {
+        unsafe { self.element.CurrentIsOffscreen() }
+            .ok()
+            .map(|value| value.as_bool())
     }
 
     fn first_child(&self) -> Option<Self> {
@@ -299,145 +315,111 @@ impl UiaNode for ComUiaNode {
     }
 }
 
-/// Identifies whether a control is a browser address/location input field.
-///
-/// Requires control type `Edit` and matching name/automation_id.
-/// Never matches `Document` text or arbitrary webpage form inputs.
-pub(crate) fn is_address_bar_control<N: UiaNode>(node: &N) -> bool {
-    if node.control_type() != UiaControlType::Edit {
+/// Accept only an explicit HTTP(S) URI from document metadata.
+fn confirmed_document_url(value: &str) -> Option<String> {
+    let url = url::Url::parse(value.trim()).ok()?;
+    if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+/// Returns whether this node's children may be inspected for browser chrome.
+fn inspect_description_node<N: UiaNode>(
+    node: &N,
+    private: &mut bool,
+    documents: &mut usize,
+    url: &mut Option<String>,
+    complete: &mut bool,
+) -> bool {
+    if node.is_password() {
+        *complete = false;
         return false;
     }
-
-    if let Some(name) = node.name() {
-        let lower = name.to_lowercase();
-        if lower.contains("address")
-            || lower.contains("endereço")
-            || lower.contains("endereco")
-            || lower.contains("search or enter")
-            || lower.contains("barra de endereço")
-            || lower.contains("barra de endereco")
-            || lower.contains("pesquisar ou digitar")
-            || lower.contains("location")
-            || lower.contains("omnibox")
-        {
-            return true;
+    if node.control_type() == UiaControlType::Document {
+        match node.is_offscreen() {
+            Some(true) => {}
+            visibility => {
+                *documents += 1;
+                *url = if *documents == 1 && visibility == Some(false) {
+                    node.document_url()
+                        .as_deref()
+                        .and_then(confirmed_document_url)
+                } else {
+                    None
+                };
+            }
         }
+        // Never read document names, text or descendants to infer identity.
+        return false;
     }
-
-    if let Some(id) = node.automation_id() {
-        let lower = id.to_lowercase();
-        if lower.contains("address")
-            || lower.contains("url")
-            || lower.contains("location")
-            || lower.contains("omnibox")
-        {
-            return true;
-        }
+    if !*private
+        && node
+            .name()
+            .as_deref()
+            .is_some_and(has_private_window_marker)
+    {
+        *private = true;
     }
-
-    false
+    !*private
 }
 
 // ---------------------------------------------------------------------------
 // Traversal algorithms over UiaNode
 // ---------------------------------------------------------------------------
 
-/// Extracts URL and privacy status from an abstract UIA tree node.
+/// Reads one visible document's confirmed URI and private browser chrome.
 ///
-/// Budgets: 250ms deadline, 200 nodes, depth 8.
-/// Rules:
-/// - Skips password elements and their subtrees entirely (lazy first_child omission).
-/// - Skips Document subtrees entirely during describe walk to prevent in-page URL/private spoofing.
-/// - Checks for private badges in toolbar / profile chrome.
-/// - Address URL must come from an address Edit control with ValuePattern/value.
-/// - NEVER interprets Document control text as browser address URL.
-/// - If private is detected, URL is cleared (`None`).
+/// A 250 ms deadline, 200-node budget and depth 40 bound traversal. Password
+/// subtrees and document contents are never visited. Missing/ambiguous metadata
+/// or an incomplete walk leaves identity unknown; address edits are not identity.
 pub(crate) fn extract_uia_description<N: UiaNode>(root: &N, title: Option<&str>) -> UiaDescription {
-    let start_time = Instant::now();
-    let deadline = start_time + Duration::from_millis(250);
-
-    let mut private = false;
-    if let Some(t) = title {
-        if has_private_window_marker(t) {
-            private = true;
-        }
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut private = title.is_some_and(has_private_window_marker);
+    if private {
+        return UiaDescription { url: None, private };
     }
-
-    let mut url: Option<String> = None;
+    let mut url = None;
+    let mut documents = 0;
+    let mut complete = true;
     let mut queue = VecDeque::new();
-
-    // Check root first
-    if !root.is_password() && root.control_type() != UiaControlType::Document {
-        if !private {
-            if let Some(name) = root.name() {
-                if has_private_window_marker(&name) {
-                    private = true;
-                }
-            }
-        }
-        if url.is_none() && is_address_bar_control(root) {
-            if let Some(val) = root.value() {
-                if let Some(norm) = normalize_browser_url(&val) {
-                    url = Some(norm);
-                }
-            }
-        }
+    if inspect_description_node(root, &mut private, &mut documents, &mut url, &mut complete) {
         if let Some(child) = root.first_child() {
-            queue.push_back((Some(child), 0usize));
+            queue.push_back((child, 1usize));
         }
     }
 
-    let mut visited_nodes = 0usize;
+    let mut visited = 1usize; // Root was already inspected.
     const MAX_NODES: usize = 200;
-    const MAX_DEPTH: usize = 8;
-
-    while let Some((maybe_node, depth)) = queue.pop_front() {
-        let Some(node) = maybe_node else {
-            continue;
-        };
-
-        visited_nodes += 1;
-        if visited_nodes >= MAX_NODES || Instant::now() >= deadline {
+    const MAX_DEPTH: usize = 40;
+    while let Some((node, depth)) = queue.pop_front() {
+        if visited >= MAX_NODES || Instant::now() >= deadline {
+            complete = false;
             break;
         }
-
-        // Privacy and Security: NEVER traverse password subtrees or Document subtrees during describe
-        let is_password = node.is_password();
-        let is_doc = node.control_type() == UiaControlType::Document;
-
-        if !is_password && !is_doc {
-            if !private {
-                if let Some(name) = node.name() {
-                    if has_private_window_marker(&name) {
-                        private = true;
-                    }
-                }
-            }
-
-            if url.is_none() && is_address_bar_control(&node) {
-                if let Some(val) = node.value() {
-                    if let Some(norm) = normalize_browser_url(&val) {
-                        url = Some(norm);
-                    }
-                }
-            }
-
+        visited += 1;
+        let descend =
+            inspect_description_node(&node, &mut private, &mut documents, &mut url, &mut complete);
+        if private {
+            break;
+        }
+        if descend {
             if depth < MAX_DEPTH {
                 if let Some(child) = node.first_child() {
-                    queue.push_back((Some(child), depth + 1));
+                    queue.push_back((child, depth + 1));
                 }
+            } else {
+                complete = false;
             }
         }
-
         if let Some(sibling) = node.next_sibling() {
-            queue.push_back((Some(sibling), depth));
+            queue.push_back((sibling, depth));
         }
     }
-
-    if private {
+    if private || !complete || documents != 1 || Instant::now() >= deadline {
         url = None;
     }
-
     UiaDescription { url, private }
 }
 
@@ -636,7 +618,6 @@ mod tests {
         name: Option<String>,
         value: Option<String>,
         text: Option<String>,
-        automation_id: Option<String>,
         delay: Option<Duration>,
         first_child: Option<FakeUiaNode>,
         next_sibling: Option<FakeUiaNode>,
@@ -648,7 +629,6 @@ mod tests {
             name: Option<&str>,
             value: Option<&str>,
             text: Option<&str>,
-            automation_id: Option<&str>,
             is_password: bool,
             delay: Option<Duration>,
         ) -> Self {
@@ -659,7 +639,6 @@ mod tests {
                     name: name.map(String::from),
                     value: value.map(String::from),
                     text: text.map(String::from),
-                    automation_id: automation_id.map(String::from),
                     delay,
                     first_child: None,
                     next_sibling: None,
@@ -698,11 +677,18 @@ mod tests {
                     name: name.map(String::from),
                     value: None,
                     text: None,
-                    automation_id: None,
                     delay: None,
                     first_child,
                     next_sibling: None,
                 }),
+            }
+        }
+
+        fn with_document_url(self, url: &str) -> Self {
+            let mut inner = self.inner.clone_fields();
+            inner.value = Some(url.to_owned());
+            Self {
+                inner: Arc::new(inner),
             }
         }
     }
@@ -715,7 +701,6 @@ mod tests {
                 name: self.name.clone(),
                 value: self.value.clone(),
                 text: self.text.clone(),
-                automation_id: self.automation_id.clone(),
                 delay: self.delay,
                 first_child: self.first_child.clone(),
                 next_sibling: self.next_sibling.clone(),
@@ -747,8 +732,12 @@ mod tests {
             self.inner.text.clone()
         }
 
-        fn automation_id(&self) -> Option<String> {
-            self.inner.automation_id.clone()
+        fn document_url(&self) -> Option<String> {
+            self.inner.value.clone()
+        }
+
+        fn is_offscreen(&self) -> Option<bool> {
+            Some(false)
         }
 
         fn first_child(&self) -> Option<Self> {
@@ -761,51 +750,12 @@ mod tests {
     }
 
     #[test]
-    fn test_uia_fake_tree_extracts_url_from_address_edit_control() {
-        let address_bar = FakeUiaNode::leaf(
-            UiaControlType::Edit,
-            Some("Address and search bar"),
-            Some("https://example.com/docs"),
-            None,
-            Some("view_1020"),
-            false,
-            None,
-        );
-        let toolbar = FakeUiaNode::with_children(
-            UiaControlType::Toolbar,
-            Some("Navigation"),
-            false,
-            vec![address_bar],
-        );
-        let document = FakeUiaNode::leaf(
-            UiaControlType::Document,
-            Some("Web content"),
-            None,
-            Some("Some document content"),
-            None,
-            false,
-            None,
-        );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            Some("Example - Microsoft Edge"),
-            false,
-            vec![toolbar, document],
-        );
-
-        let desc = extract_uia_description(&tree, Some("Example - Microsoft Edge"));
-        assert_eq!(desc.url.as_deref(), Some("https://example.com/docs"));
-        assert!(!desc.private);
-    }
-
-    #[test]
     fn windows_uia_confirmed_document_preserves_http_when_bar_omits_scheme() {
         let bar = FakeUiaNode::leaf(
             UiaControlType::Edit,
             Some("Address and search bar"),
             Some("127.0.0.1:19362"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
@@ -813,7 +763,6 @@ mod tests {
             UiaControlType::Document,
             Some("Owned page"),
             Some("http://127.0.0.1:19362/"),
-            None,
             None,
             false,
             None,
@@ -837,7 +786,6 @@ mod tests {
             Some("Address and search bar"),
             Some("https://allowed.invalid/not-submitted"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
@@ -846,16 +794,11 @@ mod tests {
             Some("Excluded page still displayed"),
             Some("https://blocked.example/private"),
             None,
-            None,
             false,
             None,
         );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            None,
-            false,
-            vec![bar, document],
-        );
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Window, None, false, vec![bar, document]);
         assert_eq!(
             extract_uia_description(&tree, None).url.as_deref(),
             Some("https://blocked.example/private")
@@ -869,16 +812,10 @@ mod tests {
             Some("Address and search bar"),
             Some("https://allowed.invalid/"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            None,
-            false,
-            vec![bar],
-        );
+        let tree = FakeUiaNode::with_children(UiaControlType::Window, None, false, vec![bar]);
         assert_eq!(extract_uia_description(&tree, None).url, None);
     }
 
@@ -889,7 +826,6 @@ mod tests {
             Some("Address and search bar"),
             Some("https://allowed.invalid/"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
@@ -898,7 +834,6 @@ mod tests {
             Some("Main"),
             Some("https://blocked.example/"),
             None,
-            None,
             false,
             None,
         );
@@ -906,7 +841,6 @@ mod tests {
             UiaControlType::Document,
             Some("Sidebar"),
             Some("https://allowed.invalid/"),
-            None,
             None,
             false,
             None,
@@ -927,7 +861,6 @@ mod tests {
             Some("Address and search bar"),
             Some("example.test/path"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
@@ -936,16 +869,11 @@ mod tests {
             None,
             Some("example.test/path"),
             None,
-            None,
             false,
             None,
         );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            None,
-            false,
-            vec![bar, document],
-        );
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Window, None, false, vec![bar, document]);
         assert_eq!(extract_uia_description(&tree, None).url, None);
     }
 
@@ -956,7 +884,6 @@ mod tests {
             Some("Web content"),
             None,
             Some("Visit https://phishing-site.test for more info"),
-            None,
             false,
             None,
         );
@@ -978,7 +905,6 @@ mod tests {
             Some("User Comment"),
             Some("https://user-comment-link.test"),
             None,
-            Some("comment_box"),
             false,
             None,
         );
@@ -1009,7 +935,6 @@ mod tests {
             Some("InPrivate"),
             None,
             None,
-            None,
             false,
             None,
         );
@@ -1018,7 +943,6 @@ mod tests {
             Some("Address"),
             Some("https://sensitive-bank.test"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
@@ -1043,7 +967,6 @@ mod tests {
             Some("Article"),
             None,
             Some("This is the main article content."),
-            None,
             false,
             None,
         );
@@ -1051,7 +974,6 @@ mod tests {
             UiaControlType::Edit,
             Some("Notes"),
             Some("User draft notes"),
-            None,
             None,
             false,
             None,
@@ -1075,7 +997,6 @@ mod tests {
             None,
             None,
             Some("my_secret_pass_child"),
-            None,
             false,
             None,
         );
@@ -1089,7 +1010,6 @@ mod tests {
             UiaControlType::Edit,
             Some("Username"),
             Some("alice"),
-            None,
             None,
             false,
             None,
@@ -1118,7 +1038,6 @@ mod tests {
             None,
             None,
             Some("head_marker_public"),
-            None,
             false,
             None,
         );
@@ -1126,7 +1045,6 @@ mod tests {
         for _ in 0..3200 {
             empty_panes.push(FakeUiaNode::leaf(
                 UiaControlType::Pane,
-                None,
                 None,
                 None,
                 None,
@@ -1139,7 +1057,6 @@ mod tests {
             None,
             None,
             Some("tail_sentinel_beyond_budget"),
-            None,
             false,
             None,
         );
@@ -1169,14 +1086,12 @@ mod tests {
             None,
             None,
             Some("fast_head_marker"),
-            None,
             false,
             None,
         );
         let slow_node = FakeUiaNode::leaf(
             UiaControlType::Pane,
             Some("Slow"),
-            None,
             None,
             None,
             false,
@@ -1187,7 +1102,6 @@ mod tests {
             None,
             None,
             Some("unreachable_tail_sentinel"),
-            None,
             false,
             None,
         );
@@ -1223,7 +1137,6 @@ mod tests {
             Some("Address and search bar"),
             Some("https://attacker.invalid"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
@@ -1232,7 +1145,6 @@ mod tests {
             Some("InPrivate"),
             None,
             Some("This page mentions InPrivate browsing"),
-            None,
             false,
             None,
         );
@@ -1241,14 +1153,14 @@ mod tests {
             Some("Web page content"),
             false,
             vec![spoofed_address, inpage_private_text],
-        );
+        )
+        .with_document_url("https://example.org/docs");
 
         let real_omnibox = FakeUiaNode::leaf(
             UiaControlType::Edit,
             Some("Address and search bar"),
             Some("https://example.org"),
             None,
-            Some("addressEdit"),
             false,
             None,
         );
@@ -1267,7 +1179,7 @@ mod tests {
         );
 
         let desc = extract_uia_description(&window, Some("Edge"));
-        assert_eq!(desc.url.as_deref(), Some("https://example.org"));
+        assert_eq!(desc.url.as_deref(), Some("https://example.org/docs"));
         assert!(
             !desc.private,
             "In-page text inside Document must not trigger private mode"
@@ -1282,7 +1194,6 @@ mod tests {
             Some("Euro document"),
             None,
             Some(&euro_body),
-            None,
             false,
             None,
         );
@@ -1303,7 +1214,6 @@ mod tests {
         let button = FakeUiaNode::leaf(
             UiaControlType::Button,
             Some("Save"),
-            None,
             None,
             None,
             false,
@@ -1337,7 +1247,6 @@ mod tests {
             Some("Large Euro document"),
             None,
             Some(&large_euro_body),
-            None,
             false,
             None,
         );

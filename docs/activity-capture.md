@@ -108,8 +108,12 @@ below) and mirrored to the menu bar.
     ScreenCaptureKit completion at 2 s. A window that is still building its
     tree cannot stall capture.
   - On Windows, the UIA description walk (URL and private detection) checks a
-    250 ms deadline, 200-node budget, and depth 8; Document subtrees are skipped
-    during description to prevent in-page URL/private spoofing. UIA text
+    250 ms deadline, 200-node budget, and depth 40. A URL must be an explicit
+    HTTP(S) URI from one visible Document's LegacyIAccessible metadata with
+    document role. Editable address bars are not identity; missing, ambiguous,
+    or incompletely inspected document metadata leaves the URL unknown.
+    Document names, text, and descendants are skipped during description to
+    prevent in-page URL/private spoofing. UIA text
     extraction checks a 250 ms deadline, 3,000 nodes, depth 40, and 20,000
     characters. Password subtrees are skipped unconditionally. UIA provider
     calls have configured 250 ms timeouts. WGC frame capture and OCR share a
