@@ -66,7 +66,8 @@ Tests: `cargo test --manifest-path src-tauri/Cargo.toml day_intelligence`
     - Filtering stages: 12,800 gated spans cut down through prose, junk, and
       document frequency gates to 135 lexical candidates, which are embedded to
       yield 24 selected semantic spans.
-    - Timings: synthetic fixture preparation took 10.13 s separately; a single
+    - Timings: model verification/readiness took 10.13 s separately and synthetic
+      fixture generation took 1.13 ms; a single
       batch embed call for the 135 candidate texts took 55.9095 s wall clock
       (encompassing tokenization, model initialization, and CPU inference);
       total distillation time was 56.7775 s wall clock.
