@@ -11,33 +11,37 @@
 ## 2. Janela, identidade e listas
 
 - [x] 2.1 RED: testes unitários de identidade (nome do executável em minúsculas, `FileDescription`, AppUserModelID) e das listas Windows em `filter.rs`, `timeline/context.rs`, `timeline/categorize.rs` e `timeline/builder.rs` (`msedge.exe` é navegador, `code.exe` é editor, `lockapp.exe` nunca é útil); verificar que falham.
-- [ ] 2.2 GREEN: `focused_window` (D2) e listas; testes de 2.1 passam; no `cert`, quadros mostram app e título corretos no export de depuração.
+- [x] 2.2 GREEN: `focused_window` (D2) e listas; testes de 2.1 passam; no `cert`, quadros mostram app e título corretos no export de depuração.
 
 ## 3. Texto, URL e OCR
 
 - [x] 3.1 RED: testes do extrator UIA com árvore simulada (orçamento de nós e tempo, URL do controle de endereço, janela privada); verificar que falham.
 - [ ] 3.2 GREEN: `accessibility_text` e URL por UI Automation (D3); testes de 3.1 passam; no `cert`, quadro do Edge com URL e texto e origem "acessibilidade".
+  - Ajuste D3 autorizado em 2026-10-19: metadados da URL confirmada do documento, sem esquema inventado ou endereço em edição. A prova inicial expôs HTTP gravado como HTTPS; esta tarefa continua aberta até RED/GREEN e nova prova.
 - [x] 3.3 RED: teste de integração do OCR com imagem de teste reconhecida pelo `Windows.Media.Ocr`, rodando no `cert`; verificar que falha.
-- [ ] 3.4 GREEN: `ocr_text` com Windows Graphics Capture e `Windows.Media.Ocr` (D4), sem arquivo em disco; teste de 3.3 passa; no `cert`, janela sem árvore UIA gera quadro com origem "OCR" e nenhum arquivo de imagem novo.
+- [x] 3.4 GREEN: `ocr_text` com Windows Graphics Capture e `Windows.Media.Ocr` (D4), sem arquivo em disco; teste de 3.3 passa; no `cert`, janela sem árvore UIA gera quadro com origem "OCR" e nenhum arquivo de imagem novo.
 
 ## 4. Entrada, área de transferência, telas, disco e ociosidade
 
 - [x] 4.1 RED: testes de normalização do Raw Input (só instantes de mouse down e key down, sem código de tecla) e do filtro de formatos ocultos da área de transferência; verificar que falham. `system_idle_ms` excluído desta rodada pelo limite registrado em 4.2.
 - [ ] 4.2 GREEN: `set_input_capture`/`drain_input_events` (D5), `clipboard_text_if_changed`, `secondary_windows`, `free_disk_bytes` (D6) e `system_idle_ms`; testes de 4.1 passam; no `cert`, cliques, teclas e cópia aparecem em `input_events` sem conteúdo digitado.
   - Limite desta rodada: falta system_idle_ms, depende da outra change. Não adicionar `frames.input_idle_ms` nem migração 6.
-- [ ] 4.3 Atualizar `docs/activity-capture.md` e `docs/activity-timeline.md` com o adaptador Windows, o banco cifrado no Windows e os nomes de tela bloqueada; conferir com o código.
+  - Prova curta nativa: `click` e `key` com contagem 1 e sem conteúdo; uma cópia redigida; marcadores de clipboard oculto e de texto digitado ausentes do export. Revisão da seleção de monitor secundário ainda em andamento.
+- [x] 4.3 Atualizar `docs/activity-capture.md` e `docs/activity-timeline.md` com o adaptador Windows, o banco cifrado no Windows e os nomes de tela bloqueada; conferir com o código.
 
 ## 5. Agentes de código e embeddings
 
 - [x] 5.1 RED: testes de `SourceRoots` no Windows (perfil e `%APPDATA%`) e da recusa de ponto de reparo ao abrir arquivos; verificar que falham.
-- [ ] 5.2 GREEN: raízes e abertura segura no Windows (D10); testes de 5.1 passam; no `cert`, uma sessão real de Claude Code ou Codex aparece na faixa de agentes. Atualizar `docs/coding-agent-sessions.md`.
-- [ ] 5.3 Candle e tokenizers no alvo Windows (D9); teste do embedder BGE passa no `cert`; tempo de embedding de uma hora medido e registrado. Se inaceitável, parar e voltar ao dono. Atualizar `docs/day-intelligence.md`.
+- [x] 5.2 GREEN: raízes e abertura segura no Windows (D10); testes de 5.1 passam; no `cert`, uma sessão real de Claude Code ou Codex aparece na faixa de agentes. Atualizar `docs/coding-agent-sessions.md`.
+- [x] 5.3 Candle e tokenizers no alvo Windows (D9); teste do embedder BGE passa no `cert`; tempo de embedding de uma hora medido e registrado. Se inaceitável, parar e voltar ao dono. Atualizar `docs/day-intelligence.md`.
   - RED do teste existente com o modelo real observado no `cert`: preparo chegou a `Ready`, mas `embed` retornou `None` e a asserção `vectors` falhou; 1 falha, 13,39 s de teste. Log `5.3-bge-real-model-red.log`.
+  - GREEN real e benchmark debug no i5-10300H: 135 textos candidatos de 1.800 amostras sintéticas de uma hora, um batch de embeddings em 55,9095 s e destilação total em 56,7775 s. Preparo separado: 10,13 s. Não é prova de captura ao vivo nem relatório gerado por LLM.
 
 ## 6. Interface
 
 - [x] 6.1 RED: testes de componente para a aba Atividade visível com `supported`, seção sem linhas de permissão fora do macOS, vista "Hoje" com estado "não suportado" e ícone de app no Windows; verificar que falham.
-- [ ] 6.2 GREEN: `settings-config.ts`, `AppSettings.tsx`, `ActivitySettingsSection.tsx`, `ActivityTimelineView.tsx`, mensagens e `app_icon.rs` no Windows (D11), seguindo `/impeccable`; testes de 6.1 passam. Atualizar a lista do que o Windows cobre no `README.md`.
+- [x] 6.2 GREEN: `settings-config.ts`, `AppSettings.tsx`, `ActivitySettingsSection.tsx`, `ActivityTimelineView.tsx`, mensagens e `app_icon.rs` no Windows (D11), seguindo `/impeccable`; testes de 6.1 passam. Atualizar a lista do que o Windows cobre no `README.md`.
+  - Regressão de componente EN/PT para todo o painel Atividade, agentes e agendamento: texto neutro, sem referência a Mac. Confirmado no WebView nativo do Windows; detector Impeccable sem achados nos seis arquivos, limitado à análise regex.
 
 ## 7. Verificação
 

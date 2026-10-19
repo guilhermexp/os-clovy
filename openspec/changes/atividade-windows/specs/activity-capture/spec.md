@@ -56,6 +56,16 @@ No Windows, o Clovy SHALL capturar com a mesma cadência, exclusões, pausas, re
 - **THEN** o quadro registra o app Edge, o título, a URL da aba e o texto da página, sem arquivo de imagem
 - Test: e2e — app de desenvolvimento na máquina Windows, leitura pelo export de depuração
 
+#### Scenario: URL confirmada sem esquema inventado
+- **WHEN** a página exibida no Edge usa HTTP e o controle de endereço omite o esquema
+- **THEN** a URL registrada vem de metadados UIA do documento confirmado e preserva HTTP; se a identidade não for comprovada, fica desconhecida em vez de inventar HTTPS
+- Test: unit — identidade UIA do documento; e2e — página HTTP própria e export de depuração no Windows
+
+#### Scenario: Endereço em edição não muda a identidade da página
+- **WHEN** uma página de domínio excluído continua exibida e o usuário digita outro endereço na barra sem navegar
+- **THEN** o endereço em edição não substitui a identidade do documento e nenhum texto da página excluída é capturado
+- Test: unit — metadados de documento e barra com valores divergentes; e2e — perfil de navegador próprio
+
 #### Scenario: Janela InPrivate
 - **WHEN** a janela em foco é uma janela InPrivate do Edge
 - **THEN** nenhum quadro é gravado e nenhum OCR é feito

@@ -45,7 +45,9 @@ As listas de `filter.rs`, `timeline/context.rs`, `timeline/categorize.rs` e `tim
 
 ### D3. Texto e URL pela UI Automation
 
-`IUIAutomation` (COM em apartamento MTA na thread de captura), `ElementFromHandle` da janela em foco, caminhada limitada (mesmo orçamento de tempo do AX no macOS: 0,25 s por chamada, teto de nós) coletando `Name` e `TextPattern`/`ValuePattern` de documento, texto e edição. URL do navegador pelo controle de endereço (Edit com `ValuePattern`) dentro da janela do navegador. Janela privada por marcador no título, já existente em `filter.rs`, mais o nome de perfil InPrivate/Incognito exposto pela UIA quando houver. Chromium ativa a árvore UIA quando um cliente a consulta; não há equivalente a `AXManualAccessibility`.
+`IUIAutomation` (COM em apartamento MTA na thread de captura), `ElementFromHandle` da janela em foco, caminhada limitada (mesmo orçamento de tempo do AX no macOS: 0,25 s por chamada, teto de nós) coletando `Name` e `TextPattern`/`ValuePattern` de documento, texto e edição. Janela privada por marcador no título, já existente em `filter.rs`, mais o nome de perfil InPrivate/Incognito exposto pela UIA quando houver. Chromium ativa a árvore UIA quando um cliente a consulta; não há equivalente a `AXManualAccessibility`.
+
+**Ajuste autorizado em 2026-10-19:** a URL identifica o documento confirmado, não o texto editável da barra. A prova no Edge abriu `http://127.0.0.1:19362/`, mas o controle omitiu o esquema e a implementação inicial inventou `https://127.0.0.1:19362`. Além disso, um endereço digitado sem navegação não identifica a página exibida. Usar metadados de URI confirmada do documento expostos pela UIA, sem ler perfis nem integrar DevTools ao produto. Não inferir esquema, não usar o valor em edição da barra e não procurar URLs no texto renderizado. Documento ausente, identidade ambígua ou metadado não disponível deixam a URL desconhecida; com exclusões de domínio configuradas, o motor falha fechado. A caminhada de descrição pode ler somente a identidade do documento, nunca seu conteúdo ou seus descendentes.
 
 ### D4. OCR com Windows Graphics Capture e `Windows.Media.Ocr`
 
