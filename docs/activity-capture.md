@@ -251,7 +251,13 @@ summaries; see [day-intelligence.md](day-intelligence.md#schema-migration-4-day_
 Get the open store from the managed `ActivityState` runtime
 (`ActivityShared::store()`); it is `None` while capture was never enabled or the
 key is missing. All methods are async and safe to call concurrently with
-capture (two-connection WAL pool).
+capture (a four-connection WAL pool).
+
+Closing uses `db::close_sqlite_pool` to drain until the live connection count
+is zero, including asynchronous returns and native worker shutdown. SQLx 0.8's
+semaphore close can finish before those resources have gone away. This matters
+on Windows, where an open SQLite handle prevents a confirmed database reset;
+the barrier waits for resources rather than retrying file deletion.
 
 | Method | Use |
 |---|---|
