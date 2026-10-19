@@ -838,4 +838,33 @@ mod tests {
             "a monitor already covered by the focused window must not sample behind it"
         );
     }
+
+    #[test]
+    fn test_secondary_window_selection_stops_at_own_window() {
+        use windows::Win32::Foundation::RECT;
+
+        let monitor = HMONITOR(0x1000 as *mut _);
+        let action = secondary_window_action(
+            HWND(0x3000 as *mut _),
+            None,
+            true,
+            false,
+            0,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 800,
+                bottom: 600,
+            },
+            monitor,
+            monitor,
+            9999,
+            9999,
+        );
+        assert_eq!(
+            action,
+            SecondaryWindowAction::Stop,
+            "an excluded Clovy window still covers the window behind it"
+        );
+    }
 }
