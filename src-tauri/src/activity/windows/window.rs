@@ -581,13 +581,13 @@ fn secondary_window_action(
     if win_monitor != sec_monitor {
         return SecondaryWindowAction::Skip;
     }
-    if pid == 0 || pid == own_pid {
+    if pid == 0 {
         return SecondaryWindowAction::Skip;
     }
 
-    // Exclude the currently focused window so it is not captured twice
-    if Some(hwnd) == focused_hwnd {
-        return SecondaryWindowAction::Skip;
+    // This window still covers the display even if it must not be captured.
+    if pid == own_pid || Some(hwnd) == focused_hwnd {
+        return SecondaryWindowAction::Stop;
     }
 
     SecondaryWindowAction::Capture
@@ -607,8 +607,8 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
     };
 
     let monitors = enumerate_display_monitors();
-    let secondary_monitors: Vec<_> = monitors.into_iter().filter(|m| !m.is_primary).collect();
-    if secondary_monitors.is_empty() {
+    let mut secondary_monitors = monitors.into_iter().filter(|m| !m.is_primary).peekable();
+    if secondary_monitors.peek().is_none() {
         return Vec::new();
     }
 
@@ -672,8 +672,9 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
             // Found topmost candidate on this monitor
             if let Some(desc) = describe_window_handle(hwnd, pid) {
                 descriptors.push(desc);
-                break; // One topmost window per secondary monitor
             }
+            // A failed descriptor must not expose a covered window either.
+            break;
         }
     }
 
