@@ -6,13 +6,9 @@
 use super::*;
 #[cfg(unix)]
 use crate::db::repositories::Repositories;
-use crate::llm::{
-    cli::CliKind,
-    registry::ProviderRef,
-    shell_env::set_login_env_for_tests,
-};
 #[cfg(unix)]
 use crate::llm::shell_env::LoginEnv;
+use crate::llm::{cli::CliKind, registry::ProviderRef, shell_env::set_login_env_for_tests};
 #[cfg(unix)]
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
 

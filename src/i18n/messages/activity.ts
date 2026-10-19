@@ -176,8 +176,7 @@ export default defineMessages({
       "Text-only activity capture records window titles and visible text into an encrypted database stored only on this device. Nothing leaves this device, and no screenshots are saved.",
     "activity.emptyState.turnOn": "Turn on in Settings",
     "activity.unsupported.title": "Activity capture is not supported",
-    "activity.unsupported.description":
-      "Activity capture is not supported on this system.",
+    "activity.unsupported.description": "Activity capture is not supported on this system.",
     "activity.state.keyMissingNotice":
       "Encryption key is missing from Keychain. Recreate the database in Settings to resume capture.",
     "activity.state.errorNotice": "Could not load timeline: {message}",
@@ -390,8 +389,7 @@ export default defineMessages({
       "A captura apenas de texto grava títulos de janelas e texto visível em um banco de dados criptografado armazenado apenas neste dispositivo. Nada sai deste dispositivo e nenhuma captura de tela é salva.",
     "activity.emptyState.turnOn": "Ativar nas Configurações",
     "activity.unsupported.title": "Captura de atividade não suportada",
-    "activity.unsupported.description":
-      "A captura de atividade não é suportada neste sistema.",
+    "activity.unsupported.description": "A captura de atividade não é suportada neste sistema.",
     "activity.state.keyMissingNotice":
       "A chave de criptografia está ausente do Keychain. Recrie o banco nas Configurações para retomar a captura.",
     "activity.state.errorNotice": "Não foi possível carregar a linha do tempo: {message}",

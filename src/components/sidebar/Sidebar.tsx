@@ -707,8 +707,7 @@ export function Sidebar({
         ? settingsTabsForCompanionPairing(companionPairingEnabled, activitySupported)
             .filter(
               (tab) =>
-                !HIDDEN_SETTINGS_TABS.has(tab.id) &&
-                !(account.localDev && tab.id === "billing"),
+                !HIDDEN_SETTINGS_TABS.has(tab.id) && !(account.localDev && tab.id === "billing"),
             )
             .map(
               (tab): CommandPromptItem => ({

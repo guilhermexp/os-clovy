@@ -6,7 +6,7 @@ use std::sync::{LazyLock, Mutex};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
-use windows::Win32::Graphics::Gdi::{HMONITOR, HDC};
+use windows::Win32::Graphics::Gdi::{HDC, HMONITOR};
 
 use crate::activity::platform::WindowDescriptor;
 
@@ -20,7 +20,7 @@ struct AutoHandle(HANDLE);
 
 impl Drop for AutoHandle {
     fn drop(&mut self) {
-        if !self.0.is_invalid() && !self.0.0.is_null() {
+        if !self.0.is_invalid() && !self.0 .0.is_null() {
             unsafe {
                 let _ = CloseHandle(self.0);
             }
@@ -327,8 +327,11 @@ fn describe_window_handle(hwnd: HWND, pid: u32) -> Option<WindowDescriptor> {
     let file_desc = image_path.as_deref().and_then(get_file_description);
 
     // Identity resolution
-    let (app_name, bundle_id) =
-        resolve_identity(image_path.as_deref(), file_desc.as_deref(), aumid.as_deref());
+    let (app_name, bundle_id) = resolve_identity(
+        image_path.as_deref(),
+        file_desc.as_deref(),
+        aumid.as_deref(),
+    );
 
     // Record in executable_path cache if both identity and path are available
     if let (Some(bid), Some(path)) = (&bundle_id, &image_path) {
@@ -384,9 +387,8 @@ fn get_process_aumid(process: HANDLE) -> Option<String> {
     // ERROR_INSUFFICIENT_BUFFER is 122
     if err == WIN32_ERROR(122) && len > 0 {
         let mut buf = vec![0u16; len as usize];
-        let err2 = unsafe {
-            GetApplicationUserModelId(process, &mut len, Some(PWSTR(buf.as_mut_ptr())))
-        };
+        let err2 =
+            unsafe { GetApplicationUserModelId(process, &mut len, Some(PWSTR(buf.as_mut_ptr()))) };
         if err2 == WIN32_ERROR(0) {
             let null_pos = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
             let s = String::from_utf16_lossy(&buf[..null_pos]);
@@ -493,9 +495,7 @@ struct DisplayMonitor {
 fn enumerate_display_monitors() -> Vec<DisplayMonitor> {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO,
-    };
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO};
 
     extern "system" fn enum_mon_proc(
         hmon: HMONITOR,
@@ -595,8 +595,8 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
     use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetForegroundWindow, GetWindowLongW, GetWindowRect,
-        GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE,
+        EnumWindows, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
+        IsIconic, IsWindowVisible, GWL_EXSTYLE,
     };
 
     let monitors = enumerate_display_monitors();
@@ -622,7 +622,12 @@ pub(crate) fn secondary_windows() -> Vec<WindowDescriptor> {
     }
 
     let mut z_windows = Vec::new();
-    let _ = unsafe { EnumWindows(Some(enum_win_proc), LPARAM(&mut z_windows as *mut _ as isize)) };
+    let _ = unsafe {
+        EnumWindows(
+            Some(enum_win_proc),
+            LPARAM(&mut z_windows as *mut _ as isize),
+        )
+    };
 
     let own_pid = std::process::id();
     let mut descriptors = Vec::new();
@@ -687,7 +692,9 @@ mod tests {
 
     #[test]
     fn test_resolve_identity_prefers_aumid_for_packaged_apps() {
-        let image = Path::new(r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.18.10301.0_x64__8wekyb3d8bbwe\WindowsTerminal.exe");
+        let image = Path::new(
+            r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.18.10301.0_x64__8wekyb3d8bbwe\WindowsTerminal.exe",
+        );
         let (app_name, bundle_id) = resolve_identity(
             Some(image),
             Some("Windows Terminal"),
@@ -800,10 +807,15 @@ mod tests {
         let is_candidate = is_secondary_window_candidate(
             focused_hwnd, // Candidate window IS the currently focused window on this secondary monitor
             Some(focused_hwnd),
-            true, // is_visible
+            true,  // is_visible
             false, // is_iconic
-            0, // ex_style
-            RECT { left: 0, top: 0, right: 800, bottom: 600 },
+            0,     // ex_style
+            RECT {
+                left: 0,
+                top: 0,
+                right: 800,
+                bottom: 600,
+            },
             secondary_hmon,
             secondary_hmon,
             1234, // pid

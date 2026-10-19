@@ -23,7 +23,12 @@ const INPUT_BEFORE: Duration = Duration::seconds(3);
 const INPUT_AFTER: Duration = Duration::seconds(1);
 /// Lock screen and screen saver: never a session, never useful.
 const AWAY_APPS: &[&str] = &[
-    "loginwindow", "screensaverengine", "lockapp", "lockapp.exe", "logonui", "logonui.exe",
+    "loginwindow",
+    "screensaverengine",
+    "lockapp",
+    "lockapp.exe",
+    "logonui",
+    "logonui.exe",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,7 +177,10 @@ impl BatchSignals {
 fn is_away_app(frame: &StoredFrame) -> bool {
     AWAY_APPS.iter().any(|app| {
         frame.app_name.trim().eq_ignore_ascii_case(app)
-            || frame.bundle_id.as_deref().is_some_and(|id| id.eq_ignore_ascii_case(app))
+            || frame
+                .bundle_id
+                .as_deref()
+                .is_some_and(|id| id.eq_ignore_ascii_case(app))
     })
 }
 
@@ -258,8 +266,7 @@ pub fn push_frame(
     let previous = state.last_frame.as_ref();
     let window_changed = previous.map_or(true, |last| !last.same_window(frame));
     let text_changed = previous.map_or(true, |last| last.text_id != frame.text_id);
-    let useful =
-        !is_away_app(frame) && (window_changed || text_changed || signals.input_near(at));
+    let useful = !is_away_app(frame) && (window_changed || text_changed || signals.input_near(at));
     state.last_frame = Some(FrameMark::of(frame, at));
 
     if !useful {
@@ -628,7 +635,14 @@ pub(super) mod tests {
 
     #[test]
     fn windows_locked_executable_is_away_even_with_a_localized_description() {
-        let mut locked = frame(1, at(10, 0, 0), "Tela de bloqueio do Windows", "Entrar", None, 1);
+        let mut locked = frame(
+            1,
+            at(10, 0, 0),
+            "Tela de bloqueio do Windows",
+            "Entrar",
+            None,
+            1,
+        );
         locked.bundle_id = Some("lockapp.exe".into());
         let signals = BatchSignals {
             input_times: vec![at(10, 0, 0)],

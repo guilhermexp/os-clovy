@@ -175,8 +175,7 @@ vi.mock("../lib/agent-sounds", () => ({
 }));
 
 vi.mock("../app/update-decision", async () => {
-  const actual =
-    await vi.importActual<typeof UpdateDecision>("../app/update-decision");
+  const actual = await vi.importActual<typeof UpdateDecision>("../app/update-decision");
   return {
     ...actual,
     startPeriodicClovyUpdateChecks: mocks.startPeriodicClovyUpdateChecks,

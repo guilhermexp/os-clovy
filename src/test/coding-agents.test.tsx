@@ -118,11 +118,11 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("coding_agents_status");
     });
-    expect(within(section).getByRole("switch", { name: "Read Claude Code sessions" })).not.toBeChecked();
-    expect(within(section).getByRole("switch", { name: "Read Cursor sessions" })).not.toBeChecked();
     expect(
-      within(section).getByText(/summarized by the agent's own CLI/i),
-    ).toBeInTheDocument();
+      within(section).getByRole("switch", { name: "Read Claude Code sessions" }),
+    ).not.toBeChecked();
+    expect(within(section).getByRole("switch", { name: "Read Cursor sessions" })).not.toBeChecked();
+    expect(within(section).getByText(/summarized by the agent's own CLI/i)).toBeInTheDocument();
   });
 
   it("turning a source on saves it with the rest of the activity settings", async () => {

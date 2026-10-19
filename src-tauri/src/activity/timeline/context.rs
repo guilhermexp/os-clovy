@@ -59,15 +59,27 @@ const TITLE_LAST_BUNDLES: &[&str] = &[
     "com.google.antigravity",
 ];
 const TITLE_LAST_EXECUTABLES: &[&str] = &[
-    "code.exe", "code-insiders.exe", "cursor.exe", "windsurf.exe", "vscodium.exe",
-    "positron.exe", "trae.exe", "kiro.exe", "antigravity.exe",
+    "code.exe",
+    "code-insiders.exe",
+    "cursor.exe",
+    "windsurf.exe",
+    "vscodium.exe",
+    "positron.exe",
+    "trae.exe",
+    "kiro.exe",
+    "antigravity.exe",
 ];
 /// Editors whose window title starts with the workspace ("project — file").
 const TITLE_FIRST_EDITORS: &[&str] = &["zed", "xcode"];
 const TITLE_FIRST_BUNDLES: &[&str] = &["dev.zed.zed", "com.apple.dt.xcode", "com.jetbrains."];
 const TITLE_FIRST_EXECUTABLES: &[&str] = &[
-    "zed.exe", "idea64.exe", "pycharm64.exe", "webstorm64.exe", "goland64.exe",
-    "rustrover64.exe", "rider64.exe",
+    "zed.exe",
+    "idea64.exe",
+    "pycharm64.exe",
+    "webstorm64.exe",
+    "goland64.exe",
+    "rustrover64.exe",
+    "rider64.exe",
 ];
 /// Title separators, the editors' own (em dash, en dash) before the hyphen.
 const SEPARATORS: &[&str] = &[" \u{2014} ", " \u{2013} ", " - "];
@@ -112,7 +124,9 @@ pub fn editor_workspace(
     // Windows editor titles may append the product after the workspace.
     // Leave the existing macOS title interpretation untouched.
     if bundle_id.is_some_and(|id| {
-        TITLE_LAST_EXECUTABLES.iter().any(|exe| id.eq_ignore_ascii_case(exe))
+        TITLE_LAST_EXECUTABLES
+            .iter()
+            .any(|exe| id.eq_ignore_ascii_case(exe))
     }) {
         if let Some((index, separator)) = SEPARATORS
             .iter()
@@ -121,7 +135,9 @@ pub fn editor_workspace(
         {
             let brand = &title[index + separator.len()..];
             if brand.eq_ignore_ascii_case(app_name.trim())
-                || TITLE_LAST_EDITORS.iter().any(|name| brand.eq_ignore_ascii_case(name))
+                || TITLE_LAST_EDITORS
+                    .iter()
+                    .any(|name| brand.eq_ignore_ascii_case(name))
             {
                 title = &title[..index];
             }
@@ -217,9 +233,16 @@ mod tests {
 
     #[test]
     fn windows_editor_identity_extracts_the_workspace_without_english_app_names() {
-        for executable in ["code.exe", "cursor.exe", "windsurf.exe", "vscodium.exe", "antigravity.exe"] {
+        for executable in [
+            "code.exe",
+            "cursor.exe",
+            "windsurf.exe",
+            "vscodium.exe",
+            "antigravity.exe",
+        ] {
             assert_eq!(
-                editor_workspace("Localized editor", Some(executable), "main.rs - billing").as_deref(),
+                editor_workspace("Localized editor", Some(executable), "main.rs - billing")
+                    .as_deref(),
                 Some("billing"),
                 "{executable}"
             );
@@ -241,7 +264,8 @@ mod tests {
                 "Visual Studio Code",
                 Some("code.exe"),
                 "main.rs - billing - Visual Studio Code",
-            ).as_deref(),
+            )
+            .as_deref(),
             Some("billing")
         );
         assert_eq!(

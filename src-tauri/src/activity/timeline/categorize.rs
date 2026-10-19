@@ -368,8 +368,13 @@ impl Scores {
 }
 
 fn score_app(evidence: &SessionEvidence<'_>, scores: &mut Scores) {
-    let name = evidence.bundle_id
-        .and_then(|id| WINDOWS_APP_NAMES.iter().find(|(exe, _)| id.eq_ignore_ascii_case(exe)))
+    let name = evidence
+        .bundle_id
+        .and_then(|id| {
+            WINDOWS_APP_NAMES
+                .iter()
+                .find(|(exe, _)| id.eq_ignore_ascii_case(exe))
+        })
         .map_or(evidence.app_name, |(_, name)| *name);
     let app = name.trim().to_lowercase();
     if TERMINALS.iter().any(|name| app.contains(name)) {

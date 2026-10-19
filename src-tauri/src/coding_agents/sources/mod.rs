@@ -625,10 +625,7 @@ mod tests {
             claude::root(&roots),
             profile.join(".claude").join("projects")
         );
-        assert_eq!(
-            codex::root(&roots),
-            profile.join(".codex").join("sessions")
-        );
+        assert_eq!(codex::root(&roots), profile.join(".codex").join("sessions"));
         assert_eq!(
             copilot_cli::root(&roots),
             profile.join(".copilot").join("session-state")
@@ -663,7 +660,9 @@ mod tests {
 
         let current_exe = std::env::current_exe().expect("current_exe");
         let status = std::process::Command::new(current_exe)
-            .arg("coding_agents::sources::tests::windows_source_roots_current_resolves_without_home")
+            .arg(
+                "coding_agents::sources::tests::windows_source_roots_current_resolves_without_home",
+            )
             .arg("--exact")
             .arg("--nocapture")
             .env(SENTINEL, "1")

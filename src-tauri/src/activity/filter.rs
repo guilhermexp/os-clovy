@@ -35,8 +35,16 @@ const BROWSER_BUNDLE_PREFIXES: &[&str] = &[
 
 // Executable identities are exact, unlike macOS bundle-id families.
 const BROWSER_EXECUTABLES: &[&str] = &[
-    "msedge.exe", "chrome.exe", "chromium.exe", "firefox.exe", "brave.exe",
-    "opera.exe", "vivaldi.exe", "arc.exe", "zen.exe", "helium.exe",
+    "msedge.exe",
+    "chrome.exe",
+    "chromium.exe",
+    "firefox.exe",
+    "brave.exe",
+    "opera.exe",
+    "vivaldi.exe",
+    "arc.exe",
+    "zen.exe",
+    "helium.exe",
 ];
 
 /// Whole words of browser app names, for apps whose bundle id is unknown.
@@ -189,7 +197,6 @@ pub fn has_private_window_marker(title: &str) -> bool {
 
     markers.iter().any(|&m| lower.contains(m))
 }
-
 
 pub fn is_clovy_window(window: &WindowDescriptor, own_pid: i32) -> bool {
     window.pid == own_pid
@@ -420,7 +427,14 @@ mod tests {
 
     #[test]
     fn windows_browser_executables_apply_domain_privacy_rules() {
-        for executable in ["msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"] {
+        for executable in [
+            "msedge.exe",
+            "chrome.exe",
+            "firefox.exe",
+            "brave.exe",
+            "opera.exe",
+            "vivaldi.exe",
+        ] {
             let browser = WindowDescriptor {
                 pid: 42,
                 app_name: "Localized browser description".into(),

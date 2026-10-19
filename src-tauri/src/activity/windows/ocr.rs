@@ -12,9 +12,9 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Graphics::Imaging::{BitmapBufferAccessMode, BitmapPixelFormat, SoftwareBitmap};
 #[cfg(test)]
 use windows::Graphics::Imaging::BitmapDecoder;
+use windows::Graphics::Imaging::{BitmapBufferAccessMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::{OcrEngine, OcrResult};
 #[cfg(test)]
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
@@ -168,7 +168,11 @@ impl OcrCapture {
 
     /// Called even on disabled ticks so canceled images do not await another OCR.
     pub(crate) fn reap_completed(&mut self) {
-        if self.pending.as_ref().is_some_and(PendingCapture::is_terminal) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(PendingCapture::is_terminal)
+        {
             drop(self.pending.take());
         }
     }
@@ -344,11 +348,19 @@ pub(crate) fn resize_software_bitmap(
     // Endpoint-aligned nearest neighbors preserve both edges. Bounds were
     // validated once above rather than branching for every pixel.
     for dy in 0..dh {
-        let sy = if dh > 1 { dy * (src_h - 1) / (dh - 1) } else { src_h / 2 };
+        let sy = if dh > 1 {
+            dy * (src_h - 1) / (dh - 1)
+        } else {
+            src_h / 2
+        };
         let src_row = src_start + sy * src_stride;
         let dest_row = dest_start + dy * dest_stride;
         for dx in 0..dw {
-            let sx = if dw > 1 { dx * (src_w - 1) / (dw - 1) } else { src_w / 2 };
+            let sx = if dw > 1 {
+                dx * (src_w - 1) / (dw - 1)
+            } else {
+                src_w / 2
+            };
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     src_ptr.add(src_row + sx * 4),
@@ -471,7 +483,6 @@ pub(crate) fn recognize_image_bytes(bytes: &[u8]) -> Option<String> {
     let bitmap = await_operation(&decoder.GetSoftwareBitmapAsync().ok()?, deadline)?;
     capture.recognize_bitmap(bitmap, deadline)
 }
-
 
 #[cfg(test)]
 mod tests {

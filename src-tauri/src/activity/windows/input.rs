@@ -14,14 +14,14 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
-    RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetWindowLongPtrW, PostMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HWND_MESSAGE, MSG,
-    RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_LEFT_BUTTON_DOWN,
+    TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HWND_MESSAGE, MSG, RI_KEY_BREAK,
+    RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_LEFT_BUTTON_DOWN,
     RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_DOWN, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CLOSE, WM_CREATE, WM_DESTROY, WM_INPUT, WNDCLASSEXW,
 };
@@ -86,11 +86,12 @@ pub(crate) fn normalize_keyboard_input(flags: u16, at: DateTime<Utc>) -> Option<
 /// Strictly uses only button flags; NEVER inspects coordinates or motion deltas.
 pub(crate) fn normalize_mouse_input(button_flags: u16, at: DateTime<Utc>) -> Option<RawInputEvent> {
     let btn = button_flags as u32;
-    if (btn & (RI_MOUSE_LEFT_BUTTON_DOWN
-        | RI_MOUSE_RIGHT_BUTTON_DOWN
-        | RI_MOUSE_MIDDLE_BUTTON_DOWN
-        | RI_MOUSE_BUTTON_4_DOWN
-        | RI_MOUSE_BUTTON_5_DOWN))
+    if (btn
+        & (RI_MOUSE_LEFT_BUTTON_DOWN
+            | RI_MOUSE_RIGHT_BUTTON_DOWN
+            | RI_MOUSE_MIDDLE_BUTTON_DOWN
+            | RI_MOUSE_BUTTON_4_DOWN
+            | RI_MOUSE_BUTTON_5_DOWN))
         != 0
     {
         Some(RawInputEvent::Click { at })
@@ -262,7 +263,8 @@ fn run_message_loop(
 
     // Publish HWND and wait for parent ACK.
     // If sending fails or parent abandons, destroy window and exit without entering message loop.
-    let outcome = worker_publish_and_wait_ack(hwnd.0 as isize, &hwnd_tx, &ack_rx, Duration::from_secs(2));
+    let outcome =
+        worker_publish_and_wait_ack(hwnd.0 as isize, &hwnd_tx, &ack_rx, Duration::from_secs(2));
     if outcome == HandshakeOutcome::Abandoned {
         let _ = unsafe { DestroyWindow(hwnd) };
         let _ = unsafe { Arc::from_raw(raw_ptr) };
@@ -490,7 +492,8 @@ mod tests {
         // Parent drops hwnd_rx before worker sends
         drop(hwnd_rx);
 
-        let outcome = worker_publish_and_wait_ack(5555, &hwnd_tx, &ack_rx, Duration::from_millis(50));
+        let outcome =
+            worker_publish_and_wait_ack(5555, &hwnd_tx, &ack_rx, Duration::from_millis(50));
         assert_eq!(
             outcome,
             HandshakeOutcome::Abandoned,

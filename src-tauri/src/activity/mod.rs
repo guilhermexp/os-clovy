@@ -440,7 +440,10 @@ mod windows_setup_tests {
                 data_dir: dir.path().to_path_buf(),
             })
         });
-        let runtime = state.0.as_ref().expect("Windows setup must keep the runtime");
+        let runtime = state
+            .0
+            .as_ref()
+            .expect("Windows setup must keep the runtime");
         let mut engine = CaptureEngine::new(
             FakePlatform::granted(),
             runtime.shared.clone(),
@@ -456,7 +459,10 @@ mod windows_setup_tests {
         let frames = store.frames_after(0, 10).await.unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].app_name, "Zed");
-        assert!(keys.current().is_some(), "the injected vault must receive a key");
+        assert!(
+            keys.current().is_some(),
+            "the injected vault must receive a key"
+        );
         store.close().await;
     }
 }

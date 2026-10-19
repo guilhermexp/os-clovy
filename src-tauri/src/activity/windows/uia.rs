@@ -85,12 +85,11 @@ impl Uia {
             let initialized = hr.is_ok();
             let com_guard = ComApartmentGuard { initialized };
 
-            let automation: IUIAutomation2 = match unsafe {
-                CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
-            } {
-                Ok(auto) => auto,
-                Err(_) => return None,
-            };
+            let automation: IUIAutomation2 =
+                match unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) } {
+                    Ok(auto) => auto,
+                    Err(_) => return None,
+                };
 
             unsafe {
                 let _ = automation.SetConnectionTimeout(250);
@@ -353,10 +352,7 @@ pub(crate) fn is_address_bar_control<N: UiaNode>(node: &N) -> bool {
 /// - Address URL must come from an address Edit control with ValuePattern/value.
 /// - NEVER interprets Document control text as browser address URL.
 /// - If private is detected, URL is cleared (`None`).
-pub(crate) fn extract_uia_description<N: UiaNode>(
-    root: &N,
-    title: Option<&str>,
-) -> UiaDescription {
+pub(crate) fn extract_uia_description<N: UiaNode>(root: &N, title: Option<&str>) -> UiaDescription {
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_millis(250);
 
@@ -849,7 +845,10 @@ mod tests {
         );
 
         let desc = extract_uia_description(&tree, Some("Blog - Edge"));
-        assert_eq!(desc.url, None, "Generic page edit fields must not be treated as address bar");
+        assert_eq!(
+            desc.url, None,
+            "Generic page edit fields must not be treated as address bar"
+        );
     }
 
     #[test]
@@ -878,12 +877,8 @@ mod tests {
             false,
             vec![inprivate_badge, address_bar],
         );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            Some("Edge"),
-            false,
-            vec![toolbar],
-        );
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Window, Some("Edge"), false, vec![toolbar]);
 
         let desc = extract_uia_description(&tree, Some("Edge"));
         assert!(desc.private, "InPrivate badge must mark private window");
@@ -954,16 +949,15 @@ mod tests {
             false,
             vec![username_field, password_field],
         );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            Some("Login"),
-            false,
-            vec![form],
-        );
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Window, Some("Login"), false, vec![form]);
 
         let text = extract_uia_text(&tree).expect("visible non-password text must be extracted");
         assert!(text.contains("alice"), "public username must be extracted");
-        assert!(!text.contains("my_secret_pass_child"), "password subtree must be skipped");
+        assert!(
+            !text.contains("my_secret_pass_child"),
+            "password subtree must be skipped"
+        );
     }
 
     #[test]
@@ -1003,15 +997,14 @@ mod tests {
         children.extend(empty_panes);
         children.push(tail);
 
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Document,
-            Some("Doc"),
-            false,
-            children,
-        );
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Document, Some("Doc"), false, children);
 
         let text = extract_uia_text(&tree).expect("head text must be extracted");
-        assert!(text.contains("head_marker_public"), "head marker must be read within budget");
+        assert!(
+            text.contains("head_marker_public"),
+            "head marker must be read within budget"
+        );
         assert!(
             !text.contains("tail_sentinel_beyond_budget"),
             "tail sentinel beyond 3000 nodes budget must not be processed"
@@ -1055,14 +1048,21 @@ mod tests {
         );
 
         let start = Instant::now();
-        let text = extract_uia_text(&tree).expect("fast head text must be extracted before deadline");
+        let text =
+            extract_uia_text(&tree).expect("fast head text must be extracted before deadline");
         let elapsed = start.elapsed();
-        assert!(text.contains("fast_head_marker"), "fast head text must be extracted");
+        assert!(
+            text.contains("fast_head_marker"),
+            "fast head text must be extracted"
+        );
         assert!(
             !text.contains("unreachable_tail_sentinel"),
             "tail sentinel after deadline must not be reached"
         );
-        assert!(elapsed < Duration::from_millis(700), "deadline must bound traversal");
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "deadline must bound traversal"
+        );
     }
 
     #[test]
@@ -1117,7 +1117,10 @@ mod tests {
 
         let desc = extract_uia_description(&window, Some("Edge"));
         assert_eq!(desc.url.as_deref(), Some("https://example.org"));
-        assert!(!desc.private, "In-page text inside Document must not trigger private mode");
+        assert!(
+            !desc.private,
+            "In-page text inside Document must not trigger private mode"
+        );
     }
 
     #[test]
@@ -1132,12 +1135,8 @@ mod tests {
             false,
             None,
         );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            Some("Window"),
-            false,
-            vec![doc],
-        );
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Window, Some("Window"), false, vec![doc]);
 
         let text = extract_uia_text(&tree).expect("text extracted without panic");
         // 7,000 characters is well within the MAX_CHARS (20,000 characters) budget.
@@ -1191,12 +1190,8 @@ mod tests {
             false,
             None,
         );
-        let tree = FakeUiaNode::with_children(
-            UiaControlType::Window,
-            Some("Window"),
-            false,
-            vec![doc],
-        );
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Window, Some("Window"), false, vec![doc]);
 
         let text = extract_uia_text(&tree).expect("text extracted without panic");
         // When exceeding 20,000 characters, it must be capped at 20,000 characters (not bytes).

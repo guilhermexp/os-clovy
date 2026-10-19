@@ -23,15 +23,57 @@ encrypted `activity.sqlite3`.
 | `src-tauri/src/day_intelligence/db.rs` | Tables and the read API |
 | `src-tauri/src/day_intelligence/pipeline.rs` | Orchestration over injected dependencies |
 | `src-tauri/src/day_intelligence/mod.rs` | Tauri state, background loop, commands |
-| `src-tauri/src/notifications.rs` | Native activity notifications (click opens "Today", snooze button) |
+| `src-tauri/src/notifications.rs` | Activity notifications (click opens "Today", snooze button on macOS; standard notifications elsewhere) |
 | `src/components/activity-timeline/DaySummaryPanel.tsx`, `src/lib/day-intelligence.ts` | The "Day summary" section of the "Today" view and its bindings |
 | `src/components/settings/DaySummarySettingsSection.tsx` | Settings, Activity: summary time, notifications, quiet hours |
 
 Tests: `cargo test --manifest-path src-tauri/Cargo.toml day_intelligence`
 (real store, fake provider) and
-`pnpm exec vitest run --configLoader=runner src/test/day-intelligence`. The real
-embedding model test is ignored by default:
-`CLOVY_TEST_EMBEDDER_MODELS=<dir with bge-small-en-v1.5> cargo test day_intelligence::embedder -- --ignored`.
+`pnpm exec vitest run --configLoader=runner src/test/day-intelligence`.
+
+### BGE embedder configuration and verification
+
+- **Platform backend (`Cargo.toml`)**:
+  - Both macOS and Windows use `Device::Cpu`. On macOS, `candle-core`,
+    `candle-nn`, and `candle-transformers` enable `features = ["accelerate"]`
+    for Apple Accelerate CPU operations, not Metal.
+  - On Windows (`[target.'cfg(target_os = "windows")'.dependencies]`), Candle
+    runs CPU-only (`candle-core = "0.10"`, `candle-nn = "0.10"`,
+    `candle-transformers = "0.10"`, without `accelerate`), using `Device::Cpu`,
+    and `tokenizers` uses `default-features = false, features = ["fancy-regex"]`
+    without C dependencies.
+  - Model download, directory structure (`<app data dir>/models/bge-small-en-v1.5`),
+    and SHA-256 caching checks are identical across platforms. If the model is
+    absent, downloading, or fails, distillation transparently falls back to
+    existing lexical deduplication (`lexical_dedup`). No additional models or
+    providers are used.
+- **Real-model test invocation**:
+  - The test `day_intelligence::embedder::tests::real_model_separates_near_duplicates_from_unrelated_text`
+    is ignored by default because it requires the downloaded model files.
+  - It is invoked by passing the directory containing `bge-small-en-v1.5` via the
+    `CLOVY_TEST_EMBEDDER_MODELS` environment variable:
+    ```bash
+    CLOVY_TEST_EMBEDDER_MODELS=<dir containing bge-small-en-v1.5> cargo test --manifest-path src-tauri/Cargo.toml --lib day_intelligence::embedder::tests::real_model_separates_near_duplicates_from_unrelated_text -- --ignored --nocapture
+    ```
+  - Acceptance: verifies `embedder.ensure_ready()` transitions to `Ready`,
+    generates 384-dimensional embeddings, and asserts `near > 0.86`
+    (deduplicating near-duplicates) and `far < 0.86` (retaining distinct topics).
+- **Synthetic 1-hour benchmark (Windows CPU)**:
+  - An explicit measurement on a debug x64 build running on an Intel Core
+    i5-10300H CPU:
+    - Input: 1,800 samples / 2 s across 4 synthetic sessions (VS Code, Edge,
+      Terminal, Notes), producing 847,650 raw characters.
+    - Filtering stages: 12,800 gated spans cut down through prose, junk, and
+      document frequency gates to 135 lexical candidates, which are embedded to
+      yield 24 selected semantic spans.
+    - Timings: synthetic fixture preparation took 10.13 s separately; a single
+      batch embed call for the 135 candidate texts took 55.9095 s wall clock
+      (encompassing tokenization, model initialization, and CPU inference);
+      total distillation time was 56.7775 s wall clock.
+    - Evidence boundary: This is an explicit debug synthetic measurement under
+      unoptimized CPU execution to verify functionality and throughput; it is
+      not a production comparative performance claim, not an LLM-generated
+      report, and not a native 1-hour live capture E2E test.
 
 ## Gating and privacy
 
@@ -104,8 +146,8 @@ wakes every minute, on a capture failure, and when a notice is due:
    the measured split, independent of how long the periods span.
 5. **Day summary**: at the configured time (default 18:00), once per day: due
    when the local clock is past the time and no automatic run of the day
-   finished, so a Mac asleep at 18:00 generates it at the first tick after
-   waking. A Mac that slept through the time and woke after midnight first
+   finished, so a device asleep at 18:00 generates it at the first tick after
+   waking. A device that slept through the time and woke after midnight first
    generates the previous day's summary (once; one day per tick). The summary
    is written only once the day's inputs are settled
    (`pipeline::incomplete`): the timeline built through the last hour that
@@ -133,16 +175,19 @@ distinct failure). The Settings, Activity switch drops them all; inside quiet
 hours they wait for the end (22:00 to 08:00 and ready at 23:00 → shown at
 08:00). Pending notices are in memory, one per kind and day.
 
-Delivery (`notifications::send_today_notification`) uses Clovy's own
-`NSUserNotification` path on macOS: `userInfo` carries `clovyTodayDay` and
-`clovyTodayKind`. A click focuses the window and emits `clovy:today:open`
-(`{ day }`), queued until the webview calls `today_open_ready` (same handshake
-as agent notifications); the app switches to "Today", selects the day, and
-opens the "Day summary" section. The notification's action button "Snooze 1h"
-posts it again an hour later; macOS shows it only when Clovy's alert style is
-"Alerts" (with "Banners" only the click works). `tauri-plugin-notification`
-has no action or click support on macOS, so unbundled dev runs fall back to
-it without click-through.
+Delivery (`notifications::send_today_notification`):
+- **macOS**: uses Clovy's native `NSUserNotification` path where `userInfo`
+  carries `clovyTodayDay` and `clovyTodayKind`. A click focuses the window and
+  emits `clovy:today:open` (`{ day }`), queued until the webview calls
+  `today_open_ready` (same handshake as agent notifications); the app switches
+  to "Today", selects the day, and opens the "Day summary" section. The
+  notification's action button "Snooze 1h" posts it again an hour later; macOS
+  shows it only when Clovy's alert style is "Alerts" (with "Banners" only the
+  click works).
+- **Windows / elsewhere**: uses `tauri-plugin-notification` (`send_via_plugin`)
+  with group `clovy-today-<kind>`, posting standard native system toasts
+  without action buttons or click-through handlers (unbundled dev runs fall back
+  to this path as well).
 
 ## Schema (migration 4, `day_intelligence`)
 
@@ -156,6 +201,10 @@ Days are local `YYYY-MM-DD`, hours local `YYYY-MM-DDTHH`; `started_at` /
 | `day_workstream_hours` | `workstream_id` → workstreams (cascade), `hour`, `minutes`, `note`, `periods_json` (migration 5, `day_workstream_periods`: `{periods: [{startedAt, endedAt}], locatedMinutes}` with UTC session bounds; NULL when only the hour is known, which includes every row written before it; an unreadable value reads as NULL) | PK `(workstream_id, hour)`; minutes are the sum |
 | `day_summaries` | `day` (PK), `headline`, `narrative`, `insights_json`, `standup_json` (`{done, in_progress, blockers}`), `hours_covered`, `locale`, `provider`, `trigger` (`scheduled`/`manual`), `generated_at` | Regenerating replaces the row |
 | `day_intelligence_runs` | `key` (PK), `attempts`, `outcome` (`ok`/`failed`/`empty`), `last_error`, `next_attempt_at`, `updated_at` | Scheduler bookkeeping |
+
+Migration 4 (`day_intelligence`) and migration 5 (`day_workstream_periods`)
+define the complete schema; no idle columns (`system_idle_ms` / `input_idle_ms`)
+or migration 6 exist (task 4.2 remains open).
 
 Retention follows capture's period: rows of days before it are deleted hourly,
 whenever the activity database is open, also while capture is off.

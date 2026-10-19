@@ -472,14 +472,12 @@ pub fn matches_schema(value: &Value, schema: &Value) -> bool {
 mod tests {
     use super::*;
     use registry::LlmEndpointRecord;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     #[cfg(unix)]
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::Path};
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-    };
 
     #[cfg(unix)]
     fn fake_cli(dir: &Path, name: &str, body: &str) {

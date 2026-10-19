@@ -33,13 +33,11 @@ pub struct AppIconRequest {
 fn plausible_bundle_id(bundle_id: &str) -> bool {
     !bundle_id.is_empty()
         && bundle_id.len() <= 255
-        && bundle_id
-            .chars()
-            .all(|c| {
-                c.is_ascii_alphanumeric()
-                    || matches!(c, '.' | '-' | '_')
-                    || (cfg!(windows) && (c == '!' || c == ' ' || c.is_alphanumeric()))
-            })
+        && bundle_id.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '.' | '-' | '_')
+                || (cfg!(windows) && (c == '!' || c == ' ' || c.is_alphanumeric()))
+        })
 }
 
 /// The app's icon as a PNG data URL, or `None` when the app is not installed,
@@ -215,7 +213,8 @@ mod windows_icon {
         }
         let icon = OwnedIcon(info.hIcon);
         let factory: IWICImagingFactory =
-            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }.ok()?;
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
+                .ok()?;
         let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }.ok()?;
         let scaler = unsafe { factory.CreateBitmapScaler() }.ok()?;
         unsafe {

@@ -4,8 +4,8 @@ use std::{ptr::NonNull, sync::LazyLock};
 use windows::core::w;
 use windows::Win32::Foundation::HGLOBAL;
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber,
-    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
+    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+    OpenClipboard, RegisterClipboardFormatW,
 };
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
@@ -15,9 +15,8 @@ static FORMAT_EXCLUDE: LazyLock<u32> = LazyLock::new(|| unsafe {
     RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing"))
 });
 
-static FORMAT_HISTORY: LazyLock<u32> = LazyLock::new(|| unsafe {
-    RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"))
-});
+static FORMAT_HISTORY: LazyLock<u32> =
+    LazyLock::new(|| unsafe { RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")) });
 
 struct ClipboardGuard;
 
@@ -182,10 +181,8 @@ impl Clipboard {
                 .mark_completed(unsafe { GetClipboardSequenceNumber() });
             return None;
         }
-        let exclude_available =
-            unsafe { IsClipboardFormatAvailable(exclude_fmt).is_ok() };
-        let history_available =
-            unsafe { IsClipboardFormatAvailable(history_fmt).is_ok() };
+        let exclude_available = unsafe { IsClipboardFormatAvailable(exclude_fmt).is_ok() };
+        let history_available = unsafe { IsClipboardFormatAvailable(history_fmt).is_ok() };
         let history_value = if !exclude_available && history_available {
             LockedClipboardData::new(history_fmt, &_guard)
                 .and_then(|data| parse_history_dword_slice(data.bytes()))
@@ -255,11 +252,9 @@ mod tests {
 
     #[test]
     fn unreadable_history_marker_never_requests_plaintext() {
-        let result = read_clipboard_content_with(
-            false,
-            history_allows_text(true, None),
-            || panic!("An unreadable password-manager marker must conceal plaintext"),
-        );
+        let result = read_clipboard_content_with(false, history_allows_text(true, None), || {
+            panic!("An unreadable password-manager marker must conceal plaintext")
+        });
         assert_eq!(result, None);
     }
 
@@ -309,7 +304,6 @@ mod tests {
             true,
             "Advanced sequence number must be eligible for inspection"
         );
-
 
         // Successfully completing sequence 101 suppresses it on subsequent checks
         policy.mark_completed(101);
