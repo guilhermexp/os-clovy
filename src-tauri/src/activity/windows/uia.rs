@@ -799,6 +799,157 @@ mod tests {
     }
 
     #[test]
+    fn windows_uia_confirmed_document_preserves_http_when_bar_omits_scheme() {
+        let bar = FakeUiaNode::leaf(
+            UiaControlType::Edit,
+            Some("Address and search bar"),
+            Some("127.0.0.1:19362"),
+            None,
+            Some("addressEdit"),
+            false,
+            None,
+        );
+        let document = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            Some("Owned page"),
+            Some("http://127.0.0.1:19362/"),
+            None,
+            None,
+            false,
+            None,
+        );
+        let tree = FakeUiaNode::with_children(
+            UiaControlType::Window,
+            Some("Microsoft Edge"),
+            false,
+            vec![bar, document],
+        );
+        assert_eq!(
+            extract_uia_description(&tree, None).url.as_deref(),
+            Some("http://127.0.0.1:19362/")
+        );
+    }
+
+    #[test]
+    fn windows_uia_edited_address_does_not_replace_the_displayed_document() {
+        let bar = FakeUiaNode::leaf(
+            UiaControlType::Edit,
+            Some("Address and search bar"),
+            Some("https://allowed.invalid/not-submitted"),
+            None,
+            Some("addressEdit"),
+            false,
+            None,
+        );
+        let document = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            Some("Excluded page still displayed"),
+            Some("https://blocked.example/private"),
+            None,
+            None,
+            false,
+            None,
+        );
+        let tree = FakeUiaNode::with_children(
+            UiaControlType::Window,
+            None,
+            false,
+            vec![bar, document],
+        );
+        assert_eq!(
+            extract_uia_description(&tree, None).url.as_deref(),
+            Some("https://blocked.example/private")
+        );
+    }
+
+    #[test]
+    fn windows_uia_address_without_document_identity_stays_unknown() {
+        let bar = FakeUiaNode::leaf(
+            UiaControlType::Edit,
+            Some("Address and search bar"),
+            Some("https://allowed.invalid/"),
+            None,
+            Some("addressEdit"),
+            false,
+            None,
+        );
+        let tree = FakeUiaNode::with_children(
+            UiaControlType::Window,
+            None,
+            false,
+            vec![bar],
+        );
+        assert_eq!(extract_uia_description(&tree, None).url, None);
+    }
+
+    #[test]
+    fn windows_uia_multiple_document_identities_stay_unknown() {
+        let bar = FakeUiaNode::leaf(
+            UiaControlType::Edit,
+            Some("Address and search bar"),
+            Some("https://allowed.invalid/"),
+            None,
+            Some("addressEdit"),
+            false,
+            None,
+        );
+        let main = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            Some("Main"),
+            Some("https://blocked.example/"),
+            None,
+            None,
+            false,
+            None,
+        );
+        let sidebar = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            Some("Sidebar"),
+            Some("https://allowed.invalid/"),
+            None,
+            None,
+            false,
+            None,
+        );
+        let tree = FakeUiaNode::with_children(
+            UiaControlType::Window,
+            None,
+            false,
+            vec![bar, main, sidebar],
+        );
+        assert_eq!(extract_uia_description(&tree, None).url, None);
+    }
+
+    #[test]
+    fn windows_uia_scheme_less_document_metadata_never_invents_https() {
+        let bar = FakeUiaNode::leaf(
+            UiaControlType::Edit,
+            Some("Address and search bar"),
+            Some("example.test/path"),
+            None,
+            Some("addressEdit"),
+            false,
+            None,
+        );
+        let document = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            None,
+            Some("example.test/path"),
+            None,
+            None,
+            false,
+            None,
+        );
+        let tree = FakeUiaNode::with_children(
+            UiaControlType::Window,
+            None,
+            false,
+            vec![bar, document],
+        );
+        assert_eq!(extract_uia_description(&tree, None).url, None);
+    }
+
+    #[test]
     fn test_uia_fake_tree_never_extracts_url_from_document_text() {
         let document = FakeUiaNode::leaf(
             UiaControlType::Document,
