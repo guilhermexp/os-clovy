@@ -1267,10 +1267,12 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[tokio::test]
     async fn windows_recreate_waits_for_a_connection_returning_during_close() {
+        use std::future::{poll_fn, Future};
         use std::sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
         };
+        use std::task::Poll;
         use tokio::sync::Notify;
 
         let (_dir, path) = temp_db();
@@ -1285,7 +1287,7 @@ mod tests {
             .create_if_missing(true)
             .pragma("key", format!("\"x'{}'\"", key.as_str()));
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(2)
             .after_release({
                 let armed = armed.clone();
                 let returning = returning.clone();
@@ -1309,29 +1311,54 @@ mod tests {
         migrate(&pool).await.unwrap();
         let store = ActivityStore { pool };
         store.insert_frame(&frame(at(1, 10), "old")).await.unwrap();
-        let connection = store.pool.acquire().await.unwrap();
+        let mut connection = store.pool.acquire().await.unwrap();
+        let mut idle = store.pool.acquire().await.unwrap();
+        idle.return_to_pool().await;
+        drop(idle);
         armed.store(true, Ordering::Release);
+        let return_task = tokio::spawn(connection.return_to_pool());
         drop(connection);
         tokio::time::timeout(Duration::from_secs(5), returning.notified())
             .await
             .expect("connection must enter its asynchronous return");
-        let closed = store.pool.close_event();
-        let closing_store = store.clone();
-        let closing = tokio::spawn(async move { closing_store.close().await });
-        tokio::time::timeout(Duration::from_secs(5), closed)
+        // Drain the idle connection while another is paused in its return.
+        // SQLx 0.8 can finish its close future before that return completes.
+        {
+            let draining = store.pool.close();
+            tokio::pin!(draining);
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                poll_fn(|cx| {
+                    let _ = draining.as_mut().poll(cx);
+                    if store.pool.size() == 1 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                }),
+            )
             .await
-            .expect("close must reject new acquisitions");
+            .expect("idle connection must finish closing");
+        }
+        let closing = store.close();
+        tokio::pin!(closing);
+        let closed_early = poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx).is_ready())).await;
         resume.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), closing)
-            .await
-            .expect("close must finish")
-            .unwrap();
+        if !closed_early {
+            tokio::time::timeout(Duration::from_secs(5), closing)
+                .await
+                .expect("close must finish after its returning connection");
+        }
+        return_task.await.unwrap();
+        // Clean up even on RED, without retrying recreation.
+        store.pool.close().await;
+        assert!(
+            !closed_early,
+            "close returned while a SQLite connection was still returning"
+        );
         keys.delete().unwrap();
 
         let recreated = ActivityStore::recreate(&path, &keys).await;
-        // Release a connection stranded by the old close barrier even on RED;
-        // do not retry recreation or hide its original result.
-        store.pool.close().await;
         let recreated = recreated.expect("closed database must be replaceable on Windows");
         assert!(recreated.frames_after(0, 10).await.unwrap().is_empty());
         recreated.close().await;
