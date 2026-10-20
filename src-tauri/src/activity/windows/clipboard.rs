@@ -1206,4 +1206,56 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+
+    #[test]
+    fn test_changed_text_preserves_unread_replacement_after_expired_request() {
+        if std::env::var("CLOVY_TEST_CLIPBOARD_REPLACEMENT").is_err() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "activity::windows::clipboard::tests::test_changed_text_preserves_unread_replacement_after_expired_request",
+                    "--nocapture",
+                ])
+                .env("CLOVY_TEST_CLIPBOARD_REPLACEMENT", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated replacement test failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut fixture = DelayedRenderFixture::new();
+        let mut clipboard = Clipboard::new();
+        let sequence_a = unsafe { GetClipboardSequenceNumber() };
+        fixture.publish_plain_text("replacement_B_unread");
+
+        // Isolate the expiry transition: A times out before the worker opens B.
+        // The existing native delayed-render tests cover the timeout itself.
+        let response = process_worker_request(&WorkerRequest {
+            epoch: 1,
+            requested_sequence: sequence_a,
+        });
+        assert_eq!(response.status, WorkerStatus::SequenceChanged);
+        assert!(response.text.is_none(), "replacement was never read");
+        clipboard.active_epoch = 1;
+        clipboard.pending_epoch = Some(1);
+        clipboard.discard_expired_response(response);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(text) = clipboard.changed_text() {
+                assert_eq!(text, "replacement_B_unread");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "unread replacement was suppressed"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
 }
