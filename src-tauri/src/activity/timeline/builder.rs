@@ -21,14 +21,20 @@ pub const FRAME_SPAN: Duration = Duration::seconds(2);
 /// Input stored with a frame happened during the tick before it.
 const INPUT_BEFORE: Duration = Duration::seconds(3);
 const INPUT_AFTER: Duration = Duration::seconds(1);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AwayPlatform {
+    Macos,
+    Windows,
+}
+
 /// Lock screen and screen saver: never a session, never useful.
-const AWAY_APPS: &[&str] = &[
-    "loginwindow",
-    "screensaverengine",
-    "lockapp",
-    "lockapp.exe",
-    "logonui",
-    "logonui.exe",
+const AWAY_APPS: &[(&str, AwayPlatform)] = &[
+    ("loginwindow", AwayPlatform::Macos),
+    ("screensaverengine", AwayPlatform::Macos),
+    ("lockapp", AwayPlatform::Windows),
+    ("lockapp.exe", AwayPlatform::Windows),
+    ("logonui", AwayPlatform::Windows),
+    ("logonui.exe", AwayPlatform::Windows),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,13 +180,12 @@ impl BatchSignals {
     }
 }
 
-fn is_away_app(frame: &StoredFrame) -> bool {
-    AWAY_APPS.iter().any(|app| {
-        frame.app_name.trim().eq_ignore_ascii_case(app)
-            || frame
-                .bundle_id
-                .as_deref()
-                .is_some_and(|id| id.eq_ignore_ascii_case(app))
+fn away_platform(frame: &StoredFrame) -> Option<AwayPlatform> {
+    let name = frame.app_name.trim();
+    let bundle = frame.bundle_id.as_deref();
+    AWAY_APPS.iter().find_map(|(app, platform)| {
+        (name.eq_ignore_ascii_case(app) || bundle.is_some_and(|id| id.eq_ignore_ascii_case(app)))
+            .then_some(*platform)
     })
 }
 
@@ -269,12 +274,17 @@ pub fn push_frame(
     let system_input_near = frame
         .input_idle_ms
         .is_some_and(|idle| idle <= (FRAME_SPAN + INPUT_AFTER).num_milliseconds() as u64);
-    let useful = !is_away_app(frame)
+    let away = away_platform(frame);
+    let useful = away.is_none()
         && (window_changed || text_changed || signals.input_near(at) || system_input_near);
     state.last_frame = Some(FrameMark::of(frame, at));
 
     if !useful {
-        state.idle_frames = state.idle_frames.saturating_add(1);
+        // Windows lock descriptors are absent time, not a visible idle desktop.
+        // Keep the existing macOS frame-density behavior.
+        if away != Some(AwayPlatform::Windows) {
+            state.idle_frames = state.idle_frames.saturating_add(1);
+        }
         if let Some(open) = state.open.as_mut() {
             open.frame_count += 1;
             open.idle_frame_count += 1;

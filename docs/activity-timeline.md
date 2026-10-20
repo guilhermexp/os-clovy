@@ -61,6 +61,10 @@ Rules (`builder.rs`):
   Sem o valor (`NULL`), vale a regra anterior. Os demais quadros são ociosos;
   `loginwindow`, `ScreenSaverEngine`, `LockApp.exe` e `LogonUI.exe` nunca são
   úteis, mesmo com entrada.
+  No Windows, quadros de `LockApp.exe` e `LogonUI.exe` também não contam como
+  evidência de uma área de trabalho ociosa: o intervalo fica em **Ausente**,
+  tanto enquanto o bloqueio continua quanto depois de retomar o trabalho.
+  A contagem preexistente dos apps de bloqueio do macOS é preservada.
   O ETL recebe a duração em `StoredFrame` por `frames_after`; o limiar de 5 min
   e a divisão entre sono, ociosidade e pausa não mudam. Ler parado por mais de
   5 min sem nenhuma entrada continua podendo produzir uma lacuna ociosa.
