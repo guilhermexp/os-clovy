@@ -241,6 +241,8 @@ build scripts in `pnpm-workspace.yaml` — live in
   process with a private window station/desktop, never the console clipboard.
   The installed-package icon test is ignored by default and requires Calculator
   and Notepad: `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib activity::app_icon::windows_tests:: -- --include-ignored`.
+- **Windows desktop build:** `scripts/build-windows.ps1`; needs Visual Studio
+  C++ Build Tools, Strawberry Perl and NASM on `PATH` (vendored OpenSSL/SQLCipher).
 - **Agent runtime gate:** `pnpm agent-runtime:typecheck` +
   `pnpm agent-runtime:test` + `pnpm agent-runtime:build` before changing the
   sidecar or its OpenAI Agents SDK pin.
