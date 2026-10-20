@@ -1,13 +1,24 @@
 //! Clipboard monitoring on Windows with password manager concealment detection.
 
-use std::{ptr::NonNull, sync::LazyLock};
-use windows::core::w;
-use windows::Win32::Foundation::HGLOBAL;
+use std::{
+    ptr::NonNull,
+    sync::{mpsc, LazyLock},
+    time::{Duration, Instant},
+};
+use windows::core::{w, BOOL};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
     OpenClipboard, RegisterClipboardFormatW,
 };
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Threading::GetCurrentThreadId;
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetThreadDesktop(dwthreadid: u32) -> HANDLE;
+    fn SetThreadDesktop(hdesktop: HANDLE) -> BOOL;
+}
 
 const CF_UNICODETEXT: u32 = 13;
 
@@ -140,8 +151,137 @@ impl ClipboardSequenceState {
     }
 }
 
+struct WorkerRequest {
+    epoch: u64,
+    requested_sequence: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WorkerStatus {
+    Success,
+    Busy,
+    Concealed,
+    SequenceChanged,
+    FormatUnavailable,
+    Error,
+}
+
+struct WorkerResponse {
+    epoch: u64,
+    sequence_after: u32,
+    text: Option<String>,
+    status: WorkerStatus,
+}
+
+fn process_worker_request(req: &WorkerRequest) -> WorkerResponse {
+    if unsafe { OpenClipboard(None).is_err() } {
+        return WorkerResponse {
+            epoch: req.epoch,
+            sequence_after: unsafe { GetClipboardSequenceNumber() },
+            text: None,
+            status: WorkerStatus::Busy,
+        };
+    }
+    let _guard = ClipboardGuard;
+
+    // 2. Sequence check after Open before plaintext
+    let seq_after_open = unsafe { GetClipboardSequenceNumber() };
+    if seq_after_open != req.requested_sequence {
+        return WorkerResponse {
+            epoch: req.epoch,
+            sequence_after: seq_after_open,
+            text: None,
+            status: WorkerStatus::SequenceChanged,
+        };
+    }
+
+    // 3. Concealment format checks
+    let exclude_fmt = *FORMAT_EXCLUDE;
+    let history_fmt = *FORMAT_HISTORY;
+    if exclude_fmt == 0 || history_fmt == 0 {
+        let seq_after_read = unsafe { GetClipboardSequenceNumber() };
+        return WorkerResponse {
+            epoch: req.epoch,
+            sequence_after: seq_after_read,
+            text: None,
+            status: WorkerStatus::Error,
+        };
+    }
+
+    let exclude_available = unsafe { IsClipboardFormatAvailable(exclude_fmt).is_ok() };
+    let history_available = unsafe { IsClipboardFormatAvailable(history_fmt).is_ok() };
+    let history_value = if !exclude_available && history_available {
+        LockedClipboardData::new(history_fmt, &_guard)
+            .and_then(|data| parse_history_dword_slice(data.bytes()))
+    } else {
+        None
+    };
+
+    let can_include_history = history_allows_text(history_available, history_value);
+    if exclude_available || !can_include_history {
+        let seq_after_read = unsafe { GetClipboardSequenceNumber() };
+        return WorkerResponse {
+            epoch: req.epoch,
+            sequence_after: seq_after_read,
+            text: None,
+            status: WorkerStatus::Concealed,
+        };
+    }
+
+    // 4. Plaintext check and read under open clipboard lock
+    let text = read_clipboard_content_with(exclude_available, can_include_history, || {
+        if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() } {
+            return None;
+        }
+        let data = LockedClipboardData::new(CF_UNICODETEXT, &_guard)?;
+        parse_utf16_slice(data.utf16()?)
+    });
+
+    let seq_after_read = unsafe { GetClipboardSequenceNumber() };
+    let (status, text) = if seq_after_read != req.requested_sequence {
+        (WorkerStatus::SequenceChanged, None)
+    } else if text.is_some() {
+        (WorkerStatus::Success, text)
+    } else {
+        (WorkerStatus::FormatUnavailable, None)
+    };
+
+    WorkerResponse {
+        epoch: req.epoch,
+        sequence_after: seq_after_read,
+        text,
+        status,
+    }
+}
+
+fn run_worker(
+    desktop_raw: usize,
+    request_rx: mpsc::Receiver<WorkerRequest>,
+    response_tx: mpsc::SyncSender<WorkerResponse>,
+) {
+    if desktop_raw == 0
+        || !unsafe { SetThreadDesktop(HANDLE(desktop_raw as *mut core::ffi::c_void)).as_bool() }
+    {
+        return;
+    }
+
+    while let Ok(req) = request_rx.recv() {
+        let resp = process_worker_request(&req);
+        if response_tx.send(resp).is_err() {
+            break;
+        }
+    }
+}
+
+const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_millis(50);
+
 pub(crate) struct Clipboard {
     sequence_state: ClipboardSequenceState,
+    // Dropping these channels detaches rather than joining a native read.
+    worker_tx: Option<mpsc::SyncSender<WorkerRequest>>,
+    worker_rx: mpsc::Receiver<WorkerResponse>,
+    active_epoch: u64,
+    pending_epoch: Option<u64>,
 }
 
 impl Default for Clipboard {
@@ -153,8 +293,34 @@ impl Default for Clipboard {
 impl Clipboard {
     pub(crate) fn new() -> Self {
         let initial = unsafe { GetClipboardSequenceNumber() };
+        let caller_thread_id = unsafe { GetCurrentThreadId() };
+        let desktop_handle = unsafe { GetThreadDesktop(caller_thread_id) };
+        let desktop_raw = if !desktop_handle.is_invalid() && !desktop_handle.0.is_null() {
+            desktop_handle.0 as usize
+        } else {
+            0
+        };
+
+        let (request_tx, request_rx) = mpsc::sync_channel(1);
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        let worker_tx = if desktop_raw == 0 {
+            None
+        } else {
+            match std::thread::Builder::new()
+                .name("clovy-clipboard-worker".into())
+                .spawn(move || run_worker(desktop_raw, request_rx, response_tx))
+            {
+                Ok(_detached) => Some(request_tx),
+                Err(_) => None,
+            }
+        };
+
         Self {
             sequence_state: ClipboardSequenceState::new(initial),
+            worker_tx,
+            worker_rx: response_rx,
+            active_epoch: 0,
+            pending_epoch: None,
         }
     }
 
@@ -162,49 +328,77 @@ impl Clipboard {
     /// since the previous inspection, unless the clipboard declares concealed or
     /// transient formats used by password managers.
     pub(crate) fn changed_text(&mut self) -> Option<String> {
+        self.reap_pending_response();
+        if self.pending_epoch.is_some() {
+            return None;
+        }
         let current_seq = unsafe { GetClipboardSequenceNumber() };
         if !self.sequence_state.is_eligible(current_seq) {
             return None;
         }
 
-        // If clipboard is busy/locked by another application, return None immediately.
-        // Because mark_completed is NOT called, this sequence remains eligible on the next tick.
-        if unsafe { OpenClipboard(None).is_err() } {
-            return None;
-        }
-        let _guard = ClipboardGuard;
-
-        let exclude_fmt = *FORMAT_EXCLUDE;
-        let history_fmt = *FORMAT_HISTORY;
-        if exclude_fmt == 0 || history_fmt == 0 {
-            self.sequence_state
-                .mark_completed(unsafe { GetClipboardSequenceNumber() });
-            return None;
-        }
-        let exclude_available = unsafe { IsClipboardFormatAvailable(exclude_fmt).is_ok() };
-        let history_available = unsafe { IsClipboardFormatAvailable(history_fmt).is_ok() };
-        let history_value = if !exclude_available && history_available {
-            LockedClipboardData::new(history_fmt, &_guard)
-                .and_then(|data| parse_history_dword_slice(data.bytes()))
-        } else {
-            None
-        };
-        let result = read_clipboard_content_with(
-            exclude_available,
-            history_allows_text(history_available, history_value),
-            || {
-                if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() } {
+        let worker_tx = self.worker_tx.as_ref()?;
+        self.active_epoch = self.active_epoch.wrapping_add(1);
+        let epoch = self.active_epoch;
+        let deadline = Instant::now() + CLIPBOARD_READ_TIMEOUT;
+        worker_tx
+            .try_send(WorkerRequest {
+                epoch,
+                requested_sequence: current_seq,
+            })
+            .ok()?;
+        self.pending_epoch = Some(epoch);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.worker_rx.recv_timeout(remaining) {
+            Ok(response) => {
+                if Instant::now() >= deadline || response.epoch != epoch {
+                    self.discard_expired_response(response);
                     return None;
                 }
-                let data = LockedClipboardData::new(CF_UNICODETEXT, &_guard)?;
-                parse_utf16_slice(data.utf16()?)
-            },
-        );
-        // Associate the decision with the sequence inspected under the lock,
-        // not the earlier optimistic check before OpenClipboard.
-        self.sequence_state
-            .mark_completed(unsafe { GetClipboardSequenceNumber() });
-        result
+                self.pending_epoch = None;
+                match response.status {
+                    // Busy or changed before reading: retry only on a later tick.
+                    WorkerStatus::Busy | WorkerStatus::SequenceChanged => None,
+                    WorkerStatus::Success => {
+                        if unsafe { GetClipboardSequenceNumber() } != response.sequence_after {
+                            return None;
+                        }
+                        self.sequence_state.mark_completed(response.sequence_after);
+                        response.text
+                    }
+                    _ => {
+                        self.sequence_state.mark_completed(response.sequence_after);
+                        None
+                    }
+                }
+            }
+            // A timeout leaves the single in-flight read quarantined until terminal.
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.pending_epoch = None;
+                self.worker_tx = None;
+                None
+            }
+        }
+    }
+
+    fn reap_pending_response(&mut self) {
+        while let Ok(response) = self.worker_rx.try_recv() {
+            self.discard_expired_response(response);
+        }
+    }
+
+    fn discard_expired_response(&mut self, response: WorkerResponse) {
+        if self.pending_epoch == Some(response.epoch) {
+            self.pending_epoch = None;
+        }
+        // Never replay an expired read, including a delayed render that advanced
+        // its sequence. Only suppress that snapshot, not a newer clipboard change.
+        if response.status != WorkerStatus::Busy
+            && unsafe { GetClipboardSequenceNumber() } == response.sequence_after
+        {
+            self.sequence_state.mark_completed(response.sequence_after);
+        }
     }
 }
 
@@ -874,6 +1068,8 @@ mod tests {
             go_rx.recv().unwrap();
             let started = std::time::Instant::now();
             let res = clipboard.changed_text();
+            // Shutdown must not join the still-blocked native read either.
+            drop(clipboard);
             let _ = tx.send((res, started.elapsed()));
         });
         fixture.set_reader_handle(reader_handle);

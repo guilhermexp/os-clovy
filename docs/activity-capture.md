@@ -197,6 +197,14 @@ below) and mirrored to the menu bar.
       clipboard text reading is skipped entirely (fail-closed, text reader is
       never called), preventing passwords and tokens from ever entering memory.
       Sequence numbers (`GetClipboardSequenceNumber`) track changes across ticks.
+      A single worker, attached to the capture caller's desktop, owns
+      `OpenClipboard`, native reads and `CloseClipboard`. The capture thread
+      waits at most 50 ms per call; an unfinished read remains single-flight
+      and quarantined until it terminates. Expired epochs and changed
+      sequences never deliver text later. Dropping the adapter does not join
+      a blocked native read. A busy clipboard is retried only on a later tick.
+      Native delayed-render regressions run in child processes with private
+      window stations/desktops and never use the console clipboard.
 - **Pause control.** "Pause capture" / "Resume capture" (settings and menu
   bar) act on the manual pause only; an automatic pause (work hours, low disk,
   protected video) shows "Pause capture" and resumes on its own.
