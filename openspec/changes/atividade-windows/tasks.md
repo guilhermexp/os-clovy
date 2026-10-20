@@ -16,8 +16,8 @@
 ## 3. Texto, URL e OCR
 
 - [x] 3.1 RED: testes do extrator UIA com árvore simulada (orçamento de nós e tempo, URL do controle de endereço, janela privada); verificar que falham.
-- [ ] 3.2 GREEN: `accessibility_text` e URL por UI Automation (D3); testes de 3.1 passam; no `cert`, quadro do Edge com URL e texto e origem "acessibilidade".
-  - Ajuste D3 autorizado em 2026-10-19: metadados da URL confirmada do documento, sem esquema inventado ou endereço em edição. A prova inicial expôs HTTP gravado como HTTPS. RED `8a21ee8a`: cinco falhas; GREEN `a04d486d`: 16 testes UIA passaram no cert. Continua aberta até nova prova nativa.
+- [x] 3.2 GREEN: `accessibility_text` e URL por UI Automation (D3); testes de 3.1 passam; no `cert`, quadro do Edge com URL e texto e origem "acessibilidade".
+  - Ajuste D3 autorizado em 2026-10-19: metadados da URL confirmada do documento, sem esquema inventado ou endereço em edição. RED `8a21ee8a`: cinco falhas; GREEN `a04d486d`: 16 testes UIA passaram no cert. Prova nativa final: quadros 170–172 com `http://127.0.0.1:19362/`, marcador visível e origem `accessibility`; URL e texto vistos no detalhe de sessão em "Hoje". Domínio excluído mais endereço não submetido: zero quadros novos; senha sintética ausente dos exports. Recibos e capturas em `.tmp/verify/atividade-windows/`.
 - [x] 3.3 RED: teste de integração do OCR com imagem de teste reconhecida pelo `Windows.Media.Ocr`, rodando no `cert`; verificar que falha.
 - [x] 3.4 GREEN: `ocr_text` com Windows Graphics Capture e `Windows.Media.Ocr` (D4), sem arquivo em disco; teste de 3.3 passa; no `cert`, janela sem árvore UIA gera quadro com origem "OCR" e nenhum arquivo de imagem novo.
 
