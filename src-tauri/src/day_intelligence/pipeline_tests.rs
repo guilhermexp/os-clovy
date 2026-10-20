@@ -104,7 +104,8 @@ async fn completed_hours_get_reports_with_measured_minutes_and_fold_into_workstr
         .map(|activity| activity.minutes)
         .collect();
     assert_eq!(minutes, vec![21, 21]);
-
+    assert_eq!(fourteen.activities[0].seconds, Some(1261));
+    assert_eq!(fourteen.activities[1].seconds, Some(1261));
     // The hour prompt carries the distilled text (entities kept, chrome cut),
     // the measured sessions, and the coding-agent block of the hour.
     let hour_calls = provider.calls_of(prompts::HOUR_REPORT);
@@ -127,6 +128,7 @@ async fn completed_hours_get_reports_with_measured_minutes_and_fold_into_workstr
     let workstreams = db::workstreams_of_day(&store, "2026-10-04").await.unwrap();
     assert_eq!(workstreams.len(), 2);
     assert_eq!(workstreams[1].minutes, 42);
+    assert_eq!(workstreams[1].seconds, 2522);
 }
 
 #[tokio::test]
@@ -187,8 +189,10 @@ async fn a_workstream_hour_takes_the_measured_times_of_the_sessions_its_activiti
     // Zed session's bounds, and the activity naming no real session adds no
     // period: its 6 minutes (weights 30:5 of 42) stay unlocated.
     assert_eq!(fourteen.minutes, 42);
+    assert_eq!(fourteen.seconds, 2522);
     assert_eq!(fourteen.periods, Some(vec![expected]));
     assert_eq!(fourteen.located_minutes, 36);
+    assert_eq!(fourteen.located_seconds, 2161);
 }
 
 #[tokio::test]
@@ -261,6 +265,7 @@ async fn a_new_hour_joins_its_workstream_and_leaves_the_others_untouched() {
         .collect();
     assert_eq!(hours, vec!["2026-10-04T13", "2026-10-04T14"]);
     assert_eq!(after[0].minutes, before[0].minutes + 42);
+    assert_eq!(after[0].seconds, before[0].seconds + 2522);
     assert_eq!(after[1], before[1], "the other workstream is unchanged");
 }
 
@@ -341,6 +346,11 @@ async fn portuguese_summary_reads_meetings_and_its_panels_match_the_day_stats() 
         panels.workstreams.iter().map(|w| w.minutes).sum::<i64>(),
         30 + 42
     );
+    assert_eq!(
+        panels.workstreams.iter().map(|w| w.seconds).sum::<i64>(),
+        panels.workstreams[0].seconds + panels.workstreams[1].seconds
+    );
+    assert!(panels.workstreams.iter().all(|w| w.seconds > 0));
     assert_eq!((panels.meeting_count, panels.meeting_ms), (1, 30 * 60_000));
     assert_eq!(
         (

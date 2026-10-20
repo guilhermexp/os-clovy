@@ -132,6 +132,7 @@ async fn activity_store(dir: &Path) -> ActivityStore {
                     browser_url: url.map(str::to_string),
                     text_source: TextSource::Accessibility,
                     text: Some(format!("{app} text {index}")),
+                    input_idle_ms: None,
                 })
                 .await
                 .unwrap();

@@ -23,6 +23,14 @@ use crate::activity::platform::{
 };
 use input_tap::InputTapController;
 
+const K_CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
+const K_CG_ANY_INPUT_EVENT_TYPE: u32 = u32::MAX;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSourceSecondsSinceLastEventType(state_id: i32, event_type: u32) -> f64;
+}
+
 /// The macOS native activity capture platform adapter.
 pub struct MacActivityPlatform {
     chromium_settled_pids: HashSet<i32>,
@@ -62,6 +70,19 @@ impl ActivityPlatform for MacActivityPlatform {
 
     fn focused_window(&mut self) -> Option<WindowDescriptor> {
         autoreleasepool(|_| ax::focused_window(&mut self.chromium_settled_pids))
+    }
+
+    fn system_idle_ms(&self) -> Option<u64> {
+        // Aggregate duration, not an event tap: no input contents or
+        // input-monitoring request are involved.
+        let seconds = unsafe {
+            CGEventSourceSecondsSinceLastEventType(
+                K_CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE,
+                K_CG_ANY_INPUT_EVENT_TYPE,
+            )
+        };
+        let idle = std::time::Duration::try_from_secs_f64(seconds).ok()?;
+        u64::try_from(idle.as_millis()).ok()
     }
 
     fn secondary_windows(&mut self) -> Vec<WindowDescriptor> {

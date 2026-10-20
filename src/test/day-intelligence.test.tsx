@@ -156,9 +156,9 @@ describe("Day summary", () => {
     expect(within(agents).getByText("2 sessions")).toBeInTheDocument();
 
     const report = document.querySelector('[data-hour="2026-10-04T14"]') as HTMLElement;
-    expect(within(report).getByText("42 min")).toBeInTheDocument();
-    expect(within(report).getAllByText("21 min")).toHaveLength(2);
-    expect(screen.getByText("13:00 · 30 min")).toBeInTheDocument();
+    expect(within(report).getByText("42m")).toBeInTheDocument();
+    expect(within(report).getAllByText("21m")).toHaveLength(2);
+    expect(screen.getByText("13:00 · 30m")).toBeInTheDocument();
   });
 
   it("copies the standup as bullet lists in one click", async () => {
@@ -297,6 +297,10 @@ describe("Day summary", () => {
     expect(await screen.findByRole("heading", { name: "Resumo do dia" })).toBeInTheDocument();
     expect(screen.getByText("Em andamento")).toBeInTheDocument();
     expect(screen.getByText("Frentes de trabalho")).toBeInTheDocument();
+    const report = document.querySelector('[data-hour="2026-10-04T14"]') as HTMLElement;
+    expect(within(report).getByText("42 min")).toBeInTheDocument();
+    expect(within(report).getAllByText("21 min")).toHaveLength(2);
+    expect(screen.getByText("13:00 · 30 min")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Copiar standup" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     const copied = (writeText.mock.calls[0] as unknown as [string])[0];
@@ -330,6 +334,79 @@ describe("Day summary", () => {
       "aria-selected",
       "true",
     );
+  });
+
+  it("shows '< 1 min' for a 40s activity and never '0 min' in DaySummaryPanel", async () => {
+    applyInterfaceLocale("pt-BR");
+    const dayWithShortActivity: DayIntelligenceDto = {
+      ...readyDay,
+      day: DAY,
+      workstreams: [
+        {
+          id: 1,
+          title: "Frente rápida",
+          summary: "Ajuste rápido",
+          minutes: 0,
+          seconds: 40,
+          hours: [
+            {
+              hour: "2026-10-04T15",
+              minutes: 0,
+              seconds: 40,
+              note: "40s de trabalho",
+              periods: null,
+              locatedMinutes: 0,
+              locatedSeconds: 0,
+            },
+          ],
+        },
+      ],
+      hourReports: [
+        {
+          hour: "2026-10-04T15",
+          startedAt: "2026-10-04T18:00:00.000000Z",
+          endedAt: "2026-10-04T19:00:00.000000Z",
+          activeMinutes: 1,
+          summary: "Ajuste rápido em segundos.",
+          activities: [
+            {
+              description: "Ajuste de 40 segundos",
+              minutes: 0,
+              seconds: 40,
+              periods: null,
+            },
+          ],
+          provider: "cli:claude",
+          generatedAt: "2026-10-04T19:01:00.000000Z",
+        },
+      ],
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "day_intelligence_day") return dayWithShortActivity;
+      if (command === "activity_timeline") return emptyTimeline;
+      if (command === "coding_agents_blocks") return [];
+      return undefined;
+    });
+
+    render(<DaySummaryPanel day={DAY} />);
+
+    const report = (await screen.findByText("Ajuste rápido em segundos.")).closest(
+      ".day-hour-report",
+    ) as HTMLElement;
+    expect(report).toBeInTheDocument();
+
+    // The activity with 40s displays "< 1 min" and NEVER "0 min"
+    const activityMinutes = report.querySelector(".day-hour-activity-minutes") as HTMLElement;
+    expect(activityMinutes).toHaveTextContent("< 1 min");
+    expect(report).not.toHaveTextContent("0 min");
+
+    // Both the workstream duration and its hour display "< 1 min", never "0 min"
+    const ws = screen.getByText("Frente rápida").closest(".day-workstream") as HTMLElement;
+    const wsMinutes = ws.querySelector(".day-workstream-minutes") as HTMLElement;
+    const wsHour = ws.querySelector(".day-workstream-hour") as HTMLElement;
+    expect(wsMinutes).toHaveTextContent("< 1 min");
+    expect(wsHour).toHaveTextContent("< 1 min");
+    expect(ws).not.toHaveTextContent("0 min");
   });
 });
 

@@ -8,8 +8,8 @@ import { type LocalHour, localHourStarts } from "./timeline-utils";
  * - A workstream is one card per stretch of work: a pause longer than
  *   `CARD_SPLIT_GAP_MS` starts a new card of the same workstream at its real
  *   time; shorter pauses stay gaps between the sitting bars of one card. A
- *   card's active minutes are the located minutes of the periods inside it
- *   plus the unlocated minutes of the by-hour parts it holds.
+ *   card's active time is the located seconds of the periods inside it
+ *   plus the unlocated seconds of the by-hour parts it holds.
  *
  * - The window runs from 20 minutes before the first sitting to 20 minutes
  *   after the last one (and to now, today), at least 150 minutes centered on
@@ -19,8 +19,8 @@ import { type LocalHour, localHourStarts } from "./timeline-utils";
  * - The base scale is 1 px per minute; a day shorter than the canvas grows by
  *   one factor (capped at 9 px per minute) until it fills it.
  * - Positions come from the bounds of the measured sessions a workstream's
- *   work was located in (its sittings), never from its active minutes. Work
- *   known only by hour (a legacy record, or the minutes of an hour no session
+ *   work was located in (its sittings), never from its active time. Work
+ *   known only by hour (a legacy record, or the seconds of an hour no session
  *   was named for) spans its whole local hour and is flagged approximate.
  * - DST days keep their 23 or 25 real local hours.
  */
@@ -28,7 +28,7 @@ import { type LocalHour, localHourStarts } from "./timeline-utils";
 /**
  * One stretch of a card: `session` is where located work happened (bounds of
  * measured sessions, joined); `hour` is a legacy hour known only by hour;
- * `unlocated` is the part of an hour's minutes no session was named for.
+ * `unlocated` is the part of an hour's seconds no session was named for.
  */
 export type TimelineSegment = {
   startMs: number;
@@ -38,6 +38,8 @@ export type TimelineSegment = {
   approximate: boolean;
   /** For an approximate segment: its active minutes in that hour. */
   minutes: number | null;
+  /** For an approximate segment: its active seconds in that hour. */
+  seconds?: number | null;
 };
 
 /** A sitting bar on the card's left rail, in the card's padding box. */
@@ -144,6 +146,9 @@ function hourPlacements(
   dayEndMs: number,
 ): HourPlacement[] {
   return workstream.hours.map((hour) => {
+    const hourSeconds = hour.seconds ?? hour.minutes * 60;
+    const locatedSeconds = hour.locatedSeconds ?? (hour.periods ? hour.locatedMinutes * 60 : 0);
+    const unlocatedSeconds = hour.periods ? hourSeconds - locatedSeconds : hourSeconds;
     const unlocatedMinutes = hour.periods ? hour.minutes - hour.locatedMinutes : hour.minutes;
     const located: HourPlacement["located"] = [];
     for (const period of hour.periods ?? []) {
@@ -153,12 +158,13 @@ function hourPlacements(
     }
     const window = hourWindow(hours, hour.hour, dayEndMs);
     const byHour: TimelineSegment | null =
-      window && !(hour.periods && unlocatedMinutes <= 0)
+      window && !(hour.periods && unlocatedSeconds <= 0)
         ? {
             ...window,
             kind: hour.periods ? "unlocated" : "hour",
             approximate: true,
             minutes: unlocatedMinutes,
+            seconds: unlocatedSeconds,
           }
         : null;
     return { located, byHour, window };
@@ -175,7 +181,13 @@ function joinSegments(placements: HourPlacement[]): TimelineSegment[] {
     if (last && period.startMs - last.endMs <= SITTING_JOIN_MS) {
       last.endMs = Math.max(last.endMs, period.endMs);
     } else {
-      sessions.push({ ...period, kind: "session", approximate: false, minutes: null });
+      sessions.push({
+        ...period,
+        kind: "session",
+        approximate: false,
+        minutes: null,
+        seconds: null,
+      });
     }
   }
   const byHour = placements.flatMap((placement) => (placement.byHour ? [placement.byHour] : []));
@@ -225,14 +237,15 @@ function stretchOfHour(placement: HourPlacement, stretches: TimelineSpan[]): num
 }
 
 /**
- * Whole minutes split by weight, largest remainder first, so the shares
- * always add up to `minutes`.
+ * Whole seconds split by weight, largest remainder first, so the shares
+ * always add up to `seconds`.
  */
-function shareMinutes(minutes: number, weights: number[]): number[] {
+function shareSeconds(seconds: number, weights: number[]): number[] {
   const total = weights.reduce((sum, weight) => sum + weight, 0);
-  const exact = weights.map((weight) => (minutes * weight) / total);
+  if (total <= 0 || seconds <= 0) return weights.map(() => 0);
+  const exact = weights.map((weight) => (seconds * weight) / total);
   const shares = exact.map(Math.floor);
-  let left = minutes - shares.reduce((sum, share) => sum + share, 0);
+  let left = seconds - shares.reduce((sum, share) => sum + share, 0);
   const order = exact
     .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
     .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
@@ -245,27 +258,29 @@ function shareMinutes(minutes: number, weights: number[]): number[] {
 }
 
 /**
- * Active minutes an hour report adds to each stretch. Its located minutes go
+ * Active seconds an hour report adds to each stretch. Its located seconds go
  * to the stretches its measured periods fall in, in proportion to them; the
- * minutes no period located go to the stretch holding its by-hour part, which
+ * seconds no period located go to the stretch holding its by-hour part, which
  * is one segment of the cut, so that stretch is the one drawn approximate.
  */
-function hourMinutesByStretch(
+function hourSecondsByStretch(
   hour: WorkstreamDto["hours"][number],
   placement: HourPlacement,
   stretches: TimelineSpan[],
 ): number[] {
   const added = stretches.map(() => 0);
-  const located = hour.periods ? hour.locatedMinutes : 0;
+  const hourSeconds = hour.seconds ?? hour.minutes * 60;
+  const locatedSeconds = hour.locatedSeconds ?? (hour.periods ? hour.locatedMinutes * 60 : 0);
+  const located = hour.periods ? locatedSeconds : 0;
   const weights = stretches.map((stretch) => overlapWith(stretch, placement.located));
   if (located !== 0 && weights.some((weight) => weight > 0)) {
-    shareMinutes(located, weights).forEach((share, index) => {
+    shareSeconds(located, weights).forEach((share, index) => {
       added[index] += share;
     });
   } else {
     added[stretchOfHour(placement, stretches)] += located;
   }
-  const unlocated = hour.minutes - located;
+  const unlocated = hourSeconds - located;
   if (unlocated !== 0) {
     const byHour = placement.byHour;
     const home = byHour ? stretches.findIndex((stretch) => overlapWith(stretch, [byHour]) > 0) : -1;
@@ -290,7 +305,7 @@ function spanOf(
   };
 }
 
-/** A workstream whole, and its stretches with the minutes and notes of their hours. */
+/** A workstream whole, and its stretches with the seconds and notes of their hours. */
 function placeWorkstream(
   workstream: WorkstreamDto,
   hours: LocalHour[],
@@ -304,13 +319,14 @@ function placeWorkstream(
     ...spanOf(workstream, part, 0),
     notes: [] as string[],
   }));
+  const workstreamSeconds = workstream.seconds ?? workstream.minutes * 60;
   workstream.hours.forEach((hour, index) => {
-    hourMinutesByStretch(hour, placements[index], stretches).forEach((minutes, part) => {
-      stretches[part].activeMs += minutes * MINUTE_MS;
+    hourSecondsByStretch(hour, placements[index], stretches).forEach((seconds, part) => {
+      stretches[part].activeMs += seconds * 1000;
     });
     if (hour.note) stretches[stretchOfHour(placements[index], stretches)].notes.push(hour.note);
   });
-  return { whole: spanOf(workstream, segments, workstream.minutes * MINUTE_MS), stretches };
+  return { whole: spanOf(workstream, segments, workstreamSeconds * 1000), stretches };
 }
 
 /** The visible stretch of the day, before any scale is applied. */

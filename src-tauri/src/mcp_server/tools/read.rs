@@ -872,13 +872,15 @@ async fn day_summary(
                     json!({
                         "hour": h.hour,
                         "minutes": h.minutes,
+                        "seconds": h.seconds,
                         "note": note,
                         // Bounds of the measured sessions the hour's work was
                         // located in (where, not how long); null when only the
-                        // hour is known. `locatedMinutes` of `minutes` are
-                        // covered by them.
+                        // hour is known. `locatedSeconds` of `seconds` are
+                        // covered by them; rounded minutes remain available.
                         "periods": h.periods,
                         "locatedMinutes": h.located_minutes,
+                        "locatedSeconds": h.located_seconds,
                         "truncated": note_trunc,
                     })
                 })
@@ -892,6 +894,7 @@ async fn day_summary(
                 "title": title,
                 "summary": summary,
                 "minutes": ws.minutes,
+                "seconds": ws.seconds,
                 "hours": hours_json,
                 "truncated": item_trunc,
             })
@@ -920,6 +923,7 @@ async fn day_summary(
                     json!({
                         "description": desc,
                         "minutes": a.minutes,
+                        "seconds": a.seconds.unwrap_or_else(|| a.minutes * 60),
                         // Bounds of the measured sessions the activity
                         // happened in, or null when only the hour is known.
                         "periods": a.periods,
@@ -1068,6 +1072,7 @@ async fn day_panels(
             "id": workstream.id,
             "title": clip(&workstream.title, 500).0,
             "minutes": workstream.minutes,
+            "seconds": workstream.seconds,
         }))
         .collect::<Vec<_>>());
     totals["totalWorkstreams"] = json!(total_workstreams);

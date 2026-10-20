@@ -13,7 +13,7 @@ encrypted `activity.sqlite3`.
 |---|---|
 | `src-tauri/src/day_intelligence/distill.rs` | Local distillation of an hour's text (no network) |
 | `src-tauri/src/day_intelligence/embedder.rs` | On-device BGE small embeddings (candle), one-time pinned download |
-| `src-tauri/src/day_intelligence/hour.rs` | Hour report prompt, answer parsing, minute normalization |
+| `src-tauri/src/day_intelligence/hour.rs` | Prompt de relatório da hora, análise da resposta, repartição em segundos com parte mínima |
 | `src-tauri/src/day_intelligence/workstreams.rs` | Anchored incremental fold of an hour into the day's workstreams |
 | `src-tauri/src/day_intelligence/summary.rs` | Day summary prompt and answer, panels, DTOs |
 | `src-tauri/src/day_intelligence/prompts.rs` | System prompts, language directive, JSON schemas |
@@ -122,29 +122,35 @@ wakes every minute, on a capture failure, and when a notice is due:
    pick 3 to 14 diverse lines per session (facility location), and rescue up to
    4 dropped lines per session whose entities (ticket keys, PR numbers, file
    paths, commit hashes) are not covered. Sessions under 15 s are flicker.
-3. **Hour report**: one call with the measured sessions (numbered `S1`,
-   `S2`, ...), coding-agent blocks, meetings, and the distilled text. The
-   answer's minutes are weights: the hour's measured active minutes (focused
-   time from the timeline, rounded) are split by largest remainder, so 42
-   measured minutes with estimates 30 and 30 show 21 and 21. Each activity
-   also names the sessions it happened in (`sessions: [3]`, optional in the
-   schema); its `periods` are those sessions' measured bounds clipped to the
-   hour and joined where they overlap or touch. A period locates the activity
-   (where), it does not measure it (how long): a session keeps one app and
-   context while its window or text changes, so two activities can name the
-   same session. Unknown numbers are ignored, and an activity naming none
-   keeps `periods: null` (known by hour only), so no clock time is estimated.
+3. **Hour report**: uma chamada com as sessões medidas (numeradas `S1`,
+   `S2`, ...), blocos de assistentes de código, reuniões e o texto destilado.
+   Os minutos da resposta funcionam como pesos: o tempo ativo medido da hora
+   (`active_seconds = focused_ms / 1000`) é repartido em segundos por maior
+   resto (`normalize_seconds`). Toda atividade listada recebe pelo menos 1 s
+   (quando `active_seconds >= n`); pesos ≤ 0, não finitos ou ausentes assumem
+   o menor peso positivo da lista (ou 1 se nenhum for positivo). A soma dos
+   segundos bate exatamente com o tempo ativo medido. `HourActivity` grava
+   `seconds` e mantém `minutes` arredondados para compatibilidade legada e
+   para o prompt da dobra. Tempos de 1 a 59 s são exibidos como "< 1 min"
+   (nunca "0 min" para atividades reais). Cada atividade também nomeia as
+   sessões em que ocorreu (`sessions: [3]`, opcional); seus `periods` são os
+   limites medidos dessas sessões recortados na hora e unidos onde se tocam.
+   O gate anterior é preservado: se `whole_minutes(focused_ms) == 0`, a hora
+   fica vazia sem chamar o provedor. A precisão em segundos só muda a
+   repartição das horas que já passariam por esse gate. Quando houver menos
+   segundos que atividades, a soma permanece exata com partes não negativas;
+   não é possível garantir 1 s para cada uma nesse caso.
 4. **Workstream fold**: one call with the day's workstreams as anchors (id,
    title, summary) and the hour's numbered activities; the answer places this
    hour only. A placement on an existing id appends the hour and may refresh
    that workstream's summary; id 0 opens one; activities left out open one
    workstream named after the first of them. Titles and untouched workstreams
    never change. Hours fold in order; a fold that failed its 4 attempts lands
-   as one new workstream without a call. The workstream's hour keeps the union
-   of its activities' `periods` (null when none had any) and `locatedMinutes`,
-   the minutes of the activities that had periods; the rest of its minutes
-   stay known only by hour, never folded into the periods. Its minutes stay
-   the measured split, independent of how long the periods span.
+   as one new workstream without a call. A hora da frente de trabalho mantém a
+   união dos `periods` das suas atividades (nulo quando nenhuma tiver períodos),
+   `locatedSeconds` (e `locatedMinutes`), que são os segundos das atividades com
+   períodos; o restante dos segundos fica conhecido apenas pela hora. Os segundos
+   da frente são a soma exata dos segundos das suas horas.
 5. **Day summary**: at the configured time (default 18:00), once per day: due
    when the local clock is past the time and no automatic run of the day
    finished, so a device asleep at 18:00 generates it at the first tick after
@@ -197,9 +203,9 @@ Days are local `YYYY-MM-DD`, hours local `YYYY-MM-DDTHH`; `started_at` /
 
 | Table | Columns | Notes |
 |---|---|---|
-| `day_hour_reports` | `hour` (PK), `day`, `started_at`, `ended_at`, `active_minutes`, `summary`, `activities_json` (`[{description, minutes, periods}]`, Clovy's minutes; `periods` absent in reports written before it), `distilled`, `distill_json` (stats), `locale`, `provider`, `generated_at`, `folded_at` | One per completed hour with activity |
+| `day_hour_reports` | `hour` (PK), `day`, `started_at`, `ended_at`, `active_minutes`, `summary`, `activities_json` (`[{description, minutes, seconds, periods}]`; `seconds` presente nos relatórios novos, com fallback em leitores legados), `distilled`, `distill_json` (stats), `locale`, `provider`, `generated_at`, `folded_at` | One per completed hour with activity |
 | `day_workstreams` | `id`, `day`, `title`, `summary`, `first_hour`, `last_hour`, `created_at`, `updated_at` | Title never changes |
-| `day_workstream_hours` | `workstream_id` → workstreams (cascade), `hour`, `minutes`, `note`, `periods_json` (migration 5, `day_workstream_periods`: `{periods: [{startedAt, endedAt}], locatedMinutes}` with UTC session bounds; NULL when only the hour is known, which includes every row written before it; an unreadable value reads as NULL) | PK `(workstream_id, hour)`; minutes are the sum |
+| `day_workstream_hours` | `workstream_id` → workstreams (cascade), `hour`, `minutes`, `note`, `periods_json` (envelope `{seconds, locatedSeconds, locatedMinutes, periods}` com bounds de sessão em UTC; nulo em registros antigos anteriores à mudança, com fallback `minutes * 60` quando `seconds` estiver ausente) | PK `(workstream_id, hour)`; minutes and seconds are the sum |
 | `day_summaries` | `day` (PK), `headline`, `narrative`, `insights_json`, `standup_json` (`{done, in_progress, blockers}`), `hours_covered`, `locale`, `provider`, `trigger` (`scheduled`/`manual`), `generated_at` | Regenerating replaces the row |
 | `day_intelligence_runs` | `key` (PK), `attempts`, `outcome` (`ok`/`failed`/`empty`), `last_error`, `next_attempt_at`, `updated_at` | Scheduler bookkeeping |
 
@@ -219,8 +225,8 @@ In `crate::day_intelligence::db`, over an open `ActivityStore`:
 | Function | Returns |
 |---|---|
 | `summary_of_day(store, "YYYY-MM-DD")` | `Option<DaySummaryDto>`: headline, narrative, insights, standup `{done, inProgress, blockers}`, `hoursCovered`, `locale`, `provider`, `trigger`, `generatedAt` |
-| `workstreams_of_day(store, day)` | `Vec<WorkstreamDto>`: id, title, summary, minutes, hours `[{hour, minutes, note, periods, locatedMinutes}]` (`periods`: `[{startedAt, endedAt}]` session bounds or null; `locatedMinutes`: minutes covered by them, 0 when null) |
-| `hour_reports_of_day(store, day)` | `Vec<HourReportDto>`: hour, bounds, active minutes, summary, activities with minutes and `periods` (null for reports written before periods) |
+| `workstreams_of_day(store, day)` | `Vec<WorkstreamDto>`: id, title, summary, minutes, seconds, hours `[{hour, minutes, seconds, note, periods, locatedMinutes, locatedSeconds}]` (`periods`: `[{startedAt, endedAt}]` ou null; fallback `minutes * 60` se ausente) |
+| `hour_reports_of_day(store, day)` | `Vec<HourReportDto>`: hour, bounds, active minutes, summary, activities with rounded minutes, optional `seconds` and `periods` (legacy reports without seconds fall back to `minutes * 60`; no history is reprocessed) |
 
 `pipeline::day_view(&ReadContext, day)` returns those plus `DayPanelsDto`
 (numbers read now from the timeline, workstreams, meetings, and blocks). The
@@ -229,7 +235,10 @@ uses this read API over `ActivityStore` to return the stored day summary,
 workstreams, and hour reports; `get_day_panels` calls `day_view` with its own
 `DaySources` (meetings of the open data partition through
 `sources::meetings_between`, the query `AppSources` runs too, and coding-agent
-blocks from the retention floor on) and returns the panels in minutes;
+blocks from the retention floor on) and returns the panels in minutes, with
+exact `seconds` alongside `minutes` for workstreams. `get_day_summary` likewise
+preserves seconds for activities, workstreams and their hours, including
+`locatedSeconds`; legacy data falls back to `minutes * 60`.
 `get_day_schedule` returns the settings below.
 
 ## Commands and event (frontend contract)
@@ -242,7 +251,7 @@ blocks from the retention floor on) and returns the panels in minutes;
 
 `panels`: `focusedMs`, `idleMs`, `awayMs`, `categories`, `topApps` (the day's
 timeline stats, `{appName, bundleId, durationMs}`), `hours` (24 local hours with focused ms; they add up to
-`focusedMs`), `workstreams` (`{id, title, minutes}`), `meetingCount`,
+`focusedMs`), `workstreams` (`{id, title, minutes, seconds}`), `meetingCount`,
 `meetingMs`, `codingAgentBlocks`, `codingAgentActiveSeconds`.
 
 Event `clovy://day-intelligence` (`{ day, running }`) follows a run's start and

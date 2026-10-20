@@ -714,6 +714,7 @@ mod view_tests {
                 browser_url: url.map(str::to_string),
                 text_source: TextSource::Accessibility,
                 text: Some(text.into()),
+                input_idle_ms: None,
             })
             .await
             .unwrap();

@@ -24,15 +24,17 @@ const TITLE_CHARS: usize = 80;
 pub struct WorkstreamHourDto {
     pub hour: String,
     pub minutes: i64,
+    pub seconds: i64,
     pub note: String,
     /// Bounds of the measured sessions the hour's work was located in; `None`
     /// when only the hour is known (written before periods existed, or no
     /// activity named a session). Where, not how long: active time is
-    /// `minutes`.
+    /// `seconds`.
     pub periods: Option<Vec<ActivityPeriod>>,
     /// Of `minutes`, those from activities located in `periods`; the rest
     /// happened somewhere in the hour. 0 when `periods` is `None`.
     pub located_minutes: i64,
+    pub located_seconds: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -42,6 +44,7 @@ pub struct WorkstreamDto {
     pub title: String,
     pub summary: String,
     pub minutes: i64,
+    pub seconds: i64,
     pub hours: Vec<WorkstreamHourDto>,
 }
 
@@ -65,11 +68,13 @@ pub struct FoldPlan {
 pub struct Append {
     pub workstream_id: i64,
     pub minutes: i64,
+    pub seconds: i64,
     pub note: String,
     /// The refreshed story; `None` keeps the stored summary.
     pub summary: Option<String>,
     pub periods: Option<Vec<ActivityPeriod>>,
     pub located_minutes: i64,
+    pub located_seconds: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,9 +82,11 @@ pub struct Create {
     pub title: String,
     pub summary: String,
     pub minutes: i64,
+    pub seconds: i64,
     pub note: String,
     pub periods: Option<Vec<ActivityPeriod>>,
     pub located_minutes: i64,
+    pub located_seconds: i64,
 }
 
 pub fn parse_placements(value: &Value) -> Option<Vec<Placement>> {
@@ -131,13 +138,13 @@ pub fn plan_fold(
 ) -> FoldPlan {
     let mut plan = FoldPlan::default();
     let mut assigned: HashSet<usize> = HashSet::new();
-    // Minutes of the activities that named a session; the others stay
-    // unlocated inside the hour instead of being folded into the periods.
-    let located = |indices: &[usize]| -> i64 {
+    let activity_seconds =
+        |activity: &HourActivity| -> i64 { activity.seconds.unwrap_or(activity.minutes * 60) };
+    let located_sec = |indices: &[usize]| -> i64 {
         indices
             .iter()
             .filter(|&&index| activities[index].periods.is_some())
-            .map(|&index| activities[index].minutes)
+            .map(|&index| activity_seconds(&activities[index]))
             .sum()
     };
     for placement in placements {
@@ -152,9 +159,14 @@ pub fn plan_fold(
         if picked.is_empty() {
             continue;
         }
-        let minutes: i64 = picked.iter().map(|&index| activities[index].minutes).sum();
+        let seconds: i64 = picked
+            .iter()
+            .map(|&index| activity_seconds(&activities[index]))
+            .sum();
+        let minutes: i64 = (seconds + 30).div_euclid(60);
         let periods = merge_periods(picked.iter().map(|&index| &activities[index].periods));
-        let located_minutes = located(&picked);
+        let located_seconds = located_sec(&picked);
+        let located_minutes = (located_seconds + 30).div_euclid(60);
         let note = picked
             .iter()
             .map(|&index| activities[index].description.as_str())
@@ -171,22 +183,26 @@ pub fn plan_fold(
                 .find(|append| append.workstream_id == placement.workstream_id)
             {
                 Some(append) => {
-                    append.minutes += minutes;
+                    append.seconds += seconds;
+                    append.minutes = (append.seconds + 30).div_euclid(60);
                     append.note.push(' ');
                     append.note.push_str(&note);
                     if summary.is_some() {
                         append.summary = summary;
                     }
                     append.periods = merge_periods([&append.periods, &periods]);
-                    append.located_minutes += located_minutes;
+                    append.located_seconds += located_seconds;
+                    append.located_minutes = (append.located_seconds + 30).div_euclid(60);
                 }
                 None => plan.appends.push(Append {
                     workstream_id: placement.workstream_id,
                     minutes,
+                    seconds,
                     note,
                     summary,
                     periods,
                     located_minutes,
+                    located_seconds,
                 }),
             }
         } else {
@@ -199,9 +215,11 @@ pub fn plan_fold(
                 title,
                 summary: summary.unwrap_or_else(|| note.clone()),
                 minutes,
+                seconds,
                 note,
                 periods,
                 located_minutes,
+                located_seconds,
             });
         }
     }
@@ -214,13 +232,20 @@ pub fn plan_fold(
             .map(|&index| activities[index].description.as_str())
             .collect::<Vec<_>>()
             .join(" ");
+        let left_seconds: i64 = left
+            .iter()
+            .map(|&index| activity_seconds(&activities[index]))
+            .sum();
+        let left_located_seconds = located_sec(&left);
         plan.creates.push(Create {
             title: short_title(&activities[first].description),
             summary: note.clone(),
-            minutes: left.iter().map(|&index| activities[index].minutes).sum(),
+            minutes: (left_seconds + 30).div_euclid(60),
+            seconds: left_seconds,
             note,
             periods: merge_periods(left.iter().map(|&index| &activities[index].periods)),
-            located_minutes: located(&left),
+            located_minutes: (left_located_seconds + 30).div_euclid(60),
+            located_seconds: left_located_seconds,
         });
     }
     plan
@@ -272,6 +297,7 @@ mod tests {
         HourActivity {
             description: description.into(),
             minutes,
+            seconds: None,
             periods: None,
         }
     }
@@ -289,6 +315,7 @@ mod tests {
             title: title.into(),
             summary: format!("{title} so far."),
             minutes: 40,
+            seconds: 40 * 60,
             hours: Vec::new(),
         }
     }
@@ -336,20 +363,30 @@ mod tests {
             vec![Append {
                 workstream_id: 1,
                 minutes: 20,
+                seconds: 20 * 60,
                 note: "Fixed the redirect".into(),
                 summary: None,
                 periods: None,
                 located_minutes: 0,
+                located_seconds: 0,
             }]
         );
         assert_eq!(plan.creates.len(), 2);
         assert_eq!(
-            (plan.creates[0].title.as_str(), plan.creates[0].minutes),
-            ("News", 10)
+            (
+                plan.creates[0].title.as_str(),
+                plan.creates[0].minutes,
+                plan.creates[0].seconds
+            ),
+            ("News", 10, 10 * 60)
         );
         assert_eq!(
-            (plan.creates[1].title.as_str(), plan.creates[1].minutes),
-            ("Answered email", 5)
+            (
+                plan.creates[1].title.as_str(),
+                plan.creates[1].minutes,
+                plan.creates[1].seconds
+            ),
+            ("Answered email", 5, 5 * 60)
         );
     }
 
@@ -364,6 +401,7 @@ mod tests {
         assert_eq!(plan.creates.len(), 1);
         assert_eq!(plan.creates[0].title, "Wrote the spec");
         assert_eq!(plan.creates[0].minutes, 42);
+        assert_eq!(plan.creates[0].seconds, 42 * 60);
     }
 
     #[test]
@@ -398,7 +436,9 @@ mod tests {
         // the whole hour's work happened inside the periods.
         assert_eq!(plan.appends.len(), 1);
         assert_eq!(plan.appends[0].minutes, 40);
+        assert_eq!(plan.appends[0].seconds, 40 * 60);
         assert_eq!(plan.appends[0].located_minutes, 35);
+        assert_eq!(plan.appends[0].located_seconds, 35 * 60);
         assert_eq!(
             plan.appends[0].periods,
             Some(vec![period("14:00", "14:30"), period("14:45", "14:50")])
@@ -407,5 +447,6 @@ mod tests {
         assert_eq!(plan.creates.len(), 1);
         assert_eq!(plan.creates[0].periods, None);
         assert_eq!(plan.creates[0].located_minutes, 0);
+        assert_eq!(plan.creates[0].located_seconds, 0);
     }
 }

@@ -56,7 +56,6 @@ export default defineMessages({
     "dayIntelligence.workstreams.empty": "Workstreams appear as each hour is reported.",
     "dayIntelligence.hours.title": "Hour by hour",
     "dayIntelligence.hours.empty": "Each completed hour with activity gets a report.",
-    "dayIntelligence.minutes": "{minutes} min",
 
     "dayIntelligence.settings.title": "Day summary",
     "dayIntelligence.settings.description":
@@ -129,7 +128,6 @@ export default defineMessages({
     "dayIntelligence.workstreams.empty": "As frentes aparecem conforme cada hora é relatada.",
     "dayIntelligence.hours.title": "Hora a hora",
     "dayIntelligence.hours.empty": "Cada hora concluída com atividade ganha um relatório.",
-    "dayIntelligence.minutes": "{minutes} min",
 
     "dayIntelligence.settings.title": "Resumo do dia",
     "dayIntelligence.settings.description":

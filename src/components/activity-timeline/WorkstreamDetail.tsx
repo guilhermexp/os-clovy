@@ -76,7 +76,14 @@ export function WorkstreamDetail({ card, onBack }: WorkstreamDetailProps) {
                           segment.kind === "hour"
                             ? "activity.workstream.hourActive"
                             : "activity.workstream.hourUnlocated",
-                          { duration: formatDuration((segment.minutes ?? 0) * 60_000, locale) },
+                          {
+                            duration: formatDuration(
+                              (segment.seconds != null
+                                ? segment.seconds
+                                : (segment.minutes ?? 0) * 60) * 1000,
+                              locale,
+                            ),
+                          },
                         )}
                       </span>
                       <span className="ws-timeline-badge" title={t("activity.grid.byHourHint")}>

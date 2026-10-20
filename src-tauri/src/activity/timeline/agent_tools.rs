@@ -272,6 +272,7 @@ mod tests {
                         browser_url: url.map(str::to_string),
                         text_source: TextSource::Accessibility,
                         text: Some(format!("{text} {index}")),
+                        input_idle_ms: None,
                     })
                     .await
                     .unwrap();
@@ -406,6 +407,7 @@ mod tests {
                     browser_url: None,
                     text_source: TextSource::Accessibility,
                     text: Some(format!("fn f{index}")),
+                    input_idle_ms: None,
                 })
                 .await
                 .unwrap();

@@ -106,6 +106,7 @@ pub struct WorkstreamMinutesDto {
     pub id: i64,
     pub title: String,
     pub minutes: i64,
+    pub seconds: i64,
 }
 
 /// The summary's charts and totals, read from the data at display time.
@@ -146,6 +147,7 @@ pub fn panels(
                 id: workstream.id,
                 title: workstream.title.clone(),
                 minutes: workstream.minutes,
+                seconds: workstream.seconds,
             })
             .collect(),
         meeting_count: recorded.len() as i64,

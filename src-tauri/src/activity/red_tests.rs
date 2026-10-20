@@ -25,6 +25,7 @@ async fn encrypted_file_is_unreadable_without_key() {
             browser_url: None,
             text_source: TextSource::Accessibility,
             text: Some("secret meeting notes".into()),
+            input_idle_ms: None,
         })
         .await
         .expect("insert");

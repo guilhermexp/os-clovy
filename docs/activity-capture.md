@@ -19,8 +19,8 @@ on it (timeline, coding-agent ingestion, day summaries). Terms are in
 |---|---|
 | `src-tauri/src/activity/mod.rs` | Tauri commands, managed state, `setup` (starts capture and timeline on macOS and Windows), `publish` (frontend event + menu bar) |
 | `src-tauri/src/activity/engine.rs` | `CaptureEngine::tick` (every 2 s), `ActivityShared` (state shared with commands and the tray) |
-| `src-tauri/src/activity/platform.rs` | `ActivityPlatform` trait: the OS seam (window descriptors, AX/UIA/OCR text, input events, clipboard, disk) |
-| `src-tauri/src/activity/macos/` | `MacActivityPlatform`: Accessibility (AX), ScreenCaptureKit + Vision OCR, event tap, pasteboard, TCC permissions |
+| `src-tauri/src/activity/platform.rs` | `ActivityPlatform` trait: the OS seam (window descriptors, AX/UIA/OCR text, input events, system idle duration, clipboard, disk) |
+| `src-tauri/src/activity/macos/` | `MacActivityPlatform`: Accessibility (AX), ScreenCaptureKit + Vision OCR, event tap, system idle duration, pasteboard, TCC permissions |
 | `src-tauri/src/activity/windows/` | `WinActivityPlatform`: UI Automation (UIA) tree inspection and text, Windows Graphics Capture (WGC) + `Windows.Media.Ocr`, content-free RawInput, fail-closed clipboard concealment, monitor enumeration, `GetDiskFreeSpaceExW` |
 | `src-tauri/src/activity/store.rs` | `ActivityStore`: the only code that opens `activity.sqlite3`; schema, migrations, read/write API, retention, debug export |
 | `src-tauri/src/activity/key.rs` | Database key (`ActivityKeyStore` via `keyring`: macOS Keychain or Windows Credential Manager) |
@@ -207,6 +207,15 @@ below) and mirrored to the menu bar.
       clipboard is retried only on a later tick.
       Native delayed-render regressions run in child processes with private
       window stations/desktops and never use the console clipboard.
+- **Tempo desde a última entrada do sistema.** Cada quadro da janela em foco
+  registra `input_idle_ms`, uma duração em milissegundos amostrada no tick,
+  junto da janela. No macOS, `ActivityPlatform::system_idle_ms()` consulta
+  `CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState,
+  kCGAnyInputEventType)`. A consulta não instala um tap nem inicia pedidos de
+  permissão; independe do switch `inputEvents` e do tap de cliques/teclas.
+  Não registra tipo, posição nem conteúdo da entrada. Se a plataforma não
+  informar o dado, o quadro guarda `NULL`. Quadros de monitores secundários
+  continuam sendo apenas contexto e não recebem esse sinal.
 - **Pause control.** "Pause capture" / "Resume capture" (settings and menu
   bar) act on the manual pause only; an automatic pause (work hours, low disk,
   protected video) shows "Pause capture" and resumes on its own.
@@ -246,7 +255,7 @@ refuses to open (`NewerSchema`). Add a version; never edit one.
 | Table | Columns | Notes |
 |---|---|---|
 | `frame_texts` | `id`, `hash` (sha256 hex, unique), `text` | Deduplicated text bodies; consecutive ticks of an unchanged window share a row |
-| `frames` | `id` (AUTOINCREMENT, never reused), `captured_at`, `app_name`, `bundle_id`, `window_title`, `browser_url`, `text_source` (`accessibility`/`ocr`/`none`), `text_id` → `frame_texts` | One row per 2 s tick of the focused window; the timeline's input |
+| `frames` | `id` (AUTOINCREMENT, never reused), `captured_at`, `app_name`, `bundle_id`, `window_title`, `browser_url`, `text_source` (`accessibility`/`ocr`/`none`), `text_id` → `frame_texts`, `input_idle_ms` (migration 6, nullable) | One row per 2 s tick of the focused window; the timeline's input |
 | `secondary_frames` | `id`, `captured_at`, `display_id`, `app_name`, `bundle_id`, `window_title`, `browser_url`, `text_source`, `text_id` | ~10 s context samples of other displays; never part of a session |
 | `input_events` | `id`, `occurred_at`, `kind` (`click`/`key`/`app_switch`/`window_focus`/`clipboard`), `app_name`, `count`, `clipboard_text` | Clicks/keys coalesced per tick (`count`); `CHECK (kind = 'clipboard' OR clipboard_text IS NULL)` |
 | `pauses` | `id`, `started_at`, `ended_at` (NULL while open), `reason` (`manual`/`work_hours`/`low_disk`/`protected_video`) | Pauses left open by a crash are closed at the next start |
@@ -258,6 +267,11 @@ Migration 3 (`coding_agent_blocks`) belongs to coding-agent ingestion; see
 [coding-agent-sessions.md](coding-agent-sessions.md#database-migration-3-coding_agent_blocks).
 Migration 4 (`day_intelligence`) adds hour reports, workstreams, and day
 summaries; see [day-intelligence.md](day-intelligence.md#schema-migration-4-day_intelligence).
+
+A migração 6 (`frame_input_idle`) acrescenta `frames.input_idle_ms INTEGER
+NULL`, sem backfill. Quadros antigos permanecem sem o sinal, preservando a
+classificação anterior ao reconstruir a linha do tempo. `frames_after` e o
+export de depuração incluem o valor como `inputIdleMs`.
 
 ### Rust API (`crate::activity::store::ActivityStore`)
 
