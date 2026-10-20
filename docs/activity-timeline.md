@@ -22,7 +22,7 @@ lanes) build on the query API below. Terms are in
 | `src-tauri/src/activity/timeline/mod.rs` | Tauri commands, background loop, exclusion/retention filtering, agent tool wiring |
 | `src-tauri/src/activity/timeline/agent_tools.rs` | `search_activity`, `get_activity_timeline` |
 | `src-tauri/src/activity/timeline/debug_import.rs` | Development-only fixture import (`CLOVY_ACTIVITY_DEBUG_IMPORT`) |
-| `src-tauri/src/activity/app_icon.rs` | `activity_app_icon`: an installed app's icon resolved by bundle id through Launch Services on macOS, or by executable/AUMID on Windows via Shell (`SHGetFileInfoW`) and WIC (`IWICBitmapScaler`), drawn as a 64x64 PNG (≤ 64 KB, per-identity in-memory cache) |
+| `src-tauri/src/activity/app_icon.rs` | `activity_app_icon`: an installed app's icon resolved by bundle id through Launch Services on macOS; executable icons via `SHGetFileInfoW` and packaged AUMIDs via AppsFolder `IShellItemImageFactory` on Windows. WIC draws a 64x64 PNG (≤ 64 KB). Successful Windows results are cached; misses remain retryable without observing a window first. |
 | `src/components/activity-timeline/`, `src/lib/activity-timeline.ts` | The "Today" view and its typed bindings; the workstream timeline is `WorkstreamTimeline.tsx` / `WorkstreamDetail.tsx` with its pure layout in `workstream-timeline-layout.ts` |
 
 Tests: `cargo test --manifest-path src-tauri/Cargo.toml activity` (timeline

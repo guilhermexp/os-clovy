@@ -1,9 +1,9 @@
 //! The real icons of "Top apps": resolved by bundle id through Launch Services
 //! on macOS, or by executable/AUMID on Windows, drawn at 64x64 px, and returned
-//! as PNG data URLs. Never by app name (two apps can share one) and never from
-//! a remote icon service. Answers, including "no icon" for an app that is gone,
-//! are cached per identity for the life of the process, so a render or a
-//! timeline refresh never looks an app up again.
+//! as PNG data URLs. Never by app name (two apps can share one) or a remote
+//! icon service. Successful results are cached per identity. Windows misses
+//! remain retryable so a transient or not-yet-observed app does not lose its
+//! icon for the process lifetime; other platforms preserve negative caching.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -58,11 +58,13 @@ pub fn app_icon_data_url(bundle_id: &str) -> Option<String> {
                 base64::engine::general_purpose::STANDARD.encode(png)
             )
         });
-    if let Ok(mut cache) = CACHE.lock() {
-        if cache.len() >= CACHE_LIMIT {
-            cache.clear();
+    if !cfg!(windows) || resolved.is_some() {
+        if let Ok(mut cache) = CACHE.lock() {
+            if cache.len() >= CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(bundle_id.to_string(), resolved.clone());
         }
-        cache.insert(bundle_id.to_string(), resolved.clone());
     }
     resolved
 }
@@ -142,12 +144,15 @@ use windows_icon::icon_png;
 #[cfg(windows)]
 mod windows_icon {
     use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
 
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{HGLOBAL, RPC_E_CHANGED_MODE};
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::Foundation::{HGLOBAL, RPC_E_CHANGED_MODE, SIZE};
+    use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ, HPALETTE};
     use windows::Win32::Graphics::Imaging::{
-        CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA,
+        CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA, IWICBitmap,
         IWICImagingFactory, WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant,
+        WICBitmapUseAlpha,
     };
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
     use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, IPropertyBag2};
@@ -155,7 +160,10 @@ mod windows_icon {
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_MULTITHREADED, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET,
     };
-    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+    use windows::Win32::UI::Shell::{
+        IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SHGetFileInfoW,
+        SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SIIGBF_ICONONLY,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
 
     use super::{ICON_PX, MAX_PNG_BYTES};
@@ -193,33 +201,24 @@ mod windows_icon {
         }
     }
 
-    pub(super) fn icon_png(identity: &str) -> Option<Vec<u8>> {
-        let path = executable_path(identity)?;
-        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let _apartment = ComApartment::enter()?;
-        let mut info = SHFILEINFOW::default();
-        if unsafe {
-            SHGetFileInfoW(
-                PCWSTR(path.as_ptr()),
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                Some(&mut info),
-                std::mem::size_of::<SHFILEINFOW>() as u32,
-                SHGFI_ICON | SHGFI_LARGEICON,
-            )
-        } == 0
-            || info.hIcon.0.is_null()
-        {
-            return None;
+    struct OwnedBitmap(HBITMAP);
+
+    impl Drop for OwnedBitmap {
+        fn drop(&mut self) {
+            if !self.0 .0.is_null() {
+                let _ = unsafe { DeleteObject(HGDIOBJ(self.0 .0)) };
+            }
         }
-        let icon = OwnedIcon(info.hIcon);
-        let factory: IWICImagingFactory =
-            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
-                .ok()?;
-        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }.ok()?;
+    }
+
+    fn encode_bitmap_source_to_png(
+        factory: &IWICImagingFactory,
+        bitmap: &IWICBitmap,
+    ) -> Option<Vec<u8>> {
         let scaler = unsafe { factory.CreateBitmapScaler() }.ok()?;
         unsafe {
             scaler.Initialize(
-                &bitmap,
+                bitmap,
                 ICON_PX as u32,
                 ICON_PX as u32,
                 WICBitmapInterpolationModeFant,
@@ -259,6 +258,66 @@ mod windows_icon {
         // IStream initialized exactly `read` bytes in the reserved allocation above.
         unsafe { png.set_len(len) };
         Some(png)
+    }
+
+    fn icon_png_from_file(path: &Path) -> Option<Vec<u8>> {
+        let _apartment = ComApartment::enter()?;
+        let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut info = SHFILEINFOW::default();
+        if unsafe {
+            SHGetFileInfoW(
+                PCWSTR(path_wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                Some(&mut info),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON,
+            )
+        } == 0
+            || info.hIcon.0.is_null()
+        {
+            return None;
+        }
+        let icon = OwnedIcon(info.hIcon);
+        let factory: IWICImagingFactory =
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
+                .ok()?;
+        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }.ok()?;
+        encode_bitmap_source_to_png(&factory, &bitmap)
+    }
+
+    fn icon_png_from_apps_folder(identity: &str) -> Option<Vec<u8>> {
+        let _apartment = ComApartment::enter()?;
+        let parsing_wide: Vec<u16> = r"shell:AppsFolder\"
+            .encode_utf16()
+            .chain(identity.encode_utf16())
+            .chain(Some(0))
+            .collect();
+        let item: IShellItem =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(parsing_wide.as_ptr()), None) }.ok()?;
+        let image_factory: IShellItemImageFactory = item.cast().ok()?;
+        let size = SIZE {
+            cx: ICON_PX as i32,
+            cy: ICON_PX as i32,
+        };
+        let hbitmap = unsafe { image_factory.GetImage(size, SIIGBF_ICONONLY) }.ok()?;
+        let owned_bitmap = OwnedBitmap(hbitmap);
+        let factory: IWICImagingFactory =
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
+                .ok()?;
+        let bitmap = unsafe {
+            factory.CreateBitmapFromHBITMAP(owned_bitmap.0, HPALETTE::default(), WICBitmapUseAlpha)
+        }
+        .ok()?;
+        encode_bitmap_source_to_png(&factory, &bitmap)
+    }
+
+    pub(super) fn icon_png(identity: &str) -> Option<Vec<u8>> {
+        if identity.contains('!') {
+            icon_png_from_apps_folder(identity)
+        } else {
+            let path = executable_path(identity)?;
+            icon_png_from_file(&path)
+        }
     }
 }
 
