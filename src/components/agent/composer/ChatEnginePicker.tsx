@@ -286,7 +286,7 @@ export function ChatEnginePicker({
                 <span className="agent-composer-model-row-name">{cli.name}</span>
                 {!cli.installed ? (
                   <span className="agent-composer-model-choice-desc">
-                    {cli.reason ?? t("chat.engine.notInstalled")}
+                    {t("chat.engine.notFoundOnPath")}
                   </span>
                 ) : cli.id === defaultCliId ? (
                   <span className="agent-composer-model-choice-desc">

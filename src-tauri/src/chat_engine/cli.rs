@@ -15,6 +15,9 @@
 //! | cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`, `--resume <id>` | project servers need approval in Cursor, not offered |
 //! | copilot | `--prompt=<prompt> --output-format json --session-id <id>` | chosen by Clovy (UUID) | `--additional-mcp-config @<file>` |
 //!
+//! On Windows a `.cmd`/`.bat` launcher gives cursor-agent and copilot the
+//! prompt on stdin instead ([`prompt_on_stdin`]).
+//!
 //! Permission flags, configuration overrides, and environment come from
 //! [`super::policy`] (by CLI, safety mode, and whether a person watches the
 //! turn); nothing here adds its own. No flag that skips or pre-grants
@@ -232,6 +235,52 @@ pub fn turn_invocation(
         set_env: policy.env,
         files,
     }
+}
+
+/// Whether `program` is a Windows batch file (`.cmd`, `.bat`): npm shims and
+/// the Cursor agent launcher. Windows starts those through `cmd.exe`, which
+/// cannot carry an argument with a line break (the spawn fails) or a command
+/// line over 8191 characters, so their prompt goes on stdin
+/// ([`prompt_on_stdin`]).
+pub fn runs_through_cmd(program: &Path) -> bool {
+    cfg!(windows)
+        && program
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+            })
+}
+
+/// Moves the prompt of a CLI that takes it as an argument to stdin, for CLIs
+/// that read it there: cursor-agent reads stdin when `-p` has no prompt
+/// argument, and copilot takes a piped prompt in place of `--prompt`. agy has
+/// no stdin prompt; its installer ships an `.exe`.
+pub fn prompt_on_stdin(
+    mut invocation: TurnInvocation,
+    kind: CliKind,
+    prompt: &str,
+) -> TurnInvocation {
+    let args = &mut invocation.args;
+    match kind {
+        CliKind::CursorAgent => {
+            if let Some(at) = args.iter().position(|arg| arg == "--") {
+                if args.get(at + 1).map(String::as_str) == Some(prompt) {
+                    args.drain(at..at + 2);
+                    invocation.stdin = Some(prompt.to_string());
+                }
+            }
+        }
+        CliKind::Copilot => {
+            let flag = format!("--prompt={prompt}");
+            if let Some(at) = args.iter().position(|arg| *arg == flag) {
+                args.remove(at);
+                invocation.stdin = Some(prompt.to_string());
+            }
+        }
+        _ => {}
+    }
+    invocation
 }
 
 fn strings(values: &[&str]) -> Vec<String> {

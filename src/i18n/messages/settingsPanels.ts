@@ -477,7 +477,7 @@ export default defineMessages({
     "settingsPanels.llm.refreshClis": "Check again",
     "settingsPanels.llm.installed": "Installed",
     "settingsPanels.llm.notInstalled": "Not installed",
-    "settingsPanels.llm.notInstalledReason": "Not found in your login shell PATH.",
+    "settingsPanels.llm.notInstalledReason": "Not found on your PATH.",
     "settingsPanels.llm.test": "Test",
     "settingsPanels.llm.testing": "Testing...",
     "settingsPanels.llm.testSuccess": "Connected in {ms} ms · Structured output: {level}",

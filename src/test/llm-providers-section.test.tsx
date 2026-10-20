@@ -45,7 +45,7 @@ const sampleClis: LlmCliStatusDto[] = [
     id: "codex",
     name: "Codex",
     installed: false,
-    reason: "Not found in your login shell PATH.",
+    reason: "`codex` was not found on your PATH.",
     structuredOutput: "none",
     toolsDisabled: false,
   },
@@ -144,7 +144,7 @@ describe("LlmProvidersSection", () => {
 
     expect(screen.getByRole("heading", { name: "Codex" })).toBeInTheDocument();
     // Non-installed CLI reasons
-    expect(screen.getAllByText("Not found in your login shell PATH.").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Not found on your PATH.").length).toBeGreaterThan(0);
     // Usage select checks
     const chatSelect = screen.getByRole("combobox", { name: "Chat" });
     const installedOption = chatSelect.querySelector(

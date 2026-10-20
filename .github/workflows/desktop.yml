@@ -334,6 +334,14 @@ jobs:
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked activity
 
+      - name: Test Windows CLI resolution
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked llm
+
+      - name: Test Windows CLI chat engine
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine
+
       - name: Build and verify unsigned Windows installer
         shell: pwsh
         run: ./scripts/build-windows.ps1

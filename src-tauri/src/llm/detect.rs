@@ -1,4 +1,5 @@
-//! Detection of the six agent CLIs on the user's login-shell PATH, with the
+//! Detection of the six agent CLIs on the user's PATH (the login shell's on macOS,
+//! the app's own on Windows; see [`super::shell_env`]), with the
 //! resolved path and the version each CLI reports.
 
 use super::{
@@ -44,10 +45,7 @@ pub async fn detect(kind: CliKind, env: &LoginEnv) -> CliStatus {
             installed: false,
             path: None,
             version: None,
-            reason: Some(format!(
-                "`{}` was not found in your login shell PATH.",
-                kind.id()
-            )),
+            reason: Some(format!("`{}` was not found on your PATH.", kind.id())),
             structured_output: kind.structured_output(),
             tools_disabled: kind.tools_disabled(),
         };

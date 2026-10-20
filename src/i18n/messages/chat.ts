@@ -149,7 +149,7 @@ export default defineMessages({
     "chat.engine.sectionEndpoints": "Endpoints",
     "chat.engine.sectionClis": "Agent CLIs",
     "chat.engine.clovy": "Clovy",
-    "chat.engine.notInstalled": "Not installed",
+    "chat.engine.notFoundOnPath": "Not found on your PATH.",
     "chat.engine.defaultEngine": "Default",
     "chat.engine.sectionLegacy": "Legacy",
     "chat.engine.clovyLegacyDescription": "Built-in agent, kept while its tools move to the CLIs",
@@ -357,7 +357,7 @@ export default defineMessages({
     "chat.engine.sectionEndpoints": "Endpoints",
     "chat.engine.sectionClis": "CLIs de agentes",
     "chat.engine.clovy": "Clovy",
-    "chat.engine.notInstalled": "Não instalado",
+    "chat.engine.notFoundOnPath": "Não encontrado no PATH da sua sessão.",
     "chat.engine.defaultEngine": "Padrão",
     "chat.engine.sectionLegacy": "Legado",
     "chat.engine.clovyLegacyDescription":
