@@ -200,9 +200,11 @@ below) and mirrored to the menu bar.
       A single worker, attached to the capture caller's desktop, owns
       `OpenClipboard`, native reads and `CloseClipboard`. The capture thread
       waits at most 50 ms per call; an unfinished read remains single-flight
-      and quarantined until it terminates. Expired epochs and changed
-      sequences never deliver text later. Dropping the adapter does not join
-      a blocked native read. A busy clipboard is retried only on a later tick.
+      and quarantined until it terminates. Expired reads never deliver text
+      later. A replacement noticed before any read remains eligible for a
+      fresh epoch; a snapshot already read by an expired request is suppressed.
+      Dropping the adapter does not join a blocked native read. A busy
+      clipboard is retried only on a later tick.
       Native delayed-render regressions run in child processes with private
       window stations/desktops and never use the console clipboard.
 - **Pause control.** "Pause capture" / "Resume capture" (settings and menu

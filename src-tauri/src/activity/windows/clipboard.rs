@@ -161,7 +161,8 @@ enum WorkerStatus {
     Success,
     Busy,
     Concealed,
-    SequenceChanged,
+    ChangedBeforeRead,
+    ChangedDuringRead,
     FormatUnavailable,
     Error,
 }
@@ -191,7 +192,7 @@ fn process_worker_request(req: &WorkerRequest) -> WorkerResponse {
             epoch: req.epoch,
             sequence_after: seq_after_open,
             text: None,
-            status: WorkerStatus::SequenceChanged,
+            status: WorkerStatus::ChangedBeforeRead,
         };
     }
 
@@ -239,7 +240,7 @@ fn process_worker_request(req: &WorkerRequest) -> WorkerResponse {
 
     let seq_after_read = unsafe { GetClipboardSequenceNumber() };
     let (status, text) = if seq_after_read != req.requested_sequence {
-        (WorkerStatus::SequenceChanged, None)
+        (WorkerStatus::ChangedDuringRead, None)
     } else if text.is_some() {
         (WorkerStatus::Success, text)
     } else {
@@ -357,8 +358,10 @@ impl Clipboard {
                 }
                 self.pending_epoch = None;
                 match response.status {
-                    // Busy or changed before reading: retry only on a later tick.
-                    WorkerStatus::Busy | WorkerStatus::SequenceChanged => None,
+                    // A changed sequence can be read afresh on a later tick.
+                    WorkerStatus::Busy
+                    | WorkerStatus::ChangedBeforeRead
+                    | WorkerStatus::ChangedDuringRead => None,
                     WorkerStatus::Success => {
                         if unsafe { GetClipboardSequenceNumber() } != response.sequence_after {
                             return None;
@@ -394,8 +397,10 @@ impl Clipboard {
         }
         // Never replay an expired read, including a delayed render that advanced
         // its sequence. Only suppress that snapshot, not a newer clipboard change.
-        if response.status != WorkerStatus::Busy
-            && unsafe { GetClipboardSequenceNumber() } == response.sequence_after
+        if !matches!(
+            response.status,
+            WorkerStatus::Busy | WorkerStatus::ChangedBeforeRead
+        ) && unsafe { GetClipboardSequenceNumber() } == response.sequence_after
         {
             self.sequence_state.mark_completed(response.sequence_after);
         }
@@ -1239,7 +1244,7 @@ mod tests {
             epoch: 1,
             requested_sequence: sequence_a,
         });
-        assert_eq!(response.status, WorkerStatus::SequenceChanged);
+        assert_eq!(response.status, WorkerStatus::ChangedBeforeRead);
         assert!(response.text.is_none(), "replacement was never read");
         clipboard.active_epoch = 1;
         clipboard.pending_epoch = Some(1);
