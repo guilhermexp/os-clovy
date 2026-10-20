@@ -458,6 +458,8 @@ through byte for byte; for chat turns see [CLI chat engine](#cli-chat-engine).
   turns on the installed claude, codex, and pi, and the policy's argv on the
   installed claude and codex with the built `clovy-mcp` and an approval card
   (`chat_engine_real_policy_smoke`, after `cargo build --bin clovy-mcp`).
+- The `windows-rust` CI job runs the `llm` and `chat_engine` filters on
+  Windows, where the `Path`, `PATHEXT`, and `.cmd` tests compile.
 - `pnpm exec vitest run src/test/llm-providers src/test/chat-engine` covers the
   settings section and the engine picker; `src/test/note-chat-default-engine`,
   `src/test/companion-models`, and the default-engine cases in

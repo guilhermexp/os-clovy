@@ -21,6 +21,10 @@
 - [x] 3.1 Atualizar `docs/llm-providers.md` com a resolução no Windows e conferir com o código.
   - `7a6dbf30`: seção "Windows resolution", nota no motor de chat e verificação.
 
+- [x] 3.2 Extra pedido pelo dono antes do merge: CI e texto de CLI não instalado.
+  - CI `6e064d49`: o job `windows-rust` roda `cargo test ... llm` e `chat_engine` após "Test Windows activity capture"; actionlint sem achado novo (o único é o SC2129 preexistente na linha 141, com os rótulos `blacksmith-*` ignorados).
+  - Texto: RED `eff45f04` (o seletor mostrava o `reason` cru do Rust, "`pi` was not found in your login shell PATH."); GREEN `b46967cc`: o seletor usa a chave `chat.engine.notFoundOnPath` (EN "Not found on your PATH.", PT "Não encontrado no PATH da sua sessão."), `settingsPanels.llm.notInstalledReason` em EN fica neutro e o motivo de `llm/detect.rs` não cita mais shell de login. A chave `chat.engine.notInstalled` saiu, porque ficou sem uso. Testes do seletor (EN e PT) e de Ajustes verdes; o detector do impeccable não achou nada.
+
 ## 4. Verificação
 
 - [x] 4.1 `make verify` verde no Mac; `cargo test --manifest-path src-tauri/Cargo.toml --locked llm` e `chat_engine` verdes no `cert`.
