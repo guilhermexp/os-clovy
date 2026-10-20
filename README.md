@@ -205,6 +205,8 @@ against OS Accounts.
 
 Clovy ships near-daily releases and development happens in the open.
 
+Fork integration history: [versioned records](.upstream-sync/history/).
+
 Clovy is also the canonical technical name for repository-controlled packages,
 crates, environment variables, workflows, and release artifacts. Released
 June-era inputs and rollback outputs remain compatibility aliases, while the
