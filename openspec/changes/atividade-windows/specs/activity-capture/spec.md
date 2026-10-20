@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Captura opcional com permissões explícitas
-A captura de atividade SHALL vir desligada. No macOS, ao ligá-la, o Clovy MUST mostrar o estado das permissões necessárias (Acessibilidade, Gravação de Tela e, para eventos de entrada, Monitoramento de Entrada) com atalhos para o painel correspondente dos Ajustes do Sistema, e MUST não capturar enquanto a permissão obrigatória faltar. No Windows, que não tem essas permissões, a captura MUST começar ao ser ligada e a interface MUST NOT mostrar pedidos de permissão.
+A captura de atividade SHALL vir desligada. No macOS, ao ligá-la, o Clovy MUST mostrar o estado das permissões necessárias (Acessibilidade, Gravação de Tela e, para eventos de entrada, Monitoramento de Entrada) com atalhos para o painel correspondente dos Ajustes do Sistema, e MUST não capturar enquanto a permissão obrigatória faltar. No Windows, que não tem essas permissões, o Clovy MUST capturar sem pedir permissões e a interface MUST NOT mostrar pedidos de permissão.
 
 #### Scenario: Ligar sem permissão
 - **WHEN** o usuário liga a captura no macOS sem ter concedido Acessibilidade e Gravação de Tela
