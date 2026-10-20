@@ -321,4 +321,693 @@ mod tests {
             "Sequence rollover from u32::MAX to 0 must be eligible"
         );
     }
+
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    };
+    use std::time::Duration;
+    use windows::core::{BOOL, PCWSTR};
+    use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::DataExchange::{
+        EmptyClipboard, GetClipboardOwner, SetClipboardData,
+    };
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+        GetWindowLongPtrW, PostMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
+        TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HWND_MESSAGE, MSG, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_RENDERFORMAT, WM_USER, WNDCLASSEXW,
+    };
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn CreateWindowStationW(
+            lpwinsta: *const u16,
+            dwflags: u32,
+            dwdesiredaccess: u32,
+            lpsa: *const core::ffi::c_void,
+        ) -> HANDLE;
+        fn GetProcessWindowStation() -> HANDLE;
+        fn SetProcessWindowStation(hwinsta: HANDLE) -> BOOL;
+        fn CloseWindowStation(hwinsta: HANDLE) -> BOOL;
+        fn CreateDesktopW(
+            lpszdesktop: *const u16,
+            lpszdevice: *const u16,
+            pdevmode: *const core::ffi::c_void,
+            dwflags: u32,
+            dwdesiredaccess: u32,
+            lpsa: *const core::ffi::c_void,
+        ) -> HANDLE;
+        fn GetThreadDesktop(dwthreadid: u32) -> HANDLE;
+        fn SetThreadDesktop(hdesktop: HANDLE) -> BOOL;
+        fn CloseDesktop(hdesktop: HANDLE) -> BOOL;
+    }
+
+    const CWF_CREATE_ONLY: u32 = 0x00000001;
+    const WINSTA_ALL_ACCESS: u32 = 0x000F037F;
+    const DESKTOP_ALL_ACCESS: u32 = 0x000F01FF;
+    const WM_ARM_DELAYED_RENDER: u32 = WM_USER + 1;
+    const WM_PUBLISH_PLAIN_TEXT: u32 = WM_USER + 2;
+
+    static STATION_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestWindowStationIsolation {
+        prev_winsta: HANDLE,
+        new_winsta: HANDLE,
+        prev_desk: HANDLE,
+        new_desk: HANDLE,
+    }
+
+    impl TestWindowStationIsolation {
+        fn new() -> Self {
+            let pid = std::process::id();
+            let nonce = STATION_NONCE.fetch_add(1, Ordering::SeqCst);
+            let name_str = format!("ClovyClipboardTest-{pid}-{nonce}");
+            let name_w: Vec<u16> = name_str.encode_utf16().chain(Some(0)).collect();
+
+            unsafe {
+                let prev_winsta = GetProcessWindowStation();
+                assert!(
+                    !prev_winsta.is_invalid() && !prev_winsta.0.is_null(),
+                    "GetProcessWindowStation failed"
+                );
+
+                // Explicit unique name + CWF_CREATE_ONLY=1: never open or reuse existing station
+                let new_winsta = CreateWindowStationW(
+                    name_w.as_ptr(),
+                    CWF_CREATE_ONLY,
+                    WINSTA_ALL_ACCESS,
+                    core::ptr::null(),
+                );
+                assert!(
+                    !new_winsta.is_invalid() && !new_winsta.0.is_null(),
+                    "CreateWindowStationW failed to create unique private station: {name_str}"
+                );
+
+                assert!(
+                    SetProcessWindowStation(new_winsta).as_bool(),
+                    "SetProcessWindowStation failed for {name_str}"
+                );
+
+                let prev_desk = GetThreadDesktop(GetCurrentThreadId());
+                assert!(
+                    !prev_desk.is_invalid() && !prev_desk.0.is_null(),
+                    "GetThreadDesktop failed"
+                );
+
+                let desk_name_str = format!("ClovyDesk-{pid}-{nonce}");
+                let desk_name_w: Vec<u16> = desk_name_str.encode_utf16().chain(Some(0)).collect();
+
+                let new_desk = CreateDesktopW(
+                    desk_name_w.as_ptr(),
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    0,
+                    DESKTOP_ALL_ACCESS,
+                    core::ptr::null(),
+                );
+                assert!(
+                    !new_desk.is_invalid() && !new_desk.0.is_null(),
+                    "CreateDesktopW failed for {desk_name_str}"
+                );
+
+                assert!(
+                    SetThreadDesktop(new_desk).as_bool(),
+                    "SetThreadDesktop failed for test thread on {desk_name_str}"
+                );
+
+                Self {
+                    prev_winsta,
+                    new_winsta,
+                    prev_desk,
+                    new_desk,
+                }
+            }
+        }
+
+        fn desktop_handle(&self) -> isize {
+            self.new_desk.0 as isize
+        }
+    }
+
+    impl Drop for TestWindowStationIsolation {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.new_desk.is_invalid() && !self.new_desk.0.is_null() {
+                    if !self.prev_desk.is_invalid() && !self.prev_desk.0.is_null() {
+                        let _ = SetThreadDesktop(self.prev_desk);
+                    }
+                    let _ = CloseDesktop(self.new_desk);
+                }
+                if !self.new_winsta.is_invalid() && !self.new_winsta.0.is_null() {
+                    if !self.prev_winsta.is_invalid() && !self.prev_winsta.0.is_null() {
+                        let _ = SetProcessWindowStation(self.prev_winsta);
+                    }
+                    let _ = CloseWindowStation(self.new_winsta);
+                }
+            }
+        }
+    }
+
+    struct DelayedOwnerSharedState {
+        render_format_received: AtomicBool,
+        render_format_tx: Mutex<mpsc::Sender<()>>,
+        unblock_rx: Mutex<mpsc::Receiver<()>>,
+        arm_ack_tx: Mutex<mpsc::Sender<bool>>,
+        publish_ack_tx: Mutex<mpsc::Sender<bool>>,
+        late_text: Mutex<Option<String>>,
+        publish_text: Mutex<Option<String>>,
+        cleanup_timeout: Duration,
+    }
+
+    unsafe extern "system" fn delayed_owner_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_CREATE => {
+                let cs = lparam.0 as *const CREATESTRUCTW;
+                if !cs.is_null() {
+                    let state_ptr = (*cs).lpCreateParams as isize;
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr);
+                }
+                LRESULT(0)
+            }
+            WM_ARM_DELAYED_RENDER => {
+                let open_ok = unsafe { OpenClipboard(Some(hwnd)).is_ok() };
+                let empty_ok = if open_ok {
+                    unsafe { EmptyClipboard().is_ok() }
+                } else {
+                    false
+                };
+                if empty_ok {
+                    unsafe {
+                        let _ = SetClipboardData(CF_UNICODETEXT, None);
+                        let _ = CloseClipboard();
+                    }
+                } else if open_ok {
+                    unsafe {
+                        let _ = CloseClipboard();
+                    }
+                }
+                let format_available =
+                    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() };
+                let owner_matches = unsafe { GetClipboardOwner().ok() == Some(hwnd) };
+                let arm_succeeded = open_ok && empty_ok && format_available && owner_matches;
+
+                let state_ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const DelayedOwnerSharedState;
+                if !state_ptr.is_null() {
+                    let state = &*state_ptr;
+                    if let Ok(tx) = state.arm_ack_tx.lock() {
+                        let _ = tx.send(arm_succeeded);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_RENDERFORMAT => {
+                let state_ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const DelayedOwnerSharedState;
+                if !state_ptr.is_null() {
+                    let state = &*state_ptr;
+                    state.render_format_received.store(true, Ordering::SeqCst);
+                    if let Ok(tx) = state.render_format_tx.lock() {
+                        let _ = tx.send(());
+                    }
+                    // Wait for unblock signal (either explicit release or fixture teardown)
+                    if let Ok(rx) = state.unblock_rx.lock() {
+                        let _ = rx.recv_timeout(state.cleanup_timeout);
+                    }
+                    // If synthetic late text was configured, supply it upon release
+                    let text_opt = state.late_text.lock().ok().and_then(|mut t| t.take());
+                    if let Some(text) = text_opt {
+                        let utf16: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+                        let bytes_len = utf16.len() * std::mem::size_of::<u16>();
+                        if let Ok(hmem) = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes_len) } {
+                            let ptr = unsafe { GlobalLock(hmem) } as *mut u16;
+                            if !ptr.is_null() {
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
+                                    let _ = GlobalUnlock(hmem);
+                                    let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0)));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Returning tells Windows delayed rendering has completed or failed
+                LRESULT(0)
+            }
+            WM_PUBLISH_PLAIN_TEXT => {
+                let state_ptr =
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const DelayedOwnerSharedState;
+                let mut success = false;
+                if !state_ptr.is_null() {
+                    let state = &*state_ptr;
+                    let text_opt = state.publish_text.lock().ok().and_then(|mut t| t.take());
+                    if let Some(text) = text_opt {
+                        let open_ok = unsafe { OpenClipboard(Some(hwnd)).is_ok() };
+                        if open_ok {
+                            let _ = unsafe { EmptyClipboard() };
+                            let utf16: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+                            let bytes_len = utf16.len() * std::mem::size_of::<u16>();
+                            if let Ok(hmem) = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes_len) } {
+                                let ptr = unsafe { GlobalLock(hmem) } as *mut u16;
+                                if !ptr.is_null() {
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(
+                                            utf16.as_ptr(),
+                                            ptr,
+                                            utf16.len(),
+                                        );
+                                        let _ = GlobalUnlock(hmem);
+                                        let _ =
+                                            SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0)));
+                                    }
+                                    success = true;
+                                }
+                            }
+                            let _ = unsafe { CloseClipboard() };
+                        }
+                    }
+                    if let Ok(tx) = state.publish_ack_tx.lock() {
+                        let _ = tx.send(success);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    struct DelayedRenderFixture {
+        station_isolation: TestWindowStationIsolation,
+        hwnd: isize,
+        owner_thread: Option<std::thread::JoinHandle<()>>,
+        reader_thread: Option<std::thread::JoinHandle<()>>,
+        unblock_tx: Option<mpsc::Sender<()>>,
+        arm_ack_rx: mpsc::Receiver<bool>,
+        publish_ack_rx: mpsc::Receiver<bool>,
+        render_format_rx: mpsc::Receiver<()>,
+        shared_state: Arc<DelayedOwnerSharedState>,
+    }
+
+    impl DelayedRenderFixture {
+        fn new() -> Self {
+            let station_isolation = TestWindowStationIsolation::new();
+            let desk_handle = station_isolation.desktop_handle();
+
+            let (unblock_tx, unblock_rx) = mpsc::channel();
+            let (arm_ack_tx, arm_ack_rx) = mpsc::channel();
+            let (publish_ack_tx, publish_ack_rx) = mpsc::channel();
+            let (render_format_tx, render_format_rx) = mpsc::channel();
+            let (ready_tx, ready_rx) = mpsc::channel();
+
+            let shared_state = Arc::new(DelayedOwnerSharedState {
+                render_format_received: AtomicBool::new(false),
+                render_format_tx: Mutex::new(render_format_tx),
+                unblock_rx: Mutex::new(unblock_rx),
+                arm_ack_tx: Mutex::new(arm_ack_tx),
+                publish_ack_tx: Mutex::new(publish_ack_tx),
+                late_text: Mutex::new(None),
+                publish_text: Mutex::new(None),
+                cleanup_timeout: Duration::from_secs(3),
+            });
+
+            let shared_state_clone = Arc::clone(&shared_state);
+            let owner_thread = std::thread::spawn(move || {
+                let hdesk = HANDLE(desk_handle as *mut core::ffi::c_void);
+                assert!(
+                    unsafe { SetThreadDesktop(hdesk).as_bool() },
+                    "SetThreadDesktop failed for owner thread"
+                );
+
+                let class_name = w!("ClovyTestDelayedClipboardOwner");
+                let h_instance = unsafe { GetModuleHandleW(None).unwrap_or_default() };
+
+                let mut wc = WNDCLASSEXW::default();
+                wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
+                wc.lpfnWndProc = Some(delayed_owner_wndproc);
+                wc.hInstance = h_instance.into();
+                wc.lpszClassName = class_name;
+
+                unsafe {
+                    let _ = RegisterClassExW(&wc);
+                }
+
+                let raw_ptr = Arc::into_raw(shared_state_clone);
+                let hwnd_res = unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        class_name,
+                        PCWSTR::null(),
+                        WINDOW_STYLE(0),
+                        0,
+                        0,
+                        0,
+                        0,
+                        Some(HWND_MESSAGE),
+                        None,
+                        Some(h_instance.into()),
+                        Some(raw_ptr as *const core::ffi::c_void),
+                    )
+                };
+
+                let hwnd = match hwnd_res {
+                    Ok(h) => h,
+                    Err(_) => {
+                        let _ = unsafe { Arc::from_raw(raw_ptr) };
+                        let _ = ready_tx.send(0);
+                        return;
+                    }
+                };
+
+                let _ = ready_tx.send(hwnd.0 as isize);
+
+                let mut msg = MSG::default();
+                while unsafe { GetMessageW(&mut msg, None, 0, 0).0 > 0 } {
+                    unsafe {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+
+                let _ = unsafe { Arc::from_raw(raw_ptr) };
+            });
+
+            let hwnd = ready_rx.recv_timeout(Duration::from_secs(2)).unwrap_or(0);
+            assert!(hwnd != 0, "failed to create delayed-render owner window");
+
+            Self {
+                station_isolation,
+                hwnd,
+                owner_thread: Some(owner_thread),
+                reader_thread: None,
+                unblock_tx: Some(unblock_tx),
+                arm_ack_rx,
+                publish_ack_rx,
+                render_format_rx,
+                shared_state,
+            }
+        }
+
+        fn arm(&mut self) {
+            let hwnd = HWND(self.hwnd as *mut core::ffi::c_void);
+            unsafe {
+                assert!(
+                    PostMessageW(Some(hwnd), WM_ARM_DELAYED_RENDER, WPARAM(0), LPARAM(0)).is_ok(),
+                    "PostMessageW WM_ARM_DELAYED_RENDER failed"
+                );
+            }
+            let ack = self
+                .arm_ack_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("timed out waiting for native arm ack");
+            assert!(
+                ack,
+                "Native clipboard arm failed: Open/Empty/format available/owner=fixture check was not satisfied"
+            );
+        }
+
+        fn set_late_text(&self, text: &str) {
+            if let Ok(mut lock) = self.shared_state.late_text.lock() {
+                *lock = Some(text.to_string());
+            }
+        }
+
+        fn release_late_render(&mut self) {
+            if let Some(tx) = self.unblock_tx.take() {
+                let _ = tx.send(());
+            }
+        }
+
+        fn publish_plain_text(&mut self, text: &str) {
+            if let Ok(mut lock) = self.shared_state.publish_text.lock() {
+                *lock = Some(text.to_string());
+            }
+            let hwnd = HWND(self.hwnd as *mut core::ffi::c_void);
+            unsafe {
+                assert!(
+                    PostMessageW(Some(hwnd), WM_PUBLISH_PLAIN_TEXT, WPARAM(0), LPARAM(0)).is_ok(),
+                    "PostMessageW WM_PUBLISH_PLAIN_TEXT failed"
+                );
+            }
+            let ack = self
+                .publish_ack_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("timed out waiting for publish plain text ack");
+            assert!(ack, "publish_plain_text failed to set clipboard data");
+        }
+
+        fn wait_clipboard_released(&self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if unsafe { OpenClipboard(None).is_ok() } {
+                    unsafe { CloseClipboard().unwrap() };
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "native reader did not close private clipboard"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn desktop(&self) -> isize {
+            self.station_isolation.desktop_handle()
+        }
+
+        fn set_reader_handle(&mut self, handle: std::thread::JoinHandle<()>) {
+            self.reader_thread = Some(handle);
+        }
+
+        fn wait_render_format_received(&self, timeout: Duration) -> bool {
+            self.render_format_rx.recv_timeout(timeout).is_ok()
+        }
+
+        fn is_render_format_received(&self) -> bool {
+            self.shared_state
+                .render_format_received
+                .load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for DelayedRenderFixture {
+        fn drop(&mut self) {
+            // 1. Unblock delayed-render owner so any pending GetClipboardData returns immediately
+            drop(self.unblock_tx.take());
+
+            // 2. Wait for reader thread to finish and join it (preventing thread leaks)
+            if let Some(reader) = self.reader_thread.take() {
+                let _ = reader.join();
+            }
+
+            // 3. Close owner window and exit owner thread message loop
+            if self.hwnd != 0 {
+                let hwnd = HWND(self.hwnd as *mut core::ffi::c_void);
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+
+            // 4. Join owner thread (preventing thread/window leaks)
+            if let Some(owner) = self.owner_thread.take() {
+                let _ = owner.join();
+            }
+        }
+    }
+
+    #[test]
+    fn test_changed_text_bounded_on_unresponsive_delayed_render_owner() {
+        if std::env::var("CLOVY_TEST_ISOLATED_CLIPBOARD").is_err() {
+            let exe = std::env::current_exe().expect("current_exe");
+            let output = std::process::Command::new(exe)
+                .arg("--exact")
+                .arg("activity::windows::clipboard::tests::test_changed_text_bounded_on_unresponsive_delayed_render_owner")
+                .arg("--nocapture")
+                .env("CLOVY_TEST_ISOLATED_CLIPBOARD", "1")
+                .output()
+                .expect("failed to spawn isolated test child process");
+
+            assert!(
+                output.status.success(),
+                "Isolated test child failed with status {:?}:\nSTDOUT:\n{}\nSTDERR:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Child process execution begins here (isolated from parent suite WinSta):
+        let mut fixture = DelayedRenderFixture::new();
+        let desk = fixture.desktop();
+        let (tx, rx) = mpsc::channel();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+
+        let reader_handle = std::thread::spawn(move || {
+            let hdesk = HANDLE(desk as *mut core::ffi::c_void);
+            assert!(
+                unsafe { SetThreadDesktop(hdesk).as_bool() },
+                "SetThreadDesktop failed for reader thread"
+            );
+            // Construct Clipboard only AFTER reader desktop is attached to private desktop
+            let mut clipboard = Clipboard::new();
+            ready_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            let started = std::time::Instant::now();
+            let res = clipboard.changed_text();
+            let _ = tx.send((res, started.elapsed()));
+        });
+        fixture.set_reader_handle(reader_handle);
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reader setup");
+        fixture.arm();
+        go_tx.send(()).unwrap();
+
+        // Assert WM_RENDERFORMAT is actually received via bounded channel,
+        // avoiding busy/no-change false-green.
+        assert!(
+            fixture.wait_render_format_received(Duration::from_millis(250)),
+            "delayed-render owner must actually receive WM_RENDERFORMAT; avoiding busy/no-change false-green"
+        );
+        assert!(
+            fixture.is_render_format_received(),
+            "render_format_received atomic flag must be true"
+        );
+
+        // Assert capture-facing call returns boundedly
+        let timeout = Duration::from_millis(250);
+        let outcome = rx.recv_timeout(timeout);
+
+        assert!(
+            outcome.is_ok(),
+            "changed_text() must return boundedly (within {:?}) when delayed-render owner does not respond to WM_RENDERFORMAT, but timed out",
+            timeout
+        );
+        let (_, elapsed) = outcome.unwrap();
+        assert!(elapsed < timeout, "capture-facing read took {elapsed:?}");
+    }
+
+    #[test]
+    fn test_changed_text_discards_stale_delayed_render_and_recovers_on_fresh_sequence() {
+        if std::env::var("CLOVY_TEST_ISOLATED_CLIPBOARD_STALE").is_err() {
+            let exe = std::env::current_exe().expect("current_exe");
+            let output = std::process::Command::new(exe)
+                .arg("--exact")
+                .arg("activity::windows::clipboard::tests::test_changed_text_discards_stale_delayed_render_and_recovers_on_fresh_sequence")
+                .arg("--nocapture")
+                .env("CLOVY_TEST_ISOLATED_CLIPBOARD_STALE", "1")
+                .output()
+                .expect("failed to spawn isolated test child process");
+
+            assert!(
+                output.status.success(),
+                "Isolated test child failed with status {:?}:\nSTDOUT:\n{}\nSTDERR:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Child process execution begins here (isolated from parent suite WinSta):
+        let mut fixture = DelayedRenderFixture::new();
+        let desk = fixture.desktop();
+        fixture.set_late_text("late_stale_text");
+
+        let (tx, rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        let reader_handle = std::thread::spawn(move || {
+            let hdesk = HANDLE(desk as *mut core::ffi::c_void);
+            assert!(
+                unsafe { SetThreadDesktop(hdesk).as_bool() },
+                "SetThreadDesktop failed for reader thread"
+            );
+            // Construct Clipboard only AFTER reader desktop is attached to private desktop
+            let mut clipboard = Clipboard::new();
+            ready_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            let started = std::time::Instant::now();
+            let res = clipboard.changed_text();
+            let _ = tx.send((clipboard, res, started.elapsed()));
+        });
+        fixture.set_reader_handle(reader_handle);
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reader setup");
+        fixture.arm();
+        go_tx.send(()).unwrap();
+
+        // Prove WM_RENDERFORMAT was actually received by fixture owner
+        assert!(
+            fixture.wait_render_format_received(Duration::from_millis(250)),
+            "delayed-render owner must actually receive WM_RENDERFORMAT; avoiding busy/no-change false-green"
+        );
+        assert!(
+            fixture.is_render_format_received(),
+            "render_format_received atomic flag must be true"
+        );
+
+        // 1. Read caller must return boundedly before release (current sync fails here semantically)
+        let timeout = Duration::from_millis(250);
+        let outcome = rx.recv_timeout(timeout);
+
+        assert!(
+            outcome.is_ok(),
+            "first read must return boundedly before delayed render is released, but timed out",
+        );
+        let (mut clipboard, first_res, elapsed) = outcome.unwrap();
+        assert!(elapsed < timeout, "capture-facing read took {elapsed:?}");
+        assert_eq!(
+            first_res, None,
+            "first read that timed out before release must return None"
+        );
+
+        // 2. Now explicitly release owner with late synthetic text
+        fixture.release_late_render();
+        fixture.wait_clipboard_released();
+
+        // 3. Subsequent changed_text calls after release must NOT emit the late value!
+        let post_release_res = clipboard.changed_text();
+        assert_ne!(
+            post_release_res.as_deref(),
+            Some("late_stale_text"),
+            "subsequent changed_text call must not emit stale late value"
+        );
+
+        // 4. A separately published fresh sequence must recover normally
+        fixture.publish_plain_text("fresh_recovered_text");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(recovered) = clipboard.changed_text() {
+                assert_eq!(recovered, "fresh_recovered_text");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fresh sequence never recovered"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
 }
