@@ -211,11 +211,14 @@ below) and mirrored to the menu bar.
   registra `input_idle_ms`, uma duração em milissegundos amostrada no tick,
   junto da janela. No macOS, `ActivityPlatform::system_idle_ms()` consulta
   `CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState,
-  kCGAnyInputEventType)`. A consulta não instala um tap nem inicia pedidos de
-  permissão; independe do switch `inputEvents` e do tap de cliques/teclas.
-  Não registra tipo, posição nem conteúdo da entrada. Se a plataforma não
-  informar o dado, o quadro guarda `NULL`. Quadros de monitores secundários
-  continuam sendo apenas contexto e não recebem esse sinal.
+  kCGAnyInputEventType)`. No Windows, consulta `GetLastInputInfo` e
+  `GetTickCount`, subtraindo os contadores de 32 bits com `wrapping_sub` antes
+  de converter para `u64`, inclusive quando o relógio circula após 49,7 dias.
+  A consulta não instala um tap, não pede permissão e independe do switch
+  `inputEvents`, do tap de cliques/teclas ou do Raw Input. Não registra tipo,
+  posição nem conteúdo da entrada. Se a plataforma não informar o dado, o
+  quadro guarda `NULL`. Quadros de monitores secundários continuam sendo
+  apenas contexto e não recebem esse sinal.
 - **Pause control.** "Pause capture" / "Resume capture" (settings and menu
   bar) act on the manual pause only; an automatic pause (work hours, low disk,
   protected video) shows "Pause capture" and resumes on its own.

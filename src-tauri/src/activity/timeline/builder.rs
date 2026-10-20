@@ -649,6 +649,7 @@ pub(super) mod tests {
             1,
         );
         locked.bundle_id = Some("lockapp.exe".into());
+        locked.input_idle_ms = Some(0);
         let signals = BatchSignals {
             input_times: vec![at(10, 0, 0)],
             pauses: Vec::new(),

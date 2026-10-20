@@ -5,7 +5,7 @@
 Motivação em `proposal.md`. Estado atual:
 
 - `CaptureEngine<P: ActivityPlatform>` (`src-tauri/src/activity/engine.rs`) e `schedule.rs`, `filter.rs`, `input.rs`, `store.rs` e `timeline/` não têm código de sistema. O único adaptador é `MacActivityPlatform` (`activity/macos/`), e `activity::setup` só chama `start()` no macOS (`activity/mod.rs:351-361`). Sem runtime, a ingestão de agentes (`coding_agents/mod.rs:236-254`) e o pipeline horário (`day_intelligence/mod.rs:123-125`) também não sobem.
-- O trait tem 10 métodos (`activity/platform.rs:100-131`). A change `atividade-ocioso-e-minutos` acrescenta `system_idle_ms`.
+- O trait tem 11 métodos (`activity/platform.rs:100-131`, incluindo `system_idle_ms`).
 - SQLCipher (`libsqlite3-sys` com `bundled-sqlcipher-vendored-openssl`) só está no alvo macOS (`Cargo.toml:163-169`), para evitar Perl e NASM no build Windows. `store.rs:585-602` recusa abrir sem cifra. A chave usa `keyring` com `windows-native`, já declarado (`Cargo.toml:179-180`), mas nunca instanciado no Windows.
 - Candle e tokenizers só existem no macOS, com `accelerate` (`Cargo.toml:170-177`); fora dele `embed` devolve erro e o destilador cai para o modo lexical (`day_intelligence/embedder.rs:347-351`).
 - Identidade de app e listas: browsers por prefixo de bundle id com fallback por nome (`filter.rs:17-41`), editores por bundle e nome (`timeline/context.rs:41-63`), tela bloqueada por nome `loginwindow`/`screensaverengine` (`timeline/builder.rs:24-25`), DRM por nome do app e domínio (`filter.rs:151-209`), ícones só por bundle id no macOS (`app_icon.rs`).
@@ -57,7 +57,7 @@ As listas de `filter.rs`, `timeline/context.rs`, `timeline/categorize.rs` e `tim
 
 Janela só de mensagens numa thread própria, `RegisterRawInputDevices` com `RIDEV_INPUTSINK` para teclado e mouse; o callback registra só o instante de mouse down e key down (sem código de tecla). Alternativa descartada: `WH_KEYBOARD_LL`/`WH_MOUSE_LL`, que ficam no caminho de toda entrada do sistema e disparam heurísticas de antivírus.
 
-`system_idle_ms` (da change `atividade-ocioso-e-minutos`): `GetLastInputInfo` com `GetTickCount64`.
+`system_idle_ms`: `GetLastInputInfo` com `GetTickCount` e subtração circular (`wrapping_sub`) em `u32`.
 
 ### D6. Área de transferência, telas e disco
 
@@ -102,4 +102,4 @@ Build nativo no `cert` (rustup `stable-x86_64-pc-windows-msvc`, Strawberry Perl,
 - Sem dados antigos no Windows: o banco de atividade nasce cifrado na primeira ativação.
 - macOS sem mudança de dados.
 - Rollback: reverter a change; no Windows o banco de atividade fica órfão e cifrado, sem efeito no banco principal.
-- Ordem: arquivar `add-activity-intelligence`, depois `atividade-ocioso-e-minutos`, depois esta.
+- Ordem: as changes `add-activity-intelligence` e `atividade-ocioso-e-minutos` já foram integradas e arquivadas na main; esta change integra o suporte ao Windows sobre as especificações canônicas.
