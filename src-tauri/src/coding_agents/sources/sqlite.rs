@@ -38,7 +38,7 @@ impl Snapshot {
     }
 
     pub async fn close(self) {
-        self.pool.close().await;
+        crate::db::close_sqlite_pool(&self.pool).await;
     }
 }
 

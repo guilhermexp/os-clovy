@@ -28,6 +28,8 @@ pub mod schedule;
 pub mod settings;
 pub mod store;
 pub mod timeline;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -348,20 +350,28 @@ pub async fn activity_debug_export(
 /// thread ticks while capture is off too (only permissions are read then), so
 /// the Activity tab shows live permission state.
 pub fn setup(app: &mut tauri::App) {
-    #[cfg(target_os = "macos")]
-    {
-        match start(app.handle()) {
-            Ok(runtime) => {
-                app.manage(ActivityState(Some(runtime)));
-                return;
-            }
-            Err(error) => tracing::warn!(%error, "activity capture unavailable"),
-        }
-    }
-    app.manage(ActivityState::default());
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let state = setup_state(|| start(app.handle()));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let state = ActivityState::default();
+    app.manage(state);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+fn setup_state<E: std::fmt::Display>(
+    start: impl FnOnce() -> Result<ActivityRuntime, E>,
+) -> ActivityState {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    match start() {
+        Ok(runtime) => return ActivityState(Some(runtime)),
+        Err(error) => tracing::warn!(%error, "activity capture unavailable"),
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = start;
+    ActivityState::default()
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
     let data_dir = crate::app_paths::app_data_dir(app)?;
     let config_dir = crate::app_paths::app_config_dir(app)?;
@@ -380,8 +390,12 @@ fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
     std::thread::Builder::new()
         .name("clovy-activity-capture".into())
         .spawn(move || {
+            #[cfg(target_os = "macos")]
+            let platform = macos::MacActivityPlatform::new();
+            #[cfg(target_os = "windows")]
+            let platform = windows::WinActivityPlatform::new();
             let engine = engine::CaptureEngine::new(
-                macos::MacActivityPlatform::new(),
+                platform,
                 thread_shared,
                 thread_keys,
                 thread_db,
@@ -402,4 +416,53 @@ fn start(app: &AppHandle) -> Result<ActivityRuntime, tauri::Error> {
         settings_path,
         data_dir,
     })
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_setup_tests {
+    use super::*;
+    use crate::activity::engine::{tests::FakePlatform, CaptureEngine, SystemClock};
+    use crate::activity::key::MemoryKeyStore;
+
+    #[tokio::test]
+    async fn windows_setup_keeps_a_runtime_that_captures_with_an_injected_platform_and_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryKeyStore::default());
+        let state = setup_state(|| {
+            Ok::<_, std::convert::Infallible>(ActivityRuntime {
+                shared: Arc::new(ActivityShared::new(ActivitySettings {
+                    enabled: true,
+                    ..ActivitySettings::default()
+                })),
+                keys: keys.clone(),
+                db_path: dir.path().join(ACTIVITY_DB_FILE),
+                settings_path: dir.path().join("activity-settings.json"),
+                data_dir: dir.path().to_path_buf(),
+            })
+        });
+        let runtime = state
+            .0
+            .as_ref()
+            .expect("Windows setup must keep the runtime");
+        let mut engine = CaptureEngine::new(
+            FakePlatform::granted(),
+            runtime.shared.clone(),
+            runtime.keys.clone(),
+            runtime.db_path.clone(),
+            Box::new(SystemClock),
+            1,
+        );
+        engine.tick().await;
+        assert!(status_of(state.0.as_ref()).supported);
+        assert_eq!(runtime.shared.state(), CaptureState::Active);
+        let store = runtime.shared.store().expect("capture must open its store");
+        let frames = store.frames_after(0, 10).await.unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].app_name, "Zed");
+        assert!(
+            keys.current().is_some(),
+            "the injected vault must receive a key"
+        );
+        store.close().await;
+    }
 }

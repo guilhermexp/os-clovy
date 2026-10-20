@@ -303,11 +303,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Windows packaging tools
+      - name: Install Windows packaging and SQLCipher tools
         shell: pwsh
         run: |
-          choco install nsis 7zip -y --no-progress
+          choco install nsis 7zip strawberryperl nasm -y --no-progress
           "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Cache cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -327,6 +329,10 @@ jobs:
           key: tauri-cargo-target-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             tauri-cargo-target-${{ runner.os }}-
+
+      - name: Test Windows activity capture
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked activity
 
       - name: Build and verify unsigned Windows installer
         shell: pwsh

@@ -472,22 +472,21 @@ pub fn matches_schema(value: &Value, schema: &Value) -> bool {
 mod tests {
     use super::*;
     use registry::LlmEndpointRecord;
-    use std::{
-        collections::BTreeMap,
-        os::unix::fs::PermissionsExt,
-        path::Path,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
     };
+    #[cfg(unix)]
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::Path};
 
+    #[cfg(unix)]
     fn fake_cli(dir: &Path, name: &str, body: &str) {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(unix)]
     fn env_with(dir: &Path) -> shell_env::LoginEnv {
         shell_env::LoginEnv::from_vars(BTreeMap::from([
             (
@@ -503,6 +502,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_call_sends_marker_and_isolation_and_returns_answer() {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("record");
@@ -542,6 +542,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_processes_get_the_profile_but_not_clovy_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("record");
@@ -639,6 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_timeout_kills_the_cli_and_its_children() {
         let dir = tempfile::tempdir().unwrap();
         let pids = dir.path().join("pids");
@@ -679,6 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_test_reports_latency_and_level() {
         let dir = tempfile::tempdir().unwrap();
         fake_cli(
@@ -720,6 +723,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_ignoring_its_schema_flag_is_not_credited_with_schema_support() {
         let dir = tempfile::tempdir().unwrap();
         // Answers what the prompt asks for, never what --json-schema demands.
@@ -739,6 +743,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_that_keeps_tools_is_never_started() {
         let dir = tempfile::tempdir().unwrap();
         let started = dir.path().join("started");

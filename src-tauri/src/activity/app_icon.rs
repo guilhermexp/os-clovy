@@ -1,9 +1,9 @@
-//! The real icons of the apps in "Top apps": resolved on this Mac by bundle
-//! id through Launch Services (`NSWorkspace`), drawn at 64x64 px, and returned
-//! as a PNG data URL. Never by app name (two apps can share one) and never
-//! over the network. Answers, including "no icon" for an app that is gone,
-//! are cached per bundle id for the life of the process, so a render or a
-//! timeline refresh never looks an app up again.
+//! The real icons of "Top apps": resolved by bundle id through Launch Services
+//! on macOS, or by executable/AUMID on Windows, drawn at 64x64 px, and returned
+//! as PNG data URLs. Never by app name (two apps can share one) or a remote
+//! icon service. Successful results are cached per identity. Windows misses
+//! remain retryable so a transient or not-yet-observed app does not lose its
+//! icon for the process lifetime; other platforms preserve negative caching.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -13,7 +13,7 @@ use serde::Deserialize;
 use crate::domain::types::AppError;
 
 /// Pixel size of the drawn icon (32 pt at 2x).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 const ICON_PX: isize = 64;
 /// A PNG above this size is refused rather than sent to the webview.
 const MAX_PNG_BYTES: usize = 64 * 1024;
@@ -29,14 +29,15 @@ pub struct AppIconRequest {
     pub bundle_id: String,
 }
 
-/// A bundle identifier as macOS writes them (reverse DNS); anything else is
-/// not looked up.
+/// An OS app identity, not an arbitrary path. Windows AUMIDs also contain `!`.
 fn plausible_bundle_id(bundle_id: &str) -> bool {
     !bundle_id.is_empty()
         && bundle_id.len() <= 255
-        && bundle_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && bundle_id.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '.' | '-' | '_')
+                || (cfg!(windows) && (c == '!' || c == ' ' || c.is_alphanumeric()))
+        })
 }
 
 /// The app's icon as a PNG data URL, or `None` when the app is not installed,
@@ -57,11 +58,13 @@ pub fn app_icon_data_url(bundle_id: &str) -> Option<String> {
                 base64::engine::general_purpose::STANDARD.encode(png)
             )
         });
-    if let Ok(mut cache) = CACHE.lock() {
-        if cache.len() >= CACHE_LIMIT {
-            cache.clear();
+    if !cfg!(windows) || resolved.is_some() {
+        if let Ok(mut cache) = CACHE.lock() {
+            if cache.len() >= CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(bundle_id.to_string(), resolved.clone());
         }
-        cache.insert(bundle_id.to_string(), resolved.clone());
     }
     resolved
 }
@@ -130,9 +133,192 @@ fn icon_png(bundle_id: &str) -> Option<Vec<u8>> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn icon_png(_bundle_id: &str) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(windows)]
+use windows_icon::icon_png;
+
+#[cfg(windows)]
+mod windows_icon {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::Foundation::{HGLOBAL, RPC_E_CHANGED_MODE, SIZE};
+    use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ, HPALETTE};
+    use windows::Win32::Graphics::Imaging::{
+        CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA, IWICBitmap,
+        IWICImagingFactory, WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant,
+        WICBitmapUseAlpha,
+    };
+    use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+    use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, IPropertyBag2};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_MULTITHREADED, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET,
+    };
+    use windows::Win32::UI::Shell::{
+        IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SHGetFileInfoW,
+        SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SIIGBF_ICONONLY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
+
+    use super::{ICON_PX, MAX_PNG_BYTES};
+    use crate::activity::windows::window::executable_path;
+
+    struct ComApartment(bool);
+
+    impl ComApartment {
+        fn enter() -> Option<Self> {
+            let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            if result.is_ok() {
+                Some(Self(true))
+            } else if result == RPC_E_CHANGED_MODE {
+                // WIC also works in the caller's existing STA; we did not add a COM reference.
+                Some(Self(false))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    struct OwnedIcon(HICON);
+
+    impl Drop for OwnedIcon {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyIcon(self.0) };
+        }
+    }
+
+    struct OwnedBitmap(HBITMAP);
+
+    impl Drop for OwnedBitmap {
+        fn drop(&mut self) {
+            if !self.0 .0.is_null() {
+                let _ = unsafe { DeleteObject(HGDIOBJ(self.0 .0)) };
+            }
+        }
+    }
+
+    fn encode_bitmap_source_to_png(
+        factory: &IWICImagingFactory,
+        bitmap: &IWICBitmap,
+    ) -> Option<Vec<u8>> {
+        let scaler = unsafe { factory.CreateBitmapScaler() }.ok()?;
+        unsafe {
+            scaler.Initialize(
+                bitmap,
+                ICON_PX as u32,
+                ICON_PX as u32,
+                WICBitmapInterpolationModeFant,
+            )
+        }
+        .ok()?;
+        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }.ok()?;
+        let encoder =
+            unsafe { factory.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null()) }.ok()?;
+        unsafe { encoder.Initialize(&stream, WICBitmapEncoderNoCache) }.ok()?;
+        let mut frame = None;
+        unsafe { encoder.CreateNewFrame(&mut frame, std::ptr::null_mut()) }.ok()?;
+        let frame = frame?;
+        unsafe { frame.Initialize(None::<&IPropertyBag2>) }.ok()?;
+        unsafe { frame.SetSize(ICON_PX as u32, ICON_PX as u32) }.ok()?;
+        let mut pixel_format = GUID_WICPixelFormat32bppBGRA;
+        unsafe { frame.SetPixelFormat(&mut pixel_format) }.ok()?;
+        unsafe { frame.WriteSource(&scaler, std::ptr::null()) }.ok()?;
+        unsafe { frame.Commit() }.ok()?;
+        unsafe { encoder.Commit() }.ok()?;
+
+        let mut stat = STATSTG::default();
+        unsafe { stream.Stat(&mut stat, STATFLAG_NONAME) }.ok()?;
+        let len = usize::try_from(stat.cbSize).ok()?;
+        if len == 0 || len > MAX_PNG_BYTES {
+            return None;
+        }
+        unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }.ok()?;
+        let mut png = Vec::<u8>::with_capacity(len);
+        let mut read = 0;
+        unsafe { stream.Read(png.as_mut_ptr().cast(), len as u32, Some(&mut read)) }
+            .ok()
+            .ok()?;
+        if read as usize != len {
+            return None;
+        }
+        // IStream initialized exactly `read` bytes in the reserved allocation above.
+        unsafe { png.set_len(len) };
+        Some(png)
+    }
+
+    fn icon_png_from_file(path: &Path) -> Option<Vec<u8>> {
+        let _apartment = ComApartment::enter()?;
+        let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut info = SHFILEINFOW::default();
+        if unsafe {
+            SHGetFileInfoW(
+                PCWSTR(path_wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                Some(&mut info),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON,
+            )
+        } == 0
+            || info.hIcon.0.is_null()
+        {
+            return None;
+        }
+        let icon = OwnedIcon(info.hIcon);
+        let factory: IWICImagingFactory =
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
+                .ok()?;
+        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }.ok()?;
+        encode_bitmap_source_to_png(&factory, &bitmap)
+    }
+
+    fn icon_png_from_apps_folder(identity: &str) -> Option<Vec<u8>> {
+        let _apartment = ComApartment::enter()?;
+        let parsing_wide: Vec<u16> = r"shell:AppsFolder\"
+            .encode_utf16()
+            .chain(identity.encode_utf16())
+            .chain(Some(0))
+            .collect();
+        let item: IShellItem =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(parsing_wide.as_ptr()), None) }.ok()?;
+        let image_factory: IShellItemImageFactory = item.cast().ok()?;
+        let size = SIZE {
+            cx: ICON_PX as i32,
+            cy: ICON_PX as i32,
+        };
+        let hbitmap = unsafe { image_factory.GetImage(size, SIIGBF_ICONONLY) }.ok()?;
+        let owned_bitmap = OwnedBitmap(hbitmap);
+        let factory: IWICImagingFactory =
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
+                .ok()?;
+        let bitmap = unsafe {
+            factory.CreateBitmapFromHBITMAP(owned_bitmap.0, HPALETTE::default(), WICBitmapUseAlpha)
+        }
+        .ok()?;
+        encode_bitmap_source_to_png(&factory, &bitmap)
+    }
+
+    pub(super) fn icon_png(identity: &str) -> Option<Vec<u8>> {
+        if identity.contains('!') {
+            icon_png_from_apps_folder(identity)
+        } else {
+            let path = executable_path(identity)?;
+            icon_png_from_file(&path)
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -167,5 +353,86 @@ mod tests {
         assert_eq!(app_icon_data_url("com.example.clovy.never-installed"), None);
         assert_eq!(app_icon_data_url("../../Applications/Finder"), None);
         assert_eq!(app_icon_data_url(""), None);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn windows_executables_have_distinct_bounded_png_icons() {
+        let icons: Vec<Vec<u8>> = ["cmd.exe", "explorer.exe"]
+            .into_iter()
+            .map(|executable| {
+                let url = app_icon_data_url(executable).expect("installed Windows app icon");
+                let payload = url.strip_prefix("data:image/png;base64,").expect("PNG URL");
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .unwrap();
+                let dimensions = imagesize::blob_size(&png).unwrap();
+                assert_eq!((dimensions.width, dimensions.height), (64, 64));
+                assert!(png.len() <= MAX_PNG_BYTES);
+                png
+            })
+            .collect();
+        assert_ne!(icons[0], icons[1], "each executable must show its own icon");
+        assert_eq!(app_icon_data_url("../../Windows/explorer.exe"), None);
+        assert_eq!(app_icon_data_url("clovy-never-installed.exe"), None);
+    }
+
+    #[test]
+    #[ignore = "requires installed Calculator and Notepad packages"]
+    fn test_fresh_icon_cache_resolves_installed_packaged_aumid() {
+        // Run alone in a fresh test process: neither identity has been observed.
+        let icons: Vec<Vec<u8>> = [
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+        ]
+        .into_iter()
+        .map(|aumid| {
+            let data_url = app_icon_data_url(aumid)
+                .unwrap_or_else(|| panic!("unobserved installed package has no icon: {aumid}"));
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(data_url.strip_prefix("data:image/png;base64,").unwrap())
+                .unwrap();
+            let dimensions = imagesize::blob_size(&png).unwrap();
+            assert_eq!((dimensions.width, dimensions.height), (64, 64));
+            assert!(png.len() <= MAX_PNG_BYTES);
+            println!("{aumid}: {} PNG bytes", png.len());
+            png
+        })
+        .collect();
+        assert_ne!(icons[0], icons[1], "packages must not share a generic icon");
+    }
+
+    #[test]
+    fn test_icon_cache_miss_does_not_permanently_negative_cache_before_executable_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_id = format!("clovy-delayed-observe-{}.exe", std::process::id());
+        let test_exe = dir.path().join(&bundle_id);
+        std::fs::copy(r"C:\Windows\System32\cmd.exe", &test_exe).unwrap();
+
+        assert_eq!(app_icon_data_url(&bundle_id), None);
+        crate::activity::windows::window::record_executable_path(&bundle_id, test_exe);
+        // A native Shell lookup may be temporarily unavailable under parallel
+        // load. The contract is retryability, not guaranteed immediate drawing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let resolved = loop {
+            if let Some(icon) = app_icon_data_url(&bundle_id) {
+                break icon;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "observing an executable must recover from an earlier icon miss"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(resolved.strip_prefix("data:image/png;base64,").unwrap())
+            .unwrap();
+        let dimensions = imagesize::blob_size(&png).unwrap();
+        assert_eq!((dimensions.width, dimensions.height), (64, 64));
     }
 }

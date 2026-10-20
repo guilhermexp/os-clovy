@@ -1,9 +1,10 @@
 # Coding-agent sessions
 
-Clovy reads the local transcripts of the coding agents the user runs on the
-Mac, cuts them into blocks, summarizes each block, and keeps the blocks in the
-encrypted activity database, so the work done in a terminal or editor agent
-(which screen capture barely sees) reaches the timeline and the day summary.
+Clovy reads the local transcripts of the coding agents the user runs on
+macOS and Windows, cuts them into blocks, summarizes each block, and keeps
+the blocks in the encrypted activity database, so the work done in a
+terminal or editor agent (which screen capture barely sees) reaches the
+timeline and the day summary.
 Terms are in [CONTEXT.md](../CONTEXT.md#activity-capture); the database is the
 one described in [activity-capture.md](activity-capture.md).
 
@@ -29,9 +30,10 @@ Tests: `cargo test --manifest-path src-tauri/Cargo.toml --locked coding_agents`
 
 ## Lifecycle
 
-`coding_agents::setup` (after `activity::setup`, macOS only) starts one async
-loop. While at least one source is on it runs every 60 s, and right away after
-the Activity settings are saved:
+`coding_agents::setup` (after `activity::setup`, cross-platform on macOS and
+Windows) starts one async loop once `SourceRoots::current()` resolves. While at
+least one source is on it runs every 60 s, and right away after the Activity
+settings are saved:
 
 1. Turning any source on makes the capture engine open the activity database
    even when activity capture itself is off (`ActivitySettings::needs_store`).
@@ -63,13 +65,23 @@ of past sessions.
 
 | Source | Store | Prompt vs reply | Working directory |
 |---|---|---|---|
-| Claude Code | `~/.claude/projects/<project>/<session>.jsonl` | `type: user` with text is a prompt; `type: user` with only `tool_result` blocks is a tool result; sidechain and meta records count only for time | `cwd` per record |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `event_msg` `item_completed` `UserMessage` / `AgentMessage` (current), or `user_message` / `agent_message` (earlier); `response_item` is skipped (injected context) | `session_meta` / `turn_context` `cwd` |
-| Copilot CLI | `~/.copilot/session-state/<session>/events.jsonl` | `user.message` `data.content` (not `transformedContent`), `assistant.message`; `session.shutdown` / `session.end` is an exit | `session.start` `data.context.cwd` |
-| Copilot in VS Code | `~/Library/Application Support/Code/User/workspaceStorage/<hash>/chatSessions/*.jsonl` (and `globalStorage/emptyWindowChatSessions/`) | Operation log replayed (`kind` 0 snapshot, 1 set, 2 append); `requests[].message.text`, response parts | `workspace.json` `folder` |
-| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`, table `cursorDiskKV` | `composerData:<id>` gives the turn order, `bubbleId:<id>:<bubble>` type 1 / 2 | none |
-| Cursor CLI | `~/.cursor/chats/<workspace-md5>/<chat>/store.db` | Root blob lists message blobs; user text is the `<user_query>` part | none |
-| Antigravity | `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl` (editor: `~/.gemini/antigravity/brain/`) | `USER_EXPLICIT` `USER_INPUT` (inside `<USER_REQUEST>`), `MODEL` `PLANNER_RESPONSE`, other `MODEL` steps are tool output | none |
+| Claude Code | `~/.claude/projects/<project>/<session>.jsonl` (`%USERPROFILE%\.claude\...` on Windows) | `type: user` with text is a prompt; `type: user` with only `tool_result` blocks is a tool result; sidechain and meta records count only for time | `cwd` per record |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (`%USERPROFILE%\.codex\...` on Windows) | `event_msg` `item_completed` `UserMessage` / `AgentMessage` (current), or `user_message` / `agent_message` (earlier); `response_item` is skipped (injected context) | `session_meta` / `turn_context` `cwd` |
+| Copilot CLI | `~/.copilot/session-state/<session>/events.jsonl` (`%USERPROFILE%\.copilot\...` on Windows) | `user.message` `data.content` (not `transformedContent`), `assistant.message`; `session.shutdown` / `session.end` is an exit | `session.start` `data.context.cwd` |
+| Copilot in VS Code | macOS: `~/Library/Application Support/Code/User/workspaceStorage/<hash>/chatSessions/*.jsonl` (and `globalStorage/emptyWindowChatSessions/`); Windows: `%APPDATA%\Code\User\workspaceStorage\<hash>\chatSessions\*.jsonl` | Operation log replayed (`kind` 0 snapshot, 1 set, 2 append); `requests[].message.text`, response parts | `workspace.json` `folder` |
+| Cursor | macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`; Windows: `%APPDATA%\Cursor\User\globalStorage\state.vscdb`, table `cursorDiskKV` | `composerData:<id>` gives the turn order, `bubbleId:<id>:<bubble>` type 1 / 2 | none |
+| Cursor CLI | `~/.cursor/chats/<workspace-md5>/<chat>/store.db` (`%USERPROFILE%\.cursor\...` on Windows) | Root blob lists message blobs; user text is the `<user_query>` part | none |
+| Antigravity | `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl` (editor: `~/.gemini/antigravity/brain/`) (`%USERPROFILE%\.gemini\...` on Windows) | `USER_EXPLICIT` `USER_INPUT` (inside `<USER_REQUEST>`), `MODEL` `PLANNER_RESPONSE`, other `MODEL` steps are tool output | none |
+
+Source locations and path resolution (`SourceRoots`):
+
+- **User home (`roots.home`)**:
+  - `SourceRoots::current()` resolves the user's home directory across platforms: checks `HOME` first, falls back to `dirs::home_dir()`, and falls back to `USERPROFILE` on Windows.
+  - Tests use `SourceRoots::from_home(path)` to point home at a temporary fixture directory.
+- **Application support (`roots.app_support(app)`)**:
+  - On macOS: resolves under `~/Library/Application Support/<app>`.
+  - On Windows: resolves via `dirs::config_dir()`, falling back to the `APPDATA` environment variable, or `%USERPROFILE%\AppData\Roaming\<app>`.
+  - In tests, `SourceRoots::from_windows(profile, appdata)` configures explicit profile and AppData paths.
 
 Source boundary and read-only rules:
 
@@ -78,7 +90,20 @@ Source boundary and read-only rules:
   listings skip symlinked entries, a candidate (and a SQLite WAL next to it)
   must be a regular file, and right before reading the candidate is checked
   again to be a regular file whose canonical path is under the canonical
-  root. Files are opened with `O_NOFOLLOW`. Nothing outside a root is read.
+  root.
+- **Symlink and reparse point defense**:
+  - On Unix / macOS, files are opened with `libc::O_NOFOLLOW` so a symlink is
+    never traversed.
+  - On Windows, where `O_NOFOLLOW` does not exist, `open_regular` opens candidates
+    with `FILE_FLAG_OPEN_REPARSE_POINT` (0x0020_0000), opening the final path
+    component itself rather than following it if it is a reparse point.
+    `GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &attributes, ...)`
+    rejects handles marked `FILE_ATTRIBUTE_REPARSE_POINT` or
+    `FILE_ATTRIBUTE_DIRECTORY` with `io::ErrorKind::PermissionDenied`.
+    The retained, validated handle is used for reading; the file is not
+    reopened after the check. This protects the final component against a
+    check/open race; it is not a claim that mutable parent junctions are
+    immune to every path-resolution race.
 - Files are opened for reading only.
 - SQLite stores (Cursor, Cursor CLI) are never opened in place: opening a live
   WAL database, even read-only, can make SQLite create or write `-wal`/`-shm`
@@ -194,8 +219,11 @@ Get the store from `ActivityState::shared()` → `ActivityShared::store()`.
 
 `activity-settings.json` gains `codingAgents`: `{ claudeCode, codex,
 copilotCli, copilotVscode, cursor, cursorCli, antigravity }`, all `false` by
-default; older files load with every source off. They are saved with the rest
-of the activity settings (`activity_save_settings`), which also wakes the scan.
+default; older files load with every source off. The DTO exposes only these
+seven source switches (there is no separate summary-disable toggle; summaries
+are automatically handled for enabled sources when a suitable summarizer is
+available). They are saved with the rest of the activity settings
+(`activity_save_settings`), which also wakes the scan.
 
 | Command | Request | Returns |
 |---|---|---|
@@ -208,8 +236,8 @@ Event: `clovy://coding-agents-updated` (no payload).
 ## UI
 
 - **Settings, Activity, "Coding agents"**: one switch per source with "Found on
-  this Mac" / "Not found on this Mac", how summaries are made, and the last
-  read time (or why the database is unavailable).
+  this device" / "Not found on this device" (device-neutral wording), how
+  summaries are made, and the last read time (or why the database is unavailable).
 - **"Today" view lane**: `CodingAgentLane` is registered in
   `EXTRA_TIMELINE_LANES` (`src/components/activity-timeline/lanes.ts`, see
   [activity-timeline.md](activity-timeline.md#lane-extension-point)), so the
@@ -227,14 +255,18 @@ Event: `clovy://coding-agents-updated` (no payload).
 
 - Unit and integration: readers per agent with synthetic fixtures (including
   real SQLite stores for Cursor and Cursor CLI), symlinks below a root never
-  discovered or opened (and a symlinked root resolved once), oversized JSONL
-  lines skipped, bounded block transcripts, the segmenter (blocks only at
-  prompts, delayed output joins the open block), store lifecycle (including a
-  block crossing the window start, and a database at the timeline's migration
-  2 gaining `coding_agent_blocks` as 3), summarizer choice (only tool-free CLIs)
-  and drain with a fake backend, the fenced prompt, the first-line marker
-  rule, and the spec scenarios over a temporary home (a disabled source is
-  never read, transcripts keep hash and mtime and nothing is created next to
-  them, 2 h 30 min becomes three blocks cut at prompts, a conversation
-  started by Clovy's own summary prompt is skipped).
+  discovered or opened (and a symlinked root resolved once), Windows
+  `FILE_FLAG_OPEN_REPARSE_POINT` handle attribute reparse point and directory
+  rejection, cross-platform path resolution in `SourceRoots::current` /
+  `SourceRoots::from_windows` (verifying `HOME`, `USERPROFILE`, `APPDATA`, and
+  Mac `Library/Application Support`), oversized JSONL lines skipped, bounded
+  block transcripts, the segmenter (blocks only at prompts, delayed output
+  joins the open block), store lifecycle (including a block crossing the window
+  start, and a database at the timeline's migration 2 gaining
+  `coding_agent_blocks` as 3), summarizer choice (only tool-free CLIs) and drain
+  with a fake backend, the fenced prompt, the first-line marker rule, and the
+  spec scenarios over a temporary home (a disabled source is never read,
+  transcripts keep hash and mtime and nothing is created next to them, 2 h 30 min
+  becomes three blocks cut at prompts, a conversation started by Clovy's own
+  summary prompt is skipped).
 - Component: `src/test/coding-agents.test.tsx` (settings section and lane).

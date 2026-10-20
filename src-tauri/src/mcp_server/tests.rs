@@ -551,6 +551,7 @@ pub(crate) fn by_id(messages: &[Value], id: i64) -> &Value {
         .unwrap_or_else(|| panic!("no answer for id {id}: {messages:?}"))
 }
 
+#[cfg(unix)]
 pub(crate) fn handler_for(data: McpData) -> channel::Handler {
     let data = Arc::new(data);
     Arc::new(move |message: Value| {
@@ -572,6 +573,7 @@ pub(crate) async fn run_relay(dir: &Path, lines: &[Value]) -> Captured {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn the_relay_answers_mcp_calls_through_the_authenticated_socket() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
@@ -621,6 +623,7 @@ async fn the_relay_answers_mcp_calls_through_the_authenticated_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn the_relay_reports_a_server_that_is_off_or_never_enabled() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
@@ -660,6 +663,7 @@ async fn the_relay_reports_a_server_that_is_off_or_never_enabled() {
 }
 
 /// `channel::connect`, retried while the app frees slots.
+#[cfg(unix)]
 async fn connect_eventually(dir: &Path) -> std::os::unix::net::UnixStream {
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -676,6 +680,7 @@ async fn connect_eventually(dir: &Path) -> std::os::unix::net::UnixStream {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn peers_that_never_authenticate_are_capped_and_closed_at_once() {
     use tokio::io::AsyncReadExt;
     let root = tempfile::tempdir().unwrap();
@@ -706,6 +711,7 @@ async fn peers_that_never_authenticate_are_capped_and_closed_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn authenticated_connections_beyond_the_cap_are_turned_away_as_busy() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
@@ -737,6 +743,7 @@ async fn authenticated_connections_beyond_the_cap_are_turned_away_as_busy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn a_connection_gets_only_a_few_requests_answered_at_once() {
     use std::io::{BufRead, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};

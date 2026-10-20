@@ -58,9 +58,29 @@ const TITLE_LAST_BUNDLES: &[&str] = &[
     "dev.kiro.desktop",
     "com.google.antigravity",
 ];
+const TITLE_LAST_EXECUTABLES: &[&str] = &[
+    "code.exe",
+    "code-insiders.exe",
+    "cursor.exe",
+    "windsurf.exe",
+    "vscodium.exe",
+    "positron.exe",
+    "trae.exe",
+    "kiro.exe",
+    "antigravity.exe",
+];
 /// Editors whose window title starts with the workspace ("project — file").
 const TITLE_FIRST_EDITORS: &[&str] = &["zed", "xcode"];
 const TITLE_FIRST_BUNDLES: &[&str] = &["dev.zed.zed", "com.apple.dt.xcode", "com.jetbrains."];
+const TITLE_FIRST_EXECUTABLES: &[&str] = &[
+    "zed.exe",
+    "idea64.exe",
+    "pycharm64.exe",
+    "webstorm64.exe",
+    "goland64.exe",
+    "rustrover64.exe",
+    "rider64.exe",
+];
 /// Title separators, the editors' own (em dash, en dash) before the hyphen.
 const SEPARATORS: &[&str] = &[" \u{2014} ", " \u{2013} ", " - "];
 
@@ -76,9 +96,15 @@ fn editor_layout(app_name: &str, bundle_id: Option<&str>) -> Option<TitleLayout>
     let bundle_matches = |prefixes: &[&str]| {
         !bundle.is_empty() && prefixes.iter().any(|prefix| bundle.starts_with(prefix))
     };
-    if bundle_matches(TITLE_LAST_BUNDLES) || TITLE_LAST_EDITORS.contains(&app.as_str()) {
+    if bundle_matches(TITLE_LAST_BUNDLES)
+        || TITLE_LAST_EXECUTABLES.contains(&bundle.as_str())
+        || TITLE_LAST_EDITORS.contains(&app.as_str())
+    {
         Some(TitleLayout::WorkspaceLast)
-    } else if bundle_matches(TITLE_FIRST_BUNDLES) || TITLE_FIRST_EDITORS.contains(&app.as_str()) {
+    } else if bundle_matches(TITLE_FIRST_BUNDLES)
+        || TITLE_FIRST_EXECUTABLES.contains(&bundle.as_str())
+        || TITLE_FIRST_EDITORS.contains(&app.as_str())
+    {
         Some(TitleLayout::WorkspaceFirst)
     } else {
         None
@@ -94,7 +120,29 @@ pub fn editor_workspace(
     window_title: &str,
 ) -> Option<String> {
     let layout = editor_layout(app_name, bundle_id)?;
-    let title = window_title.trim();
+    let mut title = window_title.trim();
+    // Windows editor titles may append the product after the workspace.
+    // Leave the existing macOS title interpretation untouched.
+    if bundle_id.is_some_and(|id| {
+        TITLE_LAST_EXECUTABLES
+            .iter()
+            .any(|exe| id.eq_ignore_ascii_case(exe))
+    }) {
+        if let Some((index, separator)) = SEPARATORS
+            .iter()
+            .filter_map(|separator| title.rfind(separator).map(|index| (index, *separator)))
+            .max_by_key(|(index, _)| *index)
+        {
+            let brand = &title[index + separator.len()..];
+            if brand.eq_ignore_ascii_case(app_name.trim())
+                || TITLE_LAST_EDITORS
+                    .iter()
+                    .any(|name| brand.eq_ignore_ascii_case(name))
+            {
+                title = &title[..index];
+            }
+        }
+    }
     let segment = match layout {
         TitleLayout::WorkspaceLast => {
             let (index, separator) = SEPARATORS
@@ -181,6 +229,49 @@ mod tests {
                 "{app}: {title}"
             );
         }
+    }
+
+    #[test]
+    fn windows_editor_identity_extracts_the_workspace_without_english_app_names() {
+        for executable in [
+            "code.exe",
+            "cursor.exe",
+            "windsurf.exe",
+            "vscodium.exe",
+            "antigravity.exe",
+        ] {
+            assert_eq!(
+                editor_workspace("Localized editor", Some(executable), "main.rs - billing")
+                    .as_deref(),
+                Some("billing"),
+                "{executable}"
+            );
+        }
+        assert_eq!(
+            editor_workspace("Localized editor", Some("zed.exe"), "billing - main.rs").as_deref(),
+            Some("billing")
+        );
+        assert_eq!(
+            editor_workspace("Document", Some("code.exe.backup"), "main.rs - billing"),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_editor_titles_do_not_use_product_branding_as_the_workspace() {
+        assert_eq!(
+            editor_workspace(
+                "Visual Studio Code",
+                Some("code.exe"),
+                "main.rs - billing - Visual Studio Code",
+            )
+            .as_deref(),
+            Some("billing")
+        );
+        assert_eq!(
+            editor_workspace("Cursor", Some("cursor.exe"), "main.rs - billing - Cursor").as_deref(),
+            Some("billing")
+        );
     }
 
     #[test]

@@ -36,6 +36,11 @@ try {
     [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64
   ) { throw "Native x64 Windows is required." }
   foreach ($tool in @("node", "pnpm", "rustc", "cargo")) { Require-Command $tool }
+  foreach ($tool in @("perl", "nasm")) {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+      throw "SQLCipher requires Strawberry Perl and NASM on PATH; missing tool: $tool."
+    }
+  }
   $nodeVersionOutput = & node --version
   $nodeVersionExit = $LASTEXITCODE
   $nodeVersion = "$nodeVersionOutput".Trim()

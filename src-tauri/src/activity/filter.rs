@@ -33,6 +33,20 @@ const BROWSER_BUNDLE_PREFIXES: &[&str] = &[
     "app.zen-browser.zen",
 ];
 
+// Executable identities are exact, unlike macOS bundle-id families.
+const BROWSER_EXECUTABLES: &[&str] = &[
+    "msedge.exe",
+    "chrome.exe",
+    "chromium.exe",
+    "firefox.exe",
+    "brave.exe",
+    "opera.exe",
+    "vivaldi.exe",
+    "arc.exe",
+    "zen.exe",
+    "helium.exe",
+];
+
 /// Whole words of browser app names, for apps whose bundle id is unknown.
 /// Word match, not substring: "Knowledge" must not read as "edge".
 const BROWSER_NAME_WORDS: &[&str] = &[
@@ -94,12 +108,94 @@ pub fn is_browser(app_name: &str, bundle_id: Option<&str>) -> bool {
         BROWSER_BUNDLE_PREFIXES
             .iter()
             .any(|prefix| bundle.starts_with(prefix))
+            || BROWSER_EXECUTABLES.contains(&bundle.as_str())
     });
     by_bundle
         || app_name
             .to_lowercase()
             .split(|ch: char| !ch.is_alphanumeric())
             .any(|word| BROWSER_NAME_WORDS.contains(&word))
+}
+
+/// Normalizes browser URL strings from AXURL attributes or address fields.
+pub fn normalize_browser_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Supported schemes
+    let allowed_schemes = [
+        "http://",
+        "https://",
+        "file://",
+        "about:",
+        "chrome://",
+        "chrome-extension://",
+        "edge://",
+        "brave://",
+        "arc://",
+        "safari://",
+    ];
+
+    for scheme in &allowed_schemes {
+        if trimmed.starts_with(scheme) {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    // Domain-like pattern without scheme: e.g. "github.com/repo" or "news.ycombinator.com"
+    if !trimmed.contains(' ') && (trimmed.contains('.') || trimmed.starts_with("localhost")) {
+        return Some(format!("https://{trimmed}"));
+    }
+
+    None
+}
+
+/// Checks window title for private/incognito browsing indicators across
+/// Chrome-family, Safari, and other browsers in multiple locales (en, pt-BR, es, fr, de).
+pub fn has_private_window_marker(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    let markers = [
+        "incognito",
+        "inprivate",
+        "private browsing",
+        "(private)",
+        "[private]",
+        "navegação privada",
+        "navegacao privada",
+        // Firefox pt-BR: "… — Navegação privativa do Mozilla Firefox".
+        "navegação privativa",
+        "navegacao privativa",
+        "janela privativa",
+        "janela privada",
+        "aba privada",
+        "guia privada",
+        "anônima",
+        // Chrome pt-BR incognito window titles end in "(Modo anônimo)"
+        // (observed live on Chrome with a pt-BR UI).
+        "anônimo",
+        "anonimo",
+        "anonima",
+        "janela anônima",
+        "janela anonima",
+        "guia anônima",
+        "guia anonima",
+        "navegação anônima",
+        "navegacao anonima",
+        "incógnito",
+        "navegación privada",
+        "navegacion privada",
+        "ventana privada",
+        "navigation privée",
+        "navigation privee",
+        "fenêtre privée",
+        "fenetre privee",
+        "privates surfen",
+        "inkognito",
+    ];
+
+    markers.iter().any(|&m| lower.contains(m))
 }
 
 pub fn is_clovy_window(window: &WindowDescriptor, own_pid: i32) -> bool {
@@ -327,6 +423,31 @@ mod tests {
         ] {
             assert!(!is_browser(name, bundle), "{name} is not a browser");
         }
+    }
+
+    #[test]
+    fn windows_browser_executables_apply_domain_privacy_rules() {
+        for executable in [
+            "msedge.exe",
+            "chrome.exe",
+            "firefox.exe",
+            "brave.exe",
+            "opera.exe",
+            "vivaldi.exe",
+        ] {
+            let browser = WindowDescriptor {
+                pid: 42,
+                app_name: "Localized browser description".into(),
+                bundle_id: Some(executable.into()),
+                ..WindowDescriptor::default()
+            };
+            assert_eq!(
+                skip_reason(&browser, &settings(), 1),
+                Some(SkipReason::UnknownBrowserUrl),
+                "{executable}"
+            );
+        }
+        assert!(!is_browser("Document", Some("msedge.exe.backup")));
     }
 
     #[test]

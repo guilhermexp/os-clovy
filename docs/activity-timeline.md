@@ -3,9 +3,11 @@
 Turns [activity capture](activity-capture.md) frames into a day timeline:
 app sessions with their context, classified gaps, deterministic categories,
 day statistics, and full-text search, all inside the encrypted
-`activity.sqlite3`. The "Today" view and the agent read it; later slices (day
-summaries, the MCP server, coding-agent lanes) build on the query API below.
-Terms are in [CONTEXT.md](../CONTEXT.md#activity-capture).
+`activity.sqlite3`. Supported on macOS and Windows 10 (1903+) / Windows 11 (x64)
+with dedicated capture adapters; Linux remains unsupported. The "Today" view
+and the agent read it; later slices (day summaries, the MCP server, coding-agent
+lanes) build on the query API below. Terms are in
+[CONTEXT.md](../CONTEXT.md#activity-capture).
 
 ## Where the code lives
 
@@ -20,7 +22,7 @@ Terms are in [CONTEXT.md](../CONTEXT.md#activity-capture).
 | `src-tauri/src/activity/timeline/mod.rs` | Tauri commands, background loop, exclusion/retention filtering, agent tool wiring |
 | `src-tauri/src/activity/timeline/agent_tools.rs` | `search_activity`, `get_activity_timeline` |
 | `src-tauri/src/activity/timeline/debug_import.rs` | Development-only fixture import (`CLOVY_ACTIVITY_DEBUG_IMPORT`) |
-| `src-tauri/src/activity/app_icon.rs` | `activity_app_icon`: an installed app's icon by bundle id (Launch Services, 64x64 PNG, per-id cache) |
+| `src-tauri/src/activity/app_icon.rs` | `activity_app_icon`: an installed app's icon resolved by bundle id through Launch Services on macOS; executable icons via `SHGetFileInfoW` and packaged AUMIDs via AppsFolder `IShellItemImageFactory` on Windows. WIC draws a 64x64 PNG (≤ 64 KB). Successful Windows results are cached; misses remain retryable without observing a window first. |
 | `src/components/activity-timeline/`, `src/lib/activity-timeline.ts` | The "Today" view and its typed bindings; the workstream timeline is `WorkstreamTimeline.tsx` / `WorkstreamDetail.tsx` with its pure layout in `workstream-timeline-layout.ts` |
 
 Tests: `cargo test --manifest-path src-tauri/Cargo.toml activity` (timeline
@@ -29,7 +31,7 @@ tests are under `activity::timeline::`) and
 
 ## ETL
 
-`timeline::start` (from `activity::setup` on macOS) runs the background loop:
+`timeline::start` (from `activity::setup` on macOS and Windows) runs the background loop:
 while a backlog remains it runs passes of at most 10,000 frames back to back,
 releasing the pass lock between them; once caught up, one pass every 30 s while
 the activity store is open. `activity_timeline`, `activity_timeline_search`, and
@@ -57,14 +59,20 @@ Rules (`builder.rs`):
   (3.000 ms, inclusive). Esse último sinal vem do sistema a cada tick e inclui
   mouse, rolagem e trackpad, sem ampliar o tap nem gravar eventos sintéticos.
   Sem o valor (`NULL`), vale a regra anterior. Os demais quadros são ociosos;
-  `loginwindow` e `ScreenSaverEngine` nunca são úteis, mesmo com entrada.
+  `loginwindow`, `ScreenSaverEngine`, `LockApp.exe` e `LogonUI.exe` nunca são
+  úteis, mesmo com entrada.
+  No Windows, quadros de `LockApp.exe` e `LogonUI.exe` também não contam como
+  evidência de uma área de trabalho ociosa: o intervalo fica em **Ausente**,
+  tanto enquanto o bloqueio continua quanto depois de retomar o trabalho.
+  A contagem preexistente dos apps de bloqueio do macOS é preservada.
   O ETL recebe a duração em `StoredFrame` por `frames_after`; o limiar de 5 min
   e a divisão entre sono, ociosidade e pausa não mudam. Ler parado por mais de
   5 min sem nenhuma entrada continua podendo produzir uma lacuna ociosa.
-- **Sessions**: consecutive useful frames of the same app (name and bundle id)
-  and context. A new context splits a session only when both are known: the
-  browser's domain (`filter::url_host`, no `www.`) or the editor's workspace
-  (VS Code family: last title segment; Zed, Xcode, JetBrains: first segment).
+- **Sessions**: consecutive useful frames of the same app (name and bundle id /
+  executable name / AUMID) and context. A new context splits a session only when
+  both are known: the browser's domain (`filter::url_host`, no `www.`) or the
+  editor's workspace (VS Code family: last title segment; Zed, Xcode, JetBrains:
+  first segment).
   A session lasts from its first frame to the next session's first frame, or to
   its last useful frame + 2 s when a gap follows. At most one session is
   active; it is categorized provisionally on every pass and finally on close.
@@ -72,12 +80,12 @@ Rules (`builder.rs`):
   one. Classified as `paused` (a pause record of one reason covers at least
   half; the reason is kept: `manual`, `work_hours`, `low_disk`, or
   `protected_video`), else `idle` (idle frames cover at least half), else
-  `sleep` (no frames: the Mac slept, capture was off, or an excluded app was in
+  `sleep` (no frames: the computer slept, capture was off, or an excluded app was in
   front). A gap closes the session before it, so its time is never session
   time. An active session left more than 5 minutes after its last useful frame
   is closed by the next pass that caught up.
 - **Ongoing gap**: while the gap has not ended yet (an unchanged screen, an open
-  pause, the Mac asleep), it is not stored; reads that are caught up with
+  pause, the machine asleep), it is not stored; reads that are caught up with
   capture add it from the last useful frame to now (`ongoing: true`, `id` 0),
   classified the same way, so the view, stats, and agent count idle and away
   time as it happens. The next useful frame stores the real gap.
@@ -155,20 +163,25 @@ allowed rows are found or the matches run out.
 | `activity_timeline` | `{ request: { from, to } }` (RFC 3339) | `{ availability, message, captureEnabled, sessions, gaps, stats }`; a gap with `ongoing: true` (`id` 0) runs to the time of the read |
 | `activity_timeline_session` | `{ request: { id } }` | `{ session, windows, textExcerpt }` through `visible_session_detail`; error `activity_session_not_found` (also past retention or excluded) |
 | `activity_timeline_search` | `{ request: { query, from, to, limit } }` (`from`/`to`/`limit` nullable; limit 1 to 200, default 50) | `{ availability, results }` |
-| `activity_app_icon` | `{ request: { bundleId } }` | The installed app's icon as a 64x64 PNG data URL (at most 64 KB), or `null` when the app is gone, the id is malformed, or the platform is not macOS |
+| `activity_app_icon` | `{ request: { bundleId } }` | The installed app's icon as a 64x64 PNG data URL (at most 64 KB), or `null` when the app is gone, the id is malformed, the PNG exceeds 64 KB, or capture is unsupported (Linux) |
 
 `stats.topApps` (`{ appName, bundleId, durationMs }`, at most 5) tells apps
 apart by bundle id: two apps sharing a name stay two rows, and an app renamed
 by an update stays one; sessions without a bundle id group by name.
-`activity_app_icon` (`activity/app_icon.rs`) resolves only by bundle id through
-Launch Services (`NSWorkspace`, no scan of `/Applications`, no network), draws
-the icon into a bitmap, and caches every answer (including "no icon") per
-bundle id for the life of the process (256 ids, then the cache starts over);
-the frontend keeps one request per id (`activityAppIcon`).
+`activity_app_icon` (`activity/app_icon.rs`) resolves app icons locally without
+network calls. On macOS it resolves by bundle id through Launch Services
+(`NSWorkspace`, no scan of `/Applications`) and draws the icon into a bitmap.
+On Windows it resolves the executable path for the bundle id / AUMID (via cache,
+`App Paths`, or `SearchPathW`), extracts the `HICON` via Shell (`SHGetFileInfoW`),
+and scales it into a 64x64 PNG using Windows Imaging Component
+(`CLSID_WICImagingFactory` and `IWICBitmapScaler`). Encoded PNGs exceeding 64 KB
+are rejected. Answers (including `None` for missing apps) are cached per
+identity for the life of the process (up to 256 entries before cycling); the
+frontend keeps one in-flight request per id (`activityAppIcon`).
 
 `availability`: `ready`, `neverEnabled` (no activity database and capture
-off), `unsupported` (not macOS), `keyMissing`, `error`. When capture is off
-but history exists, the view opens the database to show it. Event
+off), `unsupported` (Linux / unsupported platform), `keyMissing`, `error`. When
+capture is off but history exists, the view opens the database to show it. Event
 `clovy://activity-timeline` (`{ changed: true }`) follows a pass that wrote
 sessions or gaps. Types live in `src/lib/activity-timeline.ts`.
 
@@ -190,14 +203,27 @@ these two tools under the same names plus four more over the same query API
 
 ## "Today" view
 
-First-level sidebar view (hidden where capture is unsupported). Day navigation,
-search with a period filter whose results open the day at that session, and
-two sections: this timeline and the "Day summary"
-([day-intelligence.md](day-intelligence.md)). On a narrow window the header's groups (day
-navigation, section tabs, search with its period filter) wrap whole onto a
-second row; labels never break a line and only the search field shrinks
+First-level sidebar view (visible on macOS and Windows; hidden where capture is
+unsupported on Linux via `isMacLikePlatform() || isWindowsPlatform()`). Day
+navigation, search with a period filter whose results open the day at that
+session, and two sections: this timeline and the "Day summary"
+([day-intelligence.md](day-intelligence.md)). On a narrow window the header's
+groups (day navigation, section tabs, search with its period filter) wrap whole
+onto a second row; labels never break a line and only the search field shrinks
 (to 140 px).
 
+View states in `ActivityTimelineView.tsx`:
+- **`unsupported`**: renders the empty state card (`timeline-unsupported-title`,
+  `activity.unsupported.title`, `activity.unsupported.description`) with **no
+  capture CTA button**.
+- **`neverEnabled`**: renders the empty state card with a primary action button
+  "Turn on in Settings" (`activity.emptyState.turnOn`) navigating to the Activity
+  settings tab (`onNavigateToSettings("activity")`).
+- **`keyMissing` / `error`**: renders top alert banner notices with recovery
+  actions (e.g. "Open Settings" to recreate the database).
+- **`ready`**: renders day navigation, search with period filter (`today`, `7d`,
+  `30d`, `all`), section tabs ("Timeline" and "Day summary"), and the
+  "Workstreams" / "Sessions" switch.
 The timeline shows the day's workstreams by default ("Workstreams" /
 "Sessions" switch):
 

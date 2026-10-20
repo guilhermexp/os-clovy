@@ -5,7 +5,7 @@ export default defineMessages({
     "activity.tab.label": "Activity",
     "activity.title": "Activity",
     "activity.blurb":
-      "Text-only capture from your active apps, stored in an encrypted local database. Nothing leaves this Mac, and no screenshots are saved.",
+      "Text-only capture from your active apps, stored in an encrypted local database. Nothing leaves this device, and no screenshots are saved.",
 
     "activity.capture.title": "Capture activity",
     "activity.capture.description":
@@ -173,8 +173,10 @@ export default defineMessages({
 
     "activity.emptyState.title": "Activity timeline",
     "activity.emptyState.description":
-      "Text-only activity capture records window titles and visible text into an encrypted database stored only on this Mac. Nothing leaves this Mac, and no screenshots are saved.",
+      "Text-only activity capture records window titles and visible text into an encrypted database stored only on this device. Nothing leaves this device, and no screenshots are saved.",
     "activity.emptyState.turnOn": "Turn on in Settings",
+    "activity.unsupported.title": "Activity capture is not supported",
+    "activity.unsupported.description": "Activity capture is not supported on this system.",
     "activity.state.keyMissingNotice":
       "Encryption key is missing from Keychain. Recreate the database in Settings to resume capture.",
     "activity.state.errorNotice": "Could not load timeline: {message}",
@@ -215,7 +217,7 @@ export default defineMessages({
     "activity.tab.label": "Atividade",
     "activity.title": "Atividade",
     "activity.blurb":
-      "Captura apenas de texto dos seus aplicativos ativos, armazenada em um banco de dados local criptografado. Nada sai deste Mac e nenhuma captura de tela é salva.",
+      "Captura apenas de texto dos seus aplicativos ativos, armazenada em um banco de dados local criptografado. Nada sai deste dispositivo e nenhuma captura de tela é salva.",
 
     "activity.capture.title": "Capturar atividade",
     "activity.capture.description":
@@ -384,8 +386,10 @@ export default defineMessages({
 
     "activity.emptyState.title": "Linha do tempo de atividade",
     "activity.emptyState.description":
-      "A captura apenas de texto grava títulos de janelas e texto visível em um banco de dados criptografado armazenado apenas neste Mac. Nada sai deste Mac e nenhuma captura de tela é salva.",
+      "A captura apenas de texto grava títulos de janelas e texto visível em um banco de dados criptografado armazenado apenas neste dispositivo. Nada sai deste dispositivo e nenhuma captura de tela é salva.",
     "activity.emptyState.turnOn": "Ativar nas Configurações",
+    "activity.unsupported.title": "Captura de atividade não suportada",
+    "activity.unsupported.description": "A captura de atividade não é suportada neste sistema.",
     "activity.state.keyMissingNotice":
       "A chave de criptografia está ausente do Keychain. Recrie o banco nas Configurações para retomar a captura.",
     "activity.state.errorNotice": "Não foi possível carregar a linha do tempo: {message}",

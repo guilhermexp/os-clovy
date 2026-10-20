@@ -9,7 +9,7 @@ O Clovy para Windows já é distribuído, mas a captura de atividade só existe 
 - Novo adaptador de captura para Windows com a mesma cadência e as mesmas regras do macOS: janela em foco (app, título, URL do navegador), texto pela UI Automation, OCR local do Windows quando o texto vem fraco, contagem de cliques e teclas sem conteúdo, área de transferência redigida, tela secundária, espaço em disco e tempo desde a última entrada do sistema.
 - Nenhuma imagem é gravada, como no macOS.
 - O banco de atividade passa a ser cifrado com SQLCipher também no Windows, com a chave no Gerenciador de Credenciais.
-- A captura liga no Windows sem pedir permissões do sistema (o Windows não tem equivalente); a interface não mostra os pedidos de permissão do macOS nesse sistema.
+- A captura opera no Windows sem pedir permissões do sistema (o Windows não tem equivalente); a interface não mostra os pedidos de permissão do macOS nesse sistema.
 - Reconhecimento do Windows: navegadores, editores e apps de tela bloqueada (`LockApp`, `LogonUI`) por nome do executável; janelas InPrivate e anônimas nunca passam por OCR.
 - Leitura das sessões de agentes de código no Windows, incluindo os caminhos de VS Code e Cursor em `%APPDATA%`.
 - Embeddings locais das frentes também no Windows (CPU), para a mesma qualidade de agrupamento.
@@ -28,7 +28,7 @@ Nenhuma.
 - `activity-timeline`: tela bloqueada do Windows não conta como trabalho.
 - `coding-agent-ingest`: locais padrão das fontes no Windows.
 
-Essas capacidades ainda vivem só na change `add-activity-intelligence`, não em `openspec/specs/`. Ela precisa ser arquivada antes desta. Esta change depende de `atividade-ocioso-e-minutos` (método de tempo ocioso do sistema na plataforma).
+As capacidades canônicas já estão estabelecidas em `openspec/specs/` após a integração e o arquivamento de `add-activity-intelligence` e `atividade-ocioso-e-minutos` na branch principal.
 
 ## Impact
 

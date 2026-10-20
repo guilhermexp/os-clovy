@@ -49,24 +49,60 @@ pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct SourceRoots {
     pub home: PathBuf,
+    app_support_dir: Option<PathBuf>,
 }
 
 impl SourceRoots {
     pub fn from_home(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
+        Self {
+            home: home.into(),
+            app_support_dir: None,
+        }
+    }
+
+    pub fn from_windows(profile: impl Into<PathBuf>, appdata: impl Into<PathBuf>) -> Self {
+        Self {
+            home: profile.into(),
+            app_support_dir: Some(appdata.into()),
+        }
     }
 
     pub fn current() -> Option<Self> {
-        std::env::var_os("HOME")
+        let home = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
-            .map(|home| Self::from_home(PathBuf::from(home)))
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from)
+            })?;
+        let app_support_dir = if cfg!(target_os = "macos") {
+            home.join("Library").join("Application Support")
+        } else {
+            dirs::config_dir()
+                .or_else(|| {
+                    std::env::var_os("APPDATA")
+                        .filter(|appdata| !appdata.is_empty())
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| home.join("AppData").join("Roaming"))
+        };
+        Some(Self {
+            home,
+            app_support_dir: Some(app_support_dir),
+        })
     }
 
     pub fn app_support(&self, app: &str) -> PathBuf {
-        self.home
-            .join("Library")
-            .join("Application Support")
-            .join(app)
+        if let Some(dir) = &self.app_support_dir {
+            dir.join(app)
+        } else {
+            self.home
+                .join("Library")
+                .join("Application Support")
+                .join(app)
+        }
     }
 
     /// The directory whose existence means the agent was used on this Mac.
@@ -168,7 +204,47 @@ pub fn open_regular(path: &Path) -> io::Result<fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    options.open(path)
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    #[cfg(windows)]
+    {
+        use std::mem::size_of;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+        };
+
+        let handle = HANDLE(file.as_raw_handle());
+        let mut attributes = FILE_ATTRIBUTE_TAG_INFO::default();
+        // SAFETY: `handle` remains owned by `file`; `attributes` points to a
+        // correctly sized writable FILE_ATTRIBUTE_TAG_INFO value.
+        unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileAttributeTagInfo,
+                std::ptr::addr_of_mut!(attributes).cast(),
+                size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        }
+        .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
+
+        if (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
+            || (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "reparse points and directories are not accepted",
+            ));
+        }
+    }
+    Ok(file)
 }
 
 fn wal_path(path: &Path) -> PathBuf {
@@ -530,5 +606,112 @@ mod tests {
         let elsewhere = tempfile::NamedTempFile::new().unwrap();
         symlink(elsewhere.path(), dir.path().join("store.db-wal")).unwrap();
         assert!(candidate(SourceId::CursorCli, dir.path(), db, SystemTime::UNIX_EPOCH).is_none());
+    }
+
+    #[test]
+    fn windows_source_roots_resolve_cursor_and_copilot_from_appdata_and_cli_from_profile() {
+        let profile = PathBuf::from(r"C:\Users\tester");
+        let appdata = PathBuf::from(r"C:\Users\tester\AppData\Roaming");
+        let roots = SourceRoots::from_windows(&profile, &appdata);
+        assert_eq!(
+            cursor::root(&roots),
+            appdata.join("Cursor").join("User").join("globalStorage")
+        );
+        assert_eq!(
+            copilot_vscode::user_dir(&roots),
+            appdata.join("Code").join("User")
+        );
+        assert_eq!(
+            claude::root(&roots),
+            profile.join(".claude").join("projects")
+        );
+        assert_eq!(codex::root(&roots), profile.join(".codex").join("sessions"));
+        assert_eq!(
+            copilot_cli::root(&roots),
+            profile.join(".copilot").join("session-state")
+        );
+        assert_eq!(
+            cursor_cli::root(&roots),
+            profile.join(".cursor").join("chats")
+        );
+        assert_eq!(
+            antigravity::cli_root(&roots),
+            profile.join(".gemini").join("antigravity-cli")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_source_roots_current_resolves_without_home() {
+        const SENTINEL: &str = "CLOVY_TEST_WINDOWS_SOURCE_ROOTS_CURRENT_CHILD";
+        if std::env::var_os(SENTINEL).is_some() {
+            let roots =
+                SourceRoots::current().expect("SourceRoots::current() must resolve on Windows");
+            let userprofile = std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .expect("USERPROFILE must be set on Windows");
+            let appdata = std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .expect("APPDATA must be set on Windows");
+            assert_eq!(roots.home, userprofile);
+            assert_eq!(roots.app_support("Cursor"), appdata.join("Cursor"));
+            return;
+        }
+
+        let current_exe = std::env::current_exe().expect("current_exe");
+        let status = std::process::Command::new(current_exe)
+            .arg(
+                "coding_agents::sources::tests::windows_source_roots_current_resolves_without_home",
+            )
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(SENTINEL, "1")
+            .env_remove("HOME")
+            .status()
+            .expect("child process failed to start");
+        assert!(status.success(), "child process failed: {status:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_open_regular_refuses_reparse_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.jsonl");
+        fs::write(&target, "{}\n").unwrap();
+        let link = dir.path().join("link.jsonl");
+        match std::os::windows::fs::symlink_file(&target, &link) {
+            Ok(()) => {
+                assert!(
+                    open_regular(&link).is_err(),
+                    "open_regular must refuse reparse points on Windows"
+                );
+            }
+            Err(error) => {
+                panic!(
+                    "failed to create symlink for reparse point test: {error} (os error {:?})",
+                    error.raw_os_error()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn from_home_confines_app_support_under_supplied_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = SourceRoots::from_home(temp.path());
+        let cursor_dir = roots.app_support("Cursor");
+        assert!(
+            cursor_dir.starts_with(temp.path()),
+            "app_support for from_home must stay under supplied home ({:?}), got {:?}",
+            temp.path(),
+            cursor_dir
+        );
+        assert_eq!(
+            cursor_dir,
+            temp.path()
+                .join("Library")
+                .join("Application Support")
+                .join("Cursor")
+        );
     }
 }

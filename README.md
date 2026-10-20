@@ -137,8 +137,12 @@ brew install --cask open-software-network/tap/june
 ```
 
 Windows builds cover the app shell, sign-in, microphone recording, notes, and
-the bundled agent runtime, but not global dictation paste, system audio
-capture, or the macOS sandbox. macOS is the primary target.
+the bundled agent runtime. On Windows 10 1903+ and Windows 11 x64 they also
+include encrypted text-only [activity capture](docs/activity-capture.md), the
+[activity timeline](docs/activity-timeline.md), local coding-agent session
+ingestion, and CPU embeddings for day intelligence. Global dictation paste,
+system audio capture, and the macOS sandbox remain macOS-only. macOS is the
+primary target.
 
 ## Repository layout
 
@@ -167,6 +171,12 @@ the full doc map, [CONTEXT.md](CONTEXT.md) for the domain glossary, and
 You need Node.js with pnpm 11 and a Rust toolchain. The exact pnpm version is
 pinned in `package.json`.
 
+Windows native builds also need Visual Studio C++ Build Tools, Strawberry Perl,
+and NASM on `PATH` for vendored OpenSSL and SQLCipher. The Windows build script
+[`scripts/build-windows.ps1`](scripts/build-windows.ps1) checks Perl and NASM
+before Cargo starts. Activity data uses the system credential store and remains
+encrypted on both supported platforms.
+
 ```sh
 git clone https://github.com/open-software-network/os-clovy
 cd os-clovy
@@ -194,6 +204,8 @@ against OS Accounts.
 ## Contributing
 
 Clovy ships near-daily releases and development happens in the open.
+
+Fork integration history: [versioned records](.upstream-sync/history/).
 
 Clovy is also the canonical technical name for repository-controlled packages,
 crates, environment variables, workflows, and release artifacts. Released

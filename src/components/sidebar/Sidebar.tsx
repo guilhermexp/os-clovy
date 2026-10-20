@@ -92,7 +92,7 @@ import {
   type SessionPartitionMap,
 } from "../../lib/session-partition-filter";
 import { OPEN_REFERRAL_DIALOG_EVENT } from "../referral/ReferralNudge";
-import { isMacLikePlatform } from "../../lib/platform";
+import { isMacLikePlatform, isWindowsPlatform } from "../../lib/platform";
 import { settingsTabsForCompanionPairing, type SettingsTab } from "../settings/settings-config";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyLinkField } from "../ui/CopyLinkField";
@@ -374,13 +374,11 @@ export function Sidebar({
   // Guards against a stale closure double-firing the summary fetch.
   const referralLoadingRef = useRef(false);
   const referralCopyResetTimerRef = useRef<number>();
-  const [activitySupported, setActivitySupported] = useState(() => isMacLikePlatform());
+  const [activitySupported, setActivitySupported] = useState(
+    () => isMacLikePlatform() || isWindowsPlatform(),
+  );
 
   useEffect(() => {
-    if (!isMacLikePlatform()) {
-      setActivitySupported(false);
-      return;
-    }
     void activityStatus()
       .then((status) => setActivitySupported(status.supported))
       .catch(() => {});
@@ -706,12 +704,10 @@ export function Sidebar({
       // Appearance carry their row-level terms so "theme" or "account"
       // still finds the right tab.
       ...(normalized
-        ? settingsTabsForCompanionPairing(companionPairingEnabled)
+        ? settingsTabsForCompanionPairing(companionPairingEnabled, activitySupported)
             .filter(
               (tab) =>
-                !HIDDEN_SETTINGS_TABS.has(tab.id) &&
-                !(account.localDev && tab.id === "billing") &&
-                (isMacLikePlatform() || tab.id !== "activity"),
+                !HIDDEN_SETTINGS_TABS.has(tab.id) && !(account.localDev && tab.id === "billing"),
             )
             .map(
               (tab): CommandPromptItem => ({
@@ -1145,6 +1141,7 @@ export function Sidebar({
           activeTab={settingsTab}
           companionPairingEnabled={companionPairingEnabled}
           localDev={account.localDev === true}
+          activitySupported={activitySupported}
           onSelectTab={(tab) => onSettingsTabChange?.(tab)}
           onBack={() => (onExitSettings ? onExitSettings() : onChangeView("notes"))}
         />
@@ -1598,12 +1595,14 @@ function SettingsSidebarNav({
   activeTab,
   companionPairingEnabled,
   localDev,
+  activitySupported,
   onSelectTab,
   onBack,
 }: {
   activeTab: SettingsTab;
   companionPairingEnabled: boolean;
   localDev: boolean;
+  activitySupported: boolean;
   onSelectTab: (tab: SettingsTab) => void;
   onBack: () => void;
 }) {
@@ -1611,7 +1610,6 @@ function SettingsSidebarNav({
   // Hide the admin-surfaces-PR tabs until stabilized, keeping the pre-PR billing
   // rule (billing is hidden in local dev). Empty groups drop out so their
   // headers don't render.
-  const isMac = isMacLikePlatform();
   const groups = SETTINGS_SIDEBAR_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter(
@@ -1619,7 +1617,7 @@ function SettingsSidebarNav({
         !HIDDEN_SETTINGS_TABS.has(item.id) &&
         !(localDev && item.id === "billing") &&
         (companionPairingEnabled || item.id !== "linked-devices") &&
-        (isMac || item.id !== "activity"),
+        (activitySupported || item.id !== "activity"),
     ),
   })).filter((group) => group.items.length > 0);
 

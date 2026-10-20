@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Captura opcional com permissões explícitas
-A captura de atividade SHALL vir desligada. No macOS, ao ligá-la, o Clovy MUST mostrar o estado das permissões necessárias (Acessibilidade, Gravação de Tela e, para eventos de entrada, Monitoramento de Entrada) com atalhos para o painel correspondente dos Ajustes do Sistema, e MUST não capturar enquanto a permissão obrigatória faltar. No Windows, que não tem essas permissões, a captura MUST começar ao ser ligada e a interface MUST NOT mostrar pedidos de permissão.
+A captura de atividade SHALL exigir permissões de sistema apenas nas plataformas aplicáveis. No macOS, ao ligá-la ou estar ativa, o Clovy MUST mostrar o estado das permissões necessárias (Acessibilidade, Gravação de Tela e, para eventos de entrada, Monitoramento de Entrada) com atalhos para o painel correspondente dos Ajustes do Sistema, e MUST não capturar enquanto a permissão obrigatória faltar. No Windows, que não tem essas permissões, o Clovy MUST capturar sem pedir permissões e a interface MUST NOT mostrar pedidos de permissão.
 
 #### Scenario: Ligar sem permissão
 - **WHEN** o usuário liga a captura no macOS sem ter concedido Acessibilidade e Gravação de Tela
@@ -11,8 +11,8 @@ A captura de atividade SHALL vir desligada. No macOS, ao ligá-la, o Clovy MUST 
 - Test: unit — máquina de estado da captura com verificador de permissões simulado
 
 #### Scenario: Ligar no Windows
-- **WHEN** o usuário liga a captura no Windows
-- **THEN** a captura fica ativa sem pedir permissão e os ajustes de atividade não mostram linhas de permissão
+- **WHEN** a captura está ligada no Windows
+- **THEN** a captura opera sem pedir permissão e os ajustes de atividade não mostram linhas de permissão
 - Test: unit — máquina de estado com permissões não aplicáveis; component — seção de atividade no Windows
 
 ### Requirement: Somente texto, nunca pixels
@@ -55,6 +55,16 @@ No Windows, o Clovy SHALL capturar com a mesma cadência, exclusões, pausas, re
 - **WHEN** a captura está ligada no Windows e o usuário lê uma página no Edge
 - **THEN** o quadro registra o app Edge, o título, a URL da aba e o texto da página, sem arquivo de imagem
 - Test: e2e — app de desenvolvimento na máquina Windows, leitura pelo export de depuração
+
+#### Scenario: URL confirmada sem esquema inventado
+- **WHEN** a página exibida no Edge usa HTTP e o controle de endereço omite o esquema
+- **THEN** a URL registrada vem de metadados UIA do documento confirmado e preserva HTTP; se a identidade não for comprovada, fica desconhecida em vez de inventar HTTPS
+- Test: unit — identidade UIA do documento; e2e — página HTTP própria e export de depuração no Windows
+
+#### Scenario: Endereço em edição não muda a identidade da página
+- **WHEN** uma página de domínio excluído continua exibida e o usuário digita outro endereço na barra sem navegar
+- **THEN** o endereço em edição não substitui a identidade do documento e nenhum texto da página excluída é capturado
+- Test: unit — metadados de documento e barra com valores divergentes; e2e — perfil de navegador próprio
 
 #### Scenario: Janela InPrivate
 - **WHEN** a janela em foco é uma janela InPrivate do Edge

@@ -21,8 +21,21 @@ pub const FRAME_SPAN: Duration = Duration::seconds(2);
 /// Input stored with a frame happened during the tick before it.
 const INPUT_BEFORE: Duration = Duration::seconds(3);
 const INPUT_AFTER: Duration = Duration::seconds(1);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AwayPlatform {
+    Macos,
+    Windows,
+}
+
 /// Lock screen and screen saver: never a session, never useful.
-const AWAY_APPS: &[&str] = &["loginwindow", "screensaverengine"];
+const AWAY_APPS: &[(&str, AwayPlatform)] = &[
+    ("loginwindow", AwayPlatform::Macos),
+    ("screensaverengine", AwayPlatform::Macos),
+    ("lockapp", AwayPlatform::Windows),
+    ("lockapp.exe", AwayPlatform::Windows),
+    ("logonui", AwayPlatform::Windows),
+    ("logonui.exe", AwayPlatform::Windows),
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,9 +180,13 @@ impl BatchSignals {
     }
 }
 
-fn is_away_app(app_name: &str) -> bool {
-    let app = app_name.trim().to_lowercase();
-    AWAY_APPS.contains(&app.as_str())
+fn away_platform(frame: &StoredFrame) -> Option<AwayPlatform> {
+    let name = frame.app_name.trim();
+    let bundle = frame.bundle_id.as_deref();
+    AWAY_APPS.iter().find_map(|(app, platform)| {
+        (name.eq_ignore_ascii_case(app) || bundle.is_some_and(|id| id.eq_ignore_ascii_case(app)))
+            .then_some(*platform)
+    })
 }
 
 /// Classifies `[from, to)`: a capture pause covering at least half of it,
@@ -257,12 +274,17 @@ pub fn push_frame(
     let system_input_near = frame
         .input_idle_ms
         .is_some_and(|idle| idle <= (FRAME_SPAN + INPUT_AFTER).num_milliseconds() as u64);
-    let useful = !is_away_app(&frame.app_name)
+    let away = away_platform(frame);
+    let useful = away.is_none()
         && (window_changed || text_changed || signals.input_near(at) || system_input_near);
     state.last_frame = Some(FrameMark::of(frame, at));
 
     if !useful {
-        state.idle_frames = state.idle_frames.saturating_add(1);
+        // Windows lock descriptors are absent time, not a visible idle desktop.
+        // Keep the existing macOS frame-density behavior.
+        if away != Some(AwayPlatform::Windows) {
+            state.idle_frames = state.idle_frames.saturating_add(1);
+        }
         if let Some(open) = state.open.as_mut() {
             open.frame_count += 1;
             open.idle_frame_count += 1;
@@ -606,6 +628,84 @@ pub(super) mod tests {
         let (state, events) = feed(&frames, &signals);
         assert!(gaps(&events).is_empty());
         assert_eq!(state.open.unwrap().duration(), Duration::seconds(602));
+    }
+
+    #[test]
+    fn windows_lock_and_logon_frames_never_become_work_even_with_input() {
+        for app in ["LockApp", "lockapp.exe", "LogonUI", "logonui.exe"] {
+            let frames = [
+                frame(1, at(10, 0, 0), app, "Locked", None, 1),
+                frame(2, at(10, 0, 2), app, "Sign in", None, 2),
+            ];
+            let signals = BatchSignals {
+                input_times: vec![at(10, 0, 0), at(10, 0, 2)],
+                pauses: Vec::new(),
+            };
+            let (state, events) = feed(&frames, &signals);
+            assert!(state.open.is_none(), "{app} must not open a work session");
+            assert!(state.last_useful_at.is_none(), "{app} is never useful");
+            assert!(closed(&events).is_empty(), "{app} must not record work");
+        }
+    }
+
+    #[test]
+    fn windows_locked_executable_is_away_even_with_a_localized_description() {
+        let mut locked = frame(
+            1,
+            at(10, 0, 0),
+            "Tela de bloqueio do Windows",
+            "Entrar",
+            None,
+            1,
+        );
+        locked.bundle_id = Some("lockapp.exe".into());
+        locked.input_idle_ms = Some(0);
+        let signals = BatchSignals {
+            input_times: vec![at(10, 0, 0)],
+            pauses: Vec::new(),
+        };
+        let (state, events) = feed(&[locked], &signals);
+        assert!(state.open.is_none());
+        assert!(state.last_useful_at.is_none());
+        assert!(closed(&events).is_empty());
+    }
+
+    #[test]
+    fn windows_lock_samples_count_as_away_without_changing_macos_gap_semantics() {
+        for (app, expected) in [
+            ("LockApp.exe", GapKind::Sleep),
+            ("LogonUI.exe", GapKind::Sleep),
+            ("loginwindow", GapKind::Idle),
+            ("ScreenSaverEngine", GapKind::Idle),
+        ] {
+            let mut frames = vec![frame(1, at(10, 0, 0), "Code", "main.rs", None, 1)];
+            frames.extend((0..600).map(|index| StoredFrame {
+                input_idle_ms: Some(0),
+                ..frame(
+                    index + 2,
+                    at(10, 0, 2) + Duration::seconds(index * 2),
+                    app,
+                    "Locked",
+                    None,
+                    2,
+                )
+            }));
+            let now = at(10, 20, 2);
+            let (state, _) = feed(&frames, &BatchSignals::default());
+            let ongoing = ongoing_gap(&state, now, &[]).expect("locked interval is a gap");
+            assert_eq!(ongoing.kind, expected, "ongoing {app}");
+            assert_eq!(ongoing.ended_at - ongoing.started_at, Duration::minutes(20));
+
+            frames.push(frame(602, now, "Code", "main.rs", None, 3));
+            let (_, events) = feed(&frames, &BatchSignals::default());
+            let finished = gaps(&events);
+            assert_eq!(finished.len(), 1, "{app}");
+            assert_eq!(finished[0].kind, expected, "finished {app}");
+            assert_eq!(
+                finished[0].ended_at - finished[0].started_at,
+                Duration::minutes(20)
+            );
+        }
     }
 
     #[test]
