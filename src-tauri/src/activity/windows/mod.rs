@@ -118,3 +118,19 @@ impl ActivityPlatform for WinActivityPlatform {
         disk::free_bytes(path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_idle_is_available_without_input_capture() {
+        let mut platform = WinActivityPlatform::new();
+        platform.set_input_capture(false);
+
+        assert!(
+            platform.system_idle_ms().is_some(),
+            "Windows must sample system idle time even when Raw Input capture is disabled"
+        );
+    }
+}
