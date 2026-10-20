@@ -81,6 +81,7 @@ pub async fn import_file(
                     browser_url: run.browser_url.clone(),
                     text_source: TextSource::Accessibility,
                     text: Some(format!("{base}\nframe {index}")),
+                    input_idle_ms: None,
                 })
                 .await
                 .map_err(|error| error.to_string())?;

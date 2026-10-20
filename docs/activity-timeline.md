@@ -51,10 +51,16 @@ frame, so a first build over weeks of retained frames still sees old meetings.
 
 Rules (`builder.rs`):
 
-- **Useful frame**: the app, window title, URL, or text changed since the
-  previous frame, or input (click, key, switch, clipboard) happened from 3 s
-  before to 1 s after it. Other frames are idle. `loginwindow` and
-  `ScreenSaverEngine` frames are never useful.
+- **Quadro útil**: o app, título da janela, URL ou texto mudou desde o quadro
+  anterior; houve entrada gravada (clique, tecla, troca ou clipboard) de 3 s
+  antes até 1 s depois do quadro; ou `input_idle_ms <= FRAME_SPAN + 1 s`
+  (3.000 ms, inclusive). Esse último sinal vem do sistema a cada tick e inclui
+  mouse, rolagem e trackpad, sem ampliar o tap nem gravar eventos sintéticos.
+  Sem o valor (`NULL`), vale a regra anterior. Os demais quadros são ociosos;
+  `loginwindow` e `ScreenSaverEngine` nunca são úteis, mesmo com entrada.
+  O ETL recebe a duração em `StoredFrame` por `frames_after`; o limiar de 5 min
+  e a divisão entre sono, ociosidade e pausa não mudam. Ler parado por mais de
+  5 min sem nenhuma entrada continua podendo produzir uma lacuna ociosa.
 - **Sessions**: consecutive useful frames of the same app (name and bundle id)
   and context. A new context splits a session only when both are known: the
   browser's domain (`filter::url_host`, no `www.`) or the editor's workspace

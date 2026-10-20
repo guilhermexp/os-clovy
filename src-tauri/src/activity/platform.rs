@@ -107,6 +107,12 @@ pub trait ActivityPlatform {
     /// The focused window of the frontmost app on the main display.
     fn focused_window(&mut self) -> Option<WindowDescriptor>;
 
+    /// Milliseconds since any system input, without recording its contents.
+    /// Platforms without this signal keep the legacy useful-frame rule.
+    fn system_idle_ms(&self) -> Option<u64> {
+        None
+    }
+
     /// The topmost window of every secondary display (one per display).
     fn secondary_windows(&mut self) -> Vec<WindowDescriptor>;
 

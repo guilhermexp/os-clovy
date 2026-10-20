@@ -146,6 +146,7 @@ pub async fn report_hour(
     if active_minutes == 0 {
         return Ok(HourOutcome::Empty);
     }
+    let active_seconds = view.stats.focused_ms / 1000;
     let mut texts = Vec::new();
     let mut lines = Vec::new();
     let ids: Vec<i64> = view.sessions.iter().map(|session| session.id).collect();
@@ -219,7 +220,7 @@ pub async fn report_hour(
         .as_ref()
         .and_then(hour::parse_answer)
         .ok_or(PipelineError::Unusable("hour report without activities"))?;
-    let activities = hour::assemble(&answer, active_minutes, &lines);
+    let activities = hour::assemble(&answer, active_seconds, &lines);
     db::insert_hour_report(
         deps.store,
         &NewHourReport {

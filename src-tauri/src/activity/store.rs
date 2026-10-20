@@ -159,6 +159,7 @@ pub struct NewFrame {
     pub browser_url: Option<String>,
     pub text_source: TextSource,
     pub text: Option<String>,
+    pub input_idle_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +197,7 @@ pub struct StoredFrame {
     pub text_source: TextSource,
     pub text_id: Option<i64>,
     pub text: Option<String>,
+    pub input_idle_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -536,6 +538,11 @@ const MIGRATIONS: &[ActivityMigration] = &[
         name: "day_workstream_periods",
         statements: &["ALTER TABLE day_workstream_hours ADD COLUMN periods_json TEXT"],
     },
+    ActivityMigration {
+        version: 6,
+        name: "frame_input_idle",
+        statements: &["ALTER TABLE frames ADD COLUMN input_idle_ms INTEGER NULL"],
+    },
 ];
 
 pub fn timestamp(at: DateTime<Utc>) -> String {
@@ -683,8 +690,8 @@ impl ActivityStore {
         let text_id = upsert_text(&mut tx, frame.text.as_deref()).await?;
         let id = query(
             "INSERT INTO frames
-                (captured_at, app_name, bundle_id, window_title, browser_url, text_source, text_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (captured_at, app_name, bundle_id, window_title, browser_url, text_source, text_id, input_idle_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(timestamp(frame.captured_at))
         .bind(&frame.app_name)
@@ -693,6 +700,7 @@ impl ActivityStore {
         .bind(&frame.browser_url)
         .bind(frame.text_source.as_str())
         .bind(text_id)
+        .bind(frame.input_idle_ms.and_then(|idle| i64::try_from(idle).ok()))
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();
@@ -799,7 +807,7 @@ impl ActivityStore {
     ) -> Result<Vec<StoredFrame>, StoreError> {
         let rows = query(
             "SELECT f.id, f.captured_at, f.app_name, f.bundle_id, f.window_title, f.browser_url,
-                    f.text_source, f.text_id, t.text
+                    f.text_source, f.text_id, t.text, f.input_idle_ms
              FROM frames f LEFT JOIN frame_texts t ON t.id = f.text_id
              WHERE f.id > ? ORDER BY f.id LIMIT ?",
         )
@@ -985,7 +993,7 @@ impl ActivityStore {
         let frames = {
             let mut rows = query(
                 "SELECT f.id, f.captured_at, f.app_name, f.bundle_id, f.window_title, f.browser_url,
-                        f.text_source, f.text_id, t.text
+                        f.text_source, f.text_id, t.text, f.input_idle_ms
                  FROM frames f LEFT JOIN frame_texts t ON t.id = f.text_id
                  ORDER BY f.id DESC LIMIT ?",
             )
@@ -1160,6 +1168,9 @@ fn stored_frame(row: &SqliteRow) -> StoredFrame {
         text_source: TextSource::parse(row.get::<&str, _>(6)),
         text_id: row.get(7),
         text: row.get(8),
+        input_idle_ms: row
+            .get::<Option<i64>, _>(9)
+            .and_then(|idle| u64::try_from(idle).ok()),
     }
 }
 
@@ -1222,7 +1233,54 @@ mod tests {
             browser_url: None,
             text_source: TextSource::Accessibility,
             text: Some(text.into()),
+            input_idle_ms: None,
         }
+    }
+
+    #[tokio::test]
+    async fn migration_6_adds_nullable_idle_time_and_preserves_old_frames() {
+        let (_dir, path) = temp_db();
+        let keys = MemoryKeyStore::default();
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        store.insert_frame(&frame(at(1, 10), "kept")).await.unwrap();
+        // Reconstruct the released v5 shape without rewriting catalog entries.
+        let columns = query("PRAGMA table_info(frames)")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        if columns
+            .iter()
+            .any(|row| row.get::<&str, _>("name") == "input_idle_ms")
+        {
+            query("ALTER TABLE frames DROP COLUMN input_idle_ms")
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        query("DELETE FROM schema_migrations WHERE version >= 6")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store.close().await;
+        let store = ActivityStore::open(&path, &keys).await.unwrap();
+        let idle: Option<i64> = query("SELECT input_idle_ms FROM frames")
+            .fetch_one(store.pool())
+            .await
+            .expect("migration 6 adds the idle column")
+            .get(0);
+        assert_eq!(idle, None, "old frames have no invented presence signal");
+        let versions: Vec<i64> = query("SELECT version FROM schema_migrations ORDER BY version")
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            store.frames_after(0, 10).await.unwrap()[0].text.as_deref(),
+            Some("kept")
+        );
     }
 
     #[tokio::test]
@@ -1278,6 +1336,7 @@ mod tests {
             "DROP TABLE day_hour_reports",
             "DROP TABLE day_summaries",
             "DROP TABLE day_intelligence_runs",
+            "ALTER TABLE frames DROP COLUMN input_idle_ms",
             "DELETE FROM schema_migrations WHERE version >= 3",
         ] {
             query(statement).execute(&store.pool).await.unwrap();
@@ -1301,6 +1360,7 @@ mod tests {
                 (3, "coding_agent_blocks".to_string()),
                 (4, "day_intelligence".to_string()),
                 (5, "day_workstream_periods".to_string()),
+                (6, "frame_input_idle".to_string()),
             ]
         );
         assert!(store
@@ -1324,6 +1384,7 @@ mod tests {
             "DROP TABLE day_hour_reports",
             "DROP TABLE day_summaries",
             "DROP TABLE day_intelligence_runs",
+            "ALTER TABLE frames DROP COLUMN input_idle_ms",
             "DELETE FROM schema_migrations WHERE version >= 4",
         ] {
             query(statement).execute(&store.pool).await.unwrap();
@@ -1338,7 +1399,7 @@ mod tests {
             .iter()
             .map(|row| row.get(0))
             .collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
         assert!(
             crate::day_intelligence::db::summary_of_day(&store, "2026-10-01")
                 .await
@@ -1357,7 +1418,8 @@ mod tests {
         let store = ActivityStore::open(&path, &keys).await.unwrap();
         for statement in [
             "ALTER TABLE day_workstream_hours DROP COLUMN periods_json",
-            "DELETE FROM schema_migrations WHERE version = 5",
+            "ALTER TABLE frames DROP COLUMN input_idle_ms",
+            "DELETE FROM schema_migrations WHERE version >= 5",
             "INSERT INTO day_workstreams (id, day, title, summary, first_hour, last_hour, created_at, updated_at)
              VALUES (1, '2026-10-01', 'Login fix', 's', '2026-10-01T09', '2026-10-01T09', 'x', 'x')",
             "INSERT INTO day_workstream_hours (workstream_id, hour, minutes, note)

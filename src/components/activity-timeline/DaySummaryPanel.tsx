@@ -286,7 +286,10 @@ function DayPanels({ panels }: { panels: DayPanelsDto }) {
   const t = useT();
   const locale = useLocale();
   const maxHourMs = Math.max(1, ...panels.hours.map((hour) => hour.focusedMs));
-  const maxWorkstream = Math.max(1, ...panels.workstreams.map((workstream) => workstream.minutes));
+  const maxWorkstream = Math.max(
+    1,
+    ...panels.workstreams.map((workstream) => workstream.seconds ?? workstream.minutes * 60),
+  );
   const focusTotal = Math.max(1, panels.focusedMs);
 
   return (
@@ -369,13 +372,13 @@ function DayPanels({ panels }: { panels: DayPanelsDto }) {
                 <div
                   className="timeline-metric-bar-fill"
                   style={{
-                    width: `${(workstream.minutes / maxWorkstream) * 100}%`,
+                    width: `${((workstream.seconds ?? workstream.minutes * 60) / maxWorkstream) * 100}%`,
                     backgroundColor: "var(--brand)",
                   }}
                 />
               </div>
               <span className="day-panels-bar-value">
-                {formatDuration(workstream.minutes * 60_000, locale)}
+                {formatDuration((workstream.seconds ?? workstream.minutes * 60) * 1000, locale)}
               </span>
             </div>
           ))}
@@ -402,14 +405,14 @@ function Workstreams({ workstreams }: { workstreams: WorkstreamDto[] }) {
               <div className="day-workstream-header">
                 <span className="day-workstream-title">{workstream.title}</span>
                 <span className="day-workstream-minutes">
-                  {formatDuration(workstream.minutes * 60_000, locale)}
+                  {formatDuration((workstream.seconds ?? workstream.minutes * 60) * 1000, locale)}
                 </span>
               </div>
               <p className="day-workstream-summary">{workstream.summary}</p>
               <div className="day-workstream-hours">
                 {workstream.hours.map((hour) => (
                   <span key={hour.hour} className="day-workstream-hour">
-                    {`${hour.hour.slice(11, 13)}:00 · ${t("dayIntelligence.minutes", { minutes: hour.minutes })}`}
+                    {`${hour.hour.slice(11, 13)}:00 · ${formatDuration((hour.seconds ?? hour.minutes * 60) * 1000, locale)}`}
                   </span>
                 ))}
               </div>
@@ -423,6 +426,7 @@ function Workstreams({ workstreams }: { workstreams: WorkstreamDto[] }) {
 
 function HourReports({ reports }: { reports: HourReportDto[] }) {
   const t = useT();
+  const locale = useLocale();
   return (
     <section className="day-summary-section" aria-labelledby="day-hours-heading">
       <h4 id="day-hours-heading" className="day-summary-subheading">
@@ -437,7 +441,7 @@ function HourReports({ reports }: { reports: HourReportDto[] }) {
               <div className="day-hour-header">
                 <span className="day-hour-label">{`${report.hour.slice(11, 13)}:00`}</span>
                 <span className="day-hour-minutes">
-                  {t("dayIntelligence.minutes", { minutes: report.activeMinutes })}
+                  {formatDuration(report.activeMinutes * 60_000, locale)}
                 </span>
               </div>
               <p className="day-hour-summary">{report.summary}</p>
@@ -445,7 +449,11 @@ function HourReports({ reports }: { reports: HourReportDto[] }) {
                 {report.activities.map((activity) => (
                   <li key={activity.description} className="day-hour-activity">
                     <span className="day-hour-activity-minutes">
-                      {t("dayIntelligence.minutes", { minutes: activity.minutes })}
+                      {formatDuration(
+                        (activity.seconds != null ? activity.seconds : activity.minutes * 60) *
+                          1000,
+                        locale,
+                      )}
                     </span>
                     <span>{activity.description}</span>
                   </li>

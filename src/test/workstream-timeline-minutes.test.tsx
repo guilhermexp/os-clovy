@@ -131,7 +131,54 @@ describe("Active minutes of the cards of a split workstream", () => {
         },
       ],
     };
-    // 7 x 3/5 = 4.2 and 7 x 2/5 = 2.8: whole minutes by largest remainder.
-    expect(summary([uneven]).map((card) => card.minutes)).toEqual([4, 3]);
+    // 7 x 3/5 = 4.2 min (252 s) and 7 x 2/5 = 2.8 min (168 s): exact seconds partitioned.
+    expect(summary([uneven]).map((card) => card.minutes)).toEqual([4.2, 2.8]);
+    const cards = layout([uneven]).cards;
+    expect(cards.reduce((sum, card) => sum + card.activeMs, 0)).toBe(7 * MINUTE);
+  });
+
+  it("splits a resumed workstream with locatedSeconds into cards summing exactly to total seconds", () => {
+    // 70 seconds total across a 50-minute pause:
+    // Period 1: 42 seconds (10:00:00 to 10:00:42)
+    // Period 2: 28 seconds (11:00:00 to 11:00:28)
+    const exactSecondsWs: WorkstreamDto = {
+      id: 4,
+      title: "Exact seconds split",
+      summary: "",
+      minutes: 1,
+      seconds: 70,
+      hours: [
+        {
+          hour: hourKey("10"),
+          minutes: 1,
+          seconds: 42,
+          locatedMinutes: 1,
+          locatedSeconds: 42,
+          note: "Part 1",
+          periods: [
+            { startedAt: iso("10:00"), endedAt: new Date(at("10:00") + 42_000).toISOString() },
+          ],
+        },
+        {
+          hour: hourKey("11"),
+          minutes: 0,
+          seconds: 28,
+          locatedMinutes: 0,
+          locatedSeconds: 28,
+          note: "Part 2",
+          periods: [
+            { startedAt: iso("11:00"), endedAt: new Date(at("11:00") + 28_000).toISOString() },
+          ],
+        },
+      ],
+    };
+
+    const cards = layout([exactSecondsWs]).cards;
+    expect(cards).toHaveLength(2);
+    // Exact milliseconds for each card without rounding to whole minutes:
+    expect(cards[0].activeMs).toBe(42_000);
+    expect(cards[1].activeMs).toBe(28_000);
+    // Exact sum: 70_000 ms (70 seconds)
+    expect(cards.reduce((sum, card) => sum + card.activeMs, 0)).toBe(70_000);
   });
 });

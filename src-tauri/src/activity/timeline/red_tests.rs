@@ -32,6 +32,7 @@ async fn frames(
                 browser_url: url.map(str::to_string),
                 text_source: TextSource::Accessibility,
                 text: Some(format!("{title} {index}")),
+                input_idle_ms: None,
             })
             .await
             .unwrap();

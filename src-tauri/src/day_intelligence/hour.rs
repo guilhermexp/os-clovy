@@ -25,12 +25,14 @@ pub struct ActivityPeriod {
     pub ended_at: String,
 }
 
-/// One activity of an hour report, with Clovy's minutes.
+/// One activity of an hour report, with Clovy's measured seconds and rounded minutes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HourActivity {
     pub description: String,
     pub minutes: i64,
+    #[serde(default)]
+    pub seconds: Option<i64>,
     /// Bounds of the measured sessions the activity happened in, clipped to
     /// the hour and coalesced. `None` when only the hour is known: a report
     /// written before periods existed, or an activity tied to no listed
@@ -86,8 +88,9 @@ pub fn coalesce(periods: impl IntoIterator<Item = ActivityPeriod>) -> Vec<Activi
 }
 
 /// Joins the periods of the activities that have them; `None` when none has
-/// (only the hour is known). Callers keep how many minutes were located
-/// (`located_minutes`), since activities without periods add none here.
+/// (only the hour is known). Callers keep how many seconds were located
+/// (`located_seconds`) and their rounded minutes (`located_minutes`), since
+/// activities without periods add none here.
 pub fn merge_periods<'a>(
     lists: impl IntoIterator<Item = &'a Option<Vec<ActivityPeriod>>>,
 ) -> Option<Vec<ActivityPeriod>> {
@@ -101,36 +104,55 @@ pub fn merge_periods<'a>(
         .filter(|periods| !periods.is_empty())
 }
 
-/// Splits `active_minutes` across activities in proportion to `weights`
-/// (largest remainder, so the parts add up exactly). Negative or missing
-/// weights count as zero; all-zero weights split evenly.
-pub fn normalize_minutes(active_minutes: i64, weights: &[f64]) -> Vec<i64> {
-    if weights.is_empty() || active_minutes <= 0 {
+/// Splits `active_seconds` across activities in proportion to `weights`
+/// (largest remainder, so the parts add up exactly).
+///
+/// 1. Weights <= 0, non-finite, or missing take the value of the minimum positive
+///    weight in the list (or 1.0 if none is positive).
+/// 2. Each activity receives at least 1s when `active_seconds >= n`; the remainder
+///    is split by largest remainder (tie-breaking by lower index).
+/// 3. The parts sum exactly to `active_seconds`.
+pub fn normalize_seconds(active_seconds: i64, weights: &[f64]) -> Vec<i64> {
+    if weights.is_empty() || active_seconds <= 0 {
         return vec![0; weights.len()];
     }
-    let clean: Vec<f64> = weights
+    let min_positive = weights
         .iter()
-        .map(|weight| {
-            if weight.is_finite() && *weight > 0.0 {
-                *weight
+        .filter(|w| w.is_finite() && **w > 0.0)
+        .copied()
+        .reduce(f64::min)
+        .unwrap_or(1.0);
+
+    let sanitize = |w: f64| {
+        if w.is_finite() && w > 0.0 {
+            w
+        } else {
+            min_positive
+        }
+    };
+    let max_weight = weights.iter().copied().map(sanitize).fold(0.0, f64::max);
+    let scale = if max_weight > 0.0 { max_weight } else { 1.0 };
+    let total: f64 = weights.iter().copied().map(|w| sanitize(w) / scale).sum();
+
+    let n = weights.len();
+    let base = i64::from(active_seconds >= n as i64);
+    let pool = active_seconds - base * n as i64;
+
+    let exact: Vec<f64> = weights
+        .iter()
+        .copied()
+        .map(|w| {
+            if total > 0.0 {
+                ((sanitize(w) / scale) / total) * pool as f64
             } else {
-                0.0
+                (1.0 / n as f64) * pool as f64
             }
         })
         .collect();
-    let total: f64 = clean.iter().sum();
-    let shares: Vec<f64> = if total > 0.0 {
-        clean.iter().map(|weight| weight / total).collect()
-    } else {
-        vec![1.0 / clean.len() as f64; clean.len()]
-    };
-    let exact: Vec<f64> = shares
-        .iter()
-        .map(|share| share * active_minutes as f64)
-        .collect();
-    let mut minutes: Vec<i64> = exact.iter().map(|value| value.floor() as i64).collect();
-    let mut remaining = active_minutes - minutes.iter().sum::<i64>();
-    let mut order: Vec<usize> = (0..exact.len()).collect();
+
+    let mut seconds: Vec<i64> = exact.iter().map(|val| base + val.floor() as i64).collect();
+    let mut remaining = active_seconds - seconds.iter().sum::<i64>();
+    let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
         let fraction = |index: usize| exact[index] - exact[index].floor();
         fraction(b).total_cmp(&fraction(a)).then(a.cmp(&b))
@@ -139,10 +161,10 @@ pub fn normalize_minutes(active_minutes: i64, weights: &[f64]) -> Vec<i64> {
         if remaining == 0 {
             break;
         }
-        minutes[index] += 1;
+        seconds[index] += 1;
         remaining -= 1;
     }
-    minutes
+    seconds
 }
 
 /// The model's answer, or `None` when it has no usable activity.
@@ -176,12 +198,12 @@ pub fn parse_answer(value: &Value) -> Option<HourAnswer> {
     })
 }
 
-/// The answer's activities with Clovy's minutes, in the model's order. An
-/// activity's periods are the measured bounds of the sessions it names
-/// (unknown numbers ignored); naming none leaves it known by hour only.
+/// The answer's activities with Clovy's seconds and rounded minutes, in the
+/// model's order. An activity's periods are the measured bounds of the sessions
+/// it names (unknown numbers ignored); naming none leaves it known by hour only.
 pub fn assemble(
     answer: &HourAnswer,
-    active_minutes: i64,
+    active_seconds: i64,
     sessions: &[SessionLine],
 ) -> Vec<HourActivity> {
     let weights: Vec<f64> = answer
@@ -189,12 +211,12 @@ pub fn assemble(
         .iter()
         .map(|activity| activity.minutes)
         .collect();
-    let minutes = normalize_minutes(active_minutes, &weights);
+    let seconds_list = normalize_seconds(active_seconds, &weights);
     answer
         .activities
         .iter()
-        .zip(minutes)
-        .map(|(activity, minutes)| {
+        .zip(seconds_list)
+        .map(|(activity, seconds)| {
             let periods = coalesce(
                 activity
                     .sessions
@@ -208,7 +230,8 @@ pub fn assemble(
             );
             HourActivity {
                 description: activity.description.clone(),
-                minutes,
+                minutes: (seconds + 30).div_euclid(60),
+                seconds: Some(seconds),
                 periods: (!periods.is_empty()).then_some(periods),
             }
         })
@@ -301,14 +324,16 @@ mod tests {
 
     #[test]
     fn measured_minutes_are_split_by_the_model_weights() {
-        assert_eq!(normalize_minutes(42, &[30.0, 30.0]), vec![21, 21]);
-        assert_eq!(normalize_minutes(50, &[45.0, 9.0, 6.0]), vec![38, 7, 5]);
         assert_eq!(
-            normalize_minutes(10, &[1.0, 1.0, 1.0]).iter().sum::<i64>(),
-            10
+            normalize_seconds(42 * 60, &[30.0, 30.0]),
+            vec![21 * 60, 21 * 60]
         );
-        assert_eq!(normalize_minutes(9, &[0.0, -3.0, f64::NAN]), vec![3, 3, 3]);
-        assert_eq!(normalize_minutes(0, &[5.0]), vec![0]);
+        assert_eq!(normalize_seconds(120, &[10.0, 1.0, 1.0]), vec![98, 11, 11]);
+        assert_eq!(normalize_seconds(0, &[5.0]), vec![0]);
+        assert_eq!(normalize_seconds(-10, &[5.0, 5.0]), vec![0, 0]);
+        assert_eq!(normalize_seconds(9, &[0.0, -3.0, f64::NAN]), vec![3, 3, 3]);
+        assert_eq!(normalize_seconds(10, &[1e308, 1e308]), vec![5, 5]);
+        assert_eq!(normalize_seconds(2, &[1.0, 1.0, 1.0]), vec![1, 1, 0]);
     }
 
     #[test]
@@ -324,18 +349,20 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(answer.summary, "Fixed the login bug.");
-        let activities = assemble(&answer, 42, &[]);
+        let activities = assemble(&answer, 42 * 60, &[]);
         assert_eq!(
             activities,
             vec![
                 HourActivity {
                     description: "Fixed the login bug".into(),
                     minutes: 21,
+                    seconds: Some(1260),
                     periods: None,
                 },
                 HourActivity {
                     description: "Reviewed a PR".into(),
                     minutes: 21,
+                    seconds: Some(1260),
                     periods: None,
                 },
             ]
@@ -378,7 +405,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let activities = assemble(&answer, 45, &sessions);
+        let activities = assemble(&answer, 45 * 60, &sessions);
         let period = |from: &str, to: &str| ActivityPeriod {
             started_at: format!("2026-10-04T{from}:00.000000Z"),
             ended_at: format!("2026-10-04T{to}:00.000000Z"),
@@ -397,6 +424,13 @@ mod tests {
                 .map(|activity| activity.minutes)
                 .sum::<i64>(),
             45
+        );
+        assert_eq!(
+            activities
+                .iter()
+                .map(|activity| activity.seconds.unwrap_or(0))
+                .sum::<i64>(),
+            45 * 60
         );
     }
 

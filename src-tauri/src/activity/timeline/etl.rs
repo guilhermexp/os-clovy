@@ -161,6 +161,7 @@ mod tests {
             browser_url: url.map(str::to_string),
             text_source: TextSource::Accessibility,
             text: Some(text.into()),
+            input_idle_ms: None,
         }
     }
 
@@ -256,6 +257,44 @@ mod tests {
         expected.extend(numbered.iter().map(String::as_str));
         expected.push("later");
         assert_eq!(lines, expected);
+    }
+
+    #[tokio::test]
+    async fn persisted_system_idle_keeps_scrolling_focused_across_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(&dir, &MemoryKeyStore::default()).await;
+        for index in 0..=300 {
+            store
+                .insert_frame(&NewFrame {
+                    input_idle_ms: Some(1000),
+                    ..new_frame(
+                        at(10, 0, 0) + Duration::seconds(index * 2),
+                        "Preview",
+                        "doc.pdf",
+                        None,
+                        "unchanged document",
+                    )
+                })
+                .await
+                .unwrap();
+        }
+        let first = run_pass_bounded(&store, at(10, 10, 2), &[], 150)
+            .await
+            .unwrap();
+        assert!(!first.caught_up);
+        run_pass(&store, at(10, 10, 2), &[]).await.unwrap();
+        let (sessions, gaps) = day(&store).await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].1, 602_000);
+        assert!(gaps.is_empty());
+        assert_eq!(
+            store
+                .processing_cursor(TIMELINE_CONSUMER)
+                .await
+                .unwrap()
+                .last_frame_id,
+            301
+        );
     }
 
     async fn seed_day(store: &ActivityStore) {

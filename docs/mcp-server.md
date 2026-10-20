@@ -358,6 +358,13 @@ base64; a larger one stays in Clovy) and the rest as `text`.
 
 Activity times are RFC 3339 with offset; omitted bounds mean today so far. `get_day_summary` and `get_day_panels` take a local date `YYYY-MM-DD` (default today).
 
+`get_day_summary` preserva os `minutes` existentes e expõe `seconds` nas
+atividades, frentes e horas de cada frente, além de `locatedSeconds` nas horas.
+`get_day_panels` também inclui `seconds` nas frentes. Esses campos mantêm o
+tempo exato: três atividades de 40 s somam 120 s, mesmo que cada `minutes`
+arredondado seja 1. Dados antigos sem segundos usam `minutes * 60` (ou
+`locatedMinutes * 60` para o tempo localizado); zero explícito não usa fallback.
+
 Sessions and gaps leave out the app's `bundleId` and the gap's `id`: the
 "Today" view uses them only for app icons and list keys, and no tool takes a
 gap id.
