@@ -10,6 +10,12 @@
 //!
 //! `-i` is deliberately not used: interactive startup files can prompt, print
 //! banners, or wait on a TTY.
+//!
+//! Windows has no login shell: an app started from Explorer already inherits
+//! the user's and the machine's `Path`, so the app's own environment is used.
+//! The variable is named `Path` there and looked up ignoring case, and a CLI
+//! is a file named with one of the `PATHEXT` extensions (`codex.cmd`), never
+//! the extensionless POSIX script npm writes beside it.
 
 use super::process::{self, ProcessSpec};
 use std::{
@@ -49,19 +55,64 @@ impl LoginEnv {
     }
 
     pub fn path_dirs(&self) -> Vec<PathBuf> {
-        self.vars
-            .get("PATH")
-            .map(|path| std::env::split_paths(&OsString::from(path)).collect())
-            .unwrap_or_default()
+        split_path(&self.vars)
     }
 
     /// First executable named `binary` on this environment's PATH.
     pub fn which(&self, binary: &str) -> Option<PathBuf> {
+        let names = executable_names(binary, &self.vars);
         self.path_dirs()
             .into_iter()
-            .map(|dir| dir.join(binary))
+            .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
             .find(|candidate| is_executable(candidate))
     }
+}
+
+/// The name of the search-path variable: `PATH`, or on Windows the existing
+/// variable that matches it ignoring case (normally `Path`), so reading and
+/// writing it never creates a second one.
+fn path_key(vars: &BTreeMap<String, String>) -> String {
+    if cfg!(windows) {
+        if let Some(key) = vars.keys().find(|key| key.eq_ignore_ascii_case("PATH")) {
+            return key.clone();
+        }
+    }
+    "PATH".to_string()
+}
+
+fn split_path(vars: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    vars.get(&path_key(vars))
+        .map(|path| std::env::split_paths(&OsString::from(path)).collect())
+        .unwrap_or_default()
+}
+
+/// File names that run `binary`: the name itself on Unix; on Windows the
+/// name plus each `PATHEXT` extension in order, keeping only those a process
+/// can be started from (`.com`, `.exe`, `.bat`, `.cmd`).
+#[cfg(not(windows))]
+fn executable_names(binary: &str, _vars: &BTreeMap<String, String>) -> Vec<String> {
+    vec![binary.to_string()]
+}
+
+#[cfg(windows)]
+fn executable_names(binary: &str, vars: &BTreeMap<String, String>) -> Vec<String> {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+    const LAUNCHABLE: [&str; 4] = [".com", ".exe", ".bat", ".cmd"];
+    let pathext = vars
+        .iter()
+        .find(|(key, value)| key.eq_ignore_ascii_case("PATHEXT") && !value.trim().is_empty())
+        .map_or(DEFAULT_PATHEXT, |(_, value)| value.as_str());
+    let mut names: Vec<String> = Vec::new();
+    for extension in pathext
+        .split(';')
+        .map(|ext| ext.trim().to_ascii_lowercase())
+    {
+        let name = format!("{binary}{extension}");
+        if LAUNCHABLE.contains(&extension.as_str()) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Variables Clovy itself reads (its own configuration and credentials, such
@@ -128,9 +179,15 @@ pub(crate) fn set_login_env_for_tests(env: Option<LoginEnv>) {
 
 /// Captures `shell -l`'s environment and merges it over `process_env`. Falls
 /// back to `process_env` plus the usual user bin directories when the shell
-/// cannot be run or times out.
+/// cannot be run or times out. On Windows `shell` is unused: there is no
+/// login shell, and `process_env` plus the installers' directories is the
+/// environment.
 pub async fn resolve_login_env(shell: &Path, process_env: &BTreeMap<String, String>) -> LoginEnv {
-    let captured = capture_login_env(shell, process_env).await;
+    let captured = if cfg!(windows) {
+        None
+    } else {
+        capture_login_env(shell, process_env).await
+    };
     let mut vars = process_env.clone();
     if let Some(captured) = captured {
         vars.extend(captured);
@@ -187,11 +244,21 @@ fn parse_env_block(stdout: &str) -> Option<BTreeMap<String, String>> {
 /// installed by a standard installer is still found when the profile does
 /// not export its directory.
 fn append_fallback_dirs(vars: &mut BTreeMap<String, String>) {
+    let key = path_key(vars);
+    let mut dirs = split_path(vars);
+    for candidate in fallback_dirs(vars) {
+        if !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
+    if let Ok(path) = std::env::join_paths(dirs) {
+        vars.insert(key, path.to_string_lossy().into_owned());
+    }
+}
+
+#[cfg(not(windows))]
+fn fallback_dirs(vars: &BTreeMap<String, String>) -> Vec<PathBuf> {
     let home = vars.get("HOME").cloned().unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = vars
-        .get("PATH")
-        .map(|path| std::env::split_paths(&OsString::from(path)).collect())
-        .unwrap_or_default();
     let mut candidates = Vec::new();
     if !home.is_empty() {
         for relative in [".local/bin", ".npm-global/bin", ".bun/bin", ".volta/bin"] {
@@ -200,14 +267,46 @@ fn append_fallback_dirs(vars: &mut BTreeMap<String, String>) {
     }
     candidates.push(PathBuf::from("/opt/homebrew/bin"));
     candidates.push(PathBuf::from("/usr/local/bin"));
-    for candidate in candidates {
-        if !dirs.contains(&candidate) {
-            dirs.push(candidate);
-        }
-    }
-    if let Ok(path) = std::env::join_paths(dirs) {
-        vars.insert("PATH".to_string(), path.to_string_lossy().into_owned());
-    }
+    candidates
+}
+
+/// Where the official installers of the six CLIs put their launcher, each
+/// relative to a profile variable. Installers add these to the user's `Path`,
+/// so they matter only when the app started before an install or the entry
+/// was lost.
+#[cfg(windows)]
+fn fallback_dirs(vars: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    let base = |name: &str| {
+        vars.iter()
+            .find(|(key, value)| key.eq_ignore_ascii_case(name) && !value.is_empty())
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    let relative: [(&str, &[&str]); 9] = [
+        // `npm install -g` (codex, pi, copilot, claude): npm's default prefix.
+        ("APPDATA", &["npm"]),
+        // claude: native installer (`claude install`, claude.ai/install.ps1).
+        ("USERPROFILE", &[".local", "bin"]),
+        // codex: standalone installer, default visible bin directory
+        // (chatgpt.com/codex/install.ps1).
+        ("LOCALAPPDATA", &["Programs", "OpenAI", "Codex", "bin"]),
+        // codex: earlier standalone installer layout, found on a real install.
+        ("USERPROFILE", &[".codex", "bin"]),
+        // agy: antigravity.google/cli/install.ps1.
+        ("LOCALAPPDATA", &["agy", "bin"]),
+        // cursor-agent: cursor.com/install?win32=true.
+        ("LOCALAPPDATA", &["cursor-agent"]),
+        // copilot: `winget install GitHub.Copilot` links.
+        ("LOCALAPPDATA", &["Microsoft", "WinGet", "Links"]),
+        // Global installs through bun and Volta.
+        ("USERPROFILE", &[".bun", "bin"]),
+        ("LOCALAPPDATA", &["Volta", "bin"]),
+    ];
+    relative
+        .into_iter()
+        .filter_map(|(variable, parts)| {
+            base(variable).map(|dir| parts.iter().fold(dir, |dir, part| dir.join(part)))
+        })
+        .collect()
 }
 
 #[cfg(unix)]
