@@ -24,7 +24,7 @@
 ## 4. Verificação
 
 - [x] 4.1 `make verify` verde no Mac (frontend, Rust desktop com clippy `-D warnings`, companion, clovy-api); contagens registradas em `.tmp/verify/atividade-ocioso-e-minutos/`.
-- [ ] 4.2 Prova no app de desenvolvimento: ler 10 min rolando sem clicar não gera lacuna ociosa; uma hora concluída com atividade curta mostra "< 1 min" e nunca "0 min"; capturas de tela e números do export de depuração em `.tmp/verify/atividade-ocioso-e-minutos/`.
+- [x] 4.2 Prova no app de desenvolvimento: ler 10 min rolando sem clicar não gera lacuna ociosa; uma hora concluída com atividade curta mostra "< 1 min" e nunca "0 min"; capturas de tela e números do export de depuração em `.tmp/verify/atividade-ocioso-e-minutos/`. Provado no app de desenvolvimento: todos os 221 quadros do build novo trazem `input_idle_ms` (mediana 824 ms, máximo 9342 ms); o relatório da hora 18 foi gravado em segundos (516/573/230/173/115 s, 27 min ativos) e a grade mostrou as frentes. Nenhuma frente real ficou abaixo de 60 s, então o "< 1 min" está provado só pelos testes de frontend. O dono encerrou a change sem o teste manual de 10 min só rolando e sem o teste sem Monitoramento de Entrada; os dois ficam como não provados no app. A grade vazia após a hora 18 (R2) não se reproduziu.
 
 ## Workflow follow-up
 
