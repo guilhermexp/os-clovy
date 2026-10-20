@@ -661,6 +661,44 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn windows_lock_samples_count_as_away_without_changing_macos_gap_semantics() {
+        for (app, expected) in [
+            ("LockApp.exe", GapKind::Sleep),
+            ("LogonUI.exe", GapKind::Sleep),
+            ("loginwindow", GapKind::Idle),
+            ("ScreenSaverEngine", GapKind::Idle),
+        ] {
+            let mut frames = vec![frame(1, at(10, 0, 0), "Code", "main.rs", None, 1)];
+            frames.extend((0..600).map(|index| StoredFrame {
+                input_idle_ms: Some(0),
+                ..frame(
+                    index + 2,
+                    at(10, 0, 2) + Duration::seconds(index * 2),
+                    app,
+                    "Locked",
+                    None,
+                    2,
+                )
+            }));
+            let now = at(10, 20, 2);
+            let (state, _) = feed(&frames, &BatchSignals::default());
+            let ongoing = ongoing_gap(&state, now, &[]).expect("locked interval is a gap");
+            assert_eq!(ongoing.kind, expected, "ongoing {app}");
+            assert_eq!(ongoing.ended_at - ongoing.started_at, Duration::minutes(20));
+
+            frames.push(frame(602, now, "Code", "main.rs", None, 3));
+            let (_, events) = feed(&frames, &BatchSignals::default());
+            let finished = gaps(&events);
+            assert_eq!(finished.len(), 1, "{app}");
+            assert_eq!(finished[0].kind, expected, "finished {app}");
+            assert_eq!(
+                finished[0].ended_at - finished[0].started_at,
+                Duration::minutes(20)
+            );
+        }
+    }
+
+    #[test]
     fn scrolling_keeps_ten_minutes_of_unchanged_frames_focused() {
         let frames: Vec<_> = (0..=300)
             .map(|index| StoredFrame {
