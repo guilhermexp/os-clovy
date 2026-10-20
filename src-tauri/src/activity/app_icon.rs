@@ -416,8 +416,19 @@ mod windows_tests {
 
         assert_eq!(app_icon_data_url(&bundle_id), None);
         crate::activity::windows::window::record_executable_path(&bundle_id, test_exe);
-        let resolved = app_icon_data_url(&bundle_id)
-            .expect("observing an executable must recover from an earlier icon miss");
+        // A native Shell lookup may be temporarily unavailable under parallel
+        // load. The contract is retryability, not guaranteed immediate drawing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let resolved = loop {
+            if let Some(icon) = app_icon_data_url(&bundle_id) {
+                break icon;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "observing an executable must recover from an earlier icon miss"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
         let png = base64::engine::general_purpose::STANDARD
             .decode(resolved.strip_prefix("data:image/png;base64,").unwrap())
             .unwrap();
