@@ -322,4 +322,47 @@ mod windows_tests {
         assert_eq!(app_icon_data_url("../../Windows/explorer.exe"), None);
         assert_eq!(app_icon_data_url("clovy-never-installed.exe"), None);
     }
+
+    #[test]
+    #[ignore = "requires installed Calculator and Notepad packages"]
+    fn test_fresh_icon_cache_resolves_installed_packaged_aumid() {
+        // Run alone in a fresh test process: neither identity has been observed.
+        let icons: Vec<Vec<u8>> = [
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+        ]
+        .into_iter()
+        .map(|aumid| {
+            let data_url = app_icon_data_url(aumid)
+                .unwrap_or_else(|| panic!("unobserved installed package has no icon: {aumid}"));
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(data_url.strip_prefix("data:image/png;base64,").unwrap())
+                .unwrap();
+            let dimensions = imagesize::blob_size(&png).unwrap();
+            assert_eq!((dimensions.width, dimensions.height), (64, 64));
+            assert!(png.len() <= MAX_PNG_BYTES);
+            println!("{aumid}: {} PNG bytes", png.len());
+            png
+        })
+        .collect();
+        assert_ne!(icons[0], icons[1], "packages must not share a generic icon");
+    }
+
+    #[test]
+    fn test_icon_cache_miss_does_not_permanently_negative_cache_before_executable_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_id = format!("clovy-delayed-observe-{}.exe", std::process::id());
+        let test_exe = dir.path().join(&bundle_id);
+        std::fs::copy(r"C:\Windows\System32\cmd.exe", &test_exe).unwrap();
+
+        assert_eq!(app_icon_data_url(&bundle_id), None);
+        crate::activity::windows::window::record_executable_path(&bundle_id, test_exe);
+        let resolved = app_icon_data_url(&bundle_id)
+            .expect("observing an executable must recover from an earlier icon miss");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(resolved.strip_prefix("data:image/png;base64,").unwrap())
+            .unwrap();
+        let dimensions = imagesize::blob_size(&png).unwrap();
+        assert_eq!((dimensions.width, dimensions.height), (64, 64));
+    }
 }
