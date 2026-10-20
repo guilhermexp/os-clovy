@@ -83,6 +83,9 @@ below) and mirrored to the menu bar.
     `IUIAutomationTreeWalker` navigation. Window chrome (toolbars, menus,
     buttons, scroll bars) is skipped. Password elements (`is_password()`) and
     their entire subtrees are skipped unconditionally during traversal.
+    Offscreen nodes and nodes whose visibility cannot be determined are also
+    pruned before reading text or visiting children, including hidden browser
+    documents, so an allowed document cannot carry text from another tab.
   - When the content has fewer than 20 non-whitespace characters, Clovy falls
     back to local in-memory OCR on exactly that window:
     - On macOS, Apple Vision OCR on an in-memory ScreenCaptureKit image

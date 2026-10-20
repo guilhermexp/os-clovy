@@ -428,6 +428,7 @@ pub(crate) fn extract_uia_description<N: UiaNode>(root: &N, title: Option<&str>)
 /// Budgets: 250ms deadline, 3,000 nodes, depth 40, 20,000 characters.
 /// Rules:
 /// - Skips password elements and their subtrees entirely.
+/// - Skips offscreen or unknown-visibility nodes and their entire subtrees.
 /// - Skips window chrome (buttons, menus, toolbars, scrollbars).
 /// - Reads Document, Edit, and Text controls.
 /// - Deduplicates adjacent chunks and caps at 20,000 characters.
@@ -446,7 +447,7 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
     let mut queue = VecDeque::new();
 
     // Check root node
-    if !root.is_password() {
+    if !root.is_password() && root.is_offscreen() == Some(false) {
         let is_content = matches!(
             root.control_type(),
             UiaControlType::Document | UiaControlType::Edit | UiaControlType::Text
@@ -493,8 +494,8 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
             break;
         }
 
-        if node.is_password() {
-            // Password fields and their subtrees are skipped unconditionally
+        if node.is_password() || node.is_offscreen() != Some(false) {
+            // Hidden/unknown content and password subtrees must never be read.
             if let Some(sibling) = node.next_sibling() {
                 queue.push_back((Some(sibling), depth));
             }
