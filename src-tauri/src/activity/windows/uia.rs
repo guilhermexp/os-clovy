@@ -604,6 +604,7 @@ pub(crate) fn extract_uia_text<N: UiaNode>(root: &N) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     /// Node representation for test trees, implementing lazy `UiaNode` traversal.
@@ -619,6 +620,8 @@ mod tests {
         value: Option<String>,
         text: Option<String>,
         delay: Option<Duration>,
+        offscreen: Option<bool>,
+        text_reads: Arc<AtomicUsize>,
         first_child: Option<FakeUiaNode>,
         next_sibling: Option<FakeUiaNode>,
     }
@@ -640,6 +643,8 @@ mod tests {
                     value: value.map(String::from),
                     text: text.map(String::from),
                     delay,
+                    offscreen: Some(false),
+                    text_reads: Arc::new(AtomicUsize::new(0)),
                     first_child: None,
                     next_sibling: None,
                 }),
@@ -678,6 +683,8 @@ mod tests {
                     value: None,
                     text: None,
                     delay: None,
+                    offscreen: Some(false),
+                    text_reads: Arc::new(AtomicUsize::new(0)),
                     first_child,
                     next_sibling: None,
                 }),
@@ -687,6 +694,14 @@ mod tests {
         fn with_document_url(self, url: &str) -> Self {
             let mut inner = self.inner.clone_fields();
             inner.value = Some(url.to_owned());
+            Self {
+                inner: Arc::new(inner),
+            }
+        }
+
+        fn with_visibility(self, offscreen: Option<bool>) -> Self {
+            let mut inner = self.inner.clone_fields();
+            inner.offscreen = offscreen;
             Self {
                 inner: Arc::new(inner),
             }
@@ -702,6 +717,8 @@ mod tests {
                 value: self.value.clone(),
                 text: self.text.clone(),
                 delay: self.delay,
+                offscreen: self.offscreen,
+                text_reads: self.text_reads.clone(),
                 first_child: self.first_child.clone(),
                 next_sibling: self.next_sibling.clone(),
             }
@@ -729,6 +746,7 @@ mod tests {
         }
 
         fn text_content(&self, _max_chars: usize) -> Option<String> {
+            self.inner.text_reads.fetch_add(1, Ordering::SeqCst);
             self.inner.text.clone()
         }
 
@@ -737,7 +755,7 @@ mod tests {
         }
 
         fn is_offscreen(&self) -> Option<bool> {
-            Some(false)
+            self.inner.offscreen
         }
 
         fn first_child(&self) -> Option<Self> {
@@ -747,6 +765,98 @@ mod tests {
         fn next_sibling(&self) -> Option<Self> {
             self.inner.next_sibling.clone()
         }
+    }
+
+    #[test]
+    fn windows_uia_offscreen_document_never_reads_text_under_allowed_url() {
+        let visible = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            None,
+            None,
+            Some("Visible allowed article"),
+            false,
+            None,
+        )
+        .with_document_url("https://allowed.example/article");
+        let hidden_child = FakeUiaNode::leaf(
+            UiaControlType::Text,
+            None,
+            None,
+            Some("Excluded tab descendant"),
+            false,
+            None,
+        );
+        let child_reads = hidden_child.inner.text_reads.clone();
+        let hidden =
+            FakeUiaNode::with_children(UiaControlType::Document, None, false, vec![hidden_child])
+                .with_document_url("https://excluded.example/private")
+                .with_visibility(Some(true));
+        let hidden_reads = hidden.inner.text_reads.clone();
+        let tree =
+            FakeUiaNode::with_children(UiaControlType::Window, None, false, vec![visible, hidden]);
+        assert_eq!(
+            extract_uia_description(&tree, None).url.as_deref(),
+            Some("https://allowed.example/article")
+        );
+        let text = extract_uia_text(&tree);
+        assert_eq!(
+            hidden_reads.load(Ordering::SeqCst),
+            0,
+            "offscreen document text reader was invoked"
+        );
+        assert_eq!(
+            child_reads.load(Ordering::SeqCst),
+            0,
+            "offscreen subtree text reader was invoked"
+        );
+        assert_eq!(text.as_deref(), Some("Visible allowed article"));
+    }
+
+    #[test]
+    fn windows_uia_offscreen_content_is_not_read_inside_visible_document() {
+        for visibility in [Some(true), None] {
+            let hidden = FakeUiaNode::leaf(
+                UiaControlType::Text,
+                None,
+                None,
+                Some("Hidden content"),
+                false,
+                None,
+            )
+            .with_visibility(visibility);
+            let hidden_reads = hidden.inner.text_reads.clone();
+            let visible = FakeUiaNode::leaf(
+                UiaControlType::Text,
+                None,
+                None,
+                Some("Visible content"),
+                false,
+                None,
+            );
+            let tree = FakeUiaNode::with_children(
+                UiaControlType::Document,
+                None,
+                false,
+                vec![hidden, visible],
+            );
+            assert_eq!(extract_uia_text(&tree).as_deref(), Some("Visible content"));
+            assert_eq!(hidden_reads.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn windows_uia_offscreen_root_never_reads_text() {
+        let root = FakeUiaNode::leaf(
+            UiaControlType::Document,
+            None,
+            None,
+            Some("Hidden root content"),
+            false,
+            None,
+        )
+        .with_visibility(Some(true));
+        assert_eq!(extract_uia_text(&root), None);
+        assert_eq!(root.inner.text_reads.load(Ordering::SeqCst), 0);
     }
 
     #[test]
