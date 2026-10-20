@@ -200,3 +200,36 @@ mod tests {
         assert!(!alive, "helper {helper} survived the call");
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::llm::cmd_shim_tests::{npm_cmd_cli, read_record};
+
+    /// One-shot calls give the prompt on stdin; through an npm `.cmd` shim
+    /// it reaches the CLI byte for byte, however long and whatever it holds.
+    #[tokio::test]
+    async fn llm_cmd_cli_gets_the_stdin_prompt_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("received.json");
+        let program = npm_cmd_cli(dir.path(), "codex", &record);
+        let prompt = format!(
+            "linha 1\n\"aspas\" & 100% %PATH% ^ fim!\r\nlinha 3 > < |\n{}",
+            "x".repeat(20_000)
+        );
+        let output = run(ProcessSpec {
+            program,
+            args: vec!["exec".to_string(), "-".to_string()],
+            env: std::env::vars().collect(),
+            cwd: dir.path().to_path_buf(),
+            stdin: Some(prompt.clone()),
+            timeout: Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+        assert!(output.success, "{output:?}");
+        let received = read_record(&record).unwrap();
+        assert_eq!(received["stdin"].as_str(), Some(prompt.as_str()));
+        assert_eq!(received["args"], serde_json::json!(["exec", "-"]));
+    }
+}

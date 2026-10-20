@@ -242,4 +242,82 @@ mod tests {
     fn llm_env_block_requires_markers() {
         assert!(parse_env_block("PATH=/a\0").is_none());
     }
+
+    #[cfg(windows)]
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+
+    #[cfg(windows)]
+    fn windows_vars(entries: &[(&str, &Path)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string_lossy().into_owned()))
+            .collect()
+    }
+
+    /// npm writes `codex.cmd` next to a POSIX `codex` script with no
+    /// extension; only the `.cmd` can run on Windows.
+    #[test]
+    #[cfg(windows)]
+    fn llm_windows_path_key_and_pathext_pick_the_npm_cmd_shim() {
+        let npm = tempfile::tempdir().unwrap();
+        touch(&npm.path().join("codex"));
+        touch(&npm.path().join("codex.cmd"));
+        let mut vars = windows_vars(&[("Path", npm.path())]);
+        vars.insert("PATHEXT".into(), ".COM;.EXE;.BAT;.CMD".into());
+        let env = LoginEnv::from_vars(vars);
+        assert_eq!(env.which("codex"), Some(npm.path().join("codex.cmd")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn llm_windows_without_pathext_uses_the_default_extensions() {
+        let bin = tempfile::tempdir().unwrap();
+        touch(&bin.path().join("claude.exe"));
+        touch(&bin.path().join("pi"));
+        let env = LoginEnv::from_vars(windows_vars(&[("Path", bin.path())]));
+        assert_eq!(env.which("claude"), Some(bin.path().join("claude.exe")));
+        assert_eq!(env.which("pi"), None);
+    }
+
+    /// The installers' directories are found even when the app's `Path`
+    /// lacks them, and the result stays in the app's own `Path` key so the
+    /// child never gets two PATH variables.
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn llm_windows_fallback_dirs_come_from_the_user_profile() {
+        let profile = tempfile::tempdir().unwrap();
+        let roaming = profile.path().join("AppData").join("Roaming");
+        let local = profile.path().join("AppData").join("Local");
+        let system = profile.path().join("system32");
+        std::fs::create_dir_all(&system).unwrap();
+        touch(&profile.path().join(".local").join("bin").join("claude.exe"));
+        touch(&roaming.join("npm").join("codex.cmd"));
+        touch(&local.join("cursor-agent").join("cursor-agent.cmd"));
+        let process_env = windows_vars(&[
+            ("Path", &system),
+            ("USERPROFILE", profile.path()),
+            ("APPDATA", &roaming),
+            ("LOCALAPPDATA", &local),
+        ]);
+
+        let env = resolve_login_env(Path::new("unused-on-windows"), &process_env).await;
+
+        assert_eq!(
+            env.which("claude"),
+            Some(profile.path().join(".local").join("bin").join("claude.exe"))
+        );
+        assert_eq!(
+            env.which("codex"),
+            Some(roaming.join("npm").join("codex.cmd"))
+        );
+        assert_eq!(
+            env.which("cursor-agent"),
+            Some(local.join("cursor-agent").join("cursor-agent.cmd"))
+        );
+        assert!(!env.vars().contains_key("PATH"), "{:?}", env.vars().keys());
+        assert_eq!(env.path_dirs().first(), Some(&system));
+    }
 }

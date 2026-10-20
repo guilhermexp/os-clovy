@@ -16,6 +16,8 @@
 //! See `docs/llm-providers.md` for the full contract.
 
 pub mod cli;
+#[cfg(all(test, windows))]
+pub(crate) mod cmd_shim_tests;
 pub mod commands;
 pub mod detect;
 pub mod endpoint;

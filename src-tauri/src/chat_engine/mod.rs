@@ -25,6 +25,9 @@ mod red_tests;
 #[cfg(test)]
 mod tests;
 pub mod turn;
+#[cfg(all(test, windows))]
+#[path = "windows_tests.rs"]
+mod windows_tests;
 
 use crate::agent_runtime::protocol::RpcFrame;
 use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
