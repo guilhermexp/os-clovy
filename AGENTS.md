@@ -237,6 +237,10 @@ build scripts in `pnpm-workspace.yaml` — live in
   and do not "fix" the tests.
 - **Rust tests:** `pnpm test:rust` (src-tauri) and `pnpm test:clovy-api` (the
   backend workspace).
+- **Windows native activity tests:** clipboard fixtures must run in a child
+  process with a private window station/desktop, never the console clipboard.
+  The installed-package icon test is ignored by default and requires Calculator
+  and Notepad: `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib activity::app_icon::windows_tests:: -- --include-ignored`.
 - **Agent runtime gate:** `pnpm agent-runtime:typecheck` +
   `pnpm agent-runtime:test` + `pnpm agent-runtime:build` before changing the
   sidecar or its OpenAI Agents SDK pin.
