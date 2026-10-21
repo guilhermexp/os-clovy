@@ -1,19 +1,15 @@
-import type * as UpdateDecision from "../app/update-decision";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { HERO_GREETINGS } from "../components/agent/AgentWorkspace";
-import { settingsTabsForCompanionPairing } from "../components/settings/settings-config";
 import {
   dispatchDataPartitionChanged,
   resetCurrentDataPartitionForTests,
   setCurrentDataPartitionName,
 } from "../lib/data-partition";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
-import { companionFrontendConsumerAvailable } from "../lib/companion-frontend-router";
-import { rememberSessionModel } from "../lib/agent-session-models";
-import { invoke as tauriInvoke } from "../lib/tauri";
+import { resetOnboardingForReplay } from "../lib/onboarding";
 import {
   AGENT_NEW_SESSION_EVENT,
   AGENT_NEW_SESSION_PENDING_KEY,
@@ -23,13 +19,11 @@ import {
 import { CLOSE_TAB_EVENT, OPEN_SETTINGS_EVENT } from "../lib/menu-bar";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type {
-  AccountStatus,
   BootstrapResponse,
   NoteDto,
   RecordingSessionDto,
   RecordingSourceReadinessDto,
   ProviderModelDto,
-  ProviderModelsResponse,
 } from "../lib/tauri";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
@@ -91,12 +85,6 @@ const mocks = vi.hoisted(() => ({
   patchNote: vi.fn(),
   completeNoteSaveFlush: vi.fn(async () => true),
   checkRecordingSourceReadiness: vi.fn(),
-  companionCompleteFrontendRequest: vi.fn(),
-  companionConsumeAttachments: vi.fn().mockResolvedValue(undefined),
-  companionPublishAgentEvent: vi.fn().mockResolvedValue(undefined),
-  companionListAgentMedia: vi.fn().mockResolvedValue([]),
-  companionReadAgentMediaChunk: vi.fn(),
-  companionPairingEnabled: true,
   listAgentItems: vi.fn().mockResolvedValue([]),
   getAgentSession: vi.fn(),
   createAgentSession: vi.fn(),
@@ -115,10 +103,6 @@ const mocks = vi.hoisted(() => ({
   dictationHelperCommand: vi.fn(),
   listDictationHistory: vi.fn(),
   osAccountsStatus: vi.fn(),
-  osAccountsLogin: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
-  osAccountsLogout: vi.fn(),
-  osAccountsUpgrade: vi.fn(),
   agentHudShow: vi.fn(),
   agentOpenReady: vi.fn().mockResolvedValue(null),
   agentHudHide: vi.fn(),
@@ -128,15 +112,12 @@ const mocks = vi.hoisted(() => ({
   listSessionPartitions: vi.fn(),
   listProviderModels: vi.fn(),
   localVideoFileSrc: vi.fn((path: string) => `asset://${path}`),
-  p3aSettings: vi.fn(),
   playRecordingSound: vi.fn(),
   preloadRecordingSounds: vi.fn(),
   preloadAgentSounds: vi.fn(),
   providerModelSettings: vi.fn(),
-  setP3aEnabled: vi.fn(),
   videoGenerate: vi.fn(),
   videoStatus: vi.fn(),
-  startPeriodicClovyUpdateChecks: vi.fn(),
   suggestAgentSessionTitle: vi.fn(),
   gatewayRequest: vi.fn(),
   gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
@@ -158,10 +139,8 @@ vi.mock("../lib/experimental-flags", () => ({
   useExperimentalFlags: () => ({
     unlocked: false,
     browser_use: false,
-    companion_pairing: mocks.companionPairingEnabled,
     loaded: true,
     browserUseEnabled: false,
-    companionPairingEnabled: mocks.companionPairingEnabled,
   }),
 }));
 
@@ -173,14 +152,6 @@ vi.mock("../lib/recording-sounds", () => ({
 vi.mock("../lib/agent-sounds", () => ({
   preloadAgentSounds: mocks.preloadAgentSounds,
 }));
-
-vi.mock("../app/update-decision", async () => {
-  const actual = await vi.importActual<typeof UpdateDecision>("../app/update-decision");
-  return {
-    ...actual,
-    startPeriodicClovyUpdateChecks: mocks.startPeriodicClovyUpdateChecks,
-  };
-});
 
 vi.mock("../lib/tauri", () => ({
   agentRuntimeBindings: {
@@ -254,11 +225,6 @@ vi.mock("../lib/tauri", () => ({
   completeNoteSaveFlush: mocks.completeNoteSaveFlush,
   NOTE_SAVE_FLUSH_REQUESTED_EVENT: "clovy://flush-pending-note-saves",
   checkRecordingSourceReadiness: mocks.checkRecordingSourceReadiness,
-  companionCompleteFrontendRequest: mocks.companionCompleteFrontendRequest,
-  companionConsumeAttachments: mocks.companionConsumeAttachments,
-  companionPublishAgentEvent: mocks.companionPublishAgentEvent,
-  companionListAgentMedia: mocks.companionListAgentMedia,
-  companionReadAgentMediaChunk: mocks.companionReadAgentMediaChunk,
   listAgentItems: mocks.listAgentItems,
   openPrivacySettings: mocks.openPrivacySettings,
   startRecording: mocks.startRecording,
@@ -269,12 +235,7 @@ vi.mock("../lib/tauri", () => ({
   recoverRecording: mocks.recoverRecording,
   dictationHelperCommand: mocks.dictationHelperCommand,
   listDictationHistory: mocks.listDictationHistory,
-  osAccountsStatus: mocks.osAccountsStatus,
-  osAccountsStatusLocal: mocks.osAccountsStatus,
-  osAccountsLogin: mocks.osAccountsLogin,
-  osAccountsCancelLogin: mocks.osAccountsCancelLogin,
-  osAccountsLogout: mocks.osAccountsLogout,
-  osAccountsUpgrade: mocks.osAccountsUpgrade,
+  dictationSettings: vi.fn().mockRejectedValue(new Error("dictation settings unavailable")),
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
@@ -283,9 +244,7 @@ vi.mock("../lib/tauri", () => ({
   startMeetingRecording: mocks.startMeetingRecording,
   listAgentTasks: mocks.listAgentTasks,
   clovyOpenVerifyPage: vi.fn(async () => ""),
-  p3aSettings: mocks.p3aSettings,
   providerModelSettings: mocks.providerModelSettings,
-  setP3aEnabled: mocks.setP3aEnabled,
   listProviderModels: mocks.listProviderModels,
   localVideoFileSrc: mocks.localVideoFileSrc,
   videoGenerate: mocks.videoGenerate,
@@ -410,7 +369,6 @@ describe("App shortcuts", () => {
     window.localStorage.setItem("clovy:active-agent-profile", "default");
     window.localStorage.removeItem("clovy:agent:last-open-session");
     window.localStorage.removeItem("clovy.agent.sessionModels");
-    mocks.companionPairingEnabled = true;
     mocks.pendingMeetingStartRequest = undefined;
     mocks.readPendingMeetingStartRequest.mockImplementation(
       async () => mocks.pendingMeetingStartRequest ?? null,
@@ -456,16 +414,6 @@ describe("App shortcuts", () => {
         { source: "system", ready: true, permissionState: "granted" },
       ],
     });
-    mocks.companionCompleteFrontendRequest.mockResolvedValue(undefined);
-    mocks.companionListAgentMedia.mockResolvedValue([]);
-    mocks.companionReadAgentMediaChunk.mockResolvedValue({
-      artifactId: "artifact-default",
-      offsetBytes: 0,
-      totalSizeBytes: 1,
-      sha256: "0".repeat(64),
-      bytes: "AA==",
-      complete: true,
-    });
     mocks.getAgentSession.mockImplementation(async (sessionId: string) => {
       const sessions = await mocks.listAgentSessions();
       const found = sessions.find((candidate: AgentSessionDto) => candidate.id === sessionId);
@@ -474,7 +422,7 @@ describe("App shortcuts", () => {
     });
     mocks.createAgentSession.mockResolvedValue(agentSession("session-new", "New session"));
     mocks.startAgentRun.mockImplementation(async (request) => ({
-      id: "run-companion",
+      id: "run-default",
       sessionId: request.sessionId,
       status: "running",
       model: request.model,
@@ -487,23 +435,6 @@ describe("App shortcuts", () => {
       items: [],
       retentionDays: 7,
     });
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    });
-    mocks.osAccountsLogin.mockResolvedValue({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    });
-    mocks.osAccountsLogout.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
-    mocks.osAccountsUpgrade.mockResolvedValue(undefined);
     mocks.agentOpenReady.mockResolvedValue(null);
     mocks.listAgentTasks.mockResolvedValue({ items: [] });
     mocks.listAgentSessions.mockResolvedValue([]);
@@ -522,21 +453,6 @@ describe("App shortcuts", () => {
         providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       },
     });
-    mocks.p3aSettings.mockResolvedValue({
-      settings: {
-        enabled: false,
-        consentedAtWeek: null,
-        consentVersion: 1,
-      },
-    });
-    mocks.setP3aEnabled.mockResolvedValue({
-      settings: {
-        enabled: false,
-        consentedAtWeek: null,
-        consentVersion: 1,
-      },
-    });
-    mocks.startPeriodicClovyUpdateChecks.mockReturnValue(vi.fn());
     mocks.suggestAgentSessionTitle.mockImplementation(async (prompt: string) => ({
       title: prompt,
     }));
@@ -554,10 +470,25 @@ describe("App shortcuts", () => {
       return Promise.resolve({});
     });
     mocks.listeners.clear();
+    // Tauri delivers each event to every subscriber, so keep all handlers per
+    // event instead of letting the last subscriber shadow the earlier ones.
+    const handlersByEvent = new Map<string, Set<(event: { payload?: unknown }) => void>>();
     mocks.listen.mockImplementation(
       async (event: string, handler: (event: { payload?: unknown }) => void) => {
-        mocks.listeners.set(event, handler);
-        return () => mocks.listeners.delete(event);
+        const handlers =
+          handlersByEvent.get(event) ?? new Set<(event: { payload?: unknown }) => void>();
+        handlersByEvent.set(event, handlers);
+        handlers.add(handler);
+        mocks.listeners.set(event, (payload) => {
+          for (const current of [...handlers]) current(payload);
+        });
+        return () => {
+          handlers.delete(handler);
+          if (handlers.size === 0) {
+            handlersByEvent.delete(event);
+            mocks.listeners.delete(event);
+          }
+        };
       },
     );
     mocks.updateNote.mockImplementation(async (input) => ({
@@ -574,1402 +505,12 @@ describe("App shortcuts", () => {
     }));
   });
 
-  it("starts background update checks after launch gates clear", async () => {
-    vi.stubEnv("DEV", false);
-
-    try {
-      render(<App />);
-
-      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-      await waitFor(() => expect(mocks.startPeriodicClovyUpdateChecks).toHaveBeenCalledOnce());
-      expect(mocks.startPeriodicClovyUpdateChecks.mock.calls[0]?.[0]).toEqual(expect.any(Function));
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
   it("shows the startup session list App loaded in the sidebar", async () => {
     mocks.listAgentSessions.mockResolvedValue([agentSession("session-start", "Startup session")]);
 
     render(<App />);
 
     expect(await screen.findByText("Startup session")).toBeInTheDocument();
-  });
-
-  it("serves companion agent reads without opening the agent workspace", async () => {
-    const user = userEvent.setup();
-    mocks.listAgentSessions.mockResolvedValue([
-      {
-        id: "session-companion",
-        title: "Companion planning",
-        status: "completed",
-        model: "auto",
-        safetyMode: "sandboxed",
-        workspacePath: "/tmp/session-companion",
-        source: "user",
-        createdAt: "2026-07-16T09:00:00.000Z",
-        updatedAt: "2026-07-16T10:00:00.000Z",
-      },
-    ]);
-    render(<App />);
-    await user.click(await screen.findByRole("button", { name: "Meeting notes" }));
-
-    await waitFor(() =>
-      expect(mocks.listen.mock.calls.some(([event]) => event === "clovy://companion-request")).toBe(
-        true,
-      ),
-    );
-    const payload = {
-      operationId: "operation-companion",
-      intent: { type: "agentSessionsList", data: { limit: 50 } },
-    };
-    act(() => {
-      for (const [event, handler] of mocks.listen.mock.calls) {
-        if (event === "clovy://companion-request") handler({ payload });
-      }
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-companion", {
-        type: "agentSessions",
-        data: {
-          items: [
-            {
-              id: "session-companion",
-              title: "Companion planning",
-              status: "completed",
-              updatedAt: "2026-07-16T10:00:00.000Z",
-            },
-          ],
-        },
-      }),
-    );
-    expect(screen.queryByText(HERO_GREETING)).not.toBeInTheDocument();
-  });
-
-  it("returns only Auto and the live curated desktop models with canonical labels", async () => {
-    mocks.listProviderModels.mockResolvedValue({
-      mode: "generation",
-      modelType: "text",
-      selectedModel: "z-ai/glm-5.2",
-      models: [
-        generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" }),
-        generationModel("uncurated", { name: "Uncurated" }),
-        generationModel("z-ai/glm-5.2", { name: "GLM 5.2" }),
-        // Curated, but it needs the user's own key, which is not saved.
-        generationModel("moonshotai/kimi-k3", { name: "Kimi K3", serviceAvailable: false }),
-      ],
-    });
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-models-list",
-          intent: { type: "modelsList" },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-models-list", {
-        type: "models",
-        data: {
-          models: [
-            expect.objectContaining({
-              id: "open-software/auto",
-              name: "Auto",
-              routing: "automatic",
-            }),
-            expect.objectContaining({
-              id: "z-ai/glm-5.2",
-              name: "GLM 5.2",
-            }),
-            expect.objectContaining({
-              id: "moonshotai/kimi-k2.6",
-              name: "Kimi K2.6",
-              priceLabel: "$0.85 input / $4.66 output per 1M tokens",
-            }),
-          ],
-        },
-      }),
-    );
-  });
-
-  it("reads and stages a companion model switch without disturbing an active run", async () => {
-    const session = {
-      ...agentSession("session-model", "Model session"),
-      status: "running" as const,
-      model: "z-ai/glm-5.2",
-    };
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listProviderModels.mockResolvedValue({
-      mode: "generation",
-      modelType: "text",
-      selectedModel: "z-ai/glm-5.2",
-      models: [generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" })],
-    });
-    mocks.providerModelSettings.mockResolvedValue({
-      settings: { generationModel: "z-ai/glm-5.2", costQuality: 100 },
-    });
-    window.localStorage.setItem(
-      "clovy.agent.sessionModels",
-      JSON.stringify({ [session.id]: "__june_auto_generation__:20" }),
-    );
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-model-get",
-          intent: { type: "sessionModelGet", data: { storedSessionId: session.id } },
-        },
-      });
-    });
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-model-get", {
-        type: "sessionModel",
-        data: {
-          storedSessionId: session.id,
-          modelId: "open-software/auto",
-          modelName: "Auto",
-          costQuality: 20,
-        },
-      }),
-    );
-
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-model-set",
-          intent: {
-            type: "sessionModelSet",
-            data: { storedSessionId: session.id, modelId: "moonshotai/kimi-k2.6" },
-          },
-        },
-      });
-    });
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-model-set", {
-        type: "sessionModel",
-        data: {
-          storedSessionId: session.id,
-          modelId: "moonshotai/kimi-k2.6",
-          modelName: "Kimi K2.6",
-        },
-      }),
-    );
-    expect(JSON.parse(window.localStorage.getItem("clovy.agent.sessionModels") ?? "{}")).toEqual({
-      [session.id]: "moonshotai/kimi-k2.6",
-    });
-    expect(mocks.startAgentRun).not.toHaveBeenCalled();
-    expect(mocks.cancelAgentRun).not.toHaveBeenCalled();
-  });
-
-  it("publishes a model event when the desktop stages a session choice", async () => {
-    const session = agentSession("session-desktop-model", "Desktop model session");
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listProviderModels.mockResolvedValue({
-      mode: "generation",
-      modelType: "text",
-      selectedModel: "z-ai/glm-5.2",
-      models: [generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" })],
-    });
-    mocks.providerModelSettings.mockResolvedValue({
-      settings: { generationModel: "z-ai/glm-5.2", costQuality: 100 },
-    });
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => rememberSessionModel(session.id, "moonshotai/kimi-k2.6"));
-
-    await waitFor(() =>
-      expect(mocks.companionPublishAgentEvent).toHaveBeenCalledWith({
-        type: "modelChanged",
-        data: {
-          selection: {
-            storedSessionId: session.id,
-            modelId: "moonshotai/kimi-k2.6",
-            modelName: "Kimi K2.6",
-          },
-        },
-      }),
-    );
-  });
-
-  it("drops a staged model event when the data partition changes during catalog loading", async () => {
-    const partitionASession = agentSession("session-model-partition-a", "Partition A model");
-    const partitionBSession = agentSession("session-model-partition-b", "Partition B model");
-    mocks.listAgentSessions.mockResolvedValue([partitionASession, partitionBSession]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: partitionASession.id, profile: "partition-a" },
-      { sessionId: partitionBSession.id, profile: "partition-b" },
-    ]);
-    setCurrentDataPartitionName("partition-a");
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    mocks.companionPublishAgentEvent.mockClear();
-    mocks.listProviderModels.mockClear();
-    const catalog = deferred<ProviderModelsResponse>();
-    mocks.listProviderModels.mockReturnValueOnce(catalog.promise);
-
-    await act(async () => {
-      rememberSessionModel(partitionASession.id, "moonshotai/kimi-k2.6");
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    setCurrentDataPartitionName("partition-b");
-    await act(async () => {
-      catalog.resolve({
-        mode: "generation",
-        modelType: "text",
-        selectedModel: "z-ai/glm-5.2",
-        models: [generationModel("moonshotai/kimi-k2.6", { name: "Kimi K2.6" })],
-      });
-      await catalog.promise;
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(mocks.companionPublishAgentEvent).not.toHaveBeenCalled();
-  });
-
-  it("rejects uncurated companion model writes", async () => {
-    const session = agentSession("session-model-rejected", "Rejected model session");
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listProviderModels.mockResolvedValue({
-      mode: "generation",
-      modelType: "text",
-      selectedModel: "z-ai/glm-5.2",
-      models: [generationModel("moonshotai/kimi-k2.6")],
-    });
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-model-rejected",
-          intent: {
-            type: "sessionModelSet",
-            data: { storedSessionId: session.id, modelId: "uncurated" },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-model-rejected",
-        expect.objectContaining({
-          type: "error",
-          data: expect.objectContaining({ code: "unsupported" }),
-        }),
-      ),
-    );
-    expect(window.localStorage.getItem("clovy.agent.sessionModels")).toBeNull();
-  });
-
-  it("pages companion agent messages backward from the newest turns", async () => {
-    mocks.listAgentSessions.mockResolvedValue([
-      {
-        id: "session-companion",
-        title: "Companion planning",
-        status: "completed",
-        model: "auto",
-        safetyMode: "sandboxed",
-        workspacePath: "/tmp/session-companion",
-        source: "user",
-        createdAt: "2026-07-16T09:00:00.000Z",
-        updatedAt: "2026-07-16T10:03:00.000Z",
-      },
-    ]);
-    mocks.listAgentItems.mockResolvedValue([
-      {
-        id: "message-1",
-        sessionId: "session-companion",
-        sequence: 1,
-        kind: "message",
-        role: "user",
-        text: "Oldest question",
-        status: "complete",
-        createdAt: "2026-07-16T10:01:00.000Z",
-      },
-      {
-        id: "message-2",
-        sessionId: "session-companion",
-        sequence: 2,
-        kind: "message",
-        role: "assistant",
-        text: "Recent answer",
-        status: "complete",
-        createdAt: "2026-07-16T10:02:00.000Z",
-      },
-      {
-        id: "message-3",
-        sessionId: "session-companion",
-        sequence: 3,
-        kind: "message",
-        role: "user",
-        text: "Newest question",
-        status: "complete",
-        createdAt: "2026-07-16T10:03:00.000Z",
-      },
-    ]);
-    render(<App />);
-
-    await waitFor(() =>
-      expect(mocks.listen.mock.calls.some(([event]) => event === "clovy://companion-request")).toBe(
-        true,
-      ),
-    );
-    const dispatch = (cursor?: string) => {
-      const payload = {
-        operationId: cursor ? "operation-older" : "operation-latest",
-        intent: {
-          type: "agentMessagesList",
-          data: {
-            storedSessionId: "session-companion",
-            limit: 2,
-            ...(cursor ? { cursor } : {}),
-          },
-        },
-      };
-      act(() => {
-        for (const [event, handler] of mocks.listen.mock.calls) {
-          if (event === "clovy://companion-request") handler({ payload });
-        }
-      });
-    };
-
-    dispatch();
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-latest", {
-        type: "agentMessages",
-        data: {
-          items: [
-            expect.objectContaining({ id: "message-2", text: "Recent answer" }),
-            expect.objectContaining({ id: "message-3", text: "Newest question" }),
-          ],
-          nextCursor: "2",
-        },
-      }),
-    );
-
-    dispatch("2");
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-older", {
-        type: "agentMessages",
-        data: {
-          items: [expect.objectContaining({ id: "message-1", text: "Oldest question" })],
-        },
-      }),
-    );
-  });
-
-  it("returns canonical media references with companion agent history", async () => {
-    const session = agentSession("session-media", "Generated media");
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listAgentItems.mockResolvedValue([
-      {
-        id: "message-media",
-        sessionId: session.id,
-        runId: "run-media",
-        sequence: 1,
-        kind: "message",
-        role: "assistant",
-        text: "Here is the result.",
-        status: "complete",
-        createdAt: "2026-07-28T10:00:00.000Z",
-      },
-    ]);
-    mocks.companionListAgentMedia.mockResolvedValue([
-      {
-        runId: "run-media",
-        createdAt: "2026-07-28T09:59:59.000Z",
-        reference: {
-          artifactId: "artifact-media",
-          kind: "image",
-          mediaType: "image/png",
-          widthPx: 1024,
-          heightPx: 1024,
-          sizeBytes: 4096,
-        },
-      },
-    ]);
-    render(<App />);
-
-    await waitFor(() =>
-      expect(mocks.listen.mock.calls.some(([event]) => event === "clovy://companion-request")).toBe(
-        true,
-      ),
-    );
-    act(() => {
-      for (const [event, handler] of mocks.listen.mock.calls) {
-        if (event === "clovy://companion-request") {
-          handler({
-            payload: {
-              operationId: "operation-media",
-              intent: {
-                type: "agentMessagesList",
-                data: { storedSessionId: session.id, limit: 50 },
-              },
-            },
-          });
-        }
-      }
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-media", {
-        type: "agentMessages",
-        data: {
-          items: [
-            expect.objectContaining({
-              id: "message-media",
-              media: [
-                expect.objectContaining({
-                  artifactId: "artifact-media",
-                  kind: "image",
-                  mediaType: "image/png",
-                }),
-              ],
-            }),
-          ],
-        },
-      }),
-    );
-    expect(mocks.companionListAgentMedia).toHaveBeenCalledWith(session.id);
-  });
-
-  it("returns a verified media chunk through the partition-scoped frontend boundary", async () => {
-    const session = agentSession("session-media-fetch", "Generated media");
-    const chunk = {
-      artifactId: "artifact-media",
-      offsetBytes: 31 * 1024,
-      totalSizeBytes: 31 * 1024 + 4,
-      sha256: "a".repeat(64),
-      bytes: "dGFpbA==",
-      complete: true,
-    };
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.companionReadAgentMediaChunk.mockResolvedValue(chunk);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-media-fetch",
-          intent: {
-            type: "mediaFetch",
-            data: {
-              storedSessionId: session.id,
-              artifactId: chunk.artifactId,
-              offsetBytes: chunk.offsetBytes,
-            },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-media-fetch", {
-        type: "mediaChunk",
-        data: chunk,
-      }),
-    );
-    expect(mocks.companionReadAgentMediaChunk).toHaveBeenCalledWith(
-      session.id,
-      chunk.artifactId,
-      chunk.offsetBytes,
-    );
-  });
-
-  it("discards a media chunk when the active partition changes during the read", async () => {
-    const session = agentSession("session-media-partition-a", "Partition A media");
-    const chunk = deferred<{
-      artifactId: string;
-      offsetBytes: number;
-      totalSizeBytes: number;
-      sha256: string;
-      bytes: string;
-      complete: boolean;
-    }>();
-    setCurrentDataPartitionName("partition-a");
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: session.id, profile: "partition-a" },
-    ]);
-    mocks.companionReadAgentMediaChunk.mockReturnValue(chunk.promise);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-media-partition",
-          intent: {
-            type: "mediaFetch",
-            data: {
-              storedSessionId: session.id,
-              artifactId: "artifact-private",
-              offsetBytes: 0,
-            },
-          },
-        },
-      });
-    });
-    await waitFor(() =>
-      expect(mocks.companionReadAgentMediaChunk).toHaveBeenCalledWith(
-        session.id,
-        "artifact-private",
-        0,
-      ),
-    );
-
-    setCurrentDataPartitionName("partition-b");
-    chunk.resolve({
-      artifactId: "artifact-private",
-      offsetBytes: 0,
-      totalSizeBytes: 1,
-      sha256: "b".repeat(64),
-      bytes: "AA==",
-      complete: true,
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-media-partition",
-        expect.objectContaining({
-          type: "error",
-          data: expect.objectContaining({ code: "not_found" }),
-        }),
-      ),
-    );
-    expect(mocks.companionCompleteFrontendRequest).not.toHaveBeenCalledWith(
-      "operation-media-partition",
-      expect.objectContaining({ type: "mediaChunk" }),
-    );
-  });
-
-  it("preserves a missing media artifact as a non-retryable not-found result", async () => {
-    const session = agentSession("session-media-missing", "Missing media");
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.companionReadAgentMediaChunk.mockRejectedValue({
-      code: "companion_media_not_found",
-      message: "That generated media is no longer available.",
-    });
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-media-missing",
-          intent: {
-            type: "mediaFetch",
-            data: {
-              storedSessionId: session.id,
-              artifactId: "artifact-missing",
-              offsetBytes: 0,
-            },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-media-missing",
-        {
-          type: "error",
-          data: {
-            code: "not_found",
-            message: "That generated media is no longer available.",
-            retryable: false,
-          },
-        },
-      ),
-    );
-  });
-
-  it("opens the stored agent session requested by the companion", async () => {
-    const focusedSession = {
-      id: "session-companion",
-      title: "Companion planning",
-      status: "completed" as const,
-      model: "auto",
-      safetyMode: "sandboxed" as const,
-      workspacePath: "/tmp/session-companion",
-      source: "user" as const,
-      createdAt: "2026-07-16T09:00:00.000Z",
-      updatedAt: "2026-07-16T10:03:00.000Z",
-    };
-    mocks.listAgentSessions.mockResolvedValue([focusedSession]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: focusedSession.id, profile: "default" },
-    ]);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-focus")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-focus")?.({
-        payload: { agent: { storedSessionId: "session-companion" } },
-      });
-    });
-
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument(),
-    );
-    expect(screen.queryByRole("heading", { name: HERO_GREETING })).not.toBeInTheDocument();
-  });
-
-  it("uses the target session model and safety mode for companion sends", async () => {
-    const unrestricted = {
-      ...agentSession("session-unrestricted", "Unrestricted session"),
-      model: "unrestricted-model",
-      safetyMode: "unrestricted" as const,
-    };
-    const sandboxed = {
-      ...agentSession("session-sandboxed", "Sandboxed session"),
-      model: "sandboxed-model",
-      safetyMode: "sandboxed" as const,
-    };
-    mocks.listAgentSessions.mockResolvedValue([unrestricted, sandboxed]);
-    mocks.getAgentSession.mockImplementation(async (sessionId: string) =>
-      sessionId === sandboxed.id ? sandboxed : unrestricted,
-    );
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-sandboxed-send",
-          intent: {
-            type: "agentSend",
-            data: {
-              storedSessionId: sandboxed.id,
-              message: "Keep this run sandboxed",
-            },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.startAgentRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: sandboxed.id,
-          model: sandboxed.model,
-          safetyMode: sandboxed.safetyMode,
-        }),
-      ),
-    );
-    expect(mocks.startAgentRun).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: sandboxed.id,
-        safetyMode: unrestricted.safetyMode,
-      }),
-    );
-    expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-      "operation-sandboxed-send",
-      {
-        type: "agentAccepted",
-        data: { storedSessionId: sandboxed.id },
-      },
-    );
-  });
-
-  it("hands resolved companion attachments to the normal agent run and consumes references", async () => {
-    const target = agentSession("session-with-phone-file", "Attachment session");
-    mocks.listAgentSessions.mockResolvedValue([target]);
-    mocks.getAgentSession.mockResolvedValue(target);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-attachment-send",
-          intent: {
-            type: "agentSend",
-            data: {
-              storedSessionId: target.id,
-              message: "Read the attached brief",
-              attachments: [
-                {
-                  path: "/tmp/companion/content",
-                  name: "photo.png",
-                  mediaType: "image/png",
-                },
-              ],
-              attachmentReferenceIds: ["00000000-0000-0000-0000-000000000003"],
-            },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.startAgentRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: target.id,
-          attachments: ["/tmp/companion/content"],
-          attachmentMetadata: [{ name: "photo.png", mediaType: "image/png" }],
-        }),
-      ),
-    );
-    expect(mocks.companionConsumeAttachments).toHaveBeenCalledWith([
-      "00000000-0000-0000-0000-000000000003",
-    ]);
-    expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-      "operation-attachment-send",
-      {
-        type: "agentAccepted",
-        data: { storedSessionId: target.id },
-      },
-    );
-  });
-
-  it("applies and clears a companion-staged model at the companion run boundary", async () => {
-    const target = agentSession("session-staged-companion", "Staged model session");
-    mocks.listAgentSessions.mockResolvedValue([target]);
-    mocks.getAgentSession.mockResolvedValue(target);
-    rememberSessionModel(target.id, "model-staged-by-phone");
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-staged-model-send",
-          intent: {
-            type: "agentSend",
-            data: {
-              storedSessionId: target.id,
-              message: "Use the staged model",
-            },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.startAgentRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: target.id,
-          model: "model-staged-by-phone",
-        }),
-      ),
-    );
-    expect(JSON.parse(window.localStorage.getItem("clovy.agent.sessionModels") ?? "{}")).toEqual(
-      {},
-    );
-  });
-
-  it("reports acceptance when attachment cleanup fails after run dispatch", async () => {
-    const target = agentSession("session-cleanup-failure", "Cleanup failure session");
-    mocks.listAgentSessions.mockResolvedValue([target]);
-    mocks.getAgentSession.mockResolvedValue(target);
-    mocks.companionConsumeAttachments.mockRejectedValueOnce(new Error("cleanup failed"));
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-cleanup-failure",
-          intent: {
-            type: "agentSend",
-            data: {
-              storedSessionId: target.id,
-              message: "Dispatch once",
-              attachmentReferenceIds: ["00000000-0000-0000-0000-000000000004"],
-            },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-cleanup-failure",
-        {
-          type: "agentAccepted",
-          data: { storedSessionId: target.id },
-        },
-      ),
-    );
-    expect(mocks.startAgentRun).toHaveBeenCalledTimes(1);
-  });
-
-  it("prepares companion sends with current project context and clearing markers", async () => {
-    const session = agentSession("session-project-companion", "Project session");
-    const folder = {
-      id: "folder-companion",
-      name: "Private launch",
-      description: "Local project",
-      instructions: "Answer with the current launch constraints.",
-      memoryDisabled: false,
-      createdAt: now,
-      updatedAt: now,
-    };
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [folder],
-      notes: [note()],
-      activeRecoveries: [],
-      providerConfigured: true,
-    });
-    mocks.listAgentSessions.mockResolvedValue([session]);
-    mocks.listSessionFolders.mockResolvedValue([{ sessionId: session.id, folderId: folder.id }]);
-    mocks.listSessionPartitions.mockResolvedValue([{ sessionId: session.id, profile: "default" }]);
-    const firstApp = render(<App />);
-
-    await waitFor(() => expect(mocks.listSessionFolders).toHaveBeenCalled());
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-project-send",
-          intent: {
-            type: "agentSend",
-            data: { storedSessionId: session.id, message: "What changed?" },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.startAgentRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: session.id,
-          prompt: expect.stringContaining(
-            "instructions:\nAnswer with the current launch constraints.",
-          ),
-        }),
-      ),
-    );
-
-    firstApp.unmount();
-    mocks.listeners.clear();
-    mocks.startAgentRun.mockClear();
-    mocks.listSessionFolders.mockClear();
-    mocks.listSessionFolders.mockResolvedValue([]);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listSessionFolders).toHaveBeenCalled());
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-project-cleared-send",
-          intent: {
-            type: "agentSend",
-            data: { storedSessionId: session.id, message: "What now?" },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.startAgentRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: session.id,
-          prompt: expect.stringContaining(
-            "This session is no longer filed in a project. Previous project instructions no longer apply",
-          ),
-        }),
-      ),
-    );
-    expect(mocks.startAgentRun).toHaveBeenCalledWith(
-      expect.objectContaining({
-        prompt: expect.stringContaining("\n[/Clovy project context]\n\nWhat now?"),
-      }),
-    );
-  });
-
-  it("creates companion-started sessions with the sandboxed session defaults", async () => {
-    const created = {
-      ...agentSession("session-created-by-companion", "Companion request"),
-      model: "open-software/auto",
-      safetyMode: "sandboxed" as const,
-    };
-    mocks.createAgentSession.mockResolvedValue(created);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-new-session-send",
-          intent: {
-            type: "agentSend",
-            data: { message: "Start a safe session" },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.createAgentSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          model: "open-software/auto",
-          safetyMode: "sandboxed",
-          profile: "default",
-        }),
-      ),
-    );
-    expect(mocks.startAgentRun).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: created.id,
-        model: created.model,
-        safetyMode: created.safetyMode,
-      }),
-    );
-  });
-
-  it("starts a phone-started session on the default CLI engine", async () => {
-    const engineModel = "__clovy_cli_engine__:claude";
-    const created = {
-      ...agentSession("session-created-on-cli", "Companion request"),
-      model: engineModel,
-      safetyMode: "sandboxed" as const,
-    };
-    mocks.createAgentSession.mockResolvedValue(created);
-    vi.mocked(tauriInvoke).mockImplementation(async (command: string) =>
-      command === "chat_default_engine"
-        ? { modelId: engineModel, cli: "claude", legacyFallback: false }
-        : [],
-    );
-    try {
-      render(<App />);
-
-      await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-      act(() => {
-        mocks.listeners.get("clovy://companion-request")?.({
-          payload: {
-            operationId: "operation-new-cli-session-send",
-            intent: { type: "agentSend", data: { message: "Plan my week" } },
-          },
-        });
-      });
-
-      await waitFor(() =>
-        expect(mocks.createAgentSession).toHaveBeenCalledWith(
-          expect.objectContaining({ model: engineModel, safetyMode: "sandboxed" }),
-        ),
-      );
-      await waitFor(() =>
-        expect(mocks.startAgentRun).toHaveBeenCalledWith(
-          expect.objectContaining({ sessionId: created.id, model: engineModel }),
-        ),
-      );
-    } finally {
-      vi.mocked(tauriInvoke).mockImplementation(async () => []);
-    }
-  });
-
-  it("rejects a cached companion send after the active partition changes", async () => {
-    const cached = agentSession("session-partition-a", "Partition A session");
-    setCurrentDataPartitionName("partition-a");
-    mocks.listAgentSessions.mockResolvedValue([cached]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: cached.id, profile: "partition-a" },
-    ]);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    setCurrentDataPartitionName("partition-b");
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-stale-send",
-          intent: {
-            type: "agentSend",
-            data: { storedSessionId: cached.id, message: "Cross the boundary" },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith("operation-stale-send", {
-        type: "error",
-        data: {
-          code: "not_found",
-          message: "That agent session is no longer available.",
-          retryable: false,
-        },
-      }),
-    );
-    expect(mocks.startAgentRun).not.toHaveBeenCalled();
-  });
-
-  it("rejects a cached companion cancellation after the active partition changes", async () => {
-    const cached = agentSession("session-partition-a", "Partition A session");
-    setCurrentDataPartitionName("partition-a");
-    mocks.listAgentSessions.mockResolvedValue([cached]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: cached.id, profile: "partition-a" },
-    ]);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    setCurrentDataPartitionName("partition-b");
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-stale-cancel",
-          intent: {
-            type: "agentCancel",
-            data: { storedSessionId: cached.id },
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-stale-cancel",
-        expect.objectContaining({
-          type: "error",
-          data: expect.objectContaining({ code: "not_found" }),
-        }),
-      ),
-    );
-    expect(mocks.cancelAgentRun).not.toHaveBeenCalled();
-  });
-
-  it("rejects a companion send when the active partition changes while skills load", async () => {
-    const cached = agentSession("session-partition-a", "Partition A session");
-    const skills = deferred<never[]>();
-    setCurrentDataPartitionName("partition-a");
-    mocks.listAgentSessions.mockResolvedValue([cached]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: cached.id, profile: "partition-a" },
-    ]);
-    mocks.listAgentSkills.mockReturnValue(skills.promise);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-mid-await-send",
-          intent: {
-            type: "agentSend",
-            data: { storedSessionId: cached.id, message: "Cross the boundary" },
-          },
-        },
-      });
-    });
-    await waitFor(() => expect(mocks.listAgentSkills).toHaveBeenCalled());
-
-    setCurrentDataPartitionName("partition-b");
-    skills.resolve([]);
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-mid-await-send",
-        expect.objectContaining({
-          type: "error",
-          data: expect.objectContaining({ code: "not_found" }),
-        }),
-      ),
-    );
-    expect(mocks.startAgentRun).not.toHaveBeenCalled();
-  });
-
-  it("rejects a companion cancellation when the active partition changes while the run loads", async () => {
-    const cached = agentSession("session-partition-a", "Partition A session");
-    const latestRun = deferred<{
-      id: string;
-      sessionId: string;
-      status: "running";
-      model: string;
-    }>();
-    setCurrentDataPartitionName("partition-a");
-    mocks.listAgentSessions.mockResolvedValue([cached]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: cached.id, profile: "partition-a" },
-    ]);
-    mocks.getLatestAgentRun.mockReturnValue(latestRun.promise);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-mid-await-cancel",
-          intent: {
-            type: "agentCancel",
-            data: { storedSessionId: cached.id },
-          },
-        },
-      });
-    });
-    await waitFor(() => expect(mocks.getLatestAgentRun).toHaveBeenCalledWith(cached.id));
-
-    setCurrentDataPartitionName("partition-b");
-    latestRun.resolve({
-      id: "run-partition-a",
-      sessionId: cached.id,
-      status: "running",
-      model: "auto",
-    });
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-mid-await-cancel",
-        expect.objectContaining({
-          type: "error",
-          data: expect.objectContaining({ code: "not_found" }),
-        }),
-      ),
-    );
-    expect(mocks.cancelAgentRun).not.toHaveBeenCalled();
-  });
-
-  it("returns no companion messages when the active partition changes while items load", async () => {
-    const cached = agentSession("session-partition-a", "Partition A session");
-    const items =
-      deferred<
-        Array<{
-          id: string;
-          sessionId: string;
-          sequence: number;
-          kind: "message";
-          role: "assistant";
-          text: string;
-          status: "complete";
-          createdAt: string;
-        }>
-      >();
-    setCurrentDataPartitionName("partition-a");
-    mocks.listAgentSessions.mockResolvedValue([cached]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: cached.id, profile: "partition-a" },
-    ]);
-    mocks.listAgentItems.mockReturnValue(items.promise);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-request")).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://companion-request")?.({
-        payload: {
-          operationId: "operation-mid-await-messages",
-          intent: {
-            type: "agentMessagesList",
-            data: { storedSessionId: cached.id, limit: 50 },
-          },
-        },
-      });
-    });
-    await waitFor(() => expect(mocks.listAgentItems).toHaveBeenCalledWith(cached.id));
-
-    setCurrentDataPartitionName("partition-b");
-    items.resolve([
-      {
-        id: "message-partition-a",
-        sessionId: cached.id,
-        sequence: 1,
-        kind: "message",
-        role: "assistant",
-        text: "Partition A secret",
-        status: "complete",
-        createdAt: "2026-07-16T10:00:00.000Z",
-      },
-    ]);
-
-    await waitFor(() =>
-      expect(mocks.companionCompleteFrontendRequest).toHaveBeenCalledWith(
-        "operation-mid-await-messages",
-        expect.objectContaining({
-          type: "error",
-          data: expect.objectContaining({ code: "not_found" }),
-        }),
-      ),
-    );
-    expect(mocks.companionCompleteFrontendRequest).not.toHaveBeenCalledWith(
-      "operation-mid-await-messages",
-      expect.objectContaining({ type: "agentMessages" }),
-    );
-  });
-
-  it("ignores a cached companion focus target after the active partition changes", async () => {
-    const user = userEvent.setup();
-    const cached = agentSession("session-partition-a", "Partition A session");
-    setCurrentDataPartitionName("partition-a");
-    mocks.listAgentSessions.mockResolvedValue([cached]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: cached.id, profile: "partition-a" },
-    ]);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await user.click(screen.getByRole("button", { name: "Meeting notes" }));
-    await screen.findByRole("heading", { name: /Meeting notes/ });
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-focus")).toBe(true));
-    setCurrentDataPartitionName("partition-b");
-    act(() => {
-      mocks.listeners.get("clovy://companion-focus")?.({
-        payload: { agent: { storedSessionId: cached.id } },
-      });
-    });
-
-    await waitFor(() =>
-      expect(screen.queryByRole("textbox", { name: "Message Clovy" })).not.toBeInTheDocument(),
-    );
-  });
-
-  it("clears the OS Accounts browser session from sidebar sign-out", async () => {
-    const user = userEvent.setup();
-
-    render(<App />);
-
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-
-    await user.click(screen.getByRole("button", { name: "alex@example.com, account menu" }));
-    await user.click(screen.getByRole("menuitem", { name: "Sign out" }));
-
-    expect(mocks.osAccountsLogout).toHaveBeenCalledWith({ clearBrowserSession: true });
-    expect(await screen.findByRole("heading", { name: "Welcome to Clovy" })).toBeInTheDocument();
-  });
-
-  it("keeps notes, session history, and sign out available while funding is required", async () => {
-    const user = userEvent.setup();
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { credits: 0, usdMillis: 0 },
-      subscription: { subscribed: false },
-    });
-
-    render(<App />);
-
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    // No modal ever blocks the shell; the state lives in the sidebar chip.
-    expect(await screen.findByRole("button", { name: "Out of credits" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Meeting notes" }));
-    expect(await screen.findByRole("heading", { name: /Meeting notes/ })).toBeInTheDocument();
-    expect(screen.getByText("First note")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Sessions" }));
-    expect(await screen.findByRole("heading", { name: "Sessions" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "alex@example.com, account menu" }));
-    await user.click(screen.getByRole("menuitem", { name: "Sign out" }));
-    expect(mocks.osAccountsLogout).toHaveBeenCalledWith({ clearBrowserSession: true });
-    expect(await screen.findByRole("heading", { name: "Welcome to Clovy" })).toBeInTheDocument();
-  });
-
-  it("docks a persistent, non-dismissible notice above the composer while funding is required", async () => {
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { credits: 0, usdMillis: 0 },
-      subscription: { subscribed: false },
-    });
-
-    render(<App />);
-
-    // The copy renders on the composer notice and inside the sidebar chip's
-    // (collapsed) reveal.
-    expect(
-      (await screen.findAllByText("Your starter credits are used up. Upgrade to keep using Clovy."))
-        .length,
-    ).toBeGreaterThan(0);
-    expect(screen.getAllByRole("button", { name: "Upgrade to Pro" }).length).toBeGreaterThan(0);
-    // The notice is not a dialog and offers no dismissal.
-    expect(screen.queryByRole("dialog", { name: "Credits needed" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Not now" })).not.toBeInTheDocument();
-  });
-
-  it("drives the out-of-credits surfaces from the __fundingDemo console hook", async () => {
-    render(<App />);
-
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    const demo = await waitFor(() => {
-      const hook = (window as { __fundingDemo?: (branch?: string) => string }).__fundingDemo;
-      expect(hook).toBeTypeOf("function");
-      return hook as (branch?: string) => string;
-    });
-
-    // Funded account: no funding surfaces anywhere.
-    expect(screen.queryByRole("button", { name: "Out of credits" })).toBeNull();
-
-    await act(async () => {
-      demo("pro");
-    });
-    expect(
-      (
-        await screen.findAllByText(
-          "You have used your Pro credits for this cycle. Max has 5x the monthly usage.",
-        )
-      ).length,
-    ).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "Out of credits" })).toBeInTheDocument();
-
-    await act(async () => {
-      demo("off");
-    });
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "Out of credits" })).toBeNull(),
-    );
-  });
-
-  it("keeps recoverable audio available while funding blocks recovery", async () => {
-    const user = userEvent.setup();
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [],
-      notes: [note()],
-      activeRecoveries: [
-        {
-          sessionId: "recovery-1",
-          noteId: "note-1",
-          startedAt: now,
-          partialPathPresent: true,
-          finalPathPresent: false,
-          bytesFound: 4096,
-        },
-      ],
-      providerConfigured: true,
-    });
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { credits: 0, usdMillis: 0 },
-      subscription: { subscribed: false },
-    });
-
-    render(<App />);
-
-    await user.click(await screen.findByRole("button", { name: "Meeting notes" }));
-    await user.click(await screen.findByText("First note"));
-
-    const recoveryPrompt = await screen.findByLabelText("Recoverable recording");
-    const recover = within(recoveryPrompt).getByRole("button", { name: "Recover" });
-    expect(recover).toBeDisabled();
-    expect(within(recoveryPrompt).getByRole("button", { name: "Discard" })).toBeEnabled();
-    expect(
-      within(recoveryPrompt).getByText(
-        "Add credits before recovering this recording. Your saved audio will stay available.",
-      ),
-    ).toBeInTheDocument();
-
-    fireEvent.click(recover);
-    expect(mocks.recoverRecording).not.toHaveBeenCalled();
-    expect(screen.getByLabelText("Recoverable recording")).toBeInTheDocument();
   });
 
   it("starts a new session with Command-N", async () => {
@@ -2153,150 +694,6 @@ describe("App shortcuts", () => {
     expect(
       await screen.findByRole("heading", { name: "General" }, { timeout: 10_000 }),
     ).toBeInTheDocument();
-  });
-
-  it("keeps every companion surface dark until the experiment is enabled", async () => {
-    mocks.companionPairingEnabled = false;
-    const disabled = render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has(OPEN_SETTINGS_EVENT)).toBe(true));
-    await waitFor(() => expect(mocks.listeners.has("clovy://agent-runtime-event")).toBe(true));
-    expect(mocks.listeners.has("clovy://companion-focus")).toBe(false);
-    expect(mocks.listeners.has("clovy://companion-request")).toBe(false);
-    expect(companionFrontendConsumerAvailable()).toBe(false);
-    act(() => {
-      mocks.listeners.get("clovy://agent-runtime-event")?.({
-        payload: {
-          method: "message.delta",
-          sessionId: "session-companion",
-          data: { delta: "Hidden companion update" },
-        },
-      });
-    });
-    expect(mocks.companionPublishAgentEvent).not.toHaveBeenCalled();
-    expect(
-      settingsTabsForCompanionPairing(false, false).some((tab) => tab.id === "linked-devices"),
-    ).toBe(false);
-
-    act(() => {
-      mocks.listeners.get(OPEN_SETTINGS_EVENT)?.({});
-    });
-    await screen.findByRole("heading", { name: "General" });
-    expect(screen.queryByRole("button", { name: "Linked devices" })).not.toBeInTheDocument();
-
-    disabled.unmount();
-    mocks.listeners.clear();
-    mocks.listen.mockClear();
-    mocks.companionPairingEnabled = true;
-    mocks.listAgentSessions.mockResolvedValue([
-      agentSession("session-companion", "Companion session"),
-    ]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: "session-companion", profile: "default" },
-    ]);
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://companion-focus")).toBe(true));
-    expect(mocks.listeners.has("clovy://companion-request")).toBe(true);
-    await waitFor(() => expect(companionFrontendConsumerAvailable()).toBe(true));
-    act(() => {
-      mocks.listeners.get("clovy://agent-runtime-event")?.({
-        payload: {
-          method: "message.delta",
-          sessionId: "session-companion",
-          data: { delta: "Visible companion update" },
-        },
-      });
-    });
-    await waitFor(() =>
-      expect(mocks.companionPublishAgentEvent).toHaveBeenCalledWith({
-        type: "delta",
-        data: {
-          storedSessionId: "session-companion",
-          text: "Visible companion update",
-        },
-      }),
-    );
-    expect(
-      settingsTabsForCompanionPairing(true, false).some((tab) => tab.id === "linked-devices"),
-    ).toBe(true);
-
-    act(() => {
-      mocks.listeners.get(OPEN_SETTINGS_EVENT)?.({});
-    });
-    expect(await screen.findByRole("button", { name: "Linked devices" })).toBeInTheDocument();
-  });
-
-  it("does not publish any agent event from an inactive data partition", async () => {
-    const partitionASession = agentSession("session-partition-a", "Partition A session");
-    const partitionBSession = agentSession("session-partition-b", "Partition B session");
-    mocks.listAgentSessions.mockResolvedValue([partitionASession, partitionBSession]);
-    mocks.listSessionPartitions.mockResolvedValue([
-      { sessionId: partitionASession.id, profile: "partition-a" },
-      { sessionId: partitionBSession.id, profile: "partition-b" },
-    ]);
-    setCurrentDataPartitionName("partition-b");
-    render(<App />);
-
-    await waitFor(() => expect(mocks.listeners.has("clovy://agent-runtime-event")).toBe(true));
-    mocks.companionPublishAgentEvent.mockClear();
-    mocks.listSessionPartitions.mockClear();
-
-    act(() => {
-      mocks.listeners.get("clovy://agent-runtime-event")?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-partition-a-delta",
-          sessionId: partitionASession.id,
-          runId: "run-partition-a",
-          sequence: 1,
-          method: "message.delta",
-          data: {
-            itemId: "message-partition-a",
-            role: "assistant",
-            delta: "Private partition A text",
-            createdAt: now,
-          },
-        },
-      });
-      mocks.listeners.get("clovy://agent-runtime-event")?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-partition-a-run-started",
-          sessionId: partitionASession.id,
-          runId: "run-partition-a",
-          sequence: 2,
-          method: "run.started",
-          data: { startedAt: now, model: "auto" },
-        },
-      });
-      mocks.listeners.get("clovy://agent-runtime-event")?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-partition-a-tool-completed",
-          sessionId: partitionASession.id,
-          runId: "run-partition-a",
-          sequence: 3,
-          method: "tool.completed",
-          data: {
-            itemId: "tool-result-partition-a",
-            callId: "call-partition-a",
-            name: "generate_image",
-            output: [],
-            createdAt: now,
-          },
-        },
-      });
-    });
-
-    await waitFor(() =>
-      expect(mocks.listSessionPartitions.mock.calls.length).toBeGreaterThanOrEqual(3),
-    );
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(mocks.companionPublishAgentEvent).not.toHaveBeenCalled();
   });
 
   it("refreshes Accessibility after requesting access without opening settings over the native prompt", async () => {
@@ -2765,96 +1162,36 @@ describe("App shortcuts", () => {
     expect(await screen.findByDisplayValue("First note")).toBeInTheDocument();
   });
 
-  it("gates the app until the user signs in", async () => {
-    const user = userEvent.setup();
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: false,
-      configured: true,
-    });
+  it("opens on Home without an account in a release build", async () => {
+    vi.stubEnv("DEV", false);
+    mocks.osAccountsStatus.mockResolvedValue({ signedIn: false, configured: false });
 
-    render(<App />);
+    try {
+      render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Welcome to Clovy" })).toBeInTheDocument();
-    expect(mocks.bootstrapApp).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "New note" })).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "Continue with OpenSoftware" }));
-
-    await waitFor(() => expect(mocks.bootstrapApp).toHaveBeenCalledOnce());
-    // Clearing the gate lands in the persistent Clovy conversation, not a new note.
-    expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
-    expect(mocks.createNote).not.toHaveBeenCalled();
+      expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
+      expect(mocks.bootstrapApp).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
-  it("uses Windows dictation sign-in copy and opens a fresh agent session after sign-in", async () => {
-    const user = userEvent.setup();
-    const restoreNavigator = stubNavigatorPlatform(
-      "Win32",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    );
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: false,
-      configured: true,
-    });
+  it("starts a fresh install's onboarding without an account step", async () => {
+    vi.stubEnv("DEV", false);
+    resetOnboardingForReplay();
+    mocks.osAccountsStatus.mockResolvedValue({ signedIn: false, configured: false });
 
     try {
       render(<App />);
 
       expect(
-        await screen.findByText(
-          "Record conversations, turn them into notes, and dictate with your OpenSoftware account.",
-        ),
-      ).toBeInTheDocument();
-
-      await user.click(screen.getByRole("button", { name: "Continue with OpenSoftware" }));
-
-      expect(await screen.findByRole("heading", { name: HERO_GREETING })).toBeInTheDocument();
-      expect(screen.getByRole("tab", { name: "New session" })).toHaveAttribute(
-        "data-active",
-        "true",
-      );
-      expect(screen.getByRole("button", { name: "New session" })).toHaveAttribute(
-        "aria-current",
-        "page",
-      );
+        await screen.findByRole("heading", { name: "Where could I help most?" }),
+      ).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
     } finally {
-      restoreNavigator();
+      vi.unstubAllEnvs();
     }
-  });
-
-  it("does not flash the sign-in gate while account status is loading", async () => {
-    let resolveStatus: ((status: AccountStatus) => void) | undefined;
-    mocks.osAccountsStatus.mockReturnValue(
-      new Promise<AccountStatus>((resolve) => {
-        resolveStatus = resolve;
-      }),
-    );
-
-    render(<App />);
-
-    expect(screen.queryByRole("heading", { name: "Welcome to Clovy" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
-    expect(mocks.bootstrapApp).not.toHaveBeenCalled();
-
-    resolveStatus?.({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    });
-
-    expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
-  });
-
-  it("bypasses account gates in dev when account status is unavailable", async () => {
-    mocks.osAccountsStatus.mockRejectedValue(new Error("accounts unavailable"));
-
-    render(<App />);
-
-    expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
-    expect(mocks.bootstrapApp).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
   });
 
   it("refreshes partition-scoped chat sessions when the data partition switches", async () => {
@@ -3088,8 +1425,9 @@ describe("App shortcuts", () => {
 
     render(<App />);
 
-    expect(
-      await screen.findByRole("button", { name: "Send message" }, { timeout: 8_000 }),
-    ).toBeInTheDocument();
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument(),
+      { timeout: 8_000 },
+    );
   }, 15_000);
 });

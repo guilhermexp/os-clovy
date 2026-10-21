@@ -117,7 +117,7 @@ lint: check tauri-lint companion-lint clovy-api-lint  ## Lint everything
 
 test: test-web tauri-test companion-test clovy-api-test  ## Run all test suites
 
-org-references-check:  ## Fail on Open Software organization references in repo/CI files
+org-references-check:  ## Fail on Open Software organization references in repo, CI and app source
 	node scripts/check-org-references.mjs
 
 verify: org-references-check check typecheck test-web tauri-fmt-check tauri-lint tauri-test companion-fmt-check companion-lint companion-test clovy-api-fmt-check clovy-api-lint clovy-api-test  ## Full CI-parity gate

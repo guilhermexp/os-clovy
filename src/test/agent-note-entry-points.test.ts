@@ -108,15 +108,6 @@ describe("agent note entry point pending request", () => {
 
     expect(pendingNewSessionRequest()).toEqual({});
   });
-
-  it("lets category seeding take precedence over note reference seeding", () => {
-    markAgentNewSessionPending(undefined, {
-      category: "bug",
-      noteRef: { id: "note-1", title: "Launch plan" },
-    });
-
-    expect(pendingNewSessionRequest()).toEqual({ category: "bug" });
-  });
 });
 
 describe("note header actions", () => {

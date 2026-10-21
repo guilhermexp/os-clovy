@@ -33,7 +33,7 @@ vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   writeText: mocks.writeClipboardText,
 }));
 
-const BASE_URL = "https://june.link";
+const BASE_URL = "http://127.0.0.1:8080";
 
 function noteItem(overrides: Partial<Parameters<typeof ShareDialog>[0]["item"]> = {}) {
   return {
@@ -116,7 +116,7 @@ describe("ShareDialog", () => {
       }),
     );
     const link = linkField.value;
-    expect(link).toMatch(/^https:\/\/june\.link\/s\/shr_1#link\./);
+    expect(link).toMatch(/^http:\/\/127\.0\.0\.1:8080\/s\/shr_1#link\./);
     const fragment = link.split("#")[1].split(".");
     expect(fragment.slice(0, 3)).toEqual(["link", "shi_link", "key"]);
 

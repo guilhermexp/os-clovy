@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RoutinesView } from "../components/routines/RoutinesView";
@@ -126,14 +126,12 @@ function renderView(
   props: Partial<{
     onCreateRoutine: (prompt: string) => void;
     onOpenRun: (session: RoutineRunSession) => void;
-    creditActionsDisabledReason: string;
   }> = {},
 ) {
   return render(
     <RoutinesView
       onCreateRoutine={props.onCreateRoutine ?? vi.fn()}
       onOpenRun={props.onOpenRun ?? vi.fn()}
-      creditActionsDisabledReason={props.creditActionsDisabledReason}
     />,
   );
 }
@@ -1098,54 +1096,6 @@ describe("RoutinesView detail", () => {
 
     await waitFor(() => expect(screen.queryByText("Last run failed.")).toBeNull());
     expect(mocks.listRoutines).toHaveBeenCalledTimes(2);
-  });
-
-  it("disables run now with the funding explanation while credits are depleted", async () => {
-    mocks.listRoutines.mockResolvedValue([job()]);
-    renderView({ creditActionsDisabledReason: "Add credits before running a routine." });
-
-    const list = await screen.findByRole("list", { name: "Routines" });
-    await userEvent.click(
-      within(list).getByRole("button", { name: "Actions for Morning summary" }),
-    );
-    const listRunNow = screen.getByRole("menuitem", { name: "Run now" });
-    expect(listRunNow).toBeDisabled();
-    expect(listRunNow).toHaveAttribute("title", "Add credits before running a routine.");
-
-    await userEvent.click(within(list).getByText("Morning summary"));
-    const detailRunNow = screen.getByRole("button", { name: "Run now" });
-    expect(detailRunNow).toBeDisabled();
-    expect(detailRunNow).toHaveAttribute("title", "Add credits before running a routine.");
-
-    // Invoke the captured child callback directly to prove the handler itself
-    // enforces the funding guard before reaching the runtime.
-    await act(async () => {
-      if (!mocks.routineDetailOnRunNow) {
-        throw new Error("Routine detail did not expose its Run now handler.");
-      }
-      await mocks.routineDetailOnRunNow();
-    });
-    expect(mocks.triggerRoutine).not.toHaveBeenCalled();
-  });
-
-  it("blocks describing a routine while credits are depleted", async () => {
-    mocks.listRoutines.mockResolvedValue([job()]);
-    const onCreateRoutine = vi.fn();
-    renderView({
-      onCreateRoutine,
-      creditActionsDisabledReason: "Add credits before running a routine.",
-    });
-
-    const draft = await screen.findByRole("textbox", { name: "Describe a routine" });
-    await userEvent.type(draft, "Summarize my mornings");
-
-    const send = screen.getByRole("button", { name: "Ask Clovy to set it up" });
-    expect(send).toBeDisabled();
-    expect(send).toHaveAttribute("title", "Add credits before running a routine.");
-
-    // Enter-to-submit goes through the same handler-level guard.
-    fireEvent.submit(draft.closest("form") as HTMLFormElement);
-    expect(onCreateRoutine).not.toHaveBeenCalled();
   });
 
   it("shows this routine's runs and opens one on click", async () => {

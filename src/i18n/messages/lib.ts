@@ -45,7 +45,6 @@ export default defineMessages({
     "lib.errors.sharingUnavailable":
       "Sharing isn't available on this Clovy server yet. Try again after the next update.",
     "lib.errors.shareNotFound": "This share no longer exists. It may have been stopped.",
-    "lib.errors.notSignedIn": "Not signed in.",
     "lib.errors.insufficientCredits": "Your balance is too low. Upgrade to continue.",
     "lib.errors.emptyResponse": "Clovy returned no data.",
     "lib.errors.unreachable": "Couldn't reach Clovy.",
@@ -134,7 +133,6 @@ export default defineMessages({
     "lib.errors.llm.endpointModelRequired": "Enter a model ID.",
     "lib.errors.llm.endpointNameInvalid": "Enter a name of up to 80 characters.",
     "lib.errors.timedOut": "Operation timed out.",
-    "lib.errors.accountStatusTimeout": "Account status took too long. Please try again.",
     "lib.errors.fileDropUnreadable": "Could not read the dropped file.",
     "lib.errors.fileDropEmpty": "Drop files from Finder to attach them to Clovy.",
     "lib.errors.fileDropTooMany": {
@@ -232,39 +230,9 @@ export default defineMessages({
     },
     "lib.schedule.yearlyAt": "Every year on {dates} at {time}",
 
-    // Account gate.
-    "lib.accountGate.topUp": "Top up credits",
-    "lib.accountGate.upgradeToMax": "Upgrade to Max",
-    "lib.accountGate.upgrade": "Upgrade",
-
-    // Max upgrade copy.
-    "lib.maxUpgrade.confirmTitle": "Upgrade to Max?",
-    "lib.maxUpgrade.confirmBody":
-      "Max is $100 per month. A secure Stripe page will open in your browser to review and confirm. Your billing cycle restarts today.",
-    "lib.maxUpgrade.chargeConfirmBody":
-      "Max is $100 per month, charged to your saved card now. Your billing cycle restarts today.",
-    "lib.maxUpgrade.confirmLabel": "Upgrade now",
-    "lib.maxUpgrade.busyLabel": "Upgrading...",
-    "lib.maxUpgrade.browserStatus": "Waiting for you to confirm in the browser",
-    "lib.maxUpgrade.waitingStatus": "Upgrade started. Waiting for payment confirmation.",
-    "lib.maxUpgrade.readyStatus": "Max is active.",
-    "lib.maxUpgrade.slowStatus": "Payment not confirmed yet. Check billing in your account portal.",
-    "lib.maxUpgrade.hostedSlowStatus":
-      "Still waiting for payment confirmation. If you closed the Stripe page, you can try again.",
-    "lib.maxUpgrade.portalLabel": "Open billing",
-    "lib.maxUpgrade.staleActionNotice": "Your plan changed - pick an option again",
-
     // Upstream provider recovery and notices.
     "lib.upstream.tryAgain": "Try again",
     "lib.upstream.noticeBody": "The upstream provider could not complete this request.",
-    "lib.companion.messageTruncated": "[Message truncated on companion]",
-    "lib.companion.cliApprovalWaitingOnMac":
-      "Clovy is waiting for your approval on your Mac: {action}",
-    "lib.companion.cliQuestionWaitingOnMac":
-      "Clovy has a question waiting for you on your Mac: {question}",
-    "lib.companion.autoDescription": "Chooses the best available model for each request.",
-    "lib.companion.cliEngineDescription": "Runs on {name} on your Mac.",
-    "lib.companion.cliEngineDefaultDescription": "Default. Runs on {name} on your Mac.",
 
     // Routines.
     "lib.routines.legacyPaused":
@@ -495,7 +463,6 @@ export default defineMessages({
       "O compartilhamento ainda não está disponível neste servidor do Clovy. Tente de novo após a próxima atualização.",
     "lib.errors.shareNotFound":
       "Este compartilhamento não existe mais. Ele pode ter sido interrompido.",
-    "lib.errors.notSignedIn": "Você não entrou na sua conta.",
     "lib.errors.insufficientCredits": "Seu saldo está muito baixo. Faça upgrade para continuar.",
     "lib.errors.emptyResponse": "O Clovy não retornou dados.",
     "lib.errors.unreachable": "Não foi possível falar com o Clovy.",
@@ -588,7 +555,6 @@ export default defineMessages({
     "lib.errors.llm.endpointModelRequired": "Digite o ID de um modelo.",
     "lib.errors.llm.endpointNameInvalid": "Digite um nome com até 80 caracteres.",
     "lib.errors.timedOut": "A operação expirou.",
-    "lib.errors.accountStatusTimeout": "O status da conta demorou demais. Tente de novo.",
     "lib.errors.fileDropUnreadable": "Não foi possível ler o arquivo arrastado.",
     "lib.errors.fileDropEmpty": "Solte arquivos do Finder para anexá-los ao Clovy.",
     "lib.errors.fileDropTooMany": {
@@ -685,36 +651,8 @@ export default defineMessages({
     },
     "lib.schedule.yearlyAt": "Todo ano em {dates} às {time}",
 
-    "lib.accountGate.topUp": "Recarregar créditos",
-    "lib.accountGate.upgradeToMax": "Fazer upgrade para o Max",
-    "lib.accountGate.upgrade": "Fazer upgrade",
-
-    "lib.maxUpgrade.confirmTitle": "Fazer upgrade para o Max?",
-    "lib.maxUpgrade.confirmBody":
-      "O Max custa US$ 100 por mês. Uma página segura do Stripe vai abrir no seu navegador para você revisar e confirmar. Seu ciclo de cobrança recomeça hoje.",
-    "lib.maxUpgrade.chargeConfirmBody":
-      "O Max custa US$ 100 por mês, cobrados agora no seu cartão salvo. Seu ciclo de cobrança recomeça hoje.",
-    "lib.maxUpgrade.confirmLabel": "Fazer upgrade agora",
-    "lib.maxUpgrade.busyLabel": "Fazendo upgrade...",
-    "lib.maxUpgrade.browserStatus": "Aguardando sua confirmação no navegador",
-    "lib.maxUpgrade.waitingStatus": "Upgrade iniciado. Aguardando a confirmação do pagamento.",
-    "lib.maxUpgrade.readyStatus": "O Max está ativo.",
-    "lib.maxUpgrade.slowStatus":
-      "Pagamento ainda não confirmado. Verifique a cobrança no portal da sua conta.",
-    "lib.maxUpgrade.hostedSlowStatus":
-      "Ainda aguardando a confirmação do pagamento. Se você fechou a página do Stripe, pode tentar de novo.",
-    "lib.maxUpgrade.portalLabel": "Abrir cobrança",
-    "lib.maxUpgrade.staleActionNotice": "Seu plano mudou - escolha uma opção de novo",
-
     "lib.upstream.tryAgain": "Tentar de novo",
     "lib.upstream.noticeBody": "O provedor do modelo não conseguiu concluir esta solicitação.",
-    "lib.companion.messageTruncated": "[Mensagem truncada no dispositivo vinculado]",
-    "lib.companion.cliApprovalWaitingOnMac": "O Clovy aguarda sua aprovação no Mac: {action}",
-    "lib.companion.cliQuestionWaitingOnMac":
-      "O Clovy tem uma pergunta esperando por você no Mac: {question}",
-    "lib.companion.autoDescription": "Escolhe o melhor modelo disponível para cada solicitação.",
-    "lib.companion.cliEngineDescription": "Executa no {name} do seu Mac.",
-    "lib.companion.cliEngineDefaultDescription": "Padrão. Executa no {name} do seu Mac.",
 
     "lib.routines.legacyPaused":
       "Esta rotina importada usa configurações de execução antigas. Revise e recrie a rotina antes de executá-la.",

@@ -22,8 +22,6 @@ const macosLocalizedInfoPlist = readFileSync(
   resolve(process.cwd(), "src-tauri/resources/macos/en.lproj/InfoPlist.strings"),
   "utf8",
 );
-const stableUpdaterEndpoint =
-  "https://github.com/open-software-network/os-june-releases/releases/latest/download/latest.json";
 
 describe("development app identity", () => {
   it("keeps the visible name stable on a Codex issue branch", () => {
@@ -88,31 +86,18 @@ describe("macOS release identity", () => {
 describe("production identity compatibility", () => {
   it("locks immutable identities and canonical migration aliases", () => {
     expect(tauriConfig.identifier).toBe("co.opensoftware.june");
-    expect(tauriConfig.plugins["deep-link"].desktop.schemes).toEqual(["clovy", "osjune"]);
+    expect(tauriConfig.plugins["deep-link"].desktop.schemes).toEqual(["clovy"]);
     expect(tauriConfig.plugins["deep-link"].mobile).toEqual([
-      { scheme: ["clovy", "osjune"], appLink: false },
+      { scheme: ["clovy"], appLink: false },
     ]);
-    expect(tauriConfig.plugins.updater).toEqual({
-      pubkey:
-        "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwMDUxRDBGNzYyRDU0MTgKUldRWVZDMTJEeDBGVUZWQ3VsVWxCdmhFbk9McWFVWjBGTEZZZHN0NFZRQjFZaFZRVzF4Sm9NdnkK",
-      endpoints: [stableUpdaterEndpoint],
-    });
     expect(macosConfig.productName).toBe("June");
     expect(windowsConfig.productName).toBe("June");
     for (const platformConfig of [macosConfig, windowsConfig]) {
       expect(platformConfig.identifier).toBeUndefined();
-      expect(platformConfig.plugins?.updater).toBeUndefined();
       expect(platformConfig.plugins?.["deep-link"]).toBeUndefined();
     }
 
     const sourceIdentities = {
-      "src-tauri/src/updates.rs": [`const STABLE_ENDPOINT: &str = "${stableUpdaterEndpoint}";`],
-      "src-tauri/src/os_accounts.rs": [
-        'const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.accounts";',
-        'const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.accounts";',
-        'const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.accounts";',
-        'const LEGACY_DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.accounts";',
-      ],
       "src-tauri/src/agent_runtime/secrets.rs": [
         'const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.agent-secrets";',
         'const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.dev.agent-secrets";',
@@ -136,10 +121,6 @@ describe("production identity compatibility", () => {
         'const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.notion-hosted-mcp";',
         'const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.notion-hosted-mcp";',
         'const LEGACY_DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.notion-hosted-mcp";',
-      ],
-      "src-tauri/src/companion/mod.rs": [
-        'const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.companion.desktop.identity";',
-        'const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.companion.desktop.identity";',
       ],
       "src-tauri/src/extension_host.rs": [
         'pub const NATIVE_HOST_NAME: &str = "co.opensoftware.clovy.extension";',

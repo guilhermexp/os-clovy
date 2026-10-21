@@ -49,11 +49,14 @@ You can also run Clovy API directly:
 Restart `pnpm tauri:dev` after changing the root `.env`. The running Tauri
 process does not reload client configuration.
 
-The example env files default to open source local mode: no OS Accounts login,
-no billing or credit charges, and no provider keys in the desktop env. Clovy
-API accepts the local bearer token shared by `.env` and `clovy-api/.env`. That
-token must match in both files; it is not an OS Accounts token, just the
-shared secret between the local desktop app and the local Clovy API. The Clovy
+The desktop app has no sign-in, billing or credit charges: it always runs on a
+fixed local identity (`src-tauri/src/local_identity.rs`), the bearer token
+`OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` (default `local-dev-token`), and calls Clovy
+API at `http://127.0.0.1:8080` unless `CLOVY_API_URL` says otherwise. The
+example env files run Clovy API in local mode, which accepts that bearer token.
+The token must match in `.env` and `clovy-api/.env`; it is not an OS Accounts
+token, just the shared secret between the local desktop app and the local Clovy
+API. No provider keys go in the desktop env. The Clovy
 API env example binds local mode to `127.0.0.1`; if you bind it to a network
 interface, replace the default local bearer token in both env files first.
 
@@ -74,6 +77,7 @@ themselves; user grants stay in Keychain.
 Create a Google Desktop OAuth client and set `GOOGLE_OAUTH_CLIENT_ID` and
 `GOOGLE_OAUTH_CLIENT_SECRET`. Restart `pnpm tauri:dev` after changing either
 value.
+
 
 ## Local data
 

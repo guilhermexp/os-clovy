@@ -9,7 +9,6 @@ type NoteRecoveryPromptProps = {
   onRecover: (sessionId: string) => void;
   onDiscard: (sessionId: string) => void;
   disabled?: boolean;
-  recoverBlockedReason?: string;
 };
 
 export function NoteRecoveryPrompt({
@@ -17,19 +16,12 @@ export function NoteRecoveryPrompt({
   onRecover,
   onDiscard,
   disabled,
-  recoverBlockedReason,
 }: NoteRecoveryPromptProps) {
   const t = useT();
-  const isRecoveryBlocked = Boolean(recoverBlockedReason);
   const bodyRef = useRef<HTMLSpanElement>(null);
   const [bodyIsSingleLine, setBodyIsSingleLine] = useState(false);
 
   useLayoutEffect(() => {
-    if (isRecoveryBlocked) {
-      setBodyIsSingleLine(false);
-      return;
-    }
-
     const body = bodyRef.current;
     if (!body) return;
 
@@ -44,33 +36,19 @@ export function NoteRecoveryPrompt({
     const observer = new ResizeObserver(measure);
     observer.observe(body);
     return () => observer.disconnect();
-  }, [isRecoveryBlocked]);
+  }, []);
 
-  const isCentered = !isRecoveryBlocked && bodyIsSingleLine;
+  const isCentered = bodyIsSingleLine;
 
   return (
     <InlineNotice
-      className={[
-        "note-recovery-prompt",
-        isRecoveryBlocked && "note-recovery-prompt-blocked",
-        isCentered && "note-recovery-prompt-single-line",
-      ]
+      className={["note-recovery-prompt", isCentered && "note-recovery-prompt-single-line"]
         .filter(Boolean)
         .join(" ")}
       aria-label={t("recorder.recovery.aria")}
       icon={<IconRecord size={14} aria-hidden />}
       bodyRef={bodyRef}
-      body={
-        <>
-          {t("recorder.recovery.body", { size: formatBytes(recovery.bytesFound) })}
-          {recoverBlockedReason ? (
-            <>
-              {" "}
-              <span>{recoverBlockedReason}</span>
-            </>
-          ) : null}
-        </>
-      }
+      body={t("recorder.recovery.body", { size: formatBytes(recovery.bytesFound) })}
       actions={
         <>
           <button
@@ -84,8 +62,7 @@ export function NoteRecoveryPrompt({
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={disabled || isRecoveryBlocked}
-            title={recoverBlockedReason}
+            disabled={disabled}
             onClick={() => onRecover(recovery.sessionId)}
           >
             {t("recorder.recovery.recover")}

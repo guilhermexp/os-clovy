@@ -1,11 +1,9 @@
 import type { AgentSessionsListHandle } from "../components/agent/AgentSessionsList";
-import type { ReportCategory } from "../components/agent/composer/reportCategory";
 import type { NotesListHandle } from "../components/notes-list/NotesList";
 import type { SettingsTab } from "../components/settings/AppSettings";
 import type { SidebarView } from "../components/sidebar/Sidebar";
 import type { TabNav } from "./tabs/tabs";
 import type {
-  AccountStatus,
   FolderDto,
   LiveTranscriptEventDto,
   NoteDto,
@@ -14,15 +12,11 @@ import type {
 } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { RecordingSourceMode, RecordingSourceReadinessDto } from "../lib/tauri";
-import type { ClovyUpdate } from "../lib/updater";
-import type { UpdateCheckMode, UpdatePromptPayload } from "./update-decision";
 import type { NotesAction, NotesState } from "./state/app-state";
 import type * as React from "react";
 
 export type RenderAppWorkspaceDependencies = {
   accessibilityStatus: string | undefined;
-  account: AccountStatus;
-  accountLoading: boolean;
   currentDataPartitionName: string;
   activeAgentSessionFolder: FolderDto | undefined;
   activeAgentSessionId: string | undefined;
@@ -40,9 +34,6 @@ export type RenderAppWorkspaceDependencies = {
   completedSessions: Record<string, string>;
   dispatch: React.Dispatch<NotesAction>;
   folderReturnTarget: { noteId: string; label: string } | undefined;
-  fundingAccount: AccountStatus;
-  fundingRequired: boolean;
-  handleAccountChanged: (nextAccount: AccountStatus) => void;
   handleCreateFolder: (name: string, description?: string) => Promise<FolderDto | undefined>;
   handleCreateNote: (folderId?: string | null) => Promise<void>;
   handleDeleteFolder: (folderId: string) => Promise<void>;
@@ -59,9 +50,7 @@ export type RenderAppWorkspaceDependencies = {
   handleNewAgentSessionInProject: (folderId: string) => void;
   handleOpenSessionProject: (folderId: string) => void;
   handlePauseRecording: (sessionId: string) => Promise<boolean>;
-  handleReconcileToStable: () => void;
   handleRecovery: (sessionId: string, action: "validate" | "discard") => void;
-  handleRelaunchUpdate: () => void;
   handleRemoveNoteFromFolder: (
     noteId: string,
     folderId: string,
@@ -74,7 +63,6 @@ export type RenderAppWorkspaceDependencies = {
   ) => Promise<void>;
   handleRenameAgentSession: (sessionId: string, title: string) => void;
   handleRenameFolder: (folderId: string, name: string, description?: string) => Promise<void>;
-  handleReportIssue: (category?: ReportCategory) => void;
   handleResumeRecording: (sessionId: string) => Promise<void>;
   handleSaveNoteNow: (noteId: string, patch: NoteEditablePatch) => Promise<void>;
   handleReturnToAgentOriginFolder: () => void;
@@ -100,7 +88,6 @@ export type RenderAppWorkspaceDependencies = {
   handleStartRecording: () => Promise<void>;
   handleStopNowAfterMeetingEnd: (sessionId: string) => void;
   handleToggleSessionCompleted: (sessionId: string, completed: boolean) => Promise<void>;
-  handleTopUp: () => void;
   handleUpdateNote: (noteId: string, patch: NoteEditablePatch) => void;
   homeStoredSessionId: string | undefined;
   memoryFolderFilter: string | undefined;
@@ -115,13 +102,9 @@ export type RenderAppWorkspaceDependencies = {
   openTab: (nav: TabNav) => void;
   originAllNotes: boolean;
   originFolder: FolderDto | undefined;
-  readyUpdate: UpdatePromptPayload<ClovyUpdate> | null;
   recordNoticesConsentPinned: boolean;
   recordingNoteId: string | undefined;
-  refreshAccount: () => Promise<AccountStatus | undefined>;
-  refreshFundingAccount: () => Promise<AccountStatus | undefined>;
   rememberHomeSession: (sessionId: string) => void;
-  runUpdateCheck: (mode: UpdateCheckMode, check?: () => Promise<ClovyUpdate | null>) => void;
   selectedNote: NoteDto | undefined;
   selectedNoteId: string | undefined;
   selectedNoteLiveTranscript: LiveTranscriptEventDto[];
@@ -148,5 +131,4 @@ export type RenderAppWorkspaceDependencies = {
   sourceReadiness: RecordingSourceReadinessDto | undefined;
   state: NotesState;
   takeNewTabIntent: () => boolean;
-  topUpLabel: string;
 };

@@ -1,5 +1,5 @@
 //! Tauri commands for connectors, routine trust modes, and event triggers.
-//! Registered in lib.rs after the os_accounts block. Request/response
+//! Registered in lib.rs. Request/response
 //! payloads are camelCase, matching the existing command structs.
 
 use crate::db::repositories::{ConnectorGrant, Repositories, RoutineTrustRecord};

@@ -18,7 +18,9 @@ Clovy API** (`clovy-api/`), routes remote inference and runs only in local
 mode (one local bearer token, no billing, bound to `127.0.0.1`).
 Current upstreams are **Groq** for audio, **OpenRouter** for remote text,
 **fal** for media, and **Tavily** for web. Own text engines (CLI and endpoints)
-remain separate. Identity and credits come from **OS Accounts**; the local
+remain separate. In this fork the desktop has no sign-in: it runs on a fixed
+local identity (`src-tauri/src/local_identity.rs`) against Clovy API at
+`http://127.0.0.1:8080` by default (`CLOVY_API_URL` overrides); the local
 agent harness uses the **OpenAI Agents SDK**.
 
 > Read **[CONTEXT.md](CONTEXT.md)** before naming anything, and
@@ -29,15 +31,15 @@ agent harness uses the **OpenAI Agents SDK**.
 ```
 os-clovy/
 ├── src/                     # React frontend
-│   ├── app/                 # app shell, routing, update-decision
-│   ├── components/          # agent (chat), settings, account, onboarding, note-editor, recorder, sidebar, ...
+│   ├── app/                 # app shell, routing, onboarding, bootstrap
+│   ├── components/          # agent (chat), settings, onboarding, note-editor, recorder, sidebar, ...
 │   ├── lib/                 # agent runtime contracts, model privacy, Tauri bindings, ...
 │   ├── styles/              # app.css + tokens.css (design tokens)
 │   └── test/                # vitest suites (all frontend tests live here)
 ├── src-tauri/               # Rust native shell (Cargo package `clovy`)
 │   ├── src/audio/           # recording, source separation, turn detection, live preview
 │   ├── src/agent_runtime/   # sidecar protocol, tools, persistence, and migration
-│   ├── src/os_accounts.rs   # OS Accounts login (PKCE), keychain token store
+│   ├── src/local_identity.rs # fixed local user + bearer token sent to Clovy API (no sign-in)
 │   ├── src/providers/       # model-settings persistence
 │   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
@@ -187,8 +189,8 @@ build scripts in `pnpm-workspace.yaml` — live in
   The runner can exit non-zero from `hud-meeting.test.ts` teardown noise despite
   0 real failures — judge by the failure count. Composer/ProseMirror tests can
   flake with a `localsInner` crash under machine load (a `@tiptap/pm` duplicate,
-  not a regression). On **Node 26** the `font-scale` and `referral-nudge`
-  storage tests fail locally (experimental web storage shadows jsdom's
+  not a regression). On **Node 26** the `font-scale`
+  storage test fails locally (experimental web storage shadows jsdom's
   `localStorage`); run `NODE_OPTIONS=--no-experimental-webstorage pnpm test`
   and do not "fix" the tests.
 - **Rust tests:** `pnpm test:rust` (src-tauri) and `pnpm test:clovy-api` (the
@@ -254,9 +256,12 @@ build scripts in `pnpm-workspace.yaml` — live in
   support for older clients require a separate owner decision.
 - **Clovy presents as Clovy.** The local harness is an implementation detail;
   product instructions assert Clovy's identity.
-- **Identity and credits are OS Accounts'.** Clovy is an on-device client of OS
-  Accounts and never owns user or wallet state. The dependency arrow points
-  Clovy → OS Accounts, never the reverse.
+- **No Open Software services in the desktop (fork).** The app has no OS
+  Accounts sign-in, billing, credits funding, telemetry, issue reports,
+  companion, or June updater; it uses the fixed local identity. `src/`,
+  `src-tauri/src/` and `src-tauri/*.json` (outside `src/test/`) must not name
+  `opensoftware.co`, `june.link` or `open-software-network`
+  (`make org-references-check`, part of `make verify`).
 
 ## Fork guilhermexp (harness ~/orchestrator)
 

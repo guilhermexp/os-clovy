@@ -744,13 +744,8 @@ async fn benchmark_post_finalization_note_transcription_latency() {
     // This release-only harness uses a dynamic loopback API address. Its Make target is the
     // supported entry point and isolates the exact ignored test with one test-harness thread,
     // so these process-global values cannot race unrelated tests.
-    let previous = [
-        "CLOVY_API_URL",
-        "OS_CLOVY_LOCAL_DEV",
-        "OS_CLOVY_LOCAL_DEV_BEARER_TOKEN",
-    ]
-    .map(|name| (name, std::env::var_os(name)));
-    std::env::set_var("OS_CLOVY_LOCAL_DEV", "1");
+    let previous = ["CLOVY_API_URL", "OS_CLOVY_LOCAL_DEV_BEARER_TOKEN"]
+        .map(|name| (name, std::env::var_os(name)));
     std::env::set_var("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "benchmark-token");
 
     for (case, case_fixtures) in fixtures {

@@ -76,7 +76,6 @@ export default defineMessages({
     "chat.approval.resolved": "Resolved",
     "chat.notice.contextOverflow": "This conversation is too large for the selected model.",
     "chat.notice.needCredits": "You need more credits to continue.",
-    "chat.notice.addCredits": "Add credits",
     "chat.notice.toolFailed": "A tool Clovy used could not finish this request.",
     "chat.notice.runtimeStopped": "Clovy stopped unexpectedly.",
     "chat.notice.upstreamFailed": "The model service could not finish this request.",
@@ -164,8 +163,6 @@ export default defineMessages({
     "chat.model.modelLabel": "Model: {name}",
     "chat.model.chooseTextModel": "Choose text model",
     "chat.model.suggested": "Suggested",
-    "chat.model.autoBillingNote":
-      "Auto is billed to Clovy credits and does not use your OpenRouter key.",
     "chat.model.providerKeyNeeded":
       "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
     "chat.model.suggestedTextModels": "Suggested text models",
@@ -200,14 +197,8 @@ export default defineMessages({
     "chat.composer.commands": "Commands",
     "chat.composer.skills": "Skills",
     "chat.report.bug.label": "Bug report",
-    "chat.report.bug.hint": "Something isn't working right",
-    "chat.report.bug.placeholder": "What happened, and what did you expect instead?",
     "chat.report.feedback.label": "Feedback",
-    "chat.report.feedback.hint": "Share a thought with the team",
-    "chat.report.feedback.placeholder": "What should the Clovy team hear from you?",
     "chat.report.feature.label": "Feature request",
-    "chat.report.feature.hint": "Ask for something new",
-    "chat.report.feature.placeholder": "What would you like Clovy to do?",
   },
   "pt-BR": {
     "chat.openNamed": "Abrir {name}",
@@ -283,7 +274,6 @@ export default defineMessages({
     "chat.approval.resolved": "Resolvido",
     "chat.notice.contextOverflow": "Esta conversa é grande demais para o modelo selecionado.",
     "chat.notice.needCredits": "Você precisa de mais créditos para continuar.",
-    "chat.notice.addCredits": "Adicionar créditos",
     "chat.notice.toolFailed":
       "Uma ferramenta usada pelo Clovy não conseguiu concluir esta solicitação.",
     "chat.notice.runtimeStopped": "O Clovy parou inesperadamente.",
@@ -373,8 +363,6 @@ export default defineMessages({
     "chat.model.modelLabel": "Modelo: {name}",
     "chat.model.chooseTextModel": "Escolher modelo de texto",
     "chat.model.suggested": "Sugeridos",
-    "chat.model.autoBillingNote":
-      "O Auto é cobrado dos créditos do Clovy e não usa sua chave da OpenRouter.",
     "chat.model.providerKeyNeeded":
       "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
     "chat.model.suggestedTextModels": "Modelos de texto sugeridos",
@@ -410,13 +398,7 @@ export default defineMessages({
     "chat.composer.commands": "Comandos",
     "chat.composer.skills": "Skills",
     "chat.report.bug.label": "Relatório de bug",
-    "chat.report.bug.hint": "Algo não está funcionando direito",
-    "chat.report.bug.placeholder": "O que aconteceu e o que você esperava que acontecesse?",
     "chat.report.feedback.label": "Feedback",
-    "chat.report.feedback.hint": "Compartilhe uma ideia com a equipe",
-    "chat.report.feedback.placeholder": "O que a equipe do Clovy deve saber de você?",
     "chat.report.feature.label": "Solicitação de recurso",
-    "chat.report.feature.hint": "Peça algo novo",
-    "chat.report.feature.placeholder": "O que você gostaria que o Clovy fizesse?",
   },
 });

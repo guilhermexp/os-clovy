@@ -11,7 +11,7 @@ import {
   MEETING_END_STATE_EVENT,
   MEETING_START_TRANSCRIPTION_EVENT,
 } from "../lib/events";
-import type { AccountStatus, BootstrapResponse, NoteDto, RecordingSessionDto } from "../lib/tauri";
+import type { BootstrapResponse, NoteDto, RecordingSessionDto } from "../lib/tauri";
 
 type TauriListener = (event: { payload: unknown }) => unknown;
 
@@ -75,11 +75,6 @@ const mocks = vi.hoisted(() => ({
   resolveAgentRecorderRequest: vi.fn(),
   dictationHelperCommand: vi.fn(),
   listDictationHistory: vi.fn(),
-  osAccountsStatus: vi.fn(),
-  osAccountsLogin: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
-  osAccountsLogout: vi.fn(),
-  osAccountsUpgrade: vi.fn(),
   agentHudShow: vi.fn(),
   agentOpenReady: vi.fn().mockResolvedValue(null),
   agentHudHide: vi.fn(),
@@ -104,10 +99,8 @@ vi.mock("../lib/experimental-flags", () => ({
   useExperimentalFlags: () => ({
     unlocked: false,
     browser_use: false,
-    companion_pairing: false,
     loaded: true,
     browserUseEnabled: false,
-    companionPairingEnabled: false,
   }),
 }));
 
@@ -162,8 +155,6 @@ vi.mock("../lib/tauri", () => ({
   completeNoteSaveFlush: mocks.completeNoteSaveFlush,
   NOTE_SAVE_FLUSH_REQUESTED_EVENT: "clovy://flush-pending-note-saves",
   checkRecordingSourceReadiness: mocks.checkRecordingSourceReadiness,
-  companionListAgentMedia: vi.fn(async () => []),
-  companionReadAgentMediaChunk: vi.fn(),
   openPrivacySettings: mocks.openPrivacySettings,
   startRecording: mocks.startRecording,
   pauseRecording: mocks.pauseRecording,
@@ -175,12 +166,6 @@ vi.mock("../lib/tauri", () => ({
   resolveAgentRecorderRequest: mocks.resolveAgentRecorderRequest,
   dictationHelperCommand: mocks.dictationHelperCommand,
   listDictationHistory: mocks.listDictationHistory,
-  osAccountsStatus: mocks.osAccountsStatus,
-  osAccountsStatusLocal: mocks.osAccountsStatus,
-  osAccountsLogin: mocks.osAccountsLogin,
-  osAccountsCancelLogin: mocks.osAccountsCancelLogin,
-  osAccountsLogout: mocks.osAccountsLogout,
-  osAccountsUpgrade: mocks.osAccountsUpgrade,
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
@@ -290,13 +275,6 @@ describe("meeting start transcription event", () => {
       activeRecoveries: [],
       providerConfigured: true,
     };
-    const account: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    };
 
     mocks.getCurrentWindow.mockReturnValue({
       show: vi.fn().mockResolvedValue(undefined),
@@ -319,11 +297,6 @@ describe("meeting start transcription event", () => {
       items: [],
       retentionDays: 7,
     });
-    mocks.osAccountsStatus.mockResolvedValue(account);
-    mocks.osAccountsLogin.mockResolvedValue(account);
-    mocks.osAccountsLogout.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
-    mocks.osAccountsUpgrade.mockResolvedValue(undefined);
     mocks.updateNote.mockImplementation(async (input) => ({
       ...first,
       ...input,
@@ -1175,13 +1148,6 @@ describe("agent recorder request event", () => {
       activeRecoveries: [],
       providerConfigured: true,
     };
-    const account: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    };
 
     mocks.getCurrentWindow.mockReturnValue({
       show: vi.fn().mockResolvedValue(undefined),
@@ -1212,11 +1178,6 @@ describe("agent recorder request event", () => {
     });
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.listDictationHistory.mockResolvedValue({ items: [], retentionDays: 7 });
-    mocks.osAccountsStatus.mockResolvedValue(account);
-    mocks.osAccountsLogin.mockResolvedValue(account);
-    mocks.osAccountsLogout.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
-    mocks.osAccountsUpgrade.mockResolvedValue(undefined);
     mocks.updateNote.mockImplementation(async (input) => ({ ...first, ...input }));
     mocks.patchNote.mockImplementation(async (noteId, patch) => ({
       id: noteId,

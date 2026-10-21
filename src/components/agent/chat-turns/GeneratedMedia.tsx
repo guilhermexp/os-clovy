@@ -4,7 +4,6 @@ import { useT } from "../../../i18n";
 import type { AgentChatPart } from "../../../lib/agent-chat-runtime";
 import { agentFilePreview, localVideoFileSrc } from "../../../lib/tauri";
 import { CLOVY_MARK_HEIGHT, CLOVY_MARK_PATH, CLOVY_MARK_WIDTH } from "../../brand/ClovyLogo";
-import { HoverTip } from "../../ui/HoverTip";
 
 const GENERATED_MEDIA_MARK_ROWS = 28;
 const GENERATED_MEDIA_MARK_COLS = Math.round(
@@ -505,12 +504,10 @@ export function AgentGeneratedVideo({
   part,
   onDownload,
   onRetry,
-  retryDisabledReason,
 }: {
   part: Extract<AgentChatPart, { type: "video" }>;
   onDownload?: (part: Extract<AgentChatPart, { type: "video" }>) => void;
   onRetry?: () => void;
-  retryDisabledReason?: string;
 }) {
   const t = useT();
   const src = part.status === "complete" && part.path ? localVideoFileSrc(part.path) : undefined;
@@ -554,17 +551,9 @@ export function AgentGeneratedVideo({
           {part.error?.trim() || t("chat.media.videoFailed")}
         </p>
         {onRetry && part.requestId ? (
-          retryDisabledReason ? (
-            <HoverTip tip={retryDisabledReason} tabIndex={0}>
-              <button type="button" className="agent-generated-image-retry" disabled>
-                {t("common.tryAgain")}
-              </button>
-            </HoverTip>
-          ) : (
-            <button type="button" className="agent-generated-image-retry" onClick={onRetry}>
-              {t("common.tryAgain")}
-            </button>
-          )
+          <button type="button" className="agent-generated-image-retry" onClick={onRetry}>
+            {t("common.tryAgain")}
+          </button>
         ) : null}
       </div>
     );

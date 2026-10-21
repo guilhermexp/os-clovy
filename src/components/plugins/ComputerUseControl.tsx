@@ -1,7 +1,6 @@
 import { IconCircleCheck } from "central-icons/IconCircleCheck";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
-import { IconLock } from "central-icons/IconLock";
 import { IconStop } from "central-icons/IconStop";
 import { IconTelevision } from "central-icons/IconTelevision";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -23,7 +22,6 @@ import { Switch } from "../ui/Switch";
 
 type ComputerUseControlProps = {
   onOpenModels: () => void;
-  onOpenBilling: () => void;
 };
 
 function statusLabel(status?: ComputerUseStatusDto) {
@@ -92,7 +90,7 @@ function requestComputerUsePermission(permission: MacOSPermission) {
  * in the Plugins provider list avoids a second preference surface and never implies that macOS
  * TCC access was granted by Clovy's switch.
  */
-export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseControlProps) {
+export function ComputerUseControl({ onOpenModels }: ComputerUseControlProps) {
   const t = useT();
   const tRich = useTRich();
   const [status, setStatus] = useState<ComputerUseStatusDto>();
@@ -303,20 +301,6 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
             tone="info"
             icon={<IconExclamationCircle size={16} />}
             body={t("settingsPanels.computerUse.macosOnly")}
-          />
-        ) : null}
-
-        {supported && status && !planEligible && !rolloutDisabled ? (
-          <InlineNotice
-            tone="info"
-            icon={<IconLock size={16} />}
-            eyebrow={t("settingsPanels.computerUse.proFeature")}
-            body={t("settingsPanels.computerUse.proBody")}
-            actions={
-              <button type="button" className="btn btn-ghost" onClick={onOpenBilling}>
-                {t("settingsPanels.computerUse.viewPlans")}
-              </button>
-            }
           />
         ) : null}
 

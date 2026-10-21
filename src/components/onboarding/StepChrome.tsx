@@ -5,9 +5,7 @@ import { BrandPrimaryButton } from "../ui/BrandPrimaryButton";
 
 /**
  * One onboarding screen = one welcome-card: a serif title, at most one muted
- * line, then whatever the step needs. Reuses the sign-in gate chrome so
- * first-run is literally the same surface the rest of the app greets users
- * with — not a separate tour. The Clovy mark introduces the brand on the first
+ * line, then whatever the step needs. The Clovy mark introduces the brand on the first
  * screen only; after that the type carries it.
  */
 export function StepCard({

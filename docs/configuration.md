@@ -28,13 +28,9 @@ curated). `clovy-api/.env.example` and `config.toml` are authoritative.
 
 | Var | Purpose | Default |
 |-----|---------|---------|
-| `CLOVY_API_URL` | Clovy API base URL the app calls | `https://june-api.opensoftware.co` in code; `.env` (from `.env.example`) sets `http://127.0.0.1:8080` for local dev |
-| `OS_CLOVY_LOCAL_DEV` | Use a local bearer token instead of Login with Open Software | `1` (example) |
-| `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` / `_USER_ID` | The local-mode identity | `local-dev-token` / `usr_local_dev` |
-| `OS_ACCOUNTS_URL` / `OS_ACCOUNTS_API_URL` | OS Accounts portal + API (optional in local mode) | unset |
-| `OS_ACCOUNTS_CLIENT_ID` | OAuth client id (`ocl_...`) sent on `/login` | unset |
-| `OS_ACCOUNTS_LOOPBACK_PORT` | Login redirect loopback port; must match the registered `http://127.0.0.1:<port>/callback` | `8765` |
-| `OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store tokens in a file, not the Keychain (avoids prompts) | `0` |
+| `CLOVY_API_URL` | Clovy API base URL the app calls; share links use its origin | `http://127.0.0.1:8080` |
+| `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` | The fixed local identity (there is no sign-in): bearer token sent to Clovy API | `local-dev-token` |
+| `OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store connector tokens in a file, not the Keychain (avoids prompts) | `0` |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Google Desktop OAuth credential for Gmail/Calendar connectors. Google requires both at token exchange; the second value is not confidential in an installed app and grants no user-data access by itself | unset |
 | `OS_NOTETAKER_TRANSCRIPTION_LANGUAGE` | Optional ISO-639-1 language hint | unset |
 
@@ -120,7 +116,7 @@ key the provider revokes after it was saved is reported as rejected by the
 request that uses it. When Clovy API has
 no service key for a provider, its catalog rows say `serviceAvailable: false`
 and requests without the user's key fail with `<provider>_not_configured`.
-Model pickers and the companion's model list leave out or flag such rows until
+Model pickers leave out or flag such rows until
 the key is saved; a missing key is a setting, not a macOS permission.
 
 `GET /v1/models?type=image|video` lists the generation endpoints actually in

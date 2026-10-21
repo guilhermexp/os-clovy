@@ -15,7 +15,7 @@ describe("organization reference guard", () => {
     expect("co.opensoftware.june").not.toMatch(pattern);
   });
 
-  it("finds no organization references in the repository and CI scope", () => {
+  it("finds no organization references in the repository, CI and app source", () => {
     expect(findOrgReferences()).toEqual([]);
   });
 });

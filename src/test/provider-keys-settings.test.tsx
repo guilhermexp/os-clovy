@@ -65,9 +65,6 @@ describe("Provider API keys settings", () => {
           models: [],
         });
       }
-      if (command === "p3a_settings") {
-        return Promise.resolve({ enabled: false });
-      }
       return Promise.reject(new Error("no tauri in tests"));
     });
   });
@@ -79,12 +76,8 @@ describe("Provider API keys settings", () => {
   function renderAppSettings() {
     return render(
       <AppSettings
-        account={{ signedIn: false, configured: false }}
-        accountLoading={false}
         sourceMode="microphoneOnly"
         checkingSourceReadiness={false}
-        onAccountChanged={() => {}}
-        onAccountRefresh={async () => undefined}
         onSourceModeChange={() => {}}
         onEnableSystemAudio={() => {}}
         activeTab="models"

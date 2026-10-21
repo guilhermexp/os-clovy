@@ -85,7 +85,7 @@ describe("note chat model truthfulness", () => {
     expect(loadSessionModels()["note-session"]).toBe(stagedAuto);
   });
 
-  it("picks the chat engine and does not hold a CLI chat on Clovy credits", async () => {
+  it("picks the chat engine for a CLI chat", async () => {
     mocks.invoke.mockImplementation(async (command: string) =>
       command === "chat_engine_catalog"
         ? {
@@ -121,7 +121,6 @@ describe("note chat model truthfulness", () => {
       <NoteChatPanel
         note={{ id: "note-1", title: "Planning" }}
         chat={chat}
-        creditActionsDisabledReason="Add credits to keep using Clovy."
         onClose={vi.fn()}
         onOpenInAgent={vi.fn()}
       />,
@@ -132,6 +131,5 @@ describe("note chat model truthfulness", () => {
     ).toBeInTheDocument();
     // The Clovy model picker belongs to the legacy engine only.
     expect(screen.queryByRole("button", { name: /^Model/ })).not.toBeInTheDocument();
-    expect(screen.queryByText("Add credits to keep using Clovy.")).not.toBeInTheDocument();
   });
 });

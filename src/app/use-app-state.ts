@@ -19,20 +19,10 @@ import { getAgentHudEnabled } from "../lib/agent-hud-settings";
 import type { NoteDto } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { RecordingSourceMode, RecordingSourceReadinessDto } from "../lib/tauri";
-import { useAccountStatus } from "../lib/account-status";
-import { shouldReplayOnboarding } from "../lib/onboarding";
-import type { ClovyUpdate } from "../lib/updater";
 import { createInitialState, notesReducer } from "./state/app-state";
-import {
-  INITIAL_UPDATE_STATUS_DISPLAY,
-  updateStatusDisplayReducer,
-  type UpdateInstallProgress,
-  type UpdatePromptPayload,
-} from "./update-decision";
 import { SIDEBAR_DEFAULT_WIDTH, type RecordingInactivityPrompt } from "./app-shell";
 
 export function useAppState() {
-  const replayOnboarding = shouldReplayOnboarding();
   const currentDataPartitionName = useCurrentDataPartitionName();
   const initialView: SidebarView = isMacLikePlatform()
     ? "home"
@@ -190,22 +180,6 @@ export function useAppState() {
   const [accessibilityBannerDismissed, setAccessibilityBannerDismissed] = useState(false);
   const [systemAudioRefreshRequest, setSystemAudioRefreshRequest] = useState(0);
   const [microphoneStatus, setMicrophoneStatus] = useState<string>();
-  const [readyUpdate, setReadyUpdate] = useState<UpdatePromptPayload<ClovyUpdate> | null>(null);
-  const [updateStatusDisplay, dispatchUpdateStatusDisplay] = useReducer(
-    updateStatusDisplayReducer,
-    INITIAL_UPDATE_STATUS_DISPLAY,
-  );
-  const updateStatus = updateStatusDisplay.status;
-  const updateStatusLeaving = updateStatusDisplay.leaving;
-  const setUpdateStatus = useCallback((status: string | null, failed = false) => {
-    dispatchUpdateStatusDisplay({ type: "show", status, failed });
-  }, []);
-  const [preparingUpdate, setPreparingUpdate] = useState(false);
-  // Render-only flag for a visible manual check. checkingUpdateRef separately
-  // guards every check mode, including silent launch and periodic checks.
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [relaunchingUpdate, setRelaunchingUpdate] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<UpdateInstallProgress | null>(null);
   // `ready` only says this device is capable of system capture; the platform
   // grant/status is established by a microphone-plus-system probe.
   const systemSourceReadiness = sourceReadiness?.sources.find(
@@ -221,13 +195,6 @@ export function useAppState() {
     recordingState === "validating";
   const sourceMode: RecordingSourceMode =
     userWantsSystemAudio && systemGranted ? "microphonePlusSystem" : "microphoneOnly";
-  const {
-    account,
-    error: accountError,
-    loading: accountLoading,
-    refresh: refreshAccount,
-    setAccount,
-  } = useAccountStatus({ forceLogoutOnMount: replayOnboarding });
   // The note the active recording session belongs to. recordingStatus carries
   // no noteId, so without this the finish flow could only guess from the
   // currently selected note — wrong whenever the user browsed away while
@@ -363,29 +330,9 @@ export function useAppState() {
     setSystemAudioRefreshRequest,
     microphoneStatus,
     setMicrophoneStatus,
-    readyUpdate,
-    setReadyUpdate,
-    updateStatusDisplay,
-    dispatchUpdateStatusDisplay,
-    updateStatus,
-    updateStatusLeaving,
-    setUpdateStatus,
-    preparingUpdate,
-    setPreparingUpdate,
-    checkingUpdate,
-    setCheckingUpdate,
-    relaunchingUpdate,
-    setRelaunchingUpdate,
-    updateProgress,
-    setUpdateProgress,
     systemGranted,
     captureActive,
     sourceMode,
-    account,
-    accountError,
-    accountLoading,
-    refreshAccount,
-    setAccount,
     recordingNoteIdRef,
     crossPartitionRecordingNoteIdRef,
     calendarContextNotePartitionsRef,

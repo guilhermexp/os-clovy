@@ -5,38 +5,6 @@ export default defineMessages({
     // Flow chrome
     "onboarding.progress": "Setup progress: step {step} of {total}",
     "onboarding.skipForNow": "Skip for now",
-    "onboarding.language.aria": "Interface language: {language}",
-
-    // Welcome + sign-in
-    "onboarding.signIn.title": "Welcome to Clovy",
-    "onboarding.signIn.subtitle": "Private AI for everyday life and work.",
-    "onboarding.signIn.point.delegate.title": "Delegate real work",
-    "onboarding.signIn.point.delegate.detail": "Give Clovy a task and come back to the result.",
-    "onboarding.signIn.point.voice.title": "Write with your voice",
-    "onboarding.signIn.point.voice.detail": "Turn speech into polished text in any app.",
-    "onboarding.signIn.point.meetings.title": "Capture meetings",
-    "onboarding.signIn.point.meetings.detail": "Keep clear notes without inviting a bot.",
-    "onboarding.signIn.point.private.title": "Private by default",
-    "onboarding.signIn.point.private.detail": "Zero-retention models protect what you share.",
-    "onboarding.signIn.point.together.title": "Keep work together",
-    "onboarding.signIn.point.together.detail": "Bring meeting notes and projects into one place.",
-    "onboarding.signIn.point.recordings.detail": "Turn microphone recordings into clear notes.",
-    "onboarding.signIn.community": "Join the Clovy community on Telegram",
-    "onboarding.signIn.waiting": "Complete sign-in in browser",
-    "onboarding.signIn.continue": "Continue with OpenSoftware",
-    "onboarding.signIn.notConfigured": "OpenSoftware sign-in is not configured for this build.",
-    "onboarding.signIn.incomplete": "Sign-in did not complete. Please try again.",
-    "onboarding.signIn.terms":
-      "By continuing, you agree to the <terms>Terms</terms> and <privacy>Privacy Policy</privacy>.",
-
-    // Telemetry consent
-    "onboarding.telemetry.title": "Help improve Clovy",
-    "onboarding.telemetry.subtitle": "Optional and off by default. Change it anytime in Settings.",
-    "onboarding.telemetry.rowTitle": "Share anonymous usage statistics",
-    "onboarding.telemetry.rowDescription":
-      "Anonymous counts of feature usage, like how many dictation sessions happen in a week. Never your recordings, notes, or anything you write. <link>Learn how it works</link>",
-    "onboarding.telemetry.saveError": "Could not save this choice. Try again.",
-    "onboarding.telemetry.saving": "Saving",
 
     // Area
     "onboarding.area.title": "Where could I help most?",
@@ -126,41 +94,6 @@ export default defineMessages({
   "pt-BR": {
     "onboarding.progress": "Progresso da configuração: etapa {step} de {total}",
     "onboarding.skipForNow": "Pular por enquanto",
-    "onboarding.language.aria": "Idioma da interface: {language}",
-
-    "onboarding.signIn.title": "Boas-vindas ao Clovy",
-    "onboarding.signIn.subtitle": "IA privada para o dia a dia e o trabalho.",
-    "onboarding.signIn.point.delegate.title": "Delegue trabalho de verdade",
-    "onboarding.signIn.point.delegate.detail":
-      "Dê uma tarefa ao Clovy e volte para ver o resultado.",
-    "onboarding.signIn.point.voice.title": "Escreva com a voz",
-    "onboarding.signIn.point.voice.detail": "Transforme fala em texto bem escrito em qualquer app.",
-    "onboarding.signIn.point.meetings.title": "Registre reuniões",
-    "onboarding.signIn.point.meetings.detail": "Tenha notas claras sem convidar um bot.",
-    "onboarding.signIn.point.private.title": "Privado por padrão",
-    "onboarding.signIn.point.private.detail":
-      "Modelos sem retenção de dados protegem o que você compartilha.",
-    "onboarding.signIn.point.together.title": "Mantenha o trabalho reunido",
-    "onboarding.signIn.point.together.detail": "Reúna notas de reuniões e projetos em um só lugar.",
-    "onboarding.signIn.point.recordings.detail":
-      "Transforme gravações do microfone em notas claras.",
-    "onboarding.signIn.community": "Participe da comunidade Clovy no Telegram",
-    "onboarding.signIn.waiting": "Conclua o login no navegador",
-    "onboarding.signIn.continue": "Continuar com OpenSoftware",
-    "onboarding.signIn.notConfigured":
-      "O login com OpenSoftware não está configurado nesta versão.",
-    "onboarding.signIn.incomplete": "O login não foi concluído. Tente de novo.",
-    "onboarding.signIn.terms":
-      "Ao continuar, você concorda com os <terms>Termos</terms> e a <privacy>Política de privacidade</privacy>.",
-
-    "onboarding.telemetry.title": "Ajude a melhorar o Clovy",
-    "onboarding.telemetry.subtitle":
-      "Opcional e desativado por padrão. Altere quando quiser nas Configurações.",
-    "onboarding.telemetry.rowTitle": "Compartilhar estatísticas de uso anônimas",
-    "onboarding.telemetry.rowDescription":
-      "Contagens anônimas de uso de recursos, como quantas sessões de ditado acontecem em uma semana. Nunca suas gravações, notas ou qualquer coisa que você escreva. <link>Saiba como funciona</link>",
-    "onboarding.telemetry.saveError": "Não foi possível salvar esta escolha. Tente de novo.",
-    "onboarding.telemetry.saving": "Salvando",
 
     "onboarding.area.title": "Onde posso ajudar mais?",
     "onboarding.area.subtitle":

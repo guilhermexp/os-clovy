@@ -20,7 +20,6 @@ describe("Clovy repository branding", () => {
       "docs/telemetry-p3a-implementation-plan.md",
       "scripts/check-cargo-release-age.py",
       "scripts/check-pnpm-release-age.py",
-      "src/lib/p3a.ts",
     ].map(read);
 
     for (const source of currentSurfaces) {
@@ -33,9 +32,5 @@ describe("Clovy repository branding", () => {
     expect(read("README.md")).toContain("git clone https://github.com/guilhermexp/os-clovy");
     expect(read("README.md")).not.toContain("clovy-demo.gif");
     expect(read("README.md")).not.toContain("https://june-api.opensoftware.co/verify");
-    for (const source of [read("src/lib/tauri.ts"), read("src-tauri/src/commands.rs")]) {
-      expect(source).not.toContain("https://t.me/osjune");
-      expect(source).toContain("https://t.me/+B4Z8KUqEsRc4ZGVh");
-    }
   });
 });

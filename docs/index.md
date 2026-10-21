@@ -10,9 +10,9 @@ Read first, in order: **[CONTEXT.md](../CONTEXT.md)** (domain glossary) →
 Append-only; supersede with a new number or a dated addendum, never rewrite the
 decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 
-- [adr/0001](adr/0001-auto-updates-via-tauri-updater.md) — auto-updates via the Tauri updater on a separate public releases repo
+- [adr/0001](adr/0001-auto-updates-via-tauri-updater.md) — auto-updates via the Tauri updater on a separate public releases repo (superseded in this fork: the updater was removed)
 - [adr/0002](adr/0002-live-transcript-preview-strategy.md) — live transcript preview as an ephemeral companion, not the source of truth
-- [adr/0003](adr/0003-release-candidate-channel-and-promotion.md) — rc channel + promote-to-stable (every stable release starts as an RC) (superseded by desvincular-repo-ci)
+- [adr/0003](adr/0003-release-candidate-channel-and-promotion.md) — rc channel + promote-to-stable (every stable release starts as an RC) (superseded by desvincular-repo-ci; the in-app channel choice was removed by desvincular-servicos-open-software)
 - [adr/0004](adr/0004-out-of-process-system-audio-helper.md) — macOS system audio via an out-of-process helper (file IPC + Unix signals)
 - [adr/0005](adr/0005-source-separated-audio-capture.md) — one WAV per source, re-interleaved as turns
 - [adr/0006](adr/0006-embed-hermes-sandboxed-runtime.md) — embed the pinned Hermes runtime as sandboxed child processes (superseded by ADR-0038)
@@ -21,7 +21,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0009](adr/0009-hermes-config-shared-ownership-merge.md) — config.yaml is shared with the Hermes dashboard; Clovy deep-merges on spawn, never overwrites (superseded by ADR-0038)
 - [adr/0010](adr/0010-note-references-in-agent-chat.md) — note references in agent chat: `@note:<id>` text token + `get_meeting_note` fetch-by-id
 - [adr/0011](adr/0011-bundled-hermes-skills.md) — selected Hermes skills ship as read-only app resources when the runtime pin cannot move (superseded by ADR-0038)
-- [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); Clovy API generates the team-facing diagnosis
+- [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); Clovy API generates the team-facing diagnosis (superseded in this fork: the desktop no longer sends issue reports)
 - [adr/0013](adr/0013-stream-inference-responses-through-june-api.md) — inference responses stream through Clovy API (SSE pass-through + keep-alive heartbeats); charges settle after the stream ends
 - [adr/0013](adr/0013-agent-recorder-tool-via-frontend-event.md) — agent recording control: the recorder tool asks the main webview to start or stop through a frontend event, so capture always runs the visible UI path (shares the 0013 number with the streaming ADR)
 - [adr/0014](adr/0014-pinned-dictation-paste-target.md) — the dictation paste target is pinned when the recording stops, never re-resolved at paste time
@@ -51,19 +51,19 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0038](adr/0038-june-owned-openai-agents-runtime.md) - Clovy owns the local agent harness, persistence, tools, approvals, and stdio protocol on top of the OpenAI Agents SDK
 - [adr/0039](adr/0039-june-owned-routines-and-mcp.md) - Clovy owns routine scheduling and user-configured MCP transport, persistence, safety, and migration
 - [adr/0040](adr/0040-plugin-capabilities-as-host-tools.md) - Clovy-owned plugin capabilities are in-loop host tools (brokered helpers for risky engines), never Clovy-managed MCP servers
-- [adr/0041](adr/0041-june-companion-trust-boundaries.md) - original companion trust boundaries, relay-first E2EE, and desktop authority
-- [adr/0042](adr/0042-june-companion-native-swiftui.md) - native SwiftUI companion presentation; its mobile-login decision is superseded by ADRs 0043, 0046, and 0047
-- [adr/0043](adr/0043-companion-desktop-authorized-device-credential.md) - desktop-authorized pairing and revocable device credentials; its authorization model is current again through ADR 0047
-- [adr/0044](adr/0044-companion-device-generates-relay-credential.md) - companion-generated relay credentials; Clovy API receives and stores only their hashes
-- [adr/0045](adr/0045-companion-relay-single-replica-mvp.md) - the MVP relay is single-replica until pairing and live routing have shared cross-instance state
-- [adr/0046](adr/0046-companion-native-os-accounts-login.md) - superseded by ADR-0047
-- [adr/0047](adr/0047-companion-pairing-is-mobile-authorization.md) - the authenticated Desktop-created QR pairing is the phone's short-lived authorization; the phone has no account session
-- [adr/0048](adr/0048-companion-mutations-use-durable-at-most-once-reservations.md) - companion mutations reserve their operation id durably before side effects and never redispatch an outcome-unknown request
+- [adr/0041](adr/0041-june-companion-trust-boundaries.md) - original companion trust boundaries, relay-first E2EE, and desktop authority (superseded in this fork: the desktop companion was removed)
+- [adr/0042](adr/0042-june-companion-native-swiftui.md) - native SwiftUI companion presentation; its mobile-login decision is superseded by ADRs 0043, 0046, and 0047 (superseded in this fork: the desktop companion was removed)
+- [adr/0043](adr/0043-companion-desktop-authorized-device-credential.md) - desktop-authorized pairing and revocable device credentials; its authorization model is current again through ADR 0047 (superseded in this fork: the desktop companion was removed)
+- [adr/0044](adr/0044-companion-device-generates-relay-credential.md) - companion-generated relay credentials; Clovy API receives and stores only their hashes (superseded in this fork: the desktop companion was removed)
+- [adr/0045](adr/0045-companion-relay-single-replica-mvp.md) - the MVP relay is single-replica until pairing and live routing have shared cross-instance state (superseded in this fork: the desktop companion was removed)
+- [adr/0046](adr/0046-companion-native-os-accounts-login.md) - superseded by ADR-0047 (superseded in this fork: the desktop companion was removed)
+- [adr/0047](adr/0047-companion-pairing-is-mobile-authorization.md) - the authenticated Desktop-created QR pairing is the phone's short-lived authorization; the phone has no account session (superseded in this fork: the desktop companion was removed)
+- [adr/0048](adr/0048-companion-mutations-use-durable-at-most-once-reservations.md) - companion mutations reserve their operation id durably before side effects and never redispatch an outcome-unknown request (superseded in this fork: the desktop companion was removed)
 - [adr/0049](adr/0049-cancelled-dictation-takes-never-deliver.md) - each helper-owned dictation take has one cancellation token, and cancelled takes cannot start later cleanup, history, or text delivery
 - [adr/0050](adr/0050-linear-official-hosted-mcp.md) - Linear agent capabilities come from Linear's official hosted MCP while Clovy owns connection state, credential custody, and conservative approvals
-- [adr/0051](adr/0051-companion-attachments-use-bounded-staging-and-opaque-mac-references.md) - companion attachments use bounded app-data staging and opaque, user-granted Mac file references
-- [adr/0052](adr/0052-companion-media-results-use-canonical-artifacts.md) - companion image/video results reuse canonical agent artifacts and cross E2EE only as bounded references plus verified full-file chunks
-- [adr/0053](adr/0053-companion-computer-use-approvals-are-one-shot.md) - linked companions may approve one exact Computer use interruption under the desktop policy ceiling, with a short-lived one-shot permit
+- [adr/0051](adr/0051-companion-attachments-use-bounded-staging-and-opaque-mac-references.md) - companion attachments use bounded app-data staging and opaque, user-granted Mac file references (superseded in this fork: the desktop companion was removed)
+- [adr/0052](adr/0052-companion-media-results-use-canonical-artifacts.md) - companion image/video results reuse canonical agent artifacts and cross E2EE only as bounded references plus verified full-file chunks (superseded in this fork: the desktop companion was removed)
+- [adr/0053](adr/0053-companion-computer-use-approvals-are-one-shot.md) - linked companions may approve one exact Computer use interruption under the desktop policy ceiling, with a short-lived one-shot permit (superseded in this fork: the desktop companion was removed)
 - [adr/0054](adr/0054-clovy-presentation-retains-june-era-technical-identities.md) - Clovy is the product name while shipped June-era bundle, storage, API, update, and tool identities remain stable
 - [adr/0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md) - supersedes ADR-0054: Clovy becomes canonical through idempotent migration and rollback-safe aliases while immutable OS identities preserve existing installs
 - [adr/0056](adr/0056-interface-language-uses-an-in-repo-typed-catalog.md) - interface language (English, Português (Brasil)) uses an in-repo typed catalog, a localStorage preference independent of the transcription language, and a Tauri event mirrored into the native menus
@@ -111,12 +111,7 @@ Per-repo config the engineering skills read before acting (see the
 ## Subsystems
 
 - [home-assistant.md](home-assistant.md) - persistent Home conversation on the default CLI engine, its hidden session, and the legacy history import
-- [companion-architecture.md](companion-architecture.md) - iPhone/iPad companion topology, responsibility split, data flow, and limits
-- [companion-protocol.md](companion-protocol.md) - versioned encrypted application protocol and capability allowlist
-- [companion-threat-model.md](companion-threat-model.md) - assets, attackers, mitigations, and accepted risks
-- [companion-privacy.md](companion-privacy.md) - relay-visible metadata and data that remains end-to-end encrypted
-- [companion-revocation.md](companion-revocation.md) - online and future-connection revocation behavior
-- [companion-development.md](companion-development.md) - local relay, desktop, iPhone, and iPad development workflow
+- [companion-protocol.md](companion-protocol.md) - versioned encrypted application protocol of the companion crates (the desktop companion was removed in this fork; crates and relay go in a later change)
 - [browser-computer-use-prd.md](browser-computer-use-prd.md) — PRD: Browser use + Computer use plugins (JUN-278); extension in the user's browser + routines-only managed browser, phase-2 computer use
 - [release-extension.md](release-extension.md) - browser extension store identity and local packaging checks (no automated store publication)
 - [private-sharing-design.md](private-sharing-design.md) — private link sharing (JUN-308): bearer-link product contract, optional passcode, and the end-to-end encrypted snapshot model
@@ -154,25 +149,19 @@ Per-repo config the engineering skills read before acting (see the
 - [dictation.md](dictation.md) - dictation take: shortcut to capture start, the transcription route (direct to Groq with the user's key, else Clovy API), optional OpenRouter cleanup, "no speech" after Whisper, paste, warm-up, and latency targets
 - [llm-providers.md](llm-providers.md) - own providers: agent CLIs and named OpenAI-compatible endpoints, per-use selection, one-shot generation API, structured-output levels, CLI isolation contract, and the CLI chat engine (per-CLI turn, resume, stream, cancel, permissions, Clovy's tools)
 - [clovy-api-prd.md](clovy-api-prd.md) — Clovy API: upstream AI calls + OS Accounts authorize/charge (the canonical service spec)
-- [telemetry.md](telemetry.md) — public overview of Clovy telemetry, current behavior, and policies
-- [telemetry-p3a-prd.md](telemetry-p3a-prd.md) — Clovy P3A: opt-in, privacy-preserving product telemetry
-- [telemetry-p3a-implementation-plan.md](telemetry-p3a-implementation-plan.md) — implementation plan for Clovy P3A phases
-- [telemetry-questions.md](telemetry-questions.md) — public P3A question catalog and buckets
+- [telemetry-p3a-implementation-plan.md](telemetry-p3a-implementation-plan.md) — historical implementation plan for Clovy P3A (removed from the desktop in this fork)
 - [private-connectors-prd.md](private-connectors-prd.md) — private connectors & away-mode relay: an assistant that acts in email and calendar without OpenSoftware readable data (local mode shipping; away mode proposed)
 - [private-connectors-implementation-plan.md](private-connectors-implementation-plan.md) — implementation plan for private connectors phases (Phases 1-2 local mode implemented; see [adr/0016](adr/0016-private-connectors-local-mode.md))
 - [private-connectors-threat-model.md](private-connectors-threat-model.md) — local-mode threat model: the source of truth for all connector privacy copy (what OpenSoftware can and cannot see, the trust surface, agent protections, the known runtime limitation)
 - [configuration.md](configuration.md) — env + config reference (desktop client + Clovy API)
 - [auto-model-rollout.md](auto-model-rollout.md) — canary, enablement, and rollback steps for automatic private model routing
 - [development.md](development.md) — local development: quick start, local data, permissions, agent skills, verification commands
-- [os-accounts-login.md](os-accounts-login.md) — Login with Open Software: PKCE, keychain, account gates
 - [onboarding-design.md](onboarding-design.md) — onboarding flow design (verify against what shipped)
 
 ## Release & ops runbooks
 
-- [companion-relay-runbook.md](companion-relay-runbook.md) - relay deployment, health, limits, and incident response
-- [companion-apns-setup.md](companion-apns-setup.md) - Apple push setup for content-free wake hints
-- [companion-app-store-readiness.md](companion-app-store-readiness.md) - TestFlight and App Store checklist
-- [companion-security-review.md](companion-security-review.md) - required independent review checklist
+- [companion-relay-runbook.md](companion-relay-runbook.md) - relay deployment, health, limits, and incident response (relay removal pending; the desktop companion is gone)
+- [companion-apns-setup.md](companion-apns-setup.md) - Apple push setup for content-free wake hints (relay removal pending; the desktop companion is gone)
 - [release-macos.md](release-macos.md) / [release-windows.md](release-windows.md) — building and validating the desktop app locally (no published releases)
 - [computer-use-support.md](computer-use-support.md) - state guide, TCC recovery, signed helper self-test, and macOS release regression response
 - [local-ci-signoff.md](local-ci-signoff.md) — local commit-status signoff that replaces the slow hosted PR jobs during agent iteration

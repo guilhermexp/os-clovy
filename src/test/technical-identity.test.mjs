@@ -67,7 +67,7 @@ describe("Clovy technical identity", () => {
     );
   });
 
-  it("retains installed desktop and updater identities", async () => {
+  it("retains installed desktop identities", async () => {
     const [
       tauri,
       macos,
@@ -88,10 +88,7 @@ describe("Clovy technical identity", () => {
 
     expect(tauri.productName).toBe("Clovy");
     expect(tauri.identifier).toBe("co.opensoftware.june");
-    expect(tauri.plugins["deep-link"].desktop.schemes).toEqual(["clovy", "osjune"]);
-    expect(tauri.plugins.updater.endpoints).toEqual([
-      "https://github.com/open-software-network/os-june-releases/releases/latest/download/latest.json",
-    ]);
+    expect(tauri.plugins["deep-link"].desktop.schemes).toEqual(["clovy"]);
     expect(macos.productName).toBe("June");
     expect(macos.bundle.macOS.bundleName).toBe("Clovy");
     expect(macosInfoPlist).toContain("<key>CFBundleDisplayName</key>\n  <string>June</string>");
@@ -286,7 +283,6 @@ describe("Clovy technical identity", () => {
       read("crates/clovy-companion-crypto/src/lib.rs"),
     ]);
 
-    expect(desktopApi).toContain('"https://june-api.opensoftware.co"');
     expect(desktopApi).toContain('b"june-api-operation-id-v1\\0"');
     expect(desktopApi).toContain('format!("june-op-');
     expect(canonicalHeader).toContain("clovy_crypto_generate_identity");

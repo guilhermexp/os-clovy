@@ -39,9 +39,8 @@ backend (Clovy API) is not involved in connector calls.
   the copy never implies it does.
 - **Billing metadata.** Metered model calls settle against OS Accounts, so the
   usual coarse billing records exist (that a metered call happened, its action
-  slug, credits charged). No mail content is in them. Clovy's only product
-  telemetry remains opt-in, coarse-bucketed P3A aggregates; connectors add no
-  per-user app telemetry.
+  slug, credits charged). No mail content is in them. This fork's desktop
+  sends no product telemetry; connectors add no per-user app telemetry.
 
 ## Trust surface for local mode
 

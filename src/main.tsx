@@ -86,9 +86,6 @@ if (import.meta.env.DEV) {
   void import("./lib/empty-states-demo").then(({ registerEmptyStatesDemo }) =>
     registerEmptyStatesDemo(),
   );
-  // __billingDemo("pro") parks the Account → Billing card in any plan state;
-  // __billingDemo("all") stacks every variant; __billingDemo("off") resets.
-  void import("./lib/billing-demo").then(({ registerBillingDemo }) => registerBillingDemo());
   // __projectMemoryDemo() drops sample memories into an open Project settings
   // dialog so the populated memory list can be designed; call again to reset.
   void import("./lib/project-memory-demo").then(({ registerProjectMemoryDemo }) =>

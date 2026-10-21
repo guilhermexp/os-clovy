@@ -12,7 +12,7 @@ Sharing is deliberately a bearer-link flow:
 4. **Copy** copies the URL again.
 5. Once a link exists, a link action beside the current breadcrumb copies it
    without reopening the Share dialog.
-6. Anyone with the link can view without an OS Accounts sign-in. A protected
+6. Anyone with the link can view without signing in. A protected
    link also requires the separately shared passcode.
 7. **Stop sharing** revokes the link for everyone.
 
@@ -130,13 +130,15 @@ cannot make local content permanently undeletable; other errors fail closed.
 ## Viewer
 
 The static `/s/{share_id}` shell has a strict self-only CSP and no analytics.
-Links use the configured Clovy API origin (`{origin}/s/{share_id}#…`). The
-isolated viewer-only deployment and short-link domain were removed with the
-rest of the hosted infrastructure by the `desvincular-repo-ci` change. The
-browser viewer opens only passcode/link shares: legacy email invites need a
-signed-in recipient, and the viewer's OS Accounts sign-in was removed with
-it, so the page asks the recipient to open the share in Clovy or request a
-link.
+Links use the origin of the configured Clovy API (`CLOVY_API_URL`, default
+`http://127.0.0.1:8080`): `{origin}/s/{share_id}#…`, from
+`clovy_api::share_base_url`. The isolated viewer-only deployment and
+short-link domain were removed with the rest of the hosted infrastructure by
+the `desvincular-repo-ci` change, so a viewer can open a link only if it can
+reach that Clovy API. The browser viewer opens only passcode/link shares:
+legacy email invites need a signed-in recipient, and the viewer's OS Accounts
+sign-in was removed with it, so the page asks the recipient to open the share
+in Clovy or request a link.
 
 For a new link it:
 

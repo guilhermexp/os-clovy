@@ -57,12 +57,6 @@ describe("shell i18n (English default)", () => {
   });
 
   it("keeps plural and interpolated English copy", () => {
-    expect(t("shell.referral.pending", { count: 1 })).toBe(
-      "1 invited friend is waiting to subscribe.",
-    );
-    expect(t("shell.referral.pending", { count: 3 })).toBe(
-      "3 invited friends are waiting to subscribe.",
-    );
     expect(t("shell.time.minutes", { count: 5 })).toBe("5m");
   });
 });
@@ -96,12 +90,6 @@ describe("shell i18n (pt-BR)", () => {
   });
 
   it("formats plurals and compact times in Portuguese", () => {
-    expect(t("shell.referral.pending", { count: 1 })).toBe(
-      "1 amigo convidado está esperando para assinar.",
-    );
-    expect(t("shell.referral.pending", { count: 2 })).toBe(
-      "2 amigos convidados estão esperando para assinar.",
-    );
     expect(t("shell.time.hours", { count: 3 })).toBe("3 h");
   });
 

@@ -48,12 +48,8 @@ import { VIDEO_MODELS } from "../lib/video-models";
 function renderSettings() {
   return render(
     <AppSettings
-      account={{ signedIn: false, configured: false }}
-      accountLoading={false}
       sourceMode="microphoneOnly"
       checkingSourceReadiness={false}
-      onAccountChanged={() => {}}
-      onAccountRefresh={async () => undefined}
       onSourceModeChange={() => {}}
       onEnableSystemAudio={() => {}}
       activeTab="models"

@@ -1,6 +1,6 @@
 import { defineMessages } from "../define";
 
-// Settings panels (agent, plugins/connectors, linked devices, memory, model
+// Settings panels (agent, plugins/connectors, memory, model
 // pickers) plus the connector approvals tray and the Computer use control.
 export default defineMessages({
   en: {
@@ -202,77 +202,6 @@ export default defineMessages({
       "Clovy stops using this account and removes its tokens from your Keychain. Routines that rely on it will fail until you reconnect.",
     "settingsPanels.connectors.revokeWith": "Also revoke Clovy's access with {provider}",
     "settingsPanels.connectors.revokeWithProvider": "Also revoke Clovy's access with the provider",
-    "settingsPanels.devices.cap.notesRead": "Read notes",
-    "settingsPanels.devices.cap.notesEdit": "Edit notes",
-    "settingsPanels.devices.cap.agentRead": "Read agent sessions",
-    "settingsPanels.devices.cap.agentChat": "Chat with Clovy",
-    "settingsPanels.devices.cap.agentCancel": "Cancel agent runs",
-    "settingsPanels.devices.cap.modelRead": "View agent models",
-    "settingsPanels.devices.cap.modelEdit": "Change agent models",
-    "settingsPanels.devices.cap.mediaRead": "Read generated media",
-    "settingsPanels.devices.cap.settingsRead": "Read safe settings",
-    "settingsPanels.devices.cap.settingsEditSafe": "Edit safe settings",
-    "settingsPanels.devices.cap.recordingControlExisting": "Control an existing recording",
-    "settingsPanels.devices.cap.appFocus": "Focus Clovy on this Mac",
-    "settingsPanels.devices.cap.filesUpload": "Add phone attachments",
-    "settingsPanels.devices.cap.filesBrowse": "Browse shared Mac folders",
-    "settingsPanels.devices.cap.devicesReadSelf": "Read this device",
-    "settingsPanels.devices.cap.devicesRevokeSelf": "Unlink this device",
-    "settingsPanels.devices.cap.computerUseApprove": "Approve Computer use actions",
-    "settingsPanels.devices.codeExpiredError":
-      "The pairing code expired. Show a new code to try again.",
-    "settingsPanels.devices.copyFailed": "Couldn't copy the pairing code. Try again.",
-    "settingsPanels.devices.unlinkConfirm": "Unlink {name}? It will lose access immediately.",
-    "settingsPanels.devices.stopSharingConfirm":
-      "Stop sharing {name}? Linked devices will lose access to this folder immediately.",
-    "settingsPanels.devices.title": "Linked devices",
-    "settingsPanels.devices.blurb":
-      "Link an iPhone or iPad from this signed-in Mac. Every link needs explicit approval here, and the companion never receives your account session.",
-    "settingsPanels.devices.linkTitle": "Link a companion",
-    "settingsPanels.devices.linkDescription":
-      "Pairing codes expire after five minutes. The relay cannot read the pairing secret or any linked traffic.",
-    "settingsPanels.devices.showCode": "Show pairing code",
-    "settingsPanels.devices.qrAlt": "Clovy Companion pairing code",
-    "settingsPanels.devices.expires": "Expires {time}",
-    "settingsPanels.devices.enterCodeInstead": "Enter a code instead",
-    "settingsPanels.devices.enterCodeHelp":
-      "In Clovy Companion, choose Enter pairing code, then type or paste this code.",
-    "settingsPanels.devices.codeCopied": "Pairing code copied",
-    "settingsPanels.devices.copyCode": "Copy pairing code",
-    "settingsPanels.devices.clipboardNote":
-      "Copied codes may remain in clipboard history. They expire after five minutes.",
-    "settingsPanels.devices.askingToLink": "{name} is asking to link.",
-    "settingsPanels.devices.companionAskingToLink": "A companion is asking to link.",
-    "settingsPanels.devices.willReceive": "This device will receive these capabilities:",
-    "settingsPanels.devices.capabilitiesToApprove": "Capabilities to approve",
-    "settingsPanels.devices.approveDevice": "Approve this device",
-    "settingsPanels.devices.macFolders": "Mac folders",
-    "settingsPanels.devices.macFoldersDescription":
-      "Linked devices can browse file names and details only inside folders you add here. Files are read only when you attach one to a Clovy message. Folder contents cannot be downloaded to the companion.",
-    "settingsPanels.devices.addFolder": "Add folder",
-    "settingsPanels.devices.sharedFoldersAria": "Folders shared with linked devices",
-    "settingsPanels.devices.stopSharing": "Stop sharing",
-    "settingsPanels.devices.noFolders": "No Mac folders are shared with linked devices.",
-    "settingsPanels.devices.approveComputerUse": "Approve Computer use from linked devices",
-    "settingsPanels.devices.computerUseUnavailable":
-      "Enable experimental Computer use before allowing linked approvals.",
-    "settingsPanels.devices.computerUseDescription":
-      "Let a linked device approve one specific Computer use action at a time. Requests expire after 60 seconds, remain visible on this Mac, and never bypass Clovy's safety policy.",
-    "settingsPanels.devices.deviceName": "Device name",
-    "settingsPanels.devices.linkedAt": "Linked {date}",
-    "settingsPanels.devices.lastSeenSuffix": " · Last seen {date}",
-    "settingsPanels.devices.unlink": "Unlink",
-    "settingsPanels.devices.grantedCapabilities": "Granted capabilities",
-    "settingsPanels.devices.filesUploadNote":
-      "This device can add bounded phone attachments. Unlink it to revoke this access.",
-    "settingsPanels.devices.emptyTitle": "No linked devices",
-    "settingsPanels.devices.emptyBody":
-      "Link a companion above to access Clovy when you are away from this Mac.",
-    "settingsPanels.devices.stateWaiting": "Approve the device on this Mac",
-    "settingsPanels.devices.stateApproved": "Device approved",
-    "settingsPanels.devices.stateExpired": "Pairing code expired",
-    "settingsPanels.devices.stateScan": "Scan this code in Clovy Companion",
-    "settingsPanels.devices.unavailable": "Linked devices are unavailable right now.",
     "settingsPanels.memory.toggleError":
       "Your memory setting was saved, but Clovy could not finish applying it. Quit and reopen Clovy before starting another agent run.",
     "settingsPanels.memory.allProjects": "All projects",
@@ -372,8 +301,6 @@ export default defineMessages({
     "settingsPanels.picker.noModelsMatch": "No models match your search.",
     "settingsPanels.picker.matchingModelsAria": "Matching models",
     "settingsPanels.picker.autoAria": "Choose the model automatically",
-    "settingsPanels.picker.autoBillingNote":
-      "Auto is billed to Clovy credits and does not use your OpenRouter key.",
     "settingsPanels.picker.providerKeyNeeded":
       "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
     "settingsPanels.picker.providerAvailabilityUnknown":
@@ -418,10 +345,6 @@ export default defineMessages({
     "settingsPanels.computerUse.enableAria": "Enable Computer use",
     "settingsPanels.computerUse.macosOnly":
       "Computer use is available on macOS only. Windows support is not part of this release.",
-    "settingsPanels.computerUse.proFeature": "Pro feature",
-    "settingsPanels.computerUse.proBody":
-      "Computer use requires an active Pro or Max plan. Permission education and revocation remain available without a plan.",
-    "settingsPanels.computerUse.viewPlans": "View plans",
     "settingsPanels.computerUse.pausedBody":
       "Computer use is paused for this Clovy or macOS version.",
     "settingsPanels.computerUse.driverUnavailableTitle": "Bundled driver unavailable",
@@ -724,83 +647,6 @@ export default defineMessages({
       "O Clovy deixa de usar esta conta e remove os tokens dela das suas Chaves. As rotinas que dependem dela vão falhar até você reconectar.",
     "settingsPanels.connectors.revokeWith": "Também revogar o acesso do Clovy no {provider}",
     "settingsPanels.connectors.revokeWithProvider": "Também revogar o acesso do Clovy no provedor",
-    "settingsPanels.devices.cap.notesRead": "Ler notas",
-    "settingsPanels.devices.cap.notesEdit": "Editar notas",
-    "settingsPanels.devices.cap.agentRead": "Ler sessões do agente",
-    "settingsPanels.devices.cap.agentChat": "Conversar com o Clovy",
-    "settingsPanels.devices.cap.agentCancel": "Cancelar execuções do agente",
-    "settingsPanels.devices.cap.modelRead": "Ver modelos do agente",
-    "settingsPanels.devices.cap.modelEdit": "Trocar modelos do agente",
-    "settingsPanels.devices.cap.mediaRead": "Ler mídia gerada",
-    "settingsPanels.devices.cap.settingsRead": "Ler configurações seguras",
-    "settingsPanels.devices.cap.settingsEditSafe": "Editar configurações seguras",
-    "settingsPanels.devices.cap.recordingControlExisting": "Controlar uma gravação em andamento",
-    "settingsPanels.devices.cap.appFocus": "Trazer o Clovy para a frente neste Mac",
-    "settingsPanels.devices.cap.filesUpload": "Adicionar anexos do celular",
-    "settingsPanels.devices.cap.filesBrowse": "Navegar em pastas compartilhadas do Mac",
-    "settingsPanels.devices.cap.devicesReadSelf": "Ler este dispositivo",
-    "settingsPanels.devices.cap.devicesRevokeSelf": "Desvincular este dispositivo",
-    "settingsPanels.devices.cap.computerUseApprove": "Aprovar ações de uso do computador",
-    "settingsPanels.devices.codeExpiredError":
-      "O código de pareamento expirou. Mostre um novo código para tentar de novo.",
-    "settingsPanels.devices.copyFailed":
-      "Não foi possível copiar o código de pareamento. Tente de novo.",
-    "settingsPanels.devices.unlinkConfirm":
-      "Desvincular {name}? O acesso será perdido imediatamente.",
-    "settingsPanels.devices.stopSharingConfirm":
-      "Parar de compartilhar {name}? Os dispositivos vinculados vão perder o acesso a esta pasta imediatamente.",
-    "settingsPanels.devices.title": "Dispositivos vinculados",
-    "settingsPanels.devices.blurb":
-      "Vincule um iPhone ou iPad a partir deste Mac conectado. Cada vínculo precisa de aprovação explícita aqui, e o app complementar nunca recebe a sessão da sua conta.",
-    "settingsPanels.devices.linkTitle": "Vincular um app complementar",
-    "settingsPanels.devices.linkDescription":
-      "Os códigos de pareamento expiram após cinco minutos. O relay não consegue ler o segredo de pareamento nem o tráfego vinculado.",
-    "settingsPanels.devices.showCode": "Mostrar código de pareamento",
-    "settingsPanels.devices.qrAlt": "Código de pareamento do Clovy Companion",
-    "settingsPanels.devices.expires": "Expira às {time}",
-    "settingsPanels.devices.enterCodeInstead": "Digitar um código",
-    "settingsPanels.devices.enterCodeHelp":
-      "No Clovy Companion, escolha Enter pairing code e digite ou cole este código.",
-    "settingsPanels.devices.codeCopied": "Código de pareamento copiado",
-    "settingsPanels.devices.copyCode": "Copiar código de pareamento",
-    "settingsPanels.devices.clipboardNote":
-      "Códigos copiados podem ficar no histórico da área de transferência. Eles expiram após cinco minutos.",
-    "settingsPanels.devices.askingToLink": "{name} está pedindo para se vincular.",
-    "settingsPanels.devices.companionAskingToLink":
-      "Um app complementar está pedindo para se vincular.",
-    "settingsPanels.devices.willReceive": "Este dispositivo vai receber estas permissões:",
-    "settingsPanels.devices.capabilitiesToApprove": "Permissões a aprovar",
-    "settingsPanels.devices.approveDevice": "Aprovar este dispositivo",
-    "settingsPanels.devices.macFolders": "Pastas do Mac",
-    "settingsPanels.devices.macFoldersDescription":
-      "Os dispositivos vinculados só podem ver nomes e detalhes de arquivos nas pastas que você adicionar aqui. Os arquivos só são lidos quando você anexa um a uma mensagem do Clovy. O conteúdo das pastas não pode ser baixado para o app complementar.",
-    "settingsPanels.devices.addFolder": "Adicionar pasta",
-    "settingsPanels.devices.sharedFoldersAria": "Pastas compartilhadas com dispositivos vinculados",
-    "settingsPanels.devices.stopSharing": "Parar de compartilhar",
-    "settingsPanels.devices.noFolders":
-      "Nenhuma pasta do Mac está compartilhada com dispositivos vinculados.",
-    "settingsPanels.devices.approveComputerUse":
-      "Aprovar o uso do computador pelos dispositivos vinculados",
-    "settingsPanels.devices.computerUseUnavailable":
-      "Ative o uso do computador experimental antes de permitir aprovações vinculadas.",
-    "settingsPanels.devices.computerUseDescription":
-      "Permite que um dispositivo vinculado aprove uma ação específica de uso do computador por vez. Os pedidos expiram após 60 segundos, continuam visíveis neste Mac e nunca contornam a política de segurança do Clovy.",
-    "settingsPanels.devices.deviceName": "Nome do dispositivo",
-    "settingsPanels.devices.linkedAt": "Vinculado em {date}",
-    "settingsPanels.devices.lastSeenSuffix": " · Visto por último em {date}",
-    "settingsPanels.devices.unlink": "Desvincular",
-    "settingsPanels.devices.grantedCapabilities": "Permissões concedidas",
-    "settingsPanels.devices.filesUploadNote":
-      "Este dispositivo pode adicionar anexos limitados do celular. Desvincule-o para revogar este acesso.",
-    "settingsPanels.devices.emptyTitle": "Nenhum dispositivo vinculado",
-    "settingsPanels.devices.emptyBody":
-      "Vincule um app complementar acima para acessar o Clovy quando estiver longe deste Mac.",
-    "settingsPanels.devices.stateWaiting": "Aprove o dispositivo neste Mac",
-    "settingsPanels.devices.stateApproved": "Dispositivo aprovado",
-    "settingsPanels.devices.stateExpired": "Código de pareamento expirado",
-    "settingsPanels.devices.stateScan": "Escaneie este código no Clovy Companion",
-    "settingsPanels.devices.unavailable":
-      "Os dispositivos vinculados estão indisponíveis no momento.",
     "settingsPanels.memory.toggleError":
       "Sua configuração de memória foi salva, mas o Clovy não conseguiu terminar de aplicá-la. Feche e abra o Clovy de novo antes de iniciar outra execução do agente.",
     "settingsPanels.memory.allProjects": "Todos os projetos",
@@ -903,8 +749,6 @@ export default defineMessages({
     "settingsPanels.picker.noModelsMatch": "Nenhum modelo corresponde à sua busca.",
     "settingsPanels.picker.matchingModelsAria": "Modelos encontrados",
     "settingsPanels.picker.autoAria": "Escolher o modelo automaticamente",
-    "settingsPanels.picker.autoBillingNote":
-      "O Auto é cobrado em créditos do Clovy e não usa sua chave da OpenRouter.",
     "settingsPanels.picker.providerKeyNeeded":
       "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
     "settingsPanels.picker.providerAvailabilityUnknown":
@@ -949,10 +793,6 @@ export default defineMessages({
     "settingsPanels.computerUse.enableAria": "Ativar uso do computador",
     "settingsPanels.computerUse.macosOnly":
       "O uso do computador está disponível apenas no macOS. O suporte ao Windows não faz parte desta versão.",
-    "settingsPanels.computerUse.proFeature": "Recurso Pro",
-    "settingsPanels.computerUse.proBody":
-      "O uso do computador exige um plano Pro ou Max ativo. As orientações sobre permissões e a revogação continuam disponíveis sem plano.",
-    "settingsPanels.computerUse.viewPlans": "Ver planos",
     "settingsPanels.computerUse.pausedBody":
       "O uso do computador está pausado para esta versão do Clovy ou do macOS.",
     "settingsPanels.computerUse.driverUnavailableTitle": "Driver incluído indisponível",

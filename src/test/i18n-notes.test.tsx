@@ -1,10 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  NoteFailureBanner,
-  userFacingFailureMessage,
-} from "../components/note-editor/NoteFailureBanner";
+import { userFacingFailureMessage } from "../components/note-editor/NoteFailureBanner";
 import { NotesList } from "../components/notes-list/NotesList";
 import { ProjectSettingsDialog } from "../components/folders/ProjectSettingsDialog";
 import { applyInterfaceLocale } from "../i18n/locale";
@@ -91,19 +88,6 @@ describe("notes i18n (pt-BR)", () => {
     expect(userFacingFailureMessage("Microphone: authorization_denied")).toBe(
       "Microfone: O serviço está ocupado agora. Aguarde um minuto e tente de novo.",
     );
-    render(
-      <NoteFailureBanner
-        errorMessage="Your balance is too low. Upgrade to continue."
-        audioPreserved
-        onRetry={vi.fn()}
-        onTopUp={vi.fn()}
-      />,
-    );
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Seu saldo acabou. Sua gravação está salva localmente, então é só fazer upgrade e tentar de novo.",
-    );
-    expect(screen.getByRole("button", { name: "Fazer upgrade" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Tentar de novo" })).toBeInTheDocument();
   });
 
   it("translates project settings with an interpolated memory count", async () => {

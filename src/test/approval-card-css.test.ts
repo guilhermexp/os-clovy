@@ -220,25 +220,6 @@ describe("pending action card styles", () => {
   });
 });
 
-describe("inline notice centering", () => {
-  it("centers the tier-card credits notice via an override that outranks the base rule", () => {
-    // The base rule aligns notice copy with action-label baselines while
-    // wrapped copy grows downward from the first line.
-    expect(cssRuleFor(".inline-notice")).toContain("align-items: first baseline;");
-    // The credits override centers its taller tier card — and because the base
-    // rule sits LATER in this flat stylesheet, the override must carry higher
-    // specificity (a two-class compound, 0,2,0) to beat the single-class base
-    // (0,1,0).
-    expect(cssRuleFor(".inline-notice.agent-credits-notice")).toContain("align-items: center;");
-    const baseIndex = appCss.indexOf(".inline-notice {");
-    const overrideIndex = appCss.indexOf(".inline-notice.agent-credits-notice {");
-    expect(overrideIndex).toBeGreaterThan(-1);
-    // Guard the diagnosis: the base really is later in the file, so equal
-    // specificity would lose — the compound override is what makes it hold.
-    expect(baseIndex).toBeGreaterThan(overrideIndex);
-  });
-});
-
 describe("resolved action row styles", () => {
   it("tightens consecutive activity rows without tightening the answer gap", () => {
     const activitySelector = `.agent-assistant-turn-body > :is(

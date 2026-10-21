@@ -1,5 +1,9 @@
 # Clovy Companion protocol
 
+> **Fork note:** this fork's desktop app no longer has the companion (removed by
+> the `desvincular-servicos-open-software` change). The Clovy API relay and the
+> `crates/clovy-companion-*` / `june-companion-*` crates are removed in a later change.
+
 The shared crate is `crates/clovy-companion-protocol`; desktop and iOS crypto
 use `crates/clovy-companion-crypto`.
 

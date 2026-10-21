@@ -1,5 +1,9 @@
 # Companion APNs setup
 
+> **Fork note:** this fork's desktop app no longer has the companion (removed by
+> the `desvincular-servicos-open-software` change). The Clovy API relay and the
+> `crates/clovy-companion-*` / `june-companion-*` crates are removed in a later change.
+
 1. Register `co.opensoftware.june.companion` in the Apple Developer portal and
    enable Push Notifications and Background Modes remote notifications.
 2. Create an APNs token signing key and keep the `.p8` file server-side only.

@@ -21,8 +21,6 @@ export default defineMessages({
     "notes.editor.noTranscriptYet": "No transcript is available yet.",
     "notes.editor.emptyPlaceholder":
       "Hit record to capture a conversation, or just start typing your thoughts here",
-    "notes.editor.recordingNeedsCredits": "Recording needs credits",
-    "notes.editor.upgrade": "Upgrade",
     "notes.editor.micRequired": "Microphone access required",
     "notes.editor.micBlocked": "Microphone access is blocked. You can still write notes here.",
     "notes.editor.meetingEndedLabel": "Meeting ended, recording stops soon",
@@ -83,9 +81,6 @@ export default defineMessages({
     "notes.failure.generationFailed":
       "Your recording was transcribed, but Clovy couldn't generate the note. Your transcript is saved.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
-    "notes.failure.balanceRanOut":
-      "Your balance ran out. Your recording is saved locally, so {action} and retry.",
-    "notes.failure.balanceTooLow": "Your balance is too low. {action} to continue.",
     "notes.failure.generic": "Clovy couldn't finish processing this note.",
     "notes.failure.savedCanRetry": "Your recording is saved locally, so you can retry.",
     "notes.header.askWorking": "Clovy is working on your question",
@@ -358,8 +353,6 @@ export default defineMessages({
     "notes.editor.noTranscriptYet": "Nenhuma transcrição disponível ainda.",
     "notes.editor.emptyPlaceholder":
       "Clique em gravar para capturar uma conversa ou comece a digitar suas ideias aqui",
-    "notes.editor.recordingNeedsCredits": "A gravação precisa de créditos",
-    "notes.editor.upgrade": "Fazer upgrade",
     "notes.editor.micRequired": "Acesso ao microfone necessário",
     "notes.editor.micBlocked":
       "O acesso ao microfone está bloqueado. Você ainda pode escrever notas aqui.",
@@ -421,9 +414,6 @@ export default defineMessages({
     "notes.failure.generationFailed":
       "Sua gravação foi transcrita, mas o Clovy não conseguiu gerar a nota. Sua transcrição está salva.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
-    "notes.failure.balanceRanOut":
-      "Seu saldo acabou. Sua gravação está salva localmente, então é só {action} e tentar de novo.",
-    "notes.failure.balanceTooLow": "Seu saldo está muito baixo. {action} para continuar.",
     "notes.failure.generic": "O Clovy não conseguiu terminar de processar esta nota.",
     "notes.failure.savedCanRetry":
       "Sua gravação está salva localmente, então você pode tentar de novo.",

@@ -18,6 +18,12 @@ export const ORG_REFERENCE_SCOPES = [
     pathspecs: [".github", "clovy-api", "scripts", "Makefile"],
     pattern: /opensoftware\.co\b|june\.link|open-software-network|blacksmith/,
   },
+  {
+    // Tests are skipped: some pin repository and release metadata.
+    name: "app source",
+    pathspecs: ["src", "src-tauri/src", "src-tauri/*.json", ":!src/test"],
+    pattern: /opensoftware\.co\b|june\.link|open-software-network/,
+  },
 ];
 
 export function findOrgReferences({ cwd = rootDir, scopes = ORG_REFERENCE_SCOPES } = {}) {

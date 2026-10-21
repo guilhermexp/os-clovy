@@ -19,10 +19,6 @@ pub struct ExperimentalSettings {
     pub unlocked: bool,
     #[serde(default)]
     pub browser_use: bool,
-    #[serde(default)]
-    pub companion_pairing: bool,
-    #[serde(default)]
-    pub companion_computer_use_approvals: bool,
 }
 
 pub struct ExperimentalSettingsState {
@@ -34,7 +30,6 @@ pub struct ExperimentalSettingsState {
 pub struct ExperimentalSettingsSnapshot {
     #[serde(flatten)]
     pub settings: ExperimentalSettings,
-    pub companion_pairing_effective: bool,
 }
 
 pub fn setup(app: &mut tauri::App) -> Result<(), tauri::Error> {
@@ -83,16 +78,13 @@ pub fn set(
         crate::extension_host::ensure_listener_started(app.clone());
     }
 
-    let snapshot = snapshot(app, settings);
+    let snapshot = snapshot(settings);
     let _ = app.emit(EXPERIMENTAL_FLAGS_CHANGED_EVENT, snapshot.clone());
     Ok(snapshot)
 }
 
-pub fn snapshot(app: &AppHandle, settings: ExperimentalSettings) -> ExperimentalSettingsSnapshot {
-    ExperimentalSettingsSnapshot {
-        settings,
-        companion_pairing_effective: crate::companion::effective_pairing_enabled(app),
-    }
+pub fn snapshot(settings: ExperimentalSettings) -> ExperimentalSettingsSnapshot {
+    ExperimentalSettingsSnapshot { settings }
 }
 
 /// Effective Browser use availability for native callers. The stored override
@@ -103,45 +95,6 @@ pub fn browser_use_enabled(app: &AppHandle) -> bool {
         .and_then(|state| get(state.inner()).ok())
         .unwrap_or_default();
     browser_use_enabled_with(crate::feature_flags::BROWSER_USE_ENABLED, &stored)
-}
-
-/// Companion transport availability for native callers. Unlike Browser use,
-/// this experiment has no public kill switch and stays off unless this install
-/// explicitly enables it.
-pub fn companion_pairing_enabled(app: &AppHandle) -> bool {
-    app.try_state::<ExperimentalSettingsState>()
-        .and_then(|state| get(state.inner()).ok())
-        .unwrap_or_default()
-        .companion_pairing
-}
-
-pub fn companion_computer_use_approvals_enabled(app: &AppHandle) -> bool {
-    app.try_state::<ExperimentalSettingsState>()
-        .and_then(|state| get(state.inner()).ok())
-        .unwrap_or_default()
-        .companion_computer_use_approvals
-}
-
-pub fn set_companion_computer_use_approvals_enabled(
-    app: &AppHandle,
-    state: &ExperimentalSettingsState,
-    enabled: bool,
-) -> Result<(), AppError> {
-    let next = {
-        let mut current = state.settings.lock().map_err(|_| {
-            AppError::new(
-                "experimental_settings_unavailable",
-                "Experimental settings lock failed.",
-            )
-        })?;
-        let mut next = current.clone();
-        next.companion_computer_use_approvals = enabled;
-        save_settings(&state.path, &next)?;
-        *current = next.clone();
-        next
-    };
-    let _ = app.emit(EXPERIMENTAL_FLAGS_CHANGED_EVENT, snapshot(app, next));
-    Ok(())
 }
 
 fn browser_use_enabled_with(kill_switch: bool, settings: &ExperimentalSettings) -> bool {
@@ -218,8 +171,6 @@ mod tests {
         let settings = ExperimentalSettings {
             unlocked: true,
             browser_use: true,
-            companion_pairing: true,
-            companion_computer_use_approvals: true,
         };
 
         save_settings(&path, &settings).expect("save experimental settings");
@@ -237,15 +188,5 @@ mod tests {
         assert_eq!(load_settings(&path), ExperimentalSettings::default());
 
         let _ = fs::remove_dir_all(path.parent().expect("settings parent"));
-    }
-
-    #[test]
-    fn linked_computer_use_approvals_default_off_for_existing_settings() {
-        let settings: ExperimentalSettings = serde_json::from_str(
-            r#"{"unlocked":true,"browser_use":true,"companion_pairing":true}"#,
-        )
-        .expect("decode previous settings");
-
-        assert!(!settings.companion_computer_use_approvals);
     }
 }

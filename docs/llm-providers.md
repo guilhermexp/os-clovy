@@ -201,9 +201,8 @@ New work starts on the default engine: `chat_default_engine` returns
 `{ modelId, cli, legacyFallback }` (`modelId` is the CLI engine id when chat
 is on a CLI, else `null` and the caller keeps its own default) without the
 network, and the desktop's new sessions, Home's turns
-([home-assistant.md](home-assistant.md), ADR-0064), note chat, and sessions started
-from the companion ([companion-architecture.md](companion-architecture.md))
-create their session on it.
+([home-assistant.md](home-assistant.md), ADR-0064), and note chat create their
+session on it.
 The engine picker writes `__june_local_generation__:<model>@<endpoint id>`
 (both URL-encoded), so two endpoints serving the same model stay distinct and
 the agent proxy uses exactly the chosen endpoint (a removed endpoint is
@@ -461,8 +460,8 @@ through byte for byte; for chat turns see [CLI chat engine](#cli-chat-engine).
 - The `windows-rust` CI job runs the `llm` and `chat_engine` filters on
   Windows, where the `Path`, `PATHEXT`, and `.cmd` tests compile.
 - `pnpm exec vitest run src/test/llm-providers src/test/chat-engine` covers the
-  settings section and the engine picker; `src/test/note-chat-default-engine`,
-  `src/test/companion-models`, and the default-engine cases in
+  settings section and the engine picker; `src/test/note-chat-default-engine`
+  and the default-engine cases in
   `src/test/agent-workspace-runtime` and `src/test/app-shortcut` cover the
   entry points that start on the default engine.
 - `cargo test --locked llm::registry` covers the one-time move to the default

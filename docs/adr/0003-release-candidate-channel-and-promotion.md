@@ -174,3 +174,6 @@ incoming webhook is not idempotent; on an unconfirmed result, the operator check
 Slack before manually posting a recovery announcement.
 
 Superada pela change desvincular-repo-ci.
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o atualizador nem a escolha de canal estável/RC; não há canal de atualização no app (2026-10-21).

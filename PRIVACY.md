@@ -4,17 +4,9 @@ Clovy is private by architecture. Recordings, transcripts, notes, and agent
 session content stay on-device except when the user asks Clovy to run model
 inference through Clovy API.
 
-## Optional usage statistics
+## No telemetry
 
-Clovy can ask for opt-in anonymous usage statistics during onboarding and in
-Settings > General > Privacy. The default is off.
-
-When enabled in this release, Clovy stores the choice and local counters on the
-device. It does not send telemetry reports yet. Future reporting is limited to
-the public question catalog in [docs/telemetry-questions.md](docs/telemetry-questions.md).
-
-Clovy P3A never collects prompts, responses, transcripts, notes, audio, file
-names, file paths, URLs, search queries, user ids, emails, OS Accounts ids,
-device ids, install ids, cookies, or free-form strings.
-
-Turning the toggle off takes effect immediately and deletes local P3A counters.
+Clovy sends no usage statistics, telemetry, or issue reports, and has no
+account sign-in. It talks only to the Clovy API server you configure
+(`http://127.0.0.1:8080` by default, `CLOVY_API_URL` overrides) and to the
+model providers you set up yourself.

@@ -1011,7 +1011,6 @@ pub async fn cancel_agent_run(
                 "This request is already resuming. Wait for Clovy to continue before stopping it.",
             ));
         };
-        crate::companion::cancel_computer_use_approvals_for_session(&app, &run.session_id);
         host.cancel_run_streams(&run.id).await;
         super::host::emit_persisted_run_cancelled(&app, &cancelled_run)?;
         return Ok(());
@@ -1019,7 +1018,6 @@ pub async fn cancel_agent_run(
     host.request("run.cancel", &run.session_id, &run.id, json!({}))
         .await?;
     host.cancel_run_streams(&run.id).await;
-    crate::companion::cancel_computer_use_approvals_for_session(&app, &run.session_id);
     Ok(())
 }
 
@@ -1237,7 +1235,6 @@ async fn claim_interruption_resume(
     original_payload_json: &str,
     resolved_payload_json: &str,
     updated_at: &str,
-    companion_audit: Option<(&str, &str, &str, &str, &str)>,
 ) -> Result<bool, sqlx::Error> {
     let mut transaction = repository.pool.begin_with("BEGIN IMMEDIATE").await?;
     let claimed = sqlx::query::query(
@@ -1286,17 +1283,6 @@ async fn claim_interruption_resume(
     if session_updated != 1 {
         transaction.rollback().await?;
         return Ok(false);
-    }
-    if let Some((device_id, request_id, session_id, decision, resolved_at)) = companion_audit {
-        crate::db::repositories::Repositories::record_companion_computer_use_approval_decision_in_transaction(
-            &mut transaction,
-            device_id,
-            request_id,
-            session_id,
-            decision,
-            resolved_at,
-        )
-        .await?;
     }
     transaction.commit().await?;
     Ok(true)
@@ -1356,110 +1342,17 @@ pub async fn resolve_agent_interruption(
     {
         return Ok(run_json(run));
     }
-    resolve_agent_interruption_inner(&app, &host, request, InterruptionResolutionOrigin::Desktop)
-        .await
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum InterruptionResolutionOrigin {
-    Desktop,
-    Companion(crate::companion::ComputerUseApprovalOrigin),
-}
-
-pub(crate) async fn resolve_companion_computer_use_approval(
-    app: &AppHandle,
-    request_id: &str,
-    stored_session_id: &str,
-    decision: clovy_companion_protocol::ComputerUseApprovalDecision,
-    origin: crate::companion::ComputerUseApprovalOrigin,
-) -> Result<Value, AppError> {
-    use sqlx::row::Row;
-    // A CLI turn's request waits in the approval broker, not in the sidecar.
-    if let Some(result) = crate::companion::resolve_cli_computer_use_approval(
-        app,
-        request_id,
-        stored_session_id,
-        decision,
-        origin.clone(),
-    )
-    .await
-    {
-        return result;
-    }
-    let repository = repository(app).await?;
-    let row = sqlx::query::query(
-        "SELECT run_id
-         FROM agent_items
-         WHERE session_id = ?
-           AND kind = 'interruption'
-           AND json_extract(payload_json, '$.id') = ?
-           AND json_extract(payload_json, '$.status') = 'pending'
-         ORDER BY created_at DESC
-         LIMIT 1",
-    )
-    .bind(stored_session_id)
-    .bind(request_id)
-    .fetch_optional(&repository.pool)
-    .await?
-    .ok_or_else(|| {
-        AppError::new(
-            "agent_interruption_not_found",
-            "This interruption could not be found.",
-        )
-    })?;
-    let request = ResolveInterruptionRequest {
-        interruption_id: request_id.to_string(),
-        run_id: row.get("run_id"),
-        resolution: json!({
-            "kind": "approval",
-            "choice": match decision {
-                clovy_companion_protocol::ComputerUseApprovalDecision::Approve => "once",
-                clovy_companion_protocol::ComputerUseApprovalDecision::Deny => "deny",
-            },
-            "storedSessionId": stored_session_id,
-        }),
-    };
-    let host = app.state::<AgentRuntimeHost>();
-    resolve_agent_interruption_inner(
-        app,
-        &host,
-        request,
-        InterruptionResolutionOrigin::Companion(origin),
-    )
-    .await
+    resolve_agent_interruption_inner(&app, &host, request).await
 }
 
 async fn resolve_agent_interruption_inner(
     app: &AppHandle,
     host: &AgentRuntimeHost,
     request: ResolveInterruptionRequest,
-    origin: InterruptionResolutionOrigin,
 ) -> Result<Value, AppError> {
     let _resolution = host
         .lock_interruption_resolution(&request.interruption_id)
         .await;
-    let companion_session_id = match &origin {
-        InterruptionResolutionOrigin::Desktop => None,
-        InterruptionResolutionOrigin::Companion(companion_origin) => {
-            let stored_session_id = request
-                .resolution
-                .get("storedSessionId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    AppError::new(
-                        "companion_computer_use_approval_invalid",
-                        "The Computer use approval session is missing.",
-                    )
-                })?;
-            crate::companion::begin_companion_computer_use_resolution(
-                app,
-                &request.interruption_id,
-                stored_session_id,
-                companion_origin.clone(),
-            )?;
-            Some(stored_session_id.to_string())
-        }
-    };
     let repository = repository(app).await?;
     let record = interruption_record(&repository, &request.run_id, &request.interruption_id)
         .await?
@@ -1472,17 +1365,6 @@ async fn resolve_agent_interruption_inner(
     let original_interruption_json = record.payload_json.clone();
     let mut interruption: Value = serde_json::from_str(&original_interruption_json)
         .map_err(|error| AppError::new("agent_interruption_invalid", error.to_string()))?;
-    if let Some(expected_session_id) = companion_session_id.as_deref() {
-        if record.session_id != expected_session_id
-            || interruption.get("kind").and_then(Value::as_str) != Some("approval")
-            || interruption.get("toolName").and_then(Value::as_str) != Some("computer_use")
-        {
-            return Err(AppError::new(
-                "companion_computer_use_approval_invalid",
-                "The Computer use approval does not match the pending action.",
-            ));
-        }
-    }
     let run = repository.get_run(&record.run_id).await?;
     if run.status != "waiting_for_user" {
         return Err(AppError::new(
@@ -1646,37 +1528,9 @@ async fn resolve_agent_interruption_inner(
     interruption["approved"] = json!(approved);
     interruption["resolutionNonce"] = json!(resolution_nonce);
     if interruption_kind == "approval" {
-        interruption["resolvedBy"] = json!(match &origin {
-            InterruptionResolutionOrigin::Desktop => "desktop",
-            InterruptionResolutionOrigin::Companion(
-                crate::companion::ComputerUseApprovalOrigin::Companion { .. },
-            ) => "linkedDevice",
-            InterruptionResolutionOrigin::Companion(
-                crate::companion::ComputerUseApprovalOrigin::Timeout,
-            ) => "timeout",
-        });
-        if let InterruptionResolutionOrigin::Companion(
-            crate::companion::ComputerUseApprovalOrigin::Companion { device_id },
-        ) = &origin
-        {
-            interruption["resolvedByDeviceId"] = json!(device_id);
-        }
+        interruption["resolvedBy"] = json!("desktop");
     }
     let resolved_interruption_json = interruption.to_string();
-    let companion_audit = match &origin {
-        InterruptionResolutionOrigin::Companion(
-            crate::companion::ComputerUseApprovalOrigin::Companion { device_id },
-        ) => Some((
-            device_id.as_str(),
-            request.interruption_id.as_str(),
-            companion_session_id
-                .as_deref()
-                .unwrap_or(record.session_id.as_str()),
-            if approved { "approve" } else { "deny" },
-            resolution_time.as_str(),
-        )),
-        _ => None,
-    };
     // Persist the visible resolution and reset sequencing as one unit. The
     // sidecar can emit resumed events immediately after accepting the request,
     // so both must be in place before dispatch, but neither may be left behind
@@ -1687,7 +1541,6 @@ async fn resolve_agent_interruption_inner(
         &original_interruption_json,
         &resolved_interruption_json,
         &resolution_time,
-        companion_audit,
     )
     .await
     {
@@ -1707,22 +1560,6 @@ async fn resolve_agent_interruption_inner(
             "agent_interruption_expired",
             "This interruption can no longer be resumed.",
         ));
-    }
-    if let InterruptionResolutionOrigin::Companion(companion_origin) = &origin {
-        crate::companion::complete_computer_use_resolution(
-            app,
-            &request.interruption_id,
-            companion_session_id
-                .as_deref()
-                .unwrap_or(record.session_id.as_str()),
-            approved,
-            approved
-                && matches!(
-                    companion_origin,
-                    crate::companion::ComputerUseApprovalOrigin::Companion { .. }
-                ),
-            Some(companion_origin.clone()),
-        );
     }
     if let Err(error) = host
         .request("run.resume", &session.id, &run.id, params)
@@ -1797,31 +1634,13 @@ async fn resolve_agent_interruption_inner(
                 }
             }
         }
-        if let Some(stored_session_id) = companion_session_id.as_deref() {
-            crate::companion::cancel_computer_use_resolution(
-                app,
-                &request.interruption_id,
-                stored_session_id,
-            );
-        }
         restore_result?;
         return Err(error);
-    }
-    if origin == InterruptionResolutionOrigin::Desktop {
-        crate::companion::complete_computer_use_resolution(
-            app,
-            &request.interruption_id,
-            &session.id,
-            approved,
-            false,
-            None,
-        );
     }
     tracing::info!(
         interruption_id = %request.interruption_id,
         stored_session_id = %session.id,
         approved,
-        origin = ?origin,
         "resolved agent interruption"
     );
     Ok(run_json(
@@ -3608,13 +3427,6 @@ mod tests {
             &original_payload,
             &first_payload,
             "2026-07-28T00:00:00Z",
-            Some((
-                "device-1",
-                "functions.mcp_linear_save_issue:0",
-                &record.session_id,
-                "approve",
-                "2026-07-28T00:00:00Z",
-            )),
         )
         .await
         .expect("first claim");
@@ -3624,13 +3436,6 @@ mod tests {
             &original_payload,
             &second_payload,
             "2026-07-28T00:00:01Z",
-            Some((
-                "device-1",
-                "functions.mcp_linear_save_issue:0",
-                &record.session_id,
-                "deny",
-                "2026-07-28T00:00:01Z",
-            )),
         )
         .await
         .expect("second claim");
@@ -3652,21 +3457,6 @@ mod tests {
             .expect("claimed interruption")
             .get("payload_json");
         assert_eq!(stored_payload, first_payload);
-        let audit_decisions: Vec<String> = query(
-            "SELECT decision
-             FROM companion_computer_use_approval_audit
-             WHERE device_id = ? AND request_id = ? AND stored_session_id = ?",
-        )
-        .bind("device-1")
-        .bind("functions.mcp_linear_save_issue:0")
-        .bind(&record.session_id)
-        .fetch_all(&repository.pool)
-        .await
-        .expect("approval audit")
-        .into_iter()
-        .map(|row| row.get("decision"))
-        .collect();
-        assert_eq!(audit_decisions, vec!["approve"]);
     }
 
     #[tokio::test]
