@@ -238,6 +238,11 @@ pub trait FileCopier {
     fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
         std::fs::rename(from, to)
     }
+
+    /// Flushes a folder's entries; tests stand in a failing disk here.
+    fn sync_directory(&mut self, path: &Path) -> std::io::Result<()> {
+        sync_directory_now(path)
+    }
 }
 
 pub struct StdCopier;
@@ -609,6 +614,21 @@ fn write_journal(path: &Path, journal: &Journal) -> Result<(), MigrationError> {
         .and_then(|()| std::fs::rename(&temporary, path))
         .map_err(|e| fail(format!("writing {}", path.display()), e))?;
     sync_parent(path)
+}
+
+/// Flushes a folder's entries now (unused until publication goes through the
+/// copier).
+pub(super) fn sync_directory_now(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Whether the launch stops after the migration ran.
+pub(super) fn stops_the_launch(result: &Result<Outcome, MigrationError>) -> bool {
+    matches!(result, Err(error) if error.blocked)
 }
 
 /// Flushes a folder's entries (a rename, a new file). Windows has no

@@ -1121,10 +1121,11 @@ async fn paths_into_the_old_profile_are_rewritten_in_the_copy() {
         payload["attachments"][0]["path"],
         format!("{new}/agent-workspaces/s1/attachments/a.png")
     );
-    assert!(payload["content"]
-        .as_str()
-        .unwrap()
-        .contains(&format!("{new}/agent-workspaces/s1")));
+    // Free text that only mentions the old folder is the user's content (K4).
+    assert_eq!(
+        payload["content"],
+        format!("[Clovy attachment manifest v1] {old}/agent-workspaces/s1/attachments/a.png")
+    );
     let config: serde_json::Value =
         serde_json::from_str(&text(&copied, "SELECT run_config_json FROM agent_runs").await)
             .unwrap();
@@ -1164,12 +1165,23 @@ async fn paths_in_the_encrypted_activity_database_are_rewritten() {
     .await
     .unwrap();
     db.close().await;
+    let key = keys.current().unwrap();
+    {
+        use sqlx::connection::ConnectOptions;
+        let mut raw = sqlx_sqlite::SqliteConnectOptions::new()
+            .filename(plan.data.source.join(ACTIVITY_DB_FILE))
+            .pragma("key", format!("\"x'{key}'\""))
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query::query("INSERT INTO coding_agent_blocks(source, session_id, started_at, ended_at, cwd, transcript, state, updated_at) VALUES ('claude_code', 's1', '2026-10-01T09:00:00Z', '2026-10-01T09:05:00Z', ?, '[]', 'live', '2026-10-01T09:05:00Z')")
+            .bind(format!("{old}/agent-workspaces/s1"))
+            .execute(&mut raw)
+            .await
+            .unwrap();
+    }
     plan.credentials.push(activity_copy());
-    let store = MemoryStore::with(&[(
-        "old.activity-db",
-        "sqlcipher-key",
-        keys.current().unwrap().as_str(),
-    )]);
+    let store = MemoryStore::with(&[("old.activity-db", "sqlcipher-key", key.as_str())]);
 
     migrate(&plan, &store, &mut StdCopier).expect("migrate");
 
@@ -1181,10 +1193,27 @@ async fn paths_in_the_encrypted_activity_database_are_rewritten() {
         .await
         .unwrap();
     let frames = copied.frames_after(0, 10).await.unwrap();
+    // Captured screen text is content: it stays as it was (K4).
     assert_eq!(
         frames[0].window_title.as_deref(),
-        Some(format!("{new}/agent-workspaces/s1").as_str())
+        Some(format!("{old}/agent-workspaces/s1").as_str())
     );
+    copied.close().await;
+    use sqlx::connection::ConnectOptions;
+    use sqlx::row::Row;
+    let new_key = store.value("new.activity-db", "sqlcipher-key").unwrap();
+    let mut raw = sqlx_sqlite::SqliteConnectOptions::new()
+        .filename(plan.data.target.join(ACTIVITY_DB_FILE))
+        .pragma("key", format!("\"x'{new_key}'\""))
+        .connect()
+        .await
+        .unwrap();
+    let cwd: String = sqlx::query::query("SELECT cwd FROM coding_agent_blocks")
+        .fetch_one(&mut raw)
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(cwd, format!("{new}/agent-workspaces/s1"));
 }
 
 #[tokio::test]
@@ -1397,4 +1426,163 @@ fn a_failed_process_listing_is_not_an_absent_app() {
         guard::parse_image_of(true, "\"clovy.exe\",\"4242\",\"Console\"", 4242).unwrap(),
         Some("clovy.exe".to_string())
     );
+}
+
+// --- Third review (K1 to K5) -------------------------------------------------
+
+/// Publishes for real, then fails to flush the folder that names the first
+/// published target.
+struct FailingFlush {
+    renames: usize,
+}
+
+impl FileCopier for FailingFlush {
+    fn copy_file(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::copy(from, to).map(|_| ())
+    }
+
+    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.renames += 1;
+        std::fs::rename(from, to)
+    }
+
+    fn sync_directory(&mut self, path: &Path) -> std::io::Result<()> {
+        if self.renames == 1 {
+            return Err(std::io::Error::other("flush failed"));
+        }
+        super::sync_directory_now(path)
+    }
+}
+
+#[test]
+fn a_failed_flush_after_publishing_rolls_the_published_folder_back() {
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = plan_with_webview(base.path());
+    plan.credentials.push(activity_copy());
+    let store = MemoryStore::with(&[("old.activity-db", "sqlcipher-key", "k")]);
+
+    let error = migrate(&plan, &store, &mut FailingFlush { renames: 0 })
+        .expect_err("the flush after the first publication fails");
+
+    assert!(error.to_string().contains("flush failed"), "{error}");
+    assert!(is_empty_or_absent(&base.path().join("new-webkit")));
+    assert!(is_empty_or_absent(&plan.data.target));
+    assert_eq!(store.value("new.activity-db", "sqlcipher-key"), None);
+    assert!(!journal_for(&plan).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_files_are_copied_and_stay_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    let object = plan
+        .data
+        .source
+        .join("agent-workspaces/s1/repo/.git/objects/ab/cdef");
+    write(&object, b"git object");
+    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("a read-only file copies");
+
+    let copied = plan
+        .data
+        .target
+        .join("agent-workspaces/s1/repo/.git/objects/ab/cdef");
+    assert_eq!(std::fs::read(&copied).unwrap(), b"git object");
+    assert_eq!(
+        std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+}
+
+#[tokio::test]
+async fn only_known_path_fields_are_rewritten() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    let old = plan.data.source.to_string_lossy().into_owned();
+    let new = plan.data.target.to_string_lossy().into_owned();
+    std::fs::create_dir_all(&plan.data.source).unwrap();
+    let pool = sqlx_sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx_sqlite::SqliteConnectOptions::new()
+                .filename(plan.data.source.join("notes.sqlite3"))
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    crate::db::migrations::run_migrations(&pool).await.unwrap();
+    let mut notes = pool.acquire().await.unwrap();
+    let t = "2026-10-01T09:00:00Z";
+    let note_text = format!("Ran: cd {old}/agent-workspaces/s1 && ls");
+    exec(
+        &mut notes,
+        "INSERT INTO notes(id, edited_content, created_at, updated_at) VALUES ('n1', ?, ?, ?)",
+        &[&note_text, t, t],
+    )
+    .await;
+    let sibling = format!("{old} (backup)/project");
+    exec(
+        &mut notes,
+        "INSERT INTO agent_sessions(id, workspace_path, created_at, updated_at) VALUES ('s1', ?, ?, ?), ('s2', ?, ?, ?)",
+        &[&format!("{old}/agent-workspaces/s1"), t, t, &sibling, t, t],
+    )
+    .await;
+    drop(notes);
+    pool.close().await;
+    // A free-text file inside the profile that mentions the old folder.
+    let memo = format!("The workspace lived in {old}/agent-workspaces/s1.");
+    write(
+        &plan.data.source.join("agent-workspaces/s1/notes.md"),
+        memo.as_bytes(),
+    );
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    let copied = plan.data.target.join("notes.sqlite3");
+    assert_eq!(
+        text(&copied, "SELECT edited_content FROM notes").await,
+        note_text
+    );
+    assert_eq!(
+        text(
+            &copied,
+            "SELECT workspace_path FROM agent_sessions WHERE id = 's1'"
+        )
+        .await,
+        format!("{new}/agent-workspaces/s1")
+    );
+    assert_eq!(
+        text(
+            &copied,
+            "SELECT workspace_path FROM agent_sessions WHERE id = 's2'"
+        )
+        .await,
+        sibling,
+        "a sibling that only starts like the old folder stays"
+    );
+    assert_eq!(
+        std::fs::read_to_string(plan.data.target.join("agent-workspaces/s1/notes.md")).unwrap(),
+        memo
+    );
+}
+
+#[test]
+fn every_failed_migration_stops_the_launch() {
+    let ordinary = MigrationError {
+        message: "credential denied".into(),
+        blocked: false,
+    };
+    assert!(stops_the_launch(&Err(ordinary)));
+    assert!(stops_the_launch(&Err(MigrationError {
+        message: "old app running".into(),
+        blocked: true,
+    })));
+    assert!(!stops_the_launch(&Ok(Outcome::Skipped(
+        Decision::TargetInUse
+    ))));
+    assert!(!stops_the_launch(&Ok(Outcome::Resumed)));
 }
