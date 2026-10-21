@@ -25,14 +25,12 @@ the earlier bundle rename; don't reintroduce), June as the current product
 name.
 
 **Clovy API**:
-The confidential backend service that holds the App API key and the upstream
-AI provider keys, runs `authorize`→`charge` against OS Accounts on behalf of
-the Clovy app, and proxies the metered AI calls (transcription, generation,
-agent chat, web). Lives in the same repo as Clovy under its own Cargo
-workspace; ships as a separate container image to GHCR and runs in a TEE.
-Cargo crates use the `clovy-*` prefix and the binary is `clovy-api`; deployment
-continues publishing June-era image and service aliases for released clients
-under ADR-0055.
+The local backend service that holds the upstream AI provider keys and
+proxies the AI calls (transcription, generation, agent chat, web) for the Clovy
+app. It runs only in local mode: one local bearer token, no charges, bound to
+`127.0.0.1` by default. Lives in the same repo as Clovy under its own Cargo
+workspace; Cargo crates use the `clovy-*` prefix and the binary is
+`clovy-api`.
 _Avoid_: backend, proxy, AI proxy (use **Clovy API**).
 
 **OS Accounts**:
