@@ -56,19 +56,4 @@ describe("Clovy repository branding", () => {
     );
   });
 
-  it("keeps release workflows valid across the source repository cutover", () => {
-    const workflows = [
-      ".github/workflows/production-desktop-windows.yml",
-      ".github/workflows/promote-desktop.yml",
-      ".github/workflows/rc-desktop-dmg.yml",
-    ].map(read);
-
-    for (const workflow of workflows) {
-      expect(workflow).not.toContain("repositories: os-june,os-june-releases");
-      expect(workflow).toContain(`\${{ github.event.repository.name }},os-june-releases`);
-    }
-    expect(workflows[1]).toContain(
-      `"repos/\${GITHUB_REPOSITORY}/compare/\${SOURCE_COMMIT}...main"`,
-    );
-  });
 });

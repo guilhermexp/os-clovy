@@ -64,7 +64,7 @@ jobs:
       needs.changes.outputs.frontend == 'true' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'run-frontend-ci'))
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -96,7 +96,7 @@ jobs:
     name: Biome check
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -124,7 +124,7 @@ jobs:
   # open to "changed" so the suite can never be skipped by accident.
   changes:
     name: Changed paths
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.diff.outputs.frontend }}
       rust: ${{ steps.diff.outputs.rust }}
@@ -182,7 +182,7 @@ jobs:
     name: Tauri Rust format
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -198,7 +198,7 @@ jobs:
     name: Companion crates format, clippy, and tests
     needs: changes
     if: needs.changes.outputs.companion == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -246,7 +246,7 @@ jobs:
       needs.changes.outputs.rust == 'true' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'run-macos-ci'))
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -284,7 +284,7 @@ jobs:
     name: Tauri Windows build
     needs: changes
     if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.desktop_bundle == 'true'
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
