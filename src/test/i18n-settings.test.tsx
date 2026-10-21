@@ -37,7 +37,6 @@ function renderSettings(activeTab: SettingsTab) {
       checkingSourceReadiness={false}
       onSourceModeChange={() => {}}
       onEnableSystemAudio={() => {}}
-      onCheckForUpdates={() => {}}
       activeTab={activeTab}
       onTabChange={() => {}}
     />,
@@ -68,21 +67,16 @@ describe("settings in English (default)", () => {
   it("keeps the English copy", () => {
     renderSettings("about");
     expect(screen.getByRole("heading", { name: "About" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Check for updates" })).toBeInTheDocument();
   });
 });
 
 describe("settings in Portuguese (Brazil)", () => {
   beforeEach(() => applyInterfaceLocale("pt-BR"));
 
-  it("translates the About panel and the release channel control", () => {
+  it("translates the About panel", () => {
     renderSettings("about");
     expect(screen.getByRole("heading", { name: "Sobre" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Canal de lançamento" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Buscar atualizações" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Verificar servidor" })).toBeInTheDocument();
-    expect(screen.getByText("Estável")).toBeInTheDocument();
-    expect(screen.getByText("Versão candidata")).toBeInTheDocument();
   });
 
   it("translates the Models panel headings and model picker labels", () => {

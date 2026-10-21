@@ -55,9 +55,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     handleNewAgentSessionInProject,
     handleOpenSessionProject,
     handlePauseRecording,
-    handleReconcileToStable,
     handleRecovery,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
@@ -93,11 +91,9 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     openTab,
     originAllNotes,
     originFolder,
-    readyUpdate,
     recordNoticesConsentPinned,
     recordingNoteId,
     rememberHomeSession,
-    runUpdateCheck,
     selectedNote,
     selectedNoteId,
     selectedNoteLiveTranscript,
@@ -158,10 +154,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       activeTab={settingsTab}
       onTabChange={changeSettingsTab}
       onDetailPinnedChange={setSettingsDetailPinned}
-      onCheckForUpdates={() => runUpdateCheck("manual")}
-      updateReadyToRelaunch={readyUpdate != null}
-      onRelaunch={handleRelaunchUpdate}
-      onReconcileToStable={handleReconcileToStable}
       onStartBundleChat={handleStartBundleChat}
     />
   ) : activeView === "dictation" ? (

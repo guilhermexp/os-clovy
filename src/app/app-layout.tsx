@@ -19,7 +19,6 @@ import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { NoteListItemDto } from "../lib/tauri";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { handleSidebarResizeStart } from "./sidebar-resize";
-import { UpdateHub } from "./app-effects/update-ui";
 import { SidebarToggleGlyph, handleTitlebarPointerDown } from "./app-helpers";
 import {
   SIDEBAR_COLLAPSE_WIDTH,
@@ -40,7 +39,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     agentSessionsListRef,
     captureActive,
     changeSettingsTab,
-    checkingUpdate,
     closeOtherTabs,
     closeTab,
     completedSessions,
@@ -55,7 +53,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     handleOpenNoteChatInAgent,
     handleOpenRecordingNote,
     handlePauseRecordingAfterInactivityPrompt,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
@@ -78,12 +75,9 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     pendingSessionProjectRef,
     pillIsDemo,
     pillStatus,
-    preparingUpdate,
-    readyUpdate,
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    relaunchingUpdate,
     selectedNote,
     sessionFolders,
     setAccessibilityBannerDismissed,
@@ -103,8 +97,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     setSidebarResizing,
     setSidebarTransition,
     setSidebarWidth,
-    setUpdateProgress,
-    setUpdateStatus,
     settingsDetailScrollerActive,
     settingsReturnView,
     settingsTab,
@@ -117,11 +109,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     state,
     tabItems,
     takeNewTabIntent,
-    updateProgress,
-    updateProgressHiddenRef,
-    updateStatus,
-    updateStatusDisplay,
-    updateStatusLeaving,
     workspaceContent,
   } = dependencies;
   const noteChatVisible = activeView === "meetings" && selectedNote !== undefined && noteChatOpen;
@@ -235,26 +222,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         recordingTitle={recordingNoteTitle}
         onOpenRecording={() => (pillIsDemo ? undefined : void handleOpenRecordingNote())}
         collapsed={sidebarCollapsed}
-        footerAccessory={
-          <>
-            <UpdateHub
-              readyUpdate={readyUpdate}
-              status={updateStatus}
-              failed={updateStatusDisplay.failed}
-              statusLeaving={updateStatusLeaving}
-              checking={checkingUpdate}
-              preparing={preparingUpdate}
-              relaunching={relaunchingUpdate}
-              progress={updateProgress}
-              onDismissStatus={() => {
-                if (preparingUpdate) updateProgressHiddenRef.current = true;
-                setUpdateStatus(null);
-                if (!preparingUpdate) setUpdateProgress(null);
-              }}
-              onRelaunch={handleRelaunchUpdate}
-            />
-          </>
-        }
       />
       <div
         className="sidebar-resize-handle"

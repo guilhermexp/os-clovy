@@ -49,18 +49,6 @@ export default defineMessages({
     "settings.page.navAria": "Settings sections",
     "settings.general.blurb": "Your account and everyday Clovy preferences.",
 
-    "settings.releaseChannel.stable": "Stable",
-    "settings.releaseChannel.rc": "Release candidate",
-    "settings.releaseChannel.title": "Release channel",
-    "settings.releaseChannel.description":
-      "Stable is recommended. Release candidate gets early builds for testing.",
-    "settings.releaseChannel.switchAria": "Switch to stable now",
-    "settings.releaseChannel.switchEyebrow": "Switch to stable now?",
-    "settings.releaseChannel.switchBody":
-      "Installs {version}, replacing your release candidate build. You'll get {base} when it reaches stable.",
-    "settings.releaseChannel.notNow": "Not now",
-    "settings.releaseChannel.switch": "Switch to stable",
-
     "settings.autoPreference.cost": "Economy",
     "settings.autoPreference.balanced": "Balanced",
     "settings.autoPreference.quality": "Quality",
@@ -98,11 +86,7 @@ export default defineMessages({
     "settings.helper.restarting": "Dictation stopped and is restarting.",
     "settings.helper.failed": "Settings helper failed.",
     "settings.helper.unavailableAria": "Dictation unavailable",
-    "settings.helper.relaunchEyebrow": "Relaunch to finish updating",
     "settings.helper.pausedEyebrow": "Dictation paused",
-    "settings.helper.pausedUntilRelaunch":
-      "Dictation is paused until you relaunch to finish updating.",
-    "settings.helper.relaunch": "Relaunch Clovy",
 
     "settings.dictation.blurb": "Choose the language, microphone, and behavior for dictation.",
     "settings.dictation.languageDescription":
@@ -226,9 +210,6 @@ export default defineMessages({
     "settings.about.blurb": "Version, release channel, and other details about this copy of Clovy.",
     "settings.about.releaseVersion": "Release version",
     "settings.about.commit": "Commit",
-    "settings.about.updates": "Updates",
-    "settings.about.updatesDescription": "Check whether a newer version of Clovy is available.",
-    "settings.about.checkForUpdates": "Check for updates",
     "settings.about.verification": "Server verification",
     "settings.about.verificationDescription":
       "Clovy's server runs in a confidential VM. See exactly what code is running and how to verify it yourself.",
@@ -390,18 +371,6 @@ export default defineMessages({
     "settings.page.navAria": "Seções das configurações",
     "settings.general.blurb": "Sua conta e as preferências do dia a dia do Clovy.",
 
-    "settings.releaseChannel.stable": "Estável",
-    "settings.releaseChannel.rc": "Versão candidata",
-    "settings.releaseChannel.title": "Canal de lançamento",
-    "settings.releaseChannel.description":
-      "O canal estável é o recomendado. A versão candidata recebe builds antecipadas para testes.",
-    "settings.releaseChannel.switchAria": "Mudar para a versão estável agora",
-    "settings.releaseChannel.switchEyebrow": "Mudar para a versão estável agora?",
-    "settings.releaseChannel.switchBody":
-      "Instala a {version}, substituindo sua build da versão candidata. Você vai receber a {base} quando ela chegar ao canal estável.",
-    "settings.releaseChannel.notNow": "Agora não",
-    "settings.releaseChannel.switch": "Mudar para a estável",
-
     "settings.autoPreference.cost": "Economia",
     "settings.autoPreference.balanced": "Equilibrado",
     "settings.autoPreference.quality": "Qualidade",
@@ -441,11 +410,7 @@ export default defineMessages({
     "settings.helper.restarting": "O ditado parou e está reiniciando.",
     "settings.helper.failed": "O auxiliar das configurações falhou.",
     "settings.helper.unavailableAria": "Ditado indisponível",
-    "settings.helper.relaunchEyebrow": "Reinicie para concluir a atualização",
     "settings.helper.pausedEyebrow": "Ditado pausado",
-    "settings.helper.pausedUntilRelaunch":
-      "O ditado fica pausado até você reiniciar o app para concluir a atualização.",
-    "settings.helper.relaunch": "Reiniciar o Clovy",
 
     "settings.dictation.blurb": "Escolha o idioma, o microfone e o comportamento do ditado.",
     "settings.dictation.languageDescription":
@@ -572,10 +537,6 @@ export default defineMessages({
     "settings.about.blurb": "Versão, canal de lançamento e outros detalhes desta cópia do Clovy.",
     "settings.about.releaseVersion": "Versão",
     "settings.about.commit": "Commit",
-    "settings.about.updates": "Atualizações",
-    "settings.about.updatesDescription":
-      "Verifique se há uma versão mais recente do Clovy disponível.",
-    "settings.about.checkForUpdates": "Buscar atualizações",
     "settings.about.verification": "Verificação do servidor",
     "settings.about.verificationDescription":
       "O servidor do Clovy roda em uma VM confidencial. Veja exatamente qual código está rodando e como verificar por conta própria.",

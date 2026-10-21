@@ -19,14 +19,7 @@ import { getAgentHudEnabled } from "../lib/agent-hud-settings";
 import type { NoteDto } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { RecordingSourceMode, RecordingSourceReadinessDto } from "../lib/tauri";
-import type { ClovyUpdate } from "../lib/updater";
 import { createInitialState, notesReducer } from "./state/app-state";
-import {
-  INITIAL_UPDATE_STATUS_DISPLAY,
-  updateStatusDisplayReducer,
-  type UpdateInstallProgress,
-  type UpdatePromptPayload,
-} from "./update-decision";
 import { SIDEBAR_DEFAULT_WIDTH, type RecordingInactivityPrompt } from "./app-shell";
 
 export function useAppState() {
@@ -187,22 +180,6 @@ export function useAppState() {
   const [accessibilityBannerDismissed, setAccessibilityBannerDismissed] = useState(false);
   const [systemAudioRefreshRequest, setSystemAudioRefreshRequest] = useState(0);
   const [microphoneStatus, setMicrophoneStatus] = useState<string>();
-  const [readyUpdate, setReadyUpdate] = useState<UpdatePromptPayload<ClovyUpdate> | null>(null);
-  const [updateStatusDisplay, dispatchUpdateStatusDisplay] = useReducer(
-    updateStatusDisplayReducer,
-    INITIAL_UPDATE_STATUS_DISPLAY,
-  );
-  const updateStatus = updateStatusDisplay.status;
-  const updateStatusLeaving = updateStatusDisplay.leaving;
-  const setUpdateStatus = useCallback((status: string | null, failed = false) => {
-    dispatchUpdateStatusDisplay({ type: "show", status, failed });
-  }, []);
-  const [preparingUpdate, setPreparingUpdate] = useState(false);
-  // Render-only flag for a visible manual check. checkingUpdateRef separately
-  // guards every check mode, including silent launch and periodic checks.
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [relaunchingUpdate, setRelaunchingUpdate] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<UpdateInstallProgress | null>(null);
   // `ready` only says this device is capable of system capture; the platform
   // grant/status is established by a microphone-plus-system probe.
   const systemSourceReadiness = sourceReadiness?.sources.find(
@@ -353,21 +330,6 @@ export function useAppState() {
     setSystemAudioRefreshRequest,
     microphoneStatus,
     setMicrophoneStatus,
-    readyUpdate,
-    setReadyUpdate,
-    updateStatusDisplay,
-    dispatchUpdateStatusDisplay,
-    updateStatus,
-    updateStatusLeaving,
-    setUpdateStatus,
-    preparingUpdate,
-    setPreparingUpdate,
-    checkingUpdate,
-    setCheckingUpdate,
-    relaunchingUpdate,
-    setRelaunchingUpdate,
-    updateProgress,
-    setUpdateProgress,
     systemGranted,
     captureActive,
     sourceMode,

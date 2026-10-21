@@ -11,19 +11,10 @@ import { t } from "../i18n";
 import type { FolderDto, NoteDto, NoteListItemDto } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import { navEquals, type TabNav } from "./tabs/tabs";
-// "Clovy is up to date." is a confirmation, not a call to action: linger, then
-// hide on its own. Failures persist until dismissed; busy statuses advance
-// when their operation resolves and may also be dismissed while in flight.
-export const UP_TO_DATE_DISMISS_MS = 4000;
-// Soft-exit window: the update-popover-out animation runs var(--t-med) (160ms);
-// the status clears just after it finishes.
-export const UP_TO_DATE_EXIT_MS = 220;
-
 export const SIDEBAR_DEFAULT_WIDTH = 240;
 export const SIDEBAR_MIN_WIDTH = 188;
 export const SIDEBAR_MAX_WIDTH = 320;
 export const SIDEBAR_COLLAPSE_WIDTH = 160;
-export const CHECK_FOR_UPDATES_EVENT = "clovy://check-for-updates";
 export const AGENT_MENU_BAR_SESSION_FETCH_LIMIT = 100;
 export const AGENT_MENU_BAR_SESSION_LIMIT = 6;
 export const AGENT_SESSION_STARTUP_RETRY_DELAYS_MS = [

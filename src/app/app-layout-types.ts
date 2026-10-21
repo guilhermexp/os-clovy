@@ -7,12 +7,6 @@ import type { TabNav } from "./tabs/tabs";
 import type { FolderDto, NoteDto, RecordingStatusDto } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { NoteChat } from "../components/note-chat/useNoteChat";
-import type { ClovyUpdate } from "../lib/updater";
-import type {
-  UpdateInstallProgress,
-  UpdatePromptPayload,
-  UpdateStatusDisplayState,
-} from "./update-decision";
 import type { RecordingInactivityPrompt } from "./app-shell";
 import type { NotesAction, NotesState } from "./state/app-state";
 import type * as React from "react";
@@ -27,7 +21,6 @@ export type RenderAppLayoutDependencies = {
   agentSessionsListRef: React.MutableRefObject<AgentSessionsListHandle | null>;
   captureActive: boolean;
   changeSettingsTab: (tab: SettingsTab) => void;
-  checkingUpdate: boolean;
   closeOtherTabs: (id: string) => void;
   closeTab: (id: string) => void;
   completedSessions: Record<string, string>;
@@ -42,7 +35,6 @@ export type RenderAppLayoutDependencies = {
   handleOpenNoteChatInAgent: (noteRef: { id: string; title: string }, sessionId?: string) => void;
   handleOpenRecordingNote: () => Promise<void>;
   handlePauseRecordingAfterInactivityPrompt: () => void;
-  handleRelaunchUpdate: () => void;
   handleRemoveNoteFromFolder: (
     noteId: string,
     folderId: string,
@@ -85,12 +77,9 @@ export type RenderAppLayoutDependencies = {
   } | null>;
   pillIsDemo: boolean;
   pillStatus: RecordingStatusDto | null;
-  preparingUpdate: boolean;
-  readyUpdate: UpdatePromptPayload<ClovyUpdate> | null;
   recordingInactivityPrompt: RecordingInactivityPrompt | null;
   recordingInactivitySecondsRemaining: number;
   recordingNoteTitle: string;
-  relaunchingUpdate: boolean;
   selectedNote: NoteDto | undefined;
   sessionFolders: Record<string, string[]>;
   setAccessibilityBannerDismissed: React.Dispatch<React.SetStateAction<boolean>>;
@@ -115,8 +104,6 @@ export type RenderAppLayoutDependencies = {
   setSidebarResizing: React.Dispatch<React.SetStateAction<boolean>>;
   setSidebarTransition: React.Dispatch<React.SetStateAction<"none" | "smooth">>;
   setSidebarWidth: React.Dispatch<React.SetStateAction<number>>;
-  setUpdateProgress: React.Dispatch<React.SetStateAction<UpdateInstallProgress | null>>;
-  setUpdateStatus: (status: string | null, failed?: boolean) => void;
   settingsDetailScrollerActive: boolean;
   settingsReturnView: SidebarView;
   settingsTab: SettingsTab;
@@ -129,10 +116,5 @@ export type RenderAppLayoutDependencies = {
   state: NotesState;
   tabItems: TabItem[];
   takeNewTabIntent: () => boolean;
-  updateProgress: UpdateInstallProgress | null;
-  updateProgressHiddenRef: React.MutableRefObject<boolean>;
-  updateStatus: string | null;
-  updateStatusDisplay: UpdateStatusDisplayState;
-  updateStatusLeaving: boolean;
   workspaceContent: JSX.Element;
 };

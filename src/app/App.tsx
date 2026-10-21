@@ -99,13 +99,7 @@ import type { FolderDto } from "../lib/tauri";
 import type { RecordingSourceMode } from "../lib/tauri";
 import { retryPendingAutostartDefault } from "../lib/autostart";
 import { applyOnboardingReplayFlag, isOnboardingComplete } from "../lib/onboarding";
-import { reconcileToStable, relaunchClovy, type ClovyUpdate } from "../lib/updater";
 import { attachScrollThumbFade } from "../lib/scroll-thumb-fade";
-import {
-  startPeriodicClovyUpdateChecks,
-  UP_TO_DATE_STATUS,
-  type UpdatePromptPayload,
-} from "./update-decision";
 import {
   isAccessibilityBlocked,
   isCreateNoteShortcut,
@@ -117,11 +111,8 @@ import {
   ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS,
   AGENT_MENU_BAR_SESSION_LIMIT,
   AGENT_SESSION_STARTUP_RETRY_DELAYS_MS,
-  CHECK_FOR_UPDATES_EVENT,
   SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
   SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS,
-  UP_TO_DATE_DISMISS_MS,
-  UP_TO_DATE_EXIT_MS,
   noteHasDownloadableAudio,
   tabMeta,
 } from "./app-shell";
@@ -151,8 +142,6 @@ import { renderAppWorkspace } from "./app-workspace-view";
 import { renderAppLayout } from "./app-layout";
 
 import { createAppDomainActions } from "./app-domain-actions";
-
-import { useAppUpdateActions } from "./use-app-update-actions";
 
 import { createNoteActions } from "./note-actions";
 import { NoteSaveController } from "./note-save-controller";
@@ -269,21 +258,6 @@ export function App() {
     setSystemAudioRefreshRequest,
     microphoneStatus,
     setMicrophoneStatus,
-    readyUpdate,
-    setReadyUpdate,
-    updateStatusDisplay,
-    dispatchUpdateStatusDisplay,
-    updateStatus,
-    updateStatusLeaving,
-    setUpdateStatus,
-    preparingUpdate,
-    setPreparingUpdate,
-    checkingUpdate,
-    setCheckingUpdate,
-    relaunchingUpdate,
-    setRelaunchingUpdate,
-    updateProgress,
-    setUpdateProgress,
     systemGranted,
     captureActive,
     sourceMode,
@@ -389,15 +363,9 @@ export function App() {
     recordingStatusRef,
     setActiveView,
     setAgentSessions,
-    setCheckingUpdate,
     setCompletedSessions,
     setLiveTranscriptEvents,
-    setPreparingUpdate,
     setRecordingNote,
-    setRelaunchingUpdate,
-    setReadyUpdate,
-    setUpdateProgress,
-    setUpdateStatus,
   });
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
@@ -405,7 +373,7 @@ export function App() {
   });
   // The wizard handles personalization and permissions.
   const onboardingRequired = !onboardingDone;
-  // Onboarding holds bootstrap, update checks, and eager permission probes because the
+  // Onboarding holds bootstrap and eager permission probes because the
   // wizard owns the permission prompts while it is on screen.
   const appBlocked = onboardingRequired;
   meetingEndReadyRef.current = !appBlocked && bootstrapped;
@@ -774,108 +742,6 @@ export function App() {
   useEffect(() => {
     if (activeView !== "settings") setSettingsDetailPinned(false);
   }, [activeView]);
-
-  // Update state is read through refs so runUpdateCheck keeps a stable identity.
-  // Otherwise the launch effect and the manual-check listener below would tear
-  // down and re-fire every time a download or relaunch toggles state.
-  const preparingUpdateRef = useRef(false);
-  const checkingUpdateRef = useRef(false);
-  const readyUpdateRef = useRef<UpdatePromptPayload<ClovyUpdate> | null>(null);
-  const relaunchingUpdateRef = useRef(false);
-  const updateProgressHiddenRef = useRef(false);
-  useEffect(() => {
-    preparingUpdateRef.current = preparingUpdate;
-  }, [preparingUpdate]);
-  useEffect(() => {
-    readyUpdateRef.current = readyUpdate;
-  }, [readyUpdate]);
-  useEffect(() => {
-    relaunchingUpdateRef.current = relaunchingUpdate;
-  }, [relaunchingUpdate]);
-
-  const { runUpdateCheck } = useAppUpdateActions({
-    checkingUpdateRef,
-    preparingUpdateRef,
-    readyUpdateRef,
-    relaunchingUpdateRef,
-    setCheckingUpdate,
-    setPreparingUpdate,
-    setReadyUpdate,
-    setUpdateProgress,
-    setUpdateStatus,
-    updateProgressHiddenRef,
-  });
-
-  // Auto-dismiss ONLY the up-to-date confirmation: linger, play the soft exit,
-  // then clear. Any status change (a new check, a failure, a manual dismiss)
-  // or unmount runs the cleanup and cancels the pending hide. Other statuses
-  // never match, so this effect does not control their lifecycle.
-  useEffect(() => {
-    if (updateStatus !== UP_TO_DATE_STATUS) return;
-    const leaveTimer = window.setTimeout(() => {
-      dispatchUpdateStatusDisplay({ type: "beginUpToDateExit" });
-    }, UP_TO_DATE_DISMISS_MS);
-    const clearTimer = window.setTimeout(() => {
-      dispatchUpdateStatusDisplay({ type: "clearUpToDate" });
-    }, UP_TO_DATE_DISMISS_MS + UP_TO_DATE_EXIT_MS);
-    return () => {
-      window.clearTimeout(leaveTimer);
-      window.clearTimeout(clearTimer);
-    };
-  }, [updateStatus]);
-
-  // Confirmed in Settings after switching off the rc channel: re-check with
-  // reconcile=true (which re-stashes the Rust-side pending update, so a periodic
-  // check between the Settings confirm and this call can't leave a stale handle)
-  // then run the same download -> ready -> relaunch flow as any update.
-  const handleReconcileToStable = useCallback(() => {
-    runUpdateCheck("manual", reconcileToStable);
-  }, [runUpdateCheck]);
-
-  const handleRelaunchUpdate = useCallback(() => {
-    if (!readyUpdateRef.current || relaunchingUpdateRef.current) return;
-    relaunchingUpdateRef.current = true;
-    setRelaunchingUpdate(true);
-    setUpdateStatus(null);
-    void noteSaveController
-      .flushAll()
-      .then(relaunchClovy)
-      .catch((error) => {
-        relaunchingUpdateRef.current = false;
-        setRelaunchingUpdate(false);
-        setUpdateStatus(t("app.update.relaunchFailed", { message: messageFromError(error) }), true);
-      });
-  }, [noteSaveController, setUpdateStatus]);
-
-  // Launch check: silent by design — a "no update" result shows nothing so it
-  // never interrupts the user (PRD user story 7) — and fired at most once per
-  // session, so a later install toggle can't re-trigger it.
-  const launchCheckedRef = useRef(false);
-  useEffect(() => {
-    if (import.meta.env.DEV) return;
-    if (appBlocked || launchCheckedRef.current) return;
-    launchCheckedRef.current = true;
-    runUpdateCheck("launch");
-  }, [appBlocked, runUpdateCheck]);
-
-  useEffect(() => {
-    if (import.meta.env.DEV) return;
-    if (appBlocked) return;
-    return startPeriodicClovyUpdateChecks(runUpdateCheck);
-  }, [appBlocked, runUpdateCheck]);
-
-  useEffect(() => {
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-    void listen(CHECK_FOR_UPDATES_EVENT, () => runUpdateCheck("manual")).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      aborted = true;
-      unlisten?.();
-    };
-  }, [runUpdateCheck]);
 
   useEffect(() => {
     let aborted = false;
@@ -1947,9 +1813,7 @@ export function App() {
     handleNewAgentSessionInProject,
     handleOpenSessionProject,
     handlePauseRecording,
-    handleReconcileToStable,
     handleRecovery,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
@@ -1985,11 +1849,9 @@ export function App() {
     openTab,
     originAllNotes,
     originFolder,
-    readyUpdate,
     recordNoticesConsentPinned,
     recordingNoteId,
     rememberHomeSession,
-    runUpdateCheck,
     selectedNote,
     selectedNoteId,
     selectedNoteLiveTranscript,
@@ -2024,7 +1886,6 @@ export function App() {
     agentSessionsListRef,
     captureActive,
     changeSettingsTab,
-    checkingUpdate,
     closeOtherTabs,
     closeTab,
     completedSessions,
@@ -2039,7 +1900,6 @@ export function App() {
     handleOpenNoteChatInAgent,
     handleOpenRecordingNote,
     handlePauseRecordingAfterInactivityPrompt,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
@@ -2062,12 +1922,9 @@ export function App() {
     pendingSessionProjectRef,
     pillIsDemo,
     pillStatus,
-    preparingUpdate,
-    readyUpdate,
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    relaunchingUpdate,
     selectedNote,
     sessionFolders,
     setAccessibilityBannerDismissed,
@@ -2088,8 +1945,6 @@ export function App() {
     setSidebarResizing,
     setSidebarTransition,
     setSidebarWidth,
-    setUpdateProgress,
-    setUpdateStatus,
     settingsDetailScrollerActive,
     settingsReturnView,
     settingsTab,
@@ -2102,11 +1957,6 @@ export function App() {
     state,
     tabItems,
     takeNewTabIntent,
-    updateProgress,
-    updateProgressHiddenRef,
-    updateStatus,
-    updateStatusDisplay,
-    updateStatusLeaving,
     workspaceContent,
   });
   return (

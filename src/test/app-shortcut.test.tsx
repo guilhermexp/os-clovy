@@ -1,4 +1,3 @@
-import type * as UpdateDecision from "../app/update-decision";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -119,7 +118,6 @@ const mocks = vi.hoisted(() => ({
   providerModelSettings: vi.fn(),
   videoGenerate: vi.fn(),
   videoStatus: vi.fn(),
-  startPeriodicClovyUpdateChecks: vi.fn(),
   suggestAgentSessionTitle: vi.fn(),
   gatewayRequest: vi.fn(),
   gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
@@ -154,14 +152,6 @@ vi.mock("../lib/recording-sounds", () => ({
 vi.mock("../lib/agent-sounds", () => ({
   preloadAgentSounds: mocks.preloadAgentSounds,
 }));
-
-vi.mock("../app/update-decision", async () => {
-  const actual = await vi.importActual<typeof UpdateDecision>("../app/update-decision");
-  return {
-    ...actual,
-    startPeriodicClovyUpdateChecks: mocks.startPeriodicClovyUpdateChecks,
-  };
-});
 
 vi.mock("../lib/tauri", () => ({
   agentRuntimeBindings: {
@@ -463,7 +453,6 @@ describe("App shortcuts", () => {
         providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       },
     });
-    mocks.startPeriodicClovyUpdateChecks.mockReturnValue(vi.fn());
     mocks.suggestAgentSessionTitle.mockImplementation(async (prompt: string) => ({
       title: prompt,
     }));
@@ -514,20 +503,6 @@ describe("App shortcuts", () => {
       activeTab: patch.activeTab ?? first.activeTab,
       updatedAt: first.updatedAt,
     }));
-  });
-
-  it("starts background update checks after launch gates clear", async () => {
-    vi.stubEnv("DEV", false);
-
-    try {
-      render(<App />);
-
-      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-      await waitFor(() => expect(mocks.startPeriodicClovyUpdateChecks).toHaveBeenCalledOnce());
-      expect(mocks.startPeriodicClovyUpdateChecks.mock.calls[0]?.[0]).toEqual(expect.any(Function));
-    } finally {
-      vi.unstubAllEnvs();
-    }
   });
 
   it("shows the startup session list App loaded in the sidebar", async () => {

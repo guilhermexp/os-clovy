@@ -22,8 +22,6 @@ const macosLocalizedInfoPlist = readFileSync(
   resolve(process.cwd(), "src-tauri/resources/macos/en.lproj/InfoPlist.strings"),
   "utf8",
 );
-const stableUpdaterEndpoint =
-  "https://github.com/open-software-network/os-june-releases/releases/latest/download/latest.json";
 
 describe("development app identity", () => {
   it("keeps the visible name stable on a Codex issue branch", () => {
@@ -92,21 +90,14 @@ describe("production identity compatibility", () => {
     expect(tauriConfig.plugins["deep-link"].mobile).toEqual([
       { scheme: ["clovy"], appLink: false },
     ]);
-    expect(tauriConfig.plugins.updater).toEqual({
-      pubkey:
-        "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwMDUxRDBGNzYyRDU0MTgKUldRWVZDMTJEeDBGVUZWQ3VsVWxCdmhFbk9McWFVWjBGTEZZZHN0NFZRQjFZaFZRVzF4Sm9NdnkK",
-      endpoints: [stableUpdaterEndpoint],
-    });
     expect(macosConfig.productName).toBe("June");
     expect(windowsConfig.productName).toBe("June");
     for (const platformConfig of [macosConfig, windowsConfig]) {
       expect(platformConfig.identifier).toBeUndefined();
-      expect(platformConfig.plugins?.updater).toBeUndefined();
       expect(platformConfig.plugins?.["deep-link"]).toBeUndefined();
     }
 
     const sourceIdentities = {
-      "src-tauri/src/updates.rs": [`const STABLE_ENDPOINT: &str = "${stableUpdaterEndpoint}";`],
       "src-tauri/src/agent_runtime/secrets.rs": [
         'const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.agent-secrets";',
         'const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.dev.agent-secrets";',

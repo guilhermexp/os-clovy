@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { GlobalRecorderDemoApi } from "../lib/global-recorder-demo";
 import type { RecordNoticesDemoApi } from "../lib/record-notices-demo";
-import type { UpdateCardDemoApi } from "../lib/update-card-demo";
 import type { RecordingStatusDto } from "../lib/tauri";
 import { RECORD_NOTICES_DEMO_SESSION_ID } from "./processing-demo-ids";
 import type { UseAppDevDemosDependencies } from "./use-app-dev-demos-types";
@@ -13,15 +12,9 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
     recordingStatusRef,
     setActiveView,
     setAgentSessions,
-    setCheckingUpdate,
     setCompletedSessions,
     setLiveTranscriptEvents,
-    setPreparingUpdate,
     setRecordingNote,
-    setRelaunchingUpdate,
-    setReadyUpdate,
-    setUpdateProgress,
-    setUpdateStatus,
   } = dependencies;
 
   const [demoRecorderStatus, setDemoRecorderStatus] = useState<RecordingStatusDto | null>(null);
@@ -143,30 +136,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
       recordNoticesDemoRef.current = null;
     };
   }, [setRecordingNote]);
-  // Dev console driver for the sidebar update cards (window.__updateCard).
-  // Pushes synthetic values into the real update state so each card's styling
-  // can be parked and inspected without a live update.
-  const updateCardDemoRef = useRef<UpdateCardDemoApi | null>(null);
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    void import("../lib/update-card-demo").then(({ registerUpdateCardDemo }) => {
-      if (cancelled) return;
-      updateCardDemoRef.current = registerUpdateCardDemo({
-        setReadyUpdate,
-        setStatus: setUpdateStatus,
-        setRelaunching: setRelaunchingUpdate,
-        setPreparing: setPreparingUpdate,
-        setChecking: setCheckingUpdate,
-        setProgress: setUpdateProgress,
-      });
-    });
-    return () => {
-      cancelled = true;
-      updateCardDemoRef.current?.dispose();
-      updateCardDemoRef.current = null;
-    };
-  }, [setUpdateStatus]);
   // Dev console driver (window.__toastDemo) that fires each toast variant so
   // the toast styling can be inspected without walking a real flow.
   useEffect(() => {

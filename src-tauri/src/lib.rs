@@ -51,7 +51,6 @@ pub mod routines;
 mod shutdown;
 mod system_browser;
 pub mod theme_icon;
-pub mod updates;
 pub mod video_download_url;
 
 use serde::Deserialize;
@@ -60,8 +59,6 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Listener, Manager};
 
-const CHECK_FOR_UPDATES_MENU_ID: &str = "check_for_updates";
-const CHECK_FOR_UPDATES_EVENT: &str = "clovy://check-for-updates";
 const CLOSE_TAB_MENU_ID: &str = "close_tab";
 const CLOSE_TAB_EVENT: &str = "clovy://close-tab";
 const CLOSE_WINDOW_MENU_ID: &str = "close_window_main";
@@ -145,13 +142,11 @@ pub fn run() {
     builder
         // deep-link registers immediately after single-instance to keep the
         // single-instance -> deep-link handoff (documented above) adjacent and
-        // obvious; process/updater are order-independent so they follow.
+        // obvious.
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         // Launch-at-login. LaunchAgent (not AppleScript) so the entry
         // survives macOS upgrades and shows up under System Settings ->
         // General -> Login Items. Enabling/disabling stays a user action in
@@ -166,10 +161,6 @@ pub fn run() {
                 .build(),
         )
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == CHECK_FOR_UPDATES_MENU_ID {
-                let _ = app.emit(CHECK_FOR_UPDATES_EVENT, ());
-                return;
-            }
             if event.id().as_ref() == CLOSE_TAB_MENU_ID {
                 emit_close_tab_if_main_window_focused(app);
                 return;
@@ -413,11 +404,6 @@ pub fn run() {
             computer_use::computer_use_end_run,
             computer_use::computer_use_approvals_pending,
             computer_use::computer_use_approval_respond,
-            updates::get_release_channel,
-            updates::set_release_channel,
-            updates::fetch_update,
-            updates::install_update,
-            updates::relaunch_for_update,
             activity::activity_status,
             activity::activity_save_settings,
             activity::activity_set_paused,
@@ -469,7 +455,6 @@ pub fn run() {
             providers::setup(app);
             setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
-            updates::setup(app);
             dictation::setup(app);
             agent_hud::setup(app);
             notifications::setup(app);
@@ -636,13 +621,6 @@ fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
         true,
         &[
             &PredefinedMenuItem::about(handle, text.predefined_about(), Some(about_metadata))?,
-            &MenuItem::with_id(
-                handle,
-                CHECK_FOR_UPDATES_MENU_ID,
-                text.check_for_updates(),
-                true,
-                None::<&str>,
-            )?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(
                 handle,

@@ -8,7 +8,7 @@ import { assignSessionToFolder } from "../lib/tauri";
 import { AGENT_SESSION_STATUS_EVENT, type AgentSessionStatusDetail } from "../lib/agent-events";
 import { getCurrentDataPartitionName } from "../lib/data-partition";
 import { invalidateAgentSessionDraft } from "../lib/agent-session-drafts";
-import { updateMenuBarSessionStatus } from "./app-effects/update-ui";
+import { updateMenuBarSessionStatus } from "./app-effects/menu-bar-session-status";
 import type { UseAgentSessionSyncDependencies } from "./use-agent-session-sync-types";
 
 /** A copy of `next` for state, or the current set when the members match. */

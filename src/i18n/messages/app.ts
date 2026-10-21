@@ -36,21 +36,6 @@ export default defineMessages({
       other: "Clovy will pause this recording in {count} seconds if you do not answer.",
     },
 
-    // Updates
-    "app.update.upToDate": "Clovy is up to date.",
-    "app.update.unknownError": "An unknown error occurred.",
-    "app.update.checking": "Checking for updates...",
-    "app.update.downloading": "Downloading update...",
-    "app.update.preparing": "Preparing update...",
-    "app.update.failed": "Update failed: {message}",
-    "app.update.checkFailed": "Update check failed: {message}",
-    "app.update.relaunchFailed": "Relaunch failed: {message}",
-    "app.update.relaunchAria": "Relaunch to update to Clovy {version}",
-    "app.update.relaunching": "Relaunching...",
-    "app.update.relaunch": "Relaunch to update",
-    "app.update.hideProgress": "Hide update progress",
-    "app.update.dismissStatus": "Dismiss update status",
-
     // Shell chrome
     "app.sidebar.show": "Show sidebar",
     "app.sidebar.hide": "Hide sidebar",
@@ -104,20 +89,6 @@ export default defineMessages({
       one: "O Clovy vai pausar esta gravação em {count} segundo se você não responder.",
       other: "O Clovy vai pausar esta gravação em {count} segundos se você não responder.",
     },
-
-    "app.update.upToDate": "O Clovy está atualizado.",
-    "app.update.unknownError": "Ocorreu um erro desconhecido.",
-    "app.update.checking": "Procurando atualizações...",
-    "app.update.downloading": "Baixando atualização...",
-    "app.update.preparing": "Preparando atualização...",
-    "app.update.failed": "Falha na atualização: {message}",
-    "app.update.checkFailed": "Falha ao procurar atualizações: {message}",
-    "app.update.relaunchFailed": "Falha ao reiniciar: {message}",
-    "app.update.relaunchAria": "Reiniciar para atualizar para o Clovy {version}",
-    "app.update.relaunching": "Reiniciando...",
-    "app.update.relaunch": "Reiniciar para atualizar",
-    "app.update.hideProgress": "Ocultar progresso da atualização",
-    "app.update.dismissStatus": "Dispensar status da atualização",
 
     "app.sidebar.show": "Mostrar barra lateral",
     "app.sidebar.hide": "Ocultar barra lateral",

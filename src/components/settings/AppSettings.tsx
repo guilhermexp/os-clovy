@@ -82,12 +82,6 @@ import {
   type FontScaleId,
 } from "../../lib/font-scale";
 import {
-  getReleaseChannel,
-  reconcileToStable,
-  setReleaseChannel,
-  type ReleaseChannel,
-} from "../../lib/updater";
-import {
   fallbackDictationCapabilities,
   isMacLikePlatform,
   isSystemAudioSupportedPlatform,
@@ -209,16 +203,6 @@ function dateFormatOptions(t: TFunction) {
     { value: "month-first", label: t("settings.dateFormat.monthFirst") },
     { value: "day-first", label: t("settings.dateFormat.dayFirst") },
   ] satisfies { value: DateFormatPreference; label: string }[];
-}
-
-function releaseChannelOptions(t: TFunction): readonly {
-  value: ReleaseChannel;
-  label: ReactNode;
-}[] {
-  return [
-    { value: "stable", label: t("settings.releaseChannel.stable") },
-    { value: "rc", label: t("settings.releaseChannel.rc") },
-  ];
 }
 
 function autoPreferenceOptions(t: TFunction): readonly {
@@ -389,17 +373,6 @@ type AppSettingsProps = {
   // data-note-detail-scroller on .main-panel-body and the detail owns its own
   // scroll region under a pinned breadcrumb bar.
   onDetailPinnedChange?: (pinned: boolean) => void;
-  // Runs the app updater's manual check flow.
-  onCheckForUpdates?: () => void;
-  // True when an update is downloaded and waiting for a relaunch. The bundle
-  // swap is what can kill the dictation helper, so the "dictation paused"
-  // notice points the user at the relaunch that finishes the update.
-  updateReadyToRelaunch?: boolean;
-  // Relaunches Clovy to finish a staged update (also restores the helper).
-  onRelaunch?: () => void;
-  // Confirmed leave-rc reconcile: downloads and installs the current stable,
-  // even if it is older than the running prerelease build (Q4-Q8).
-  onReconcileToStable?: () => void;
   // Opens a new agent session that runs a skill bundle's slash command.
   onStartBundleChat?: (prompt: string) => void;
   activitySupported?: boolean;
@@ -422,10 +395,6 @@ export function AppSettings({
   activeTab: controlledTab,
   onTabChange,
   onDetailPinnedChange,
-  onCheckForUpdates,
-  updateReadyToRelaunch,
-  onRelaunch,
-  onReconcileToStable,
   onStartBundleChat,
   activitySupported: activitySupportedProp,
 }: AppSettingsProps) {
@@ -467,7 +436,6 @@ export function AppSettings({
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
   const fontScale = useFontScaleId();
   const [dateFormat, setDateFormat] = useState<DateFormatPreference>(() => getStoredDateFormat());
-  const [releaseChannel, setReleaseChannelValue] = useState<ReleaseChannel>("stable");
   const experimentalFlags = useExperimentalFlags();
   const experimentalUnlockClicksRef = useRef({
     ...INITIAL_EXPERIMENTAL_UNLOCK_CLICK_STATE,
@@ -475,9 +443,6 @@ export function AppSettings({
   const experimentalUnlockingRef = useRef(false);
   const [experimentalOperation, setExperimentalOperation] = useState<"flags" | "unpack">();
   const [experimentalError, setExperimentalError] = useState<string>();
-  // Set only when a leave-rc switch turns up an installable stable, so the
-  // bespoke in-context confirm below the toggle can name the exact version.
-  const [reconcileVersion, setReconcileVersion] = useState<string>();
   const [pickerMode, setPickerMode] = useState<ProviderModelMode>();
   const [modelPickerFlyout, setModelPickerFlyout] = useState<ModelPickerFlyout>(null);
   const [modelSearch, setModelSearch] = useState("");
@@ -589,63 +554,6 @@ export function AppSettings({
   useEffect(() => {
     capturingShortcutRef.current = capturingShortcut;
   }, [capturingShortcut]);
-
-  // Load the persisted release channel once the updater is available. Gated on
-  // a stable boolean (not the onCheckForUpdates prop itself, which is an inline
-  // arrow with a new identity each render) so this loads once, not per render.
-  const updaterAvailable = Boolean(onCheckForUpdates);
-  useEffect(() => {
-    if (!updaterAvailable) return;
-    let active = true;
-    void getReleaseChannel()
-      .then((channel) => {
-        if (active) setReleaseChannelValue(channel);
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [updaterAvailable]);
-
-  const handleReleaseChannelChange = (next: ReleaseChannel) => {
-    setReleaseChannelValue(next);
-    // Any channel change dismisses a stale reconcile offer (e.g. toggling back
-    // to rc, or stable -> rc -> stable) before we decide whether to re-offer.
-    setReconcileVersion(undefined);
-    void setReleaseChannel(next)
-      .then(() => {
-        // Leaving rc for stable while running a prerelease build: stable is
-        // normally older than the rc you are on, so a routine check would never
-        // pull it. Offer a one-time reconcile down onto the current stable (Q4-Q8).
-        if (next === "stable" && isPrereleaseBuild()) {
-          void offerReconcileToStable();
-        }
-      })
-      .catch(() => {
-        // Persist failed: re-read so the toggle reflects the real saved channel
-        // rather than an optimistic value that never reached disk.
-        void getReleaseChannel()
-          .then(setReleaseChannelValue)
-          .catch(() => undefined);
-      });
-  };
-
-  async function offerReconcileToStable() {
-    try {
-      const update = await reconcileToStable();
-      // Only prompt when a stable is actually installable. If stable has already
-      // caught up or passed the rc, the routine updater handles it (no reconcile).
-      if (update) setReconcileVersion(update.version);
-    } catch {
-      // A failed reconcile check is silent: the channel is already saved and the
-      // routine update flow will retry on its next check.
-    }
-  }
-
-  function confirmReconcileToStable() {
-    setReconcileVersion(undefined);
-    onReconcileToStable?.();
-  }
 
   useEffect(() => {
     setMicOpen(false);
@@ -1669,23 +1577,8 @@ export function AppSettings({
               <InlineNotice
                 role="alert"
                 aria-label={t("settings.helper.unavailableAria")}
-                eyebrow={
-                  updateReadyToRelaunch
-                    ? t("settings.helper.relaunchEyebrow")
-                    : t("settings.helper.pausedEyebrow")
-                }
-                body={
-                  updateReadyToRelaunch
-                    ? t("settings.helper.pausedUntilRelaunch")
-                    : helperUnavailable.message
-                }
-                actions={
-                  updateReadyToRelaunch && onRelaunch ? (
-                    <button type="button" className="btn btn-secondary" onClick={onRelaunch}>
-                      {t("settings.helper.relaunch")}
-                    </button>
-                  ) : undefined
-                }
+                eyebrow={t("settings.helper.pausedEyebrow")}
+                body={helperUnavailable.message}
               />
             ) : null}
             <div className="settings-card">
@@ -2372,76 +2265,6 @@ export function AppSettings({
                   </div>
                 </div>
 
-                {onCheckForUpdates ? (
-                  <>
-                    <div className="settings-row">
-                      <div className="settings-row-info">
-                        <h3 className="settings-row-title">{t("settings.about.updates")}</h3>
-                        <p className="settings-row-description">
-                          {t("settings.about.updatesDescription")}
-                        </p>
-                      </div>
-                      <div className="settings-row-control">
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={onCheckForUpdates}
-                        >
-                          {t("settings.about.checkForUpdates")}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="settings-row">
-                      <div className="settings-row-info">
-                        <h3 className="settings-row-title">{t("settings.releaseChannel.title")}</h3>
-                        <p className="settings-row-description">
-                          {t("settings.releaseChannel.description")}
-                        </p>
-                      </div>
-                      <div className="settings-row-control">
-                        <SegmentedControl<ReleaseChannel>
-                          aria-label={t("settings.releaseChannel.title")}
-                          value={releaseChannel}
-                          options={releaseChannelOptions(t)}
-                          onValueChange={handleReleaseChannelChange}
-                        />
-                      </div>
-                    </div>
-
-                    {reconcileVersion ? (
-                      <div className="settings-row">
-                        <InlineNotice
-                          aria-label={t("settings.releaseChannel.switchAria")}
-                          eyebrow={t("settings.releaseChannel.switchEyebrow")}
-                          body={t("settings.releaseChannel.switchBody", {
-                            version: reconcileVersion,
-                            base: baseVersion(),
-                          })}
-                          actions={
-                            <>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                onClick={() => setReconcileVersion(undefined)}
-                              >
-                                {t("settings.releaseChannel.notNow")}
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                onClick={confirmReconcileToStable}
-                              >
-                                {t("settings.releaseChannel.switch")}
-                              </button>
-                            </>
-                          }
-                        />
-                      </div>
-                    ) : null}
-                  </>
-                ) : null}
-
                 <div className="settings-row">
                   <div className="settings-row-info">
                     <h3 className="settings-row-title">{t("settings.about.verification")}</h3>
@@ -3125,16 +2948,4 @@ function messageFromError(error: unknown) {
     return String((error as { message: unknown }).message);
   }
   return String(error);
-}
-
-// The running build is a release candidate (X.Y.Z-rc.N). Only these get the
-// leave-rc reconcile offer; a clean stable build has nothing to reconcile.
-function isPrereleaseBuild() {
-  return APP_VERSION.includes("-rc");
-}
-
-// The base version an rc will become once promoted (0.0.25-rc.2 -> 0.0.25), used
-// to reassure the user which stable they will land on when it ships.
-function baseVersion() {
-  return APP_VERSION.split("-")[0];
 }

@@ -79,10 +79,6 @@ impl MenuStrings {
         }
     }
 
-    // App menu.
-    pub fn check_for_updates(&self) -> &'static str {
-        self.pick("Check for Updates", "Procurar atualizações")
-    }
     pub fn settings(&self) -> &'static str {
         self.pick("Settings...", "Configurações...")
     }
