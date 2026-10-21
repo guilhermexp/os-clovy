@@ -162,9 +162,7 @@ a second or late answer gets `agent_interruption_expired`.
 CLI turn gets (15 minutes, `chat_engine::policy::CLI_TOOL_TIMEOUT`, checked at
 compile time). A clarification (`request_clarification`) is the same item
 with `kind: "clarification"`, `question`, and `choices`; the answer is the
-tool's result. On a linked phone, the request shows as waiting on the Mac;
-only `computer_use` can be answered there, once
-([ADR-0053](adr/0053-companion-computer-use-approvals-are-one-shot.md)).
+tool's result.
 Browser use keeps its own approval tray instead (below), so one click never
 shows two cards.
 

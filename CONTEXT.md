@@ -2,9 +2,10 @@
 
 Clovy is a Tauri desktop app that records meetings/dictation, transcribes
 the audio, turns the transcript into structured notes, and hosts an AI agent
-you can chat with over those notes. It depends on the **OS Accounts**
-identity-and-credits platform for sign-in and for billing metered AI usage,
-and runs a Clovy-owned **agent harness** built on the OpenAI Agents SDK.
+you can chat with over those notes. It runs under a fixed **local identity**
+against a **Clovy API** server (local by default), with no sign-in, billing,
+telemetry or companion app, and runs a Clovy-owned **agent harness** built on
+the OpenAI Agents SDK.
 
 This document is a glossary, not a spec. Terms are canonical; the `_Avoid_`
 lines are binding. Implementation, endpoints, and code shape live under
@@ -17,8 +18,8 @@ lines are binding. Implementation, endpoints, and code shape live under
 **Clovy (the app)**:
 The user-facing Tauri desktop product — the macOS `.app` users install. The
 Cargo package is `clovy`; the binary on disk remains `os-june` and the bundle
-identifier remains `co.opensoftware.june` for installed-app, updater, and
-permission continuity. See
+identifier remains `co.opensoftware.june` for installed-app and permission
+continuity. See
 [ADR-0055](docs/adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
 _Avoid_: notetaker, OS Notetaker (legacy names — fully removed from code as of
 the earlier bundle rename; don't reintroduce), June as the current product
@@ -27,8 +28,10 @@ name.
 **Clovy API**:
 The confidential backend service that holds the App API key and the upstream
 AI provider keys, runs `authorize`→`charge` against OS Accounts on behalf of
-the Clovy app, and proxies the metered AI calls (transcription, generation,
-agent chat, web). Lives in the same repo as Clovy under its own Cargo
+the Clovy app (outside its local mode), and proxies the metered AI calls
+(transcription, generation, agent chat, web). The desktop calls
+`http://127.0.0.1:8080` by default (`CLOVY_API_URL` overrides) with the
+**local identity**'s bearer token. Lives in the same repo as Clovy under its own Cargo
 workspace; ships as a separate container image to GHCR and runs in a TEE.
 Cargo crates use the `clovy-*` prefix and the binary is `clovy-api`; deployment
 continues publishing June-era image and service aliases for released clients
@@ -36,10 +39,19 @@ under ADR-0055.
 _Avoid_: backend, proxy, AI proxy (use **Clovy API**).
 
 **OS Accounts**:
-The Open Software identity-and-credits platform. Source of truth for *who the
-user is* and *how many credits they have*. Clovy and Clovy API both depend on
-it; it never depends on them.
+The Open Software identity-and-credits platform that Clovy API's metering
+(`authorize`→`charge`) talks to outside its local mode. The desktop app no
+longer signs in to it or reads accounts, plans or balances from it; it uses the
+**local identity** instead.
 _Avoid_: accounts, the identity service, the auth service.
+
+**Local identity**:
+The desktop's only identity: a fixed local user (`usr_local_dev`, or
+`OS_CLOVY_LOCAL_DEV_USER_ID`) and the bearer token sent to Clovy API
+(`OS_CLOVY_LOCAL_DEV_BEARER_TOKEN`, default `local-dev-token`), from
+`src-tauri/src/local_identity.rs`. There is no sign-in, so the app is always
+connected.
+_Avoid_: account, login, session (for this), signed-in user.
 
 **Upstream provider**:
 A third-party service Clovy API calls on the user's behalf: **Groq** for
@@ -416,17 +428,11 @@ conversation turns).
 The ProseMirror chat input with slash commands and attachment chips.
 _Avoid_: textbox.
 
-**Issue report**:
-A bug / feedback / feature submission to the Clovy team, collected by the
-report dialog (composer "+", sidebar, or settings) and sent straight to Clovy
-API `/v1/issue-reports` — no agent turn runs and nothing is authorized or
-charged. The team-facing **diagnosis** is generated inside Clovy API at
-delivery time on a server-configured model, at Clovy's expense, and is never
-shown to the user (see
-[ADR-0012](docs/adr/0012-direct-issue-report-submission.md)).
-_Avoid_: bug report for the mechanism (bug is one of three report
-categories), Clovy's reply for the diagnosis (the user never sees it),
-investigation turn (the removed chip flow; old clients only).
+**Issue report** (removed):
+The in-app bug / feedback report dialog and its `/v1/issue-reports` call were
+removed from the desktop; see
+[ADR-0012](docs/adr/0012-direct-issue-report-submission.md). Don't reintroduce
+the term for new work.
 
 **Slash command**:
 A `/name arg` handled client-side before submit — builtin `/model`, `/file`,
@@ -689,89 +695,32 @@ The metered-operation id (e.g. `note_transcribe`, `dictate_transcribe`,
 splits the bill in the dashboard.
 _Avoid_: operation, endpoint.
 
-**Plan**:
-The OS Accounts subscription level carried in the account snapshot
-(`subscription.plan`, e.g. `max`). Gates features and sizes the recurring
-**credit grant**; the **FundingGate** keys off subscription state.
-_Avoid_: tier, subscription (that is the whole object, not the level).
+**Plan** / **Credit grant** (removed):
+The desktop no longer reads OS Accounts plans, subscriptions or wallet grants,
+and nothing in the app is gated on a plan (Computer use included). Billing,
+funding, referrals and the plan upgrade were removed.
 
-**Credit grant**:
-Credits deposited into the wallet by OS Accounts when a plan starts, renews,
-or upgrades. Arrives asynchronously after the plan change itself resolves, so
-"plan flipped" and "credits arrived" are two separate moments — Clovy polls
-the account snapshot until the grant lands rather than assuming credits are
-present the instant the plan changes.
-_Avoid_: top-up (a user-initiated purchase), refill.
+### Clovy companion (removed)
 
-### Clovy companion
+The desktop no longer has the companion: pairing, the encrypted transport,
+**linked devices**, remote Computer use approvals and the "Linked devices"
+settings tab were removed. The Clovy API **companion relay** and the
+`crates/clovy-companion-*` / `june-companion-*` crates still exist until a
+later change removes them; their wire terms live in
+[docs/companion-protocol.md](docs/companion-protocol.md). Don't use the
+companion terms for new desktop work.
 
-**Clovy Companion**:
-The separate native iPhone and iPad app that presents typed views of data held
-by a user's running Clovy Desktop. Its native SwiftUI is not Clovy Desktop, and
-the shared Rust crypto library is not Clovy's embedded **Hermes**
-agent runtime.
-_Avoid_: mobile Clovy, Tauri mobile, WebView companion.
+### Desktop shell
 
-**Linked device**:
-One phone, tablet, or desktop installation with its own stable device id and
-Curve25519 identity, explicitly approved by the user for a fixed capability
-set. The link belongs to the OS Accounts user authenticated by the desktop that
-created and approved its pairing. The companion never receives or copies the
-desktop session and does not sign in separately.
-_Avoid_: session, login, trusted account.
-
-**Companion pairing**:
-The five-minute, desktop-approved flow that authorizes the companion under the
-desktop's current account, authenticates the two device identities, and
-establishes a **linked device** relationship. Its pairing code is available as
-a QR or a manual URL-safe encoding of the same bootstrap payload. The pairing
-secret is single-use state, not a reusable device credential.
-_Avoid_: login, sync, invite.
-
-**Device credential**:
-The random opaque credential a companion generates locally during pairing. It
-sends only its SHA-256 hash for desktop approval, stores the credential in
-Keychain, and uses it to authorize one linked device at the relay. It cannot
-decrypt companion frames or replace the device's Curve25519 private key.
-_Avoid_: OS Accounts token, desktop token, pairing secret.
-
-**Companion relay**:
-The Clovy API module that authenticates devices and routes bounded opaque
-ciphertext between linked devices. It cannot decrypt a **companion frame** and
-does not queue offline control requests.
-_Avoid_: Gateway (reserved for the Hermes JSON-RPC boundary), remote command
-server, sync server.
-
-**Companion frame**:
-A versioned, capability-scoped, expiring application message encrypted between
-linked devices. Only routing metadata and ciphertext are visible to the
-**companion relay**.
-_Avoid_: raw command, Hermes frame, Tauri command.
-
-**Companion media result**:
-A bounded metadata reference to a canonical image or video artifact generated
-by Clovy's agent for one stored session and run. The reference is not the media
-itself; a linked device with `mediaRead` fetches the verified full artifact in
-chunks.
-_Avoid_: media upload, attachment path, inline media.
-
-### Desktop shell & updates
-
-**Release channel**:
-The updater track: `stable` or `rc` (shipped in PR #529; see
-[ADR-0003](docs/adr/0003-release-candidate-channel-and-promotion.md)).
-_Avoid_: beta.
-
-**Update manifest** (`latest.json`):
-The signed JSON on the public releases repo listing per-platform artifacts and
-their Ed25519 signatures; the RC variant is `latest-rc.json`.
-_Avoid_: appcast.
+**Release channel** / **Update manifest** (removed):
+The in-app updater and its `stable` / `rc` channel choice were removed from the
+desktop (see [ADR-0001](docs/adr/0001-auto-updates-via-tauri-updater.md) and
+[ADR-0003](docs/adr/0003-release-candidate-channel-and-promotion.md)); the app
+does not check for or install updates.
 
 **Releases repo**:
-The separate public repo `open-software-network/os-june-releases` that hosts
-signed artifacts + the update manifest. The source repo is also public, but the
-updater retains this June-era release coordinate for compatibility (see
-[ADR-0001](docs/adr/0001-auto-updates-via-tauri-updater.md) and
+The separate public repo `open-software-network/os-june-releases` that hosted
+signed artifacts and the update manifest for the removed updater (see
 [ADR-0055](docs/adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md)).
 _Avoid_: "GitHub release" (unqualified).
 
@@ -782,25 +731,10 @@ are Groq for audio, OpenRouter for remote text, fal for media, and Tavily
 for web.
 _Avoid_: model config (unqualified).
 
-**Account snapshot** (`AccountStatus`):
-The user + credit balance + subscription state fetched from OS Accounts and
-surfaced to the UI.
-_Avoid_: profile, balance (unqualified).
-
-**Avatar** (`avatar_seed`):
-The network-wide generated account presentation owned by OS Accounts. A saved
-selection is a renderer-versioned `v1:<payload>` seed; without a supported
-selection, Clovy derives `v1:default:<User.id>` without writing it. The seed
-fixes cloud geometry across conforming Apps, while Clovy supplies colors from
-the active theme. An explicit refresh may remain local while its profile write
-cannot sync.
-_Avoid_: App avatar, unversioned avatar seed, silently replacing an unsupported
-future version.
-
-**AccountGate** / **FundingGate**:
-The sign-in wall (`AccountGate`) versus the credits-exhausted / upgrade wall
-(`FundingGate`, keyed off `subscription.subscribed`).
-_Avoid_: paywall (unqualified — say which gate).
+**Account snapshot** / **Avatar** / **AccountGate** / **FundingGate** (removed):
+The account state, the generated account avatar, the sign-in wall and the
+credits/upgrade wall were removed with OS Accounts sign-in; the app runs on the
+**local identity**.
 
 **Agent HUD**:
 The floating agent overlay window, toggled from the menu bar and separate
@@ -1022,14 +956,15 @@ _Avoid_: do not disturb (that is the macOS Focus feature).
   stripping — qualify when you mean that.)
 - **"transcribe"** is overloaded between **dictation** (short, latency-
   critical) and **note transcription** (long, batch). Always qualify which.
-- **"credits"** always means OS Accounts credits (integers, `$1 = 1000
-  credits`). Never use it for upstream provider cost (which is dollars).
+- **"credits"** always means the integer units Clovy API prices and meters
+  work in (`$1 = 1000 credits`, OS Accounts credits outside its local mode).
+  Never use it for upstream provider cost (which is dollars).
 - **"the session id"** is ambiguous — say **stored** (persistent, UI-facing) or
   **runtime** (live process) session id.
 - **"the model"** never means the agent harness; it is the LLM selected through
   Clovy's model gateway and called by the runtime.
-- **"channel"** is overloaded: a **Source** lane (mic/system), a **release
-  channel** (stable/rc), or a WAV interleave channel. Qualify.
+- **"channel"** is overloaded: a **Source** lane (mic/system) or a WAV
+  interleave channel. Qualify.
 
 ## Example dialogue
 

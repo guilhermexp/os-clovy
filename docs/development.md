@@ -50,11 +50,15 @@ You can also run Clovy API directly:
 Restart `pnpm tauri:dev` after changing the root `.env`. The running Tauri
 process does not reload client configuration.
 
-The example env files default to open source local mode: no OS Accounts login,
-no billing or credit charges, and no provider keys in the desktop env. Clovy
-API accepts the local bearer token shared by `.env` and `clovy-api/.env`. That
-token must match in both files; it is not an OS Accounts token, just the
-shared secret between the local desktop app and the local Clovy API. The Clovy
+The desktop app has no sign-in, billing or credit charges: it always runs on a
+fixed local identity (`src-tauri/src/local_identity.rs`), user
+`OS_CLOVY_LOCAL_DEV_USER_ID` (default `usr_local_dev`) and bearer token
+`OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` (default `local-dev-token`), and calls Clovy
+API at `http://127.0.0.1:8080` unless `CLOVY_API_URL` says otherwise. The
+example env files run Clovy API in local mode, which accepts that bearer token.
+The token must match in `.env` and `clovy-api/.env`; it is not an OS Accounts
+token, just the shared secret between the local desktop app and the local Clovy
+API. No provider keys go in the desktop env. The Clovy
 API env example binds local mode to `127.0.0.1`; if you bind it to a network
 interface, replace the default local bearer token in both env files first.
 
@@ -88,28 +92,12 @@ from your working tree.
 make dev-staging
 ```
 
-The target runs `pnpm tauri:dev` with five overrides:
-
-- `CLOVY_API_URL=https://june-api-staging.opensoftware.co`
-- `OS_CLOVY_LOCAL_DEV=0`
-- `OS_ACCOUNTS_URL=https://os-accounts-portal-staging.up.railway.app`
-- `OS_ACCOUNTS_API_URL=https://os-accounts-api-staging.up.railway.app`
-- `CLOVY_DEV_SKIP_LOCAL_API=1`
-
-Process env beats `.env`, so these win even when `.env` selects local mode.
-The target does not set `OS_ACCOUNTS_CLIENT_ID`: put the staging client id
-(`ocl_...`) in `.env` or export it in the shell, or login fails with
-`os_accounts_unconfigured`. You also need an OS Accounts staging account with
-credits, because staging meters every request. Set
-`OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE=1` in a debug build to avoid a Keychain
-prompt on every run.
-
-Auth is a real Login with Open Software against staging OS Accounts. The
-local-dev bearer token does not work: staging Clovy API boots with
-`CLOVY__LOCAL_DEV__ENABLED` unset, so it verifies OS Accounts JWTs and charges
-credits. Staging stays JWT-only on purpose. Every Clovy API image soaks there
-before it is promoted to production, so it has to exercise the same auth and
-metering path production runs.
+This fork's desktop app cannot use staging. Staging Clovy API boots with
+`CLOVY__LOCAL_DEV__ENABLED` unset, so it accepts only OS Accounts JWTs and
+charges credits, and the desktop no longer signs in to OS Accounts: it sends
+only the local identity's bearer token, which staging rejects. The target still
+runs `pnpm tauri:dev` with `CLOVY_API_URL` pointing at staging, but requests
+fail authentication.
 
 `https://june-api-staging.opensoftware.co` is the compatibility hostname served by a `dstack-ingress`
 container inside the staging CVM. It terminates TLS on 443 and proxies to
@@ -169,8 +157,7 @@ ride Phala sealed env and are injected at boot inside the CVM, and the deploy
 passes `--no-public-logs --no-public-sysinfo`. Auth is local-dev mode with a
 random bearer token minted per run, never printed, and gone when the VM is
 deleted. Local-dev mode replaces JWT verification and disables OS Accounts
-metering, so no OS Accounts App API key ever reaches an ephemeral CVM. There
-is no issue-report key either, so issue reports stay in the CVM logs.
+metering, so no OS Accounts App API key ever reaches an ephemeral CVM.
 
 The CVM name, URL, bearer token, image ref, git sha, and creation time land in
 `.ephemeral-clovy-api.json` (mode 600, gitignored). It is written before the
@@ -181,7 +168,6 @@ up by `ephemeral-api`:
 
 ```sh
 export CLOVY_API_URL="$(jq -r .url .ephemeral-clovy-api.json)"
-export OS_CLOVY_LOCAL_DEV=1
 export OS_CLOVY_LOCAL_DEV_BEARER_TOKEN="$(jq -r .token .ephemeral-clovy-api.json)"
 export CLOVY_DEV_SKIP_LOCAL_API=1
 ```

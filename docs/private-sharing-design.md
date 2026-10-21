@@ -12,7 +12,7 @@ Sharing is deliberately a bearer-link flow:
 4. **Copy** copies the URL again.
 5. Once a link exists, a link action beside the current breadcrumb copies it
    without reopening the Share dialog.
-6. Anyone with the link can view without an OS Accounts sign-in. A protected
+6. Anyone with the link can view without signing in. A protected
    link also requires the separately shared passcode.
 7. **Stop sharing** revokes the link for everyone.
 
@@ -128,14 +128,11 @@ cannot make local content permanently undeletable; other errors fail closed.
 ## Viewer
 
 The static `/s/{share_id}` shell has a strict self-only CSP and no analytics.
-Production links use `https://june.link/s/{share_id}#…`. That hostname is served
-by an isolated viewer-only Clovy API CVM with its own ingress and certificate;
-it reads the same encrypted-share database but cannot create or mutate shares
-or invoke product APIs. `https://june-api.opensoftware.co` remains on its own
-CVM and ingress. Staging and local builds keep the viewer on their configured
-API origin. This preserves the viewer's self-only network policy while keeping
-production links short and branded, and makes a june.link DNS/certificate
-failure incapable of taking the primary API off port 443.
+Links use the origin of the configured Clovy API (`CLOVY_API_URL`, default
+`http://127.0.0.1:8080`): `{origin}/s/{share_id}#…`, from
+`clovy_api::share_base_url`. The desktop no longer points links at a separate
+short-link host, so a viewer can open a link only if it can reach that Clovy
+API. This keeps the viewer's self-only network policy.
 
 For a new link it:
 

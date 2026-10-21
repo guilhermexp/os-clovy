@@ -1,8 +1,9 @@
 # Computer use support runbook
 
 Computer use has independent gates: Clovy's stored grant, the Clovy API rollout
-decision, macOS access for the signed helper, an active plan, a vision-capable
-model, and a visible attended turn. Do not treat one as proof that the others
+decision, macOS access for the signed helper, a vision-capable model, and a
+visible attended turn. No account or plan is required: the plan gate always
+passes since the desktop has no sign-in. Do not treat one as proof that the others
 are enabled.
 
 The shipped helper bundle names and development executable aliases documented
@@ -15,7 +16,7 @@ below retain their June-era technical identities under
 | --- | --- | --- |
 | `unsupported` | This is not macOS. | Computer use is not shipped on Windows. |
 | `rollout_disabled` | Clovy API disabled this app/macOS version, or the first safety decision could not be fetched. | Keep the grant revocable, check connectivity, then inspect Clovy API's `[computer_use]` config. Do not bypass the gate. |
-| `plan_required` | No active Pro/Max or compatible legacy paid subscription is cached. | Refresh the account or open View plans. An existing Clovy grant can still be revoked. |
+| `plan_required` | Kept in the state type but no longer reached: the plan check always passes without an account. | None. |
 | `off` | The Clovy grant is off. The helper may still have macOS grants. | Enable from Plugins after reading the permission explanation. |
 | `driver_missing` | The signed app does not contain the pinned helper/stamp. | Reinstall or update Clovy. Do not run an upstream installer. |
 | `driver_mismatch` | The helper version does not match the repo pin. | Stop rollout and inspect the build provenance/SBOM. |

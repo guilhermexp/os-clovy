@@ -73,9 +73,8 @@ iOS companion app (fast-follow; needs the relay), team/org layer, in-enclave rou
 
 ## 6. Success metrics
 
-*(All billing-derived or aggregate — no per-user app telemetry. Clovy's only
-product telemetry is opt-in, coarse-bucketed P3A aggregates; any new question
-follows [telemetry-p3a-prd.md](telemetry-p3a-prd.md).)*
+*(All billing-derived or aggregate — no per-user app telemetry. This fork's
+desktop sends no product telemetry; P3A was removed.)*
 
 | Metric | Target | Why it matters |
 |---|---|---|

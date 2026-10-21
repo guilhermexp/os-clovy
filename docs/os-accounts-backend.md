@@ -1,5 +1,10 @@
 # OS Accounts — metering backend (future work)
 
+> **Fork note:** this fork's desktop app no longer signs in to OS Accounts (the
+> `desvincular-servicos-open-software` change); `src-tauri/src/os_accounts.rs`
+> is gone and the desktop uses a fixed local identity. The identity half
+> described below no longer exists.
+
 > **Superseded / historical.** This document specifies a *future* metering
 > backend. That backend is now shipped; its canonical spec is
 > [clovy-api-prd.md](clovy-api-prd.md) and `authorize`/`charge` is fully
