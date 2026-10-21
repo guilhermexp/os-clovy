@@ -21,8 +21,8 @@ Gates de `AGENTS.md` ("Verification") em cada grupo para o que ele tocou. Fronte
 
 ## 4. Prova
 
-- [ ] 4.1 `make verify` sem falhas.
-- [ ] 4.2 App de dev (perfil `-dev`): capturas da tela inicial e do composer sem rodapé/aviso, seletor de motor e Configurações com ícones; Plugins com GitHub "via gh" conectado sozinho (com o `gh` do dono logado) e uma leitura real (`list_repositories`) por um turno Claude Code; uso do computador "Pronto" sem conta Pro. Evidência em `.tmp/verify/runtimes-cli-na-ui/run-<id>/report.md`.
+- [x] 4.1 `make verify` sem falhas. Em `f510140c` no Mac: frontend 2060, Rust desktop 2014 (clippy `-D warnings`), companion ok (`run-mac/make-verify.log`, interrompido no início do lint da Clovy API); `make clovy-api-lint clovy-api-test` em seguida, saída 0, 588 testes (`run-mac/clovy-api.log`). Depois do merge do `main` (`0e985527`): `make -k verify` saiu 0, Vitest 188 arquivos / 1807 testes, Rust 2572 passaram / 0 falhas / 21 ignorados (`run-mac-merge/make-verify.log` no checkout principal).
+- [x] 4.2 App de dev (perfil `-dev`): capturas da tela inicial e do composer sem rodapé/aviso, seletor de motor e Configurações com ícones; Plugins com GitHub "via gh" conectado sozinho (com o `gh` do dono logado) e uma leitura real (`list_repositories`) por um turno Claude Code; uso do computador "Pronto" sem conta Pro. Evidência em `.tmp/verify/runtimes-cli-na-ui/run-<id>/report.md`. — Após o merge, no perfil `-dev`: composer sem rodapé nem aviso; seletor de motor com logos, "Padrão" no Claude Code e o Copilot desabilitado com "Não encontrado no PATH da sua sessão."; Plugins com GitHub "via gh" conectado como `guilhermexp` (capturas em `run-mac-merge/` no checkout principal). A leitura real `list_repositories` está na sessão "Teste P42" de 2026-10-19 no mesmo perfil. O dono aceitou a change; o "Pronto" do uso do computador ficou coberto pelos testes de `ComputerUseControl`, sem captura.
 
 ## Workflow follow-up
 
