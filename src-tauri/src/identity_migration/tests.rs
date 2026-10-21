@@ -911,3 +911,289 @@ fn an_interrupted_publication_is_finished_by_the_next_launch() {
         b"ui state"
     );
 }
+
+// --- I1: paths into the old profile are rewritten in the copy --------------
+
+async fn exec(connection: &mut sqlx_sqlite::SqliteConnection, sql: &str, binds: &[&str]) {
+    let mut statement = sqlx::query::query(sql);
+    for bind in binds {
+        statement = statement.bind(bind.to_string());
+    }
+    statement.execute(connection).await.unwrap();
+}
+
+async fn text(path: &Path, sql: &str) -> String {
+    use sqlx::connection::ConnectOptions;
+    use sqlx::row::Row;
+    let mut connection = sqlx_sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query::query(sql)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap()
+        .get(0)
+}
+
+#[tokio::test]
+async fn paths_into_the_old_profile_are_rewritten_in_the_copy() {
+    use sqlx::connection::ConnectOptions;
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    let old = plan.data.source.to_string_lossy().into_owned();
+    let new = plan.data.target.to_string_lossy().into_owned();
+    std::fs::create_dir_all(&plan.data.source).unwrap();
+    // The app stores canonical paths: /private/var/... for a /var/... dir.
+    let old_canonical = plan.data.source.canonicalize().unwrap();
+    let old_canonical = old_canonical.to_string_lossy().into_owned();
+    let new_canonical = base
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("new")
+        .to_string_lossy()
+        .into_owned();
+    let db = plan.data.source.join("notes.sqlite3");
+    let pool = sqlx_sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx_sqlite::SqliteConnectOptions::new()
+                .filename(&db)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    crate::db::migrations::run_migrations(&pool).await.unwrap();
+    let mut notes = pool.acquire().await.unwrap();
+    let workspace = format!("{old}/agent-workspaces/s1");
+    let payload = serde_json::json!({
+        "attachments": [{ "path": format!("{workspace}/attachments/a.png") }],
+        "content": format!("[Clovy attachment manifest v1] {workspace}/attachments/a.png"),
+    })
+    .to_string();
+    let config = serde_json::json!({ "workspace": workspace }).to_string();
+    let t = "2026-10-01T09:00:00Z";
+    exec(
+        &mut *notes,
+        "INSERT INTO notes(id, created_at, updated_at) VALUES ('n1', ?, ?)",
+        &[t, t],
+    )
+    .await;
+    exec(
+        &mut *notes,
+        "INSERT INTO recording_sessions(id, note_id, status, started_at, partial_path, final_path) VALUES ('r1', 'n1', 'complete', ?, ?, ?)",
+        &[t, &format!("{old}/recordings/n1/r1/mic.partial.wav"), &format!("{old_canonical}/recordings/n1/r1/mic.wav")],
+    )
+    .await;
+    exec(
+        &mut *notes,
+        "INSERT INTO audio_artifacts(id, note_id, recording_session_id, path, format, duration_ms, size_bytes, checksum, created_at) VALUES ('a1', 'n1', 'r1', ?, 'wav', 1, 1, 'x', ?)",
+        &[&format!("{old}/recordings/n1/r1/mic.wav"), t],
+    )
+    .await;
+    exec(
+        &mut *notes,
+        "INSERT INTO agent_sessions(id, workspace_path, created_at, updated_at) VALUES ('s1', ?, ?, ?), ('s2', '/Users/someone/Projects/app', ?, ?), ('s3', ?, ?, ?)",
+        &[&workspace, t, t, t, t, &format!("{old}-backup/agent-workspaces/s3"), t, t],
+    )
+    .await;
+    exec(
+        &mut *notes,
+        "INSERT INTO agent_runs(id, session_id, status, model, started_at, updated_at, run_config_json) VALUES ('run1', 's1', 'completed', 'auto', ?, ?, ?)",
+        &[t, t, &config],
+    )
+    .await;
+    exec(
+        &mut *notes,
+        "INSERT INTO agent_items(id, session_id, run_id, sequence, kind, payload_json, created_at) VALUES ('i1', 's1', 'run1', 0, 'user_message', ?, ?)",
+        &[&payload, t],
+    )
+    .await;
+    drop(notes);
+    pool.close().await;
+    write(
+        &plan.data.source.join("extension-host-path"),
+        format!("{old}/extension-host.json").as_bytes(),
+    );
+    let before = tree_hash(&plan.data.source);
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    let copied = plan.data.target.join("notes.sqlite3");
+    assert_eq!(
+        text(&copied, "SELECT partial_path FROM recording_sessions").await,
+        format!("{new}/recordings/n1/r1/mic.partial.wav")
+    );
+    assert_eq!(
+        text(&copied, "SELECT final_path FROM recording_sessions").await,
+        format!("{new_canonical}/recordings/n1/r1/mic.wav")
+    );
+    assert_eq!(
+        text(&copied, "SELECT path FROM audio_artifacts").await,
+        format!("{new}/recordings/n1/r1/mic.wav")
+    );
+    assert_eq!(
+        text(
+            &copied,
+            "SELECT workspace_path FROM agent_sessions WHERE id = 's1'"
+        )
+        .await,
+        format!("{new}/agent-workspaces/s1")
+    );
+    // Paths outside the profile, even a look-alike sibling, stay put.
+    assert_eq!(
+        text(
+            &copied,
+            "SELECT workspace_path FROM agent_sessions WHERE id = 's2'"
+        )
+        .await,
+        "/Users/someone/Projects/app"
+    );
+    assert_eq!(
+        text(
+            &copied,
+            "SELECT workspace_path FROM agent_sessions WHERE id = 's3'"
+        )
+        .await,
+        format!("{old}-backup/agent-workspaces/s3")
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&text(&copied, "SELECT payload_json FROM agent_items").await).unwrap();
+    assert_eq!(
+        payload["attachments"][0]["path"],
+        format!("{new}/agent-workspaces/s1/attachments/a.png")
+    );
+    assert!(payload["content"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("{new}/agent-workspaces/s1")));
+    let config: serde_json::Value =
+        serde_json::from_str(&text(&copied, "SELECT run_config_json FROM agent_runs").await)
+            .unwrap();
+    assert_eq!(config["workspace"], format!("{new}/agent-workspaces/s1"));
+    assert_eq!(
+        std::fs::read_to_string(plan.data.target.join("extension-host-path")).unwrap(),
+        format!("{new}/extension-host.json")
+    );
+    assert_eq!(tree_hash(&plan.data.source), before);
+}
+
+#[tokio::test]
+async fn paths_in_the_encrypted_activity_database_are_rewritten() {
+    use crate::activity::key::{ActivityKeyStore, MemoryKeyStore};
+    use crate::activity::store::{ActivityStore, NewFrame, TextSource, ACTIVITY_DB_FILE};
+    use chrono::{TimeZone, Utc};
+
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = dir_plan(base.path());
+    std::fs::create_dir_all(&plan.data.source).unwrap();
+    let old = plan.data.source.to_string_lossy().into_owned();
+    let new = plan.data.target.to_string_lossy().into_owned();
+    let keys = MemoryKeyStore::default();
+    let db = ActivityStore::open(&plan.data.source.join(ACTIVITY_DB_FILE), &keys)
+        .await
+        .unwrap();
+    db.insert_frame(&NewFrame {
+        captured_at: Utc.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap(),
+        app_name: "Terminal".into(),
+        bundle_id: None,
+        window_title: Some(format!("{old}/agent-workspaces/s1")),
+        browser_url: None,
+        text_source: TextSource::Accessibility,
+        text: Some("cd into the workspace".into()),
+        input_idle_ms: None,
+    })
+    .await
+    .unwrap();
+    db.close().await;
+    plan.credentials.push(activity_copy());
+    let store = MemoryStore::with(&[(
+        "old.activity-db",
+        "sqlcipher-key",
+        keys.current().unwrap().as_str(),
+    )]);
+
+    migrate(&plan, &store, &mut StdCopier).expect("migrate");
+
+    let new_keys = MemoryKeyStore::default();
+    new_keys
+        .store(&store.value("new.activity-db", "sqlcipher-key").unwrap())
+        .unwrap();
+    let copied = ActivityStore::open(&plan.data.target.join(ACTIVITY_DB_FILE), &new_keys)
+        .await
+        .unwrap();
+    let frames = copied.frames_after(0, 10).await.unwrap();
+    assert_eq!(
+        frames[0].window_title.as_deref(),
+        Some(format!("{new}/agent-workspaces/s1").as_str())
+    );
+}
+
+#[tokio::test]
+async fn webview_local_storage_values_are_rewritten() {
+    use sqlx::connection::ConnectOptions;
+    use sqlx::row::Row;
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    let old = plan.data.source.to_string_lossy().into_owned();
+    let new = plan.data.target.to_string_lossy().into_owned();
+    plan.extra_directories.push(DirectoryCopy {
+        source: base.path().join("old-webkit"),
+        target: base.path().join("new-webkit"),
+    });
+    // WebKit keeps localStorage values as UTF-16 blobs.
+    let store_path = base
+        .path()
+        .join("old-webkit/LocalStorage/localstorage.sqlite3");
+    std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+    let utf16 =
+        |value: &str| -> Vec<u8> { value.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    let mut storage = sqlx_sqlite::SqliteConnectOptions::new()
+        .filename(&store_path)
+        .create_if_missing(true)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query::query("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE PRIMARY KEY NOT NULL, value BLOB NOT NULL ON CONFLICT FAIL)")
+        .execute(&mut storage)
+        .await
+        .unwrap();
+    let queued = format!(r#"[{{"attachments":["{old}/agent-attachment-staging/a.png"]}}]"#);
+    sqlx::query::query(
+        "INSERT INTO ItemTable(key, value) VALUES ('clovy.agent.queuedFollowUps', ?)",
+    )
+    .bind(utf16(&queued))
+    .execute(&mut storage)
+    .await
+    .unwrap();
+    drop(storage);
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    let mut copied = sqlx_sqlite::SqliteConnectOptions::new()
+        .filename(
+            base.path()
+                .join("new-webkit/LocalStorage/localstorage.sqlite3"),
+        )
+        .read_only(true)
+        .connect()
+        .await
+        .unwrap();
+    let value: Vec<u8> = sqlx::query::query("SELECT value FROM ItemTable")
+        .fetch_one(&mut copied)
+        .await
+        .unwrap()
+        .get(0);
+    let units: Vec<u16> = value
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    assert_eq!(
+        String::from_utf16(&units).unwrap(),
+        format!(r#"[{{"attachments":["{new}/agent-attachment-staging/a.png"]}}]"#)
+    );
+}
