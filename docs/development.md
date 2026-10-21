@@ -129,15 +129,15 @@ across restarts and rebuilds
 The launcher never resets permissions.
 
 - **Bundle:** `src-tauri/target/debug/Clovy Dev.app`, bundle identifier
-  `<identifier>.dev` (`co.opensoftware.june.dev` on a normal branch). The
+  `<identifier>.dev` (`dev.guilhermexp.clovy.dev` on a normal branch). The
   compiled Tauri identifier, and with it the `<identifier>-dev` data
   directory, does not change. A branch identity (`codex/jun-278-…`) or
   `CLOVY_DEV_APP_IDENTIFIER` gets its own bundle, for example
-  `Clovy Dev permproof.app` for `co.opensoftware.june.permproof`. The browser
+  `Clovy Dev permproof.app` for `dev.guilhermexp.clovy.permproof`. The browser
   extension's native messaging host follows the compiled identity too: the
   shim built with it reads only the release app's descriptor or the one in
   `<identifier>-dev`, never another profile's.
-- **Bundle contents:** besides `os-june`, `clovy-mcp`, and `clovy-nm-shim`,
+- **Bundle contents:** besides `clovy`, `clovy-mcp`, and `clovy-nm-shim`,
   the bundle carries the resources `tauri.conf.json` declares for every
   platform (browser extension files, agent skills) at their bundle paths, and
   rebuilds when they change. Helpers are not copied in: debug builds resolve
@@ -153,7 +153,7 @@ The launcher never resets permissions.
   `APPLE_SIGNING_IDENTITY` inherited from the shell; release builds keep
   signing with `APPLE_SIGNING_IDENTITY`.
 - **One certificate everywhere:** the same identity signs `Clovy Dev.app`
-  (with `clovy-mcp` and `clovy-nm-shim` beside `os-june` in
+  (with `clovy-mcp` and `clovy-nm-shim` beside `clovy` in
   `Contents/MacOS`) and the helpers in `.tauri-helper` (Computer use driver,
   dictation helper, system audio helper). Their designated requirement is
   `identifier "<bundle id>" and anchor apple generic and certificate
@@ -185,16 +185,16 @@ What macOS sees in development:
 | Component | Identity | Started by |
 | --- | --- | --- |
 | `Clovy Dev.app` | `<identifier>.dev` | the runner, responsible for its own requests |
-| `.tauri-helper/June Dictation Helper.app` | `co.opensoftware.june.dictation-helper.dev.w<worktree>` | Clovy Dev, as a child process |
-| `.tauri-helper/June.app` (system audio) | `co.opensoftware.june.audio-capture.dev.w<worktree>` | Clovy Dev, through LaunchServices |
-| `.tauri-helper/June Computer Use Driver.app` | `co.opensoftware.june.computer-use-driver.dev.w<worktree>` | Clovy Dev, through LaunchServices |
+| `.tauri-helper/Clovy Dictation Helper.app` | `dev.guilhermexp.clovy.dictation-helper.dev.w<worktree>` | Clovy Dev, as a child process |
+| `.tauri-helper/Clovy Audio Capture.app` (system audio) | `dev.guilhermexp.clovy.audio-capture.dev.w<worktree>` | Clovy Dev, through LaunchServices |
+| `.tauri-helper/Clovy Computer Use Driver.app` | `dev.guilhermexp.clovy.computer-use-driver.dev.w<worktree>` | Clovy Dev, through LaunchServices |
 
 `w<worktree>` is the first 12 hex digits of the SHA-256 of the checkout path,
 the same key for the three helpers, so helper grants never land on an
 installed release or on another worktree. Release builds keep the published
-identifiers (`co.opensoftware.june.dictation-helper`,
-`co.opensoftware.june.audio-capture`,
-`co.opensoftware.june.computer-use-driver`). Requests Clovy Dev makes itself
+identifiers (`dev.guilhermexp.clovy.dictation-helper`,
+`dev.guilhermexp.clovy.audio-capture`,
+`dev.guilhermexp.clovy.computer-use-driver`). Requests Clovy Dev makes itself
 (microphone for notes, Accessibility and Screen Recording for activity
 capture, notifications) are listed as Clovy Dev. Computer use Accessibility
 belongs to the driver and its Screen Recording to the outer responsible app,
@@ -215,7 +215,7 @@ To reset a development grant on purpose, name the dev bundle, never the
 release identifier:
 
 ```sh
-tccutil reset Microphone co.opensoftware.june.dev
+tccutil reset Microphone dev.guilhermexp.clovy.dev
 ```
 
 ## Verification commands
@@ -275,7 +275,7 @@ but do not launch, with the official Node 24 PATH and a run-owned identifier:
 PATH="$HOME/.local/share/node-official/node24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   pnpm tauri:build -- --debug --bundles app \
   --config src-tauri/tauri.macos.conf.json \
-  --config '{"identifier":"co.opensoftware.june.targetproof20261012","bundle":{"createUpdaterArtifacts":false}}'
+  --config '{"identifier":"dev.guilhermexp.clovy.targetproof20261012","bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 This compiles a separate data identity; editing Info.plist is insufficient.

@@ -196,3 +196,5 @@ and legacy artifacts remain published.
   after refresh-token rotation.
 
 Superada pela change desvincular-repo-ci na linha do ambiente do Clovy API: `JUNE__*` deixou de ser lido; o restante da ponte continua.
+
+2026-10-21: superada pela [ADR-0068](0068-clovy-takes-its-own-identity-with-a-one-time-migration.md). O fork troca o identificador para `dev.guilhermexp.clovy`, copia uma vez o perfil e as credenciais June e remove a ponte.

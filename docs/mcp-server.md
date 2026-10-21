@@ -188,7 +188,7 @@ responses sent by the client get no answer.
 
 **Debug builds and production data.** A debug `clovy-mcp` refuses a `--dir`
 under the installed app's data directory
-(`~/Library/Application Support/co.opensoftware.june`), answering every
+(`~/Library/Application Support/dev.guilhermexp.clovy`), answering every
 message with that reason, unless `OS_CLOVY_USE_PROD_DATA_DIR` is set (the same
 opt-in the debug app honors). Development snippets point at the `-dev` data
 directory.

@@ -16,14 +16,18 @@ lines are binding. Implementation, endpoints, and code shape live under
 ### Platform
 
 **Clovy (the app)**:
-The user-facing Tauri desktop product — the macOS `.app` users install. The
-Cargo package is `clovy`; the binary on disk remains `os-june` and the bundle
-identifier remains `co.opensoftware.june` for installed-app and permission
-continuity. See
-[ADR-0055](docs/adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
+The user-facing Tauri desktop product — `Clovy.app`, executable `clovy`,
+bundle identifier `dev.guilhermexp.clovy`. See
+[ADR-0068](docs/adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md).
 _Avoid_: notetaker, OS Notetaker (legacy names — fully removed from code as of
 the earlier bundle rename; don't reintroduce), June as the current product
 name.
+
+**Identity migration**:
+The one-time copy, on the first launch under `dev.guilhermexp.clovy`, of the
+June-era data and config directories, WebView store and credential items into
+the new names. All or nothing; the source is never changed.
+_Avoid_: move, rename (the old profile stays), upgrade.
 
 **Clovy API**:
 The local backend service that holds the upstream AI provider keys and

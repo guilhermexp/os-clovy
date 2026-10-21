@@ -6,9 +6,10 @@ the `desvincular-repo-ci` change. Build the NSIS installer locally with
 `scripts/build-windows.ps1` (prerequisites in `AGENTS.md`) and validate it
 with the checks below.
 
-`Clovy_*` names are the canonical build artifacts. June-named artifact aliases, `os-june.exe`, and the
-`$env:LOCALAPPDATA\June` install path remain compatibility identities under
-[ADR-0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
+The installer installs `clovy.exe` under `$env:LOCALAPPDATA\Clovy` with the owner
+as publisher, per
+[ADR-0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md);
+`scripts/verify-windows-artifacts.ps1` checks the payload.
 
 ## Windows support
 
@@ -59,11 +60,11 @@ Copy a locally built `Clovy_x64-setup.exe` to a clean Windows 11 VM and run:
 $installer = "$env:USERPROFILE\Downloads\Clovy_x64-setup.exe"
 Get-AuthenticodeSignature $installer | Format-List
 Start-Process -FilePath $installer -ArgumentList "/S" -Wait
-Start-Process "$env:LOCALAPPDATA\June\os-june.exe"
+Start-Process "$env:LOCALAPPDATA\Clovy\clovy.exe"
 ```
 
 The installed app is branded as Clovy, but the current Windows binary on disk is
-`os-june.exe` under `$env:LOCALAPPDATA\June`.
+`clovy.exe` under `$env:LOCALAPPDATA\Clovy`.
 
 Confirm the app launches as Clovy, the bundled agent starts on a clean VM with
 no Python installed, and Windows dictation can record from the microphone and

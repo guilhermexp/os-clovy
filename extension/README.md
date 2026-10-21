@@ -45,8 +45,8 @@ so the registered host manifest matches every local build.
 
 ## Release
 
-There is no automated Chrome Web Store publication in this repository. The
-store identity and local packaging checks are in
+There is no store publication in this repository. The extension identity and
+local packaging checks are in
 [docs/release-extension.md](../docs/release-extension.md).
 
 ## Rotating the pinned key

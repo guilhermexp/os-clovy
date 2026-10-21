@@ -124,7 +124,7 @@ below) and mirrored to the menu bar.
     until terminal state. These budgets are not a hard latency guarantee for
     synchronous native API calls.
 - **Exclusions** (`filter::skip_reason`): Clovy's own windows (own pid or a
-  `co.opensoftware.june*`/`co.opensoftware.clovy*` bundle id), ignored apps
+  `dev.guilhermexp.clovy*` bundle id), ignored apps
   (exact, case-insensitive name or bundle
   id/executable), private/incognito windows (no OCR fallback either), URLs
   whose host is an ignored domain or one of its subdomains, and, while any domain
@@ -226,14 +226,14 @@ below) and mirrored to the menu bar.
 ## Database
 
 `activity.sqlite3` in the app data dir. Debug builds use the compiled app
-identifier with a `-dev` suffix (normally `co.opensoftware.june-dev`; proof
+identifier with a `-dev` suffix (normally `dev.guilhermexp.clovy-dev`; proof
 builds use a run-owned identifier). SQLCipher uses a random 32-byte raw key
 in the system credential vault:
-- On macOS, Keychain service `co.opensoftware.clovy.activity-db`
-  (`co.opensoftware.clovy-dev.activity-db` in debug builds), account `sqlcipher-key`.
+- On macOS, Keychain service `dev.guilhermexp.clovy.activity-db`
+  (`dev.guilhermexp.clovy-dev.activity-db` in debug builds), account `sqlcipher-key`.
 - On Windows, Windows Credential Manager via `keyring` with identical service
-  names (`co.opensoftware.clovy.activity-db` canonical,
-  `co.opensoftware.clovy-dev.activity-db` dev) and user `sqlcipher-key`.
+  names (`dev.guilhermexp.clovy.activity-db` canonical,
+  `dev.guilhermexp.clovy-dev.activity-db` dev) and user `sqlcipher-key`.
 
 WAL mode, `auto_vacuum = INCREMENTAL`. A file without its key is unreadable
 ("file is not a database"). Windows builds require Strawberry Perl and NASM on

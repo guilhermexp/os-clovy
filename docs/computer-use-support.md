@@ -6,9 +6,8 @@ signed helper, macOS access for it, and a visible attended CLI turn
 Clovy vision model or remote rollout). Do not treat one as proof that the
 others are enabled.
 
-The shipped helper bundle names and development executable aliases documented
-below retain their June-era technical identities under
-[ADR-0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
+Names and identifiers below follow
+[ADR-0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md).
 
 ## State guide
 
@@ -26,12 +25,12 @@ below retain their June-era technical identities under
 
 1. Press Stop current task before changing permissions or reinstalling.
 2. Confirm the intended helper exists in the installed app at
-   `Contents/Resources/native/bin/June Computer Use Driver.app` and has bundle
-   identifier `co.opensoftware.june.computer-use-driver`. A packaged helper
+   `Contents/Resources/native/bin/Clovy Computer Use Driver.app` and has bundle
+   identifier `dev.guilhermexp.clovy.computer-use-driver`. A packaged helper
    also requires the signed outer Clovy app with the same Developer ID team.
 3. In System Settings > Privacy & Security, inspect Accessibility and Screen
-   Recording separately. Accessibility names `June Computer Use Driver`;
-   Screen Recording names the outer `June` app because macOS assigns capture to
+   Recording separately. Accessibility names `Clovy Computer Use Driver`;
+   Screen Recording names the outer `Clovy` app because macOS assigns capture to
    the responsible launcher. If either entry is absent, drag the matching card
    from Clovy into that pane: the helper card for Accessibility, or the outer
    Clovy card for Screen Recording. Removing a macOS grant may require Clovy to
@@ -72,12 +71,12 @@ Accessibility granted to the helper and Screen Recording granted to the outer
 certificate, or `CLOVY_DEV_SIGNING_IDENTITY=-` is a new identity for macOS and
 asks again. To repeat the first-permission walkthrough on purpose, remove the
 entries in System Settings, or run `tccutil reset Accessibility
-co.opensoftware.june.computer-use-driver.dev.w<worktree>` and `tccutil reset
-ScreenCapture co.opensoftware.june.dev` yourself.
+dev.guilhermexp.clovy.computer-use-driver.dev.w<worktree>` and `tccutil reset
+ScreenCapture dev.guilhermexp.clovy.dev` yourself.
 
 The Tauri dev runner starts the app from
-`target/<profile>/Clovy Dev.app/Contents/MacOS/os-june`. The authenticated
-debug helper accepts only `os-june` in one of this checkout's Cargo profile
+`target/<profile>/Clovy Dev.app/Contents/MacOS/clovy`. The authenticated
+debug helper accepts only `clovy` in one of this checkout's Cargo profile
 directories (marked by Cargo's `.cargo-lock`): Cargo's own binary, or the main
 executable of a bundle directly inside that directory. Other names, deeper
 bundles, and paths outside this checkout's target tree are refused. If the
@@ -87,10 +86,10 @@ boundary:
 
 ```sh
 node scripts/computer-use-self-test.mjs --permissions-only \
-  --host "src-tauri/target/debug/Clovy Dev.app/Contents/MacOS/os-june"
+  --host "src-tauri/target/debug/Clovy Dev.app/Contents/MacOS/clovy"
 ```
 
-The production helper always keeps `co.opensoftware.june.computer-use-driver`
+The production helper always keeps `dev.guilhermexp.clovy.computer-use-driver`
 and its release signature.
 
 ## Build and release diagnosis
@@ -100,7 +99,7 @@ staging helper:
 
 ```sh
 pnpm computer-use:prepare
-cargo build --manifest-path src-tauri/Cargo.toml --bin os-june --locked
+cargo build --manifest-path src-tauri/Cargo.toml --bin clovy --locked
 pnpm computer-use:self-test
 ```
 

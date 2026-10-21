@@ -5,18 +5,13 @@ signed, notarized and published builds belonged to the original organization
 and were removed by the `desvincular-repo-ci` change. Build the app locally and
 validate the bundle with the checks below.
 
-`Clovy_*` names are the canonical build artifacts. June-named artifact aliases
-and the installed `June.app` path remain
-compatibility identities under
-[ADR-0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
-The bundle keeps `CFBundleDisplayName=June` in its base `Info.plist` so macOS
-recognizes that the physical `June.app` path has not been renamed, then maps the
-localized display name to Clovy through `en.lproj/InfoPlist.strings`. Finder and
-newly pinned Dock items therefore present Clovy while updater and permission
-continuity stay attached to `June.app`. A Dock item pinned before the rebrand
-may retain its own cached `June` label after an in-place update. macOS exposes
-no supported application API for rewriting that per-user Dock state; remove the
-old item and choose **Keep in Dock** again once to refresh it to Clovy.
+The build is `Clovy.app` (bundle identifier `dev.guilhermexp.clovy`,
+executable `clovy`), per
+[ADR-0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md).
+`node scripts/verify-macos-app-name.mjs <path-to-Clovy.app>` checks the bundle
+name, identifier, executable and the name Finder shows. The first launch copies
+the June-era profile and credentials once; the old `June.app` and its data stay
+untouched until the owner removes them.
 
 ## macOS support
 
@@ -45,7 +40,7 @@ pnpm tauri:build:signed-dmg
 Install the built app into `/Applications` and run:
 
 ```sh
-APP="/Applications/June.app"
+APP="/Applications/Clovy.app"
 DMG="<path to the built Clovy_universal.dmg>"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
@@ -54,9 +49,9 @@ spctl --assess --type install --verbose "$DMG"
 xcrun stapler validate "$APP"
 xcrun stapler validate "$DMG"
 plutil -extract CFBundleURLTypes xml1 -o - "$APP/Contents/Info.plist"
-lipo -archs "$APP/Contents/MacOS/os-june"
-lipo -archs "$APP/Contents/Resources/native/bin/June Dictation Helper.app/Contents/MacOS/june-dictation-helper"
-lipo -archs "$APP/Contents/Resources/native/bin/June.app/Contents/MacOS/june-system-audio-recorder"
+lipo -archs "$APP/Contents/MacOS/clovy"
+lipo -archs "$APP/Contents/Resources/native/bin/Clovy Dictation Helper.app/Contents/MacOS/clovy-dictation-helper"
+lipo -archs "$APP/Contents/Resources/native/bin/Clovy Audio Capture.app/Contents/MacOS/clovy-system-audio-recorder"
 RUNTIME="$APP/Contents/Resources/native/bin/clovy-agent-runtime"
 test "$(shasum -a 256 "$RUNTIME" | awk '{print $1}')" = "$(cat "$RUNTIME.sha256")"
 codesign --verify --strict --verbose=2 "$RUNTIME"
@@ -64,7 +59,7 @@ codesign --verify --strict --verbose=2 "$RUNTIME"
 /usr/bin/arch -x86_64 "$RUNTIME"
 ```
 
-Confirm `osjune` appears in `CFBundleURLSchemes` and each `lipo` command
+Confirm `clovy` appears in `CFBundleURLSchemes` and each `lipo` command
 prints both `x86_64` and `arm64`. The runtime checksum and signature must pass,
 and both architecture commands must execute successfully. On an
 Apple Silicon validation host, the x86_64 command is a real Rosetta execution,

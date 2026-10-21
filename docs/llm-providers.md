@@ -17,7 +17,7 @@ Models). Transcription always stays on Clovy API (CLIs do not transcribe).
 | `llm/process.rs` | Child runner: own process group, timeout kills the whole group, group swept after exit, 8 MiB output cap |
 | `llm/endpoint.rs` | OpenAI-compatible `/chat/completions` one-shot calls, structured-output ladder probe, RPM pacing |
 | `llm/registry.rs` | Persisted registry (endpoints, per-use selection, measured levels), legacy migration, validation |
-| `llm/secrets.rs` | Keychain store for endpoint keys (`co.opensoftware.clovy.llm-providers`, `co.opensoftware.clovy-dev.llm-providers` in debug); in-memory under `cargo test` |
+| `llm/secrets.rs` | Keychain store for endpoint keys (`dev.guilhermexp.clovy.llm-providers`, `dev.guilhermexp.clovy-dev.llm-providers` in debug); in-memory under `cargo test` |
 | `llm/commands.rs` | Tauri commands (below) |
 
 ## Generation API for feature code

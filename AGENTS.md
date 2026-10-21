@@ -229,14 +229,13 @@ build scripts in `pnpm-workspace.yaml` — live in
 
 ## Boundaries
 
-- **Clovy-canonical identity migrates through a compatibility bridge.** New
-  package, service, environment, credential, storage, native-host, deep-link,
-  and artifact names use Clovy. Preserve every released June-era reader with
-  canonical-first fallback, copy-on-read, dual-write, or published aliases as
-  appropriate. Keep immutable bundle, executable, updater, OS Platform, and
-  externally provisioned identities until a verified transfer exists. Never
-  remove an alias without satisfying the retirement gates in
-  [ADR-0055](docs/adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
+- **Clovy has its own identity.** The app is `dev.guilhermexp.clovy`
+  (`Clovy.app`, executable `clovy`); Rust spells the identifier only in
+  `src-tauri/src/app_identity.rs`, and credential services derive from the
+  compiled identifier. The June-era names survive only as sources of the
+  one-time `identity_migration` and of one-way reads; never write a June-era
+  name again ([ADR-0068](docs/adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md),
+  superseding ADR-0055).
 - **Service-managed upstream provider keys live only in Clovy API, never in the desktop binary.**
   Keys for Groq, OpenRouter, fal and Tavily, and the OS Accounts App API key,
   belong to Clovy API. Explicit user BYOK credentials stay in the local
@@ -271,8 +270,11 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
 - **OpenSpec** (`openspec/`, pt-BR) holds what to build for fork features;
   `specs/` stays the upstream Spec Kit history. Scenarios carry `Test:` stamps.
 - **Data safety:** never run against the real install data
-  (`~/Library/Application Support/co.opensoftware.june`). Debug builds already
-  use the isolated `co.opensoftware.june-dev` dirs; never set
+  (`~/Library/Application Support/dev.guilhermexp.clovy`, and the June-era
+  `co.opensoftware.june` it migrates from). Debug builds use the isolated
+  `dev.guilhermexp.clovy-dev` dirs (a default-identity dev build migrates the
+  owner's `co.opensoftware.june-dev` into it on first launch, so never launch
+  one before the owner does); never set
   `OS_CLOVY_USE_PROD_DATA_DIR` in tests or verification. Keychain items created
   by dev builds must use a `-dev` service suffix.
   Persisted Rust paths must use `app_paths::app_data_dir` or
@@ -300,12 +302,16 @@ Gates (run from the repo root, judge by failure count per the notes above):
 
 Functional proof (Reality) for desktop features:
 
-1. Isolation: debug builds only. The owner's `co.opensoftware.june-dev` profile
+1. Isolation: debug builds only. The owner's `dev.guilhermexp.clovy-dev` profile
    is not a throwaway fixture. For automation compile a separate identifier:
-   `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"co.opensoftware.june.timelineproof","bundle":{"createUpdaterArtifacts":false}}'`
+   `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"dev.guilhermexp.clovy.timelineproof","bundle":{"createUpdaterArtifacts":false}}'`
    (Node 24 PATH below). Choose a run-owned identifier/profile; copy the dev
    profile without its live MCP socket before launch. This example uses
-   `~/Library/Application Support/co.opensoftware.june.timelineproof-dev`.
+   `~/Library/Application Support/dev.guilhermexp.clovy.timelineproof-dev`.
+   A proof identifier never migrates the June-era profile; to prove the
+   migration, set the debug-only `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE=<id>` to
+   a synthetic source profile `<id>-dev` (and `<id>-dev.<name>` credential
+   services) the run created.
    Copy the bundle into the evidence folder, re-sign ad hoc if needed
    (`codesign --force --deep -s -`), open by exact path, and verify the process's
    database paths with `lsof` before changing settings or generating reports.
@@ -314,16 +320,17 @@ Functional proof (Reality) for desktop features:
    Bind Computer Use to that exact bundle path. If the main window is hidden,
    `open -a <exact-bundle-path>` reopens it. macOS permissions belong to the
    proof app itself; the owner grants them in Privacy & Security when needed.
-   Never open or look up bundle id `co.opensoftware.june`; never launch an old
+   Never open or look up bundle id `dev.guilhermexp.clovy` or the June-era
+   `co.opensoftware.june`; never launch an old
    proof binary against a profile with a newer database schema. Stop only
    processes started by this run.
-   Startup may create the shared `~/Library/LaunchAgents/June.plist` even for
+   Startup may create the shared `~/Library/LaunchAgents/Clovy.plist` even for
    a proof bundle. Check its `ProgramArguments`: undo this run's autostart
    through Settings → General only when it points to this run's exact bundle,
    and verify the entry is gone. Never remove another app's login entry.
    Never create, unlock, or switch keychains, and never change the default
-   keychain or its search list: the app reads its keys from `login` (`-dev`
-   services). Only one native proof runs on the machine at a time; parallel
+   keychain or its search list: the app reads its keys from `login`
+   (`<identifier>-dev.<name>` services). Only one native proof runs on the machine at a time; parallel
    workers do not open the app. A macOS password dialog on the owner's screen
    is an incident: stop this run's processes and report it.
 2. Readiness: wait for the main window; macOS permissions the feature needs

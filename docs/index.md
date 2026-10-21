@@ -65,7 +65,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0052](adr/0052-companion-media-results-use-canonical-artifacts.md) - companion image/video results reuse canonical agent artifacts and cross E2EE only as bounded references plus verified full-file chunks (superseded in this fork: the desktop companion was removed)
 - [adr/0053](adr/0053-companion-computer-use-approvals-are-one-shot.md) - linked companions may approve one exact Computer use interruption under the desktop policy ceiling, with a short-lived one-shot permit (superseded in this fork: the desktop companion was removed)
 - [adr/0054](adr/0054-clovy-presentation-retains-june-era-technical-identities.md) - Clovy is the product name while shipped June-era bundle, storage, API, update, and tool identities remain stable
-- [adr/0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md) - supersedes ADR-0054: Clovy becomes canonical through idempotent migration and rollback-safe aliases while immutable OS identities preserve existing installs
+- [adr/0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md) - (superseded by ADR-0068) supersedes ADR-0054: Clovy becomes canonical through idempotent migration and rollback-safe aliases while immutable OS identities preserve existing installs
 - [adr/0056](adr/0056-interface-language-uses-an-in-repo-typed-catalog.md) - interface language (English, Português (Brasil)) uses an in-repo typed catalog, a localStorage preference independent of the transcription language, and a Tauri event mirrored into the native menus
 - [adr/0057](adr/0057-activity-database-uses-sqlcipher-linked-app-wide.md) - the activity database is a separate SQLCipher file with a Keychain key; SQLCipher is linked app-wide on macOS and the unkeyed main database is unaffected
 - [adr/0058](adr/0058-clovy-mcp-server-relays-to-the-running-app.md) - the Clovy MCP server is a stdio relay (`clovy-mcp`) to the running app over a same-user Unix socket with an installation secret; the binary never opens the databases
@@ -78,6 +78,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0065](adr/0065-dictation-calls-the-users-own-provider-directly.md) - with the user's own Groq or OpenRouter key, dictation transcription and cleanup go straight from the desktop to that provider carrying only that key; service keys stay in Clovy API
 - [adr/0066](adr/0066-github-connector-can-ride-the-github-cli-login.md) - the GitHub connector can connect on its own through a signed-in GitHub CLI (`credentialSource: "gh"`), reading the token from `gh` on every call and never storing it; read only at first, disconnect turns the automation off (amends ADR-0036)
 - [adr/0067](adr/0067-computer-use-depends-only-on-local-gates.md) - Computer use is ready from the grant, the pinned driver and macOS permissions alone: no Pro/Max plan, Clovy vision model or remote rollout; the tool is offered only to CLI turns through `clovy-mcp` (amends ADR-0028)
+- [adr/0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md) - supersedes ADR-0055: the app becomes `dev.guilhermexp.clovy` (`Clovy.app`, `clovy`), the extension gets the owner's key pair, and the first launch copies the June-era profile and credentials once; the compatibility bridges are removed
 
 ## Enforceable rules (spec/)
 

@@ -1,22 +1,20 @@
-# Clovy browser extension: store identity and local packaging
+# Clovy browser extension: identity and local packaging
 
-The Chrome Web Store release pipeline (RC submission, stable promotion, keyless
-GitHub OIDC publishing) belonged to the original organization's desktop
-release flow and was removed by the `desvincular-repo-ci` change. There is no
-automated store publication in this repository. What remains is the store
-identity the code is pinned to and the local build and checks.
+There is no store publication in this repository: the extension is loaded
+unpacked from `extension/dist`. Its identity follows
+[ADR-0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md).
 
-`Clovy-extension.zip` is the canonical artifact name. The existing store item
-identity remains unchanged for installed-extension continuity under
-[ADR-0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
+`Clovy-extension.zip` is the canonical artifact name.
 
-## Store identity
+## Identity
 
-- The store item ID is `jfpogffllplkfoooiaibjkojkngbdnik`. Its public key is
-  mirrored into `extension/public/manifest.json` `key` and the ID into
-  `EXTENSION_ID` in `src-tauri/src/extension_host.rs`, so load-unpacked builds
-  share the store item's ID. If the item is ever recreated, adopt the new key
-  and ID the same way.
+- The extension ID is `cmfpkfaibipkocbjcpgamaednndpopcp`. It derives from the
+  `key` in `extension/public/manifest.json`, the public half of the owner's
+  own RSA key pair; the private half never enters the repository. The ID is
+  pinned in `EXTENSION_ID` (`src-tauri/src/extension_host.rs`) and checked by
+  `scripts/validate-extension-id.mjs`. If the key pair is ever replaced, update
+  the three together.
+- The native messaging host is `dev.guilhermexp.clovy.extension`.
 - The Chrome Web Store rejects any uploaded manifest that contains a `key`
   field ("key field is not allowed in manifest"); strip it from
   `extension/dist/manifest.json` before zipping a package for the store.
