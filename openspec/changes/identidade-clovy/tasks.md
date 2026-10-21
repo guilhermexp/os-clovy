@@ -37,3 +37,18 @@
   - Caso A (app antigo rodando): recusa com mensagem clara e nenhum perfil criado. O alerta não foi capturado nesta sessão.
   - Caso B: caminhos reescritos (gravação e workspace), notas e atividade lidas pelo app, origem igual por hash.
   - Windows não repetido; o código só-Windows novo usa apenas `std` e não foi compilado lá.
+
+## 6. Segunda revisão (J1–J7)
+
+- [x] 6.1 RED `4125a3af`: 6 falhas (`review2-red.txt`).
+- [x] 6.2 GREEN `2d1a7d3d`, 29/29 (`review2-green.txt`):
+  - J1/J7: lock de SO (flock/LockFileEx) com prazo e erro bloqueante;
+  - J2: retomada que falha bloqueia e preserva o estado;
+  - J3: fsync do staging, do journal e da pasta; journal ilegível bloqueia e fica;
+  - J4/J5: JSON reescrito folha a folha, só onde um caminho começa pela raiz;
+  - J6: falha do `tasklist` é erro.
+  - `e82bfd44`: flush por handle gravável (achado no CI Windows).
+- [x] 6.3 Docs: ADR-0068 (`b29e8251`) e `owner-first-launch.md` (estado de recuperação preservado).
+- [x] 6.4 `make verify` exit 0 (`make-verify-6.txt`). Falhas de carga fora desta change em `flaky.txt`.
+- [x] 6.5 Prova no Mac, caso B (`mac-review2/report.md`): `args_json` igual à raiz reescrito e workspace externo com a raiz como sufixo intacto. Houve um incidente com um diálogo do Keychain, registrado no report.
+- [x] 6.6 CI Windows 39666093272 (`mac-review2/windows-ci.md`): compila; os 4 testes `identity_migration` selecionados passam; as falhas restantes estão em `activity::windows`, não tocado.
