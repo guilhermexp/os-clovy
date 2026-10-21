@@ -588,11 +588,12 @@ pub fn run_at_startup() {
             None
         },
     };
-    let mut plan = plan(&dirs, target, debug, &source);
+    let plan = plan(&dirs, target, debug, &source);
     #[cfg(target_os = "macos")]
-    if let Some(bundle) = macos_bundle_identifier() {
-        retarget_webkit(&mut plan, &dirs, target, &source.identifier, &bundle);
-    }
+    let plan = match macos_bundle_identifier() {
+        Some(bundle) => retarget_webkit(plan, &dirs, target, &source.identifier, &bundle),
+        None => plan,
+    };
     let result = migrate(&plan, &SystemStore, &mut StdCopier);
     let line = match &result {
         Ok(Outcome::Skipped(_)) => return,
@@ -621,14 +622,14 @@ pub fn run_at_startup() {}
 /// proof bundle sets to the bare identifier instead of `<identifier>.dev`.
 #[cfg(target_os = "macos")]
 fn retarget_webkit(
-    plan: &mut MigrationPlan,
+    mut plan: MigrationPlan,
     dirs: &PlatformDirs,
     target: &str,
     source: &str,
     bundle: &str,
-) {
+) -> MigrationPlan {
     let (Some(webkit), Some(suffix)) = (&dirs.webkit, bundle.strip_prefix(target)) else {
-        return;
+        return plan;
     };
     for copy in &mut plan.extra_directories {
         if copy.target.parent() == Some(webkit.as_path()) {
@@ -636,6 +637,7 @@ fn retarget_webkit(
             copy.source = webkit.join(format!("{source}{suffix}"));
         }
     }
+    plan
 }
 
 #[cfg(target_os = "macos")]
@@ -711,7 +713,7 @@ fn platform_accounts(service: &str) -> Result<Vec<String>, String> {
 fn platform_accounts(service: &str) -> Result<Vec<String>, String> {
     use windows::Win32::Foundation::ERROR_NOT_FOUND;
     use windows::Win32::Security::Credentials::{
-        CredEnumerateW, CredFree, CREDENTIALW, CRED_ENUMERATE_FLAGS, CRED_TYPE_GENERIC,
+        CredEnumerateW, CredFree, CREDENTIALW, CRED_TYPE_GENERIC,
     };
 
     let mut count = 0_u32;
@@ -721,7 +723,7 @@ fn platform_accounts(service: &str) -> Result<Vec<String>, String> {
     let listed = unsafe {
         CredEnumerateW(
             windows::core::PCWSTR::null(),
-            CRED_ENUMERATE_FLAGS(0),
+            None,
             &mut count,
             &mut credentials,
         )
