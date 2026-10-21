@@ -500,6 +500,6 @@ pub async fn grant_bundles(
     stored(repos, account_id).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "github_cli_tests.rs"]
 mod tests;

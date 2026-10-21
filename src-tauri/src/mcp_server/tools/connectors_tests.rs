@@ -572,6 +572,7 @@ impl ConnectorDriver for GhDriver {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn gh_account_write_needs_the_bundle_and_an_approval_before_it_reaches_github() {
     use crate::connectors::github_cli::{self, ConnectMode};
