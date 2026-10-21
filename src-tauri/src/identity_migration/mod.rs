@@ -923,18 +923,23 @@ pub fn run_at_startup() {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn alert(message: &str) {
     let message = format!("Clovy could not move your data to its new identity yet.\n\n{message}");
+    // Shown by Clovy itself on the main thread: an alert from a helper
+    // process can be dismissed without ever reaching the owner.
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("/usr/bin/osascript")
-        .args([
-            "-e",
-            "on run argv",
-            "-e",
-            "display alert \"Clovy\" message (item 1 of argv) as critical",
-            "-e",
-            "end run",
-            &message,
-        ])
-        .status();
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        use objc2_app_kit::{NSAlert, NSAlertStyle, NSApplication, NSApplicationActivationPolicy};
+        use objc2_foundation::NSString;
+
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        let alert = NSAlert::new(mtm);
+        alert.setAlertStyle(NSAlertStyle::Critical);
+        alert.setMessageText(&NSString::from_str("Clovy"));
+        alert.setInformativeText(&NSString::from_str(&message));
+        alert.runModal();
+    }
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("powershell")
         .args([
