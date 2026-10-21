@@ -43,11 +43,19 @@ to macOS, Windows, browsers and credential stores.
   setup hook). When the new data directory is absent or empty and the June-era
   one exists, it copies the data and config directories, the WebView store and
   every credential item (including the SQLCipher key of `activity.sqlite3`)
-  into the new names. The copy is staged beside the target, verified by file
-  count and size, the credentials are written, and only then are the staged
-  folders renamed into place. Any failure removes everything the run created,
-  so the new profile stays empty. The source is never moved, changed or
-  deleted.
+  into the new names. The copy is staged beside the target and verified by
+  file count and size. Databases travel as `VACUUM INTO` snapshots (the
+  SQLCipher one with the copied key) taken from a private scratch copy, so
+  the source is never opened. Every path into the old profile (database
+  text, WebKit localStorage, small text files, symlinks) is rewritten to the
+  new one. The credentials are written, refusing a target credential that
+  already holds a different value, and only then are the staged folders
+  renamed into place, the data folder last, under a journal that lets the
+  next launch finish or undo an interrupted publication. A lock per target
+  keeps two launches apart. Nothing is copied while the old app runs: the
+  launch shows an alert and quits, so the next one can migrate. Any other
+  failure removes everything the run created, so the new profile stays
+  empty. The source is never moved, changed or deleted.
 - The June-era names survive only as migration sources: the source list in
   `identity_migration`, and one-way reads of a June-era persona file, Obsidian
   skill copy or skill setting row. Nothing June-era is written again. The
@@ -65,10 +73,13 @@ to macOS, Windows, browsers and credential stores.
   only under the default identifier. Proofs use their own identifier plus the
   debug-only `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE`, which names a synthetic
   source profile and never falls back to the June one.
-- A migration that fails (a denied Keychain prompt, a locked file) leaves the
-  app on an empty new profile with the June-era one intact; the error is logged
-  beside the new folder (`<identifier>[-dev].identity-migration.log`). The
-  owner can quit, delete the empty new folder and relaunch to retry.
+- A migration that fails (a denied Keychain prompt, a conflicting target
+  credential) leaves the app on an empty new profile with the June-era one
+  intact; the error is logged beside the new folder
+  (`<identifier>[-dev].identity-migration.log`). To retry, the owner quits,
+  deletes the new folder and any `<identifier>[-dev].*` credential the failed
+  launch created (the activity key `<identifier>[-dev].activity-db` above
+  all), and relaunches.
 - Released June-era wire and persisted names that are not identity (Clovy API
   headers and error codes, toolset ids such as `june_gmail`, the
   `__june_*__` model prefixes) are out of scope and stay as they are.

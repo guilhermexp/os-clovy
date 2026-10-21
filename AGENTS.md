@@ -311,7 +311,9 @@ Functional proof (Reality) for desktop features:
    A proof identifier never migrates the June-era profile; to prove the
    migration, set the debug-only `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE=<id>` to
    a synthetic source profile `<id>-dev` (and `<id>-dev.<name>` credential
-   services) the run created.
+   services) the run created; `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE_APP=<name>`
+   names that profile's "old app" executable, which blocks the copy while it
+   runs.
    Copy the bundle into the evidence folder, re-sign ad hoc if needed
    (`codesign --force --deep -s -`), open by exact path, and verify the process's
    database paths with `lsof` before changing settings or generating reports.
