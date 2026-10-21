@@ -20,14 +20,8 @@ use std::{
 };
 use tauri::AppHandle;
 
-// The deployed production API (Phala dstack; see clovy-api/deploy/
-// docker-compose.production.yml). NOT .network — that hostname has no DNS
-// record, and the v0.0.3 DMG shipped pointing at it.
-// The June-era hostname is a permanent compatibility endpoint for released
-// clients. Do not switch this default until a Clovy hostname exists and this
-// origin remains a verified alias.
-const DEFAULT_CLOVY_API_URL: &str = "https://june-api.opensoftware.co";
-const DEFAULT_SHARE_BASE_URL: &str = "https://june.link";
+// The owner's own clovy-api, run locally; `CLOVY_API_URL` points elsewhere.
+const DEFAULT_CLOVY_API_URL: &str = "http://127.0.0.1:8080";
 // Nemotron 3 Nano over GLM 5.2: dictation is latency-critical and nano ran
 // ~0.8s per utterance vs GLM's 2-4s (12s outliers), which felt too slow in
 // daily use. Known nano tradeoffs, accepted for speed: explicit unnumbered
@@ -2325,19 +2319,10 @@ pub fn verify_url() -> String {
     format!("{}/verify", clovy_api_url())
 }
 
-/// Origin that share links point at (`{origin}/s/{share_id}#…`). Production
-/// uses the short branded hostname; local and staging builds stay on their
-/// configured Clovy API origin so they never depend on production.
+/// Origin that share links point at (`{origin}/s/{share_id}#…`): the
+/// configured Clovy API serves them.
 pub fn share_base_url() -> String {
-    share_base_url_for_api(&clovy_api_url())
-}
-
-fn share_base_url_for_api(api_url: &str) -> String {
-    if api_url == DEFAULT_CLOVY_API_URL {
-        DEFAULT_SHARE_BASE_URL.to_string()
-    } else {
-        api_url.to_string()
-    }
+    clovy_api_url()
 }
 
 /// Final assistant text from a chat completion, normalized for reasoning
@@ -3497,34 +3482,6 @@ mod tests {
                 Some("https://built.example.test")
             ),
             "https://runtime.example.test"
-        );
-    }
-
-    #[test]
-    fn share_links_use_the_default_server_origin() {
-        assert_eq!(
-            share_base_url_for_api(&resolve_clovy_api_url(None, None)),
-            "http://127.0.0.1:8080"
-        );
-    }
-
-    #[test]
-    fn production_share_links_use_the_short_domain() {
-        assert_eq!(
-            share_base_url_for_api(DEFAULT_CLOVY_API_URL),
-            DEFAULT_SHARE_BASE_URL
-        );
-    }
-
-    #[test]
-    fn nonproduction_share_links_stay_on_the_configured_api_origin() {
-        assert_eq!(
-            share_base_url_for_api("http://127.0.0.1:8080"),
-            "http://127.0.0.1:8080"
-        );
-        assert_eq!(
-            share_base_url_for_api("https://clovy-api-staging.opensoftware.co"),
-            "https://clovy-api-staging.opensoftware.co"
         );
     }
 

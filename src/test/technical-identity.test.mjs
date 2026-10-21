@@ -508,7 +508,6 @@ describe("Clovy technical identity", () => {
       read(".github/workflows/promote-clovy-api.yml"),
     ]);
 
-    expect(desktopApi).toContain('"https://june-api.opensoftware.co"');
     expect(desktopApi).toContain('b"june-api-operation-id-v1\\0"');
     expect(desktopApi).toContain('format!("june-op-');
     expect(canonicalHeader).toContain("clovy_crypto_generate_identity");
