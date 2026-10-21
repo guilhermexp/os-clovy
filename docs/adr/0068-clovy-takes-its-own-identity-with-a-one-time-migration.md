@@ -46,20 +46,26 @@ to macOS, Windows, browsers and credential stores.
   into the new names. The copy is staged beside the target and verified by
   file count and size. Databases travel as `VACUUM INTO` snapshots (the
   SQLCipher one with the copied key) taken from a private scratch copy, so
-  the source is never opened. Every path into the old profile (database
-  text, JSON values string by string, WebKit localStorage, small text files,
-  symlinks) is rewritten to the new one, but only where a path starts with
-  the old folder, so an external path that merely contains it stays. The credentials are written, refusing a target credential that
+  the source is never opened. Only the places where the app stores paths into
+  its own profile are rewritten: a fixed list of columns (recordings, audio
+  artifacts, agent workspaces and artifacts, MCP server command and
+  arguments, coding-agent cwd), JSON path keys (attachments, workspace,
+  path), the WebKit queued follow-ups, `extension-host-path` and symlink
+  targets, and only when the value is the old root or the root followed by a
+  separator. Notes, transcripts, chat messages, captured activity and any
+  other file keep their text, even where it mentions the old folder. The
+  credentials are written, refusing a target credential that
   already holds a different value, and only then are the staged folders
   renamed into place, the data folder last, under a journal that lets the
   next launch finish or undo an interrupted publication; staging, journal and
   folders are flushed to disk before publishing. A resume that cannot finish,
   or a journal that cannot be read, stops the launch and keeps everything as
   it is. An operating-system lock per target (flock, LockFileEx) keeps two
-  launches apart. Nothing is copied while the old app runs: the
-  launch shows an alert and quits, so the next one can migrate. Any other
-  failure removes everything the run created, so the new profile stays
-  empty. The source is never moved, changed or deleted.
+  launches apart. Nothing is copied while the old app runs. Any failure
+  removes everything the run created (unless a journal must be kept to
+  finish it) and stops the launch with an alert, so the new profile stays
+  empty and nobody starts using it by mistake. The source is never moved,
+  changed or deleted.
 - The June-era names survive only as migration sources: the source list in
   `identity_migration`, and one-way reads of a June-era persona file, Obsidian
   skill copy or skill setting row. Nothing June-era is written again. The
@@ -77,13 +83,12 @@ to macOS, Windows, browsers and credential stores.
   only under the default identifier. Proofs use their own identifier plus the
   debug-only `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE`, which names a synthetic
   source profile and never falls back to the June one.
-- A migration that fails (a denied Keychain prompt, a conflicting target
-  credential) leaves the app on an empty new profile with the June-era one
-  intact; the error is logged beside the new folder
-  (`<identifier>[-dev].identity-migration.log`). To retry, the owner quits,
-  deletes the new folder and any `<identifier>[-dev].*` credential the failed
-  launch created (the activity key `<identifier>[-dev].activity-db` above
-  all), and relaunches.
+- A migration that fails stops the launch with an alert and leaves the new
+  profile empty and the June-era one intact; the error is logged beside the
+  new folder (`<identifier>[-dev].identity-migration.log`). The owner fixes the
+  cause and relaunches. Only when the log names a conflicting credential does
+  the owner delete that new `<identifier>[-dev].*` item; with a journal
+  present, nothing is cleaned up by hand.
 - Released June-era wire and persisted names that are not identity (Clovy API
   headers and error codes, toolset ids such as `june_gmail`, the
   `__june_*__` model prefixes) are out of scope and stay as they are.
