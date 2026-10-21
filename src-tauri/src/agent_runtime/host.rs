@@ -1232,15 +1232,6 @@ fn tool_payload(params: &Value, status: &str) -> ToolPayload {
     }
 }
 
-fn is_computer_use_approval(params: &Value) -> bool {
-    params
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("approval")
-        == "approval"
-        && params.get("toolName").and_then(Value::as_str) == Some("computer_use")
-}
-
 fn resolve_runtime_command(app: &AppHandle) -> Result<(PathBuf, Vec<PathBuf>), AppError> {
     if cfg!(debug_assertions) {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1792,22 +1783,6 @@ mod tests {
             interruption_stable_id(&json!({}), "transport-event-c"),
             "transport-event-c"
         );
-    }
-
-    #[test]
-    fn only_computer_use_approval_interruptions_are_remotely_routable() {
-        assert!(is_computer_use_approval(
-            &json!({ "toolName": "computer_use" })
-        ));
-        assert!(is_computer_use_approval(
-            &json!({ "kind": "approval", "toolName": "computer_use" })
-        ));
-        assert!(!is_computer_use_approval(
-            &json!({ "kind": "secret", "toolName": "computer_use" })
-        ));
-        assert!(!is_computer_use_approval(
-            &json!({ "kind": "approval", "toolName": "run_shell" })
-        ));
     }
 
     #[tokio::test]

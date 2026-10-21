@@ -28,7 +28,7 @@ curated). `clovy-api/.env.example` and `config.toml` are authoritative.
 | Var | Purpose | Default |
 |-----|---------|---------|
 | `CLOVY_API_URL` | Clovy API base URL the app calls; share links use its origin | `http://127.0.0.1:8080` |
-| `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` / `_USER_ID` | The fixed local identity (there is no sign-in): bearer token sent to Clovy API and the local user id | `local-dev-token` / `usr_local_dev` |
+| `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` | The fixed local identity (there is no sign-in): bearer token sent to Clovy API | `local-dev-token` |
 | `OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store connector tokens in a file, not the Keychain (avoids prompts) | `0` |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Google Desktop OAuth credential for Gmail/Calendar connectors. Google requires both at token exchange; the second value is not confidential in an installed app and grants no user-data access by itself | unset |
 | `OS_NOTETAKER_TRANSCRIPTION_LANGUAGE` | Optional ISO-639-1 language hint | unset |

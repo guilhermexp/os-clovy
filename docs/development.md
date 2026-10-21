@@ -51,8 +51,7 @@ Restart `pnpm tauri:dev` after changing the root `.env`. The running Tauri
 process does not reload client configuration.
 
 The desktop app has no sign-in, billing or credit charges: it always runs on a
-fixed local identity (`src-tauri/src/local_identity.rs`), user
-`OS_CLOVY_LOCAL_DEV_USER_ID` (default `usr_local_dev`) and bearer token
+fixed local identity (`src-tauri/src/local_identity.rs`), the bearer token
 `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` (default `local-dev-token`), and calls Clovy
 API at `http://127.0.0.1:8080` unless `CLOVY_API_URL` says otherwise. The
 example env files run Clovy API in local mode, which accepts that bearer token.

@@ -46,8 +46,7 @@ longer signs in to it or reads accounts, plans or balances from it; it uses the
 _Avoid_: accounts, the identity service, the auth service.
 
 **Local identity**:
-The desktop's only identity: a fixed local user (`usr_local_dev`, or
-`OS_CLOVY_LOCAL_DEV_USER_ID`) and the bearer token sent to Clovy API
+The desktop's only identity: the bearer token sent to Clovy API
 (`OS_CLOVY_LOCAL_DEV_BEARER_TOKEN`, default `local-dev-token`), from
 `src-tauri/src/local_identity.rs`. There is no sign-in, so the app is always
 connected.
