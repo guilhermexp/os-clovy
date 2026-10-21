@@ -12,7 +12,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 
 - [adr/0001](adr/0001-auto-updates-via-tauri-updater.md) — auto-updates via the Tauri updater on a separate public releases repo
 - [adr/0002](adr/0002-live-transcript-preview-strategy.md) — live transcript preview as an ephemeral companion, not the source of truth
-- [adr/0003](adr/0003-release-candidate-channel-and-promotion.md) — rc channel + promote-to-stable (every stable release starts as an RC)
+- [adr/0003](adr/0003-release-candidate-channel-and-promotion.md) — rc channel + promote-to-stable (every stable release starts as an RC) (superseded by desvincular-repo-ci)
 - [adr/0004](adr/0004-out-of-process-system-audio-helper.md) — macOS system audio via an out-of-process helper (file IPC + Unix signals)
 - [adr/0005](adr/0005-source-separated-audio-capture.md) — one WAV per source, re-interleaved as turns
 - [adr/0006](adr/0006-embed-hermes-sandboxed-runtime.md) — embed the pinned Hermes runtime as sandboxed child processes (superseded by ADR-0038)
@@ -34,7 +34,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0021](adr/0021-june-api-v1-compatibility-policy.md) — `/v1` is additive-only for shipped app versions: per-version contract fixtures gate CI and production promotes, clients send `x-june-app-version`, error codes never renumber
 - [adr/0022](adr/0022-venice-private-first-model-routing.md) — historical Venice/Phala routing and privacy decision; the 2026-10-08 addendum replaces it with OpenRouter without inherited TEE or zero-retention claims
 - [adr/0023](adr/0023-attested-os-api-service-chain.md) - superseded by ADR-0024
-- [adr/0024](adr/0024-independent-product-verification.md) - Clovy, Open Software API, and Chat publish independent verification evidence without cross-product release pinning
+- [adr/0024](adr/0024-independent-product-verification.md) - Clovy, Open Software API, and Chat publish independent verification evidence without cross-product release pinning (superseded by desvincular-repo-ci)
 - [adr/0025](adr/0025-targeted-hermes-approval-protocol.md) - MCP approvals use stable request identity, targeted resolution, bounded queues, and fail-closed retirement (superseded by ADR-0038)
 - [adr/0026](adr/0026-durable-note-transcription-jobs.md) - saved-audio Source spans use durable, fingerprinted, idempotent note-transcription jobs
 - [adr/0027](adr/0027-june-owned-project-memory-store.md) — memory entries live in Clovy's SQLite (not the Hermes memory toolset), scoped by project, agent writes via the loopback proxy, project context by prompt injection
@@ -45,7 +45,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0032](adr/0032-session-completion-june-owned-local-state.md) — marking a session complete is Clovy-owned local SQLite state keyed by the stored Hermes session id, orthogonal to Hermes' archive flag; mirrors the `session_folders` stack
 - [adr/0033](adr/0033-notion-hosted-mcp-connect-preview.md) - Notion hosted MCP connector preview with read-only `june_notion`, approved page creation and updates, and no selected-resource claim
 - [adr/0034](adr/0034-obsidian-vault-discovery-mcp.md) - Obsidian vault discovery uses a Clovy-owned MCP server, not an ambient environment variable (MCP-server shape superseded by ADR-0040)
-- [adr/0035](adr/0035-extension-releases-follow-desktop-rc-promotion.md) - Chrome Web Store packages are reviewed during desktop RC and the exact staged bytes publish after stable desktop promotion
+- [adr/0035](adr/0035-extension-releases-follow-desktop-rc-promotion.md) - Chrome Web Store packages are reviewed during desktop RC and the exact staged bytes publish after stable desktop promotion (superseded by desvincular-repo-ci)
 - [adr/0036](adr/0036-github-connector-app-user-tokens.md) - GitHub connector uses GitHub App user access tokens only (no app private key on device or backend), local-mode custody per ADR-0016, Clovy-side read/write gating, approval-only writes
 - [adr/0037](adr/0037-versioned-local-sqlite-migrations.md) - Clovy's local SQLite schema uses an append-only release-ordered catalog, introspection-based legacy stamping, and one transaction for all pending migrations
 - [adr/0038](adr/0038-june-owned-openai-agents-runtime.md) - Clovy owns the local agent harness, persistence, tools, approvals, and stdio protocol on top of the OpenAI Agents SDK

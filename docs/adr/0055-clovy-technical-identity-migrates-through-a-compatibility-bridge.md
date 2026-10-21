@@ -194,3 +194,5 @@ and legacy artifacts remain published.
 - **Copy legacy state once and delete it.** Rejected because a crash can split
   the migration and a rollback would read stale or missing state, especially
   after refresh-token rotation.
+
+Superada pela change desvincular-repo-ci na linha do ambiente do Clovy API: `JUNE__*` deixou de ser lido; o restante da ponte continua.
