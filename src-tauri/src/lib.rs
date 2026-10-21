@@ -5,6 +5,7 @@ pub mod agent_hud;
 pub mod agent_mcp;
 pub mod agent_recorder;
 pub mod agent_runtime;
+pub mod app_identity;
 pub mod app_paths;
 pub mod approval_broker;
 pub mod audio;
@@ -116,6 +117,9 @@ type MainWindowSendEventImp = unsafe extern "C-unwind" fn(
 
 pub fn run() {
     providers::load_local_env();
+    // Before Tauri creates a window (and its WebView store) or opens a
+    // database: the first launch copies the June-era identity (ADR-0068).
+    identity_migration::run_at_startup();
     let context = tauri::generate_context!();
     let mut builder = tauri::Builder::default();
 
