@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { extensionIdFromManifestKey } from "./extension-release.mjs";
 
-const EXPECTED_EXTENSION_ID = "jfpogffllplkfoooiaibjkojkngbdnik";
+const EXPECTED_EXTENSION_ID = "cmfpkfaibipkocbjcpgamaednndpopcp";
 const manifestPath = fileURLToPath(new URL("../extension/dist/manifest.json", import.meta.url));
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const extensionId = extensionIdFromManifestKey(manifest.key);

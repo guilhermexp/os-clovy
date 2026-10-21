@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsjL164jMyv+KtQbchajMaa7co6s+GH04Bj42+b8aMRhC9zW5gTPE1XMefPHTZHipM7aZ+nFeNJpGJ9YwD/MudZvSQkkvJvO5Qv3NXqHxKlkyxovJz7dKG1rKAdfEc+FvutkO9DRx7LvWZDUjHFCI7c4RL/WM/HPv83Q9pVvuFOYW3Bn9GY14H6O1v1TmaDGAb8D0hVNmdpJBgOB2WtYCaR5D8M7ZmtW6fRJHqPoJm2V2Q+/besXQheMkg1eHoxExGLGzuc33G2a0AI8TU/NyoMaiWwmKasl5/eRA0CDZhTODMBfoVNVwJe5BG1pYo+2nI9eE7AlnRcnPvi8ipT0tRwIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwRxSIqgboGzwICJNzwth1zp0aD+wWTLzajY5fIpP8y3UNEPeI23JOn4Nd6huzYR2B0qcOQq52h+alx/t9GhtJHB5/d60kEAx1roWosQ12OMGOM43e42uOMFx9TteGaZ5pPr26K03n30Mn2/2iTyLPwEn/pwtvC8vbKIrdwWoY15QihJlnEXpGBjJN7arVSFww1TMV+dr+ZyFYT5WSlPhKb8H4MeJo7XR33C4WrdbFXiTA5cF6I9j+ravZ+mxUmZ8pCvMP3Ld/iew8faZwDFS42ZhRmL6+eEzxplgL9x3X4cbGnSq+J4Zksqtj+6RoJQuUvL3y9il9u5eD83YJv8p3wIDAQAB",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",

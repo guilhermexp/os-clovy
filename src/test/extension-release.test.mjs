@@ -26,7 +26,7 @@ import {
 } from "../../scripts/stable-release-provenance.mjs";
 import manifest from "../../extension/public/manifest.json";
 
-const extensionId = "jfpogffllplkfoooiaibjkojkngbdnik";
+const extensionId = "cmfpkfaibipkocbjcpgamaednndpopcp";
 const sourceCommit = "a".repeat(40);
 const fingerprint = `sha256:${"b".repeat(64)}`;
 

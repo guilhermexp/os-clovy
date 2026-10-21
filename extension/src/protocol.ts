@@ -8,9 +8,8 @@
 export const PROTOCOL_VERSION = 4;
 
 /** Must match NATIVE_HOST_NAME in src-tauri/src/extension_host.rs. */
-export const NATIVE_HOST_NAME = "co.opensoftware.clovy.extension";
-export const LEGACY_NATIVE_HOST_NAME = "co.opensoftware.june.extension";
-export const NATIVE_HOST_NAMES = [NATIVE_HOST_NAME, LEGACY_NATIVE_HOST_NAME] as const;
+export const NATIVE_HOST_NAME = "dev.guilhermexp.clovy.extension";
+export const NATIVE_HOST_NAMES = [NATIVE_HOST_NAME] as const;
 
 export type HelloMessage = {
   v: number;

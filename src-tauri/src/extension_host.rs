@@ -40,12 +40,10 @@ use crate::domain::types::AppError;
 /// the two.
 pub const PROTOCOL_VERSION: u32 = 4;
 
-/// The extension id pinned by the `key` field in `extension/manifest.json`.
-/// Both come from the Chrome Web Store item (Package tab): the store owns the
-/// keypair, and the manifest `key` mirrors its public key so load-unpacked
-/// builds share the store item's id. Update both together if the store item
-/// is ever recreated.
-pub const EXTENSION_ID: &str = "jfpogffllplkfoooiaibjkojkngbdnik";
+/// The extension id pinned by the `key` field in `extension/manifest.json`:
+/// the owner's own keypair (the private half stays outside the repository),
+/// so every load-unpacked build keeps this id. Update both together.
+pub const EXTENSION_ID: &str = "cmfpkfaibipkocbjcpgamaednndpopcp";
 
 pub(crate) fn validate_extension_manifest(path: &std::path::Path) -> Result<(), AppError> {
     let manifest: Value = serde_json::from_slice(
@@ -90,8 +88,7 @@ fn extension_id_from_manifest_key(key: &str) -> Result<String, AppError> {
 /// Native messaging host name: the extension connects to this name, and the
 /// host manifest file carries it (Chrome requires the file be named
 /// `<host name>.json`).
-pub const NATIVE_HOST_NAME: &str = "co.opensoftware.clovy.extension";
-pub const LEGACY_NATIVE_HOST_NAME: &str = "co.opensoftware.june.extension";
+pub const NATIVE_HOST_NAME: &str = "dev.guilhermexp.clovy.extension";
 
 /// The release app's bundle identifier. Its data directory belongs to the
 /// installed app and holds the descriptor pointer every shim reads.
@@ -1027,14 +1024,9 @@ pub fn register_browser_extension_host(
             "Browser extension pairing is only supported on macOS for now.",
         )
     })?;
-    let manifests = [NATIVE_HOST_NAME, LEGACY_NATIVE_HOST_NAME].map(|host_name| {
-        serde_json::to_vec_pretty(&host_manifest_json(host_name, &shim_path))
-            .map(|body| (host_name, body))
-            .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))
-    });
-    let [manifest, legacy_manifest] = manifests;
-    let (manifest_name, manifest_body) = manifest?;
-    let (legacy_manifest_name, legacy_manifest_body) = legacy_manifest?;
+    let manifest_body =
+        serde_json::to_vec_pretty(&host_manifest_json(NATIVE_HOST_NAME, &shim_path))
+            .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
     let data_dir = crate::app_paths::app_data_dir(&app)
         .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
     let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| {
@@ -1049,11 +1041,8 @@ pub fn register_browser_extension_host(
     for hosts_dir in hosts_dirs {
         std::fs::create_dir_all(&hosts_dir)
             .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
-        let manifest_path = hosts_dir.join(format!("{manifest_name}.json"));
+        let manifest_path = hosts_dir.join(format!("{NATIVE_HOST_NAME}.json"));
         std::fs::write(&manifest_path, &manifest_body)
-            .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
-        let legacy_manifest_path = hosts_dir.join(format!("{legacy_manifest_name}.json"));
-        std::fs::write(&legacy_manifest_path, &legacy_manifest_body)
             .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
         manifest_paths.push(manifest_path);
     }
@@ -1295,14 +1284,6 @@ mod tests {
             origins,
             &[Value::String(format!("chrome-extension://{EXTENSION_ID}/"))]
         );
-
-        let legacy = host_manifest_json(
-            LEGACY_NATIVE_HOST_NAME,
-            std::path::Path::new("/tmp/clovy-nm-shim"),
-        );
-        assert_eq!(legacy["name"], LEGACY_NATIVE_HOST_NAME);
-        assert_eq!(legacy["path"], manifest["path"]);
-        assert_eq!(legacy["allowed_origins"], manifest["allowed_origins"]);
     }
 
     #[test]
