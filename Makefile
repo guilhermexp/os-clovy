@@ -9,8 +9,7 @@
 	companion-fmt companion-fmt-check companion-lint companion-test \
 	clovy-api-fmt clovy-api-fmt-check clovy-api-lint clovy-api-test \
 	fmt fmt-check lint test verify \
-	local-ci signoff-pr signoff-frontend signoff-rust-macos \
-	skills-update skills-restore skills-sync sfw-check
+	local-ci signoff-pr signoff-frontend signoff-rust-macos
 
 .DEFAULT_GOAL := help
 
@@ -108,23 +107,6 @@ clovy-api-lint:  ## clippy (warnings = errors)
 
 clovy-api-test:  ## cargo test
 	cd clovy-api && cargo test --all-targets --all-features --locked
-
-# --- Skills (.agents/skills is the source of truth; .claude/skills are symlinks) ---
-# The runner executes registry code, so it is version-pinned and wrapped in
-# Socket Firewall per spec/package-install-security.md.
-SKILLS_CLI := skills@1.5.15
-
-sfw-check:
-	@command -v sfw >/dev/null 2>&1 || { echo "Socket Firewall (sfw) is required: npm i -g sfw (see spec/package-install-security.md)" >&2; exit 1; }
-
-skills-update: sfw-check  ## Update project skills to latest (sfw npx skills)
-	sfw npx -y $(SKILLS_CLI) update --project --yes
-
-skills-restore: sfw-check  ## Restore skills from the lockfile (sfw npx skills)
-	sfw npx -y $(SKILLS_CLI) experimental_install
-
-skills-sync: sfw-check  ## Re-link skills into .claude/skills (sfw npx skills)
-	sfw npx -y $(SKILLS_CLI) experimental_sync --yes
 
 # --- Aggregates ---
 fmt: format tauri-fmt companion-fmt clovy-api-fmt  ## Format everything

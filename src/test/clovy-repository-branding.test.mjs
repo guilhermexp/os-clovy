@@ -7,7 +7,6 @@ const read = (path) => readFileSync(resolve(process.cwd(), path), "utf8");
 describe("Clovy repository branding", () => {
   it("uses the canonical source repository in current public surfaces", () => {
     const currentSurfaces = [
-      ".conductor/settings.toml",
       "CONTEXT.md",
       "README.md",
       "CONTRIBUTING.md",
@@ -28,7 +27,6 @@ describe("Clovy repository branding", () => {
     for (const source of currentSurfaces) {
       expect(source).not.toMatch(/open-software-network\/os-june(?!-releases)/);
     }
-    expect(read(".conductor/settings.toml")).not.toContain("os-june Tauri desktop app");
     expect(read("docs/private-connectors-implementation-plan.md")).toContain(
       "**Repos:** `os-clovy`",
     );
