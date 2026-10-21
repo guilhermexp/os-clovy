@@ -3379,16 +3379,22 @@ fn clovy_api_operation_id(operation_id: &str) -> String {
 
 pub(crate) fn clovy_api_url() -> String {
     crate::env_compat::load_local_env();
-    crate::env_compat::var("CLOVY_API_URL", "JUNE_API_URL")
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            option_env!("CLOVY_API_URL")
-                .or(option_env!("JUNE_API_URL"))
-                .map(|value| value.trim().trim_end_matches('/').to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_CLOVY_API_URL.to_string())
+    resolve_clovy_api_url(
+        crate::env_compat::var("CLOVY_API_URL", "JUNE_API_URL").as_deref(),
+        option_env!("CLOVY_API_URL").or(option_env!("JUNE_API_URL")),
+    )
+}
+
+/// The runtime `CLOVY_API_URL` wins over the one baked in at build time;
+/// without either, the default server.
+fn resolve_clovy_api_url(runtime: Option<&str>, build: Option<&str>) -> String {
+    [runtime, build]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().trim_end_matches('/'))
+        .find(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_CLOVY_API_URL)
+        .to_string()
 }
 
 async fn read_audio(path: &Path) -> Result<Vec<u8>, AppError> {
@@ -3463,6 +3469,42 @@ mod tests {
                 .get(LEGACY_APP_VERSION_HEADER)
                 .and_then(|value| value.to_str().ok()),
             Some(APP_VERSION)
+        );
+    }
+
+    #[test]
+    fn the_api_defaults_to_the_local_server() {
+        assert_eq!(resolve_clovy_api_url(None, None), "http://127.0.0.1:8080");
+        assert_eq!(
+            resolve_clovy_api_url(Some("  "), None),
+            "http://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn clovy_api_url_overrides_the_default_server() {
+        assert_eq!(
+            resolve_clovy_api_url(Some(" https://notes.example.test/ "), None),
+            "https://notes.example.test"
+        );
+        assert_eq!(
+            resolve_clovy_api_url(None, Some("https://built.example.test")),
+            "https://built.example.test"
+        );
+        assert_eq!(
+            resolve_clovy_api_url(
+                Some("https://runtime.example.test"),
+                Some("https://built.example.test")
+            ),
+            "https://runtime.example.test"
+        );
+    }
+
+    #[test]
+    fn share_links_use_the_default_server_origin() {
+        assert_eq!(
+            share_base_url_for_api(&resolve_clovy_api_url(None, None)),
+            "http://127.0.0.1:8080"
         );
     }
 
