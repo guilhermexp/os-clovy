@@ -15,6 +15,21 @@ describe("organization reference guard", () => {
     expect("co.opensoftware.june").not.toMatch(pattern);
   });
 
+  it("flags the June-era app identity in app code", () => {
+    const scope = ORG_REFERENCE_SCOPES.find(({ name }) => name === "app identity");
+    for (const sample of [
+      '"identifier": "co.opensoftware.june"',
+      "Contents/MacOS/os-june",
+      "/Applications/June.app",
+    ]) {
+      expect(sample).toMatch(scope.pattern);
+    }
+    expect('"identifier": "dev.guilhermexp.clovy"').not.toMatch(scope.pattern);
+    expect(scope.pathspecs.filter((spec) => spec.startsWith(":!src-tauri"))).toEqual([
+      ":!src-tauri/src/identity_migration",
+    ]);
+  });
+
   it("finds no organization references in the repository, CI and app source", () => {
     expect(findOrgReferences()).toEqual([]);
   });

@@ -24,6 +24,28 @@ export const ORG_REFERENCE_SCOPES = [
     pathspecs: ["src", "src-tauri/src", "src-tauri/*.json", ":!src/test"],
     pattern: /opensoftware\.co\b|june\.link|open-software-network/,
   },
+  {
+    // The June-era app identity (ADR-0068). Its one exception is the identity
+    // migration module: the list of migration sources and the tests pinning it.
+    name: "app identity",
+    pathspecs: [
+      "src",
+      "src-tauri/src",
+      "src-tauri/native",
+      "src-tauri/build.rs",
+      "src-tauri/Cargo.toml",
+      "src-tauri/Info.plist",
+      "src-tauri/*.json",
+      "extension/src",
+      "extension/public",
+      "index.html",
+      "onboarding-preview.html",
+      "styleguide.html",
+      ":!src/test",
+      ":!src-tauri/src/identity_migration",
+    ],
+    pattern: /co\.opensoftware|os-june|June\.app/,
+  },
 ];
 
 export function findOrgReferences({ cwd = rootDir, scopes = ORG_REFERENCE_SCOPES } = {}) {
