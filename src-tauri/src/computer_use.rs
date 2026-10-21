@@ -5485,6 +5485,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[tokio::test]
+    async fn computer_use_needs_no_account_plan() {
+        assert!(plan_eligible().await);
+    }
+
     #[test]
     fn companion_permit_does_not_leak_to_a_second_decision_in_one_action() {
         let permit = CompanionAuthorizationPermit::new("session-1", "call-1");

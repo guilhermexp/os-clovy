@@ -35,6 +35,7 @@ mod http_client;
 pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
+mod local_identity;
 pub mod macos_menu_icons;
 pub mod mcp_server;
 pub mod meeting_calendar_context;

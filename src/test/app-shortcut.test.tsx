@@ -13,6 +13,7 @@ import {
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import { companionFrontendConsumerAvailable } from "../lib/companion-frontend-router";
 import { rememberSessionModel } from "../lib/agent-session-models";
+import { resetOnboardingForReplay } from "../lib/onboarding";
 import { invoke as tauriInvoke } from "../lib/tauri";
 import {
   AGENT_NEW_SESSION_EVENT,
@@ -269,6 +270,7 @@ vi.mock("../lib/tauri", () => ({
   recoverRecording: mocks.recoverRecording,
   dictationHelperCommand: mocks.dictationHelperCommand,
   listDictationHistory: mocks.listDictationHistory,
+  dictationSettings: vi.fn().mockRejectedValue(new Error("dictation settings unavailable")),
   osAccountsStatus: mocks.osAccountsStatus,
   osAccountsStatusLocal: mocks.osAccountsStatus,
   osAccountsLogin: mocks.osAccountsLogin,
@@ -2763,6 +2765,36 @@ describe("App shortcuts", () => {
     await user.click(screen.getByRole("button", { name: /back to first note/i }));
 
     expect(await screen.findByDisplayValue("First note")).toBeInTheDocument();
+  });
+
+  it("opens on Home without an account in a release build", async () => {
+    vi.stubEnv("DEV", false);
+    mocks.osAccountsStatus.mockResolvedValue({ signedIn: false, configured: false });
+
+    try {
+      render(<App />);
+
+      expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
+      expect(mocks.bootstrapApp).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("starts a fresh install's onboarding without an account step", async () => {
+    vi.stubEnv("DEV", false);
+    resetOnboardingForReplay();
+    mocks.osAccountsStatus.mockResolvedValue({ signedIn: false, configured: false });
+
+    try {
+      render(<App />);
+
+      expect(await screen.findByRole("heading", { name: "Help improve Clovy" })).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("gates the app until the user signs in", async () => {
