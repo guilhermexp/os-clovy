@@ -1179,6 +1179,9 @@ async fn paths_in_the_encrypted_activity_database_are_rewritten() {
             .execute(&mut raw)
             .await
             .unwrap();
+        // Closed for real: a dropped connection checkpoints later, under the
+        // copy, like a live writer would.
+        sqlx::connection::Connection::close(raw).await.unwrap();
     }
     plan.credentials.push(activity_copy());
     let store = MemoryStore::with(&[("old.activity-db", "sqlcipher-key", key.as_str())]);
