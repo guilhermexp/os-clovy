@@ -52,3 +52,16 @@
 - [x] 6.4 `make verify` exit 0 (`make-verify-6.txt`). Falhas de carga fora desta change em `flaky.txt`.
 - [x] 6.5 Prova no Mac, caso B (`mac-review2/report.md`): `args_json` igual à raiz reescrito e workspace externo com a raiz como sufixo intacto. Houve um incidente com um diálogo do Keychain, registrado no report.
 - [x] 6.6 CI Windows 39666093272 (`mac-review2/windows-ci.md`): compila; os 4 testes `identity_migration` selecionados passam; as falhas restantes estão em `activity::windows`, não tocado.
+
+## 7. Terceira revisão (K1–K5)
+
+- [x] 7.1 RED `bb9bbac2` (6 falhas, `review3-red.txt`).
+- [x] 7.2 GREEN `baa8de4f` + `1666b710` (correção de fixture com conexão fechada de forma assíncrona), 33/33 em 10 rodadas (`review3-green.txt`):
+  - K1: rollback do que foi publicado quando o flush falha;
+  - K2: flush sem exigir escrita na origem; arquivo só-leitura preservado;
+  - K3/K4: reescrita só na lista explícita de campos de caminho; conteúdo livre intacto;
+  - K5: qualquer falha bloqueia a abertura.
+- [x] 7.3 Docs: ADR-0068 (`112d6a1c`) e `owner-first-launch.md`.
+- [x] 7.4 `make verify` exit 0 (`make-verify-7.txt`).
+- [x] 7.5 Prova no Mac (`mac-review3/report.md`): falha forçada bloqueia no `NSAlert` sem criar perfil; nota e mensagem com o caminho antigo intactas; campos de caminho reescritos; objeto Git 0444 preservado; origem igual por hash.
+- [x] 7.6 CI Windows 39671302382: compila; os 4 testes `identity_migration` do filtro passam; só a falha de clipboard preexistente.
