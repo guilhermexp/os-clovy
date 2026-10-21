@@ -259,7 +259,7 @@ describe("ChatEnginePicker", () => {
       expect(row.querySelector(".agent-composer-model-row-logo svg")).not.toBeNull();
       expect(row.querySelector(".agent-composer-model-row-name")).toHaveTextContent(name);
       expect(row.querySelector(".agent-composer-model-choice-desc")).toHaveTextContent(
-        "Not found in your login shell PATH.",
+        "Not found on your PATH.",
       );
     }
 
