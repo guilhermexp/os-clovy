@@ -5,11 +5,8 @@ import type { SettingsTab } from "../components/settings/AppSettings";
 import type { SidebarView } from "../components/sidebar/Sidebar";
 import type { TabItem } from "../components/tabs/TabBar";
 import type { TabNav } from "./tabs/tabs";
-import type { ReferralNudgeMoment } from "../components/referral/ReferralNudge";
 import type { FolderDto, NoteDto, RecordingStatusDto, AccountStatus } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
-import type { MaxUpgradeTransport } from "../lib/billing-actions";
-import type { MaxGrantWait } from "../lib/max-upgrade";
 import type { NoteChat } from "../components/note-chat/useNoteChat";
 import type { ClovyUpdate } from "../lib/updater";
 import type {
@@ -30,8 +27,6 @@ export type RenderAppLayoutDependencies = {
   activeView: SidebarView;
   agentSessions: AgentSessionDto[];
   agentSessionsListRef: React.MutableRefObject<AgentSessionsListHandle | null>;
-  appMaxGrantWaitRef: React.MutableRefObject<MaxGrantWait | undefined>;
-  billingNotice: string | null;
   captureActive: boolean;
   changeSettingsTab: (tab: SettingsTab) => void;
   checkingUpdate: boolean;
@@ -39,12 +34,9 @@ export type RenderAppLayoutDependencies = {
   closeTab: (id: string) => void;
   completedSessions: Record<string, string>;
   confirmDeleteNote: boolean;
-  confirmMaxUpgrade: () => Promise<void>;
   detailScrollerActive: boolean;
   dispatch: React.Dispatch<NotesAction>;
   error: string | null;
-  fundingAccount: AccountStatus;
-  fundingRequired: boolean;
   handleCreateFolder: (name: string, description?: string) => Promise<FolderDto | undefined>;
   handleDeleteNote: (noteId: string) => Promise<void>;
   handleEnableAccessibility: () => void;
@@ -81,12 +73,6 @@ export type RenderAppLayoutDependencies = {
   handleToggleSessionCompleted: (sessionId: string, completed: boolean) => Promise<void>;
   homeStoredSessionId: string | undefined;
   mainPanelBodyRef: React.MutableRefObject<HTMLDivElement | null>;
-  maxUpgradeError: string | undefined;
-  maxUpgradePrompt: {
-    action: "upgrade_to_max";
-    plan: "max";
-    transport: MaxUpgradeTransport;
-  } | null;
   moveDialogNoteIds: string[] | null;
   moveDialogSessionIds: string[] | null;
   noteChat: NoteChat;
@@ -108,9 +94,6 @@ export type RenderAppLayoutDependencies = {
   recordingInactivityPrompt: RecordingInactivityPrompt | null;
   recordingInactivitySecondsRemaining: number;
   recordingNoteTitle: string;
-  referralNudgeMoment: ReferralNudgeMoment | null;
-  referralNudgeSourceRef: React.MutableRefObject<"trigger" | "demo">;
-  refreshFundingAccount: () => Promise<AccountStatus | undefined>;
   relaunchingUpdate: boolean;
   selectedNote: NoteDto | undefined;
   sessionFolders: Record<string, string[]>;
@@ -125,20 +108,12 @@ export type RenderAppLayoutDependencies = {
   setFolderReturnTarget: React.Dispatch<
     React.SetStateAction<{ noteId: string; label: string } | undefined>
   >;
-  setMaxUpgradePrompt: React.Dispatch<
-    React.SetStateAction<{
-      action: "upgrade_to_max";
-      plan: "max";
-      transport: MaxUpgradeTransport;
-    } | null>
-  >;
   setMoveDialogNoteIds: React.Dispatch<React.SetStateAction<string[] | null>>;
   setMoveDialogSessionIds: React.Dispatch<React.SetStateAction<string[] | null>>;
   setNoteChatOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setNoteShareUrl: React.Dispatch<React.SetStateAction<string | null>>;
   setOriginAllNotes: React.Dispatch<React.SetStateAction<boolean>>;
   setOriginFolderId: React.Dispatch<React.SetStateAction<string | undefined>>;
-  setReferralNudgeMoment: React.Dispatch<React.SetStateAction<ReferralNudgeMoment | null>>;
   setShareNoteOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSidebarCollapsed: React.Dispatch<React.SetStateAction<boolean>>;
   setSidebarResizing: React.Dispatch<React.SetStateAction<boolean>>;

@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import type { GlobalRecorderDemoApi } from "../lib/global-recorder-demo";
 import type { RecordNoticesDemoApi } from "../lib/record-notices-demo";
 import type { UpdateCardDemoApi } from "../lib/update-card-demo";
-import type { ReferralNudgeMoment } from "../components/referral/ReferralNudge";
 import type { RecordingStatusDto } from "../lib/tauri";
 import { RECORD_NOTICES_DEMO_SESSION_ID } from "./processing-demo-ids";
 import type { UseAppDevDemosDependencies } from "./use-app-dev-demos-types";
@@ -144,31 +143,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
       recordNoticesDemoRef.current = null;
     };
   }, [setRecordingNote]);
-  // The referral delight nudge (bottom-left card). Real shows come from the
-  // trigger layer (useReferralNudgeTriggers below); the dev console driver
-  // (window.__referralNudge) parks the card without touching the persisted
-  // caps, which is why the source is tracked — only trigger-shown cards may
-  // record a click-through.
-  const [referralNudgeMoment, setReferralNudgeMoment] = useState<ReferralNudgeMoment | null>(null);
-  const referralNudgeSourceRef = useRef<"trigger" | "demo">("trigger");
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    let dispose: (() => void) | undefined;
-    void import("../lib/referral-nudge-demo").then(({ registerReferralNudgeDemo }) => {
-      if (cancelled) return;
-      ({ dispose } = registerReferralNudgeDemo({
-        setMoment: (moment) => {
-          referralNudgeSourceRef.current = "demo";
-          setReferralNudgeMoment(moment);
-        },
-      }));
-    });
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
-  }, []);
   // Dev console driver for the sidebar update cards (window.__updateCard).
   // Pushes synthetic values into the real update state so each card's styling
   // can be parked and inspected without a live update.
@@ -231,9 +205,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
     recordNoticesConsentPinned,
     recordNoticesMicOverride,
     recordNoticesDemoRef,
-    referralNudgeMoment,
-    setReferralNudgeMoment,
-    referralNudgeSourceRef,
     finishingSessionsRef,
   };
 }

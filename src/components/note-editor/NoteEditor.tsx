@@ -12,9 +12,8 @@ import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconChevronBottom } from "central-icons-filled/IconChevronBottom";
 import { IconMicrophone } from "central-icons-filled/IconMicrophone";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import type { CSSProperties, ReactNode, RefObject } from "react";
+import type { CSSProperties, RefObject } from "react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { FundingTier } from "../account/FundingNotice";
 import { Switch } from "../ui/Switch";
 import { clockTimeOptions, formatDate, t as translate, useT } from "../../i18n";
 import type {
@@ -63,14 +62,6 @@ type NoteEditorProps = {
   recordingStatus?: RecordingStatusDto;
   meetingEndCountdown?: { sessionId: string; secondsRemaining: number } | null;
   recordingDisabled?: boolean;
-  recordingBlockedReason?: string;
-  retryBlockedReason?: string;
-  /** The persistent out-of-credits notice, pre-wired by App. When present it
-   * replaces the plain record-blocked InlineNotice in the editor footer. */
-  fundingNotice?: ReactNode;
-  /** The user's current plan, for the failed-note banner's tier card. */
-  fundingTier?: FundingTier;
-  recoveryBlockedReason?: string;
   liveTranscript?: LiveTranscriptEventDto[];
   sourceMode: RecordingSourceMode;
   sourceReadiness?: RecordingSourceReadinessDto;
@@ -93,8 +84,6 @@ type NoteEditorProps = {
   onKeepRecordingAfterMeetingEnd?: (sessionId: string) => void;
   onStopNowAfterMeetingEnd?: (sessionId: string) => void;
   onRetry: () => void | Promise<void>;
-  onTopUp: () => void;
-  topUpLabel?: string;
   onRecoverRecording: (sessionId: string) => void;
   onDiscardRecording: (sessionId: string) => void;
   onAssignFolder: (folderId: string) => void;
@@ -261,11 +250,6 @@ export function NoteEditor({
   recordingStatus,
   meetingEndCountdown,
   recordingDisabled = false,
-  recordingBlockedReason,
-  retryBlockedReason,
-  fundingNotice,
-  fundingTier,
-  recoveryBlockedReason,
   liveTranscript = [],
   sourceMode,
   sourceReadiness,
@@ -285,8 +269,6 @@ export function NoteEditor({
   onKeepRecordingAfterMeetingEnd,
   onStopNowAfterMeetingEnd,
   onRetry,
-  onTopUp,
-  topUpLabel,
   onRecoverRecording,
   onDiscardRecording,
   onAssignFolder,
@@ -425,10 +407,8 @@ export function NoteEditor({
   }, [consentReminderVisible, consentReminderPinned]);
   const processingStatus = processingStageStatus(note.processingStatus);
   const processingLock = processingStatus !== null;
-  const recordButtonDisabled = recordingDisabled || Boolean(recordingBlockedReason);
-  // A funding block disables the record button but not the options chevron:
-  // choosing sources is free, and note processing can queue another recording,
-  // so that setting stays reachable unless another recording is active.
+  const recordButtonDisabled = recordingDisabled;
+  // Choosing sources stays reachable unless another recording is active.
   const recordOptionsDisabled = recordingDisabled;
   // When generation finishes for the note you're looking at, reveal the fresh
   // notes with a top-down wipe instead of letting the text snap in. Only fires
@@ -548,7 +528,6 @@ export function NoteEditor({
             onRecover={onRecoverRecording}
             onDiscard={onDiscardRecording}
             disabled={processingLock}
-            recoverBlockedReason={recoveryBlockedReason}
           />
         ) : null}
         {note.processingStatus === "transcribing" && note.lastError ? (
@@ -565,10 +544,6 @@ export function NoteEditor({
             errorMessage={note.lastError}
             audioPreserved={!!(note.audio || note.audioSources?.length)}
             onRetry={onRetry}
-            onTopUp={onTopUp}
-            topUpLabel={topUpLabel}
-            retryBlockedReason={retryBlockedReason}
-            tier={fundingTier}
           />
         ) : null}
         {activeTab === "transcription" ? (
@@ -663,21 +638,6 @@ export function NoteEditor({
       </section>
 
       <div className="editor-footer">
-        {!recordingForNote
-          ? (fundingNotice ??
-            (recordingBlockedReason ? (
-              <InlineNotice
-                className="record-funding-blocked"
-                aria-label={t("notes.editor.recordingNeedsCredits")}
-                body={recordingBlockedReason}
-                actions={
-                  <button type="button" className="btn btn-secondary" onClick={onTopUp}>
-                    {topUpLabel ?? t("notes.editor.upgrade")}
-                  </button>
-                }
-              />
-            ) : null))
-          : null}
         {micDenied && !recordingForNote ? (
           <InlineNotice
             className="record-mic-blocked"
@@ -891,42 +851,24 @@ export function NoteEditor({
                       }}
                     >
                       <div className="record-idle">
-                        {recordingBlockedReason ? (
-                          <HoverTip
-                            tip={recordingBlockedReason}
-                            className="record-button-tip"
-                            tabIndex={0}
-                          >
-                            <button
-                              type="button"
-                              className="record-button"
-                              aria-label={t("notes.editor.recordingNeedsCredits")}
-                              disabled={recordButtonDisabled}
-                              onClick={onStartRecording}
-                            >
-                              <IconMicrophone size={20} />
-                            </button>
-                          </HoverTip>
-                        ) : (
-                          <button
-                            type="button"
-                            className="record-button"
-                            aria-label={
-                              recordingDisabled
-                                ? t("notes.editor.recordingInProgress")
-                                : t("notes.editor.record")
-                            }
-                            title={
-                              recordingDisabled
-                                ? t("notes.editor.recordingInProgress")
-                                : t("notes.editor.record")
-                            }
-                            disabled={recordButtonDisabled}
-                            onClick={onStartRecording}
-                          >
-                            <IconMicrophone size={20} />
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          className="record-button"
+                          aria-label={
+                            recordingDisabled
+                              ? t("notes.editor.recordingInProgress")
+                              : t("notes.editor.record")
+                          }
+                          title={
+                            recordingDisabled
+                              ? t("notes.editor.recordingInProgress")
+                              : t("notes.editor.record")
+                          }
+                          disabled={recordButtonDisabled}
+                          onClick={onStartRecording}
+                        >
+                          <IconMicrophone size={20} />
+                        </button>
                         {showRecordingOptions && !recordOptionsDisabled ? (
                           <button
                             type="button"

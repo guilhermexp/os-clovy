@@ -372,8 +372,6 @@ export default defineMessages({
     "settingsPanels.picker.noModelsMatch": "No models match your search.",
     "settingsPanels.picker.matchingModelsAria": "Matching models",
     "settingsPanels.picker.autoAria": "Choose the model automatically",
-    "settingsPanels.picker.autoBillingNote":
-      "Auto is billed to Clovy credits and does not use your OpenRouter key.",
     "settingsPanels.picker.providerKeyNeeded":
       "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
     "settingsPanels.picker.providerAvailabilityUnknown":
@@ -418,10 +416,6 @@ export default defineMessages({
     "settingsPanels.computerUse.enableAria": "Enable Computer use",
     "settingsPanels.computerUse.macosOnly":
       "Computer use is available on macOS only. Windows support is not part of this release.",
-    "settingsPanels.computerUse.proFeature": "Pro feature",
-    "settingsPanels.computerUse.proBody":
-      "Computer use requires an active Pro or Max plan. Permission education and revocation remain available without a plan.",
-    "settingsPanels.computerUse.viewPlans": "View plans",
     "settingsPanels.computerUse.pausedBody":
       "Computer use is paused for this Clovy or macOS version.",
     "settingsPanels.computerUse.driverUnavailableTitle": "Bundled driver unavailable",
@@ -903,8 +897,6 @@ export default defineMessages({
     "settingsPanels.picker.noModelsMatch": "Nenhum modelo corresponde à sua busca.",
     "settingsPanels.picker.matchingModelsAria": "Modelos encontrados",
     "settingsPanels.picker.autoAria": "Escolher o modelo automaticamente",
-    "settingsPanels.picker.autoBillingNote":
-      "O Auto é cobrado em créditos do Clovy e não usa sua chave da OpenRouter.",
     "settingsPanels.picker.providerKeyNeeded":
       "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
     "settingsPanels.picker.providerAvailabilityUnknown":
@@ -949,10 +941,6 @@ export default defineMessages({
     "settingsPanels.computerUse.enableAria": "Ativar uso do computador",
     "settingsPanels.computerUse.macosOnly":
       "O uso do computador está disponível apenas no macOS. O suporte ao Windows não faz parte desta versão.",
-    "settingsPanels.computerUse.proFeature": "Recurso Pro",
-    "settingsPanels.computerUse.proBody":
-      "O uso do computador exige um plano Pro ou Max ativo. As orientações sobre permissões e a revogação continuam disponíveis sem plano.",
-    "settingsPanels.computerUse.viewPlans": "Ver planos",
     "settingsPanels.computerUse.pausedBody":
       "O uso do computador está pausado para esta versão do Clovy ou do macOS.",
     "settingsPanels.computerUse.driverUnavailableTitle": "Driver incluído indisponível",

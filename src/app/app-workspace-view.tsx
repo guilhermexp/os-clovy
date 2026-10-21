@@ -1,5 +1,4 @@
 import { t } from "../i18n";
-import { FundingNotice, fundingTierOf } from "../components/account/FundingNotice";
 import { markAgentNewSessionPending } from "../components/agent/session-persistence";
 import { AgentSessionsList } from "../components/agent/AgentSessionsList";
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
@@ -10,13 +9,6 @@ import { IconProjects } from "central-icons/IconProjects";
 import { agentRuntimeBindings, retryProcessing } from "../lib/tauri";
 import { selectSessionProjectContext } from "../lib/agent-project-context";
 import { messageFromError } from "../lib/errors";
-import {
-  composerFundingDisabledReason,
-  noteRetryFundingDisabledReason,
-  recoveryFundingDisabledReason,
-  recordingFundingDisabledReason,
-  routineFundingDisabledReason,
-} from "./app-shell";
 import type { RenderAppWorkspaceDependencies } from "./app-workspace-view-types";
 import {
   ActivityTimelineViewRoute,
@@ -49,8 +41,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     completedSessions,
     dispatch,
     folderReturnTarget,
-    fundingAccount,
-    fundingRequired,
     handleAccountChanged,
     handleCreateFolder,
     handleCreateNote,
@@ -93,7 +83,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     handleStartRecording,
     handleStopNowAfterMeetingEnd,
     handleToggleSessionCompleted,
-    handleTopUp,
     handleUpdateNote,
     homeStoredSessionId,
     memoryFolderFilter,
@@ -112,7 +101,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     recordNoticesConsentPinned,
     recordingNoteId,
     refreshAccount,
-    refreshFundingAccount,
     rememberHomeSession,
     runUpdateCheck,
     selectedNote,
@@ -137,7 +125,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     sourceReadiness,
     state,
     takeNewTabIntent,
-    topUpLabel,
   } = dependencies;
 
   const resolveAgentSessionProjectContext = (sessionId: string) => {
@@ -212,7 +199,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     />
   ) : activeView === "routines" ? (
     <RoutinesViewRoute
-      creditActionsDisabledReason={fundingRequired ? routineFundingDisabledReason() : undefined}
       onCreateRoutine={(prompt) => {
         markAgentNewSessionPending(prompt);
         setActiveAgentSession(undefined);
@@ -253,21 +239,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
           }
         })();
       }}
-      creditActionsDisabledReason={fundingRequired ? composerFundingDisabledReason() : undefined}
-      renderFundingNotice={
-        fundingRequired
-          ? (textFundingContext) => (
-              <FundingNotice
-                account={fundingAccount}
-                onRefresh={refreshFundingAccount}
-                textFundingContext={textFundingContext}
-              />
-            )
-          : undefined
-      }
-      fundingTier={fundingTierOf(fundingAccount)}
-      topUpLabel={topUpLabel}
-      onTopUp={handleTopUp}
       resolveSessionProjectContext={resolveAgentSessionProjectContext}
     />
   ) : activeView === "agent" ? (
@@ -277,21 +248,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       initialSession={activeAgentSessionSeed}
       initialSessionId={activeAgentSessionId}
       onSessionSelected={setActiveAgentSession}
-      creditActionsDisabledReason={fundingRequired ? composerFundingDisabledReason() : undefined}
-      renderFundingNotice={
-        fundingRequired
-          ? (textFundingContext) => (
-              <FundingNotice
-                account={fundingAccount}
-                onRefresh={refreshFundingAccount}
-                textFundingContext={textFundingContext}
-              />
-            )
-          : undefined
-      }
-      fundingTier={fundingTierOf(fundingAccount)}
-      topUpLabel={topUpLabel}
-      onTopUp={handleTopUp}
       sessionInProject={Boolean(activeAgentSessionFolder)}
       resolveSessionProjectContext={resolveAgentSessionProjectContext}
       projectContext={
@@ -578,15 +534,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
           recordingStatus={selectedNoteId === recordingNoteId ? state.recordingStatus : undefined}
           meetingEndCountdown={selectedNoteId === recordingNoteId ? meetingEndCountdown : null}
           recordingDisabled={Boolean(state.recordingStatus && selectedNoteId !== recordingNoteId)}
-          recordingBlockedReason={fundingRequired ? recordingFundingDisabledReason() : undefined}
-          fundingNotice={
-            fundingRequired ? (
-              <FundingNotice account={fundingAccount} onRefresh={refreshFundingAccount} />
-            ) : undefined
-          }
-          fundingTier={fundingTierOf(fundingAccount)}
-          retryBlockedReason={fundingRequired ? noteRetryFundingDisabledReason() : undefined}
-          recoveryBlockedReason={fundingRequired ? recoveryFundingDisabledReason() : undefined}
           liveTranscript={selectedNoteLiveTranscript}
           sourceMode={sourceMode}
           sourceReadiness={sourceReadiness}
@@ -618,10 +565,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
           onStopNowAfterMeetingEnd={handleStopNowAfterMeetingEnd}
           onRetry={async () => {
             if (!selectedNote) return;
-            if (fundingRequired) {
-              setError(noteRetryFundingDisabledReason());
-              return;
-            }
             try {
               const note = await retryProcessing(
                 selectedNote.id,
@@ -642,8 +585,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
               throw err;
             }
           }}
-          onTopUp={handleTopUp}
-          topUpLabel={topUpLabel}
           onAssignFolder={(folderId) => void handleSetNoteFolder(selectedNote.id, folderId)}
           onRemoveFolder={(folderId) => void handleRemoveNoteFromFolder(selectedNote.id, folderId)}
           onNavigateToFolder={(folderId) => {

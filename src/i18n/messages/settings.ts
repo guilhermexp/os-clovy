@@ -37,7 +37,6 @@ export default defineMessages({
     "settings.dateFormat.dayFirst": "9 Jul",
 
     "settings.tabs.general": "General",
-    "settings.tabs.billing": "Billing",
     "settings.tabs.shortcuts": "Shortcuts",
     "settings.tabs.dictation": "Dictation",
     "settings.tabs.audio": "Audio",
@@ -407,7 +406,6 @@ export default defineMessages({
     "settings.dateFormat.dayFirst": "9 jul",
 
     "settings.tabs.general": "Geral",
-    "settings.tabs.billing": "Cobrança",
     "settings.tabs.shortcuts": "Atalhos",
     "settings.tabs.dictation": "Ditado",
     "settings.tabs.audio": "Áudio",

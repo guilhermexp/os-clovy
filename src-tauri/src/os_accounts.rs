@@ -204,11 +204,6 @@ struct BalanceWire {
 }
 
 #[derive(Deserialize)]
-struct CheckoutSessionWire {
-    url: String,
-}
-
-#[derive(Deserialize)]
 struct SubscriptionWire {
     subscribed: bool,
     status: Option<String>,
@@ -228,31 +223,6 @@ struct SubscriptionWire {
     scheduled_plan: Option<String>,
     #[serde(default)]
     scheduled_plan_credits: Option<i64>,
-}
-
-#[derive(Deserialize)]
-struct ReferralSummaryWire {
-    code: String,
-    url: String,
-    referred_count: i64,
-    pending_count: i64,
-    qualified_count: i64,
-    earned_months: i64,
-    applied_months: i64,
-    available_months: i64,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ReferralSummary {
-    pub code: String,
-    pub url: String,
-    pub referred_count: i64,
-    pub pending_count: i64,
-    pub qualified_count: i64,
-    pub earned_months: i64,
-    pub applied_months: i64,
-    pub available_months: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -343,21 +313,6 @@ impl From<MeWire> for AccountUser {
             display_name: w.display_name,
             avatar_url: w.avatar_url,
             avatar_seed: w.avatar_seed,
-        }
-    }
-}
-
-impl From<ReferralSummaryWire> for ReferralSummary {
-    fn from(w: ReferralSummaryWire) -> Self {
-        Self {
-            code: w.code,
-            url: w.url,
-            referred_count: w.referred_count,
-            pending_count: w.pending_count,
-            qualified_count: w.qualified_count,
-            earned_months: w.earned_months,
-            applied_months: w.applied_months,
-            available_months: w.available_months,
         }
     }
 }
@@ -849,173 +804,6 @@ fn accounts_browser_logout_url(cfg: &Config) -> Option<String> {
         return None;
     }
     Some(format!("{accounts_url}/login?signed-out=1"))
-}
-
-#[tauri::command]
-pub async fn os_accounts_upgrade(plan: Option<String>) -> Result<(), AppError> {
-    if local_dev_enabled() {
-        return Ok(());
-    }
-    let cfg = Config::load();
-    if !cfg.configured() {
-        return Err(AppError::new(
-            "os_accounts_unconfigured",
-            "OS Accounts is not configured for this build.",
-        ));
-    }
-    let session: CheckoutSessionWire = authed_post(
-        &cfg,
-        "/billing/subscription",
-        subscription_checkout_request(plan.as_deref()),
-    )
-    .await?;
-    let url = session.url.trim();
-    if url.is_empty() {
-        return Err(AppError::new(
-            "empty_response",
-            "OS Accounts returned no checkout URL.",
-        ));
-    }
-    open_in_browser(url)
-}
-
-/// Open a hosted Billing Portal session where an existing subscriber reviews
-/// and confirms a prorated plan upgrade. Credits remain authoritative only
-/// after the OS Accounts invoice webhook updates the account snapshot.
-#[tauri::command]
-pub async fn os_accounts_upgrade_session(plan: String) -> Result<(), AppError> {
-    if local_dev_enabled() {
-        return Ok(());
-    }
-    let cfg = Config::load();
-    if !cfg.configured() {
-        return Err(AppError::new(
-            "os_accounts_unconfigured",
-            "OS Accounts is not configured for this build.",
-        ));
-    }
-    let Some(plan) = normalized_plan(&plan) else {
-        return Err(AppError::new(
-            UNKNOWN_PLAN_CODE,
-            "A plan is required to upgrade your subscription.",
-        ));
-    };
-    let session: CheckoutSessionWire = authed_post(
-        &cfg,
-        "/billing/subscription/upgrade-session",
-        upgrade_session_request(plan),
-    )
-    .await?;
-    let url = session.url.trim();
-    if url.is_empty() {
-        return Err(AppError::new(
-            "empty_response",
-            "OS Accounts returned no upgrade URL.",
-        ));
-    }
-    open_in_browser(url)
-}
-
-fn upgrade_session_request(plan: &str) -> serde_json::Value {
-    serde_json::json!({ "plan": plan })
-}
-
-/// Omitting `plan` keeps the accounts-API default (Pro), so Clovy stays
-/// compatible with deployments that predate plan tiers.
-fn subscription_checkout_request(plan: Option<&str>) -> serde_json::Value {
-    let plan = plan.map(str::trim).filter(|plan| !plan.is_empty());
-    match plan {
-        Some(plan) => serde_json::json!({
-            "allow_promotion_codes": true,
-            "plan": plan,
-        }),
-        None => serde_json::json!({
-            "allow_promotion_codes": true,
-        }),
-    }
-}
-
-/// Change the plan on the caller's *existing* subscription in place (e.g. Pro to
-/// Max). Unlike `os_accounts_upgrade`, which starts a fresh Stripe checkout, this
-/// PATCHes the live subscription and returns its updated status. The associated
-/// credits still arrive only after the invoice webhook, so callers must poll the
-/// account snapshot before announcing the new plan as active.
-#[tauri::command]
-pub async fn os_accounts_change_plan(plan: String) -> Result<AccountSubscription, AppError> {
-    if local_dev_enabled() {
-        // No live billing in local mode; hand back the canned subscription so
-        // callers can refresh their UI without a network round-trip.
-        return Ok(local_dev_account_status()
-            .subscription
-            .expect("local dev status always carries a subscription"));
-    }
-    let cfg = Config::load();
-    if !cfg.configured() {
-        return Err(AppError::new(
-            "os_accounts_unconfigured",
-            "OS Accounts is not configured for this build.",
-        ));
-    }
-    let Some(plan) = normalized_plan(&plan) else {
-        return Err(AppError::new(
-            "unknown_plan",
-            "A plan is required to change your subscription.",
-        ));
-    };
-    let subscription: SubscriptionWire =
-        authed_patch(&cfg, "/billing/subscription", change_plan_request(plan)).await?;
-    Ok(subscription.into())
-}
-
-/// PATCH body for an in-place plan change. The endpoint keys off `plan` alone;
-/// proration and immediate credit grant are decided server-side.
-fn change_plan_request(plan: &str) -> serde_json::Value {
-    serde_json::json!({ "plan": plan })
-}
-
-/// Trim a plan slug, treating a blank string as "no plan" so Clovy never sends an
-/// empty slug the accounts API would reject with `unknown_plan`.
-fn normalized_plan(plan: &str) -> Option<&str> {
-    let plan = plan.trim();
-    (!plan.is_empty()).then_some(plan)
-}
-
-/// Opens the accounts portal in the default browser. The webview swallows
-/// `target="_blank"` anchors, so any in-app "go to the portal" affordance
-/// (funding, billing, referrals) must route through this command.
-#[tauri::command]
-pub fn os_accounts_open_portal() -> Result<(), AppError> {
-    if local_dev_enabled() {
-        return Ok(());
-    }
-    let cfg = Config::load();
-    let url = cfg.accounts_url.trim_end_matches('/');
-    if url.is_empty() {
-        return Err(AppError::new(
-            "os_accounts_unconfigured",
-            "OS Accounts is not configured for this build.",
-        ));
-    }
-    open_in_browser(url)
-}
-
-#[tauri::command]
-pub async fn os_accounts_referral_summary() -> Result<ReferralSummary, AppError> {
-    if local_dev_enabled() {
-        return Err(AppError::new(
-            "referrals_unavailable",
-            "Referral links are not available in local development mode.",
-        ));
-    }
-    let cfg = Config::load();
-    if !cfg.configured() {
-        return Err(AppError::new(
-            "os_accounts_unconfigured",
-            "OS Accounts is not configured for this build.",
-        ));
-    }
-    let summary: ReferralSummaryWire = authed_get(&cfg, "/referrals/me").await?;
-    Ok(summary.into())
 }
 
 /// Register the deep-link handler at app setup. Forwards every exact
@@ -2521,79 +2309,6 @@ mod tests {
     }
 
     #[test]
-    fn subscription_checkout_request_allows_promotion_codes() {
-        assert_eq!(
-            subscription_checkout_request(None),
-            serde_json::json!({ "allow_promotion_codes": true })
-        );
-    }
-
-    #[test]
-    fn subscription_checkout_request_carries_the_chosen_plan() {
-        assert_eq!(
-            subscription_checkout_request(Some("max")),
-            serde_json::json!({ "allow_promotion_codes": true, "plan": "max" })
-        );
-        // Blank input degrades to the accounts-API default instead of sending
-        // an empty slug the server would reject.
-        assert_eq!(
-            subscription_checkout_request(Some("  ")),
-            serde_json::json!({ "allow_promotion_codes": true })
-        );
-    }
-
-    #[test]
-    fn change_plan_request_carries_only_the_plan() {
-        assert_eq!(
-            change_plan_request("max"),
-            serde_json::json!({ "plan": "max" })
-        );
-    }
-
-    #[test]
-    fn upgrade_session_request_carries_only_the_plan() {
-        assert_eq!(
-            upgrade_session_request("max"),
-            serde_json::json!({ "plan": "max" })
-        );
-    }
-
-    #[test]
-    fn upgrade_session_response_maps_the_browser_url() {
-        let session: CheckoutSessionWire = serde_json::from_value(serde_json::json!({
-            "url": "https://billing.stripe.com/session/upgrade"
-        }))
-        .expect("upgrade-session response");
-
-        assert_eq!(session.url, "https://billing.stripe.com/session/upgrade");
-    }
-
-    #[test]
-    fn upgrade_session_route_missing_shapes_map_to_a_stable_code() {
-        let path = "/billing/subscription/upgrade-session";
-        for status in [
-            reqwest::StatusCode::NOT_FOUND,
-            reqwest::StatusCode::METHOD_NOT_ALLOWED,
-        ] {
-            assert_eq!(
-                accounts_request_error_for_response(path, status, None, None).code,
-                UPGRADE_SESSION_UNAVAILABLE_CODE
-            );
-            assert_eq!(
-                empty_accounts_response(path, status).code,
-                UPGRADE_SESSION_UNAVAILABLE_CODE
-            );
-            let decode_error = serde_json::from_str::<Envelope<CheckoutSessionWire>>("not json")
-                .err()
-                .expect("invalid route-missing body");
-            assert_eq!(
-                decode_accounts_response_error_for_response(path, status, decode_error).code,
-                UPGRADE_SESSION_UNAVAILABLE_CODE
-            );
-        }
-    }
-
-    #[test]
     fn accounts_error_maps_the_numeric_top_up_gate_to_a_stable_code() {
         let error = accounts_request_error(
             Some(ERR_TOP_UP_REQUIRES_MAX),
@@ -2678,14 +2393,6 @@ mod tests {
             accounts_request_error(Some(ERR_PLAN_NOT_ENABLED), None).message,
             "That plan is not available yet."
         );
-    }
-
-    #[test]
-    fn normalized_plan_trims_and_rejects_blanks() {
-        assert_eq!(normalized_plan("  max  "), Some("max"));
-        assert_eq!(normalized_plan("pro"), Some("pro"));
-        assert_eq!(normalized_plan("   "), None);
-        assert_eq!(normalized_plan(""), None);
     }
 
     #[test]

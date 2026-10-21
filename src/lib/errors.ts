@@ -350,34 +350,11 @@ export function messageFromError(err: unknown) {
 
 /** Stable error code from a thrown Tauri `AppError` (`{ code, message }`),
  * or undefined for anything without one. Lets callers branch on a specific
- * failure (e.g. "referrals_unavailable") instead of matching message text. */
+ * failure (e.g. "provider_api_key_rejected") instead of matching message text. */
 export function errorCode(err: unknown): string | undefined {
   if (err && typeof err === "object" && "code" in err) {
     const code = (err as { code: unknown }).code;
     return typeof code === "string" ? code : undefined;
-  }
-  return undefined;
-}
-
-/** Whether an error means buying credits is gated behind the Max plan. Robust
- * to every shape the gate can reach us in: the structured Rust AppError code
- * (`top_up_requires_max`, mapped in os_accounts.rs from the accounts
- * envelope), the raw numeric envelope code (3002) should a payload ever pass
- * through unmapped, and the canonical message ("Buying credits requires the
- * Max plan.") as a last resort. */
-export function isTopUpRequiresMaxError(err: unknown): boolean {
-  if (errorCode(err) === "top_up_requires_max") return true;
-  if (numericErrorCode(err) === 3002) return true;
-  return /requires the max plan/i.test(rawMessageFromError(err));
-}
-
-/** Numeric error code from a raw accounts envelope (`error_code`) or any
- * error object carrying a numeric code field, or undefined when absent. */
-function numericErrorCode(err: unknown): number | undefined {
-  if (!err || typeof err !== "object") return undefined;
-  const shape = err as { code?: unknown; error_code?: unknown; errorCode?: unknown };
-  for (const value of [shape.error_code, shape.errorCode, shape.code]) {
-    if (typeof value === "number") return value;
   }
   return undefined;
 }
@@ -404,17 +381,4 @@ export function describeShareError(err: unknown): string {
     return t("lib.errors.shareNotFound");
   }
   return messageFromError(err);
-}
-
-/** Whether an error message means the user's balance ran out. String match is
- * intentional and a known weakness — billing failures reach us as plain text
- * from several layers (Tauri commands and upstream provider errors),
- * none of which carry a structured code today. The patterns cover the Clovy
- * API's friendly message and the raw provider error
- * (`... 'error_code': 4301, 'message': 'insufficient_credits'`). */
-export function isInsufficientCreditsMessage(message?: string) {
-  if (!message) return false;
-  return /out of credits|insufficient credits|insufficient_credits|balance is too low/i.test(
-    message,
-  );
 }

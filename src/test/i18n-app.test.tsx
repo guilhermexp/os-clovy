@@ -1,10 +1,6 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  composerFundingDisabledReason,
-  recordingFundingDisabledReason,
-  tabMeta,
-} from "../app/app-shell";
+import { tabMeta } from "../app/app-shell";
 import { UpdateHub } from "../app/app-effects/update-ui";
 import { UP_TO_DATE_STATUS } from "../app/update-decision";
 import { createWorkspaceLoader } from "../app/workspace-lazy";
@@ -38,9 +34,6 @@ afterEach(() => {
 describe("app shell copy in English (default)", () => {
   it("keeps the English tab titles and update status", () => {
     expect(tabMeta({ view: "all-notes" }, [], [], []).title).toBe("All notes");
-    expect(composerFundingDisabledReason()).toBe(
-      "Add credits to send messages or generate images and videos.",
-    );
     renderUpdateHub();
     expect(screen.getByRole("status")).toHaveTextContent("Clovy is up to date.");
     expect(screen.getByRole("button", { name: "Dismiss update status" })).toBeInTheDocument();
@@ -50,14 +43,11 @@ describe("app shell copy in English (default)", () => {
 describe("app shell copy in pt-BR", () => {
   beforeEach(() => applyInterfaceLocale("pt-BR"));
 
-  it("translates tab titles and funding gates at call time", () => {
+  it("translates tab titles at call time", () => {
     expect(tabMeta({ view: "all-notes" }, [], [], []).title).toBe("Todas as notas");
     expect(tabMeta({ view: "home" }, [], [], []).title).toBe("Início");
     expect(tabMeta({ view: "settings" }, [], [], []).title).toBe("Configurações");
     expect(tabMeta({ view: "agent" }, [], [], []).title).toBe("Nova sessão");
-    expect(recordingFundingDisabledReason()).toBe(
-      "Adicione créditos antes de iniciar uma gravação. Você ainda pode navegar e editar.",
-    );
   });
 
   it("renders the up-to-date sentinel and update controls in Portuguese", () => {

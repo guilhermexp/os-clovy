@@ -36,14 +36,8 @@ export const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 export const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 export const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
 export const MEETING_START_LISTENER_RETRY_DELAYS_MS = [250, 1_000, 5_000] as const;
-// Funding and start-expiry copy is read at call time so it follows the
-// interface language.
+// Start-expiry copy is read at call time so it follows the interface language.
 export const meetingStartRequestExpiredMessage = () => t("app.recording.startExpired");
-export const composerFundingDisabledReason = () => t("app.funding.composer");
-export const recordingFundingDisabledReason = () => t("app.funding.recording");
-export const noteRetryFundingDisabledReason = () => t("app.funding.noteRetry");
-export const recoveryFundingDisabledReason = () => t("app.funding.recovery");
-export const routineFundingDisabledReason = () => t("app.funding.routine");
 // Floor for the note card so the sidebar can't be dragged wide enough to
 // crush it into a sliver — it always keeps a usable width plus its gutters.
 export const MAIN_PANEL_MIN_WIDTH = 420;

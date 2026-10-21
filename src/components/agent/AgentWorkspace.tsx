@@ -63,7 +63,6 @@ import {
   type ProviderApiKeysConfigured,
   type ProviderModelDto,
 } from "../../lib/tauri";
-import { shouldBlockTextOnFunding } from "../../lib/account-gate";
 import {
   type AgentSessionStatusDetail,
   type AgentSessionStatusKind,
@@ -360,7 +359,6 @@ export function AgentWorkspace({
   sessionInProject = false,
   projectContext,
   resolveSessionProjectContext,
-  creditActionsDisabledReason,
 }: AgentWorkspaceProps = {}) {
   const t = useT();
   const { companionPairingEnabled } = useExperimentalFlags();
@@ -730,17 +728,6 @@ export function AgentWorkspace({
     if (persisted) setPendingInitialTurn(undefined);
   }, [pendingInitialTurn, projection.items]);
   const activeModel = selectedModel(models, model);
-  const activeEngine = classifyChatEngineModel(model, engineCatalog, models);
-  const textActionsDisabledReason = shouldBlockTextOnFunding(
-    activeEngine.kind === "clovy" && Boolean(creditActionsDisabledReason),
-    {
-      activeModelId: model || undefined,
-      activeModel,
-      providerApiKeysConfigured,
-    },
-  )
-    ? creditActionsDisabledReason
-    : undefined;
 
   const readHomeTaskCards = useCallback(
     (storedSessionId: string) =>
@@ -1339,7 +1326,6 @@ export function AgentWorkspace({
       running ||
       waiting ||
       submitting ||
-      textActionsDisabledReason ||
       !queuedFollowUp ||
       !selectedId ||
       hydratedSelectionId !== selectedId ||
@@ -1374,7 +1360,6 @@ export function AgentWorkspace({
     running,
     selectedId,
     submitting,
-    textActionsDisabledReason,
     waiting,
   ]);
 
@@ -1452,7 +1437,7 @@ export function AgentWorkspace({
       recoveredSubmission?.prompt ??
       draftRef.current
     ).trim();
-    if (!prompt || waiting || submitting || textActionsDisabledReason) {
+    if (!prompt || waiting || submitting) {
       clearQueuedSubmissionAttempt();
       return;
     }
@@ -2074,10 +2059,6 @@ export function AgentWorkspace({
   }
 
   async function startDictation() {
-    if (creditActionsDisabledReason) {
-      setError(creditActionsDisabledReason);
-      return;
-    }
     try {
       await dictationHelperCommand({ type: "start_listening" });
     } catch (cause) {
@@ -2223,7 +2204,7 @@ export function AgentWorkspace({
         <button
           type="button"
           aria-label={t("agent.unsent.retry")}
-          disabled={running || waiting || submitting || Boolean(textActionsDisabledReason)}
+          disabled={running || waiting || submitting}
           onClick={() => {
             recoverableSubmissionSnapshotRef.current = recoverableSubmission;
             setError(undefined);
@@ -2356,7 +2337,6 @@ export function AgentWorkspace({
       stopping={stoppingRunId === projection.run?.id}
       submitting={submitting || (homeMode && homeSessionCreating)}
       attaching={attaching}
-      disabledReason={textActionsDisabledReason}
       notice={!heroMode ? error : undefined}
       hero={heroMode}
       showModelPicker={!homeMode}
@@ -2612,9 +2592,7 @@ export function AgentWorkspace({
                             ? t("agent.queued.retryAttachments")
                             : t("agent.queued.retryFollowUp")
                         }
-                        disabled={
-                          running || waiting || submitting || Boolean(textActionsDisabledReason)
-                        }
+                        disabled={running || waiting || submitting}
                         onClick={() => {
                           attemptedQueuedMessageIdsRef.current.delete(queuedFollowUp.messageId);
                           setFailedQueuedMessageIds((current) => {

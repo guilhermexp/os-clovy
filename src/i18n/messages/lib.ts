@@ -232,28 +232,6 @@ export default defineMessages({
     },
     "lib.schedule.yearlyAt": "Every year on {dates} at {time}",
 
-    // Account gate.
-    "lib.accountGate.topUp": "Top up credits",
-    "lib.accountGate.upgradeToMax": "Upgrade to Max",
-    "lib.accountGate.upgrade": "Upgrade",
-
-    // Max upgrade copy.
-    "lib.maxUpgrade.confirmTitle": "Upgrade to Max?",
-    "lib.maxUpgrade.confirmBody":
-      "Max is $100 per month. A secure Stripe page will open in your browser to review and confirm. Your billing cycle restarts today.",
-    "lib.maxUpgrade.chargeConfirmBody":
-      "Max is $100 per month, charged to your saved card now. Your billing cycle restarts today.",
-    "lib.maxUpgrade.confirmLabel": "Upgrade now",
-    "lib.maxUpgrade.busyLabel": "Upgrading...",
-    "lib.maxUpgrade.browserStatus": "Waiting for you to confirm in the browser",
-    "lib.maxUpgrade.waitingStatus": "Upgrade started. Waiting for payment confirmation.",
-    "lib.maxUpgrade.readyStatus": "Max is active.",
-    "lib.maxUpgrade.slowStatus": "Payment not confirmed yet. Check billing in your account portal.",
-    "lib.maxUpgrade.hostedSlowStatus":
-      "Still waiting for payment confirmation. If you closed the Stripe page, you can try again.",
-    "lib.maxUpgrade.portalLabel": "Open billing",
-    "lib.maxUpgrade.staleActionNotice": "Your plan changed - pick an option again",
-
     // Upstream provider recovery and notices.
     "lib.upstream.tryAgain": "Try again",
     "lib.upstream.noticeBody": "The upstream provider could not complete this request.",
@@ -684,27 +662,6 @@ export default defineMessages({
       other: "Todo mês nos dias {days} às {time}",
     },
     "lib.schedule.yearlyAt": "Todo ano em {dates} às {time}",
-
-    "lib.accountGate.topUp": "Recarregar créditos",
-    "lib.accountGate.upgradeToMax": "Fazer upgrade para o Max",
-    "lib.accountGate.upgrade": "Fazer upgrade",
-
-    "lib.maxUpgrade.confirmTitle": "Fazer upgrade para o Max?",
-    "lib.maxUpgrade.confirmBody":
-      "O Max custa US$ 100 por mês. Uma página segura do Stripe vai abrir no seu navegador para você revisar e confirmar. Seu ciclo de cobrança recomeça hoje.",
-    "lib.maxUpgrade.chargeConfirmBody":
-      "O Max custa US$ 100 por mês, cobrados agora no seu cartão salvo. Seu ciclo de cobrança recomeça hoje.",
-    "lib.maxUpgrade.confirmLabel": "Fazer upgrade agora",
-    "lib.maxUpgrade.busyLabel": "Fazendo upgrade...",
-    "lib.maxUpgrade.browserStatus": "Aguardando sua confirmação no navegador",
-    "lib.maxUpgrade.waitingStatus": "Upgrade iniciado. Aguardando a confirmação do pagamento.",
-    "lib.maxUpgrade.readyStatus": "O Max está ativo.",
-    "lib.maxUpgrade.slowStatus":
-      "Pagamento ainda não confirmado. Verifique a cobrança no portal da sua conta.",
-    "lib.maxUpgrade.hostedSlowStatus":
-      "Ainda aguardando a confirmação do pagamento. Se você fechou a página do Stripe, pode tentar de novo.",
-    "lib.maxUpgrade.portalLabel": "Abrir cobrança",
-    "lib.maxUpgrade.staleActionNotice": "Seu plano mudou - escolha uma opção de novo",
 
     "lib.upstream.tryAgain": "Tentar de novo",
     "lib.upstream.noticeBody": "O provedor do modelo não conseguiu concluir esta solicitação.",

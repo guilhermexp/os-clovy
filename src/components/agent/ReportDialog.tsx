@@ -5,7 +5,6 @@ import { useId, useMemo, useState } from "react";
 
 import { useLocale, useT } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
-import { recordPositiveFeedbackSent } from "../../lib/referral-nudge";
 import { submitIssueReport } from "../../lib/tauri";
 import { DotSpinner } from "../DotSpinner";
 import { Dialog, DialogField } from "../ui/Dialog";
@@ -87,7 +86,6 @@ export function ReportDialog({
         attachmentPaths,
         ...(canAttachFailureDetails && includeFailureDetails ? { storedSessionId } : {}),
       });
-      if (category === "feedback") recordPositiveFeedbackSent();
       setSent(true);
     } catch (cause) {
       setError(t("agent.report.sendFailed", { error: messageFromError(cause) }));

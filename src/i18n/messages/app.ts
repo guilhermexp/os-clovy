@@ -19,15 +19,6 @@ export default defineMessages({
     "app.breadcrumb.backToSessions": "Back to sessions",
     "app.breadcrumb.backToMeetingNotes": "Back to meeting notes",
 
-    // Funding gates
-    "app.funding.composer": "Add credits to send messages or generate images and videos.",
-    "app.funding.recording":
-      "Add credits before starting a recording. You can still browse and edit.",
-    "app.funding.noteRetry": "Add credits before retrying note generation.",
-    "app.funding.recovery":
-      "Add credits before recovering this recording. Your saved audio will stay available.",
-    "app.funding.routine": "Add credits before running a routine.",
-
     // Recording
     "app.recording.startExpired":
       "Recording did not start in time. Open meeting notes and select Record to try again.",
@@ -100,14 +91,6 @@ export default defineMessages({
     "app.breadcrumb.backToRoutines": "Voltar para rotinas",
     "app.breadcrumb.backToSessions": "Voltar para sessões",
     "app.breadcrumb.backToMeetingNotes": "Voltar para notas de reunião",
-
-    "app.funding.composer": "Adicione créditos para enviar mensagens ou gerar imagens e vídeos.",
-    "app.funding.recording":
-      "Adicione créditos antes de iniciar uma gravação. Você ainda pode navegar e editar.",
-    "app.funding.noteRetry": "Adicione créditos antes de tentar gerar a nota de novo.",
-    "app.funding.recovery":
-      "Adicione créditos antes de recuperar esta gravação. O áudio salvo continuará disponível.",
-    "app.funding.routine": "Adicione créditos antes de executar uma rotina.",
 
     "app.recording.startExpired":
       "A gravação não começou a tempo. Abra as notas de reunião e selecione Gravar para tentar de novo.",

@@ -1300,17 +1300,6 @@ export type AccountStatus = {
   portalUrl?: string;
 };
 
-export type ReferralSummary = {
-  code: string;
-  url: string;
-  referredCount: number;
-  pendingCount: number;
-  qualifiedCount: number;
-  earnedMonths: number;
-  appliedMonths: number;
-  availableMonths: number;
-};
-
 export async function osAccountsStatus() {
   return invoke<AccountStatus>("os_accounts_status");
 }
@@ -1343,38 +1332,6 @@ export async function osAccountsLogout(options: AccountsLogoutOptions = {}) {
 /** Persist an explicit Avatar v1 selection on the signed-in OS Accounts User. */
 export async function osAccountsSetAvatarSeed(seed: string) {
   return invoke<AccountUser>("os_accounts_set_avatar_seed", { seed });
-}
-
-/** Opens subscription checkout in the browser. Omitting `plan` keeps the
- * accounts-API default (Pro). */
-export async function osAccountsUpgrade(plan?: SubscriptionPlan) {
-  return invoke<void>("os_accounts_upgrade", { plan });
-}
-
-/** Opens a hosted billing-portal session for an existing subscriber to review
- * and confirm a full-price plan upgrade that restarts the billing cycle. */
-export async function osAccountsUpgradeSession(plan: SubscriptionPlan) {
-  return invoke<void>("os_accounts_upgrade_session", { plan });
-}
-
-/** Changes the plan on the caller's existing subscription in place (Pro to
- * Max), charging the saved card immediately with no browser review. This is
- * the compatibility fallback for deployments without hosted upgrade
- * sessions, and callers must only dispatch it behind the charge-now consent
- * copy. Credits still arrive only through the invoice webhook, so callers
- * poll account status until the grant lands. */
-export async function osAccountsChangePlan(plan: SubscriptionPlan) {
-  return invoke<AccountSubscription>("os_accounts_change_plan", { plan });
-}
-
-/** Opens the accounts portal in the default browser — the webview swallows
- * target="_blank" anchors, so portal navigation must go through Rust. */
-export async function osAccountsOpenPortal() {
-  return invoke<void>("os_accounts_open_portal");
-}
-
-export async function osAccountsReferralSummary() {
-  return invoke<ReferralSummary>("os_accounts_referral_summary");
 }
 
 export async function dictationCapabilities() {

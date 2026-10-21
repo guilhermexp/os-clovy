@@ -3,7 +3,6 @@ import { type MessageKey, t } from "../../i18n";
 export type SettingsTab =
   | "general"
   | "appearance"
-  | "billing"
   | "shortcuts"
   | "activity"
   | "dictation"
@@ -17,7 +16,6 @@ export type SettingsTab =
 const SETTINGS_TAB_LABEL_KEYS: Record<SettingsTab, MessageKey> = {
   general: "settings.tabs.general",
   appearance: "settings.appearance.title",
-  billing: "settings.tabs.billing",
   shortcuts: "settings.tabs.shortcuts",
   activity: "activity.tab.label",
   dictation: "settings.tabs.dictation",
@@ -44,7 +42,6 @@ function settingsTab(id: SettingsTab): { id: SettingsTab; label: string } {
 export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   settingsTab("general"),
   settingsTab("appearance"),
-  settingsTab("billing"),
   settingsTab("shortcuts"),
   settingsTab("activity"),
   settingsTab("dictation"),

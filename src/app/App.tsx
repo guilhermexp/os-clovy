@@ -15,7 +15,6 @@ import { noteReadyToShare } from "../lib/share-payload";
 import { SETTINGS_TABS } from "../components/settings/AppSettings";
 import type { TabItem } from "../components/tabs/TabBar";
 import { reorderTabs } from "./tabs/tabs";
-import { useReferralNudgeTriggers } from "./referral-nudge-triggers";
 import {
   checkRecordingSourceReadiness,
   companionCompleteFrontendRequest,
@@ -130,13 +129,7 @@ import type { FolderDto, AccountStatus } from "../lib/tauri";
 import type { RecordingSourceMode } from "../lib/tauri";
 import { retryPendingAutostartDefault } from "../lib/autostart";
 import { applyOnboardingReplayFlag, isOnboardingComplete } from "../lib/onboarding";
-import {
-  depletedBalanceActionLabel,
-  shouldBlockOnFunding,
-  shouldBlockOnSignIn,
-} from "../lib/account-gate";
-import type { MaxUpgradeTransport } from "../lib/billing-actions";
-import type { MaxGrantWait } from "../lib/max-upgrade";
+import { shouldBlockOnSignIn } from "../lib/account-gate";
 import { reconcileToStable, relaunchClovy, type ClovyUpdate } from "../lib/updater";
 import { attachScrollThumbFade } from "../lib/scroll-thumb-fade";
 import {
@@ -156,7 +149,6 @@ import {
   AGENT_MENU_BAR_SESSION_LIMIT,
   AGENT_SESSION_STARTUP_RETRY_DELAYS_MS,
   CHECK_FOR_UPDATES_EVENT,
-  recoveryFundingDisabledReason,
   SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
   SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS,
   UP_TO_DATE_DISMISS_MS,
@@ -182,8 +174,6 @@ import { useRecordingEvents } from "./use-recording-events";
 import { useMeetingEndEvents } from "./use-meeting-end-events";
 
 import { useRecordingControls } from "./use-recording-controls";
-
-import { useAccountActions } from "./use-account-actions";
 
 import { useAppNavigation } from "./use-app-navigation";
 
@@ -429,9 +419,6 @@ export function App() {
     recordNoticesConsentPinned,
     recordNoticesMicOverride,
     recordNoticesDemoRef,
-    referralNudgeMoment,
-    setReferralNudgeMoment,
-    referralNudgeSourceRef,
     finishingSessionsRef,
   } = useAppDevDemos({
     dispatch,
@@ -458,103 +445,16 @@ export function App() {
     !account.signedIn &&
     (accountLoading || !!accountError || !account.configured);
   const signInRequired = !devAccountsUnconfigured && shouldBlockOnSignIn(account);
-  // Dev console driver (window.__fundingDemo) that parks the out-of-credits
-  // surfaces (composer notice, sidebar chip) on a synthetic account snapshot
-  // so every funding branch can be inspected without a depleted account. The
-  // override bypasses the sign-in/unconfigured guards on purpose: the browser
-  // sandbox is rarely signed in, and the demo exists precisely there.
-  const [fundingDemoAccount, setFundingDemoAccountState] = useState<AccountStatus | null>(null);
-  const fundingDemoRef = useRef<AccountStatus | null>(null);
-  const setFundingDemoAccount = useCallback((next: AccountStatus | null) => {
-    fundingDemoRef.current = next;
-    setFundingDemoAccountState(next);
-  }, []);
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    let dispose: (() => void) | undefined;
-    void import("../lib/funding-demo").then(({ registerFundingDemo }) => {
-      if (cancelled) return;
-      ({ dispose } = registerFundingDemo({ setOverride: setFundingDemoAccount }));
-    });
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
-  }, [setFundingDemoAccount]);
-  const fundingAccount = fundingDemoAccount ?? account;
-  const refreshFundingAccount = useCallback(async () => {
-    if (fundingDemoRef.current) return fundingDemoRef.current;
-    return refreshAccount();
-  }, [refreshAccount]);
-  const fundingRequired = fundingDemoAccount
-    ? shouldBlockOnFunding(fundingDemoAccount)
-    : !devAccountsUnconfigured && !signInRequired && shouldBlockOnFunding(account);
-  const topUpLabel = depletedBalanceActionLabel(account);
-  // Confirm gate for the Pro -> Max plan change reached from depleted-balance
-  // surfaces (note failure banner, agent workspace notice). Capture the action
-  // at click time so a later account refresh cannot reroute confirmation to a
-  // different billing transport. `transport` flips to charge_now only after a
-  // hosted capability signal, swapping the dialog to the charge-now copy that
-  // the next confirm actually consents to.
-  const [maxUpgradePrompt, setMaxUpgradePrompt] = useState<{
-    action: "upgrade_to_max";
-    plan: "max";
-    transport: MaxUpgradeTransport;
-  } | null>(null);
-  const [maxUpgradeError, setMaxUpgradeError] = useState<string>();
-  // Transient billing feedback shown beside the error banner. Success is only
-  // announced after the credit grant poll observes a higher credit balance.
-  const [billingNotice, setBillingNotice] = useState<string | null>(null);
-  const appMaxGrantWaitRef = useRef<MaxGrantWait>();
-  const billingNoticeTimerRef = useRef<number | undefined>(undefined);
-  const showBillingNotice = useCallback((notice: string, autoClearMs?: number) => {
-    window.clearTimeout(billingNoticeTimerRef.current);
-    setBillingNotice(notice);
-    if (autoClearMs) {
-      billingNoticeTimerRef.current = window.setTimeout(() => setBillingNotice(null), autoClearMs);
-    }
-  }, []);
-  const { confirmMaxUpgrade, handleTopUp } = useAccountActions({
-    account,
-    appMaxGrantWaitRef,
-    billingNoticeTimerRef,
-    maxUpgradePrompt,
-    refreshAccount,
-    setBillingNotice,
-    setError,
-    setMaxUpgradeError,
-    setMaxUpgradePrompt,
-    showBillingNotice,
-  });
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
     return isOnboardingComplete();
   });
-  // The wizard handles sign-in, personalization, and permissions. Funding
-  // only blocks once the account snapshot positively reports no spendable
-  // credits.
+  // The wizard handles sign-in, personalization, and permissions.
   const onboardingRequired = !accountLoading && !onboardingDone;
-  // Funding no longer blocks the shell or its read-only data. Onboarding still
-  // holds bootstrap, update checks, and eager permission probes because the
+  // Onboarding holds bootstrap, update checks, and eager permission probes because the
   // wizard owns the permission prompts while it is on screen.
   const appBlocked = accountLoading || signInRequired || onboardingRequired;
   meetingEndReadyRef.current = !appBlocked && bootstrapped;
-  // The referral delight nudge's trigger layer: counts the moments (5th note,
-  // first agent completion, 25th dictation) and surfaces the card when the
-  // caps and gates allow. T4 (positive feedback) records from the report flow
-  // directly.
-  // Gated on captureActive too: a growth card sliding in mid-meeting is the
-  // one timing guaranteed to annoy. A moment that fires during a recording is
-  // consumed without showing (the caps never queue).
-  useReferralNudgeTriggers({
-    notes: state.notes,
-    enabled: account.signedIn && !account.localDev && onboardingDone && !captureActive,
-    onShow: (moment) => {
-      referralNudgeSourceRef.current = "trigger";
-      setReferralNudgeMoment(moment);
-    },
-  });
   const publishAgentMenuBarState = useCallback(() => {
     void emitAgentMenuBarState(
       buildAgentMenuBarState({
@@ -864,10 +764,6 @@ export function App() {
   );
 
   function handleRecovery(sessionId: string, action: "validate" | "discard") {
-    if (action === "validate" && fundingRequired) {
-      setError(recoveryFundingDisabledReason());
-      return;
-    }
     const recoveryNoteId = state.activeRecoveries.find(
       (recovery) => recovery.sessionId === sessionId,
     )?.noteId;
@@ -2205,7 +2101,6 @@ export function App() {
     calendarContextNotePartitionsRef,
     calendarContextNoteUpdatesRef,
     dispatch,
-    fundingRequired,
     handleEmptyNotesAfterDelete,
     pendingCalendarContextAdoptionsRef,
     recordingNoteIdRef,
@@ -2506,8 +2401,6 @@ export function App() {
     completedSessions,
     dispatch,
     folderReturnTarget,
-    fundingAccount,
-    fundingRequired,
     handleAccountChanged,
     handleCreateFolder,
     handleCreateNote,
@@ -2550,7 +2443,6 @@ export function App() {
     handleStartRecording,
     handleStopNowAfterMeetingEnd,
     handleToggleSessionCompleted,
-    handleTopUp,
     handleUpdateNote,
     homeStoredSessionId,
     memoryFolderFilter,
@@ -2569,7 +2461,6 @@ export function App() {
     recordNoticesConsentPinned,
     recordingNoteId,
     refreshAccount,
-    refreshFundingAccount,
     rememberHomeSession,
     runUpdateCheck,
     selectedNote,
@@ -2594,7 +2485,6 @@ export function App() {
     sourceReadiness,
     state,
     takeNewTabIntent,
-    topUpLabel,
   });
 
   const appLayout = renderAppLayout({
@@ -2606,8 +2496,6 @@ export function App() {
     activeView,
     agentSessions: focusedAgentSessions,
     agentSessionsListRef,
-    appMaxGrantWaitRef,
-    billingNotice,
     captureActive,
     changeSettingsTab,
     checkingUpdate,
@@ -2615,12 +2503,9 @@ export function App() {
     closeTab,
     completedSessions,
     confirmDeleteNote,
-    confirmMaxUpgrade,
     detailScrollerActive,
     dispatch,
     error,
-    fundingAccount,
-    fundingRequired,
     handleCreateFolder,
     handleDeleteNote,
     handleEnableAccessibility,
@@ -2641,8 +2526,6 @@ export function App() {
     handleToggleSessionCompleted,
     homeStoredSessionId,
     mainPanelBodyRef,
-    maxUpgradeError,
-    maxUpgradePrompt,
     moveDialogNoteIds,
     moveDialogSessionIds,
     noteChat,
@@ -2660,9 +2543,6 @@ export function App() {
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    referralNudgeMoment,
-    referralNudgeSourceRef,
-    refreshFundingAccount,
     relaunchingUpdate,
     selectedNote,
     sessionFolders,
@@ -2673,14 +2553,12 @@ export function App() {
     setConfirmDeleteNote,
     setError,
     setFolderReturnTarget,
-    setMaxUpgradePrompt,
     setMoveDialogNoteIds,
     setMoveDialogSessionIds,
     setNoteChatOpen,
     setNoteShareUrl,
     setOriginAllNotes,
     setOriginFolderId,
-    setReferralNudgeMoment,
     setShareNoteOpen,
     setSidebarCollapsed,
     setSidebarResizing,

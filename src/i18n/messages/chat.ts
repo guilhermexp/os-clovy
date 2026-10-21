@@ -76,7 +76,6 @@ export default defineMessages({
     "chat.approval.resolved": "Resolved",
     "chat.notice.contextOverflow": "This conversation is too large for the selected model.",
     "chat.notice.needCredits": "You need more credits to continue.",
-    "chat.notice.addCredits": "Add credits",
     "chat.notice.toolFailed": "A tool Clovy used could not finish this request.",
     "chat.notice.runtimeStopped": "Clovy stopped unexpectedly.",
     "chat.notice.upstreamFailed": "The model service could not finish this request.",
@@ -164,8 +163,6 @@ export default defineMessages({
     "chat.model.modelLabel": "Model: {name}",
     "chat.model.chooseTextModel": "Choose text model",
     "chat.model.suggested": "Suggested",
-    "chat.model.autoBillingNote":
-      "Auto is billed to Clovy credits and does not use your OpenRouter key.",
     "chat.model.providerKeyNeeded":
       "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
     "chat.model.suggestedTextModels": "Suggested text models",
@@ -283,7 +280,6 @@ export default defineMessages({
     "chat.approval.resolved": "Resolvido",
     "chat.notice.contextOverflow": "Esta conversa é grande demais para o modelo selecionado.",
     "chat.notice.needCredits": "Você precisa de mais créditos para continuar.",
-    "chat.notice.addCredits": "Adicionar créditos",
     "chat.notice.toolFailed":
       "Uma ferramenta usada pelo Clovy não conseguiu concluir esta solicitação.",
     "chat.notice.runtimeStopped": "O Clovy parou inesperadamente.",
@@ -373,8 +369,6 @@ export default defineMessages({
     "chat.model.modelLabel": "Modelo: {name}",
     "chat.model.chooseTextModel": "Escolher modelo de texto",
     "chat.model.suggested": "Sugeridos",
-    "chat.model.autoBillingNote":
-      "O Auto é cobrado dos créditos do Clovy e não usa sua chave da OpenRouter.",
     "chat.model.providerKeyNeeded":
       "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
     "chat.model.suggestedTextModels": "Modelos de texto sugeridos",

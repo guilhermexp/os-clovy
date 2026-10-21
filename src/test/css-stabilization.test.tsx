@@ -17,7 +17,7 @@ describe("CSS stabilization state selectors", () => {
   });
 
   it("keeps the intrinsic accordion transitions that reflow surrounding content", () => {
-    expect(appCss.match(/transition:\s*grid-template-rows\b/g)).toHaveLength(3);
+    expect(appCss.match(/transition:\s*grid-template-rows\b/g)).toHaveLength(2);
   });
 
   it("marks shared component state explicitly", () => {

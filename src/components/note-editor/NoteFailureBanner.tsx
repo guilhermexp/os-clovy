@@ -1,34 +1,12 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { useState } from "react";
 import { type MessageKey, t as translate, useT } from "../../i18n";
-import { isInsufficientCreditsMessage } from "../../lib/errors";
-import { TierMiniCard } from "../account/FundingNotice";
-import type { FundingTier } from "../account/FundingNotice";
-
-export type FailureKind = "balance_low" | "generic";
 
 type Props = {
   errorMessage?: string;
   audioPreserved: boolean;
   onRetry: () => void | Promise<void>;
-  onTopUp: () => void;
-  topUpLabel?: string;
-  retryBlockedReason?: string;
-  /** The user's current plan; balance failures lead with its tier card so
-   * the banner reads as "your card declined", matching the other credits
-   * surfaces. */
-  tier?: FundingTier;
 };
-
-// String match (see isInsufficientCreditsMessage) is intentional and a known
-// weakness — the backend currently persists only the error message on the
-// note, not the structured code (see commands.rs::finish_recording where
-// set_note_status is called with Some(error.message)). When we start storing
-// the code we can switch to a strict equality check on the backend billing
-// error code.
-export function classifyFailure(message?: string): FailureKind {
-  return isInsufficientCreditsMessage(message) ? "balance_low" : "generic";
-}
 
 export function userFacingFailureMessage(message?: string) {
   if (!message) return undefined;
@@ -105,21 +83,9 @@ export function isInvalidClovyResponseMessage(message: string) {
   );
 }
 
-export function NoteFailureBanner({
-  errorMessage,
-  audioPreserved,
-  onRetry,
-  onTopUp,
-  topUpLabel: topUpLabelProp,
-  retryBlockedReason,
-  tier,
-}: Props) {
+export function NoteFailureBanner({ errorMessage, audioPreserved, onRetry }: Props) {
   const t = useT();
-  const topUpLabel = topUpLabelProp ?? t("notes.editor.upgrade");
-  const kind = classifyFailure(errorMessage);
-  const isBalanceIssue = kind === "balance_low";
   const displayMessage = userFacingFailureMessage(errorMessage);
-  const topUpAction = topUpLabel.toLowerCase();
   // Local busy flag so a fast double-click can't fire onRetry twice. The
   // banner unmounts when the note transitions out of `failed` status, so we
   // don't need to reset this state ourselves; the catch covers the case
@@ -143,28 +109,17 @@ export function NoteFailureBanner({
   }
 
   return (
-    <aside className="note-failure-banner" role="alert" data-kind={kind}>
-      {isBalanceIssue && tier ? <TierMiniCard tier={tier} /> : null}
+    <aside className="note-failure-banner" role="alert">
       <p className="note-failure-message">
-        {isBalanceIssue
-          ? audioPreserved
-            ? t("notes.failure.balanceRanOut", { action: topUpAction })
-            : t("notes.failure.balanceTooLow", { action: topUpLabel })
-          : (displayMessage ?? t("notes.failure.generic"))}
-        {!isBalanceIssue && audioPreserved ? ` ${t("notes.failure.savedCanRetry")}` : null}
-        {retryBlockedReason ? ` ${retryBlockedReason}` : null}
+        {displayMessage ?? t("notes.failure.generic")}
+        {audioPreserved ? ` ${t("notes.failure.savedCanRetry")}` : null}
       </p>
       <div className="note-failure-actions">
-        {isBalanceIssue ? (
-          <button type="button" className="btn btn-secondary" onClick={onTopUp} disabled={retrying}>
-            {topUpLabel}
-          </button>
-        ) : null}
         <button
           type="button"
           className="btn btn-ghost"
           onClick={() => void handleRetry()}
-          disabled={!audioPreserved || retrying || Boolean(retryBlockedReason)}
+          disabled={!audioPreserved || retrying}
           aria-busy={retrying || undefined}
         >
           <IconArrowRotateClockwise

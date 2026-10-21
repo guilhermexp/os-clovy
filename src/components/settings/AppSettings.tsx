@@ -62,7 +62,7 @@ import type {
   RecordingSourceMode,
   RecordingSourceReadinessDto,
 } from "../../lib/tauri";
-import { AccountSettingsSection, BillingSettingsSection } from "../account/AccountSettings";
+import { AccountSettingsSection } from "../account/AccountSettings";
 import { KeycapShortcut } from "../shortcuts/KeycapShortcut";
 import { chordFromKeyEvent, shortcutFromCapturePayload } from "../shortcuts/use-shortcut-capture";
 import {
@@ -573,7 +573,7 @@ export function AppSettings({
   const settingsTabs = settingsTabsForCompanionPairing(
     experimentalFlags.companionPairingEnabled,
     effectiveActivitySupported,
-  ).filter((tab) => !(account.localDev && tab.id === "billing"));
+  );
   const capabilities = useDictationCapabilities();
   const systemAudioSupportedPlatform = capabilities.systemAudio || isSystemAudioSupportedPlatform();
   const defaultShortcuts =
@@ -679,17 +679,6 @@ export function AppSettings({
       void resetMicTestState(true);
     }
   }, [activeTab]);
-
-  useEffect(() => {
-    if (!account.localDev || activeTab !== "billing") {
-      return;
-    }
-    if (controlled) {
-      onTabChange?.("general");
-      return;
-    }
-    setInternalTab("general");
-  }, [account.localDev, activeTab, controlled, onTabChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -889,7 +878,7 @@ export function AppSettings({
       setProviderModels((models) => ({ ...models, [mode]: response.models }));
     } catch (error) {
       if (request !== providerCatalogRequests.current[mode]) return;
-      // A stale successful fetch must not assert funding after a failed refresh.
+      // A stale successful fetch must not survive a failed refresh.
       setProviderModels((models) => ({ ...models, [mode]: [] }));
       setStatus(messageFromError(error));
     }
@@ -1714,10 +1703,6 @@ export function AppSettings({
           </section>
         ) : null}
 
-        {activeTab === "billing" && !account.localDev ? (
-          <BillingSettingsSection account={account} onRefresh={onAccountRefresh} />
-        ) : null}
-
         {activeTab === "shortcuts" ? (
           <section className="settings-group" aria-labelledby="shortcuts-heading">
             <SettingsPageHeader
@@ -2388,10 +2373,7 @@ export function AppSettings({
 
         {activeTab === "connectors" ? (
           <>
-            <ConnectorsSection
-              onOpenModels={() => setActiveTab("models")}
-              onOpenBilling={() => setActiveTab("billing")}
-            />
+            <ConnectorsSection onOpenModels={() => setActiveTab("models")} />
             <AgentMcpServersSection />
           </>
         ) : null}

@@ -104,7 +104,6 @@ type RoutinesViewProps = {
   onCreateRoutine: (prompt: string) => void;
   /** Opens a past scheduled run in the agent view. */
   onOpenRun: (session: RoutineRunSession) => void;
-  creditActionsDisabledReason?: string;
 };
 
 type Page =
@@ -112,11 +111,7 @@ type Page =
   | { kind: "create"; template?: RoutineTemplate }
   | { kind: "detail"; jobId: string };
 
-export function RoutinesView({
-  onCreateRoutine,
-  onOpenRun,
-  creditActionsDisabledReason,
-}: RoutinesViewProps) {
+export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) {
   const t = useT();
   const { policy } = useConnectorPolicy();
   const [allRoutines, setRoutines] = useState<RoutineJob[]>([]);
@@ -336,7 +331,6 @@ export function RoutinesView({
   }
 
   async function runNow(routine: RoutineJob) {
-    if (creditActionsDisabledReason) return;
     markBusy(routine.job_id, true);
     try {
       await triggerRoutine(routine.job_id);
@@ -485,10 +479,6 @@ export function RoutinesView({
   }
 
   function submitDescribe() {
-    // Describing a routine runs an agent session, so it is metered like every
-    // other composer; the guard backs the disabled send button (Enter still
-    // submits the form).
-    if (creditActionsDisabledReason) return;
     const description = describeDraft.trim();
     if (!description) return;
     setDescribeDraft("");
@@ -546,7 +536,6 @@ export function RoutinesView({
     <DescribeBar
       draft={describeDraft}
       unrestricted={describeUnrestricted}
-      disabledReason={creditActionsDisabledReason}
       onDraftChange={setDescribeDraft}
       onUnrestrictedChange={setDescribeUnrestricted}
       onSubmit={submitDescribe}
@@ -598,7 +587,6 @@ export function RoutinesView({
           onSave={(updates) => saveRoutine(detailRoutine.job_id, updates)}
           onToggleActive={() => void toggleActive(detailRoutine)}
           onRunNow={() => runNow(detailRoutine)}
-          runNowDisabledReason={creditActionsDisabledReason}
           onDelete={() => setPendingDelete(detailRoutine)}
           onOpenRun={onOpenRun}
           onRetryLoad={detailErrorRetryable ? retryDetailLoad : undefined}
@@ -689,7 +677,6 @@ export function RoutinesView({
                   setErrorRetryable(false);
                 })
               }
-              runNowDisabledReason={creditActionsDisabledReason}
               onDelete={() => setPendingDelete(routine)}
             />
           ))}
@@ -797,7 +784,6 @@ function RoutineRow({
   busy,
   onOpen,
   onRunNow,
-  runNowDisabledReason,
   onDelete,
 }: {
   routine: RoutineJob;
@@ -805,7 +791,6 @@ function RoutineRow({
   busy: boolean;
   onOpen: () => void;
   onRunNow: () => void;
-  runNowDisabledReason?: string;
   onDelete: () => void;
 }) {
   const t = useT();
@@ -922,8 +907,7 @@ function RoutineRow({
               <button
                 type="button"
                 role="menuitem"
-                disabled={Boolean(runNowDisabledReason) || busy || routine.state !== "scheduled"}
-                title={runNowDisabledReason}
+                disabled={busy || routine.state !== "scheduled"}
                 onClick={() => {
                   setMenuOpen(false);
                   onRunNow();
@@ -1040,16 +1024,12 @@ const ROUTINE_EXECUTION_MODE_OPTIONS = [
 function DescribeBar({
   draft,
   unrestricted,
-  disabledReason,
   onDraftChange,
   onUnrestrictedChange,
   onSubmit,
 }: {
   draft: string;
   unrestricted: boolean;
-  /** Set while funding blocks metered actions: send disables with this as
-   * its tooltip (the draft itself stays editable, like the chat composers). */
-  disabledReason?: string;
   onDraftChange: (draft: string) => void;
   onUnrestrictedChange: (unrestricted: boolean) => void;
   onSubmit: () => void;
@@ -1125,9 +1105,8 @@ function DescribeBar({
               <button
                 type="submit"
                 className="agent-composer-send"
-                disabled={!draft.trim() || Boolean(disabledReason)}
+                disabled={!draft.trim()}
                 aria-label={t("routines.describe.send")}
-                title={disabledReason}
               >
                 <IconArrowUp size={16} />
               </button>

@@ -33,7 +33,6 @@ const mocks = vi.hoisted(() => ({
   clovyOpenCommunityPage: vi.fn(),
   clovyOpenVerifyPage: vi.fn(),
   osAccountsCancelLogin: vi.fn(),
-  osAccountsOpenPortal: vi.fn(),
   listen: vi.fn(),
 }));
 
@@ -62,7 +61,6 @@ vi.mock("../lib/tauri", () => ({
   clovyOpenCommunityPage: mocks.clovyOpenCommunityPage,
   clovyOpenVerifyPage: mocks.clovyOpenVerifyPage,
   osAccountsCancelLogin: mocks.osAccountsCancelLogin,
-  osAccountsOpenPortal: mocks.osAccountsOpenPortal,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -75,11 +73,6 @@ const account: AccountStatus = {
   user: { id: "u1", handle: "casey", displayName: "Casey Tester" },
   balance: { credits: 5000, usdMillis: 5000 },
   subscription: { subscribed: true, status: "trialing" },
-};
-
-const unsubscribedAccount: AccountStatus = {
-  ...account,
-  subscription: { subscribed: false },
 };
 
 const signedOutAccount: AccountStatus = {
@@ -163,7 +156,6 @@ describe("OnboardingFlow", () => {
     mocks.openPrivacySettings.mockResolvedValue(undefined);
     mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
     mocks.clovyOpenCommunityPage.mockResolvedValue(undefined);
-    mocks.osAccountsOpenPortal.mockResolvedValue(undefined);
     mocks.setDictationLanguage.mockResolvedValue(undefined);
     mocks.setDictationShortcut.mockResolvedValue(undefined);
     mocks.setP3aEnabled.mockImplementation((enabled: boolean) =>
@@ -553,30 +545,6 @@ describe("OnboardingFlow", () => {
     } finally {
       restoreNavigator();
     }
-  });
-
-  it("does not ask unsubscribed users for a card during onboarding", async () => {
-    const user = userEvent.setup();
-    const onComplete = vi.fn();
-    render(<OnboardingFlow {...flowProps({ account: unsubscribedAccount, onComplete })} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-    await user.click(screen.getByRole("radio", { name: /Work/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Let Clovy listen and type" });
-
-    grantPermissions();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-
-    expect(screen.queryByRole("heading", { name: /free trial/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Start free trial/i })).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Talk to Clovy" })).toBeNull();
-    expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
   });
 
   it("resumes a legacy practice step at permissions", async () => {

@@ -40,8 +40,6 @@ export type RenderAppWorkspaceDependencies = {
   completedSessions: Record<string, string>;
   dispatch: React.Dispatch<NotesAction>;
   folderReturnTarget: { noteId: string; label: string } | undefined;
-  fundingAccount: AccountStatus;
-  fundingRequired: boolean;
   handleAccountChanged: (nextAccount: AccountStatus) => void;
   handleCreateFolder: (name: string, description?: string) => Promise<FolderDto | undefined>;
   handleCreateNote: (folderId?: string | null) => Promise<void>;
@@ -100,7 +98,6 @@ export type RenderAppWorkspaceDependencies = {
   handleStartRecording: () => Promise<void>;
   handleStopNowAfterMeetingEnd: (sessionId: string) => void;
   handleToggleSessionCompleted: (sessionId: string, completed: boolean) => Promise<void>;
-  handleTopUp: () => void;
   handleUpdateNote: (noteId: string, patch: NoteEditablePatch) => void;
   homeStoredSessionId: string | undefined;
   memoryFolderFilter: string | undefined;
@@ -119,7 +116,6 @@ export type RenderAppWorkspaceDependencies = {
   recordNoticesConsentPinned: boolean;
   recordingNoteId: string | undefined;
   refreshAccount: () => Promise<AccountStatus | undefined>;
-  refreshFundingAccount: () => Promise<AccountStatus | undefined>;
   rememberHomeSession: (sessionId: string) => void;
   runUpdateCheck: (mode: UpdateCheckMode, check?: () => Promise<ClovyUpdate | null>) => void;
   selectedNote: NoteDto | undefined;
@@ -148,5 +144,4 @@ export type RenderAppWorkspaceDependencies = {
   sourceReadiness: RecordingSourceReadinessDto | undefined;
   state: NotesState;
   takeNewTabIntent: () => boolean;
-  topUpLabel: string;
 };

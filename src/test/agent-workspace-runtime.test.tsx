@@ -2239,56 +2239,6 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(await screen.findByText("Resume with this file")).toBeVisible();
   });
 
-  it("releases a queued attempt when submit becomes blocked before its frame", async () => {
-    saveQueuedAgentFollowUps({
-      [session.id]: {
-        messageId: "blocked-frame",
-        prompt: "Retry after funding refresh",
-        attachments: ["/tmp/retry.pdf"],
-        model: "fast",
-        thinkingLevel: "medium",
-      },
-    });
-    const frameCallbacks: FrameRequestCallback[] = [];
-    const animationFrame = vi
-      .spyOn(window, "requestAnimationFrame")
-      .mockImplementation((callback) => {
-        frameCallbacks.push(callback);
-        return frameCallbacks.length;
-      });
-    try {
-      const view = render(<AgentWorkspace initialSession={session} />);
-      await waitFor(() => expect(frameCallbacks).toHaveLength(1));
-
-      view.rerender(
-        <AgentWorkspace
-          initialSession={session}
-          creditActionsDisabledReason="Add credits to continue"
-        />,
-      );
-      act(() => frameCallbacks.shift()?.(0));
-      await waitFor(() =>
-        expect(
-          mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run"),
-        ).toHaveLength(0),
-      );
-
-      view.rerender(<AgentWorkspace initialSession={session} />);
-      await waitFor(() => expect(frameCallbacks).toHaveLength(1));
-      act(() => frameCallbacks.shift()?.(0));
-      await waitFor(() =>
-        expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-          request: expect.objectContaining({
-            prompt: "Retry after funding refresh",
-            attachments: ["/tmp/retry.pdf"],
-          }),
-        }),
-      );
-    } finally {
-      animationFrame.mockRestore();
-    }
-  });
-
   it("keeps a restored follow-up when its run start fails after navigation", async () => {
     saveQueuedAgentFollowUps({
       [session.id]: {
@@ -3181,62 +3131,6 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
         request: expect.objectContaining({ model: engineModel }),
-      }),
-    );
-  });
-
-  it("keeps explicit OpenRouter BYOK text available when Clovy credits are unavailable", async () => {
-    const user = userEvent.setup();
-    const openrouterSession = { ...session, model: "openrouter-text" };
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([openrouterSession]);
-      if (command === "get_agent_session") return Promise.resolve(openrouterSession);
-      if (command === "list_provider_models") {
-        return Promise.resolve({
-          mode: "generation",
-          selectedModel: "openrouter-text",
-          modelType: "text",
-          models: [
-            {
-              provider: "openrouter",
-              id: "openrouter-text",
-              name: "OpenRouter text",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-              privacy: "private",
-              contextTokens: 128_000,
-            },
-          ],
-        });
-      }
-      if (command === "provider_model_settings") {
-        return Promise.resolve({
-          settings: { costQuality: 100 },
-          effectiveSettings: {
-            providerApiKeysConfigured: { groq: false, openrouter: true, fal: false, tavily: false },
-          },
-        });
-      }
-      return defaultInvoke?.(command, args);
-    });
-
-    render(
-      <AgentWorkspace
-        initialSession={openrouterSession}
-        creditActionsDisabledReason="Add credits to continue"
-      />,
-    );
-    await screen.findByText("Earlier answer");
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await waitFor(() => expect(composer).toBeEnabled());
-    await user.type(composer, "Use my OpenRouter key");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({ model: "openrouter-text" }),
       }),
     );
   });

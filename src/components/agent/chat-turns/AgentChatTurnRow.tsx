@@ -17,7 +17,6 @@ import {
 import { hasBrowserAccessRequest, stripBrowserAccessRequest } from "../../../lib/browser-access";
 import { intlLocale, useT } from "../../../i18n";
 import { agentFilePreview } from "../../../lib/tauri";
-import type { FundingTier } from "../../account/FundingNotice";
 import { CopyStateIcon } from "../../ui/CopyStateIcon";
 import { DotSpinner } from "../../DotSpinner";
 import { HoverTip } from "../../ui/HoverTip";
@@ -74,11 +73,7 @@ export function AgentChatTurnRow({
   onRetryUpstreamFailure,
   upstreamFailureRetryAttempted,
   upstreamFailureRetryDisabled,
-  creditActionsDisabledReason,
   onThinkingOpenChange,
-  onTopUp,
-  topUpLabel,
-  fundingTier,
   onVisibleMarkdownChange,
   onBranch,
   branching,
@@ -120,11 +115,7 @@ export function AgentChatTurnRow({
   onRetryUpstreamFailure?: (assistantTurnId: string) => void;
   upstreamFailureRetryAttempted?: boolean;
   upstreamFailureRetryDisabled?: boolean;
-  creditActionsDisabledReason?: string;
   onThinkingOpenChange: (key: string, open: boolean) => void;
-  onTopUp?: () => void;
-  topUpLabel?: string;
-  fundingTier?: FundingTier;
   onVisibleMarkdownChange?: (visibleMarkdown: string) => void;
   onBranch?: (itemId: string) => void;
   branching?: boolean;
@@ -587,12 +578,7 @@ export function AgentChatTurnRow({
                 }
               />
             ) : (
-              <CreditsNoticePart
-                key={`${turn.id}:notice:${index}`}
-                onTopUp={onTopUp}
-                topUpLabel={topUpLabel}
-                tier={fundingTier}
-              />
+              <CreditsNoticePart key={`${turn.id}:notice:${index}`} />
             )
           ) : part.type === "steering" ? (
             <SteeringPart key={`${turn.id}:steering:${index}`} part={part} />
@@ -610,7 +596,6 @@ export function AgentChatTurnRow({
               part={part}
               onDownload={onDownloadVideo}
               onRetry={onRetryVideo ? () => onRetryVideo(turn.id, part) : undefined}
-              retryDisabledReason={part.jobId ? undefined : creditActionsDisabledReason}
             />
           ) : null,
         )}

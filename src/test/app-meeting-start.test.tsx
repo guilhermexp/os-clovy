@@ -79,7 +79,6 @@ const mocks = vi.hoisted(() => ({
   osAccountsLogin: vi.fn(),
   osAccountsCancelLogin: vi.fn(),
   osAccountsLogout: vi.fn(),
-  osAccountsUpgrade: vi.fn(),
   agentHudShow: vi.fn(),
   agentOpenReady: vi.fn().mockResolvedValue(null),
   agentHudHide: vi.fn(),
@@ -180,7 +179,6 @@ vi.mock("../lib/tauri", () => ({
   osAccountsLogin: mocks.osAccountsLogin,
   osAccountsCancelLogin: mocks.osAccountsCancelLogin,
   osAccountsLogout: mocks.osAccountsLogout,
-  osAccountsUpgrade: mocks.osAccountsUpgrade,
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
@@ -323,7 +321,6 @@ describe("meeting start transcription event", () => {
     mocks.osAccountsLogin.mockResolvedValue(account);
     mocks.osAccountsLogout.mockResolvedValue(undefined);
     mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
-    mocks.osAccountsUpgrade.mockResolvedValue(undefined);
     mocks.updateNote.mockImplementation(async (input) => ({
       ...first,
       ...input,
@@ -1216,7 +1213,6 @@ describe("agent recorder request event", () => {
     mocks.osAccountsLogin.mockResolvedValue(account);
     mocks.osAccountsLogout.mockResolvedValue(undefined);
     mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
-    mocks.osAccountsUpgrade.mockResolvedValue(undefined);
     mocks.updateNote.mockImplementation(async (input) => ({ ...first, ...input }));
     mocks.patchNote.mockImplementation(async (noteId, patch) => ({
       id: noteId,
