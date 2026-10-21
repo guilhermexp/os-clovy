@@ -5,7 +5,7 @@
 .PHONY: help install \
 	dev dev-staging dev-api \
 	ephemeral-api ephemeral-api-down dev-with-ephemeral-api \
-	check format typecheck test-web \
+	third-party-guard check format typecheck test-web \
 	tauri-fmt tauri-fmt-check tauri-lint tauri-test \
 	companion-fmt companion-fmt-check companion-lint companion-test \
 	clovy-api-fmt clovy-api-fmt-check clovy-api-lint clovy-api-test \
@@ -61,6 +61,9 @@ dev-with-ephemeral-api:  ## Run the app against a fresh ephemeral CVM; deletes i
 	./scripts/ephemeral-clovy-api.sh dev
 
 # --- Frontend (src/, scripts/) ---
+third-party-guard:  ## Fail if app source names Open Software service addresses
+	./scripts/check-third-party-services.sh
+
 check:  ## Biome check (format + lint, incl. the lucide ban)
 	pnpm check
 
@@ -160,7 +163,7 @@ lint: check tauri-lint companion-lint clovy-api-lint  ## Lint everything
 
 test: test-web tauri-test companion-test clovy-api-test  ## Run all test suites
 
-verify: check typecheck test-web tauri-fmt-check tauri-lint tauri-test companion-fmt-check companion-lint companion-test clovy-api-fmt-check clovy-api-lint clovy-api-test  ## Full CI-parity gate
+verify: third-party-guard check typecheck test-web tauri-fmt-check tauri-lint tauri-test companion-fmt-check companion-lint companion-test clovy-api-fmt-check clovy-api-lint clovy-api-test  ## Full CI-parity gate
 
 local-ci:  ## Run path-aware local PR checks and post required signoff/* statuses
 	./scripts/local-ci.sh
