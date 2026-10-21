@@ -3,7 +3,7 @@ use reqwest::StatusCode;
 use std::time::Duration;
 
 /// Total attempts per upstream call: the original request plus one retry.
-/// Mirrors the bounded charge retry in `os_accounts.rs` — enough to absorb a
+/// Enough to absorb a
 /// connection reset or a momentary 429/5xx without blowing the desktop
 /// client's request budget.
 pub(crate) const UPSTREAM_ATTEMPTS: u32 = 2;

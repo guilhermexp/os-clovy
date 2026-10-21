@@ -3,8 +3,8 @@ use serde::Serialize;
 
 use crate::envelope::ApiResponse;
 
-/// Liveness probe — the process is up. Polled by the Phala/dstack prelaunch and
-/// load balancers; must stay dependency-free so it answers even mid-startup.
+/// Liveness probe — the process is up. Polled by the desktop dev runner;
+/// must stay dependency-free so it answers even mid-startup.
 pub(crate) async fn livez() -> StatusCode {
     StatusCode::OK
 }

@@ -224,7 +224,6 @@ try {
 
   Invoke-Checked { & git check-ref-format "refs/heads/$Branch" } "branch name validation"
   Invoke-Checked { & git fetch origin --prune } "origin fetch"
-  Invoke-Checked { & git fetch upstream --prune } "upstream fetch"
   $dryRunOutput = & but branch update $Branch --strategy pick-remote --dry-run --verbose --format agent 2>&1
   $dryRunExit = $LASTEXITCODE
   $dryRunOutput | Write-Host

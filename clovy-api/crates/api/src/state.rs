@@ -147,13 +147,10 @@ struct ApiStateInner {
     // Private sharing (JUN-308). None until a share database is configured;
     // handlers answer 501 sharing_unavailable in that state.
     share: Option<Arc<ShareService>>,
-    share_viewer: ShareViewerInfo,
     share_rate: ShareRateLimiter,
-    share_http: reqwest::Client,
     agent_admission: AgentAdmissionControl,
     p3a_reports: Arc<P3aReportService>,
     limits: ApiLimits,
-    attestation: AttestationInfo,
     browser_transports: BrowserTransportsConfig,
     upstream_service_keys: UpstreamServiceKeys,
 }
@@ -195,28 +192,6 @@ pub struct ApiLimits {
     pub request_timeout_secs: u64,
 }
 
-/// Public deployment facts rendered by the `/verify` attestation page.
-#[derive(Clone)]
-pub struct AttestationInfo {
-    /// Full git commit the running image was built from; empty when the
-    /// build did not stamp one (local/dev builds).
-    pub source_commit: String,
-    pub source_repo_url: String,
-    pub image_repo: String,
-    pub trust_center_url: String,
-}
-
-/// Static facts the browser viewer page needs to run its PKCE sign-in.
-#[derive(Clone, Debug, Default)]
-pub struct ShareViewerInfo {
-    /// OS Accounts site origin (sign-in UI).
-    pub accounts_url: String,
-    /// OS Accounts API origin (token exchange proxy target).
-    pub accounts_api_url: String,
-    /// Public OAuth client id registered for the viewer.
-    pub client_id: String,
-}
-
 pub struct ApiStateParams {
     pub pricing: Arc<PricingTable>,
     pub computer_use: clovy_config::ComputerUseConfig,
@@ -235,9 +210,7 @@ pub struct ApiStateParams {
     pub issue_reports: Arc<IssueReportService>,
     pub p3a_reports: Arc<P3aReportService>,
     pub share: Option<Arc<ShareService>>,
-    pub share_viewer: ShareViewerInfo,
     pub limits: ApiLimits,
-    pub attestation: AttestationInfo,
     pub browser_transports: BrowserTransportsConfig,
     pub upstream_service_keys: UpstreamServiceKeys,
 }
@@ -267,16 +240,13 @@ impl ApiState {
                 issue_reports: params.issue_reports,
                 issue_report_permits: Arc::new(Semaphore::new(ISSUE_REPORT_MAX_CONCURRENCY)),
                 share: params.share,
-                share_viewer: params.share_viewer,
                 share_rate,
-                share_http: reqwest::Client::new(),
                 agent_admission: AgentAdmissionControl::new(
                     params.limits.max_agent_inflight_body_bytes,
                     params.limits.max_agent_concurrent_requests_per_user,
                 ),
                 p3a_reports: params.p3a_reports,
                 limits: params.limits,
-                attestation: params.attestation,
                 browser_transports: params.browser_transports,
                 upstream_service_keys: params.upstream_service_keys,
             }),
@@ -305,24 +275,8 @@ impl ApiState {
         self.inner.share.as_deref()
     }
 
-    pub(crate) fn share_viewer(&self) -> &ShareViewerInfo {
-        &self.inner.share_viewer
-    }
-
     pub(crate) fn share_rate(&self) -> &ShareRateLimiter {
         &self.inner.share_rate
-    }
-
-    pub(crate) fn share_viewer_accounts_api(&self) -> String {
-        self.inner
-            .share_viewer
-            .accounts_api_url
-            .trim_end_matches('/')
-            .to_string()
-    }
-
-    pub(crate) fn share_http(&self) -> &reqwest::Client {
-        &self.inner.share_http
     }
 
     pub(crate) fn pricing(&self) -> &PricingTable {
@@ -399,10 +353,6 @@ impl ApiState {
 
     pub(crate) fn limits(&self) -> ApiLimits {
         self.inner.limits
-    }
-
-    pub(crate) fn attestation(&self) -> &AttestationInfo {
-        &self.inner.attestation
     }
 
     pub(crate) fn browser_transports(&self) -> BrowserTransportsConfig {

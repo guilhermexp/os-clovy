@@ -26,19 +26,6 @@ pub fn upstream_client(timeout: Duration) -> Result<Client, reqwest::Error> {
         .build()
 }
 
-/// Dedicated os-platform issue-report client. Uploading a 300 MiB attachment
-/// can legitimately exceed the shared client's 60-second budget, so this
-/// client follows the configured Clovy API request timeout instead.
-///
-/// This only extends the per-request timeout and explicitly disables reqwest's
-/// default protocol-NACK retries: os-platform file and Issue creation POSTs are
-/// not idempotent, so replaying a timed-out request can create duplicates.
-pub fn issue_report_client(request_timeout: Duration) -> Result<Client, reqwest::Error> {
-    client_builder(request_timeout)
-        .retry(reqwest::retry::never())
-        .build()
-}
-
 /// Reads an error body only to log its size, stopping once `limit` bytes have
 /// arrived so a large or endless upstream error body is never buffered.
 /// Returns the bytes read, capped at `limit`.
@@ -54,10 +41,6 @@ pub(crate) async fn read_body_len_capped(
         }
     }
     Ok(read.min(limit))
-}
-
-pub fn jwks_client() -> Client {
-    build_client(Duration::from_secs(5))
 }
 
 fn build_client(timeout: Duration) -> Client {

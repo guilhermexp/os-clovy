@@ -4,6 +4,12 @@
 **Companion doc:** [private-connectors-implementation-plan.md](private-connectors-implementation-plan.md) (CTO)
 **One-liner:** Give Clovy Town-grade integrations — an assistant that acts in your email, calendar, and work tools, proactively — without OpenSoftware ever being able to read user data.
 
+> **Hosting note (2026-10-21).** Away mode assumed the TEE-attested Clovy API
+> on Phala, reproducible builds and `/verify`. The `desvincular-repo-ci` change
+> removed that hosted infrastructure: Clovy API now runs only locally. Local
+> mode is unaffected; away mode has no hosting target until a new one is
+> decided.
+
 ---
 
 ## 1. Why now

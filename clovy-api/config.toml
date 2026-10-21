@@ -1,13 +1,13 @@
 [server]
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 8080
 request_timeout_secs = 600
 # Refresh OpenRouter pricing and model metadata in-process so newly released
-# models appear without restarting the production CVM.
+# models appear without restarting the server.
 model_catalog_refresh_secs = 300
 max_audio_bytes = 26214400
 max_json_bytes = 524288
-# os-platform accepts 300 MiB attachments. The extra 1 MiB covers multipart
+# Issue reports accept 300 MiB attachments. The extra 1 MiB covers multipart
 # framing and report text while keeping a single total request budget.
 max_issue_report_bytes = 315621376
 max_image_edit_bytes = 69921452
@@ -28,30 +28,11 @@ max_agent_concurrent_requests_per_user = 8
 attended_enabled = true
 managed_enabled = true
 
-# Public facts shown on the /verify attestation page. source_commit is not
-# set here - the Docker build stamps it via CLOVY__ATTESTATION__SOURCE_COMMIT.
-[attestation]
-source_repo_url = "https://github.com/open-software-network/os-clovy"
-image_repo = "ghcr.io/open-software-network/clovy-api"
-trust_center_url = "https://trust.phala.com/app/6514acb0e08dc4825e2b6e22a46f0ed0ff455b54"
-
 [issue_reports]
-# User-submitted issue reports are filed as os-platform Issues for Clovy under
-# the retained `june` project handle. The only per-environment value is the bot
-# user's fellow API key
-# (osk_...), set via CLOVY__ISSUE_REPORTS__OS_PLATFORM_API_KEY. Without it,
-# reports are accepted but land in structured logs only.
-os_platform_api_url = "https://app.opensoftware.co/api"
-os_platform_api_key = ""
-os_platform_org = "open-software"
-os_platform_project = "june"
-os_platform_label = "bug"
-# Reward asset for the zero-reward Issue (required when the target Org has
-# no default reward asset configured).
-os_platform_reward_asset = "POINTS"
+# Issue reports are logged by the server, never forwarded.
 # Server-side diagnosis: reports arriving without a client diagnosis get one
 # generated on this model at Clovy's own expense (never metered) before they
-# are filed. Unset the model to turn diagnosis off. The call is bounded by
+# are logged. Unset the model to turn diagnosis off. The call is bounded by
 # the timeout, a 1024-token output cap, and a per-user hourly cap that skips
 # the diagnosis (never the delivery) when exhausted.
 diagnosis_model = "z-ai/glm-5.2"
@@ -66,19 +47,8 @@ disabled_clovy_versions = []
 disabled_macos_versions = []
 
 [os_accounts]
-# api_url has no default - must come from CLOVY__OS_ACCOUNTS__API_URL
-# per environment so a missing override fails loud against the dev
-# fallback in AppConfig::default rather than silently hitting staging.
-# iss is the canonical OS Accounts site URL used in the JWT's `iss` claim
-# — the same value on staging and prod. JWKS lives on the API origin, but
-# the issuer claim points at the canonical site. Confirmed by decoding a
-# real staging token 2026-05-28.
-iss = "https://accounts.opensoftware.co"
-# aud is the canonical audience for tokens minted by OS Accounts for ANY
-# consumer app, not a per-app value. Strict-string match.
-aud = "open-software-apps"
-jwks_refresh_secs = 300
-jwks_miss_min_backoff_secs = 5
+# Credit estimates and hold windows for metered actions. Local mode never
+# charges; these still bound the inference client windows.
 authorize_hold_ttl_note_transcribe_secs = 60
 # Covers the bounded metered-inference client window (route timeout minus the
 # authorize + settlement budgets = 390s) plus the settlement budget (150s),
@@ -98,24 +68,18 @@ authorize_hold_ttl_web_secs = 30
 
 [share]
 # Private sharing (JUN-308). Sharing endpoints answer 501 until a share
-# database is configured. Set via CLOVY__SHARE__DATABASE_URL per environment.
-
+# database is configured. Set via CLOVY__SHARE__DATABASE_URL.
 database_url = ""
-# OS Accounts sign-in origin for the browser viewer; empty falls back to
-# os_accounts.iss. The viewer OAuth client id must be registered in OS
-# Accounts with redirect https://<api-origin>/s/callback.
-viewer_accounts_url = ""
-viewer_client_id = ""
 max_ciphertext_bytes = 10485760
 
-# Clovy Companion is fail-closed outside local development until a dedicated
+# Clovy Companion keeps linked-device state in memory until a dedicated
 # Postgres URL is configured. APNs signing values are secret env-only inputs.
 [companion]
 database_url = ""
 apns_team_id = ""
 apns_key_id = ""
 apns_private_key_pem = ""
-apns_bundle_id = "co.opensoftware.june.companion"
+apns_bundle_id = ""
 apns_production = false
 
 # Upstream base URLs. Service keys are secret env-only inputs:

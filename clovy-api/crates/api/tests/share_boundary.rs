@@ -15,7 +15,6 @@ use axum::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use clovy_api::ShareViewerInfo;
 use clovy_domain::{
     DomainError, MAX_INVITES_PER_SHARE, NewShare, NewShareInvite, SHARE_LINK_EMAIL,
     ShareInviteRecord, ShareKind, ShareRecord, ShareStore, ShareStoreError, ShareViewRecord,
@@ -308,14 +307,7 @@ fn share_router() -> Router {
 }
 
 fn state_with_share(share: Option<Arc<ShareService>>) -> clovy_api::ApiState {
-    support::test_state_with_share(
-        share,
-        ShareViewerInfo {
-            accounts_url: "https://accounts.example".to_string(),
-            accounts_api_url: "https://accounts-api.example".to_string(),
-            client_id: "client_viewer".to_string(),
-        },
-    )
+    support::test_state_with_share(share)
 }
 
 async fn call(router: &Router, request: Request<Body>) -> (StatusCode, Value) {
@@ -384,38 +376,6 @@ async fn viewer_shell_fails_closed_when_sharing_disabled() {
     let (status, body) = call(&router, request).await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     assert_eq!(body["message"], "sharing_unavailable");
-}
-
-#[tokio::test]
-async fn viewer_router_exposes_reads_but_not_owner_or_product_routes() {
-    let router = clovy_api::viewer_router(state_with_share(None));
-
-    for path in ["/v1/shares", "/v1/models", "/v1/issue-reports"] {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(path)
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("router responds");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-    }
-
-    let health = router
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/healthz")
-                .body(Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("router responds");
-    assert_eq!(health.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -912,9 +872,8 @@ async fn viewer_shell_is_static_noindex_and_identical_for_any_id() {
     let shell = std::str::from_utf8(&pages[0]).expect("viewer shell is utf-8");
     assert!(shell.contains("[hidden] { display: none !important; }"));
     assert!(shell.contains("Passcode required"));
-    assert!(shell.contains(
-        "<a id=\"download-cta\" href=\"https://www.opensoftware.co/clovy\" rel=\"noreferrer\">Get Clovy</a>"
-    ));
+    assert!(!shell.contains("download-cta"));
+    assert!(!shell.contains("__ACCOUNTS_URL__"));
     assert!(!shell.contains("Maybe later"));
 }
 

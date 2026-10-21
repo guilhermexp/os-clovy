@@ -172,3 +172,5 @@ version guard fails closed unless GitHub explicitly reports that the fixed
 release does not exist. Webhook delivery gets one bounded attempt because the
 incoming webhook is not idempotent; on an unconfirmed result, the operator checks
 Slack before manually posting a recovery announcement.
+
+Superada pela change desvincular-repo-ci.

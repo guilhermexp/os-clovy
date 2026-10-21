@@ -12,7 +12,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 
 - [adr/0001](adr/0001-auto-updates-via-tauri-updater.md) — auto-updates via the Tauri updater on a separate public releases repo
 - [adr/0002](adr/0002-live-transcript-preview-strategy.md) — live transcript preview as an ephemeral companion, not the source of truth
-- [adr/0003](adr/0003-release-candidate-channel-and-promotion.md) — rc channel + promote-to-stable (every stable release starts as an RC)
+- [adr/0003](adr/0003-release-candidate-channel-and-promotion.md) — rc channel + promote-to-stable (every stable release starts as an RC) (superseded by desvincular-repo-ci)
 - [adr/0004](adr/0004-out-of-process-system-audio-helper.md) — macOS system audio via an out-of-process helper (file IPC + Unix signals)
 - [adr/0005](adr/0005-source-separated-audio-capture.md) — one WAV per source, re-interleaved as turns
 - [adr/0006](adr/0006-embed-hermes-sandboxed-runtime.md) — embed the pinned Hermes runtime as sandboxed child processes (superseded by ADR-0038)
@@ -34,7 +34,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0021](adr/0021-june-api-v1-compatibility-policy.md) — `/v1` is additive-only for shipped app versions: per-version contract fixtures gate CI and production promotes, clients send `x-june-app-version`, error codes never renumber
 - [adr/0022](adr/0022-venice-private-first-model-routing.md) — historical Venice/Phala routing and privacy decision; the 2026-10-08 addendum replaces it with OpenRouter without inherited TEE or zero-retention claims
 - [adr/0023](adr/0023-attested-os-api-service-chain.md) - superseded by ADR-0024
-- [adr/0024](adr/0024-independent-product-verification.md) - Clovy, Open Software API, and Chat publish independent verification evidence without cross-product release pinning
+- [adr/0024](adr/0024-independent-product-verification.md) - Clovy, Open Software API, and Chat publish independent verification evidence without cross-product release pinning (superseded by desvincular-repo-ci)
 - [adr/0025](adr/0025-targeted-hermes-approval-protocol.md) - MCP approvals use stable request identity, targeted resolution, bounded queues, and fail-closed retirement (superseded by ADR-0038)
 - [adr/0026](adr/0026-durable-note-transcription-jobs.md) - saved-audio Source spans use durable, fingerprinted, idempotent note-transcription jobs
 - [adr/0027](adr/0027-june-owned-project-memory-store.md) — memory entries live in Clovy's SQLite (not the Hermes memory toolset), scoped by project, agent writes via the loopback proxy, project context by prompt injection
@@ -45,7 +45,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0032](adr/0032-session-completion-june-owned-local-state.md) — marking a session complete is Clovy-owned local SQLite state keyed by the stored Hermes session id, orthogonal to Hermes' archive flag; mirrors the `session_folders` stack
 - [adr/0033](adr/0033-notion-hosted-mcp-connect-preview.md) - Notion hosted MCP connector preview with read-only `june_notion`, approved page creation and updates, and no selected-resource claim
 - [adr/0034](adr/0034-obsidian-vault-discovery-mcp.md) - Obsidian vault discovery uses a Clovy-owned MCP server, not an ambient environment variable (MCP-server shape superseded by ADR-0040)
-- [adr/0035](adr/0035-extension-releases-follow-desktop-rc-promotion.md) - Chrome Web Store packages are reviewed during desktop RC and the exact staged bytes publish after stable desktop promotion
+- [adr/0035](adr/0035-extension-releases-follow-desktop-rc-promotion.md) - Chrome Web Store packages are reviewed during desktop RC and the exact staged bytes publish after stable desktop promotion (superseded by desvincular-repo-ci)
 - [adr/0036](adr/0036-github-connector-app-user-tokens.md) - GitHub connector uses GitHub App user access tokens only (no app private key on device or backend), local-mode custody per ADR-0016, Clovy-side read/write gating, approval-only writes
 - [adr/0037](adr/0037-versioned-local-sqlite-migrations.md) - Clovy's local SQLite schema uses an append-only release-ordered catalog, introspection-based legacy stamping, and one transaction for all pending migrations
 - [adr/0038](adr/0038-june-owned-openai-agents-runtime.md) - Clovy owns the local agent harness, persistence, tools, approvals, and stdio protocol on top of the OpenAI Agents SDK
@@ -103,8 +103,8 @@ the `spec/` entries above for the enforceable versions).
 Per-repo config the engineering skills read before acting (see the
 "Agent skills" section in [AGENTS.md](../AGENTS.md)).
 
-- [agents/issue-tracker.md](agents/issue-tracker.md) — issues live on os-platform (org `june`), read via the os-platform skill, writes append-only via the API
-- [agents/triage-labels.md](agents/triage-labels.md) — the five triage roles mapped to platform labels + statuses
+- [agents/issue-tracker.md](agents/issue-tracker.md) — work is tracked as harness tickets with OpenSpec changes, not GitHub Issues
+- [agents/triage-labels.md](agents/triage-labels.md) — the five triage roles mapped to harness ticket states
 - [agents/domain.md](agents/domain.md) — single-context layout; how skills consume CONTEXT.md and ADRs
 - [agents/collaboration.md](agents/collaboration.md) — how agents build, delegate, and review across harnesses: the skill family map, reviewer-is-never-the-author, trust levels
 
@@ -118,7 +118,7 @@ Per-repo config the engineering skills read before acting (see the
 - [companion-revocation.md](companion-revocation.md) - online and future-connection revocation behavior
 - [companion-development.md](companion-development.md) - local relay, desktop, iPhone, and iPad development workflow
 - [browser-computer-use-prd.md](browser-computer-use-prd.md) — PRD: Browser use + Computer use plugins (JUN-278); extension in the user's browser + routines-only managed browser, phase-2 computer use
-- [release-extension.md](release-extension.md) - Chrome Web Store publisher setup, RC review gate, stable promotion, and recovery runbook
+- [release-extension.md](release-extension.md) - browser extension store identity and local packaging checks (no automated store publication)
 - [private-sharing-design.md](private-sharing-design.md) — private link sharing (JUN-308): bearer-link product contract, optional passcode, and the end-to-end encrypted snapshot model
 - [computer-use-cua-driver-spike.md](computer-use-cua-driver-spike.md) — spike (JUN-288): run the bundled cua-driver outside the write jail as a broker-owned, separately-signed daemon (recommended on identity/lifecycle grounds; a fully relocated daemon does start in-jail, up to the TCC gate); pinning + installer-never-runs confirmed
 - [plugins/portfolio.md](plugins/portfolio.md) — JUN-309 portfolio: current ChatGPT plugin surface inventory, ranking rubric, Clovy's top 10, shared product contract, sequencing, metrics, and explicit deferrals
@@ -163,10 +163,9 @@ Per-repo config the engineering skills read before acting (see the
 - [private-connectors-threat-model.md](private-connectors-threat-model.md) — local-mode threat model: the source of truth for all connector privacy copy (what OpenSoftware can and cannot see, the trust surface, agent protections, the known runtime limitation)
 - [configuration.md](configuration.md) — env + config reference (desktop client + Clovy API)
 - [auto-model-rollout.md](auto-model-rollout.md) — canary, enablement, and rollback steps for automatic private model routing
-- [development.md](development.md) — local development: quick start, running against staging or an ephemeral Phala CVM, local data, permissions, agent skills, verification commands
+- [development.md](development.md) — local development: quick start, local data, permissions, agent skills, verification commands
 - [os-accounts-login.md](os-accounts-login.md) — Login with Open Software: PKCE, keychain, account gates
 - [onboarding-design.md](onboarding-design.md) — onboarding flow design (verify against what shipped)
-- ~~os-accounts-backend.md~~ — historical; superseded by `clovy-api-prd.md`
 
 ## Release & ops runbooks
 
@@ -174,12 +173,8 @@ Per-repo config the engineering skills read before acting (see the
 - [companion-apns-setup.md](companion-apns-setup.md) - Apple push setup for content-free wake hints
 - [companion-app-store-readiness.md](companion-app-store-readiness.md) - TestFlight and App Store checklist
 - [companion-security-review.md](companion-security-review.md) - required independent review checklist
-- [release-macos.md](release-macos.md) / [release-windows.md](release-windows.md) — the release runbooks
-- [desktop-release-runner.md](desktop-release-runner.md) — Mac Studio self-hosted runner setup for signed desktop releases
-- [reproducible-builds.md](reproducible-builds.md) — Clovy API source → TEE trust chain (Phase A shipped)
-- [github-security-readiness.md](github-security-readiness.md) — pre-public repo hardening checklist
+- [release-macos.md](release-macos.md) / [release-windows.md](release-windows.md) — building and validating the desktop app locally (no published releases)
 - [computer-use-support.md](computer-use-support.md) - state guide, TCC recovery, signed helper self-test, and macOS release regression response
-- [clovy-link-rollout.md](clovy-link-rollout.md) — isolated rollout of the `june.link` short-link origin, kept off the production Clovy API ingress
 - [local-ci-signoff.md](local-ci-signoff.md) — local commit-status signoff that replaces the slow hosted PR jobs during agent iteration
 
 ## QA

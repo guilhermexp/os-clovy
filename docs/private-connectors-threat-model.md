@@ -29,9 +29,11 @@ backend (Clovy API) is not involved in connector calls.
 
 - **Model inference is a separate path.** When a routine runs, its prompt (which
   can include mail or calendar content the routine chose to read) goes to
-  whichever model provider you selected. By default that is Clovy API, which runs
-  in a TEE (Phala) so its own operators cannot read prompt data, but it is still
-  a network call off your device. If you select a local model, inference stays
+  whichever model provider you selected. By default that is Clovy API, which now
+  runs locally next to the app and forwards the prompt to the selected upstream
+  provider, so it is still a network call off your device. (The TEE-hosted
+  Clovy API this model originally assumed was removed by the
+  `desvincular-repo-ci` change.) If you select a local model, inference stays
   on-device too. The "OpenSoftware is not in the connector data path" claim
   covers token custody and provider API calls. It does not cover inference, and
   the copy never implies it does.

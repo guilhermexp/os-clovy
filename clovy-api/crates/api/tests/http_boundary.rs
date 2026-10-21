@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode, header},
 };
-use clovy_api::{AttestationInfo, router};
+use clovy_api::router;
 use clovy_config::{
     BrowserTransportsConfig, DEFAULT_MAX_AGENT_CHAT_BYTES, DEFAULT_MAX_IMAGE_EDIT_BYTES,
 };
@@ -920,7 +920,7 @@ async fn integration_issue_report_delivers_attachments_to_the_sink() -> Result<(
         },
         ..RecordingIssueReportSink::default()
     });
-    let router = router(test_state_with_issue_sink(sink.clone(), test_attestation()));
+    let router = router(test_state_with_issue_sink(sink.clone()));
     // The legacy June-only cap was 10 MiB. Crossing it proves the video bytes
     // now reach the authenticated Clovy API boundary instead of being dropped
     // by the desktop before submission.
@@ -1016,7 +1016,7 @@ async fn integration_issue_report_stream_opt_in_preserves_buffered_json()
         },
         ..RecordingIssueReportSink::default()
     });
-    let app = router(test_state_with_issue_sink(sink, test_attestation()));
+    let app = router(test_state_with_issue_sink(sink));
 
     let buffered_response = match app
         .clone()
@@ -1072,10 +1072,7 @@ async fn integration_issue_report_stream_opt_in_preserves_buffered_json()
 #[tokio::test]
 async fn integration_issue_report_stream_returns_compatible_error_event()
 -> Result<(), Box<dyn Error>> {
-    let app = router(test_state_with_issue_sink(
-        Arc::new(FailingIssueReportSink),
-        test_attestation(),
-    ));
+    let app = router(test_state_with_issue_sink(Arc::new(FailingIssueReportSink)));
 
     let buffered_response = match app
         .clone()
@@ -1119,7 +1116,6 @@ async fn integration_issue_report_stream_sends_keep_alive_before_result()
 -> Result<(), Box<dyn Error>> {
     let app = router(test_state_with_issue_sink_and_timeout(
         Arc::new(SlowIssueReportSink),
-        test_attestation(),
         30,
     ));
     let response = match app
@@ -1148,11 +1144,7 @@ async fn integration_issue_report_stream_sends_keep_alive_before_result()
 async fn integration_issue_report_permit_survives_stream_disconnect_until_delivery_finishes()
 -> Result<(), Box<dyn Error>> {
     let sink = Arc::new(BlockingIssueReportSink::new());
-    let app = router(test_state_with_issue_sink_and_timeout(
-        sink.clone(),
-        test_attestation(),
-        30,
-    ));
+    let app = router(test_state_with_issue_sink_and_timeout(sink.clone(), 30));
     let first_response = match app
         .clone()
         .oneshot(multipart_request(
@@ -1204,11 +1196,7 @@ async fn integration_issue_report_permit_survives_stream_disconnect_until_delive
 async fn integration_issue_report_stream_deadline_includes_permit_wait()
 -> Result<(), Box<dyn Error>> {
     let sink = Arc::new(DeadlineBudgetIssueReportSink::new());
-    let app = router(test_state_with_issue_sink_and_timeout(
-        sink.clone(),
-        test_attestation(),
-        1,
-    ));
+    let app = router(test_state_with_issue_sink_and_timeout(sink.clone(), 1));
     let first_response = match app
         .clone()
         .oneshot(multipart_request(
@@ -1433,7 +1421,6 @@ async fn integration_dictate_fills_language_when_provider_returns_none()
     // `None` and the service must fill it in from the transcript text (JUN-180).
     let state = test_state_with_sinks_and_transcriber(
         test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        test_attestation(),
         Arc::new(LanguagelessTranscriber),
     );
     let response = match router(state)
@@ -1467,7 +1454,6 @@ async fn integration_dictate_prefers_requested_language_over_detection()
     // text is English, but the request asks for Polish.
     let state = test_state_with_sinks_and_transcriber(
         test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        test_attestation(),
         Arc::new(LanguagelessTranscriber),
     );
     let response = match router(state)
@@ -2040,55 +2026,25 @@ async fn integration_video_animate_rejects_body_over_configured_limit() -> Resul
 }
 
 #[tokio::test]
-async fn integration_verify_page_is_public_html() -> Result<(), Box<dyn Error>> {
-    let response = send(get_request("/verify")?).await;
+async fn integration_attestation_and_accounts_sign_in_routes_are_gone() -> Result<(), Box<dyn Error>>
+{
+    // Unknown routes answer 401 before routing without a token, so ask as an
+    // authenticated caller: the routes themselves must not exist.
+    let verify = send(get_request_with_auth("/verify", Some(AUTHORIZATION))?).await;
+    assert_eq!(verify.status(), StatusCode::NOT_FOUND);
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        content_type.starts_with("text/html"),
-        "unexpected content type: {content_type}"
-    );
-    let body = response_text(response).await?;
-    assert!(body.contains("Verify this server"));
-    assert!(body.contains("<title>Verify this server</title>"));
-    assert!(body.contains("This server runs inside an Intel TDX confidential VM."));
-    assert!(body.contains("<dt>Version</dt>"));
-    assert!(!body.contains("Verify this server ·"));
-    assert!(!body.contains("<dt>Service</dt>"));
-    assert!(!body.to_ascii_lowercase().contains("scribe-api"));
-    assert!(!body.to_ascii_lowercase().contains("scribe api"));
-    assert!(body.contains("ghcr.io/open-software-network/clovy-api:0123abc"));
-    assert!(body.contains(&format!(
-        "https://github.com/open-software-network/os-clovy/commit/{TEST_COMMIT}"
-    )));
-    assert!(body.contains("https://trust.phala.com/app/test-app-id"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn integration_verify_page_without_commit_reports_unstamped_build()
--> Result<(), Box<dyn Error>> {
-    let attestation = AttestationInfo {
-        source_commit: String::new(),
-        ..test_attestation()
-    };
-    let response = match router(test_state_with_attestation(attestation))
-        .oneshot(get_request("/verify")?)
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => match error {},
-    };
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_text(response).await?;
-    assert!(body.contains("not stamped"));
+    let token_exchange = send(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/share-viewer/token")
+            .header(header::AUTHORIZATION, AUTHORIZATION)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"code":"c","code_verifier":"v","redirect_uri":"http://127.0.0.1/s/callback"}"#,
+            ))?,
+    )
+    .await;
+    assert_eq!(token_exchange.status(), StatusCode::NOT_FOUND);
     Ok(())
 }
 
