@@ -33,15 +33,10 @@ import { applyInterfaceLocale } from "../i18n/locale";
 function renderSettings(activeTab: SettingsTab) {
   return render(
     <AppSettings
-      account={{ signedIn: false, configured: false }}
-      accountLoading={false}
       sourceMode="microphoneOnly"
       checkingSourceReadiness={false}
-      onAccountChanged={() => {}}
-      onAccountRefresh={async () => undefined}
       onSourceModeChange={() => {}}
       onEnableSystemAudio={() => {}}
-      onCheckForUpdates={() => {}}
       activeTab={activeTab}
       onTabChange={() => {}}
     />,
@@ -72,22 +67,16 @@ describe("settings in English (default)", () => {
   it("keeps the English copy", () => {
     renderSettings("about");
     expect(screen.getByRole("heading", { name: "About" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Check for updates" })).toBeInTheDocument();
-    expect(SETTINGS_TABS.find((tab) => tab.id === "linked-devices")?.label).toBe("Linked devices");
   });
 });
 
 describe("settings in Portuguese (Brazil)", () => {
   beforeEach(() => applyInterfaceLocale("pt-BR"));
 
-  it("translates the About panel and the release channel control", () => {
+  it("translates the About panel", () => {
     renderSettings("about");
     expect(screen.getByRole("heading", { name: "Sobre" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Canal de lançamento" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Buscar atualizações" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Verificar servidor" })).toBeInTheDocument();
-    expect(screen.getByText("Estável")).toBeInTheDocument();
-    expect(screen.getByText("Versão candidata")).toBeInTheDocument();
   });
 
   it("translates the Models panel headings and model picker labels", () => {
@@ -102,9 +91,6 @@ describe("settings in Portuguese (Brazil)", () => {
 
   it("reads tab labels in the current language", () => {
     expect(SETTINGS_TABS.find((tab) => tab.id === "general")?.label).toBe("Geral");
-    expect(SETTINGS_TABS.find((tab) => tab.id === "linked-devices")?.label).toBe(
-      "Dispositivos vinculados",
-    );
   });
 
   it("translates the mic test control", () => {

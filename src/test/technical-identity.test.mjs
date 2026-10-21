@@ -1,10 +1,7 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { ensureClovyApiEnv } from "../../scripts/clovy-api-env-compat.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -23,100 +20,7 @@ function workflowTriggerPaths(source, trigger) {
   return [...block.matchAll(/^\s{6}- "([^"]+)"$/gm)].map((match) => match[1]);
 }
 
-function shareSessionBridge(source, sessionStorage) {
-  const start = source.indexOf('  var STATE_KEY = "clovy_share_state";');
-  const end = source.indexOf("  // ── PKCE sign-in", start);
-  expect(start).toBeGreaterThan(-1);
-  expect(end).toBeGreaterThan(start);
-  const context = { sessionStorage };
-  runInNewContext(
-    `${source.slice(start, end)}\n` +
-      "globalThis.bridge = { saveState, loadState, saveToken, loadToken, removeToken };",
-    context,
-  );
-  return context.bridge;
-}
-
-function memorySessionStorage(initial = {}) {
-  const values = new Map(Object.entries(initial));
-  return {
-    getItem(key) {
-      return values.get(key) ?? null;
-    },
-    removeItem(key) {
-      values.delete(key);
-    },
-    setItem(key, value) {
-      values.set(key, String(value));
-    },
-    values,
-  };
-}
-
 describe("Clovy technical identity", () => {
-  it("prefers canonical Clovy API env configuration", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "clovy-api-env-"));
-    try {
-      await mkdir(join(tempRoot, "clovy-api"));
-      await mkdir(join(tempRoot, "june-api"));
-      await writeFile(join(tempRoot, "clovy-api", ".env"), "SOURCE=canonical\n");
-      await writeFile(join(tempRoot, "june-api", ".env"), "SOURCE=legacy\n");
-
-      expect(ensureClovyApiEnv(tempRoot).source).toBe("canonical");
-      expect(await readFile(join(tempRoot, "clovy-api", ".env"), "utf8")).toBe(
-        "SOURCE=canonical\n",
-      );
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("migrates a legacy-only Clovy API env without exposing its contents", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "clovy-api-env-"));
-    try {
-      await mkdir(join(tempRoot, "clovy-api"));
-      await mkdir(join(tempRoot, "june-api"));
-      const legacyConfig = "CLOVY__UPSTREAMS__GROQ__API_KEY=secret-value\n";
-      await writeFile(join(tempRoot, "june-api", ".env"), legacyConfig);
-
-      expect(ensureClovyApiEnv(tempRoot)).toEqual({
-        source: "legacy",
-        path: join(tempRoot, "clovy-api", ".env"),
-      });
-      expect(await readFile(join(tempRoot, "clovy-api", ".env"), "utf8")).toBe(legacyConfig);
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("leaves Clovy API env configuration absent when neither file exists", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "clovy-api-env-"));
-    try {
-      await mkdir(join(tempRoot, "clovy-api"));
-      await mkdir(join(tempRoot, "june-api"));
-
-      expect(ensureClovyApiEnv(tempRoot).source).toBe("none");
-      await expect(readFile(join(tempRoot, "clovy-api", ".env"), "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("uses the canonical root Clovy API env in Conductor with a legacy fallback", async () => {
-    const conductor = await read(".conductor/settings.toml");
-    const canonicalEnv = "$CONDUCTOR_ROOT_PATH/clovy-api/.env";
-    const legacyEnv = "$CONDUCTOR_ROOT_PATH/june-api/.env";
-
-    expect(conductor.indexOf(canonicalEnv)).toBeGreaterThan(-1);
-    expect(conductor.indexOf(legacyEnv)).toBeGreaterThan(conductor.indexOf(canonicalEnv));
-    expect(conductor).toContain(
-      `if [ ! -f \\"$api_env\\" ] && [ -f \\"${legacyEnv}\\" ]; then api_env=\\"${legacyEnv}\\"; fi`,
-    );
-    expect(conductor).toContain('ln -sf \\"$api_env\\" clovy-api/.env');
-  });
-
   it("uses Clovy for canonical package, service, and helper names", async () => {
     const [
       packageJson,
@@ -163,7 +67,7 @@ describe("Clovy technical identity", () => {
     );
   });
 
-  it("retains installed desktop and updater identities", async () => {
+  it("retains installed desktop identities", async () => {
     const [
       tauri,
       macos,
@@ -184,10 +88,7 @@ describe("Clovy technical identity", () => {
 
     expect(tauri.productName).toBe("Clovy");
     expect(tauri.identifier).toBe("co.opensoftware.june");
-    expect(tauri.plugins["deep-link"].desktop.schemes).toEqual(["clovy", "osjune"]);
-    expect(tauri.plugins.updater.endpoints).toEqual([
-      "https://github.com/open-software-network/os-june-releases/releases/latest/download/latest.json",
-    ]);
+    expect(tauri.plugins["deep-link"].desktop.schemes).toEqual(["clovy"]);
     expect(macos.productName).toBe("June");
     expect(macos.bundle.macOS.bundleName).toBe("Clovy");
     expect(macosInfoPlist).toContain("<key>CFBundleDisplayName</key>\n  <string>June</string>");
@@ -320,7 +221,6 @@ describe("Clovy technical identity", () => {
       backendApi,
       extensionHost,
       extensionProtocol,
-      shareViewer,
     ] = await Promise.all([
       read("src-tauri/src/credential_compat.rs"),
       read("src/lib/storage-compat.ts"),
@@ -333,7 +233,6 @@ describe("Clovy technical identity", () => {
       read("clovy-api/crates/api/src/lib.rs"),
       read("src-tauri/src/extension_host.rs"),
       read("extension/src/protocol.ts"),
-      read("clovy-api/crates/api/src/handlers/share_viewer_page.js"),
     ]);
 
     expect(credentials).toContain("canonical_service");
@@ -354,127 +253,10 @@ describe("Clovy technical identity", () => {
       expect(source).toContain("co.opensoftware.clovy.extension");
       expect(source).toContain("co.opensoftware.june.extension");
     }
-    for (const key of ["state", "token"]) {
-      expect(shareViewer).toContain(`clovy_share_${key}`);
-      expect(shareViewer).toContain(`june_share_${key}`);
-    }
-    expect(shareViewer).toContain("sessionStorage.setItem(LEGACY_STATE_KEY, serialized)");
-    expect(shareViewer).toContain("sessionStorage.setItem(STATE_KEY, serialized)");
-    expect(shareViewer).toContain("sessionStorage.setItem(LEGACY_TOKEN_KEY, token)");
-    expect(shareViewer).toContain("sessionStorage.setItem(TOKEN_KEY, token)");
-    expect(shareViewer).toContain("sessionStorage.removeItem(LEGACY_TOKEN_KEY)");
-    expect(shareViewer).toContain("sessionStorage.removeItem(TOKEN_KEY)");
-  });
-
-  it("reconciles share-viewer state and tokens across deploy and rollback", async () => {
-    const source = await read("clovy-api/crates/api/src/handlers/share_viewer_page.js");
-    const legacyState = JSON.stringify({
-      csrf: "callback-csrf",
-      verifier: "verifier",
-      returnPath: "/s/shr_1",
-      fragment: "invite.key",
-    });
-    const storage = memorySessionStorage({
-      clovy_share_state: JSON.stringify({ csrf: "stale-csrf" }),
-      june_share_state: legacyState,
-      june_share_token: "legacy-token",
-    });
-    const bridge = shareSessionBridge(source, storage);
-
-    expect(JSON.stringify(bridge.loadState("callback-csrf"))).toBe(legacyState);
-    expect(storage.values.get("clovy_share_state")).toBe(legacyState);
-    expect(storage.values.get("june_share_state")).toBe(legacyState);
-    expect(bridge.loadToken()).toBe("legacy-token");
-    expect(storage.values.get("clovy_share_token")).toBe("legacy-token");
-    expect(storage.values.get("june_share_token")).toBe("legacy-token");
-
-    bridge.saveToken("clovy-token");
-    expect(storage.values.get("clovy_share_token")).toBe("clovy-token");
-    expect(storage.values.get("june_share_token")).toBe("clovy-token");
-    bridge.removeToken();
-    expect(storage.values.has("clovy_share_token")).toBe(false);
-    expect(storage.values.has("june_share_token")).toBe(false);
-
-    const canonicalOnlyStorage = memorySessionStorage({
-      clovy_share_token: "deleted-by-rollback",
-    });
-    const canonicalOnlyBridge = shareSessionBridge(source, canonicalOnlyStorage);
-    expect(canonicalOnlyBridge.loadToken()).toBe("");
-    expect(canonicalOnlyStorage.values.has("clovy_share_token")).toBe(false);
-    expect(canonicalOnlyStorage.values.has("june_share_token")).toBe(false);
-  });
-
-  it("passes legacy API URL fallbacks through distributable build steps", async () => {
-    const workflows = await Promise.all(
-      [
-        [".github/workflows/staging-desktop-dmg.yml", "STAGING"],
-        [".github/workflows/rc-desktop-dmg.yml", "PRODUCTION"],
-        [".github/workflows/promote-desktop.yml", "PRODUCTION"],
-        [".github/workflows/production-desktop-windows.yml", "PRODUCTION"],
-      ].map(async ([path, environment]) => [await read(path), environment]),
-    );
-
-    for (const [workflow, environment] of workflows) {
-      const fallback = `\${{ secrets.${environment}_CLOVY_API_URL || secrets.${environment}_JUNE_API_URL }}`;
-      expect(workflow).toContain(`${environment}_CLOVY_API_URL: ${fallback}`);
-      expect(workflow).toContain(`CLOVY_API_URL: ${fallback}`);
-    }
-  });
-
-  it("builds historical desktop releases through the agent runtime identity bridge", async () => {
-    const [macPromotion, windowsProduction] = await Promise.all([
-      read(".github/workflows/promote-desktop.yml"),
-      read(".github/workflows/production-desktop-windows.yml"),
-    ]);
-
-    for (const legacyVariable of ["JUNE_AGENT_RUNTIME_TARGET", "JUNE_AGENT_RUNTIME_PREBUILT"]) {
-      expect(macPromotion).toContain(legacyVariable);
-      expect(windowsProduction).toContain(legacyVariable);
-    }
-    for (const legacyVariable of ["JUNE_AGENT_RUNTIME_NODE_ARM64", "JUNE_AGENT_RUNTIME_NODE_X64"]) {
-      expect(macPromotion).toContain(legacyVariable);
-    }
-
-    expect(macPromotion).toContain(".tauri-agent-runtime/clovy-agent-runtime");
-    expect(macPromotion).toContain(".tauri-agent-runtime/june-agent-runtime");
-    expect(macPromotion).toContain("Canonical and legacy agent runtime outputs differ.");
-    expect(macPromotion).toContain("Canonical and legacy packaged agent runtimes differ.");
-    expect(macPromotion).toContain('test "$(shasum -a 256 "$runtime"');
-    expect(macPromotion).toContain('codesign --verify --strict --verbose=2 "$runtime"');
-    expect(macPromotion).toContain(
-      'node scripts/build-agent-runtime.mjs --smoke "$smoke_dir/clovy-agent-runtime" --smoke-arch arm64',
-    );
-
-    expect(windowsProduction).toContain(".tauri-agent-runtime/clovy-agent-runtime.exe");
-    expect(windowsProduction).toContain(".tauri-agent-runtime/june-agent-runtime.exe");
-    expect(windowsProduction).toContain("Canonical and legacy agent runtime outputs differ.");
-    expect(windowsProduction).toContain("Get-AuthenticodeSignature -FilePath $runtime.FullName");
-    expect(windowsProduction).toContain('Set-Content -LiteralPath "$($runtime.FullName).sha256"');
-    expect(windowsProduction).toContain(
-      "node scripts/build-agent-runtime.mjs --smoke $smokeRuntime",
-    );
-    expect(windowsProduction).toContain('$legacyRuntime = "native/bin/june-agent-runtime.exe"');
-    expect(windowsProduction).toContain("function Test-ArchivePath([string]$path)");
-    expect(windowsProduction).toContain('"(?m)(?:^|\\s)$escapedPath(?:\\s|$)"');
-    expect(windowsProduction).toContain(
-      "$hasCanonicalRuntime = Test-ArchivePath $canonicalRuntime",
-    );
-    expect(windowsProduction).toContain("$hasLegacyRuntime = Test-ArchivePath $legacyRuntime");
-    expect(windowsProduction).not.toContain(
-      "$listingText -match [regex]::Escape($canonicalRuntime)",
-    );
-    expect(windowsProduction).not.toContain("$listingText -match [regex]::Escape($legacyRuntime)");
-    expect(windowsProduction).toContain(
-      'foreach ($expected in @($packagedRuntime, "$packagedRuntime.sha256"',
-    );
-    expect(windowsProduction).toContain("if (!(Test-ArchivePath $expected))");
   });
 
   it("runs Clovy API checks when the canonical companion protocol changes", async () => {
-    const [apiChecks, apiBuild] = await Promise.all([
-      read(".github/workflows/clovy-api.yml"),
-      read(".github/workflows/build-clovy-api.yml"),
-    ]);
+    const apiChecks = await read(".github/workflows/clovy-api.yml");
     const apiCheckPaths = [
       "clovy-api/**",
       "crates/clovy-companion-protocol/**",
@@ -484,12 +266,6 @@ describe("Clovy technical identity", () => {
 
     expect(workflowTriggerPaths(apiChecks, "pull_request")).toEqual(apiCheckPaths);
     expect(workflowTriggerPaths(apiChecks, "push")).toEqual(apiCheckPaths);
-    expect(workflowTriggerPaths(apiBuild, "push")).toEqual([
-      "clovy-api/**",
-      "crates/clovy-companion-protocol/**",
-      ".github/actions/phala-deploy/**",
-      ".github/workflows/build-clovy-api.yml",
-    ]);
   });
 
   it("preserves released API and C ABI contracts while publishing canonical aliases", async () => {
@@ -499,19 +275,14 @@ describe("Clovy technical identity", () => {
       canonicalCompatibilityHeader,
       oldPathCompatibilityHeader,
       cryptoSource,
-      apiBuild,
-      apiPromotion,
     ] = await Promise.all([
       read("src-tauri/src/clovy_api.rs"),
       read("crates/clovy-companion-crypto/include/clovy_companion_crypto.h"),
       read("crates/clovy-companion-crypto/include/june_companion_crypto.h"),
       read("crates/june-companion-crypto/include/june_companion_crypto.h"),
       read("crates/clovy-companion-crypto/src/lib.rs"),
-      read(".github/workflows/build-clovy-api.yml"),
-      read(".github/workflows/promote-clovy-api.yml"),
     ]);
 
-    expect(desktopApi).toContain('"https://june-api.opensoftware.co"');
     expect(desktopApi).toContain('b"june-api-operation-id-v1\\0"');
     expect(desktopApi).toContain('format!("june-op-');
     expect(canonicalHeader).toContain("clovy_crypto_generate_identity");
@@ -520,10 +291,6 @@ describe("Clovy technical identity", () => {
     expect(oldPathCompatibilityHeader).toBe(canonicalCompatibilityHeader);
     expect(cryptoSource).toContain('pub unsafe extern "C" fn clovy_crypto_generate_identity');
     expect(cryptoSource).toContain('pub unsafe extern "C" fn june_crypto_generate_identity');
-    for (const workflow of [apiBuild, apiPromotion]) {
-      expect(workflow).toContain("/clovy-api");
-      expect(workflow).toContain("/june-api");
-    }
   });
 
   it("uses Clovy for newly written runtime state and private source concepts", async () => {
@@ -604,36 +371,28 @@ describe("Clovy technical identity", () => {
   it("uses Clovy for ephemeral build and dictation artifacts", async () => {
     const [
       signedDmg,
-      rcWorkflow,
-      promotionWorkflow,
       tauri,
       macHelper,
       windowsHelper,
       dictation,
       computerUseFixture,
-      reproducibleBuilds,
       index,
       onboardingPreview,
       styleguide,
     ] = await Promise.all([
       read("scripts/build-signed-dmg.sh"),
-      read(".github/workflows/rc-desktop-dmg.yml"),
-      read(".github/workflows/promote-desktop.yml"),
       read("src-tauri/tauri.conf.json").then(JSON.parse),
       read("src-tauri/native/mac-dictation-helper/main.swift"),
       read("src-tauri/native/windows-dictation-helper/src/audio.rs"),
       read("src-tauri/src/dictation.rs"),
       read("src-tauri/native/computer-use-fixture/main.swift"),
-      read("docs/reproducible-builds.md"),
       read("index.html"),
       read("onboarding-preview.html"),
       read("styleguide.html"),
     ]);
 
-    for (const source of [signedDmg, rcWorkflow, promotionWorkflow]) {
-      expect(source).toContain("clovy-signing.keychain-db");
-      expect(source).not.toContain("os-june-signing.keychain-db");
-    }
+    expect(signedDmg).toContain("clovy-signing.keychain-db");
+    expect(signedDmg).not.toContain("os-june-signing.keychain-db");
     expect(tauri.app.security.assetProtocol.scope).toEqual([
       "$TEMP/clovy-dictation-*.m4a",
       "$TEMP/clovy-dictation-*.wav",
@@ -645,28 +404,11 @@ describe("Clovy technical identity", () => {
     expect(dictation).toContain('format!("clovy-dictation-{utterance_id}-normalized.wav")');
     expect(computerUseFixture).toContain('"clovy-cu-observer-window"');
     expect(computerUseFixture).not.toContain('"june-cu-observer-window"');
-    expect(reproducibleBuilds).toContain("the `clovy-api` binary");
     expect(index.indexOf('localStorage.getItem("os-clovy:theme")')).toBeLessThan(
       index.indexOf('localStorage.getItem("os-june:theme")'),
     );
     expect(onboardingPreview).toContain("clovy.replayOnboarding()");
     expect(onboardingPreview).toContain("window.__CLOVY_STUB__");
     expect(styleguide).toContain("else os-clovy:theme / system");
-  });
-
-  it("keeps legacy ephemeral CVM state recoverable and ignored", async () => {
-    const [gitignore, ephemeralApi] = await Promise.all([
-      read(".gitignore"),
-      read("scripts/ephemeral-clovy-api.sh"),
-    ]);
-
-    expect(gitignore).toContain(".ephemeral-clovy-api.json*");
-    expect(gitignore).toContain(".ephemeral-june-api.json*");
-    expect(ephemeralApi).toContain('LEGACY_STATE_FILE=".ephemeral-june-api.json"');
-    expect(ephemeralApi).toContain('ln "$LEGACY_STATE_FILE" "$STATE_FILE"');
-    expect(ephemeralApi).toContain('rm -f "$LEGACY_STATE_FILE"');
-    expect(ephemeralApi.indexOf("migrate_legacy_state_file\n\ncase")).toBeGreaterThan(-1);
-    expect(ephemeralApi).toContain("until both recorded CVMs are torn down.");
-    expect(ephemeralApi.match(/down_remaining_legacy_state/g)).toHaveLength(3);
   });
 });

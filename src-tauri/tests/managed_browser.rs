@@ -400,6 +400,7 @@ async fn public_page_end_to_end_with_production_policy() {
     session.close().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "launches the real detected browser; run with -- --ignored"]
 async fn profile_is_deleted_after_a_browser_kill_and_after_drop() {

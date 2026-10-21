@@ -175,9 +175,7 @@ export function ModelPickerPopover({
   allModelsLabel?: string;
   /** Which providers have the user's own key saved. With it, rows Clovy cannot
    * serve without that key (`serviceAvailable: false`) stay out of the lists
-   * and a note says which key to add. With an OpenRouter key saved, the pinned
-   * Auto section also carries a billing note: Auto is a Clovy-managed route,
-   * so it meters Clovy credits and never uses the key (JUN-329). */
+   * and a note says which key to add. */
   providerApiKeysConfigured?: ProviderApiKeysConfigured;
   /** Whether the provider catalog behind `options` has actually loaded.
    * `options` alone cannot say: the host injects a synthetic entry for the
@@ -916,11 +914,6 @@ export function ModelPickerPopover({
                       aria-label={t("settingsPanels.picker.autoAria")}
                     />
                   </div>
-                  {providerApiKeysConfigured?.openrouter ? (
-                    <p className="agent-composer-model-auto-note">
-                      {t("settingsPanels.picker.autoBillingNote")}
-                    </p>
-                  ) : null}
                 </>
               ) : null}
               {onCostQualityChange && autoEnabled && showAutoPreference ? (

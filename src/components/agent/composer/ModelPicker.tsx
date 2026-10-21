@@ -29,7 +29,6 @@ import { HoverTip } from "../../ui/HoverTip";
 import { ModelPrivacyChip, ModelRowPrivacyBadge } from "../../ui/ModelPrivacyChip";
 import { Switch } from "../../ui/Switch";
 import { ThinkingLevelMeter } from "../../ui/ThinkingLevelMeter";
-import { AUTO_MODEL_ID } from "../../settings/ModelPickerDialog";
 import { ModelPickerCardContent } from "../../settings/ModelPickerPopover";
 
 /** The composer's model picker: the trigger pill and its two-layer popover
@@ -279,11 +278,7 @@ export function ComposerModelPopover({
   searchRef: RefObject<HTMLInputElement>;
   /** Which providers have the user's own key saved. Rows Clovy cannot serve
    * without that key (`serviceAvailable: false`) stay out of the list and a
-   * note says which key to add. With an OpenRouter key saved and Auto as the
-   * active selection, the popover also leads with the billing note from the
-   * settings picker: Auto is a Clovy-managed route, so it meters Clovy credits
-   * and never uses the key. This popover has no Auto section, so the note is
-   * the only billing signal on this surface (JUN-329). */
+   * note says which key to add. */
   providerApiKeysConfigured?: ProviderApiKeysConfigured;
   thinkingLevel?: ThinkingLevel;
   onFlyoutChange: (flyout: ComposerModelFlyout) => void;
@@ -589,9 +584,6 @@ export function ComposerModelPopover({
       }}
     >
       <p className="agent-composer-model-title">{t("chat.model.suggested")}</p>
-      {providerApiKeysConfigured?.openrouter && model.id === AUTO_MODEL_ID ? (
-        <p className="agent-composer-model-auto-note">{t("chat.model.autoBillingNote")}</p>
-      ) : null}
       {missingProviderKeys.map((provider) => (
         <p key={provider} className="agent-composer-model-auto-note">
           {t("chat.model.providerKeyNeeded", {

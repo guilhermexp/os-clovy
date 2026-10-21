@@ -1,10 +1,8 @@
-import { isMacLikePlatform } from "../../lib/platform";
 import { type MessageKey, t } from "../../i18n";
 
 export type SettingsTab =
   | "general"
   | "appearance"
-  | "billing"
   | "shortcuts"
   | "activity"
   | "dictation"
@@ -13,12 +11,10 @@ export type SettingsTab =
   | "agent"
   | "memory"
   | "connectors"
-  | "linked-devices"
   | "about";
 const SETTINGS_TAB_LABEL_KEYS: Record<SettingsTab, MessageKey> = {
   general: "settings.tabs.general",
   appearance: "settings.appearance.title",
-  billing: "settings.tabs.billing",
   shortcuts: "settings.tabs.shortcuts",
   activity: "activity.tab.label",
   dictation: "settings.tabs.dictation",
@@ -27,7 +23,6 @@ const SETTINGS_TAB_LABEL_KEYS: Record<SettingsTab, MessageKey> = {
   agent: "settings.tabs.agent",
   memory: "settings.tabs.memory",
   connectors: "settings.tabs.connectors",
-  "linked-devices": "settings.tabs.linkedDevices",
   about: "settings.tabs.about",
 };
 
@@ -45,7 +40,6 @@ function settingsTab(id: SettingsTab): { id: SettingsTab; label: string } {
 export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   settingsTab("general"),
   settingsTab("appearance"),
-  settingsTab("billing"),
   settingsTab("shortcuts"),
   settingsTab("activity"),
   settingsTab("dictation"),
@@ -54,14 +48,9 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   settingsTab("agent"),
   settingsTab("memory"),
   settingsTab("connectors"),
-  settingsTab("linked-devices"),
   settingsTab("about"),
 ];
 
-export function settingsTabsForCompanionPairing(companionPairingEnabled: boolean) {
-  const mac = isMacLikePlatform();
-  return SETTINGS_TABS.filter(
-    (tab) =>
-      (companionPairingEnabled || tab.id !== "linked-devices") && (mac || tab.id !== "activity"),
-  );
+export function settingsTabsForPlatform(activitySupported: boolean) {
+  return SETTINGS_TABS.filter((tab) => activitySupported || tab.id !== "activity");
 }

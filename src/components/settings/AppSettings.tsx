@@ -21,14 +21,12 @@ import {
   useT,
 } from "../../i18n";
 import {
-  CLOVY_COMMUNITY_URL,
   dictationHotkeyStatus,
   dictationHelperCommand,
   dictationSettings,
   listProviderModels,
   localAudioFileSrc,
   providerModelSettings,
-  clovyOpenCommunityPage,
   clovyOpenVerifyPage,
   clearProviderApiKey,
   setDictationLanguage,
@@ -46,7 +44,6 @@ import { autostartEnabled, autostartSupported, setAutostartEnabled } from "../..
 import { replayOnboarding } from "../../lib/onboarding";
 import { errorCode, messageForErrorCode } from "../../lib/errors";
 import type {
-  AccountStatus,
   DictationHelperEvent,
   DictationMicrophoneDeviceDto,
   DictationShortcutKind,
@@ -62,7 +59,6 @@ import type {
   RecordingSourceMode,
   RecordingSourceReadinessDto,
 } from "../../lib/tauri";
-import { AccountSettingsSection, BillingSettingsSection } from "../account/AccountSettings";
 import { KeycapShortcut } from "../shortcuts/KeycapShortcut";
 import { chordFromKeyEvent, shortcutFromCapturePayload } from "../shortcuts/use-shortcut-capture";
 import {
@@ -77,7 +73,6 @@ import { Switch } from "../ui/Switch";
 import { HoverTip } from "../ui/HoverTip";
 import { toast } from "../ui/Toaster";
 import { APP_COMMIT_HASH, APP_VERSION } from "../../app/build-info";
-import type { ReportCategory } from "../agent/composer/reportCategory";
 import { getStoredTheme, setStoredTheme, type ThemePreference } from "../../lib/theme";
 import { BRAND_PRESETS, getStoredBrand, setStoredBrand, type BrandId } from "../../lib/brand";
 import {
@@ -87,15 +82,10 @@ import {
   type FontScaleId,
 } from "../../lib/font-scale";
 import {
-  getReleaseChannel,
-  reconcileToStable,
-  setReleaseChannel,
-  type ReleaseChannel,
-} from "../../lib/updater";
-import {
   fallbackDictationCapabilities,
   isMacLikePlatform,
   isSystemAudioSupportedPlatform,
+  isWindowsPlatform,
   useDictationCapabilities,
 } from "../../lib/platform";
 import { systemAudioAvailability } from "../../lib/source-readiness";
@@ -133,14 +123,13 @@ import { DEFAULT_VIDEO_MODEL, videoModelCatalog } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { AgentMcpServersSection } from "./AgentMcpServersSection";
 import { ConnectorsSection } from "./ConnectorsSection";
-import { LinkedDevicesSection } from "./LinkedDevicesSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
-import { PrivacySettingsSection } from "./PrivacySettingsSection";
 import { ActivitySettingsSection } from "./ActivitySettingsSection";
-import { SETTINGS_TABS, type SettingsTab } from "./settings-config";
+import { activityStatus } from "../../lib/activity-capture";
+import { SETTINGS_TABS, settingsTabsForPlatform, type SettingsTab } from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
 import {
   getStoredDateFormat,
@@ -214,16 +203,6 @@ function dateFormatOptions(t: TFunction) {
     { value: "month-first", label: t("settings.dateFormat.monthFirst") },
     { value: "day-first", label: t("settings.dateFormat.dayFirst") },
   ] satisfies { value: DateFormatPreference; label: string }[];
-}
-
-function releaseChannelOptions(t: TFunction): readonly {
-  value: ReleaseChannel;
-  label: ReactNode;
-}[] {
-  return [
-    { value: "stable", label: t("settings.releaseChannel.stable") },
-    { value: "rc", label: t("settings.releaseChannel.rc") },
-  ];
 }
 
 function autoPreferenceOptions(t: TFunction): readonly {
@@ -340,14 +319,6 @@ export type { SettingsTab };
 // Same list (and translated `label` getters) as the sidebar's settings nav.
 export { SETTINGS_TABS };
 
-export function appSettingsTabsForCompanionPairing(companionPairingEnabled: boolean) {
-  const mac = isMacLikePlatform();
-  return SETTINGS_TABS.filter(
-    (tab) =>
-      (companionPairingEnabled || tab.id !== "linked-devices") && (mac || tab.id !== "activity"),
-  );
-}
-
 /**
  * The shared settings page header (Codex-app style): a large serif page title
  * with one muted one-line blurb beneath, and generous space before the content.
@@ -382,15 +353,11 @@ type AppSettingsProps = {
   memoryFolderFilter?: string;
   /** Drill from a memory's project tag into that project. */
   onOpenProject?: (folderId: string) => void;
-  account: AccountStatus;
-  accountLoading: boolean;
   sourceMode: RecordingSourceMode;
   sourceReadiness?: RecordingSourceReadinessDto;
   checkingSourceReadiness: boolean;
   microphonePermissionStatus?: string;
   accessibilityPermissionStatus?: string;
-  onAccountChanged: (next: AccountStatus) => void;
-  onAccountRefresh: () => Promise<AccountStatus | undefined>;
   onSourceModeChange: (mode: RecordingSourceMode) => void;
   onEnableMicrophone?: () => void;
   onEnableAccessibility?: () => void;
@@ -406,21 +373,9 @@ type AppSettingsProps = {
   // data-note-detail-scroller on .main-panel-body and the detail owns its own
   // scroll region under a pinned breadcrumb bar.
   onDetailPinnedChange?: (pinned: boolean) => void;
-  // Runs the app updater's manual check flow.
-  onCheckForUpdates?: () => void;
-  // True when an update is downloaded and waiting for a relaunch. The bundle
-  // swap is what can kill the dictation helper, so the "dictation paused"
-  // notice points the user at the relaunch that finishes the update.
-  updateReadyToRelaunch?: boolean;
-  // Relaunches Clovy to finish a staged update (also restores the helper).
-  onRelaunch?: () => void;
-  // Confirmed leave-rc reconcile: downloads and installs the current stable,
-  // even if it is older than the running prerelease build (Q4-Q8).
-  onReconcileToStable?: () => void;
-  // Opens Agent with the direct issue report dialog preselected.
-  onReportIssue?: (category: ReportCategory) => void;
   // Opens a new agent session that runs a skill bundle's slash command.
   onStartBundleChat?: (prompt: string) => void;
+  activitySupported?: boolean;
 };
 
 export function AppSettings({
@@ -428,15 +383,11 @@ export function AppSettings({
   onFoldersImported,
   memoryFolderFilter,
   onOpenProject,
-  account,
-  accountLoading,
   sourceMode,
   sourceReadiness,
   checkingSourceReadiness,
   microphonePermissionStatus,
   accessibilityPermissionStatus,
-  onAccountChanged,
-  onAccountRefresh,
   onSourceModeChange,
   onEnableMicrophone,
   onEnableAccessibility,
@@ -444,12 +395,8 @@ export function AppSettings({
   activeTab: controlledTab,
   onTabChange,
   onDetailPinnedChange,
-  onCheckForUpdates,
-  updateReadyToRelaunch,
-  onRelaunch,
-  onReconcileToStable,
-  onReportIssue,
   onStartBundleChat,
+  activitySupported: activitySupportedProp,
 }: AppSettingsProps) {
   const [settings, setSettings] = useState<DictationSettingsDto>(DEFAULT_SETTINGS);
   const [providerSettings, setProviderSettings] =
@@ -489,7 +436,6 @@ export function AppSettings({
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
   const fontScale = useFontScaleId();
   const [dateFormat, setDateFormat] = useState<DateFormatPreference>(() => getStoredDateFormat());
-  const [releaseChannel, setReleaseChannelValue] = useState<ReleaseChannel>("stable");
   const experimentalFlags = useExperimentalFlags();
   const experimentalUnlockClicksRef = useRef({
     ...INITIAL_EXPERIMENTAL_UNLOCK_CLICK_STATE,
@@ -497,9 +443,6 @@ export function AppSettings({
   const experimentalUnlockingRef = useRef(false);
   const [experimentalOperation, setExperimentalOperation] = useState<"flags" | "unpack">();
   const [experimentalError, setExperimentalError] = useState<string>();
-  // Set only when a leave-rc switch turns up an installable stable, so the
-  // bespoke in-context confirm below the toggle can name the exact version.
-  const [reconcileVersion, setReconcileVersion] = useState<string>();
   const [pickerMode, setPickerMode] = useState<ProviderModelMode>();
   const [modelPickerFlyout, setModelPickerFlyout] = useState<ModelPickerFlyout>(null);
   const [modelSearch, setModelSearch] = useState("");
@@ -554,9 +497,23 @@ export function AppSettings({
   }, [detailPinned, onDetailPinnedChange]);
   // Never leave the host thinking a detail scroller is active after unmount.
   useEffect(() => () => onDetailPinnedChange?.(false), [onDetailPinnedChange]);
-  const settingsTabs = appSettingsTabsForCompanionPairing(
-    experimentalFlags.companionPairingEnabled,
-  ).filter((tab) => !(account.localDev && tab.id === "billing"));
+  const [internalActivitySupported, setInternalActivitySupported] = useState(
+    () => isMacLikePlatform() || isWindowsPlatform(),
+  );
+  useEffect(() => {
+    if (activitySupportedProp !== undefined) return;
+    let active = true;
+    void activityStatus()
+      .then((status) => {
+        if (active) setInternalActivitySupported(status.supported);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [activitySupportedProp]);
+  const effectiveActivitySupported = activitySupportedProp ?? internalActivitySupported;
+  const settingsTabs = settingsTabsForPlatform(effectiveActivitySupported);
   const capabilities = useDictationCapabilities();
   const systemAudioSupportedPlatform = capabilities.systemAudio || isSystemAudioSupportedPlatform();
   const defaultShortcuts =
@@ -598,63 +555,6 @@ export function AppSettings({
     capturingShortcutRef.current = capturingShortcut;
   }, [capturingShortcut]);
 
-  // Load the persisted release channel once the updater is available. Gated on
-  // a stable boolean (not the onCheckForUpdates prop itself, which is an inline
-  // arrow with a new identity each render) so this loads once, not per render.
-  const updaterAvailable = Boolean(onCheckForUpdates);
-  useEffect(() => {
-    if (!updaterAvailable) return;
-    let active = true;
-    void getReleaseChannel()
-      .then((channel) => {
-        if (active) setReleaseChannelValue(channel);
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [updaterAvailable]);
-
-  const handleReleaseChannelChange = (next: ReleaseChannel) => {
-    setReleaseChannelValue(next);
-    // Any channel change dismisses a stale reconcile offer (e.g. toggling back
-    // to rc, or stable -> rc -> stable) before we decide whether to re-offer.
-    setReconcileVersion(undefined);
-    void setReleaseChannel(next)
-      .then(() => {
-        // Leaving rc for stable while running a prerelease build: stable is
-        // normally older than the rc you are on, so a routine check would never
-        // pull it. Offer a one-time reconcile down onto the current stable (Q4-Q8).
-        if (next === "stable" && isPrereleaseBuild()) {
-          void offerReconcileToStable();
-        }
-      })
-      .catch(() => {
-        // Persist failed: re-read so the toggle reflects the real saved channel
-        // rather than an optimistic value that never reached disk.
-        void getReleaseChannel()
-          .then(setReleaseChannelValue)
-          .catch(() => undefined);
-      });
-  };
-
-  async function offerReconcileToStable() {
-    try {
-      const update = await reconcileToStable();
-      // Only prompt when a stable is actually installable. If stable has already
-      // caught up or passed the rc, the routine updater handles it (no reconcile).
-      if (update) setReconcileVersion(update.version);
-    } catch {
-      // A failed reconcile check is silent: the channel is already saved and the
-      // routine update flow will retry on its next check.
-    }
-  }
-
-  function confirmReconcileToStable() {
-    setReconcileVersion(undefined);
-    onReconcileToStable?.();
-  }
-
   useEffect(() => {
     setMicOpen(false);
     setLanguageOpen(false);
@@ -662,17 +562,6 @@ export function AppSettings({
       void resetMicTestState(true);
     }
   }, [activeTab]);
-
-  useEffect(() => {
-    if (!account.localDev || activeTab !== "billing") {
-      return;
-    }
-    if (controlled) {
-      onTabChange?.("general");
-      return;
-    }
-    setInternalTab("general");
-  }, [account.localDev, activeTab, controlled, onTabChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -872,7 +761,7 @@ export function AppSettings({
       setProviderModels((models) => ({ ...models, [mode]: response.models }));
     } catch (error) {
       if (request !== providerCatalogRequests.current[mode]) return;
-      // A stale successful fetch must not assert funding after a failed refresh.
+      // A stale successful fetch must not survive a failed refresh.
       setProviderModels((models) => ({ ...models, [mode]: [] }));
       setStatus(messageFromError(error));
     }
@@ -1465,8 +1354,6 @@ export function AppSettings({
     void setExperimentalFlags({
       unlocked: true,
       browser_use: experimentalFlags.browser_use,
-      companion_pairing: experimentalFlags.companion_pairing,
-      companion_computer_use_approvals: experimentalFlags.companion_computer_use_approvals,
     })
       .then(() => toast(translate("settings.experiments.unlocked")))
       .catch((error) => setExperimentalError(messageFromError(error)))
@@ -1475,22 +1362,13 @@ export function AppSettings({
       });
   }
 
-  async function updateExperimentalFlags(update: {
-    unlocked?: boolean;
-    browser_use?: boolean;
-    companion_pairing?: boolean;
-    companion_computer_use_approvals?: boolean;
-  }) {
+  async function updateExperimentalFlags(update: { unlocked?: boolean; browser_use?: boolean }) {
     setExperimentalOperation("flags");
     setExperimentalError(undefined);
     try {
       await setExperimentalFlags({
         unlocked: update.unlocked ?? experimentalFlags.unlocked,
         browser_use: update.browser_use ?? experimentalFlags.browser_use,
-        companion_pairing: update.companion_pairing ?? experimentalFlags.companion_pairing,
-        companion_computer_use_approvals:
-          update.companion_computer_use_approvals ??
-          experimentalFlags.companion_computer_use_approvals,
       });
     } catch (error) {
       setExperimentalError(messageFromError(error));
@@ -1550,13 +1428,6 @@ export function AppSettings({
               title={t("settings.tabs.general")}
               blurb={t("settings.general.blurb")}
             />
-            <AccountSettingsSection
-              account={account}
-              loading={accountLoading}
-              onAccountChanged={onAccountChanged}
-              onRefresh={onAccountRefresh}
-            />
-
             <PermissionsSettingsSection
               microphonePermissionStatus={microphonePermissionStatus}
               microphoneReadiness={microphoneReadiness}
@@ -1568,8 +1439,6 @@ export function AppSettings({
             />
 
             <StartupSettingsSection />
-
-            <PrivacySettingsSection />
           </>
         ) : null}
 
@@ -1697,10 +1566,6 @@ export function AppSettings({
           </section>
         ) : null}
 
-        {activeTab === "billing" && !account.localDev ? (
-          <BillingSettingsSection account={account} onRefresh={onAccountRefresh} />
-        ) : null}
-
         {activeTab === "shortcuts" ? (
           <section className="settings-group" aria-labelledby="shortcuts-heading">
             <SettingsPageHeader
@@ -1712,23 +1577,8 @@ export function AppSettings({
               <InlineNotice
                 role="alert"
                 aria-label={t("settings.helper.unavailableAria")}
-                eyebrow={
-                  updateReadyToRelaunch
-                    ? t("settings.helper.relaunchEyebrow")
-                    : t("settings.helper.pausedEyebrow")
-                }
-                body={
-                  updateReadyToRelaunch
-                    ? t("settings.helper.pausedUntilRelaunch")
-                    : helperUnavailable.message
-                }
-                actions={
-                  updateReadyToRelaunch && onRelaunch ? (
-                    <button type="button" className="btn btn-secondary" onClick={onRelaunch}>
-                      {t("settings.helper.relaunch")}
-                    </button>
-                  ) : undefined
-                }
+                eyebrow={t("settings.helper.pausedEyebrow")}
+                body={helperUnavailable.message}
               />
             ) : null}
             <div className="settings-card">
@@ -2376,10 +2226,6 @@ export function AppSettings({
           </>
         ) : null}
 
-        {activeTab === "linked-devices" && experimentalFlags.companionPairingEnabled ? (
-          <LinkedDevicesSection />
-        ) : null}
-
         {activeTab === "about" ? (
           <section className="settings-group" aria-labelledby="about-heading">
             <SettingsPageHeader
@@ -2419,96 +2265,6 @@ export function AppSettings({
                   </div>
                 </div>
 
-                {onCheckForUpdates ? (
-                  <>
-                    <div className="settings-row">
-                      <div className="settings-row-info">
-                        <h3 className="settings-row-title">{t("settings.about.updates")}</h3>
-                        <p className="settings-row-description">
-                          {t("settings.about.updatesDescription")}
-                        </p>
-                      </div>
-                      <div className="settings-row-control">
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={onCheckForUpdates}
-                        >
-                          {t("settings.about.checkForUpdates")}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="settings-row">
-                      <div className="settings-row-info">
-                        <h3 className="settings-row-title">{t("settings.releaseChannel.title")}</h3>
-                        <p className="settings-row-description">
-                          {t("settings.releaseChannel.description")}
-                        </p>
-                      </div>
-                      <div className="settings-row-control">
-                        <SegmentedControl<ReleaseChannel>
-                          aria-label={t("settings.releaseChannel.title")}
-                          value={releaseChannel}
-                          options={releaseChannelOptions(t)}
-                          onValueChange={handleReleaseChannelChange}
-                        />
-                      </div>
-                    </div>
-
-                    {reconcileVersion ? (
-                      <div className="settings-row">
-                        <InlineNotice
-                          aria-label={t("settings.releaseChannel.switchAria")}
-                          eyebrow={t("settings.releaseChannel.switchEyebrow")}
-                          body={t("settings.releaseChannel.switchBody", {
-                            version: reconcileVersion,
-                            base: baseVersion(),
-                          })}
-                          actions={
-                            <>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                onClick={() => setReconcileVersion(undefined)}
-                              >
-                                {t("settings.releaseChannel.notNow")}
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                onClick={confirmReconcileToStable}
-                              >
-                                {t("settings.releaseChannel.switch")}
-                              </button>
-                            </>
-                          }
-                        />
-                      </div>
-                    ) : null}
-                  </>
-                ) : null}
-
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <h3 className="settings-row-title">{t("settings.about.community")}</h3>
-                    <p className="settings-row-description">
-                      {t("settings.about.communityDescription", {
-                        url: CLOVY_COMMUNITY_URL.replace("https://", ""),
-                      })}
-                    </p>
-                  </div>
-                  <div className="settings-row-control">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => void clovyOpenCommunityPage().catch(() => undefined)}
-                    >
-                      {t("settings.about.joinCommunity")}
-                    </button>
-                  </div>
-                </div>
-
                 <div className="settings-row">
                   <div className="settings-row-info">
                     <h3 className="settings-row-title">{t("settings.about.verification")}</h3>
@@ -2526,26 +2282,6 @@ export function AppSettings({
                     </button>
                   </div>
                 </div>
-
-                {onReportIssue ? (
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">{t("settings.about.reportIssue")}</h3>
-                      <p className="settings-row-description">
-                        {t("settings.about.reportIssueDescription")}
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={() => onReportIssue("bug")}
-                      >
-                        {t("settings.about.reportIssue")}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
 
                 {import.meta.env.DEV ? (
                   // Dev builds only: same helper the devtools console exposes
@@ -2608,30 +2344,6 @@ export function AppSettings({
                         aria-label={t("settings.experiments.browserUseAria")}
                         onCheckedChange={(browser_use) =>
                           void updateExperimentalFlags({ browser_use })
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">{t("settings.experiments.companion")}</h3>
-                      <p className="settings-row-description">
-                        {experimentalFlags.companion_pairing ===
-                        experimentalFlags.companionPairingEnabled
-                          ? t("settings.experiments.companionDescription")
-                          : experimentalFlags.companionPairingEnabled
-                            ? t("settings.experiments.companionPendingOff")
-                            : t("settings.experiments.companionPendingOn")}
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <Switch
-                        checked={experimentalFlags.companion_pairing}
-                        disabled={experimentalOperation !== undefined}
-                        aria-label={t("settings.experiments.companionAria")}
-                        onCheckedChange={(companion_pairing) =>
-                          void updateExperimentalFlags({ companion_pairing })
                         }
                       />
                     </div>
@@ -3236,16 +2948,4 @@ function messageFromError(error: unknown) {
     return String((error as { message: unknown }).message);
   }
   return String(error);
-}
-
-// The running build is a release candidate (X.Y.Z-rc.N). Only these get the
-// leave-rc reconcile offer; a clean stable build has nothing to reconcile.
-function isPrereleaseBuild() {
-  return APP_VERSION.includes("-rc");
-}
-
-// The base version an rc will become once promoted (0.0.25-rc.2 -> 0.0.25), used
-// to reassure the user which stable they will land on when it ships.
-function baseVersion() {
-  return APP_VERSION.split("-")[0];
 }

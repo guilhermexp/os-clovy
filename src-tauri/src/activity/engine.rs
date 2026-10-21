@@ -290,12 +290,15 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
             self.low_disk = low_disk_next(self.low_disk, self.platform.free_disk_bytes(&directory));
         }
         let focused = if observing {
-            self.platform.focused_window()
+            let input_idle_ms = self.platform.system_idle_ms();
+            self.platform
+                .focused_window()
+                .map(|window| (window, input_idle_ms))
         } else {
             None
         };
         let protected_video = settings.pause_on_protected_video
-            && focused.as_ref().is_some_and(|window| {
+            && focused.as_ref().is_some_and(|(window, _)| {
                 is_protected_video(&window.app_name, window.browser_url.as_deref())
             });
 
@@ -447,11 +450,12 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
         &mut self,
         store: &ActivityStore,
         settings: &ActivitySettings,
-        window: WindowDescriptor,
+        focused: (WindowDescriptor, Option<u64>),
         now: DateTime<Utc>,
         raw_input: &[RawInputEvent],
         clipboard: Option<String>,
     ) -> usize {
+        let (window, input_idle_ms) = focused;
         if skip_reason(&window, settings, self.own_pid).is_some() {
             // Excluded: no text read, no frame, and the tick's input and
             // clipboard are discarded with it.
@@ -482,6 +486,7 @@ impl<P: ActivityPlatform> CaptureEngine<P> {
             browser_url: window.browser_url.clone(),
             text_source,
             text,
+            input_idle_ms,
         };
         let stored = match store.insert_frame(&frame).await {
             Ok(_) => {
@@ -642,6 +647,7 @@ pub(super) mod tests {
         clipboard: VecDeque<String>,
         input: Vec<RawInputEvent>,
         free_disk: Option<u64>,
+        input_idle_ms: Option<u64>,
         calls: Arc<Mutex<Calls>>,
         input_capture: Arc<AtomicBool>,
         /// Scripted `focused_window` results, consumed before `focused`.
@@ -665,6 +671,7 @@ pub(super) mod tests {
                 clipboard: VecDeque::new(),
                 input: Vec::new(),
                 free_disk: Some(100 << 30),
+                input_idle_ms: None,
                 calls: Arc::default(),
                 input_capture: Arc::default(),
                 focused_reads: VecDeque::new(),
@@ -682,6 +689,9 @@ pub(super) mod tests {
             self.focused_reads
                 .pop_front()
                 .unwrap_or_else(|| self.focused.clone())
+        }
+        fn system_idle_ms(&self) -> Option<u64> {
+            self.input_idle_ms
         }
         fn secondary_windows(&mut self) -> Vec<WindowDescriptor> {
             self.secondary_reads
@@ -862,6 +872,36 @@ pub(super) mod tests {
             "no OCR when AX has text"
         );
         assert!(harness.shared.last_frame_at().is_some());
+    }
+
+    #[tokio::test]
+    async fn tick_persists_system_idle_without_input_monitoring() {
+        let mut platform = FakePlatform::granted();
+        platform.permissions.input_monitoring = PermissionState::Denied;
+        platform.input_idle_ms = Some(500);
+        let mut harness = Harness::new(platform, enabled_settings());
+        harness.engine.tick().await;
+        let frames = harness.frames().await;
+        assert_eq!(frames.len(), 1);
+        let exported = serde_json::to_value(&frames[0]).unwrap();
+        assert_eq!(exported["inputIdleMs"], serde_json::json!(500));
+        assert!(!harness.engine.input_capture_on);
+        assert!(harness
+            .events()
+            .await
+            .iter()
+            .all(|event| { !matches!(event.kind, InputEventKind::Click | InputEventKind::Key) }));
+    }
+
+    #[tokio::test]
+    async fn tick_keeps_capturing_when_system_idle_is_unavailable() {
+        let mut harness = Harness::new(FakePlatform::granted(), enabled_settings());
+        harness.engine.tick().await;
+        let frames = harness.frames().await;
+        assert_eq!(frames.len(), 1);
+        let exported = serde_json::to_value(&frames[0]).unwrap();
+        assert_eq!(exported["inputIdleMs"], serde_json::Value::Null);
+        assert_eq!(frames[0].app_name, "Zed");
     }
 
     #[tokio::test]

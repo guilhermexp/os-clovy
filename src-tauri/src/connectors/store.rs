@@ -41,7 +41,7 @@ fn dev_plaintext_token_file(provider: ConnectorProvider) -> &'static str {
 }
 
 /// What lives in one keychain entry. Token fields zeroize on drop so rotated
-/// grants don't linger in memory (mirrors `os_accounts::TokenPair`).
+/// grants don't linger in memory.
 #[derive(Serialize, Deserialize, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct StoredConnectorTokens {
     pub access_token: String,
@@ -234,7 +234,7 @@ fn keychain_services_for_build(
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn use_prod_connector_tokens() -> bool {
-    crate::os_accounts::load_local_env();
+    crate::env_compat::load_local_env();
     cfg!(debug_assertions)
         && crate::env_compat::truthy(
             USE_PROD_ACCOUNTS_TOKENS_ENV,
@@ -244,7 +244,7 @@ fn use_prod_connector_tokens() -> bool {
 
 #[cfg(debug_assertions)]
 fn use_dev_plaintext_token_store() -> bool {
-    crate::os_accounts::load_local_env();
+    crate::env_compat::load_local_env();
     crate::env_compat::truthy(
         DEV_PLAINTEXT_TOKEN_STORE_ENV,
         LEGACY_DEV_PLAINTEXT_TOKEN_STORE_ENV,

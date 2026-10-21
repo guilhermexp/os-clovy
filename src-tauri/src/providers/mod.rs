@@ -702,7 +702,7 @@ pub async fn clovy_model_runtime_capabilities(model_id: &str) -> ClovyModelRunti
             .and_then(|model| model.context_tokens),
         supports_vision: generation_model_supports_vision_from_catalog(
             model_id,
-            crate::os_accounts::local_dev_enabled(),
+            true,
             models
                 .iter()
                 .map(|model| (model.id.as_str(), model.capabilities.as_slice())),
@@ -1510,7 +1510,7 @@ pub fn default_unattended_cli() -> Option<CliKind> {
 }
 
 pub fn load_local_env() {
-    crate::os_accounts::load_local_env();
+    crate::env_compat::load_local_env();
 }
 
 fn current_settings() -> ProviderModelSettings {
@@ -3468,11 +3468,13 @@ mod tests {
     }
 
     fn login_path_with(clis: &[&str]) -> tempfile::TempDir {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
         for cli in clis {
             let path = bin.path().join(cli);
             fs::write(&path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         crate::llm::shell_env::set_login_env_for_tests(Some(

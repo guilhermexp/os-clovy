@@ -18,7 +18,6 @@ import {
   type AgentChatPart,
   type AgentChatTurn,
 } from "../../lib/agent-chat-runtime";
-import { shouldBlockTextOnFunding, type TextFundingModelContext } from "../../lib/account-gate";
 import {
   type ChatEngineCatalog,
   chatEngineCatalog,
@@ -44,7 +43,6 @@ import {
   type ComposerModelFlyout,
 } from "../agent/composer/ModelPicker";
 import { modelOptions, selectedModel } from "../settings/ModelPickerDialog";
-import type { TextFundingNoticeContext } from "../account/FundingNotice";
 import type { NoteChat, NoteChatAttachment } from "./useNoteChat";
 
 /** Note-tailored presets, shown as the main session view's preset chips (icon
@@ -156,8 +154,6 @@ export function NoteChatPanel({
   note,
   chat,
   recordingActive,
-  creditActionsDisabledReason,
-  renderFundingNotice,
   onClose,
   onOpenInAgent,
 }: {
@@ -169,10 +165,6 @@ export function NoteChatPanel({
    * ducks the recording's mic while dictation listens (so a dictated question
    * never lands in the note); this only tunes the tooltip to say so. */
   recordingActive?: boolean;
-  creditActionsDisabledReason?: string;
-  /** App owns the account and billing action; the composer owns the active
-   * session model and picker. */
-  renderFundingNotice?: (context: TextFundingNoticeContext) => ReactNode;
   onClose: () => void;
   onOpenInAgent: (sessionId: string | undefined) => void;
 }) {
@@ -231,10 +223,6 @@ export function NoteChatPanel({
   // Focus the composer, then explicitly start the dictation helper. Stop and
   // discard controls are correlated separately with the take shown in the HUD.
   async function startDictation() {
-    if (creditActionsDisabledReason) {
-      setComposerError(creditActionsDisabledReason);
-      return;
-    }
     composerRef.current?.focus();
     try {
       await dictationHelperCommand({ type: "start_listening" });
@@ -261,8 +249,7 @@ export function NoteChatPanel({
   const modelPopoverRef = useRef<HTMLDivElement>(null);
   const modelSearchRef = useRef<HTMLInputElement>(null);
   // Catalog hydration is presentation-only. The session-local staged choice
-  // is authoritative until a run applies it, including choices acknowledged
-  // to a linked companion while this panel is already open.
+  // is authoritative until a run applies it.
   useEffect(() => {
     let stale = false;
     void listProviderModels("generation")
@@ -299,18 +286,6 @@ export function NoteChatPanel({
   }, []);
   const activeEngine = classifyChatEngineModel(activeModelId, engineCatalog, models);
   const model = selectedModel(models, activeModelId);
-  const textFundingContext: TextFundingModelContext = {
-    activeModelId: activeModelId || undefined,
-    activeModel: model,
-    providerApiKeysConfigured,
-  };
-  // A CLI or an endpoint does not spend Clovy credits.
-  const textActionsDisabledReason = shouldBlockTextOnFunding(
-    activeEngine.kind === "clovy" && Boolean(creditActionsDisabledReason),
-    textFundingContext,
-  )
-    ? creditActionsDisabledReason
-    : undefined;
 
   function selectModel(nextModelId: string) {
     setModel(nextModelId);
@@ -405,7 +380,7 @@ export function NoteChatPanel({
   }, [turns.length, lastTurnSize, working, fade.update]);
 
   async function handleSend() {
-    if (working || textActionsDisabledReason) return;
+    if (working) return;
     if (!composerRef.current?.flushPendingChange()) return;
     const serializedText = draftRef.current;
     const text = serializedText.trim();
@@ -518,9 +493,7 @@ export function NoteChatPanel({
                       assistantPartNode(
                         part,
                         index,
-                        working || chat.submissionPending || textActionsDisabledReason
-                          ? undefined
-                          : () => void retry(turn.id),
+                        working || chat.submissionPending ? undefined : () => void retry(turn.id),
                       ),
                     )}
                   </div>
@@ -542,20 +515,6 @@ export function NoteChatPanel({
           ) : null}
         </div>
         <footer ref={footerRef} className="note-chat-composer">
-          {textActionsDisabledReason
-            ? (renderFundingNotice?.({
-                ...textFundingContext,
-                onSelectOpenRouterModel: () => {
-                  setModelFlyout(null);
-                  setModelSearch("");
-                  setModelOpen(true);
-                },
-              }) ?? (
-                <p className="agent-composer-notice" role="status">
-                  {textActionsDisabledReason}
-                </p>
-              ))
-            : null}
           {/* The actual chatbox: the agent composer's box/attach/toolbar/model/
            * send classes, wired to the panel's session. */}
           <div className="agent-composer-box">
@@ -619,12 +578,10 @@ export function NoteChatPanel({
                   className="agent-composer-mic"
                   aria-label={t("notes.chat.dictate")}
                   title={
-                    creditActionsDisabledReason ??
-                    (recordingActive
+                    recordingActive
                       ? t("notes.chat.dictateDuringRecording")
-                      : t("notes.chat.startDictation"))
+                      : t("notes.chat.startDictation")
                   }
-                  disabled={Boolean(creditActionsDisabledReason)}
                   onClick={() => void startDictation()}
                 >
                   <IconMicrophone size={18} />
@@ -644,9 +601,7 @@ export function NoteChatPanel({
                     type="button"
                     className="agent-composer-send"
                     aria-label={t("notes.chat.send")}
-                    disabled={
-                      Boolean(textActionsDisabledReason) || (draftEmpty && !attachments.length)
-                    }
+                    disabled={draftEmpty && !attachments.length}
                     onClick={() => void handleSend()}
                   >
                     <IconArrowUp size={18} />

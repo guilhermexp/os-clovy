@@ -35,7 +35,7 @@ const sampleCatalog: ChatEngineCatalog = {
       id: "pi",
       name: "Pi",
       installed: false,
-      reason: "Not found in PATH",
+      reason: "`pi` was not found in your login shell PATH.",
       modelId: "__clovy_cli_engine__:pi",
     },
   ],
@@ -104,7 +104,7 @@ describe("ChatEnginePicker", () => {
     ).toEqual([
       "Claude CodeDefault",
       "Codex",
-      "PiNot found in your login shell PATH.",
+      "PiNot found on your PATH.",
       "Local Ollama",
       "ClovyBuilt-in agent, kept while its tools move to the CLIs",
     ]);
@@ -128,7 +128,7 @@ describe("ChatEnginePicker", () => {
     );
   });
 
-  it("disables a not-installed CLI with its reason", async () => {
+  it("disables a not-installed CLI with a translated reason, not the backend's", async () => {
     const user = userEvent.setup();
     const setModel = vi.fn();
 
@@ -138,8 +138,21 @@ describe("ChatEnginePicker", () => {
 
     const piOption = screen.getByRole("menuitemradio", { name: /Pi/ });
     expect(piOption).toBeDisabled();
-    expect(piOption).toHaveTextContent("Not found in your login shell PATH.");
-    expect(piOption).not.toHaveTextContent("Not found in PATH");
+    expect(piOption).toHaveTextContent("Not found on your PATH.");
+    expect(piOption).not.toHaveTextContent("login shell");
+  });
+
+  it("shows the not-installed reason in the interface language", async () => {
+    applyInterfaceLocale("pt-BR");
+    const user = userEvent.setup();
+
+    render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={sampleCatalog} />);
+
+    await user.click(screen.getByRole("button", { name: /Mecanismo de chat/i }));
+
+    const piOption = screen.getByRole("menuitemradio", { name: /Pi/ });
+    expect(piOption).toBeDisabled();
+    expect(piOption).toHaveTextContent("Não encontrado no PATH da sua sessão.");
   });
 
   it("choosing a CLI calls setModel with __clovy_cli_engine__:<id>", async () => {

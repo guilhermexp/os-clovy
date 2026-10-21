@@ -7,8 +7,8 @@
 //! flow, not a custom URI scheme. Google requires the Desktop client's
 //! `client_secret` at its token endpoint even though an installed application
 //! cannot keep that credential confidential; PKCE remains the protection for
-//! an intercepted authorization code. Mirrors the os_accounts.rs login flow
-//! mechanics. [`loopback_authorize`] owns the PKCE/CSRF minting, the
+//! an intercepted authorization code.
+//! [`loopback_authorize`] owns the PKCE/CSRF minting, the
 //! listener, and the browser handoff; [`authorize`] is Google's thin wrapper
 //! around it and owns Google's own auth-URL shape, token exchange, and email
 //! resolution. `linear::authorize` is the same kind of thin wrapper; neither
@@ -305,7 +305,7 @@ pub(crate) async fn loopback_authorize(
         flow.clear_cancel_sender();
         return Err(error);
     }
-    if let Err(error) = crate::os_accounts::open_in_browser(&auth_url) {
+    if let Err(error) = crate::system_browser::open_in_browser(&auth_url) {
         flow.clear_cancel_sender();
         return Err(error);
     }
@@ -404,7 +404,7 @@ fn build_auth_url(
 }
 
 // Branded loopback success page, shared by every loopback flow (the connectors
-// here plus the dev-only os_accounts sign-in). Self-contained: the loopback
+// here). Self-contained: the loopback
 // origin cannot reach the app's bundled assets, so the two text faces the page
 // uses are embedded as data: URIs — the listener answers exactly one request,
 // so a follow-up fetch for a font file would find the port already closed —
@@ -727,7 +727,7 @@ pub async fn revoke(token: &str) -> bool {
 
 /// Resolve the account email that keys custody and the DB index. Prefer the
 /// id_token email claim (scopes always include `openid email`; decoded
-/// without verification, like os_accounts does for `exp` — the token came
+/// without verification — the token came
 /// straight from Google over TLS); fall back to the userinfo endpoint.
 async fn resolve_email(tokens: &GoogleTokenResponse) -> Result<String, AppError> {
     if let Some(email) = tokens

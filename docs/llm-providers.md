@@ -12,7 +12,7 @@ Models). Transcription always stays on Clovy API (CLIs do not transcribe).
 |---|---|
 | `llm/mod.rs` | Public API: `generate`, `generate_for_activity`, `generate_on_cli_for_activity`, `provider_for`, `test_provider`, `run_cli`, `parse_json_value`, `StructuredOutputLevel`, `LlmError`, `CLOVY_AUTHORSHIP_MARKER` |
 | `llm/cli.rs` | Catalog of the six CLIs (`claude`, `codex`, `pi`, `agy`, `cursor-agent`, `copilot`), which of them can run with every tool off, one-shot argv/stdin/env for those, output parsing, schema strictifier |
-| `llm/shell_env.rs` | Login-shell environment (`$SHELL -l -c 'env -0'`, captured once, merged over the app environment, plus fallback bin dirs) |
+| `llm/shell_env.rs` | Login-shell environment (`$SHELL -l -c 'env -0'`, captured once, merged over the app environment, plus fallback bin dirs); on Windows the app environment plus the installers' directories, with `PATHEXT` resolution |
 | `llm/detect.rs` | Installed / path / `--version` per CLI |
 | `llm/process.rs` | Child runner: own process group, timeout kills the whole group, group swept after exit, 8 MiB output cap |
 | `llm/endpoint.rs` | OpenAI-compatible `/chat/completions` one-shot calls, structured-output ladder probe, RPM pacing |
@@ -111,7 +111,8 @@ Every allowed one-shot call also:
   `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`, such as the local development bearer token
   from `.env`) are removed by `llm::shell_env::cli_environment`, the one filter
   for one-shot calls, `--version` detection, the login-shell capture, and the
-  CLI chat engine; Clovy never logs in or edits CLI configuration;
+  CLI chat engine; Clovy never logs in or edits CLI configuration; on
+  Windows see [Windows resolution](#windows-resolution);
 - starts with `CLOVY_AUTHORSHIP_MARKER` (`[clovy-internal-ai-call]`) alone on
   the first prompt line and sets `CLOVY_ONESHOT=1`; session ingestion skips
   any CLI session whose first prompt's first line is exactly the marker;
@@ -200,9 +201,8 @@ New work starts on the default engine: `chat_default_engine` returns
 `{ modelId, cli, legacyFallback }` (`modelId` is the CLI engine id when chat
 is on a CLI, else `null` and the caller keeps its own default) without the
 network, and the desktop's new sessions, Home's turns
-([home-assistant.md](home-assistant.md), ADR-0064), note chat, and sessions started
-from the companion ([companion-architecture.md](companion-architecture.md))
-create their session on it.
+([home-assistant.md](home-assistant.md), ADR-0064), and note chat create their
+session on it.
 The engine picker writes `__june_local_generation__:<model>@<endpoint id>`
 (both URL-encoded), so two endpoints serving the same model stay distinct and
 the agent proxy uses exactly the chosen endpoint (a removed endpoint is
@@ -224,6 +224,14 @@ One message on a CLI engine is one CLI process in the session workspace:
 | agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`; `--conversation <id>` | none (only `agy mcp add`, which edits its global configuration) |
 | cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`; `--resume <id>` | none (project MCP servers need approval inside Cursor) |
 | copilot | `--prompt=<prompt> --output-format json --session-id <id>` | a UUID Clovy chooses on the first turn | `--additional-mcp-config=@<temporary file>` |
+
+On Windows a CLI resolved as a `.cmd` or `.bat` launcher (npm installs, the
+Cursor agent installer) runs through `cmd.exe`, which refuses an argument
+with a line break and a command line over 8191 characters. For such a
+launcher cursor-agent gets its prompt on stdin instead of `-- <prompt>` (it
+reads stdin when `-p` has no prompt), and copilot gets it on stdin instead of
+`--prompt=<prompt>` (`chat_engine::cli::prompt_on_stdin`). agy keeps the
+argument: its installer ships `agy.exe`.
 
 - **Permissions.** The flags come from one table, `chat_engine::policy`, by
   CLI, the session's safety mode (`sandboxed` or `unrestricted`), and whether
@@ -400,17 +408,46 @@ still runs there.
 endpoint form; with no typed key and an `endpointId`, the backend uses the
 Keychain key saved for that endpoint (the key never reaches the webview).
 
+## Windows resolution
+
+Windows has no login shell. `llm::shell_env` uses the app's own environment
+(an app started from Explorer inherits the user's and the machine's `Path`),
+captured once per run like the macOS login environment:
+
+- the search path is the existing variable that matches `PATH` ignoring case
+  (normally `Path`); fallback directories are written back to that same
+  variable, so a child never sees two;
+- `which` tries, in each directory, the name plus each `PATHEXT` extension in
+  order (default `.COM;.EXE;.BAT;.CMD`), keeping only `.com`, `.exe`, `.bat`
+  and `.cmd`, and never the bare name: npm writes a POSIX `codex` script
+  beside `codex.cmd`;
+- the fallback directories are where the official installers put each CLI:
+  `%APPDATA%\npm` (npm global installs), `%USERPROFILE%\.local\bin` (claude),
+  `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` and `%USERPROFILE%\.codex\bin`
+  (codex standalone, current and earlier layout), `%LOCALAPPDATA%\agy\bin`
+  (agy), `%LOCALAPPDATA%\cursor-agent` (cursor-agent),
+  `%LOCALAPPDATA%\Microsoft\WinGet\Links` (copilot through winget),
+  `%USERPROFILE%\.bun\bin` and `%LOCALAPPDATA%\Volta\bin`.
+
+A CLI installed while the app is open appears after a restart, as on macOS.
+One-shot calls always send the prompt on stdin, which `.cmd` launchers pass
+through byte for byte; for chat turns see [CLI chat engine](#cli-chat-engine).
+
 ## Verification
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --locked llm` covers the
   catalog, isolation flags and marker, login-shell resolution with fake shells
   and CLIs, timeouts without orphans, the endpoint probe against a fake HTTP
   server, migration, DTO secrecy, usage validation, activity gating and
-  serialization, and a fake-CLI note persisted like a Clovy note.
+  serialization, and a fake-CLI note persisted like a Clovy note. On Windows
+  it also covers the `Path` key, `PATHEXT`, the installers' directories, and
+  a one-shot prompt through an npm `.cmd` shim.
 - `cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine` covers
   the CLI chat engine with a fake CLI per CLI (two turns with the resume id,
   stream to events and items, cancel without orphans, a message sent during a
-  run, the MCP configuration each CLI receives, approval refusals, failures),
+  run, the MCP configuration each CLI receives, approval refusals, failures;
+  on Windows, multi-line and over-limit prompts reaching cursor-agent and
+  copilot `.cmd` launchers intact),
   the permission table and the forbidden-flag sweep (`chat_engine::policy`),
   the turn token (present in each CLI's server arguments, bound to the run,
   revoked at the end) and a write tool approved, denied, and cancelled through
@@ -420,9 +457,11 @@ Keychain key saved for that endpoint (the key never reaches the webview).
   turns on the installed claude, codex, and pi, and the policy's argv on the
   installed claude and codex with the built `clovy-mcp` and an approval card
   (`chat_engine_real_policy_smoke`, after `cargo build --bin clovy-mcp`).
+- The `windows-rust` CI job runs the `llm` and `chat_engine` filters on
+  Windows, where the `Path`, `PATHEXT`, and `.cmd` tests compile.
 - `pnpm exec vitest run src/test/llm-providers src/test/chat-engine` covers the
-  settings section and the engine picker; `src/test/note-chat-default-engine`,
-  `src/test/companion-models`, and the default-engine cases in
+  settings section and the engine picker; `src/test/note-chat-default-engine`
+  and the default-engine cases in
   `src/test/agent-workspace-runtime` and `src/test/app-shortcut` cover the
   entry points that start on the default engine.
 - `cargo test --locked llm::registry` covers the one-time move to the default

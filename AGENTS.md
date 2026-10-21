@@ -14,72 +14,35 @@ Clovy is a local-first **Tauri desktop app** for meeting notes: it records a
 meeting or dictation, transcribes audio, turns transcripts into structured
 notes, and hosts an AI agent over the user's notes. The frontend is **React**
 (`src/`), the native shell is **Rust** (`src-tauri/`), and the **Rust backend,
-Clovy API** (`clovy-api/`), routes remote inference and metered billing.
+Clovy API** (`clovy-api/`), routes remote inference and runs only in local
+mode (one local bearer token, no billing, bound to `127.0.0.1`).
 Current upstreams are **Groq** for audio, **OpenRouter** for remote text,
 **fal** for media, and **Tavily** for web. Own text engines (CLI and endpoints)
-remain separate. Identity and credits come from **OS Accounts**; the local
-agent harness uses the **OpenAI Agents SDK**. Attested hosting of Clovy API
-does not attest these upstreams or imply TEE/ZDR for their inference.
+remain separate. In this fork the desktop has no sign-in: it runs on a fixed
+local identity (`src-tauri/src/local_identity.rs`) against Clovy API at
+`http://127.0.0.1:8080` by default (`CLOVY_API_URL` overrides); the local
+agent harness uses the **OpenAI Agents SDK**.
 
 > Read **[CONTEXT.md](CONTEXT.md)** before naming anything, and
 > **[docs/index.md](docs/index.md)** to find the doc for the area you touch.
-
-## OS Platform (shared brain)
-
-Platform-enabled repo — Product `june`, Team `os-core`, Issue prefix `JUN`.
-The product handle and issue prefix are retained June-era technical identities;
-the current product name is Clovy (see
-[ADR-0055](docs/adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md)).
-Use the `os_platform_*` MCP tools (https://platform-api.opensoftware.co/mcp);
-REST fallback `https://app.opensoftware.co/api` + `Authorization: Bearer
-$OS_PLATFORM_API_KEY`. Never print or store credentials.
-
-**Before work that will produce a branch** (skip for Q&A, typos, exploration, CI):
-1. `os_platform_get_product{handle:"june"}` — response embeds the Product
-   Memory index; `os_platform_get_memory` only entries whose description touches
-   your task.
-2. Find-or-create the Issue: `os_platform_search_product_issues` first; create
-   only if no open Issue matches the outcome. One Issue per independently
-   reviewable outcome; reuse it across sessions.
-3. Set the Issue `in_progress` (`os_platform_set_issue_status` with the Product
-   handle, Issue number, and status), branch `JUN-<number>-<slug>`, and
-   put `JUN-<number>` in commit subjects and the PR title/body. PR-Links
-   advances in_review/completed automatically where installed; if it doesn't,
-   set them yourself. Leave unfinished work in its true status.
-
-**After the work lands**: for each durable fact (decision, convention, gotcha
-that cost >10 min) — check the memory index, then `os_platform_create_memory` or
-`os_platform_update_memory` the existing slug; never a near-duplicate, never
-secrets, never a local notes file.
-
-**Posts** (`os_platform_create_post{team:"os-core"}`): only when a teammate
-would act differently for reading it — blocked and stopping, a decision that
-changes someone's work, a shipped result the derived events don't convey, or a
-start of cross-person/cross-session work. Normally ≤1 per Issue per day. Read
-`os_platform_get_team_timeline` before asking anyone "what's the status?".
-
-**No access** (no MCP tools, no key): say once — "OS Platform not configured;
-see README → OS Platform" — then work normally, fully offline. No local memory
-substitute; put durable learnings in the PR description. At handoff, state
-"platform sync skipped"; never imply the platform steps ran.
 
 ## Structure
 
 ```
 os-clovy/
 ├── src/                     # React frontend
-│   ├── app/                 # app shell, routing, update-decision
-│   ├── components/          # agent (chat), settings, account, onboarding, note-editor, recorder, sidebar, ...
+│   ├── app/                 # app shell, routing, onboarding, bootstrap
+│   ├── components/          # agent (chat), settings, onboarding, note-editor, recorder, sidebar, ...
 │   ├── lib/                 # agent runtime contracts, model privacy, Tauri bindings, ...
 │   ├── styles/              # app.css + tokens.css (design tokens)
 │   └── test/                # vitest suites (all frontend tests live here)
 ├── src-tauri/               # Rust native shell (Cargo package `clovy`)
 │   ├── src/audio/           # recording, source separation, turn detection, live preview
 │   ├── src/agent_runtime/   # sidecar protocol, tools, persistence, and migration
-│   ├── src/os_accounts.rs   # OS Accounts login (PKCE), keychain token store
+│   ├── src/local_identity.rs # fixed local user + bearer token sent to Clovy API (no sign-in)
 │   ├── src/providers/       # model-settings persistence
-│   ├── src/llm/             # own providers: agent CLIs, OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
-│   ├── src/activity/        # activity capture (AX/OCR text only), encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
+│   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
+│   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/day_intelligence/ # distillation + local embeddings, hourly reports, workstreams, day summary/standup, schedule, notifications (docs/day-intelligence.md; tests: `cargo test day_intelligence`)
 │   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated local socket, read-only tools/resources (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
@@ -180,28 +143,23 @@ and **every skill is symlinked into `.claude/skills/`**. A skill must never exis
 only under `.claude/`, and a `.claude/skills/<name>` entry must always be a
 symlink to `../../.agents/skills/<name>` — never a real directory. Add a new
 skill under `.agents/skills/<name>/` and create the `.claude/skills/<name>`
-symlink in the same change. Current project skills: `os-design`, `os-platform`,
-`os-accounts-integration`, `os-rust-backend`, `os-rust-backend-ci`,
-`os-task-prep`, `repo-build-pr`, `repo-review`, `repo-delegate`,
-`repo-orchestrate`, `repo-retrospect`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus the Spec
-Kit workflow skills (`speckit-*`). `make skills-update` /
-`skills-restore` / `skills-sync` (thin wrappers over `npx skills`) refresh,
-restore from the lockfile, or re-link them.
+symlink in the same change. Current project skills: `os-design`,
+`repo-build-pr`, `repo-review`, `repo-delegate`, `repo-orchestrate`,
+`repo-retrospect`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus the Spec Kit
+workflow skills (`speckit-*`). Skills are vendored files; there is no remote
+skills lockfile.
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues live on the Open Software platform (os-platform), org `june` — not
-GitHub Issues. Read/search/take via the `os-platform` skill script; writes go
-through the documented platform API with an append-only, probe-then-verify
-discipline. See `docs/agents/issue-tracker.md`.
+Work is tracked as harness tickets (`~/orchestrator`), not GitHub Issues. See
+`docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Hybrid mapping: `needs-triage` / `needs-info` / `ready-for-human` are platform
-labels; "ready-for-agent" = status `todo` + os-task-prep enrichment; "wontfix"
-= status `cancelled`. See `docs/agents/triage-labels.md`.
+Triage roles map onto harness ticket states. See
+`docs/agents/triage-labels.md`.
 
 ### Domain docs
 
@@ -231,12 +189,23 @@ build scripts in `pnpm-workspace.yaml` — live in
   The runner can exit non-zero from `hud-meeting.test.ts` teardown noise despite
   0 real failures — judge by the failure count. Composer/ProseMirror tests can
   flake with a `localsInner` crash under machine load (a `@tiptap/pm` duplicate,
-  not a regression). On **Node 26** the `font-scale` and `referral-nudge`
-  storage tests fail locally (experimental web storage shadows jsdom's
+  not a regression). On **Node 26** the `font-scale`
+  storage test fails locally (experimental web storage shadows jsdom's
   `localStorage`); run `NODE_OPTIONS=--no-experimental-webstorage pnpm test`
   and do not "fix" the tests.
 - **Rust tests:** `pnpm test:rust` (src-tauri) and `pnpm test:clovy-api` (the
   backend workspace).
+- **Windows native activity tests:** clipboard fixtures must run in a child
+  process with a private window station/desktop, never the console clipboard.
+  The installed-package icon test is ignored by default and requires Calculator
+  and Notepad: `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib activity::app_icon::windows_tests:: -- --include-ignored`.
+- **Windows desktop build:** `scripts/build-windows.ps1`; needs Visual Studio
+  C++ Build Tools, Strawberry Perl and NASM on `PATH` (vendored OpenSSL/SQLCipher).
+- **Windows-only Rust tests:** `activity::windows`, the Windows `llm` cases
+  (`LoginEnv`, `cmd_shim_tests.rs`) and `chat_engine/windows_tests.rs` compile
+  only on Windows, so `make verify` on the Mac does not run them. Run
+  `cargo test --manifest-path src-tauri/Cargo.toml --locked <activity|llm|chat_engine>`
+  on a Windows host; CI's `windows-rust` job (manual dispatch) runs the same three.
 - **Agent runtime gate:** `pnpm agent-runtime:typecheck` +
   `pnpm agent-runtime:test` + `pnpm agent-runtime:build` before changing the
   sidecar or its OpenAI Agents SDK pin.
@@ -287,16 +256,17 @@ build scripts in `pnpm-workspace.yaml` — live in
   support for older clients require a separate owner decision.
 - **Clovy presents as Clovy.** The local harness is an implementation detail;
   product instructions assert Clovy's identity.
-- **Identity and credits are OS Accounts'.** Clovy is an on-device client of OS
-  Accounts and never owns user or wallet state. The dependency arrow points
-  Clovy → OS Accounts, never the reverse.
+- **No Open Software services in the desktop (fork).** The app has no OS
+  Accounts sign-in, billing, credits funding, telemetry, issue reports,
+  companion, or June updater; it uses the fixed local identity. `src/`,
+  `src-tauri/src/` and `src-tauri/*.json` (outside `src/test/`) must not name
+  `opensoftware.co`, `june.link` or `open-software-network`
+  (`make org-references-check`, part of `make verify`).
 
 ## Fork guilhermexp (harness ~/orchestrator)
 
 This checkout is Guilherme's personal fork (`origin` = guilhermexp/os-clovy,
-`upstream` = open-software-network/os-clovy). OS Platform is not configured
-here: say "platform sync skipped" and work offline; issues/branches use the
-harness tickets, not `JUN-*`.
+the only remote). Issues and branches use the harness tickets, not `JUN-*`.
 
 - **OpenSpec** (`openspec/`, pt-BR) holds what to build for fork features;
   `specs/` stays the upstream Spec Kit history. Scenarios carry `Test:` stamps.
@@ -372,6 +342,13 @@ Functional proof (Reality) for desktop features:
    app's own debug export command, never by copying keys into the transcript).
 5. Evidence under `.tmp/verify/<ticket>/run-<id>/` with a `report.md`;
    cleanup leaves the `-dev` data intact unless the run created a throwaway copy.
+6. Windows: launch the dev app (`pnpm tauri:dev` with a run-owned
+   `CLOVY_DEV_APP_IDENTIFIER`) in the logged-in console session through an
+   interactive scheduled task. With the console locked, screen capture shows
+   only the lock screen: drive and capture the WebView over CDP
+   (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>`,
+   reached through an SSH tunnel). Use one `CARGO_TARGET_DIR` and stop the app
+   before `cargo test`: the running executable locks the build.
 
 UI-only checks may use the browser shim from `.agents/skills/browser-test-tauri-fe`;
 that proves rendering, not the native flow.
@@ -475,3 +452,7 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## Contexto por área
+
+- [src-tauri/src/activity/windows/AGENTS.md](src-tauri/src/activity/windows/AGENTS.md): Windows capture adapter.

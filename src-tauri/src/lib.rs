@@ -15,7 +15,6 @@ pub mod claude_projects;
 pub mod clovy_api;
 pub mod coding_agents;
 pub mod commands;
-pub mod companion;
 pub mod computer_use;
 mod computer_use_cursor;
 mod computer_use_permission_drag;
@@ -35,6 +34,7 @@ mod http_client;
 pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
+mod local_identity;
 pub mod macos_menu_icons;
 pub mod mcp_server;
 pub mod meeting_calendar_context;
@@ -45,14 +45,12 @@ mod note_audio_export;
 mod note_save_flush;
 pub mod notifications;
 pub mod obsidian;
-pub mod os_accounts;
-pub mod p3a;
 mod process_group;
 pub mod providers;
 pub mod routines;
 mod shutdown;
+mod system_browser;
 pub mod theme_icon;
-pub mod updates;
 pub mod video_download_url;
 
 use serde::Deserialize;
@@ -61,8 +59,6 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Listener, Manager};
 
-const CHECK_FOR_UPDATES_MENU_ID: &str = "check_for_updates";
-const CHECK_FOR_UPDATES_EVENT: &str = "clovy://check-for-updates";
 const CLOSE_TAB_MENU_ID: &str = "close_tab";
 const CLOSE_TAB_EVENT: &str = "clovy://close-tab";
 const CLOSE_WINDOW_MENU_ID: &str = "close_window_main";
@@ -146,13 +142,11 @@ pub fn run() {
     builder
         // deep-link registers immediately after single-instance to keep the
         // single-instance -> deep-link handoff (documented above) adjacent and
-        // obvious; process/updater are order-independent so they follow.
+        // obvious.
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         // Launch-at-login. LaunchAgent (not AppleScript) so the entry
         // survives macOS upgrades and shows up under System Settings ->
         // General -> Login Items. Enabling/disabling stays a user action in
@@ -167,10 +161,6 @@ pub fn run() {
                 .build(),
         )
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == CHECK_FOR_UPDATES_MENU_ID {
-                let _ = app.emit(CHECK_FOR_UPDATES_EVENT, ());
-                return;
-            }
             if event.id().as_ref() == CLOSE_TAB_MENU_ID {
                 emit_close_tab_if_main_window_focused(app);
                 return;
@@ -240,23 +230,6 @@ pub fn run() {
             routines::routine_browser_access_set,
             commands::experimental_flags_get,
             commands::experimental_flags_set,
-            companion::companion_begin_pairing,
-            companion::companion_pairing_status,
-            companion::companion_approve_pairing,
-            companion::companion_list_devices,
-            companion::companion_list_browse_roots,
-            companion::companion_grant_browse_root,
-            companion::companion_revoke_browse_root,
-            companion::companion_consume_attachments,
-            companion::companion_computer_use_approval_settings,
-            companion::companion_set_computer_use_approval_enabled,
-            companion::companion_rename_device,
-            companion::companion_revoke_device,
-            companion::companion_complete_frontend_request,
-            companion::companion_cancel_frontend_request,
-            companion::companion_publish_agent_event,
-            companion::companion_list_agent_media,
-            companion::companion_read_agent_media_chunk,
             commands::create_note,
             commands::list_notes,
             commands::get_note,
@@ -296,7 +269,6 @@ pub fn run() {
             commands::set_folder_memory_disabled,
             commands::memory_settings,
             commands::set_memory_enabled,
-            commands::submit_issue_report,
             commands::share_create,
             commands::share_list,
             commands::share_get,
@@ -314,10 +286,8 @@ pub fn run() {
             commands::reveal_path,
             commands::unpack_bundled_extension,
             commands::clovy_open_verify_page,
-            commands::clovy_open_community_page,
             commands::clovy_open_external_url,
             commands::june_open_verify_page,
-            commands::june_open_community_page,
             commands::june_open_external_url,
             commands::start_meeting_recording,
             commands::start_recording,
@@ -399,21 +369,6 @@ pub fn run() {
             llm::commands::llm_delete_endpoint,
             llm::commands::llm_set_usage,
             llm::commands::llm_test_provider,
-            p3a::p3a_settings,
-            p3a::p3a_question_catalog,
-            p3a::set_p3a_enabled,
-            p3a::p3a_record,
-            os_accounts::os_accounts_status,
-            os_accounts::os_accounts_status_local,
-            os_accounts::os_accounts_login,
-            os_accounts::os_accounts_cancel_login,
-            os_accounts::os_accounts_logout,
-            os_accounts::os_accounts_set_avatar_seed,
-            os_accounts::os_accounts_upgrade,
-            os_accounts::os_accounts_upgrade_session,
-            os_accounts::os_accounts_change_plan,
-            os_accounts::os_accounts_open_portal,
-            os_accounts::os_accounts_referral_summary,
             extension_host::extension_pairing_status,
             extension_host::register_browser_extension_host,
             connectors::commands::connectors_policy,
@@ -451,11 +406,6 @@ pub fn run() {
             computer_use::computer_use_end_run,
             computer_use::computer_use_approvals_pending,
             computer_use::computer_use_approval_respond,
-            updates::get_release_channel,
-            updates::set_release_channel,
-            updates::fetch_update,
-            updates::install_update,
-            updates::relaunch_for_update,
             activity::activity_status,
             activity::activity_save_settings,
             activity::activity_set_paused,
@@ -483,8 +433,6 @@ pub fn run() {
         .manage(Arc::new(browser_broker::BrowserBroker::default()))
         .manage(computer_use::ComputerUseState::default())
         .manage(shutdown::ShutdownCoordinator::default())
-        .manage(companion::CompanionRuntime::default())
-        .manage(os_accounts::LoginFlow::default())
         .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
         .manage(connectors::NotionConnectFlow::default())
@@ -509,16 +457,11 @@ pub fn run() {
             providers::setup(app);
             setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
-            p3a::setup(app);
-            updates::setup(app);
             dictation::setup(app);
             agent_hud::setup(app);
             notifications::setup(app);
             meeting_detection::setup(app);
             extension_host::setup(app);
-            // Companion pairing is restart-required: setup latches the
-            // persisted experiment for every native and frontend boundary.
-            companion::setup(app.handle());
             routines::start_scheduler(app.handle());
             // Poll Google for the events routines subscribe to (email arrivals
             // and upcoming meetings) and wake the matching durable routine.
@@ -527,7 +470,6 @@ pub fn run() {
             // GitHub account yet (ADR-0066); off the startup path.
             connectors::start_github_cli_detection(app.handle());
             meeting_hud::setup(app);
-            os_accounts::setup_deep_link(app);
             #[cfg(target_os = "macos")]
             setup_main_window_lifecycle(app);
             Ok(())
@@ -684,13 +626,6 @@ fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
         true,
         &[
             &PredefinedMenuItem::about(handle, text.predefined_about(), Some(about_metadata))?,
-            &MenuItem::with_id(
-                handle,
-                CHECK_FOR_UPDATES_MENU_ID,
-                text.check_for_updates(),
-                true,
-                None::<&str>,
-            )?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(
                 handle,

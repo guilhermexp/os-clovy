@@ -64,7 +64,7 @@ jobs:
       needs.changes.outputs.frontend == 'true' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'run-frontend-ci'))
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -96,7 +96,7 @@ jobs:
     name: Biome check
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -124,7 +124,7 @@ jobs:
   # open to "changed" so the suite can never be skipped by accident.
   changes:
     name: Changed paths
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.diff.outputs.frontend }}
       rust: ${{ steps.diff.outputs.rust }}
@@ -182,7 +182,7 @@ jobs:
     name: Tauri Rust format
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -198,7 +198,7 @@ jobs:
     name: Companion crates format, clippy, and tests
     needs: changes
     if: needs.changes.outputs.companion == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -246,7 +246,7 @@ jobs:
       needs.changes.outputs.rust == 'true' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'run-macos-ci'))
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -284,7 +284,7 @@ jobs:
     name: Tauri Windows build
     needs: changes
     if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.desktop_bundle == 'true'
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -303,11 +303,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Windows packaging tools
+      - name: Install Windows packaging and SQLCipher tools
         shell: pwsh
         run: |
-          choco install nsis 7zip -y --no-progress
+          choco install nsis 7zip strawberryperl nasm -y --no-progress
           "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Cache cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -327,6 +329,18 @@ jobs:
           key: tauri-cargo-target-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             tauri-cargo-target-${{ runner.os }}-
+
+      - name: Test Windows activity capture
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked activity
+
+      - name: Test Windows CLI resolution
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked llm
+
+      - name: Test Windows CLI chat engine
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine
 
       - name: Build and verify unsigned Windows installer
         shell: pwsh

@@ -51,3 +51,7 @@ Builds are now **universal** (x86_64 + arm64), so the `aarch64`-only consequence
 above no longer applies: Intel Macs receive a matching `platforms` entry and
 auto-update. The rc/stable release-channel switching is recorded in
 [ADR-0003](0003-release-candidate-channel-and-promotion.md).
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o atualizador da June: o plugin updater, `updates.rs`, a UI e o item de menu "Check for Updates" foram removidos (2026-10-21).

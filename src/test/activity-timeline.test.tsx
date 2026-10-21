@@ -444,4 +444,91 @@ describe("ActivityTimelineView", () => {
     expect(end.getHours()).toBe(0);
     expect(end.getDate() - start.getDate()).toBe(1);
   });
+
+  it("renders unsupported state when availability is unsupported without capture-off banner or turn-on button", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "activity_timeline") {
+        return {
+          availability: "unsupported",
+          message: null,
+          captureEnabled: false,
+          sessions: [],
+          gaps: [],
+          stats: { focusedMs: 0, idleMs: 0, awayMs: 0, topApps: [], categories: [] },
+        };
+      }
+      return undefined;
+    });
+
+    const onNavigateToSettings = vi.fn();
+    render(<ActivityTimelineView onNavigateToSettings={onNavigateToSettings} />);
+
+    expect(
+      await screen.findByRole("heading", { name: /not supported|não suportad/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/not supported on this system|não é suportada neste sistema/i),
+    ).toBeInTheDocument();
+
+    // MUST NOT display the capture paused/off banner
+    expect(
+      screen.queryByText(/capture is currently off|captura está desligada/i),
+    ).not.toBeInTheDocument();
+
+    // MUST NOT display the turn-on button
+    expect(screen.queryByRole("button", { name: /turn on|ativar/i })).not.toBeInTheDocument();
+  });
+
+  it("resolves and renders Windows executable app icon from activity_app_icon, falling back to icon glyph when missing", async () => {
+    const windowsExeBundleId = "C:\\Program Files\\Notepad++\\notepad++.exe";
+    const base64Icon =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    invokeMock.mockImplementation(async (command: string, args?: { request?: unknown }) => {
+      if (command === "activity_timeline") {
+        return {
+          ...mockReadyTimeline,
+          stats: {
+            ...mockReadyTimeline.stats,
+            topApps: [
+              {
+                appName: "Notepad++",
+                bundleId: windowsExeBundleId,
+                durationMs: 3600_000,
+              },
+              {
+                appName: "UnknownApp",
+                bundleId: "C:\\Tools\\unknown.exe",
+                durationMs: 1800_000,
+              },
+            ],
+          },
+        };
+      }
+      if (command === "activity_app_icon") {
+        const req = args?.request as { bundleId: string };
+        if (req.bundleId === windowsExeBundleId) {
+          return base64Icon;
+        }
+        return null;
+      }
+      return undefined;
+    });
+
+    const { container } = render(<ActivityTimelineView />);
+
+    await screen.findByText("Notepad++");
+    await waitFor(() => {
+      const img = container.querySelector<HTMLImageElement>("img.app-icon");
+      expect(img).not.toBeNull();
+      expect(img?.src).toBe(base64Icon);
+    });
+
+    expect(screen.getByText("UnknownApp")).toBeInTheDocument();
+    expect(container.querySelector(".app-icon-fallback")).toBeInTheDocument();
+
+    expect(invokeMock).toHaveBeenCalledWith("activity_app_icon", {
+      request: { bundleId: windowsExeBundleId },
+    });
+  });
 });

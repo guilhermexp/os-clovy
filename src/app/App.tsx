@@ -10,22 +10,12 @@ import { toast } from "../components/ui/Toaster";
 import { t, useLocale } from "../i18n";
 import { exportNoteAsPdf } from "../lib/note-pdf";
 import { useNoteChat } from "../components/note-chat/useNoteChat";
-import { useExperimentalFlags } from "../lib/experimental-flags";
 import { noteReadyToShare } from "../lib/share-payload";
 import { SETTINGS_TABS } from "../components/settings/AppSettings";
 import type { TabItem } from "../components/tabs/TabBar";
 import { reorderTabs } from "./tabs/tabs";
-import { useReferralNudgeTriggers } from "./referral-nudge-triggers";
 import {
   checkRecordingSourceReadiness,
-  companionCompleteFrontendRequest,
-  companionListAgentMedia,
-  companionPublishAgentEvent,
-  companionReadAgentMediaChunk,
-  listAgentItems,
-  type CompanionAgentStatus,
-  type CompanionFrontendRequest,
-  type CompanionResultPayload,
   createFolder,
   createNote,
   dictationHelperCommand,
@@ -35,9 +25,7 @@ import {
   LIVE_TRANSCRIPT_EVENT,
   listSessionPartitions,
   listAgentSessions,
-  listProviderModels,
   openPrivacySettings,
-  osAccountsLogout,
   recoverRecording,
   revealPath,
   renameFolder,
@@ -48,7 +36,6 @@ import {
   NOTE_SAVE_FLUSH_REQUESTED_EVENT,
   patchNote,
   queueMeetingEndFinishRequest,
-  providerModelSettings,
   type LiveTranscriptEventDto,
   type MeetingEndStatus,
   type NoteDto,
@@ -65,25 +52,7 @@ import {
 } from "../lib/agent-events";
 import { selectSessionProjectContext } from "../lib/agent-project-context";
 import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
-import { errorCode, messageFromError } from "../lib/errors";
-import { boundedCompanionText, companionAgentMessagesFromItems } from "../lib/agent-chat-runtime";
-import {
-  companionFrontendConsumerAvailable,
-  queueCompanionFrontendRequest,
-} from "../lib/companion-frontend-router";
-import {
-  companionEngineClis,
-  companionModelOptions,
-  companionSessionModelSelection,
-  companionStoredModelId,
-} from "../lib/companion-models";
-import { companionSessionInActivePartition } from "../lib/companion-partition";
-import {
-  AGENT_SESSION_MODEL_CHANGED_EVENT,
-  type AgentSessionModelChangedDetail,
-  loadSessionModels,
-  rememberSessionModel,
-} from "../lib/agent-session-models";
+import { messageFromError } from "../lib/errors";
 import { readClovyHomeStoredSessionId, writeClovyHomeStoredSessionId } from "../lib/clovy-home";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import {
@@ -126,24 +95,11 @@ import {
   setAgentHudEnabled,
   type AgentHudVisibilityChangedDetail,
 } from "../lib/agent-hud-settings";
-import type { FolderDto, AccountStatus } from "../lib/tauri";
+import type { FolderDto } from "../lib/tauri";
 import type { RecordingSourceMode } from "../lib/tauri";
 import { retryPendingAutostartDefault } from "../lib/autostart";
 import { applyOnboardingReplayFlag, isOnboardingComplete } from "../lib/onboarding";
-import {
-  depletedBalanceActionLabel,
-  shouldBlockOnFunding,
-  shouldBlockOnSignIn,
-} from "../lib/account-gate";
-import type { MaxUpgradeTransport } from "../lib/billing-actions";
-import type { MaxGrantWait } from "../lib/max-upgrade";
-import { reconcileToStable, relaunchClovy, type ClovyUpdate } from "../lib/updater";
 import { attachScrollThumbFade } from "../lib/scroll-thumb-fade";
-import {
-  startPeriodicClovyUpdateChecks,
-  UP_TO_DATE_STATUS,
-  type UpdatePromptPayload,
-} from "./update-decision";
 import {
   isAccessibilityBlocked,
   isCreateNoteShortcut,
@@ -155,12 +111,8 @@ import {
   ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS,
   AGENT_MENU_BAR_SESSION_LIMIT,
   AGENT_SESSION_STARTUP_RETRY_DELAYS_MS,
-  CHECK_FOR_UPDATES_EVENT,
-  recoveryFundingDisabledReason,
   SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
   SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS,
-  UP_TO_DATE_DISMISS_MS,
-  UP_TO_DATE_EXIT_MS,
   noteHasDownloadableAudio,
   tabMeta,
 } from "./app-shell";
@@ -183,8 +135,6 @@ import { useMeetingEndEvents } from "./use-meeting-end-events";
 
 import { useRecordingControls } from "./use-recording-controls";
 
-import { useAccountActions } from "./use-account-actions";
-
 import { useAppNavigation } from "./use-app-navigation";
 
 import { renderAppWorkspace } from "./app-workspace-view";
@@ -192,8 +142,6 @@ import { renderAppWorkspace } from "./app-workspace-view";
 import { renderAppLayout } from "./app-layout";
 
 import { createAppDomainActions } from "./app-domain-actions";
-
-import { useAppUpdateActions } from "./use-app-update-actions";
 
 import { createNoteActions } from "./note-actions";
 import { NoteSaveController } from "./note-save-controller";
@@ -213,13 +161,12 @@ import { useSessionMetadata } from "./use-session-metadata";
 import { useNoteProcessingEvents } from "./use-note-processing-events";
 
 import { useAppState } from "./use-app-state";
-import { renderAppAccountGate } from "./app-account-gates";
+import { renderAppOnboarding } from "./app-onboarding";
 
 export function App() {
   // Subscribes the shell to the interface language: the render helpers and
   // tab titles below read `t` at render time.
   const locale = useLocale();
-  const { companionPairingEnabled } = useExperimentalFlags();
   const {
     currentDataPartitionName,
     dataPartitionRefreshRevision,
@@ -311,29 +258,9 @@ export function App() {
     setSystemAudioRefreshRequest,
     microphoneStatus,
     setMicrophoneStatus,
-    readyUpdate,
-    setReadyUpdate,
-    updateStatusDisplay,
-    dispatchUpdateStatusDisplay,
-    updateStatus,
-    updateStatusLeaving,
-    setUpdateStatus,
-    preparingUpdate,
-    setPreparingUpdate,
-    checkingUpdate,
-    setCheckingUpdate,
-    relaunchingUpdate,
-    setRelaunchingUpdate,
-    updateProgress,
-    setUpdateProgress,
     systemGranted,
     captureActive,
     sourceMode,
-    account,
-    accountError,
-    accountLoading,
-    refreshAccount,
-    setAccount,
     recordingNoteIdRef,
     crossPartitionRecordingNoteIdRef,
     calendarContextNotePartitionsRef,
@@ -429,9 +356,6 @@ export function App() {
     recordNoticesConsentPinned,
     recordNoticesMicOverride,
     recordNoticesDemoRef,
-    referralNudgeMoment,
-    setReferralNudgeMoment,
-    referralNudgeSourceRef,
     finishingSessionsRef,
   } = useAppDevDemos({
     dispatch,
@@ -439,122 +363,20 @@ export function App() {
     recordingStatusRef,
     setActiveView,
     setAgentSessions,
-    setCheckingUpdate,
     setCompletedSessions,
     setLiveTranscriptEvents,
-    setPreparingUpdate,
     setRecordingNote,
-    setRelaunchingUpdate,
-    setReadyUpdate,
-    setUpdateProgress,
-    setUpdateStatus,
-  });
-  // A dev build without the OS Accounts env vars (fresh workspace, no .env)
-  // can never complete sign-in, so the account gates would be dead
-  // ends — skip them and let account-dependent features surface their own
-  // errors. Release builds always gate; so do dev builds once configured.
-  const devAccountsUnconfigured =
-    import.meta.env.DEV &&
-    !account.signedIn &&
-    (accountLoading || !!accountError || !account.configured);
-  const signInRequired = !devAccountsUnconfigured && shouldBlockOnSignIn(account);
-  // Dev console driver (window.__fundingDemo) that parks the out-of-credits
-  // surfaces (composer notice, sidebar chip) on a synthetic account snapshot
-  // so every funding branch can be inspected without a depleted account. The
-  // override bypasses the sign-in/unconfigured guards on purpose: the browser
-  // sandbox is rarely signed in, and the demo exists precisely there.
-  const [fundingDemoAccount, setFundingDemoAccountState] = useState<AccountStatus | null>(null);
-  const fundingDemoRef = useRef<AccountStatus | null>(null);
-  const setFundingDemoAccount = useCallback((next: AccountStatus | null) => {
-    fundingDemoRef.current = next;
-    setFundingDemoAccountState(next);
-  }, []);
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    let dispose: (() => void) | undefined;
-    void import("../lib/funding-demo").then(({ registerFundingDemo }) => {
-      if (cancelled) return;
-      ({ dispose } = registerFundingDemo({ setOverride: setFundingDemoAccount }));
-    });
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
-  }, [setFundingDemoAccount]);
-  const fundingAccount = fundingDemoAccount ?? account;
-  const refreshFundingAccount = useCallback(async () => {
-    if (fundingDemoRef.current) return fundingDemoRef.current;
-    return refreshAccount();
-  }, [refreshAccount]);
-  const fundingRequired = fundingDemoAccount
-    ? shouldBlockOnFunding(fundingDemoAccount)
-    : !devAccountsUnconfigured && !signInRequired && shouldBlockOnFunding(account);
-  const topUpLabel = depletedBalanceActionLabel(account);
-  // Confirm gate for the Pro -> Max plan change reached from depleted-balance
-  // surfaces (note failure banner, agent workspace notice). Capture the action
-  // at click time so a later account refresh cannot reroute confirmation to a
-  // different billing transport. `transport` flips to charge_now only after a
-  // hosted capability signal, swapping the dialog to the charge-now copy that
-  // the next confirm actually consents to.
-  const [maxUpgradePrompt, setMaxUpgradePrompt] = useState<{
-    action: "upgrade_to_max";
-    plan: "max";
-    transport: MaxUpgradeTransport;
-  } | null>(null);
-  const [maxUpgradeError, setMaxUpgradeError] = useState<string>();
-  // Transient billing feedback shown beside the error banner. Success is only
-  // announced after the credit grant poll observes a higher credit balance.
-  const [billingNotice, setBillingNotice] = useState<string | null>(null);
-  const appMaxGrantWaitRef = useRef<MaxGrantWait>();
-  const billingNoticeTimerRef = useRef<number | undefined>(undefined);
-  const showBillingNotice = useCallback((notice: string, autoClearMs?: number) => {
-    window.clearTimeout(billingNoticeTimerRef.current);
-    setBillingNotice(notice);
-    if (autoClearMs) {
-      billingNoticeTimerRef.current = window.setTimeout(() => setBillingNotice(null), autoClearMs);
-    }
-  }, []);
-  const { confirmMaxUpgrade, handleTopUp } = useAccountActions({
-    account,
-    appMaxGrantWaitRef,
-    billingNoticeTimerRef,
-    maxUpgradePrompt,
-    refreshAccount,
-    setBillingNotice,
-    setError,
-    setMaxUpgradeError,
-    setMaxUpgradePrompt,
-    showBillingNotice,
   });
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
     return isOnboardingComplete();
   });
-  // The wizard handles sign-in, personalization, and permissions. Funding
-  // only blocks once the account snapshot positively reports no spendable
-  // credits.
-  const onboardingRequired = !accountLoading && !onboardingDone;
-  // Funding no longer blocks the shell or its read-only data. Onboarding still
-  // holds bootstrap, update checks, and eager permission probes because the
+  // The wizard handles personalization and permissions.
+  const onboardingRequired = !onboardingDone;
+  // Onboarding holds bootstrap and eager permission probes because the
   // wizard owns the permission prompts while it is on screen.
-  const appBlocked = accountLoading || signInRequired || onboardingRequired;
+  const appBlocked = onboardingRequired;
   meetingEndReadyRef.current = !appBlocked && bootstrapped;
-  // The referral delight nudge's trigger layer: counts the moments (5th note,
-  // first agent completion, 25th dictation) and surfaces the card when the
-  // caps and gates allow. T4 (positive feedback) records from the report flow
-  // directly.
-  // Gated on captureActive too: a growth card sliding in mid-meeting is the
-  // one timing guaranteed to annoy. A moment that fires during a recording is
-  // consumed without showing (the caps never queue).
-  useReferralNudgeTriggers({
-    notes: state.notes,
-    enabled: account.signedIn && !account.localDev && onboardingDone && !captureActive,
-    onShow: (moment) => {
-      referralNudgeSourceRef.current = "trigger";
-      setReferralNudgeMoment(moment);
-    },
-  });
   const publishAgentMenuBarState = useCallback(() => {
     void emitAgentMenuBarState(
       buildAgentMenuBarState({
@@ -864,10 +686,6 @@ export function App() {
   );
 
   function handleRecovery(sessionId: string, action: "validate" | "discard") {
-    if (action === "validate" && fundingRequired) {
-      setError(recoveryFundingDisabledReason());
-      return;
-    }
     const recoveryNoteId = state.activeRecoveries.find(
       (recovery) => recovery.sessionId === sessionId,
     )?.noteId;
@@ -899,30 +717,6 @@ export function App() {
     dispatch({ type: "recordingStatusCleared" });
   }
 
-  const handleAccountChanged = useCallback(
-    (nextAccount: AccountStatus) => {
-      if (signInRequired && !shouldBlockOnSignIn(nextAccount)) {
-        // The launch handshake armed at state init has likely expired (15s
-        // TTL) while the user sat on the sign-in gate — re-arm it so clearing
-        // the gate still opens onto a fresh session.
-        markAgentNewSessionPending();
-      }
-      setAccount(nextAccount);
-    },
-    [setAccount, signInRequired],
-  );
-
-  // Log out from the sidebar identity popover. Dropping the session flips
-  // shouldBlockOnSignIn back on, so the app falls through to the AccountGate.
-  async function handleSignOut() {
-    try {
-      await osAccountsLogout({ clearBrowserSession: true });
-      handleAccountChanged({ signedIn: false, configured: account.configured });
-    } catch (err) {
-      setError(messageFromError(err));
-    }
-  }
-
   useEffect(() => {
     preloadRecordingSounds();
     preloadAgentSounds();
@@ -949,108 +743,6 @@ export function App() {
     if (activeView !== "settings") setSettingsDetailPinned(false);
   }, [activeView]);
 
-  // Update state is read through refs so runUpdateCheck keeps a stable identity.
-  // Otherwise the launch effect and the manual-check listener below would tear
-  // down and re-fire every time a download or relaunch toggles state.
-  const preparingUpdateRef = useRef(false);
-  const checkingUpdateRef = useRef(false);
-  const readyUpdateRef = useRef<UpdatePromptPayload<ClovyUpdate> | null>(null);
-  const relaunchingUpdateRef = useRef(false);
-  const updateProgressHiddenRef = useRef(false);
-  useEffect(() => {
-    preparingUpdateRef.current = preparingUpdate;
-  }, [preparingUpdate]);
-  useEffect(() => {
-    readyUpdateRef.current = readyUpdate;
-  }, [readyUpdate]);
-  useEffect(() => {
-    relaunchingUpdateRef.current = relaunchingUpdate;
-  }, [relaunchingUpdate]);
-
-  const { runUpdateCheck } = useAppUpdateActions({
-    checkingUpdateRef,
-    preparingUpdateRef,
-    readyUpdateRef,
-    relaunchingUpdateRef,
-    setCheckingUpdate,
-    setPreparingUpdate,
-    setReadyUpdate,
-    setUpdateProgress,
-    setUpdateStatus,
-    updateProgressHiddenRef,
-  });
-
-  // Auto-dismiss ONLY the up-to-date confirmation: linger, play the soft exit,
-  // then clear. Any status change (a new check, a failure, a manual dismiss)
-  // or unmount runs the cleanup and cancels the pending hide. Other statuses
-  // never match, so this effect does not control their lifecycle.
-  useEffect(() => {
-    if (updateStatus !== UP_TO_DATE_STATUS) return;
-    const leaveTimer = window.setTimeout(() => {
-      dispatchUpdateStatusDisplay({ type: "beginUpToDateExit" });
-    }, UP_TO_DATE_DISMISS_MS);
-    const clearTimer = window.setTimeout(() => {
-      dispatchUpdateStatusDisplay({ type: "clearUpToDate" });
-    }, UP_TO_DATE_DISMISS_MS + UP_TO_DATE_EXIT_MS);
-    return () => {
-      window.clearTimeout(leaveTimer);
-      window.clearTimeout(clearTimer);
-    };
-  }, [updateStatus]);
-
-  // Confirmed in Settings after switching off the rc channel: re-check with
-  // reconcile=true (which re-stashes the Rust-side pending update, so a periodic
-  // check between the Settings confirm and this call can't leave a stale handle)
-  // then run the same download -> ready -> relaunch flow as any update.
-  const handleReconcileToStable = useCallback(() => {
-    runUpdateCheck("manual", reconcileToStable);
-  }, [runUpdateCheck]);
-
-  const handleRelaunchUpdate = useCallback(() => {
-    if (!readyUpdateRef.current || relaunchingUpdateRef.current) return;
-    relaunchingUpdateRef.current = true;
-    setRelaunchingUpdate(true);
-    setUpdateStatus(null);
-    void noteSaveController
-      .flushAll()
-      .then(relaunchClovy)
-      .catch((error) => {
-        relaunchingUpdateRef.current = false;
-        setRelaunchingUpdate(false);
-        setUpdateStatus(t("app.update.relaunchFailed", { message: messageFromError(error) }), true);
-      });
-  }, [noteSaveController, setUpdateStatus]);
-
-  // Launch check: silent by design — a "no update" result shows nothing so it
-  // never interrupts the user (PRD user story 7) — and fired at most once per
-  // session, so a later install toggle can't re-trigger it.
-  const launchCheckedRef = useRef(false);
-  useEffect(() => {
-    if (import.meta.env.DEV) return;
-    if (appBlocked || launchCheckedRef.current) return;
-    launchCheckedRef.current = true;
-    runUpdateCheck("launch");
-  }, [appBlocked, runUpdateCheck]);
-
-  useEffect(() => {
-    if (import.meta.env.DEV) return;
-    if (appBlocked) return;
-    return startPeriodicClovyUpdateChecks(runUpdateCheck);
-  }, [appBlocked, runUpdateCheck]);
-
-  useEffect(() => {
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-    void listen(CHECK_FOR_UPDATES_EVENT, () => runUpdateCheck("manual")).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      aborted = true;
-      unlisten?.();
-    };
-  }, [runUpdateCheck]);
-
   useEffect(() => {
     let aborted = false;
     let unlisten: (() => void) | undefined;
@@ -1070,393 +762,6 @@ export function App() {
     setActiveView,
     setAgentOrigin,
   });
-
-  const companionScopedSessions = useCallback(async () => {
-    const partition = getCurrentDataPartitionName();
-    const [sessions, partitions] = await Promise.all([
-      listAgentSessions(),
-      refreshSessionPartitions(),
-    ]);
-    if (getCurrentDataPartitionName() !== partition) return [];
-    const fresh = filterAgentSessionsForDataPartition(sessions, partitions, partition);
-    const currentById = new Map(
-      agentMenuBarSessionsRef.current.map((session) => [session.id, session]),
-    );
-    const scoped = fresh.map((session) => {
-      const current = currentById.get(session.id);
-      return current?.title?.trim() ? { ...session, title: current.title } : session;
-    });
-    scoped.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    return scoped;
-  }, [refreshSessionPartitions]);
-
-  const openCompanionAgentSession = useCallback(
-    async (storedSessionId?: string | null) => {
-      if (!storedSessionId) {
-        setAgentOrigin(undefined);
-        setActiveView("agent");
-        setActiveAgentSession(undefined);
-        return;
-      }
-      const session = (await companionScopedSessions().catch(() => [])).find(
-        (candidate) => candidate.id === storedSessionId,
-      );
-      if (!session) return;
-      setAgentOrigin(undefined);
-      setActiveView("agent");
-      setActiveAgentSession(session);
-    },
-    [companionScopedSessions, setActiveAgentSession],
-  );
-
-  useEffect(() => {
-    if (!companionPairingEnabled) return;
-    type CompanionFocusTarget =
-      | "settings"
-      | { agent: { storedSessionId?: string | null } }
-      | { note: { noteId: string } };
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-    void listen<CompanionFocusTarget>("clovy://companion-focus", (event) => {
-      const target = event.payload;
-      if (target === "settings") {
-        openSettings();
-        return;
-      }
-      if ("note" in target) {
-        setActiveView("meetings");
-        void getNote(target.note.noteId)
-          .then((note) => dispatch({ type: "noteLoaded", note }))
-          .catch((error) => setError(messageFromError(error)));
-        return;
-      }
-      void openCompanionAgentSession(target.agent.storedSessionId);
-    }).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      aborted = true;
-      unlisten?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companionPairingEnabled, openSettings]);
-
-  useEffect(() => {
-    if (!companionPairingEnabled) return;
-    const publishModelChange = (event: Event) => {
-      const detail = (event as CustomEvent<AgentSessionModelChangedDetail>).detail;
-      if (!detail?.sessionId || !detail.storedModel) return;
-      void Promise.all([
-        listProviderModels("generation"),
-        providerModelSettings(),
-        companionEngineClis(),
-      ])
-        .then(async ([catalog, settings, engines]) => {
-          const session = await companionSessionInActivePartition(detail.sessionId);
-          if (!session) return;
-          const currentStoredModel = loadSessionModels()[session.id] ?? session.model;
-          if (currentStoredModel !== detail.storedModel) return;
-          return companionPublishAgentEvent({
-            type: "modelChanged",
-            data: {
-              selection: companionSessionModelSelection(
-                session.id,
-                currentStoredModel,
-                catalog.models,
-                settings.settings.costQuality,
-                engines,
-              ),
-            },
-          });
-        })
-        .catch(() => undefined);
-    };
-    window.addEventListener(AGENT_SESSION_MODEL_CHANGED_EVENT, publishModelChange);
-    return () => window.removeEventListener(AGENT_SESSION_MODEL_CHANGED_EVENT, publishModelChange);
-  }, [companionPairingEnabled]);
-
-  useEffect(() => {
-    if (!companionPairingEnabled) return;
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-
-    async function handleCompanionRequest(payload: CompanionFrontendRequest) {
-      try {
-        switch (payload.intent.type) {
-          case "agentSessionsList": {
-            const sessions = await companionScopedSessions();
-            const page = companionByteBoundedPage(
-              sessions.map((session) => ({
-                id: session.id,
-                title: boundedCompanionText(session.title.trim() || "New session", 512),
-                status: companionAgentSessionStatus(
-                  session,
-                  agentMenuBarWorkingSessionIdsRef.current,
-                  agentMenuBarWaitingSessionIdsRef.current,
-                ),
-                updatedAt: session.updatedAt,
-              })),
-              payload.intent.data.cursor,
-              payload.intent.data.limit,
-            );
-            await companionCompleteFrontendRequest(
-              payload.operationId,
-              page ? { type: "agentSessions", data: page } : companionCursorError("agent session"),
-            );
-            return;
-          }
-          case "agentMessagesList": {
-            const { storedSessionId, cursor, limit } = payload.intent.data;
-            const knownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            if (!knownSession) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const [items, media] = await Promise.all([
-              listAgentItems(storedSessionId),
-              companionListAgentMedia(storedSessionId),
-            ]);
-            const stillKnownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            if (!stillKnownSession) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const messages = companionAgentMessagesFromItems(items, media);
-            const page = companionByteBoundedPage([...messages].reverse(), cursor, limit);
-            page?.items.reverse();
-            await companionCompleteFrontendRequest(
-              payload.operationId,
-              page ? { type: "agentMessages", data: page } : companionCursorError("agent message"),
-            );
-            return;
-          }
-          case "modelsList": {
-            const [catalog, settings, engines] = await Promise.all([
-              listProviderModels("generation"),
-              providerModelSettings(),
-              companionEngineClis(),
-            ]);
-            await companionCompleteFrontendRequest(payload.operationId, {
-              type: "models",
-              data: {
-                models: companionModelOptions(
-                  catalog.models,
-                  settings.settings.providerApiKeysConfigured,
-                  engines,
-                ),
-              },
-            });
-            return;
-          }
-          case "sessionModelGet": {
-            const { storedSessionId } = payload.intent.data;
-            const [catalog, settings, engines] = await Promise.all([
-              listProviderModels("generation"),
-              providerModelSettings(),
-              companionEngineClis(),
-            ]);
-            const session = (await companionScopedSessions()).find(
-              (candidate) => candidate.id === storedSessionId,
-            );
-            if (!session) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            await companionCompleteFrontendRequest(payload.operationId, {
-              type: "sessionModel",
-              data: companionSessionModelSelection(
-                session.id,
-                loadSessionModels()[session.id] ?? session.model,
-                catalog.models,
-                settings.settings.costQuality,
-                engines,
-              ),
-            });
-            return;
-          }
-          case "sessionModelSet": {
-            const { storedSessionId, modelId } = payload.intent.data;
-            const [catalog, settings, engines] = await Promise.all([
-              listProviderModels("generation"),
-              providerModelSettings(),
-              companionEngineClis(),
-            ]);
-            const allowedModels = companionModelOptions(
-              catalog.models,
-              settings.settings.providerApiKeysConfigured,
-              engines,
-            );
-            if (!allowedModels.some((model) => model.id === modelId)) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "unsupported",
-                  message: "That model is not available in Clovy's recommended model set.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const session = (await companionScopedSessions()).find(
-              (candidate) => candidate.id === storedSessionId,
-            );
-            if (!session) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const storedModel = companionStoredModelId(modelId, settings.settings.costQuality);
-            rememberSessionModel(session.id, storedModel);
-            await companionCompleteFrontendRequest(payload.operationId, {
-              type: "sessionModel",
-              data: companionSessionModelSelection(
-                session.id,
-                storedModel,
-                catalog.models,
-                settings.settings.costQuality,
-                engines,
-              ),
-            });
-            return;
-          }
-          case "mediaFetch": {
-            const { storedSessionId, artifactId, offsetBytes } = payload.intent.data;
-            const knownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            if (!knownSession) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That generated media is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            let chunk: Awaited<ReturnType<typeof companionReadAgentMediaChunk>>;
-            try {
-              chunk = await companionReadAgentMediaChunk(storedSessionId, artifactId, offsetBytes);
-            } catch (error) {
-              const code = errorCode(error);
-              const notFound =
-                code === "companion_media_not_found" ||
-                code === "companion_agent_session_not_found";
-              const unsupported = code === "companion_media_chunk_invalid";
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: notFound ? "not_found" : unsupported ? "unsupported" : "internal",
-                  message: messageFromError(error),
-                  retryable: !notFound && !unsupported,
-                },
-              });
-              return;
-            }
-            const stillKnownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            await companionCompleteFrontendRequest(
-              payload.operationId,
-              stillKnownSession
-                ? { type: "mediaChunk", data: chunk }
-                : {
-                    type: "error",
-                    data: {
-                      code: "not_found",
-                      message: "That generated media is no longer available.",
-                      retryable: false,
-                    },
-                  },
-            );
-            return;
-          }
-          case "agentSend":
-          case "agentCancel": {
-            const storedSessionId = payload.intent.data.storedSessionId;
-            if (
-              storedSessionId &&
-              !(await companionScopedSessions()).some((session) => session.id === storedSessionId)
-            ) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const consumerAvailable = companionFrontendConsumerAvailable();
-            queueCompanionFrontendRequest(payload);
-            if (consumerAvailable) return;
-            void openCompanionAgentSession(payload.intent.data.storedSessionId);
-            return;
-          }
-        }
-      } catch (error) {
-        await companionCompleteFrontendRequest(payload.operationId, {
-          type: "error",
-          data: {
-            code: "internal",
-            message: messageFromError(error),
-            retryable: true,
-          },
-        }).catch(() => undefined);
-      }
-    }
-
-    void listen<CompanionFrontendRequest>("clovy://companion-request", ({ payload }) => {
-      void handleCompanionRequest(payload);
-    }).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      aborted = true;
-      unlisten?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    companionPairingEnabled,
-    companionScopedSessions,
-    openCompanionAgentSession,
-    setActiveAgentSession,
-  ]);
 
   const agentSessionsRef = useRef(agentSessions);
   agentSessionsRef.current = agentSessions;
@@ -2064,7 +1369,6 @@ export function App() {
     handleSetSessionFolder,
     handleToggleSessionCompleted,
     handleRemoveSessionFromFolder,
-    handleReportIssue,
     handleOpenNoteChatInAgent,
     handleStartBundleChat,
     handleNewAgentSessionInProject,
@@ -2205,7 +1509,6 @@ export function App() {
     calendarContextNotePartitionsRef,
     calendarContextNoteUpdatesRef,
     dispatch,
-    fundingRequired,
     handleEmptyNotesAfterDelete,
     pendingCalendarContextAdoptionsRef,
     recordingNoteIdRef,
@@ -2449,18 +1752,8 @@ export function App() {
     });
   }
 
-  const accountGate = renderAppAccountGate({
-    account,
-    accountError,
-    accountLoading,
-    devAccountsUnconfigured,
-    handleAccountChanged,
-    onboardingRequired,
-    refreshAccount,
-    setOnboardingDone,
-    signInRequired,
-  });
-  if (accountGate) return accountGate;
+  const onboarding = renderAppOnboarding({ onboardingRequired, setOnboardingDone });
+  if (onboarding) return onboarding;
 
   // The in-note RecorderBar covers the recording while you're looking at its
   // note. Elsewhere, the sidebar header carries a tiny recording presence; the
@@ -2487,8 +1780,6 @@ export function App() {
 
   const workspaceContent = renderAppWorkspace({
     accessibilityStatus,
-    account,
-    accountLoading,
     currentDataPartitionName,
     activeAgentSessionFolder,
     activeAgentSessionId,
@@ -2506,9 +1797,6 @@ export function App() {
     completedSessions,
     dispatch,
     folderReturnTarget,
-    fundingAccount,
-    fundingRequired,
-    handleAccountChanged,
     handleCreateFolder,
     handleCreateNote,
     handleDeleteFolder,
@@ -2525,14 +1813,11 @@ export function App() {
     handleNewAgentSessionInProject,
     handleOpenSessionProject,
     handlePauseRecording,
-    handleReconcileToStable,
     handleRecovery,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
     handleRenameFolder,
-    handleReportIssue,
     handleResumeRecording,
     handleSaveNoteNow,
     handleReturnToAgentOriginFolder,
@@ -2550,7 +1835,6 @@ export function App() {
     handleStartRecording,
     handleStopNowAfterMeetingEnd,
     handleToggleSessionCompleted,
-    handleTopUp,
     handleUpdateNote,
     homeStoredSessionId,
     memoryFolderFilter,
@@ -2565,13 +1849,9 @@ export function App() {
     openTab,
     originAllNotes,
     originFolder,
-    readyUpdate,
     recordNoticesConsentPinned,
     recordingNoteId,
-    refreshAccount,
-    refreshFundingAccount,
     rememberHomeSession,
-    runUpdateCheck,
     selectedNote,
     selectedNoteId,
     selectedNoteLiveTranscript,
@@ -2594,33 +1874,25 @@ export function App() {
     sourceReadiness,
     state,
     takeNewTabIntent,
-    topUpLabel,
   });
 
   const appLayout = renderAppLayout({
     accessibilityBannerDismissed,
     accessibilityBlocked,
-    account,
     activateTab,
     activeTabId,
     activeView,
     agentSessions: focusedAgentSessions,
     agentSessionsListRef,
-    appMaxGrantWaitRef,
-    billingNotice,
     captureActive,
     changeSettingsTab,
-    checkingUpdate,
     closeOtherTabs,
     closeTab,
     completedSessions,
     confirmDeleteNote,
-    confirmMaxUpgrade,
     detailScrollerActive,
     dispatch,
     error,
-    fundingAccount,
-    fundingRequired,
     handleCreateFolder,
     handleDeleteNote,
     handleEnableAccessibility,
@@ -2628,21 +1900,16 @@ export function App() {
     handleOpenNoteChatInAgent,
     handleOpenRecordingNote,
     handlePauseRecordingAfterInactivityPrompt,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
     handleReorderTabs,
-    handleReportIssue,
     handleSelectNote,
     handleSetNoteFolder,
     handleSetSessionFolder,
-    handleSignOut,
     handleToggleSessionCompleted,
     homeStoredSessionId,
     mainPanelBodyRef,
-    maxUpgradeError,
-    maxUpgradePrompt,
     moveDialogNoteIds,
     moveDialogSessionIds,
     noteChat,
@@ -2655,15 +1922,9 @@ export function App() {
     pendingSessionProjectRef,
     pillIsDemo,
     pillStatus,
-    preparingUpdate,
-    readyUpdate,
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    referralNudgeMoment,
-    referralNudgeSourceRef,
-    refreshFundingAccount,
-    relaunchingUpdate,
     selectedNote,
     sessionFolders,
     setAccessibilityBannerDismissed,
@@ -2673,21 +1934,17 @@ export function App() {
     setConfirmDeleteNote,
     setError,
     setFolderReturnTarget,
-    setMaxUpgradePrompt,
     setMoveDialogNoteIds,
     setMoveDialogSessionIds,
     setNoteChatOpen,
     setNoteShareUrl,
     setOriginAllNotes,
     setOriginFolderId,
-    setReferralNudgeMoment,
     setShareNoteOpen,
     setSidebarCollapsed,
     setSidebarResizing,
     setSidebarTransition,
     setSidebarWidth,
-    setUpdateProgress,
-    setUpdateStatus,
     settingsDetailScrollerActive,
     settingsReturnView,
     settingsTab,
@@ -2700,11 +1957,6 @@ export function App() {
     state,
     tabItems,
     takeNewTabIntent,
-    updateProgress,
-    updateProgressHiddenRef,
-    updateStatus,
-    updateStatusDisplay,
-    updateStatusLeaving,
     workspaceContent,
   });
   return (
@@ -2715,68 +1967,3 @@ export function App() {
 }
 
 // The collapsed transform is driven by `aria-pressed` on the parent button.
-
-function companionByteBoundedPage<T>(
-  items: T[],
-  cursor: string | undefined,
-  limit: number,
-): { items: T[]; nextCursor?: string } | undefined {
-  const offset = companionCursorOffset(cursor);
-  if (offset === undefined) return undefined;
-  const page: T[] = [];
-  let encodedBytes = 0;
-  let index = offset;
-  while (index < items.length && page.length < limit) {
-    const item = items[index];
-    if (item === undefined) break;
-    const itemBytes = new TextEncoder().encode(JSON.stringify(item)).byteLength;
-    if (page.length > 0 && encodedBytes + itemBytes > 38 * 1024) break;
-    page.push(item);
-    encodedBytes += itemBytes;
-    index += 1;
-  }
-  return {
-    items: page,
-    ...(index < items.length ? { nextCursor: String(index) } : {}),
-  };
-}
-
-function companionCursorOffset(cursor: string | undefined) {
-  if (cursor !== undefined && !/^\d+$/.test(cursor)) return undefined;
-  const offset = cursor === undefined ? 0 : Number(cursor);
-  return Number.isSafeInteger(offset) && offset >= 0 ? offset : undefined;
-}
-
-function companionCursorError(scope: string): CompanionResultPayload {
-  return {
-    type: "error",
-    data: {
-      code: "invalid_request",
-      message: `The ${scope} cursor is invalid.`,
-      retryable: false,
-    },
-  };
-}
-
-function companionAgentSessionStatus(
-  session: AgentSessionDto,
-  workingSessionIds: ReadonlySet<string>,
-  waitingSessionIds: ReadonlySet<string>,
-): CompanionAgentStatus {
-  if (waitingSessionIds.has(session.id)) return "waitingForUser";
-  if (workingSessionIds.has(session.id)) return "running";
-  switch (session.status) {
-    case "running":
-      return "running";
-    case "waiting_for_user":
-      return "waitingForUser";
-    case "completed":
-      return "completed";
-    case "failed":
-      return "failed";
-    case "interrupted":
-      return "cancelled";
-    default:
-      return "idle";
-  }
-}

@@ -14,10 +14,11 @@ when they disagree, the files win.
 
 ## How Clovy API config resolves (Figment)
 
-`AppConfig::default()` ← `config.toml` (ships in the Docker image) ← legacy
-`JUNE__SECTION__FIELD` env vars ← canonical `CLOVY__SECTION__FIELD` env vars (a
+`AppConfig::default()` ← `config.toml` ← `CLOVY__SECTION__FIELD` env vars (a
 double underscore separates sections; single underscores in field names stay
-literal, so `APP_API_KEY` → `app_api_key`).
+literal, so `BEARER_TOKEN` → `bearer_token`). `JUNE__*` variables are ignored.
+Clovy API runs only in local mode: it authenticates one local bearer token,
+never charges, and binds `127.0.0.1` by default.
 Secrets are env-only and redacted in logs. Prices layer once more: built-in
 fallback ← `config.toml` ← provider catalog data that Clovy API loads (remote
 text prices come from the OpenRouter catalog; Groq ASR and fal media prices are
@@ -27,13 +28,9 @@ curated). `clovy-api/.env.example` and `config.toml` are authoritative.
 
 | Var | Purpose | Default |
 |-----|---------|---------|
-| `CLOVY_API_URL` | Clovy API base URL the app calls | `https://june-api.opensoftware.co` in code; `.env` (from `.env.example`) sets `http://127.0.0.1:8080` for local dev |
-| `OS_CLOVY_LOCAL_DEV` | Use a local bearer token instead of Login with Open Software | `1` (example) |
-| `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` / `_USER_ID` | The local-mode identity | `local-dev-token` / `usr_local_dev` |
-| `OS_ACCOUNTS_URL` / `OS_ACCOUNTS_API_URL` | OS Accounts portal + API (optional in local mode) | unset |
-| `OS_ACCOUNTS_CLIENT_ID` | OAuth client id (`ocl_...`) sent on `/login` | unset |
-| `OS_ACCOUNTS_LOOPBACK_PORT` | Login redirect loopback port; must match the registered `http://127.0.0.1:<port>/callback` | `8765` |
-| `OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store tokens in a file, not the Keychain (avoids prompts) | `0` |
+| `CLOVY_API_URL` | Clovy API base URL the app calls; share links use its origin | `http://127.0.0.1:8080` |
+| `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` | The fixed local identity (there is no sign-in): bearer token sent to Clovy API | `local-dev-token` |
+| `OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store connector tokens in a file, not the Keychain (avoids prompts) | `0` |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Google Desktop OAuth credential for Gmail/Calendar connectors. Google requires both at token exchange; the second value is not confidential in an installed app and grants no user-data access by itself | unset |
 | `OS_NOTETAKER_TRANSCRIPTION_LANGUAGE` | Optional ISO-639-1 language hint | unset |
 
@@ -59,14 +56,12 @@ through the bridge release.
 | `CLOVY__UPSTREAMS__OPENROUTER__API_KEY` | OpenRouter service key: remote text (chat, notes, dictation cleanup) |
 | `CLOVY__UPSTREAMS__FAL__API_KEY` | fal service key: image generation and editing, video generation and animation |
 | `CLOVY__UPSTREAMS__TAVILY__API_KEY` | Tavily service key: web search and page extraction |
-| `CLOVY__OS_ACCOUNTS__APP_API_KEY` | The `osk_` App API key Clovy API uses to authorize/charge |
-| `CLOVY__ISSUE_REPORTS__OS_PLATFORM_API_KEY` | Bot key to file issue reports as os-platform Issues (else log-only) |
+| `CLOVY__LOCAL_DEV__BEARER_TOKEN` | The local bearer token; required to be non-placeholder on a non-loopback host |
 | `CLOVY__COMPANION__DATABASE_URL` | Postgres trust-metadata store; required to enable the production companion relay |
 | `CLOVY__COMPANION__APNS_PRIVATE_KEY_PEM` | Apple APNs `.p8` key; literal newlines or `\\n` escapes are accepted |
 
 Non-secret (usually left to `config.toml`): `CLOVY__SERVER__HOST` / `PORT`,
-`CLOVY__OS_ACCOUNTS__API_URL`, `CLOVY__LOCAL_DEV__ENABLED` / `BEARER_TOKEN` /
-`USER_ID`, `CLOVY__UPSTREAMS__*__BASE_URL`.
+`CLOVY__LOCAL_DEV__USER_ID`, `CLOVY__UPSTREAMS__*__BASE_URL`.
 
 Companion APNs configuration also needs
 `CLOVY__COMPANION__APNS_TEAM_ID`, `CLOVY__COMPANION__APNS_KEY_ID`,
@@ -74,12 +69,10 @@ Companion APNs configuration also needs
 `CLOVY__COMPANION__APNS_PRODUCTION`. If any APNs value is missing, relay and
 foreground reconnect still work but background wake hints are disabled.
 
-June-era `JUNE__*` variables remain lower-precedence compatibility inputs.
-
 ## Clovy API settings (`clovy-api/config.toml`)
 
-- **Server:** `request_timeout_secs` 600, `max_audio_bytes` 25 MiB, `max_json_bytes` 512 KiB, `max_agent_chat_bytes` 12 MiB (dedicated `/v1/chat/completions` cap, aligned with the desktop client boundary and sized for a 1M-token context window; must be ≥ the 12 MiB client cap), `max_issue_report_bytes` 301 MiB total (one 300 MiB os-platform attachment plus multipart overhead), `max_image_edit_bytes` sized for a 50 MiB source image after base64 expansion.
-- **Metering estimate:** `flat_estimate_credits` 250 — the flat credit Hold per metered action; skips per-request estimation.
+- **Server:** `request_timeout_secs` 600, `max_audio_bytes` 25 MiB, `max_json_bytes` 512 KiB, `max_agent_chat_bytes` 12 MiB (dedicated `/v1/chat/completions` cap, aligned with the desktop client boundary and sized for a 1M-token context window; must be ≥ the 12 MiB client cap), `max_issue_report_bytes` 301 MiB total (one 300 MiB attachment plus multipart overhead), `max_image_edit_bytes` sized for a 50 MiB source image after base64 expansion.
+- **Metering estimate:** `flat_estimate_credits` 250 — the flat credit Hold per metered action; skips per-request estimation. Local mode authorizes every Hold and never charges; the TTLs below still bound the inference client windows.
 - **Hold TTLs (secs):** `note_transcribe` 60, `note_generate` 300, `dictate_transcribe` 30, `dictate_cleanup` 30, `web` 30, `image` defaults to `request_timeout_secs` + 30 (630) — validation rejects an image TTL that cannot outlive the request timeout, so a slow generation can still settle its charge.
 - **Web tools:** `web_search_credits` 20, `web_fetch_credits` 20 (flat).
 - **Media:** `image_pricing` (flat credits per generated image), `image_edit_pricing` (per edited image), and `video_pricing` / `video_animate_pricing` (markup on fal's quote). `fal-ai/flux-2/edit` is 96 credits, an estimate and not a proven account price: up to 2 MP in plus 2 MP out at fal's documented $0.012/MP is $0.048, with the existing margin of about 2x; fal's billing unit and rounding are not documented. A request naming a retired or unknown model is served by `default_image_model`, `default_image_edit_model`, `default_video_model`, or `default_video_animate_model` ([ADR-0021](adr/0021-june-api-v1-compatibility-policy.md)).
@@ -87,9 +80,8 @@ June-era `JUNE__*` variables remain lower-precedence compatibility inputs.
 - **Image edit geometry:** an edit request carries no size. Clovy API keeps the oriented source's proportions. The image it sends holds at most 1024x1024 pixels, and the output size it asks fal for is explicit, 512 to 2048 per side within the same pixel budget. A source that fits and needs no orientation or canvas work is sent as is. A larger source is resized by Clovy API before anything reaches fal, as a whole image, keeping proportions and edges, never cropped or stretched; extreme ratios get neutral padding that is removed from the result. That resize costs Clovy API CPU and memory inside its blocking preparation work. The decoder keeps its default 512 MiB allocation limit (`max_alloc`), so an image that needs more is refused there with a useful error. Aborting the request does not interrupt a decode that is already running.
 - **Image edit result size:** fal's edit must come back at the requested size, with one observed exception for `fal-ai/flux-2/edit`. Real runs asked for 1254x836 (a 1536x1024 source) answered 1280x864, the whole frame with each side rounded up to the next multiple of 32; fal documents no such rounding. For that endpoint only, Clovy API also accepts exactly that rounded size and scales the whole frame back to the requested size (as a PNG) before removing any canvas padding. A requested side already on that grid must come back exact, and any other size is still refused as `upstream_provider_failed`, after fal has run the edit.
 - **Preview cap:** `note_transcribe_preview_max_audio_secs` 30.
-- **OS Accounts token contract:** `iss` `https://accounts.opensoftware.co`, `aud` `open-software-apps`, `jwks_refresh_secs` 300, `jwks_miss_min_backoff_secs` 5.
 - **Pricing:** one `[pricing."<model_id>"]` table per priced model (unit, credits, provider, model_type, capabilities, ...). A model with no pricing entry is rejected at the boundary (see [ADR-0007](adr/0007-model-capability-source-of-truth.md) and its addendum).
-- **Attestation / issue reports:** the TEE trust-center URL + the fixed os-platform destination (`open-software` / `june`).
+- **Issue reports:** logged by Clovy API only; `[issue_reports]` configures the optional server-side diagnosis model.
 
 ## User provider keys
 
@@ -124,7 +116,7 @@ key the provider revokes after it was saved is reported as rejected by the
 request that uses it. When Clovy API has
 no service key for a provider, its catalog rows say `serviceAvailable: false`
 and requests without the user's key fail with `<provider>_not_configured`.
-Model pickers and the companion's model list leave out or flag such rows until
+Model pickers leave out or flag such rows until
 the key is saved; a missing key is a setting, not a macOS permission.
 
 `GET /v1/models?type=image|video` lists the generation endpoints actually in

@@ -90,7 +90,7 @@ import release settings or scan release helper records.
 At launch and on a key-down after a minute idle, Clovy reads the user's Groq
 and OpenRouter keys, each on its own, into the Keychain store's per-account
 cache (the same cache a key save or removal updates; there is no second one),
-fetches the OS Accounts token when the take will use Clovy API, and opens the
+reads the local identity's bearer token when the take will use Clovy API, and opens the
 transcription connection without sending audio: `GET /models` on Groq with
 the user's key, else Clovy API's `GET /healthz`. The helper preloads the cues
 and prepares the next recorder after every take. No audio is recorded outside

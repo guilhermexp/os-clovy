@@ -3,7 +3,6 @@ import {
   type AgentNewSessionDetail,
 } from "../components/agent/session-persistence";
 import { AGENT_NEW_SESSION_EVENT } from "../lib/agent-events";
-import type { ReportCategory } from "../components/agent/composer/reportCategory";
 import {
   assignNoteToFolder,
   assignSessionToFolder,
@@ -202,24 +201,6 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
     }
   }
 
-  // "Report an issue": navigate to Agent and open the direct report dialog.
-  // It submits through Clovy API without a model turn, so there is nothing to
-  // charge; Clovy API creates the team-facing diagnosis.
-  function handleReportIssue(category: ReportCategory = "bug") {
-    pendingSessionProjectRef.current = null;
-    setAgentOrigin(undefined);
-    markAgentNewSessionPending(undefined, { category });
-    setActiveAgentSession(undefined);
-    setActiveView("agent");
-    window.setTimeout(() => {
-      window.dispatchEvent(
-        new CustomEvent<AgentNewSessionDetail>(AGENT_NEW_SESSION_EVENT, {
-          detail: { category },
-        }),
-      );
-    }, 0);
-  }
-
   // Escalates a note chat into the full agent view. An existing stored session
   // opens in place, while a chat that never started falls back to the seeded
   // new-session flow.
@@ -293,7 +274,6 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
     handleSetSessionFolder,
     handleToggleSessionCompleted,
     handleRemoveSessionFromFolder,
-    handleReportIssue,
     handleOpenNoteChatInAgent,
     handleAskClovyAboutNote,
     handleStartBundleChat,

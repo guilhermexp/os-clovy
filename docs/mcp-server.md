@@ -162,9 +162,7 @@ a second or late answer gets `agent_interruption_expired`.
 CLI turn gets (15 minutes, `chat_engine::policy::CLI_TOOL_TIMEOUT`, checked at
 compile time). A clarification (`request_clarification`) is the same item
 with `kind: "clarification"`, `question`, and `choices`; the answer is the
-tool's result. On a linked phone, the request shows as waiting on the Mac;
-only `computer_use` can be answered there, once
-([ADR-0053](adr/0053-companion-computer-use-approvals-are-one-shot.md)).
+tool's result.
 Browser use keeps its own approval tray instead (below), so one click never
 shows two cards.
 
@@ -357,6 +355,13 @@ base64; a larger one stays in Clovy) and the rest as `text`.
 ### Times and resources
 
 Activity times are RFC 3339 with offset; omitted bounds mean today so far. `get_day_summary` and `get_day_panels` take a local date `YYYY-MM-DD` (default today).
+
+`get_day_summary` preserva os `minutes` existentes e expõe `seconds` nas
+atividades, frentes e horas de cada frente, além de `locatedSeconds` nas horas.
+`get_day_panels` também inclui `seconds` nas frentes. Esses campos mantêm o
+tempo exato: três atividades de 40 s somam 120 s, mesmo que cada `minutes`
+arredondado seja 1. Dados antigos sem segundos usam `minutes * 60` (ou
+`locatedMinutes * 60` para o tempo localizado); zero explícito não usa fallback.
 
 Sessions and gaps leave out the app's `bundleId` and the gap's `id`: the
 "Today" view uses them only for app icons and list keys, and no tool takes a

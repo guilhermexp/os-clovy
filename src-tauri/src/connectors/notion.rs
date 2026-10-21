@@ -518,7 +518,7 @@ pub async fn connect(
         &resource.resource,
     );
 
-    crate::os_accounts::open_in_browser(&auth_url)?;
+    crate::system_browser::open_in_browser(&auth_url)?;
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     if let Ok(mut slot) = flow.cancel.lock() {

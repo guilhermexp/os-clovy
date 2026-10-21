@@ -1,5 +1,4 @@
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
-import { IconArrowBoxRight } from "central-icons/IconArrowBoxRight";
 import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconRobot2 } from "central-icons/IconRobot2";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
@@ -8,11 +7,9 @@ import { IconBrain2 } from "central-icons/IconBrain2";
 import { IconBrainSideview } from "central-icons/IconBrainSideview";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconColorPalette } from "central-icons/IconColorPalette";
-import { IconCreditCard1 } from "central-icons/IconCreditCard1";
 import { IconDotGrid1x3Vertical } from "central-icons/IconDotGrid1x3Vertical";
 import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
 import { IconFolderDelete } from "central-icons/IconFolderDelete";
-import { IconGift1 } from "central-icons/IconGift1";
 import { IconHomeOpen } from "central-icons/IconHomeOpen";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
@@ -24,7 +21,6 @@ import { IconPin } from "central-icons/IconPin";
 import { IconArchive } from "central-icons/IconArchive";
 import { IconArrowUndoUp } from "central-icons/IconArrowUndoUp";
 import { IconPlugin1 } from "central-icons/IconPlugin1";
-import { IconPhone } from "central-icons/IconPhone";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
@@ -47,10 +43,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { markAgentNewSessionPending } from "../agent/session-persistence";
-import { CategoryIcon } from "../agent/composer/CategoryIcon";
-import { ClovyMark, ClovyWordmark } from "../brand/ClovyLogo";
-import { AccountAvatar, accountDisplayName } from "../account/AccountAvatar";
-import { type ReportCategory, reportCategoryDef } from "../agent/composer/reportCategory";
+import { ClovyWordmark } from "../brand/ClovyLogo";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
@@ -61,42 +54,29 @@ import {
   type AgentSessionsChangedDetail,
   type AgentSessionsHydratedDetail,
 } from "../../lib/agent-events";
-import { errorCode, messageFromError } from "../../lib/errors";
+import { messageFromError } from "../../lib/errors";
 import { useDismiss } from "../../lib/use-dismiss";
 import { attachScrollThumbFade } from "../../lib/scroll-thumb-fade";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import { useRecordingPresenceBounds } from "../../lib/recording-presence-bounds";
 import { isPrimaryShortcut, primaryShortcutLabel } from "../../lib/platform";
-import type {
-  AccountStatus,
-  NoteListItemDto,
-  RecordingStatusDto,
-  ReferralSummary,
-} from "../../lib/tauri";
-import {
-  deleteAgentSession,
-  listSessionPartitions,
-  osAccountsReferralSummary,
-} from "../../lib/tauri";
+import type { NoteListItemDto, RecordingStatusDto } from "../../lib/tauri";
+import { deleteAgentSession, listSessionPartitions } from "../../lib/tauri";
 import type { AgentSessionDto } from "../../lib/agent-runtime-contract";
 import {
   SIDEBAR_DEMO_SESSIONS_EVENT,
   type SidebarDemoSessionsDetail,
 } from "../../lib/completed-sessions-demo-ids";
 import { useCurrentDataPartitionName } from "../../lib/data-partition";
-import { useExperimentalFlags } from "../../lib/experimental-flags";
 import {
   sessionMatchesDataPartition,
   sessionPartitionMap,
   type SessionPartitionMap,
 } from "../../lib/session-partition-filter";
-import { OPEN_REFERRAL_DIALOG_EVENT } from "../referral/ReferralNudge";
-import { isMacLikePlatform } from "../../lib/platform";
-import { settingsTabsForCompanionPairing, type SettingsTab } from "../settings/settings-config";
+import { isMacLikePlatform, isWindowsPlatform } from "../../lib/platform";
+import { settingsTabsForPlatform, type SettingsTab } from "../settings/settings-config";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { CopyLinkField } from "../ui/CopyLinkField";
-import { Dialog } from "../ui/Dialog";
 import { DotSpinner } from "../DotSpinner";
 import { combineSourceAudioLevels, Waveform } from "../recorder/Waveform";
 import { RenameSessionDialog } from "../agent/RenameSessionDialog";
@@ -146,17 +126,14 @@ export type SidebarView =
 type SidebarProps = {
   notes: NoteListItemDto[];
   activeView: SidebarView;
-  // Settings is its own page reached from the user's name; these default so
+  // Settings is its own page reached from the footer menu; these default so
   // tests that mount the sidebar for non-settings views can skip the plumbing.
-  account?: AccountStatus;
   settingsTab?: SettingsTab;
   onSettingsTabChange?: (tab: SettingsTab) => void;
   onChangeView: (view: SidebarView) => void;
   // Returns to wherever the user was before opening settings (falls back to
   // Notes when not wired, e.g. unit tests).
   onExitSettings?: () => void;
-  onSignOut?: () => void;
-  onReportIssue?: (category: ReportCategory) => void;
   onSelectNote: (noteId: string) => void;
   onNewAgentSession: () => void;
   /** Whether the persistent Home conversation is available on this platform. */
@@ -262,11 +239,6 @@ const SETTINGS_SIDEBAR_GROUPS: {
         icon: <IconColorPalette size={16} />,
       },
       {
-        id: "billing",
-        label: "shell.settingsNav.billing",
-        icon: <IconCreditCard1 size={16} />,
-      },
-      {
         id: "shortcuts",
         label: "shell.settingsNav.shortcuts",
         icon: <IconShortcut size={16} />,
@@ -311,20 +283,13 @@ const SETTINGS_SIDEBAR_GROUPS: {
   {
     id: "app",
     title: "shell.settingsNav.group.app",
-    items: [
-      {
-        id: "linked-devices",
-        label: "shell.settingsNav.linkedDevices",
-        icon: <IconPhone size={16} />,
-      },
-      { id: "about", label: "shell.settingsNav.about", icon: <IconCircleInfo size={16} /> },
-    ],
+    items: [{ id: "about", label: "shell.settingsNav.about", icon: <IconCircleInfo size={16} /> }],
   },
 ];
 
 /**
  * Settings tabs introduced by the admin-surfaces PR, hidden from the nav until
- * they're stabilized. The pre-PR tabs (General, Billing, Shortcuts, Dictation,
+ * they're stabilized. The pre-PR tabs (General, Shortcuts, Dictation,
  * Audio, Models, Agent, Installed skills, About) stay visible, plus External
  * skill directories (PR-new but verified working). These are hidden, not
  * removed: tabs, panels, and logic are all intact. Re-enable one by deleting its
@@ -336,13 +301,10 @@ export const HIDDEN_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set();
 export function Sidebar({
   notes,
   activeView,
-  account = { signedIn: false, configured: false },
   settingsTab = "general",
   onSettingsTabChange,
   onChangeView,
   onExitSettings,
-  onSignOut,
-  onReportIssue,
   onSelectNote,
   onNewAgentSession,
   homeEnabled = true,
@@ -367,34 +329,18 @@ export function Sidebar({
   const [commandQuery, setCommandQuery] = useState("");
   const [commandActiveIndex, setCommandActiveIndex] = useState(0);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [identityMenuOpen, setIdentityMenuOpen] = useState(false);
-  const [referralDialogOpen, setReferralDialogOpen] = useState(false);
-  const [referralSummary, setReferralSummary] = useState<ReferralSummary | null>(null);
-  const [referralLoading, setReferralLoading] = useState(false);
-  // Guards against a stale closure double-firing the summary fetch.
-  const referralLoadingRef = useRef(false);
-  const referralCopyResetTimerRef = useRef<number>();
-  const [activitySupported, setActivitySupported] = useState(() => isMacLikePlatform());
+  const [activitySupported, setActivitySupported] = useState(
+    () => isMacLikePlatform() || isWindowsPlatform(),
+  );
 
   useEffect(() => {
-    if (!isMacLikePlatform()) {
-      setActivitySupported(false);
-      return;
-    }
     void activityStatus()
       .then((status) => setActivitySupported(status.supported))
       .catch(() => {});
   }, []);
-  const [referralError, setReferralError] = useState<string | null>(null);
-  // The deployment can simply not offer referrals (a 404 from /referrals/me).
-  // That's not a transient failure, so it gets a calm message with no retry.
-  const [referralUnavailable, setReferralUnavailable] = useState(false);
-  const [referralCopyError, setReferralCopyError] = useState<string | null>(null);
-  const [referralCopied, setReferralCopied] = useState(false);
   const searchShortcut = primaryShortcutLabel("K");
   const newSessionShortcut = primaryShortcutLabel("N");
   const inSettings = activeView === "settings";
-  const { companionPairingEnabled } = useExperimentalFlags();
   const [allAgentSessions, setAgentSessions] = useState<AgentSessionDto[]>([]);
   // Chats belong to the data partition they were created under (ADR 0031).
   // The sidebar filters its list through the session-to-partition map and re-filters
@@ -495,78 +441,6 @@ export function Sidebar({
   const pinnedAgentSessions = sidebarSessionLists.pinned;
   const visibleAgentSessions = sidebarSessionLists.visible;
   const hasMorePinnedAgentSessions = sidebarSessionLists.pinnedTotal > pinnedAgentSessions.length;
-
-  async function loadReferralSummary() {
-    if (!account.signedIn || account.localDev) return;
-    if (referralLoadingRef.current) return;
-    referralLoadingRef.current = true;
-    setReferralLoading(true);
-    setReferralError(null);
-    setReferralUnavailable(false);
-    try {
-      setReferralSummary(await osAccountsReferralSummary());
-    } catch (error) {
-      setReferralUnavailable(errorCode(error) === "referrals_unavailable");
-      setReferralError(messageFromError(error));
-    } finally {
-      referralLoadingRef.current = false;
-      setReferralLoading(false);
-    }
-  }
-
-  function openReferralDialog() {
-    if (account.localDev) return;
-    setReferralDialogOpen(true);
-    if (referralCopyResetTimerRef.current !== undefined) {
-      window.clearTimeout(referralCopyResetTimerRef.current);
-      referralCopyResetTimerRef.current = undefined;
-    }
-    setReferralCopied(false);
-    setReferralCopyError(null);
-    if (!referralLoading) {
-      void loadReferralSummary();
-    }
-  }
-
-  // Shell surfaces outside the sidebar (the referral delight nudge) open the
-  // referral dialog by window event, since the dialog lives here. Re-attached
-  // every render (the command-prompt keydown pattern below) so the handler
-  // never closes over stale account state.
-  useEffect(() => {
-    function onOpenReferralDialog() {
-      openReferralDialog();
-    }
-
-    window.addEventListener(OPEN_REFERRAL_DIALOG_EVENT, onOpenReferralDialog);
-    return () => window.removeEventListener(OPEN_REFERRAL_DIALOG_EVENT, onOpenReferralDialog);
-  });
-
-  async function copyReferralLink() {
-    if (!referralSummary) return;
-    try {
-      await navigator.clipboard.writeText(referralSummary.url);
-      setReferralCopyError(null);
-      setReferralCopied(true);
-      if (referralCopyResetTimerRef.current !== undefined) {
-        window.clearTimeout(referralCopyResetTimerRef.current);
-      }
-      referralCopyResetTimerRef.current = window.setTimeout(() => {
-        setReferralCopied(false);
-        referralCopyResetTimerRef.current = undefined;
-      }, 1600);
-    } catch {
-      setReferralCopyError(t("shell.referral.copyFailed"));
-    }
-  }
-
-  useEffect(
-    () => () => {
-      if (referralCopyResetTimerRef.current !== undefined) {
-        window.clearTimeout(referralCopyResetTimerRef.current);
-      }
-    },
-    [],
-  );
 
   const commandPromptGroups = useMemo<CommandPromptGroup[]>(() => {
     const normalized = normalizeCommandQuery(commandQuery);
@@ -703,16 +577,11 @@ export function Sidebar({
       },
       // Per-tab settings jumps surface only once a query is typed so ten
       // rows don't flood the default Quick actions list. General and
-      // Appearance carry their row-level terms so "theme" or "account"
+      // Appearance carry their row-level terms so "theme" or "permissions"
       // still finds the right tab.
       ...(normalized
-        ? settingsTabsForCompanionPairing(companionPairingEnabled)
-            .filter(
-              (tab) =>
-                !HIDDEN_SETTINGS_TABS.has(tab.id) &&
-                !(account.localDev && tab.id === "billing") &&
-                (isMacLikePlatform() || tab.id !== "activity"),
-            )
+        ? settingsTabsForPlatform(activitySupported)
+            .filter((tab) => !HIDDEN_SETTINGS_TABS.has(tab.id))
             .map(
               (tab): CommandPromptItem => ({
                 id: `quick:settings-${tab.id}`,
@@ -720,7 +589,7 @@ export function Sidebar({
                 icon: <IconSettingsGear4 size={15} />,
                 searchText: normalizeCommandQuery(
                   tab.id === "general"
-                    ? `settings general account permissions privacy ${tab.label}`
+                    ? `settings general permissions privacy ${tab.label}`
                     : tab.id === "appearance"
                       ? `settings appearance theme accent text size dark light mode ${tab.label}`
                       : tab.id === "activity"
@@ -736,73 +605,22 @@ export function Sidebar({
         : []),
     ].filter(matches);
 
-    // Support: the report entry points (reusing the identity menu's items and
-    // CategoryIcon), invite friends, and sign out — each guarded exactly like
-    // the identity menu so the prompt never offers an action the menu hides.
-    const supportItems: CommandPromptItem[] = [
-      ...(onReportIssue
-        ? REPORT_MENU_ITEMS.map((item): CommandPromptItem => {
-            const def = reportCategoryDef(item.category);
-            const label = t(item.label);
-            return {
-              id: `support:report-${item.category}`,
-              label,
-              icon: <CategoryIcon category={item.category} size={15} />,
-              searchText: normalizeCommandQuery(`${label} ${def?.keywords.join(" ") ?? ""}`),
-              action: () => onReportIssue(item.category),
-            };
-          })
-        : []),
-      ...(account.signedIn && !account.localDev
-        ? [
-            {
-              id: "support:invite-friends",
-              label: t("shell.identity.inviteFriends"),
-              icon: <IconGift1 size={15} />,
-              searchText: normalizeCommandQuery(
-                `invite friends referral share ${t("shell.identity.inviteFriends")}`,
-              ),
-              action: () => openReferralDialog(),
-            } satisfies CommandPromptItem,
-          ]
-        : []),
-      ...(account.signedIn && !account.localDev && onSignOut
-        ? [
-            {
-              id: "support:sign-out",
-              label: t("shell.identity.signOut"),
-              icon: <IconArrowBoxRight size={15} />,
-              searchText: normalizeCommandQuery(
-                `sign out log out logout ${t("shell.identity.signOut")}`,
-              ),
-              action: onSignOut,
-            } satisfies CommandPromptItem,
-          ]
-        : []),
-    ].filter(matches);
-
     return [
       { title: t("shell.command.group.recents"), items: recentItems },
       { title: t("shell.command.group.quickActions"), items: quickItems },
-      { title: t("shell.command.group.support"), items: supportItems },
     ].filter((group) => group.items.length > 0);
   }, [
-    account.localDev,
-    account.signedIn,
     activitySupported,
     agentSessions,
     commandQuery,
-    companionPairingEnabled,
     completedSessionIds,
     homeEnabled,
     notes,
     onChangeView,
     onOpenRecording,
-    onReportIssue,
     onSelectAgentSession,
     onSelectNote,
     onSettingsTabChange,
-    onSignOut,
     recordingStatus,
     t,
   ]);
@@ -860,7 +678,6 @@ export function Sidebar({
 
       setQuery("");
       setMenu(null);
-      setIdentityMenuOpen(false);
       setCommandPromptOpen(false);
       setAgentSessions(buildSidebarDevStateSessions());
       setSelectedAgentSessionId(SIDEBAR_DEV_SESSION_IDS.selected);
@@ -936,7 +753,6 @@ export function Sidebar({
 
   function openCommandPrompt() {
     setMenu(null);
-    setIdentityMenuOpen(false);
     setCommandQuery("");
     setCommandActiveIndex(0);
     setCommandPromptOpen(true);
@@ -1143,8 +959,7 @@ export function Sidebar({
       {inSettings ? (
         <SettingsSidebarNav
           activeTab={settingsTab}
-          companionPairingEnabled={companionPairingEnabled}
-          localDev={account.localDev === true}
+          activitySupported={activitySupported}
           onSelectTab={(tab) => onSettingsTabChange?.(tab)}
           onBack={() => (onExitSettings ? onExitSettings() : onChangeView("notes"))}
         />
@@ -1378,54 +1193,8 @@ export function Sidebar({
 
       <footer className="sidebar-footer">
         {footerAccessory}
-        <SidebarIdentity
-          account={account}
-          menuOpen={identityMenuOpen}
-          onToggleMenu={() => setIdentityMenuOpen((open) => !open)}
-          onCloseMenu={() => setIdentityMenuOpen(false)}
-          onInviteFriends={
-            account.signedIn && !account.localDev
-              ? () => {
-                  setIdentityMenuOpen(false);
-                  openReferralDialog();
-                }
-              : undefined
-          }
-          onOpenSettings={() => {
-            setIdentityMenuOpen(false);
-            onChangeView("settings");
-          }}
-          onReportIssue={
-            onReportIssue
-              ? (category) => {
-                  setIdentityMenuOpen(false);
-                  onReportIssue(category);
-                }
-              : undefined
-          }
-          onSignOut={
-            onSignOut
-              ? () => {
-                  setIdentityMenuOpen(false);
-                  onSignOut();
-                }
-              : undefined
-          }
-        />
+        <SidebarSettingsButton onOpenSettings={() => onChangeView("settings")} />
       </footer>
-
-      <ReferralDialog
-        open={referralDialogOpen}
-        summary={referralSummary}
-        loading={referralLoading}
-        error={referralError}
-        unavailable={referralUnavailable}
-        copyError={referralCopyError}
-        copied={referralCopied}
-        onClose={() => setReferralDialogOpen(false)}
-        onRetry={() => void loadReferralSummary()}
-        onCopy={() => void copyReferralLink()}
-      />
 
       {menu?.kind === "agent-session" && menuAgentSession ? (
         <AgentSessionContextMenu
@@ -1596,30 +1365,22 @@ function buildSidebarDevStateSessions(): AgentSessionDto[] {
 
 function SettingsSidebarNav({
   activeTab,
-  companionPairingEnabled,
-  localDev,
+  activitySupported,
   onSelectTab,
   onBack,
 }: {
   activeTab: SettingsTab;
-  companionPairingEnabled: boolean;
-  localDev: boolean;
+  activitySupported: boolean;
   onSelectTab: (tab: SettingsTab) => void;
   onBack: () => void;
 }) {
   const t = useT();
-  // Hide the admin-surfaces-PR tabs until stabilized, keeping the pre-PR billing
-  // rule (billing is hidden in local dev). Empty groups drop out so their
-  // headers don't render.
-  const isMac = isMacLikePlatform();
+  // Hide the admin-surfaces-PR tabs until stabilized. Empty groups drop out so
+  // their headers don't render.
   const groups = SETTINGS_SIDEBAR_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter(
-      (item) =>
-        !HIDDEN_SETTINGS_TABS.has(item.id) &&
-        !(localDev && item.id === "billing") &&
-        (companionPairingEnabled || item.id !== "linked-devices") &&
-        (isMac || item.id !== "activity"),
+      (item) => !HIDDEN_SETTINGS_TABS.has(item.id) && (activitySupported || item.id !== "activity"),
     ),
   })).filter((group) => group.items.length > 0);
 
@@ -1853,189 +1614,15 @@ function isSearchShortcut(event: KeyboardEvent) {
   return event.key.toLowerCase() === "k" && isPrimaryShortcut(event);
 }
 
-function ReferralDialog({
-  open,
-  summary,
-  loading,
-  error,
-  unavailable,
-  copyError,
-  copied,
-  onClose,
-  onRetry,
-  onCopy,
-}: {
-  open: boolean;
-  summary: ReferralSummary | null;
-  loading: boolean;
-  error: string | null;
-  unavailable: boolean;
-  copyError: string | null;
-  copied: boolean;
-  onClose: () => void;
-  onRetry: () => void;
-  onCopy: () => void;
-}) {
+// The footer entry point: one row that opens the settings page.
+function SidebarSettingsButton({ onOpenSettings }: { onOpenSettings: () => void }) {
   const t = useT();
-  const pendingFriends = summary?.pendingCount ?? 0;
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title={t("shell.referral.title")}
-      className="referral-dialog"
-      width={640}
-    >
-      <div className="referral-split">
-        <div className="referral-hero">
-          <span className="referral-hero-logo" aria-hidden>
-            <ClovyMark width={28} height={29} variant="mono" />
-          </span>
-          <span className="referral-hero-eyebrow">
-            <IconGift1 size={13} />
-            {t("shell.referral.eyebrow")}
-          </span>
-          <p className="referral-hero-title">{t("shell.referral.title")}</p>
-          <p className="referral-hero-copy">{t("shell.referral.copy")}</p>
-        </div>
-        <div className="referral-panel">
-          {loading ? (
-            <div className="referral-dialog-status" role="status">
-              <DotSpinner /> {t("shell.referral.loading")}
-            </div>
-          ) : unavailable ? (
-            // Deployment doesn't offer referrals — retrying can't fix that, so
-            // there's no "Try again", just a calm note.
-            <div className="referral-dialog-status">
-              <p>{t("shell.referral.unavailable")}</p>
-            </div>
-          ) : error ? (
-            <div className="referral-error-card">
-              <span className="referral-error-title">{t("shell.referral.errorTitle")}</span>
-              <p>{error}</p>
-              <button type="button" className="btn btn-secondary" onClick={onRetry}>
-                {t("common.tryAgain")}
-              </button>
-            </div>
-          ) : summary ? (
-            <>
-              <span className="referral-panel-title">{t("shell.referral.shareTitle")}</span>
-              <CopyLinkField
-                value={summary.url}
-                label={t("shell.referral.linkLabel")}
-                copied={copied}
-                onCopy={onCopy}
-              />
-              {copyError ? <p className="referral-copy-error">{copyError}</p> : null}
-              <div className="referral-stats">
-                <div>
-                  <span className="referral-stat-value">{summary.qualifiedCount}</span>
-                  <span className="referral-stat-label">{t("shell.referral.friendsReferred")}</span>
-                </div>
-              </div>
-              {pendingFriends > 0 ? (
-                <p className="referral-progress-note">
-                  {t("shell.referral.pending", { count: pendingFriends })}
-                </p>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      </div>
-    </Dialog>
-  );
-}
-
-// The user's name is the settings entry point: clicking it opens a small
-// popover whose actions open the settings page or sign out.
-// The report shortcuts in the account menu: the same set as the composer's
-// "+" popover, minus attaching a file. Action-phrased to read as menu verbs.
-const REPORT_MENU_ITEMS: { category: ReportCategory; label: MessageKey }[] = [
-  { category: "bug", label: "shell.identity.reportBug" },
-  { category: "feedback", label: "shell.identity.sendFeedback" },
-  { category: "feature", label: "shell.identity.requestFeature" },
-];
-function SidebarIdentity({
-  account,
-  menuOpen,
-  onToggleMenu,
-  onCloseMenu,
-  onInviteFriends,
-  onOpenSettings,
-  onReportIssue,
-  onSignOut,
-}: {
-  account: AccountStatus;
-  menuOpen: boolean;
-  onToggleMenu: () => void;
-  onCloseMenu: () => void;
-  onInviteFriends?: () => void;
-  onOpenSettings: () => void;
-  onReportIssue?: (category: ReportCategory) => void;
-  onSignOut?: () => void;
-}) {
-  const t = useT();
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const name = accountDisplayName(account);
-
-  useDismiss(wrapRef, menuOpen, onCloseMenu);
-
-  return (
-    <div className="sidebar-identity-wrap" ref={wrapRef}>
-      <button
-        type="button"
-        className="sidebar-nav-item sidebar-identity"
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        aria-label={t("shell.identity.menuLabel", { name })}
-        onClick={onToggleMenu}
-      >
-        <AccountAvatar account={account} className="sidebar-nav-icon" />
-        <span className="sidebar-nav-label">{name}</span>
+    <div className="sidebar-identity-wrap">
+      <button type="button" className="sidebar-nav-item sidebar-identity" onClick={onOpenSettings}>
+        <IconSettingsGear4 size={16} className="sidebar-nav-icon" />
+        <span className="sidebar-nav-label">{t("common.settings")}</span>
       </button>
-      {menuOpen ? (
-        <div className="sidebar-identity-menu" role="menu">
-          {onInviteFriends ? (
-            <button
-              type="button"
-              role="menuitem"
-              className="sidebar-invite-item"
-              onClick={onInviteFriends}
-            >
-              <IconGift1 size={14} />
-              {t("shell.identity.inviteFriends")}
-            </button>
-          ) : null}
-          <button type="button" role="menuitem" onClick={onOpenSettings}>
-            <IconSettingsGear4 size={14} />
-            {t("common.settings")}
-          </button>
-          {onReportIssue
-            ? REPORT_MENU_ITEMS.map((item) => (
-                <button
-                  key={item.category}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => onReportIssue(item.category)}
-                >
-                  <span className="sidebar-report-icon" data-category={item.category}>
-                    <CategoryIcon category={item.category} size={14} />
-                  </span>
-                  {t(item.label)}
-                </button>
-              ))
-            : null}
-          {account.signedIn && !account.localDev && onSignOut ? (
-            <>
-              <div className="context-menu-separator" role="separator" />
-              <button type="button" role="menuitem" onClick={onSignOut}>
-                <IconArrowBoxRight size={14} />
-                {t("shell.identity.signOut")}
-              </button>
-            </>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   );
 }

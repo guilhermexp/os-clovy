@@ -49,10 +49,7 @@ pub use handlers::web::{WebFetchRequest, WebSearchRequest};
 #[cfg(feature = "benchmark")]
 #[doc(hidden)]
 pub use share_rate_limit::ShareRateLimiter;
-pub use state::{
-    ApiLimits, ApiState, ApiStateParams, AttestationInfo, CompanionPushConfig, ShareViewerInfo,
-    UpstreamServiceKeys,
-};
+pub use state::{ApiLimits, ApiState, ApiStateParams, CompanionPushConfig, UpstreamServiceKeys};
 
 /// Real shipped app version, sent by the desktop client on every request.
 /// Old stable builds keep calling production long after main moves on; this
@@ -77,13 +74,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/livez", get(handlers::health::livez))
         .route("/readyz", get(handlers::health::readyz))
         .route("/healthz", get(handlers::health::healthz))
-        .route("/verify", get(handlers::verify::verify))
         .route("/robots.txt", get(handlers::share_viewer::robots))
         .route("/s/{share_id}", get(handlers::share_viewer::shell))
-        .route(
-            "/v1/share-viewer/token",
-            post(handlers::share_viewer::token_exchange),
-        )
         .route("/v1/shares", get(handlers::share::list))
         .route(
             "/v1/shares/{share_id}",
@@ -189,7 +181,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/v1/issue-reports",
-            // Reports can carry QA videos accepted by os-platform, so they
+            // Reports can carry QA videos, so they
             // have a dedicated body budget instead of inheriting audio's
             // unrelated 25 MiB ceiling.
             post(handlers::issues::submit).layer(
@@ -214,56 +206,6 @@ pub fn router(state: ApiState) -> Router {
             // The request span carries the calling app version so a deploy
             // that hurts only older shipped clients shows up in logs as a
             // per-version error spike instead of support tickets.
-            TraceLayer::new_for_http().make_span_with(|request: &Request| {
-                let app_version = client_header(
-                    request.headers(),
-                    CLOVY_APP_VERSION_HEADER,
-                    LEGACY_APP_VERSION_HEADER,
-                );
-                tracing::info_span!(
-                    "request",
-                    method = %request.method(),
-                    uri = %request.uri(),
-                    version = ?request.version(),
-                    app_version,
-                )
-            }),
-        )
-        .layer(CorsLayer::new())
-        .with_state(state)
-}
-
-/// Read-only surface for the isolated `june.link` CVM.
-///
-/// Keeping this router separate is a deployment boundary, not just a UI
-/// convention: the short-link origin can render/decrypt shares and complete
-/// legacy recipient sign-in, but it cannot create, mutate, or delete shares
-/// and cannot invoke any inference or reporting endpoint.
-pub fn viewer_router(state: ApiState) -> Router {
-    let limits = state.limits();
-    let timeout = ServiceBuilder::new()
-        .layer(HandleErrorLayer::new(handle_timeout_error))
-        .layer(TimeoutLayer::new(Duration::from_secs(
-            limits.request_timeout_secs,
-        )));
-    Router::new()
-        .route("/livez", get(handlers::health::livez))
-        .route("/readyz", get(handlers::health::readyz))
-        .route("/healthz", get(handlers::health::healthz))
-        .route("/verify", get(handlers::verify::verify))
-        .route("/robots.txt", get(handlers::share_viewer::robots))
-        .route("/s/{share_id}", get(handlers::share_viewer::shell))
-        .route(
-            "/v1/share-viewer/token",
-            post(handlers::share_viewer::token_exchange),
-        )
-        .route("/v1/shares/{share_id}/view", get(handlers::share::view))
-        .route(
-            "/v1/shares/{share_id}/link-view",
-            get(handlers::share::link_view),
-        )
-        .layer(timeout)
-        .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request| {
                 let app_version = client_header(
                     request.headers(),
@@ -358,8 +300,8 @@ async fn handle_timeout_error(error: BoxError) -> axum::response::Response {
 /// and JSON-parse a multi-MiB body — up to `max_agent_chat_bytes` (12 MiB),
 /// `max_share_body_bytes` (~14 MiB), `max_image_edit_bytes` (~66 MiB), or
 /// `max_audio_bytes` (25 MiB) — before the handler's own `authenticated_user`
-/// check ran. The verify is a cached-JWKS signature check, so re-checking in
-/// the handler is cheap; keeping the handler check makes each handler correct
+/// check ran. The verify is an in-memory local token comparison, so
+/// re-checking in the handler is cheap; keeping the handler check makes each handler correct
 /// on its own.
 async fn authenticate_and_admit(
     State(state): State<ApiState>,

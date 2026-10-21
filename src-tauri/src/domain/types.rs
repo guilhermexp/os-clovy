@@ -42,8 +42,6 @@ pub struct ListNotesResponse {
     pub items: Vec<NoteListItemDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    #[serde(skip)]
-    pub(crate) item_cursors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -894,38 +892,6 @@ pub struct SuggestAgentSessionTitleRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SuggestAgentSessionTitleResponse {
     pub title: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitIssueReportRequest {
-    /// Which kind of report this is ("bug" | "feedback" | "feature"), used for
-    /// triage on the server. Optional so older callers keep deserializing.
-    #[serde(default)]
-    pub category: Option<String>,
-    pub description: String,
-    #[serde(default)]
-    pub agent_diagnosis: Option<String>,
-    #[serde(default)]
-    pub attachment_names: Vec<String>,
-    /// Original local paths from the report picker or workspace paths created
-    /// for DOM-dropped files; their bytes are sent with the report.
-    #[serde(default)]
-    pub attachment_paths: Vec<String>,
-    #[serde(default)]
-    #[serde(alias = "sessionId")]
-    pub stored_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitIssueReportResponse {
-    pub received: bool,
-    /// Names of attachments whose bytes were omitted locally, by a
-    /// compatibility fallback, or by Clovy API. The report still carries the
-    /// names so the team knows which files were intended.
-    #[serde(default)]
-    pub skipped_attachment_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

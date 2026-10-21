@@ -3,6 +3,8 @@
 //! conversation (`--resume <id>` for claude) and both answers are persisted
 //! in order.
 
+#![cfg(unix)]
+
 use super::tests::{Harness, FAKE_CLAUDE};
 use crate::llm::cli::CliKind;
 

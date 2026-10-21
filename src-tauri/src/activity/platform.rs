@@ -107,6 +107,12 @@ pub trait ActivityPlatform {
     /// The focused window of the frontmost app on the main display.
     fn focused_window(&mut self) -> Option<WindowDescriptor>;
 
+    /// Milliseconds since any system input, without recording its contents.
+    /// Platforms without this signal keep the legacy useful-frame rule.
+    fn system_idle_ms(&self) -> Option<u64> {
+        None
+    }
+
     /// The topmost window of every secondary display (one per display).
     fn secondary_windows(&mut self) -> Vec<WindowDescriptor>;
 
@@ -114,7 +120,8 @@ pub trait ActivityPlatform {
     /// accessibility when needed. `None` or empty when the app exposes none.
     fn accessibility_text(&mut self, window: &WindowDescriptor) -> Option<String>;
 
-    /// Local OCR of `window`. The image lives only in memory for the call.
+    /// Local OCR of `window`, without persisting images. A timed-out native
+    /// operation may retain one in-memory image until cancellation completes.
     fn ocr_text(&mut self, window: &WindowDescriptor) -> Option<String>;
 
     /// Clipboard text when it changed since the previous call.

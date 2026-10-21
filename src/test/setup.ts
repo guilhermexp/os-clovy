@@ -15,10 +15,6 @@ installStorageCompatibilityBridge();
 // stuck in the DOM and exit-dependent assertions flaky.
 MotionGlobalConfig.skipAnimations = true;
 
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: vi.fn(async () => undefined),
-}));
-
 // A formatter without a locale follows the machine's LANG, so a pt-BR machine
 // would read "Segunda-feira" and "10.000" wherever code formats with the
 // system's locale. Pin that default to en-US so every suite formats the same

@@ -19,7 +19,7 @@ import {
   revealMainWindowForMeetingStartError,
   startingRecordingStatus,
 } from "./app-helpers";
-import { meetingStartRequestExpiredMessage, recordingFundingDisabledReason } from "./app-shell";
+import { meetingStartRequestExpiredMessage } from "./app-shell";
 import type { UseRecordingStartActionsDependencies } from "./use-recording-start-actions-types";
 
 export function useRecordingStartActions(dependencies: UseRecordingStartActionsDependencies) {
@@ -30,7 +30,6 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
     calendarContextNotePartitionsRef,
     calendarContextNoteUpdatesRef,
     dispatch,
-    fundingRequired,
     handleEmptyNotesAfterDelete,
     pendingCalendarContextAdoptionsRef,
     recordingNoteIdRef,
@@ -54,10 +53,6 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
       noteId: string,
       options: { startAlreadyClaimed?: boolean; sourceMode?: RecordingSourceMode } = {},
     ): Promise<boolean> => {
-      if (fundingRequired) {
-        setError(recordingFundingDisabledReason());
-        return false;
-      }
       const startAlreadyClaimed = options.startAlreadyClaimed ?? false;
       const requestedSourceMode = options.sourceMode ?? sourceMode;
       if (
@@ -140,7 +135,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         setCheckingSourceReadiness(false);
       }
     },
-    [fundingRequired, setRecordingNote, sourceMode],
+    [setRecordingNote, sourceMode],
   );
 
   const handleStartRecording = useCallback(async () => {
@@ -155,11 +150,6 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
 
   const handleStartMeetingDetectedRecording = useCallback(
     async (requestId: string, noteId: string) => {
-      if (fundingRequired) {
-        revealMainWindowForMeetingStartError();
-        setError(recordingFundingDisabledReason());
-        return true;
-      }
       const competingRecording = recordingStatusRef.current;
       if (recordingStartInFlightRef.current || competingRecording?.state === "starting") {
         return false;
@@ -248,14 +238,11 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         setCheckingSourceReadiness(false);
       }
     },
-    [fundingRequired, setRecordingNote, sourceMode],
+    [setRecordingNote, sourceMode],
   );
 
   const handleStartAgentRecording = useCallback(
     async (requestedSourceMode: RecordingSourceMode) => {
-      if (fundingRequired) {
-        throw new Error(recordingFundingDisabledReason());
-      }
       if (recordingStartInFlightRef.current || recordingStatusRef.current) {
         throw new Error(
           `A recording is already running for note ${recordingNoteIdRef.current ?? "unknown"}.`,
@@ -310,7 +297,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         }
       }
     },
-    [fundingRequired, handleStartRecordingForNote, selectedNoteId],
+    [handleStartRecordingForNote, selectedNoteId],
   );
 
   // Click the floating global recorder pill to jump back to the note the

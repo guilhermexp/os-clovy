@@ -19,15 +19,6 @@ export default defineMessages({
     "app.breadcrumb.backToSessions": "Back to sessions",
     "app.breadcrumb.backToMeetingNotes": "Back to meeting notes",
 
-    // Funding gates
-    "app.funding.composer": "Add credits to send messages or generate images and videos.",
-    "app.funding.recording":
-      "Add credits before starting a recording. You can still browse and edit.",
-    "app.funding.noteRetry": "Add credits before retrying note generation.",
-    "app.funding.recovery":
-      "Add credits before recovering this recording. Your saved audio will stay available.",
-    "app.funding.routine": "Add credits before running a routine.",
-
     // Recording
     "app.recording.startExpired":
       "Recording did not start in time. Open meeting notes and select Record to try again.",
@@ -45,28 +36,11 @@ export default defineMessages({
       other: "Clovy will pause this recording in {count} seconds if you do not answer.",
     },
 
-    // Updates
-    "app.update.upToDate": "Clovy is up to date.",
-    "app.update.unknownError": "An unknown error occurred.",
-    "app.update.checking": "Checking for updates...",
-    "app.update.downloading": "Downloading update...",
-    "app.update.preparing": "Preparing update...",
-    "app.update.failed": "Update failed: {message}",
-    "app.update.checkFailed": "Update check failed: {message}",
-    "app.update.relaunchFailed": "Relaunch failed: {message}",
-    "app.update.relaunchAria": "Relaunch to update to Clovy {version}",
-    "app.update.relaunching": "Relaunching...",
-    "app.update.relaunch": "Relaunch to update",
-    "app.update.hideProgress": "Hide update progress",
-    "app.update.dismissStatus": "Dismiss update status",
-
     // Shell chrome
     "app.sidebar.show": "Show sidebar",
     "app.sidebar.hide": "Hide sidebar",
     "app.sidebar.resize": "Resize sidebar",
     "app.sidebar.toggle": "Toggle sidebar",
-    "app.gate.startingAria": "Starting Clovy",
-    "app.gate.starting": "Starting Clovy...",
     "app.workspace.loading": "Loading view",
     "app.workspace.loadFailedTitle": "Couldn't open this view",
     "app.workspace.loadFailedBody": "Clovy couldn't load this part of the app. Try again.",
@@ -101,14 +75,6 @@ export default defineMessages({
     "app.breadcrumb.backToSessions": "Voltar para sessões",
     "app.breadcrumb.backToMeetingNotes": "Voltar para notas de reunião",
 
-    "app.funding.composer": "Adicione créditos para enviar mensagens ou gerar imagens e vídeos.",
-    "app.funding.recording":
-      "Adicione créditos antes de iniciar uma gravação. Você ainda pode navegar e editar.",
-    "app.funding.noteRetry": "Adicione créditos antes de tentar gerar a nota de novo.",
-    "app.funding.recovery":
-      "Adicione créditos antes de recuperar esta gravação. O áudio salvo continuará disponível.",
-    "app.funding.routine": "Adicione créditos antes de executar uma rotina.",
-
     "app.recording.startExpired":
       "A gravação não começou a tempo. Abra as notas de reunião e selecione Gravar para tentar de novo.",
     "app.recording.micNotReady": "O microfone não está pronto.",
@@ -124,26 +90,10 @@ export default defineMessages({
       other: "O Clovy vai pausar esta gravação em {count} segundos se você não responder.",
     },
 
-    "app.update.upToDate": "O Clovy está atualizado.",
-    "app.update.unknownError": "Ocorreu um erro desconhecido.",
-    "app.update.checking": "Procurando atualizações...",
-    "app.update.downloading": "Baixando atualização...",
-    "app.update.preparing": "Preparando atualização...",
-    "app.update.failed": "Falha na atualização: {message}",
-    "app.update.checkFailed": "Falha ao procurar atualizações: {message}",
-    "app.update.relaunchFailed": "Falha ao reiniciar: {message}",
-    "app.update.relaunchAria": "Reiniciar para atualizar para o Clovy {version}",
-    "app.update.relaunching": "Reiniciando...",
-    "app.update.relaunch": "Reiniciar para atualizar",
-    "app.update.hideProgress": "Ocultar progresso da atualização",
-    "app.update.dismissStatus": "Dispensar status da atualização",
-
     "app.sidebar.show": "Mostrar barra lateral",
     "app.sidebar.hide": "Ocultar barra lateral",
     "app.sidebar.resize": "Redimensionar barra lateral",
     "app.sidebar.toggle": "Alternar barra lateral",
-    "app.gate.startingAria": "Iniciando o Clovy",
-    "app.gate.starting": "Iniciando o Clovy...",
     "app.workspace.loading": "Carregando visualização",
     "app.workspace.loadFailedTitle": "Não foi possível abrir esta visualização",
     "app.workspace.loadFailedBody":

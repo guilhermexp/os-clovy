@@ -5,7 +5,6 @@ import { autonomyUnlockHint } from "../lib/connectors";
 import { LANGUAGE_OPTIONS, languageLabel } from "../lib/dictation-languages";
 import { describeShareError } from "../lib/errors";
 import { FONT_SCALE_PRESETS } from "../lib/font-scale";
-import { MAX_UPGRADE_CONFIRM_TITLE, isMaxUpgradeWaitStatus } from "../lib/max-upgrade";
 import { compactScheduleLabel, humanizeSchedule } from "../lib/routine-schedule";
 import type { ConnectorPolicyCatalog } from "../lib/tauri";
 
@@ -118,12 +117,5 @@ describe("lib copy in Brazilian Portuguese", () => {
     );
     // Messages that are not known codes pass through untouched.
     expect(describeShareError({ message: "boom" })).toBe("boom");
-  });
-
-  it("keeps Max upgrade copy live and recognizes wait lines in either language", () => {
-    expect(MAX_UPGRADE_CONFIRM_TITLE).toBe("Fazer upgrade para o Max?");
-    expect(isMaxUpgradeWaitStatus("Aguardando sua confirmação no navegador")).toBe(true);
-    expect(isMaxUpgradeWaitStatus("Waiting for you to confirm in the browser")).toBe(true);
-    expect(isMaxUpgradeWaitStatus("O Max está ativo.")).toBe(false);
   });
 });

@@ -256,7 +256,6 @@ async fn done_origin_checkpoints_are_monotonic_and_single_shot() {
             ])
             .env(TIMING_TEST_CHILD_ENV, "1")
             .env("CLOVY_API_URL", format!("http://{address}"))
-            .env("OS_CLOVY_LOCAL_DEV", "1")
             .env("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "timing-test-token")
             .output()
             .expect("run isolated timing test child")

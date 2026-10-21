@@ -328,6 +328,18 @@ export function ActivityTimelineView({ onNavigateToSettings }: ActivityTimelineV
             ) : null}
           </div>
         </section>
+      ) : availability === "unsupported" ? (
+        <section className="timeline-empty-state" aria-labelledby="timeline-unsupported-title">
+          <div className="timeline-empty-card">
+            <div className="timeline-empty-icon-wrap" aria-hidden="true">
+              <IconCircleInfo size={28} />
+            </div>
+            <h3 id="timeline-unsupported-title" className="timeline-empty-title">
+              {t("activity.unsupported.title")}
+            </h3>
+            <p className="timeline-empty-description">{t("activity.unsupported.description")}</p>
+          </div>
+        </section>
       ) : (
         <div className="timeline-content-body">
           {/* Banner notices for error, keyMissing, or capture disabled */}

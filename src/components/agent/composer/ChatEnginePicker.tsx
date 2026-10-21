@@ -244,10 +244,7 @@ export function ChatEnginePicker({
                 <span className="agent-composer-model-row-name">{cli.name}</span>
                 {!cli.installed ? (
                   <span className="agent-composer-model-choice-desc">
-                    {/* The backend reason is English-only; detection only ever
-                        fails on a missing binary, so show the same translated
-                        line as Settings > Models. */}
-                    {t("settingsPanels.llm.notInstalledReason")}
+                    {t("chat.engine.notFoundOnPath")}
                   </span>
                 ) : cli.id === defaultCliId ? (
                   <span className="agent-composer-model-choice-desc">

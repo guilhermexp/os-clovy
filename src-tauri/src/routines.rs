@@ -3033,10 +3033,12 @@ mod tests {
     }
 
     /// Persists like the app does (routine projection included).
+    #[cfg(unix)]
     struct RoutineSink {
         repository: AgentRepository,
     }
 
+    #[cfg(unix)]
     impl crate::chat_engine::FrameSink for RoutineSink {
         async fn publish(&self, frame: crate::agent_runtime::protocol::RpcFrame) {
             crate::agent_runtime::host::persist_runtime_event(&self.repository, &frame)
@@ -3046,6 +3048,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn routine_on_a_cli_engine_runs_unattended_and_records_its_result() {
         use crate::llm::cli::CliKind;
         use std::os::unix::fs::PermissionsExt;

@@ -494,7 +494,6 @@ dependencies = [
  "clovy-domain",
  "hound",
  "image",
- "jsonwebtoken",
  "mp4",
  "pretty_assertions",
  "reqwest",

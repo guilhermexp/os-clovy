@@ -3,14 +3,11 @@
 //!
 //! 1. the turn binding opens the run's Computer use lease
 //!    (`crate::computer_use::begin_turn_lease`), in place of the chat surface;
-//! 2. the approval broker shows the card on the Mac and, in the ADR-0053
-//!    scope (D4), the same request goes to a linked phone, which may answer
-//!    it once (`crate::companion::offer_cli_computer_use_approval`); the
-//!    first answer settles the card and any later one is refused;
-//! 3. only then the existing Computer use broker runs the action with a
-//!    per-call permit (the call id): a phone approval is consumed once for
-//!    that action's target, and otherwise the per-app authorization of the
-//!    Computer use broker still applies (`computer_use.rs`).
+//! 2. the approval broker shows the card on the Mac; the first answer
+//!    settles it and any later one is refused;
+//! 3. only then the existing Computer use broker runs the action, and the
+//!    per-app authorization of the Computer use broker still applies
+//!    (`computer_use.rs`).
 //!
 //! Unattended turns are refused with `unattended_requires_approval` before
 //! anything happens. The tool result carries the driver's content as MCP
@@ -39,36 +36,17 @@ fn parameters() -> Value {
     json!({ "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true })
 }
 
-/// What the group needs from the app: the lease, the linked phone, and the
-/// Computer use broker. Tests replace it with a fake driver.
+/// What the group needs from the app: the lease and the Computer use broker.
+/// Tests replace it with a fake driver.
 pub(crate) trait ComputerUseHost: Send + Sync {
     /// Opens (or keeps) the turn's Computer use lease.
     fn begin_turn(&self, binding: &TurnBinding) -> Result<(), AppError>;
 
-    /// Offers the approval to linked devices; `false` = the Mac only.
-    fn offer_to_companion<'a>(
-        &'a self,
-        binding: &'a TurnBinding,
-        request_id: &'a str,
-        call_id: &'a str,
-        arguments: &'a Value,
-    ) -> BoxFuture<'a, bool>;
-
-    /// The card was settled without the phone (or the phone already did):
-    /// retire the phone's card with the outcome.
-    fn retire_companion(&self, binding: &TurnBinding, request_id: &str, approved: bool);
-
-    /// Runs the approved action; `call_id` is the per-call permit a phone
-    /// approval is bound to. Returns the broker's MCP-shaped result.
-    fn execute<'a>(
-        &'a self,
-        binding: &'a TurnBinding,
-        call_id: &'a str,
-        arguments: Value,
-    ) -> BoxFuture<'a, Value>;
+    /// Runs the approved action. Returns the broker's MCP-shaped result.
+    fn execute(&self, arguments: Value) -> BoxFuture<'_, Value>;
 }
 
-/// The app's Computer use broker and companion.
+/// The app's Computer use broker.
 struct AppHost<'a> {
     app: &'a AppHandle,
 }
@@ -78,61 +56,10 @@ impl ComputerUseHost for AppHost<'_> {
         crate::computer_use::begin_turn_lease(self.app, binding)
     }
 
-    fn offer_to_companion<'a>(
-        &'a self,
-        binding: &'a TurnBinding,
-        request_id: &'a str,
-        call_id: &'a str,
-        arguments: &'a Value,
-    ) -> BoxFuture<'a, bool> {
-        Box::pin(crate::companion::offer_cli_computer_use_approval(
-            self.app,
-            request_id,
-            crate::companion::CliComputerUseRequest {
-                run_id: binding.run_id.clone(),
-                stored_session_id: binding.session_id.clone(),
-                tool_call_id: call_id.to_string(),
-            },
-            arguments,
+    fn execute(&self, arguments: Value) -> BoxFuture<'_, Value> {
+        Box::pin(crate::computer_use::handle_cli_action_for_call(
+            self.app, arguments,
         ))
-    }
-
-    fn retire_companion(&self, binding: &TurnBinding, request_id: &str, approved: bool) {
-        crate::companion::retire_cli_computer_use_approval(
-            self.app,
-            request_id,
-            &binding.session_id,
-            approved,
-        );
-    }
-
-    fn execute<'a>(
-        &'a self,
-        binding: &'a TurnBinding,
-        call_id: &'a str,
-        arguments: Value,
-    ) -> BoxFuture<'a, Value> {
-        Box::pin(async move {
-            let result = crate::computer_use::handle_cli_action_for_call(
-                self.app,
-                arguments,
-                &binding.session_id,
-                call_id,
-            )
-            .await;
-            let status = if is_error(&result) {
-                crate::companion::ComputerUseExecutionStatus::Failed
-            } else {
-                crate::companion::ComputerUseExecutionStatus::Succeeded
-            };
-            crate::companion::publish_computer_use_execution_status(
-                self.app,
-                call_id,
-                &binding.session_id,
-                status,
-            );
-            result
-        })
     }
 }
 
@@ -162,10 +89,6 @@ impl ComputerUseTools {
         let broker = ctx.broker()?;
         host.begin_turn(binding)?;
         let call_id = Uuid::new_v4().to_string();
-        let request_id = format!("cli-{call_id}");
-        let offered = host
-            .offer_to_companion(binding, &request_id, &call_id, arguments)
-            .await;
         let decision = broker
             .request(
                 &ApprovalTurn::from(binding),
@@ -183,11 +106,8 @@ impl ComputerUseTools {
                 },
             )
             .await;
-        if offered {
-            host.retire_companion(binding, &request_id, decision.is_ok());
-        }
         decision.map_err(|denial| AppError::new(denial.code(), denial.message()))?;
-        let result = host.execute(binding, &call_id, arguments.clone()).await;
+        let result = host.execute(arguments.clone()).await;
         if is_error(&result) {
             return Err(AppError::new("computer_use_failed", error_text(&result)));
         }

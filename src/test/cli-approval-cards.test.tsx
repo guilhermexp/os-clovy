@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalPart, ClarifyPart } from "../components/agent/chat-turns/AgentActionCards";
 import { setInterfaceLocale } from "../i18n";
-import { type AgentChatPart, companionAgentMessagesFromItems } from "../lib/agent-chat-runtime";
+import type { AgentChatPart } from "../lib/agent-chat-runtime";
 import {
   agentItemsToChatTurns,
   applyAgentRuntimeEvent,
@@ -317,32 +317,5 @@ describe("CLI interruption events", () => {
           item.interruption.resolution,
       ).toBe("once");
     }
-  });
-});
-
-describe("companion notice (D4)", () => {
-  it("tells the phone a CLI request waits on the Mac, only while pending", () => {
-    const messages = companionAgentMessagesFromItems([cliApproval(), cliQuestion()]);
-    expect(messages.map((message) => message.text)).toEqual([
-      "Clovy is waiting for your approval on your Mac: Create a routine",
-      "Clovy has a question waiting for you on your Mac: Which calendar?",
-    ]);
-    expect(messages.every((message) => message.role === "assistant")).toBe(true);
-
-    expect(
-      companionAgentMessagesFromItems([
-        cliApproval({ status: "resolved", resolution: "once" }),
-        cliQuestion({ status: "cancelled" }),
-      ]),
-    ).toEqual([]);
-  });
-
-  it("leaves native approvals on the Mac as before", () => {
-    const item = cliApproval();
-    if (item.kind === "interruption") {
-      const { engine: _engine, ...native } = item.interruption;
-      item.interruption = native as AgentInterruptionDto;
-    }
-    expect(companionAgentMessagesFromItems([item])).toEqual([]);
   });
 });

@@ -226,7 +226,7 @@ pub async fn execute_turn<S: FrameSink>(
             }
             None => launch.clone(),
         });
-    let invocation = cli::turn_invocation(
+    let mut invocation = cli::turn_invocation(
         context.kind,
         &prompt,
         conversation.as_deref(),
@@ -235,6 +235,9 @@ pub async fn execute_turn<S: FrameSink>(
         context.permissions(),
         &context.images,
     );
+    if cli::runs_through_cmd(&context.program) {
+        invocation = cli::prompt_on_stdin(invocation, context.kind, &prompt);
+    }
     for (path, content) in &invocation.files {
         if let Err(error) = std::fs::write(path, content) {
             frames

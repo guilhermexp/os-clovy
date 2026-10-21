@@ -1,7 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import type { CSSProperties } from "react";
 import { t } from "../i18n";
-import { FundingChip, FundingNotice } from "../components/account/FundingNotice";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
@@ -14,28 +13,14 @@ import { TabBar } from "../components/tabs/TabBar";
 import { ConnectorApprovalsTray } from "../components/connectors/ConnectorApprovalsTray";
 import { ComputerUseApprovalsTray } from "../components/agent/ComputerUseApprovalsTray";
 import { BrowserApprovalsTray } from "../components/agent/BrowserApprovalsTray";
-import { OPEN_REFERRAL_DIALOG_EVENT, ReferralNudge } from "../components/referral/ReferralNudge";
-import { markReferralNudgeClickedThrough } from "../lib/referral-nudge";
 import { Dialog } from "../components/ui/Dialog";
-import { osAccountsOpenPortal } from "../lib/tauri";
 import { isMacLikePlatform, isWindowsPlatform } from "../lib/platform";
-import { messageFromError } from "../lib/errors";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { NoteListItemDto } from "../lib/tauri";
-import {
-  MAX_UPGRADE_BUSY_LABEL,
-  MAX_UPGRADE_CHARGE_CONFIRM_BODY,
-  MAX_UPGRADE_CONFIRM_BODY,
-  MAX_UPGRADE_CONFIRM_LABEL,
-  MAX_UPGRADE_CONFIRM_TITLE,
-  MAX_UPGRADE_PORTAL_LABEL,
-} from "../lib/max-upgrade";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { handleSidebarResizeStart } from "./sidebar-resize";
-import { UpdateHub } from "./app-effects/update-ui";
 import { SidebarToggleGlyph, handleTitlebarPointerDown } from "./app-helpers";
 import {
-  composerFundingDisabledReason,
   SIDEBAR_COLLAPSE_WIDTH,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -47,27 +32,20 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
   const {
     accessibilityBannerDismissed,
     accessibilityBlocked,
-    account,
     activateTab,
     activeTabId,
     activeView,
     agentSessions,
     agentSessionsListRef,
-    appMaxGrantWaitRef,
-    billingNotice,
     captureActive,
     changeSettingsTab,
-    checkingUpdate,
     closeOtherTabs,
     closeTab,
     completedSessions,
     confirmDeleteNote,
-    confirmMaxUpgrade,
     detailScrollerActive,
     dispatch,
     error,
-    fundingAccount,
-    fundingRequired,
     handleCreateFolder,
     handleDeleteNote,
     handleEnableAccessibility,
@@ -75,21 +53,16 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     handleOpenNoteChatInAgent,
     handleOpenRecordingNote,
     handlePauseRecordingAfterInactivityPrompt,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
     handleReorderTabs,
-    handleReportIssue,
     handleSelectNote,
     handleSetNoteFolder,
     handleSetSessionFolder,
-    handleSignOut,
     handleToggleSessionCompleted,
     homeStoredSessionId,
     mainPanelBodyRef,
-    maxUpgradeError,
-    maxUpgradePrompt,
     moveDialogNoteIds,
     moveDialogSessionIds,
     noteChat,
@@ -102,15 +75,9 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     pendingSessionProjectRef,
     pillIsDemo,
     pillStatus,
-    preparingUpdate,
-    readyUpdate,
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
-    referralNudgeMoment,
-    referralNudgeSourceRef,
-    refreshFundingAccount,
-    relaunchingUpdate,
     selectedNote,
     sessionFolders,
     setAccessibilityBannerDismissed,
@@ -118,23 +85,18 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     setActiveView,
     setAgentOrigin,
     setConfirmDeleteNote,
-    setError,
     setFolderReturnTarget,
-    setMaxUpgradePrompt,
     setMoveDialogNoteIds,
     setMoveDialogSessionIds,
     setNoteChatOpen,
     setNoteShareUrl,
     setOriginAllNotes,
     setOriginFolderId,
-    setReferralNudgeMoment,
     setShareNoteOpen,
     setSidebarCollapsed,
     setSidebarResizing,
     setSidebarTransition,
     setSidebarWidth,
-    setUpdateProgress,
-    setUpdateStatus,
     settingsDetailScrollerActive,
     settingsReturnView,
     settingsTab,
@@ -147,11 +109,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     state,
     tabItems,
     takeNewTabIntent,
-    updateProgress,
-    updateProgressHiddenRef,
-    updateStatus,
-    updateStatusDisplay,
-    updateStatusLeaving,
     workspaceContent,
   } = dependencies;
   const noteChatVisible = activeView === "meetings" && selectedNote !== undefined && noteChatOpen;
@@ -206,7 +163,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         activeView={activeView}
         homeEnabled={isMacLikePlatform()}
         homeStoredSessionId={homeStoredSessionId}
-        account={account}
         settingsTab={settingsTab}
         onSettingsTabChange={changeSettingsTab}
         onChangeView={(view) => {
@@ -232,8 +188,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           }
         }}
         onExitSettings={() => setActiveView(settingsReturnView)}
-        onSignOut={() => void handleSignOut()}
-        onReportIssue={handleReportIssue}
         onSelectNote={(noteId) => {
           if (takeNewTabIntent()) {
             openTab({ view: "meetings", noteId });
@@ -268,29 +222,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         recordingTitle={recordingNoteTitle}
         onOpenRecording={() => (pillIsDemo ? undefined : void handleOpenRecordingNote())}
         collapsed={sidebarCollapsed}
-        footerAccessory={
-          <>
-            <UpdateHub
-              readyUpdate={readyUpdate}
-              status={updateStatus}
-              failed={updateStatusDisplay.failed}
-              statusLeaving={updateStatusLeaving}
-              checking={checkingUpdate}
-              preparing={preparingUpdate}
-              relaunching={relaunchingUpdate}
-              progress={updateProgress}
-              onDismissStatus={() => {
-                if (preparingUpdate) updateProgressHiddenRef.current = true;
-                setUpdateStatus(null);
-                if (!preparingUpdate) setUpdateProgress(null);
-              }}
-              onRelaunch={handleRelaunchUpdate}
-            />
-            {fundingRequired ? (
-              <FundingChip account={fundingAccount} onRefresh={refreshFundingAccount} />
-            ) : null}
-          </>
-        }
       />
       <div
         className="sidebar-resize-handle"
@@ -358,22 +289,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
             }
           >
             {error ? <p className="error-banner">{error}</p> : null}
-            {billingNotice ? (
-              <p className="notice-banner" role="status">
-                {billingNotice}{" "}
-                {appMaxGrantWaitRef.current?.phase === "slow" ? (
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => {
-                      void osAccountsOpenPortal().catch((err) => setError(messageFromError(err)));
-                    }}
-                  >
-                    {MAX_UPGRADE_PORTAL_LABEL}
-                  </button>
-                ) : null}
-              </p>
-            ) : null}
             <div className="workspace">{workspaceContent}</div>
           </div>
           <AnimatePresence>
@@ -407,20 +322,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
             note={{ id: selectedNote.id, title: selectedNote.title }}
             chat={noteChat}
             recordingActive={captureActive}
-            creditActionsDisabledReason={
-              fundingRequired ? composerFundingDisabledReason() : undefined
-            }
-            renderFundingNotice={
-              fundingRequired
-                ? (textFundingContext) => (
-                    <FundingNotice
-                      account={fundingAccount}
-                      onRefresh={refreshFundingAccount}
-                      textFundingContext={textFundingContext}
-                    />
-                  )
-                : undefined
-            }
             onClose={() => setNoteChatOpen(false)}
             onOpenInAgent={(sessionId) => {
               setNoteChatOpen(false);
@@ -534,20 +435,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         }
         onMoved={() => agentSessionsListRef.current?.resetSelection()}
       />
-      <ConfirmDialog
-        open={maxUpgradePrompt !== null}
-        onClose={() => setMaxUpgradePrompt(null)}
-        onConfirm={confirmMaxUpgrade}
-        title={MAX_UPGRADE_CONFIRM_TITLE}
-        description={
-          maxUpgradeError ??
-          (maxUpgradePrompt?.transport === "charge_now"
-            ? MAX_UPGRADE_CHARGE_CONFIRM_BODY
-            : MAX_UPGRADE_CONFIRM_BODY)
-        }
-        confirmLabel={MAX_UPGRADE_CONFIRM_LABEL}
-        confirmBusyLabel={MAX_UPGRADE_BUSY_LABEL}
-      />
       {/* Connector action approvals (approval trust mode) can arrive from a
             routine or chat in any view, so the tray is mounted at the shell. */}
       <div className="shell-approvals-stack">
@@ -555,22 +442,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         <ComputerUseApprovalsTray />
         <ConnectorApprovalsTray />
       </div>
-      {/* The referral delight nudge floats bottom-left at the shell so it can
-            appear over any view; click-through opens the sidebar-owned referral
-            dialog by event. */}
-      {referralNudgeMoment ? (
-        <ReferralNudge
-          moment={referralNudgeMoment}
-          onInvite={() => {
-            // Ends all future nudging, per the frequency rules — but only for
-            // real trigger shows; demo cards must not poison the caps.
-            if (referralNudgeSourceRef.current === "trigger") markReferralNudgeClickedThrough();
-            setReferralNudgeMoment(null);
-            window.dispatchEvent(new Event(OPEN_REFERRAL_DIALOG_EVENT));
-          }}
-          onDismiss={() => setReferralNudgeMoment(null)}
-        />
-      ) : null}
     </main>
   );
 }

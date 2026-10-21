@@ -6,18 +6,9 @@ export function ContextOverflowNoticePart() {
   return <div className="agent-system-notice">{t("chat.notice.contextOverflow")}</div>;
 }
 
-export function CreditsNoticePart({ onTopUp }: { onTopUp?: () => void; [key: string]: unknown }) {
+export function CreditsNoticePart(_props: { [key: string]: unknown }) {
   const t = useT();
-  return (
-    <div className="agent-system-notice">
-      {t("chat.notice.needCredits")}
-      {onTopUp ? (
-        <button type="button" onClick={onTopUp}>
-          {t("chat.notice.addCredits")}
-        </button>
-      ) : null}
-    </div>
-  );
+  return <div className="agent-system-notice">{t("chat.notice.needCredits")}</div>;
 }
 
 export function UpstreamProviderFailureNoticePart({

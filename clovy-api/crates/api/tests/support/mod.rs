@@ -10,7 +10,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Method, Request, header},
 };
-use clovy_api::{ApiLimits, ApiState, ApiStateParams, AttestationInfo, router};
+use clovy_api::{ApiLimits, ApiState, ApiStateParams, router};
 use clovy_config::{
     BrowserTransportsConfig, DEFAULT_MAX_AGENT_CHAT_BYTES, DEFAULT_MAX_IMAGE_EDIT_BYTES,
     DEFAULT_MAX_ISSUE_REPORT_BYTES, ModelPriceConfig, ModelProvider, ModelType, PriceUnit,
@@ -44,47 +44,27 @@ use tower::ServiceExt;
 pub(crate) use clovy_api::UpstreamServiceKeys;
 
 pub(crate) const AUTHORIZATION: &str = "Bearer valid-token";
-pub(crate) const TEST_COMMIT: &str = "0123abc4567890def0123abc4567890def012345";
 
 pub(crate) fn test_router() -> Router {
     router(test_state())
 }
 
-pub(crate) fn test_attestation() -> AttestationInfo {
-    AttestationInfo {
-        source_commit: TEST_COMMIT.to_string(),
-        source_repo_url: "https://github.com/open-software-network/os-clovy".to_string(),
-        image_repo: "ghcr.io/open-software-network/clovy-api".to_string(),
-        trust_center_url: "https://trust.phala.com/app/test-app-id".to_string(),
-    }
-}
-
 pub(crate) fn test_state() -> ApiState {
-    test_state_with_attestation(test_attestation())
+    test_state_with_sinks(test_issue_report_service(Arc::new(
+        RecordingIssueReportSink::default(),
+    )))
 }
 
-pub(crate) fn test_state_with_attestation(attestation: AttestationInfo) -> ApiState {
-    test_state_with_sinks(
-        test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        attestation,
-    )
-}
-
-pub(crate) fn test_state_with_issue_sink(
-    issue_reports: Arc<dyn IssueReportSink>,
-    attestation: AttestationInfo,
-) -> ApiState {
-    test_state_with_issue_sink_and_timeout(issue_reports, attestation, 5)
+pub(crate) fn test_state_with_issue_sink(issue_reports: Arc<dyn IssueReportSink>) -> ApiState {
+    test_state_with_issue_sink_and_timeout(issue_reports, 5)
 }
 
 pub(crate) fn test_state_with_issue_sink_and_timeout(
     issue_reports: Arc<dyn IssueReportSink>,
-    attestation: AttestationInfo,
     request_timeout_secs: u64,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
         issue_reports: test_issue_report_service(issue_reports),
-        attestation,
         request_timeout_secs,
         ..default_test_state_deps()
     })
@@ -100,21 +80,16 @@ pub(crate) fn test_issue_report_service(
     }))
 }
 
-pub(crate) fn test_state_with_sinks(
-    issue_reports: Arc<IssueReportService>,
-    attestation: AttestationInfo,
-) -> ApiState {
-    test_state_with_sinks_and_transcriber(issue_reports, attestation, Arc::new(FakeTranscriber))
+pub(crate) fn test_state_with_sinks(issue_reports: Arc<IssueReportService>) -> ApiState {
+    test_state_with_sinks_and_transcriber(issue_reports, Arc::new(FakeTranscriber))
 }
 
 pub(crate) fn test_state_with_sinks_and_transcriber(
     issue_reports: Arc<IssueReportService>,
-    attestation: AttestationInfo,
     transcriber: Arc<dyn Transcriber>,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
         issue_reports,
-        attestation,
         transcriber,
         ..default_test_state_deps()
     })
@@ -138,17 +113,11 @@ pub(crate) fn test_state_with_p3a_sink(p3a_sink: Arc<dyn P3aSink>) -> ApiState {
     })
 }
 
-pub(crate) fn test_state_with_share(
-    share: Option<Arc<clovy_services::ShareService>>,
-    share_viewer: clovy_api::ShareViewerInfo,
-) -> ApiState {
-    test_state_from_deps_with_viewer(
-        TestStateDeps {
-            share,
-            ..default_test_state_deps()
-        },
-        share_viewer,
-    )
+pub(crate) fn test_state_with_share(share: Option<Arc<clovy_services::ShareService>>) -> ApiState {
+    test_state_from_deps(TestStateDeps {
+        share,
+        ..default_test_state_deps()
+    })
 }
 
 pub(crate) fn test_state_with_text_pricing_without_auto(
@@ -219,7 +188,6 @@ pub(crate) fn test_state_with_text_pricing_without_auto_and_kimi_capabilities(
 pub(crate) struct TestStateDeps {
     pub(crate) pricing: BTreeMap<String, ModelPriceConfig>,
     pub(crate) issue_reports: Arc<IssueReportService>,
-    pub(crate) attestation: AttestationInfo,
     pub(crate) transcriber: Arc<dyn Transcriber>,
     pub(crate) generator: Arc<dyn Generator>,
     pub(crate) cleaner: Arc<dyn Cleaner>,
@@ -235,7 +203,6 @@ pub(crate) fn default_test_state_deps() -> TestStateDeps {
     TestStateDeps {
         pricing: models(),
         issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
-        attestation: test_attestation(),
         transcriber: Arc::new(FakeTranscriber),
         generator: Arc::new(FakeGenerator),
         cleaner: Arc::new(FakeCleaner::default()),
@@ -256,15 +223,8 @@ pub(crate) fn test_state_with_cleaner(cleaner: Arc<dyn Cleaner>) -> ApiState {
     test_state_from_deps(deps)
 }
 
-pub(crate) fn test_state_from_deps(deps: TestStateDeps) -> ApiState {
-    test_state_from_deps_with_viewer(deps, clovy_api::ShareViewerInfo::default())
-}
-
 #[allow(clippy::too_many_lines)]
-pub(crate) fn test_state_from_deps_with_viewer(
-    deps: TestStateDeps,
-    share_viewer: clovy_api::ShareViewerInfo,
-) -> ApiState {
+pub(crate) fn test_state_from_deps(deps: TestStateDeps) -> ApiState {
     let pricing = Arc::new(PricingTable::new(deps.pricing));
     let os_accounts = Arc::new(FakeOsAccounts);
     let cleaner = deps.cleaner;
@@ -352,7 +312,6 @@ pub(crate) fn test_state_from_deps_with_viewer(
         video,
         issue_reports: deps.issue_reports,
         share: deps.share,
-        share_viewer,
         p3a_reports: Arc::new(P3aReportService::new(P3aReportServiceDeps {
             sink: deps.p3a_sink,
         })),
@@ -367,7 +326,6 @@ pub(crate) fn test_state_from_deps_with_viewer(
             max_agent_concurrent_requests_per_user: 1024,
             request_timeout_secs: deps.request_timeout_secs,
         },
-        attestation: deps.attestation,
         browser_transports: deps.browser_transports,
         upstream_service_keys: deps.upstream_service_keys,
     })

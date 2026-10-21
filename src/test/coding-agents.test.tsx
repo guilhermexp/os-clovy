@@ -116,9 +116,13 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
     expect(switches).toHaveLength(7);
     for (const toggle of switches) expect(toggle).not.toBeChecked();
     await waitFor(() => {
-      expect(within(section).getAllByText("Found on this Mac")).toHaveLength(2);
+      expect(invokeMock).toHaveBeenCalledWith("coding_agents_status");
     });
-    expect(within(section).getAllByText("Not found on this Mac")).toHaveLength(5);
+    expect(
+      within(section).getByRole("switch", { name: "Read Claude Code sessions" }),
+    ).not.toBeChecked();
+    expect(within(section).getByRole("switch", { name: "Read Cursor sessions" })).not.toBeChecked();
+    expect(within(section).getByText(/summarized by the agent's own CLI/i)).toBeInTheDocument();
   });
 
   it("shows each source with its brand mark", async () => {
@@ -165,6 +169,83 @@ describe("CodingAgentSourcesSection in Settings, Activity", () => {
     render(<ActivitySettingsSection />);
     expect(await screen.findByRole("region", { name: "Agentes de código" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Ler sessões do Cursor" })).toBeInTheDocument();
+  });
+
+  it("preserves OS-context invariant on Windows for coding-agent sources in English", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "Win32",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+
+      render(<ActivitySettingsSection />);
+
+      const section = await screen.findByRole("region", { name: "Coding agents" });
+      await waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith("coding_agents_status");
+      });
+      const descriptions = section.querySelectorAll(
+        ".settings-group-description, .settings-row-description",
+      );
+      for (const el of descriptions) {
+        expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
+      }
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
+  });
+
+  it("preserves OS-context invariant on Windows for coding-agent sources in Portuguese", async () => {
+    const originalPlatform = navigator.platform;
+    const originalUserAgent = navigator.userAgent;
+
+    try {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "Win32",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+
+      applyInterfaceLocale("pt-BR");
+      render(<ActivitySettingsSection />);
+
+      const section = await screen.findByRole("region", { name: "Agentes de código" });
+      await waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith("coding_agents_status");
+      });
+      const descriptions = section.querySelectorAll(
+        ".settings-group-description, .settings-row-description",
+      );
+      for (const el of descriptions) {
+        expect(el.textContent).not.toMatch(/\b(Mac|macOS)\b/i);
+      }
+    } finally {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => originalPlatform,
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () => originalUserAgent,
+      });
+    }
   });
 });
 

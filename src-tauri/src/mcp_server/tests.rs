@@ -152,6 +152,7 @@ pub(super) async fn activity_store() -> (tempfile::TempDir, ActivityStore) {
                     browser_url: url.map(str::to_string),
                     text_source: TextSource::Accessibility,
                     text: Some(format!("{text} {index}")),
+                    input_idle_ms: None,
                 })
                 .await
                 .unwrap();
@@ -550,6 +551,7 @@ pub(crate) fn by_id(messages: &[Value], id: i64) -> &Value {
         .unwrap_or_else(|| panic!("no answer for id {id}: {messages:?}"))
 }
 
+#[cfg(unix)]
 pub(crate) fn handler_for(data: McpData) -> channel::Handler {
     let data = Arc::new(data);
     Arc::new(move |message: Value| {
@@ -571,6 +573,7 @@ pub(crate) async fn run_relay(dir: &Path, lines: &[Value]) -> Captured {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn the_relay_answers_mcp_calls_through_the_authenticated_socket() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
@@ -620,6 +623,7 @@ async fn the_relay_answers_mcp_calls_through_the_authenticated_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn the_relay_reports_a_server_that_is_off_or_never_enabled() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
@@ -659,6 +663,7 @@ async fn the_relay_reports_a_server_that_is_off_or_never_enabled() {
 }
 
 /// `channel::connect`, retried while the app frees slots.
+#[cfg(unix)]
 async fn connect_eventually(dir: &Path) -> std::os::unix::net::UnixStream {
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -675,6 +680,7 @@ async fn connect_eventually(dir: &Path) -> std::os::unix::net::UnixStream {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn peers_that_never_authenticate_are_capped_and_closed_at_once() {
     use tokio::io::AsyncReadExt;
     let root = tempfile::tempdir().unwrap();
@@ -705,6 +711,7 @@ async fn peers_that_never_authenticate_are_capped_and_closed_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn authenticated_connections_beyond_the_cap_are_turned_away_as_busy() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
@@ -736,6 +743,7 @@ async fn authenticated_connections_beyond_the_cap_are_turned_away_as_busy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
 async fn a_connection_gets_only_a_few_requests_answered_at_once() {
     use std::io::{BufRead, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1079,6 +1087,7 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
                 HourActivity {
                     description: "Coding Zephyr".into(),
                     minutes: 40,
+                    seconds: Some(2400),
                     periods: Some(vec![ActivityPeriod {
                         started_at: "2026-10-01T09:05:00.000000Z".into(),
                         ended_at: "2026-10-01T09:45:00.000000Z".into(),
@@ -1087,6 +1096,7 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
                 HourActivity {
                     description: "Reading mail".into(),
                     minutes: 5,
+                    seconds: Some(300),
                     periods: None,
                 },
             ],
@@ -1110,12 +1120,14 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
                 title: "Zephyr importer".into(),
                 summary: "Scaffolding importer".into(),
                 minutes: 45,
+                seconds: 2700,
                 note: "Initial scaffold".into(),
                 periods: Some(vec![ActivityPeriod {
                     started_at: "2026-10-01T09:05:00.000000Z".into(),
                     ended_at: "2026-10-01T09:50:00.000000Z".into(),
                 }]),
                 located_minutes: 30,
+                located_seconds: 1800,
             }],
             appends: vec![],
         },
@@ -1274,6 +1286,183 @@ async fn day_summary_returns_stored_summary_workstreams_and_reports_or_empty_sta
 }
 
 #[tokio::test]
+async fn day_summary_preserves_exact_seconds_and_legacy_duration_fallbacks() {
+    use crate::day_intelligence::db::{apply_fold, insert_hour_report, NewHourReport};
+    use crate::day_intelligence::hour::{ActivityPeriod, HourActivity};
+    use crate::day_intelligence::workstreams::{plan_fold, Placement};
+
+    let (_dir, store) = activity_store().await;
+    let day = "2026-10-01";
+    let period = ActivityPeriod {
+        started_at: "2026-10-01T09:00:00.000000Z".into(),
+        ended_at: "2026-10-01T09:00:40.000000Z".into(),
+    };
+    let activities: Vec<HourActivity> = (1..=3)
+        .map(|index| HourActivity {
+            description: format!("Short task {index}"),
+            minutes: 1,
+            seconds: Some(40),
+            periods: (index == 1).then(|| vec![period.clone()]),
+        })
+        .collect();
+    for hour in [8, 9] {
+        insert_hour_report(
+            &store,
+            &NewHourReport {
+                hour: format!("{day}T{hour:02}"),
+                day: day.into(),
+                started_at: at(hour, 0),
+                ended_at: at(hour + 1, 0),
+                active_minutes: 2,
+                summary: "Short tasks".into(),
+                activities: if hour == 9 {
+                    activities.clone()
+                } else {
+                    Vec::new()
+                },
+                distilled: String::new(),
+                distill_stats: json!({}),
+                locale: "en".into(),
+                provider: "test-provider".into(),
+                generated_at: at(10, 0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // A released report has no seconds field. An explicit zero in a newer
+    // report must not fall back to its rounded minutes.
+    query("UPDATE day_hour_reports SET activities_json = ? WHERE hour = ?")
+        .bind(
+            json!([
+                {"description": "Legacy task", "minutes": 2},
+                {"description": "Explicit zero", "minutes": 1, "seconds": 0}
+            ])
+            .to_string(),
+        )
+        .bind(format!("{day}T08"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let placements: Vec<Placement> = (1..=3)
+        .map(|index| Placement {
+            workstream_id: 0,
+            title: format!("Short task {index}"),
+            summary: String::new(),
+            activities: vec![index],
+        })
+        .collect();
+    apply_fold(
+        &store,
+        day,
+        &format!("{day}T09"),
+        &plan_fold(&[], &activities, &placements),
+        at(10, 0),
+    )
+    .await
+    .unwrap();
+    let legacy_id = query(
+        "INSERT INTO day_workstreams (day, title, summary, first_hour, last_hour, created_at, updated_at)
+         VALUES (?, 'Legacy work', 'Legacy work', '2026-10-01T08', '2026-10-01T08', 'x', 'x')",
+    )
+    .bind(day)
+    .execute(store.pool())
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    query(
+        "INSERT INTO day_workstream_hours (workstream_id, hour, minutes, note, periods_json)
+         VALUES (?, '2026-10-01T08', 2, 'Legacy task', ?)",
+    )
+    .bind(legacy_id)
+    .bind(json!({"periods": [period], "locatedMinutes": 1}).to_string())
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let open = data(
+        notes_pool().await,
+        ActivityAccess::Open {
+            store,
+            settings: capture_on(),
+        },
+    );
+    let summary = call(&open, "get_day_summary", json!({"date": day}))
+        .await
+        .unwrap();
+    let reports = summary["hourReports"].as_array().unwrap();
+    let modern = &reports[1];
+    assert_eq!(modern["activeMinutes"], json!(2));
+    let durations: Vec<_> = modern["activities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|activity| (activity["minutes"].clone(), activity["seconds"].clone()))
+        .collect();
+    assert_eq!(durations, vec![(json!(1), json!(40)); 3]);
+    let legacy_activities = &reports[0]["activities"];
+    assert_eq!(legacy_activities[0]["minutes"], json!(2));
+    assert_eq!(legacy_activities[0]["seconds"], json!(120));
+    assert_eq!(legacy_activities[1]["minutes"], json!(1));
+    assert_eq!(legacy_activities[1]["seconds"], json!(0));
+
+    let workstreams = summary["workstreams"].as_array().unwrap();
+    let durations: Vec<_> = workstreams
+        .iter()
+        .map(|workstream| (workstream["minutes"].clone(), workstream["seconds"].clone()))
+        .collect();
+    assert_eq!(
+        durations,
+        vec![
+            (json!(1), json!(40)),
+            (json!(1), json!(40)),
+            (json!(1), json!(40)),
+            (json!(2), json!(120)),
+        ]
+    );
+    let hours: Vec<_> = workstreams
+        .iter()
+        .map(|workstream| {
+            let hour = &workstream["hours"][0];
+            (
+                hour["minutes"].clone(),
+                hour["seconds"].clone(),
+                hour["locatedMinutes"].clone(),
+                hour["locatedSeconds"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        hours,
+        vec![
+            (json!(1), json!(40), json!(1), json!(40)),
+            (json!(1), json!(40), json!(0), json!(0)),
+            (json!(1), json!(40), json!(0), json!(0)),
+            (json!(2), json!(120), json!(1), json!(60)),
+        ]
+    );
+
+    let panels = call(&open, "get_day_panels", json!({"date": day}))
+        .await
+        .unwrap();
+    let durations: Vec<_> = panels["panels"]["workstreams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workstream| (workstream["minutes"].clone(), workstream["seconds"].clone()))
+        .collect();
+    assert_eq!(
+        durations,
+        vec![
+            (json!(1), json!(40)),
+            (json!(1), json!(40)),
+            (json!(1), json!(40)),
+            (json!(2), json!(120)),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn day_panels_draw_the_day_from_filtered_activity_meetings_and_coding_agents() {
     use crate::coding_agents::settings::CodingAgentSources;
     use crate::coding_agents::store::NewBlock;
@@ -1357,10 +1546,12 @@ async fn day_panels_draw_the_day_from_filtered_activity_meetings_and_coding_agen
             creates: vec![Create {
                 title: "Zephyr importer".into(),
                 summary: "Scaffolding importer".into(),
-                minutes: 7,
+                minutes: 1,
+                seconds: 40,
                 note: "Initial scaffold".into(),
                 periods: None,
                 located_minutes: 0,
+                located_seconds: 0,
             }],
             appends: vec![],
         },
@@ -1408,7 +1599,7 @@ async fn day_panels_draw_the_day_from_filtered_activity_meetings_and_coding_agen
     assert_eq!(at_nine["focusedMinutes"], json!(7.0));
     assert_eq!(
         panels["workstreams"],
-        json!([{ "id": panels["workstreams"][0]["id"], "title": "Zephyr importer", "minutes": 7 }])
+        json!([{ "id": panels["workstreams"][0]["id"], "title": "Zephyr importer", "minutes": 1, "seconds": 40 }])
     );
     // Only the open partition's meeting; only the source turned on.
     assert_eq!(panels["meetings"], json!({ "count": 1, "minutes": 30.0 }));

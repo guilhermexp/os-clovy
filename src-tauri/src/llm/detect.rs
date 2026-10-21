@@ -1,4 +1,5 @@
-//! Detection of the six agent CLIs on the user's login-shell PATH, with the
+//! Detection of the six agent CLIs on the user's PATH (the login shell's on macOS,
+//! the app's own on Windows; see [`super::shell_env`]), with the
 //! resolved path and the version each CLI reports.
 
 use super::{
@@ -44,10 +45,7 @@ pub async fn detect(kind: CliKind, env: &LoginEnv) -> CliStatus {
             installed: false,
             path: None,
             version: None,
-            reason: Some(format!(
-                "`{}` was not found in your login shell PATH.",
-                kind.id()
-            )),
+            reason: Some(format!("`{}` was not found on your PATH.", kind.id())),
             structured_output: kind.structured_output(),
             tools_disabled: kind.tools_disabled(),
         };
@@ -89,9 +87,13 @@ async fn read_version(path: &std::path::Path, env: &LoginEnv) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::llm::shell_env::resolve_login_env;
-    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::Path};
+    use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::{os::unix::fs::PermissionsExt, path::Path};
 
+    #[cfg(unix)]
     fn write_script(path: &Path, body: &str) {
         std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -99,6 +101,7 @@ mod tests {
 
     /// A fake login shell: like a profile, it prepends `extra_dir` to PATH
     /// and exports a profile variable, then runs the `-c` script.
+    #[cfg(unix)]
     fn fake_login_shell(dir: &Path, extra_dir: &Path) -> std::path::PathBuf {
         let shell = dir.join("fake-shell");
         write_script(
@@ -111,6 +114,7 @@ mod tests {
         shell
     }
 
+    #[cfg(unix)]
     fn gui_app_env(home: &Path) -> BTreeMap<String, String> {
         BTreeMap::from([
             ("PATH".to_string(), "/usr/bin:/bin".to_string()),
@@ -119,6 +123,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_cli_found_only_through_the_login_shell_path() {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("local-bin");
@@ -178,6 +183,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn llm_broken_login_shell_falls_back_to_the_app_environment() {
         let root = tempfile::tempdir().unwrap();
         let shell = root.path().join("broken-shell");
