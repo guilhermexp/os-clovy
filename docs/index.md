@@ -118,7 +118,7 @@ Per-repo config the engineering skills read before acting (see the
 - [companion-revocation.md](companion-revocation.md) - online and future-connection revocation behavior
 - [companion-development.md](companion-development.md) - local relay, desktop, iPhone, and iPad development workflow
 - [browser-computer-use-prd.md](browser-computer-use-prd.md) — PRD: Browser use + Computer use plugins (JUN-278); extension in the user's browser + routines-only managed browser, phase-2 computer use
-- [release-extension.md](release-extension.md) - Chrome Web Store publisher setup, RC review gate, stable promotion, and recovery runbook
+- [release-extension.md](release-extension.md) - browser extension store identity and local packaging checks (no automated store publication)
 - [private-sharing-design.md](private-sharing-design.md) — private link sharing (JUN-308): bearer-link product contract, optional passcode, and the end-to-end encrypted snapshot model
 - [computer-use-cua-driver-spike.md](computer-use-cua-driver-spike.md) — spike (JUN-288): run the bundled cua-driver outside the write jail as a broker-owned, separately-signed daemon (recommended on identity/lifecycle grounds; a fully relocated daemon does start in-jail, up to the TCC gate); pinning + installer-never-runs confirmed
 - [plugins/portfolio.md](plugins/portfolio.md) — JUN-309 portfolio: current ChatGPT plugin surface inventory, ranking rubric, Clovy's top 10, shared product contract, sequencing, metrics, and explicit deferrals
@@ -163,10 +163,9 @@ Per-repo config the engineering skills read before acting (see the
 - [private-connectors-threat-model.md](private-connectors-threat-model.md) — local-mode threat model: the source of truth for all connector privacy copy (what OpenSoftware can and cannot see, the trust surface, agent protections, the known runtime limitation)
 - [configuration.md](configuration.md) — env + config reference (desktop client + Clovy API)
 - [auto-model-rollout.md](auto-model-rollout.md) — canary, enablement, and rollback steps for automatic private model routing
-- [development.md](development.md) — local development: quick start, running against staging or an ephemeral Phala CVM, local data, permissions, agent skills, verification commands
+- [development.md](development.md) — local development: quick start, local data, permissions, agent skills, verification commands
 - [os-accounts-login.md](os-accounts-login.md) — Login with Open Software: PKCE, keychain, account gates
 - [onboarding-design.md](onboarding-design.md) — onboarding flow design (verify against what shipped)
-- ~~os-accounts-backend.md~~ — historical; superseded by `clovy-api-prd.md`
 
 ## Release & ops runbooks
 
@@ -174,12 +173,8 @@ Per-repo config the engineering skills read before acting (see the
 - [companion-apns-setup.md](companion-apns-setup.md) - Apple push setup for content-free wake hints
 - [companion-app-store-readiness.md](companion-app-store-readiness.md) - TestFlight and App Store checklist
 - [companion-security-review.md](companion-security-review.md) - required independent review checklist
-- [release-macos.md](release-macos.md) / [release-windows.md](release-windows.md) — the release runbooks
-- [desktop-release-runner.md](desktop-release-runner.md) — Mac Studio self-hosted runner setup for signed desktop releases
-- [reproducible-builds.md](reproducible-builds.md) — Clovy API source → TEE trust chain (Phase A shipped)
-- [github-security-readiness.md](github-security-readiness.md) — pre-public repo hardening checklist
+- [release-macos.md](release-macos.md) / [release-windows.md](release-windows.md) — building and validating the desktop app locally (no published releases)
 - [computer-use-support.md](computer-use-support.md) - state guide, TCC recovery, signed helper self-test, and macOS release regression response
-- [clovy-link-rollout.md](clovy-link-rollout.md) — isolated rollout of the `june.link` short-link origin, kept off the production Clovy API ingress
 - [local-ci-signoff.md](local-ci-signoff.md) — local commit-status signoff that replaces the slow hosted PR jobs during agent iteration
 
 ## QA

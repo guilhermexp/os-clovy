@@ -380,7 +380,6 @@ describe("Clovy technical identity", () => {
       windowsHelper,
       dictation,
       computerUseFixture,
-      reproducibleBuilds,
       index,
       onboardingPreview,
       styleguide,
@@ -391,7 +390,6 @@ describe("Clovy technical identity", () => {
       read("src-tauri/native/windows-dictation-helper/src/audio.rs"),
       read("src-tauri/src/dictation.rs"),
       read("src-tauri/native/computer-use-fixture/main.swift"),
-      read("docs/reproducible-builds.md"),
       read("index.html"),
       read("onboarding-preview.html"),
       read("styleguide.html"),
@@ -410,7 +408,6 @@ describe("Clovy technical identity", () => {
     expect(dictation).toContain('format!("clovy-dictation-{utterance_id}-normalized.wav")');
     expect(computerUseFixture).toContain('"clovy-cu-observer-window"');
     expect(computerUseFixture).not.toContain('"june-cu-observer-window"');
-    expect(reproducibleBuilds).toContain("the `clovy-api` binary");
     expect(index.indexOf('localStorage.getItem("os-clovy:theme")')).toBeLessThan(
       index.indexOf('localStorage.getItem("os-june:theme")'),
     );

@@ -15,7 +15,6 @@ describe("Clovy repository branding", () => {
       ".github/ISSUE_TEMPLATE/feature_request.yml",
       "clovy-api/config.toml",
       "clovy-api/crates/config/src/lib.rs",
-      "docs/desktop-release-runner.md",
       "docs/private-connectors-implementation-plan.md",
       "docs/release-extension.md",
       "docs/telemetry-p3a-implementation-plan.md",
