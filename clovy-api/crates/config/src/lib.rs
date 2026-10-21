@@ -1,5 +1,5 @@
 use figment::{
-    Figment, Provider,
+    Figment,
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
@@ -27,9 +27,8 @@ const UPSTREAM_API_KEY_PLACEHOLDERS: &[&str] = &[
 ];
 pub const IMAGE_EDIT_SOURCE_MAX_BYTES: usize = 50 * 1024 * 1024;
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
-/// Matches os-platform's general attachment cap. Clovy API is the authenticated
-/// report boundary, so it must accept the same video size the downstream file
-/// API accepts instead of silently imposing the platform's former 10 MiB cap.
+/// Issue report attachment cap: large enough for a screen recording, while
+/// the total request cap below keeps the body bounded.
 pub const ISSUE_REPORT_ATTACHMENT_MAX_BYTES: usize = 300 * 1024 * 1024;
 /// Multipart framing and the report's text fields need a small amount of room
 /// beyond one maximum-sized attachment. This remains a total request cap, so
@@ -164,7 +163,6 @@ pub struct AppConfig {
     pub browser_transports: BrowserTransportsConfig,
     pub os_accounts: OsAccountsConfig,
     pub upstreams: UpstreamsConfig,
-    pub attestation: AttestationConfig,
     #[serde(default)]
     pub issue_reports: IssueReportsConfig,
     /// Emergency rollout control for the local Computer use driver. The
@@ -251,7 +249,6 @@ impl Debug for AppConfig {
             .field("browser_transports", &self.browser_transports)
             .field("os_accounts", &self.os_accounts)
             .field("upstreams", &self.upstreams)
-            .field("attestation", &self.attestation)
             .field("issue_reports", &self.issue_reports)
             .field("computer_use", &self.computer_use)
             .field("share", &RedactedShare(&self.share))
@@ -330,34 +327,10 @@ const fn default_true() -> bool {
     true
 }
 
-/// Where user-submitted issue reports get forwarded. The destination defaults
-/// to Clovy's legacy `june` product handle in OS Platform; only the bot API key is
-/// environment specific. Without that key, reports land in structured logs only.
-#[derive(Clone, Deserialize, Serialize)]
+/// Issue reports are logged by the service, never forwarded. These settings
+/// cover only the optional server-side diagnosis that runs before logging.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct IssueReportsConfig {
-    /// Base URL of the os-platform (fellow) API.
-    #[serde(default = "default_issue_report_api_url")]
-    pub os_platform_api_url: String,
-    /// os-platform API key of the reporting bot user — that user
-    /// must be a member of the target Org/Project. Redacted Debug.
-    /// `CLOVY__ISSUE_REPORTS__OS_PLATFORM_API_KEY`.
-    #[serde(default)]
-    pub os_platform_api_key: String,
-    /// Target Org handle (or opaque `org_…` id).
-    #[serde(default = "default_issue_report_org")]
-    pub os_platform_org: String,
-    /// Target Project handle (or opaque `prj_…` id).
-    #[serde(default = "default_issue_report_project")]
-    pub os_platform_project: String,
-    /// Label slug attached to every report Issue.
-    #[serde(default = "default_issue_report_label")]
-    pub os_platform_label: String,
-    /// Reward asset symbol for the zero-reward Issue (e.g. "POINTS").
-    /// Issues are bounties under the hood, and creation fails when neither
-    /// the Project nor the Org has a default reward asset — naming one here
-    /// sidesteps that. Empty omits the field and relies on the defaults.
-    #[serde(default = "default_issue_report_reward_asset")]
-    pub os_platform_reward_asset: String,
     /// Optional model id used by Clovy API to diagnose issue reports before
     /// delivery. `None` preserves direct delivery with no upstream model call.
     #[serde(default)]
@@ -371,26 +344,6 @@ pub struct IssueReportsConfig {
     pub diagnosis_max_per_user_per_hour: u64,
 }
 
-fn default_issue_report_api_url() -> String {
-    "https://app.opensoftware.co/api".to_string()
-}
-
-fn default_issue_report_org() -> String {
-    "june".to_string()
-}
-
-fn default_issue_report_project() -> String {
-    "bug-reports".to_string()
-}
-
-fn default_issue_report_label() -> String {
-    "bug".to_string()
-}
-
-fn default_issue_report_reward_asset() -> String {
-    "POINTS".to_string()
-}
-
 fn default_issue_report_diagnosis_timeout_secs() -> u64 {
     DEFAULT_ISSUE_REPORT_DIAGNOSIS_TIMEOUT_SECS
 }
@@ -402,57 +355,11 @@ fn default_issue_report_diagnosis_max_per_user_per_hour() -> u64 {
 impl Default for IssueReportsConfig {
     fn default() -> Self {
         Self {
-            os_platform_api_url: default_issue_report_api_url(),
-            os_platform_api_key: String::new(),
-            os_platform_org: default_issue_report_org(),
-            os_platform_project: default_issue_report_project(),
-            os_platform_label: default_issue_report_label(),
-            os_platform_reward_asset: default_issue_report_reward_asset(),
             diagnosis_model: None,
             diagnosis_timeout_secs: default_issue_report_diagnosis_timeout_secs(),
             diagnosis_max_per_user_per_hour: default_issue_report_diagnosis_max_per_user_per_hour(),
         }
     }
-}
-
-impl Debug for IssueReportsConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("IssueReportsConfig")
-            .field("os_platform_api_url", &self.os_platform_api_url)
-            .field(
-                "os_platform_api_key",
-                if self.os_platform_api_key.is_empty() {
-                    &"<unset>"
-                } else {
-                    &REDACTED
-                },
-            )
-            .field("os_platform_org", &self.os_platform_org)
-            .field("os_platform_project", &self.os_platform_project)
-            .field("os_platform_label", &self.os_platform_label)
-            .field("os_platform_reward_asset", &self.os_platform_reward_asset)
-            .field("diagnosis_model", &self.diagnosis_model)
-            .field("diagnosis_timeout_secs", &self.diagnosis_timeout_secs)
-            .field(
-                "diagnosis_max_per_user_per_hour",
-                &self.diagnosis_max_per_user_per_hour,
-            )
-            .finish()
-    }
-}
-
-/// Public facts the `/verify` attestation page reports. Nothing here is a
-/// secret; all fields have working defaults so local builds need no setup.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AttestationConfig {
-    /// Full git commit the running image was built from. Stamped into the
-    /// image env by the Docker build (`ARG GIT_SHA`); empty for local builds.
-    #[serde(default)]
-    pub source_commit: String,
-    pub source_repo_url: String,
-    pub image_repo: String,
-    pub trust_center_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -480,8 +387,6 @@ pub struct ServerConfig {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct LocalDevConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_local_dev_bearer_token")]
     pub bearer_token: String,
     #[serde(default = "default_local_dev_user_id")]
@@ -515,7 +420,6 @@ fn default_local_dev_user_id() -> String {
 impl Default for LocalDevConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             bearer_token: default_local_dev_bearer_token(),
             user_id: default_local_dev_user_id(),
             viewer_bearer_token: String::new(),
@@ -529,7 +433,6 @@ impl Debug for LocalDevConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LocalDevConfig")
-            .field("enabled", &self.enabled)
             .field(
                 "bearer_token",
                 if self.bearer_token.is_empty() {
@@ -559,19 +462,6 @@ pub struct ShareConfig {
     /// Postgres URL for the share store. Empty disables sharing.
     #[serde(default)]
     pub database_url: String,
-    /// OS Accounts site origin the viewer sends recipients to for sign-in
-    /// (e.g. `https://accounts.opensoftware.co`). Empty falls back to the
-    /// canonical issuer from `os_accounts.iss`.
-    #[serde(default)]
-    pub viewer_accounts_url: String,
-    /// Public OAuth client id registered for the browser viewer.
-    #[serde(default)]
-    pub viewer_client_id: String,
-    /// Restrict this process to the read-only browser viewer surface. This is
-    /// used by the isolated june.link CVM so its ingress and certificate
-    /// lifecycle cannot expose or disrupt the primary Clovy API deployment.
-    #[serde(default)]
-    pub viewer_only: bool,
     /// Max accepted ciphertext, in bytes.
     #[serde(default = "default_share_max_ciphertext_bytes")]
     pub max_ciphertext_bytes: usize,
@@ -638,9 +528,6 @@ impl Default for ShareConfig {
     fn default() -> Self {
         Self {
             database_url: String::new(),
-            viewer_accounts_url: String::new(),
-            viewer_client_id: String::new(),
-            viewer_only: false,
             max_ciphertext_bytes: default_share_max_ciphertext_bytes(),
         }
     }
@@ -666,28 +553,16 @@ impl Debug for RedactedShare<'_> {
                     "<redacted>"
                 },
             )
-            .field("viewer_accounts_url", &self.0.viewer_accounts_url)
-            .field("viewer_client_id", &self.0.viewer_client_id)
-            .field("viewer_only", &self.0.viewer_only)
             .field("max_ciphertext_bytes", &self.0.max_ciphertext_bytes)
             .finish()
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+/// Credit estimates and hold windows the metering flow computes for every
+/// metered action. In local mode nothing is charged; the values still bound
+/// the inference client windows and request validation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OsAccountsConfig {
-    pub api_url: String,
-    pub app_api_key: String,
-    /// Optional service token for anonymous P3A aggregate ingestion into OS
-    /// Accounts. When unset (empty), P3A ingest is disabled: reports fall back
-    /// to the log-only sink while startup and all other ingest proceed
-    /// normally.
-    #[serde(default)]
-    pub p3a_ingest_token: String,
-    pub iss: String,
-    pub aud: String,
-    pub jwks_refresh_secs: u64,
-    pub jwks_miss_min_backoff_secs: u64,
     pub authorize_hold_ttl_note_transcribe_secs: u64,
     pub authorize_hold_ttl_note_generate_secs: u64,
     pub authorize_hold_ttl_dictate_transcribe_secs: u64,
@@ -720,66 +595,6 @@ pub struct OsAccountsConfig {
     /// max (ADR 0015 Decision 2).
     #[serde(default = "default_video_hold_ttl_secs")]
     pub authorize_hold_ttl_video_secs: u64,
-}
-
-impl Debug for OsAccountsConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OsAccountsConfig")
-            .field("api_url", &self.api_url)
-            .field("app_api_key", &REDACTED)
-            .field(
-                "p3a_ingest_token",
-                if self.p3a_ingest_token.trim().is_empty() {
-                    &"<unset>"
-                } else {
-                    &REDACTED
-                },
-            )
-            .field("iss", &self.iss)
-            .field("aud", &self.aud)
-            .field("jwks_refresh_secs", &self.jwks_refresh_secs)
-            .field(
-                "jwks_miss_min_backoff_secs",
-                &self.jwks_miss_min_backoff_secs,
-            )
-            .field(
-                "authorize_hold_ttl_note_transcribe_secs",
-                &self.authorize_hold_ttl_note_transcribe_secs,
-            )
-            .field(
-                "authorize_hold_ttl_note_generate_secs",
-                &self.authorize_hold_ttl_note_generate_secs,
-            )
-            .field(
-                "authorize_hold_ttl_dictate_transcribe_secs",
-                &self.authorize_hold_ttl_dictate_transcribe_secs,
-            )
-            .field(
-                "authorize_hold_ttl_dictate_cleanup_secs",
-                &self.authorize_hold_ttl_dictate_cleanup_secs,
-            )
-            .field(
-                "note_transcribe_preview_max_audio_secs",
-                &self.note_transcribe_preview_max_audio_secs,
-            )
-            .field("flat_estimate_credits", &self.flat_estimate_credits)
-            .field("web_search_credits", &self.web_search_credits)
-            .field("web_fetch_credits", &self.web_fetch_credits)
-            .field(
-                "authorize_hold_ttl_web_secs",
-                &self.authorize_hold_ttl_web_secs,
-            )
-            .field(
-                "authorize_hold_ttl_image_secs",
-                &self.authorize_hold_ttl_image_secs,
-            )
-            .field(
-                "authorize_hold_ttl_video_secs",
-                &self.authorize_hold_ttl_video_secs,
-            )
-            .finish()
-    }
 }
 
 /// Clovy's service access to each upstream: Groq for audio, `OpenRouter` for
@@ -1191,13 +1006,6 @@ impl Default for AppConfig {
             local_dev: LocalDevConfig::default(),
             browser_transports: BrowserTransportsConfig::default(),
             os_accounts: OsAccountsConfig {
-                api_url: String::new(),
-                app_api_key: String::new(),
-                p3a_ingest_token: String::new(),
-                iss: "os-accounts-dev".to_string(),
-                aud: "clovy-api-dev".to_string(),
-                jwks_refresh_secs: 300,
-                jwks_miss_min_backoff_secs: 5,
                 authorize_hold_ttl_note_transcribe_secs: 60,
                 authorize_hold_ttl_note_generate_secs: DEFAULT_IMAGE_HOLD_TTL_SECS,
                 authorize_hold_ttl_dictate_transcribe_secs: 30,
@@ -1227,14 +1035,6 @@ impl Default for AppConfig {
                     api_key: String::new(),
                     base_url: "https://api.tavily.com".to_string(),
                 },
-            },
-            attestation: AttestationConfig {
-                source_commit: String::new(),
-                source_repo_url: "https://github.com/open-software-network/os-clovy".to_string(),
-                image_repo: "ghcr.io/open-software-network/clovy-api".to_string(),
-                trust_center_url:
-                    "https://trust.phala.com/app/6514acb0e08dc4825e2b6e22a46f0ed0ff455b54"
-                        .to_string(),
             },
             issue_reports: IssueReportsConfig::default(),
             computer_use: ComputerUseConfig::default(),
@@ -1270,102 +1070,46 @@ pub enum ConfigError {
     InvalidPricing { model: String, reason: String },
 }
 
-fn merge_compatibility_namespaces(
-    figment: Figment,
-    legacy: impl Provider,
-    canonical: impl Provider,
-) -> Figment {
-    figment.merge(legacy).merge(canonical)
-}
-
 pub fn load() -> Result<AppConfig, ConfigError> {
-    let base = Figment::new()
+    let config: AppConfig = Figment::new()
         .merge(Serialized::defaults(AppConfig::default()))
-        .merge(Toml::file("config.toml"));
-    // Released deployments still provide JUNE__ variables. Merge them first,
-    // then let the Clovy-canonical namespace override field by field so
-    // rollout can be gradual and reversible.
-    let config: AppConfig = merge_compatibility_namespaces(
-        base,
-        Env::prefixed("JUNE__").split("__"),
-        Env::prefixed("CLOVY__").split("__"),
-    )
-    .extract()
-    .map_err(Box::new)
-    .map_err(ConfigError::from)?;
+        .merge(Toml::file("config.toml"))
+        .merge(Env::prefixed("CLOVY__").split("__"))
+        .extract()
+        .map_err(Box::new)
+        .map_err(ConfigError::from)?;
     validate(&config)?;
     Ok(config)
 }
 
-const LEGACY_OS_ACCOUNTS_APP_API_KEY_PLACEHOLDER: &str = concat!("osk", "_REPLACE_ME");
-const OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS: &[&str] = &[
-    "REPLACE_WITH_OS_ACCOUNTS_APP_API_KEY",
-    LEGACY_OS_ACCOUNTS_APP_API_KEY_PLACEHOLDER,
-];
 const LOCAL_DEV_BEARER_TOKEN_PLACEHOLDERS: &[&str] = &[LOCAL_DEV_BEARER_TOKEN_PLACEHOLDER];
 
 fn validate(config: &AppConfig) -> Result<(), ConfigError> {
-    if config.share.viewer_only {
-        return validate_viewer_only(config);
-    }
-
     validate_server_config(config)?;
-    if config.local_dev.enabled {
-        validate_local_dev_bearer_token(config)?;
-        validate_required_text("local_dev.user_id", &config.local_dev.user_id)?;
-        if !config.local_dev.user_id.starts_with("usr_") {
-            return Err(ConfigError::InvalidRequired {
-                field: "local_dev.user_id",
-                reason: "must start with usr_",
-            });
-        }
-    } else {
-        validate_absolute_http_url("os_accounts.api_url", &config.os_accounts.api_url)?;
-        validate_required_secret(
-            "os_accounts.app_api_key",
-            &config.os_accounts.app_api_key,
-            OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS,
-        )?;
-        // os_accounts.p3a_ingest_token is deliberately not validated here:
-        // the token is optional, and when unset the P3A sink degrades to
-        // log-only instead of failing startup (JUN-231).
+    validate_local_dev_bearer_token(config)?;
+    validate_required_text("local_dev.user_id", &config.local_dev.user_id)?;
+    if !config.local_dev.user_id.starts_with("usr_") {
+        return Err(ConfigError::InvalidRequired {
+            field: "local_dev.user_id",
+            reason: "must start with usr_",
+        });
     }
     validate_request_limits(config)?;
     validate_issue_report_diagnosis(config)?;
 
-    // Every capability's upstream needs its base URL. Outside local dev Clovy
-    // also needs its own service key for each, so service-funded requests work
-    // at startup; requests carrying the user's own key need no service key.
-    for (base_url_field, api_key_field, upstream) in [
-        (
-            "upstreams.groq.base_url",
-            "upstreams.groq.api_key",
-            &config.upstreams.groq,
-        ),
+    // Every capability's upstream needs its base URL. A service key is
+    // optional: without one, requests need the user's own key for that
+    // upstream.
+    for (base_url_field, upstream) in [
+        ("upstreams.groq.base_url", &config.upstreams.groq),
         (
             "upstreams.openrouter.base_url",
-            "upstreams.openrouter.api_key",
             &config.upstreams.openrouter,
         ),
-        (
-            "upstreams.fal.base_url",
-            "upstreams.fal.api_key",
-            &config.upstreams.fal,
-        ),
-        (
-            "upstreams.tavily.base_url",
-            "upstreams.tavily.api_key",
-            &config.upstreams.tavily,
-        ),
+        ("upstreams.fal.base_url", &config.upstreams.fal),
+        ("upstreams.tavily.base_url", &config.upstreams.tavily),
     ] {
         validate_absolute_http_url(base_url_field, &upstream.base_url)?;
-        if !config.local_dev.enabled {
-            validate_required_secret(
-                api_key_field,
-                &upstream.api_key,
-                UPSTREAM_API_KEY_PLACEHOLDERS,
-            )?;
-        }
     }
 
     for (model_id, pricing) in &config.pricing {
@@ -1416,34 +1160,6 @@ fn validate_server_config(config: &AppConfig) -> Result<(), ConfigError> {
         "server.model_catalog_refresh_secs",
         config.server.model_catalog_refresh_secs,
     )
-}
-
-/// The isolated short-link process does not expose product routes and must not
-/// need their billing/provider credentials. Validate only the network origins
-/// and limits its viewer routes actually use. Sharing itself still fails closed
-/// at runtime (501) when the database or public client id is absent; the deploy
-/// contract probes the shell and a missing link so a partially sealed CVM
-/// cannot pass activation.
-fn validate_viewer_only(config: &AppConfig) -> Result<(), ConfigError> {
-    validate_absolute_http_url("os_accounts.api_url", &config.os_accounts.api_url)?;
-    let (viewer_accounts_field, viewer_accounts_url) =
-        if config.share.viewer_accounts_url.trim().is_empty() {
-            ("os_accounts.iss", &config.os_accounts.iss)
-        } else {
-            (
-                "share.viewer_accounts_url",
-                &config.share.viewer_accounts_url,
-            )
-        };
-    validate_absolute_http_url(viewer_accounts_field, viewer_accounts_url)?;
-    validate_request_limits(config)?;
-    if config.share.max_ciphertext_bytes == 0 {
-        return Err(ConfigError::InvalidRequired {
-            field: "share.max_ciphertext_bytes",
-            reason: "must be > 0",
-        });
-    }
-    Ok(())
 }
 
 /// Video markups (thousandths) must be > 0 — a zero markup would charge nothing
@@ -1782,24 +1498,6 @@ fn validate_required_text(field: &'static str, value: &str) -> Result<(), Config
     Ok(())
 }
 
-fn validate_required_secret(
-    field: &'static str,
-    value: &str,
-    placeholders: &[&str],
-) -> Result<(), ConfigError> {
-    validate_required_text(field, value)?;
-    if placeholders
-        .iter()
-        .any(|placeholder| value.trim() == *placeholder)
-    {
-        return Err(ConfigError::InvalidRequired {
-            field,
-            reason: "placeholder value must be replaced",
-        });
-    }
-    Ok(())
-}
-
 fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), ConfigError> {
     validate_required_text(field, value)?;
     let parsed = Url::parse(value.trim()).map_err(|_| ConfigError::InvalidRequired {
@@ -1855,23 +1553,19 @@ mod tests {
         AppConfig, ConfigError, DEFAULT_IMAGE_CLIENT_TIMEOUT_SECS, DEFAULT_IMAGE_HOLD_TTL_SECS,
         DEFAULT_MAX_AGENT_CHAT_BYTES, DEFAULT_MAX_AGENT_CONCURRENT_REQUESTS_PER_USER,
         DEFAULT_MAX_AGENT_INFLIGHT_BODY_BYTES, DEFAULT_MAX_IMAGE_EDIT_BYTES,
-        DEFAULT_MAX_ISSUE_REPORT_BYTES, DEFAULT_REQUEST_TIMEOUT_SECS, DEFAULT_VIDEO_HOLD_TTL_SECS,
-        DEFAULT_VIDEO_JOB_MAX_SECS, DEFAULT_VIDEO_MAX_RESPONSE_BYTES, IMAGE_EDIT_SOURCE_MAX_BYTES,
+        DEFAULT_REQUEST_TIMEOUT_SECS, DEFAULT_VIDEO_HOLD_TTL_SECS, DEFAULT_VIDEO_JOB_MAX_SECS,
+        DEFAULT_VIDEO_MAX_RESPONSE_BYTES, IMAGE_EDIT_SOURCE_MAX_BYTES,
         IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS, ISSUE_REPORT_ATTACHMENT_MAX_BYTES, ModelPriceConfig,
-        ModelProvider, ModelType, OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS,
-        OS_ACCOUNTS_AUTHORIZE_TIMEOUT_BUDGET_SECS, OS_ACCOUNTS_MAX_HOLD_TTL_SECS, PriceUnit,
-        UPSTREAM_API_KEY_PLACEHOLDERS, UpstreamConfig, VIDEO_CLIENT_POLL_WINDOW_SECS,
-        VIDEO_SETTLEMENT_TIMEOUT_MARGIN_SECS, image_client_timeout_secs, is_loopback_host,
-        merge_compatibility_namespaces, validate, validate_request_limits,
+        ModelProvider, ModelType, OS_ACCOUNTS_AUTHORIZE_TIMEOUT_BUDGET_SECS,
+        OS_ACCOUNTS_MAX_HOLD_TTL_SECS, PriceUnit, UPSTREAM_API_KEY_PLACEHOLDERS, UpstreamConfig,
+        VIDEO_CLIENT_POLL_WINDOW_SECS, VIDEO_SETTLEMENT_TIMEOUT_MARGIN_SECS,
+        image_client_timeout_secs, is_loopback_host, validate, validate_request_limits,
     };
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
 
     fn valid_config() -> AppConfig {
         let mut config = AppConfig::default();
-        config.os_accounts.api_url = "http://127.0.0.1:3000".to_string();
-        config.os_accounts.app_api_key = "osk_test".to_string();
-        config.os_accounts.p3a_ingest_token = "p3a-test-token".to_string();
         config.upstreams.groq.api_key = "gsk-test".to_string();
         config.upstreams.openrouter.api_key = "sk-or-test".to_string();
         config.upstreams.fal.api_key = "fal-test".to_string();
@@ -1890,32 +1584,6 @@ mod tests {
             .merge(Toml::file(toml_path))
             .extract::<AppConfig>()
             .unwrap_or_default()
-    }
-
-    #[test]
-    fn clovy_environment_namespace_wins_with_june_as_fallback() {
-        use figment::{Figment, providers::Serialized};
-        use serde_json::json;
-
-        let both = merge_compatibility_namespaces(
-            Figment::new().merge(Serialized::defaults(AppConfig::default())),
-            Serialized::defaults(json!({ "server": { "port": 8181 } })),
-            Serialized::defaults(json!({ "server": { "port": 8282 } })),
-        )
-        .extract::<AppConfig>();
-        assert!(both.is_ok());
-        let both = both.unwrap_or_default();
-        assert_eq!(both.server.port, 8282);
-
-        let legacy_only = merge_compatibility_namespaces(
-            Figment::new().merge(Serialized::defaults(AppConfig::default())),
-            Serialized::defaults(json!({ "server": { "port": 8181 } })),
-            Serialized::defaults(json!({})),
-        )
-        .extract::<AppConfig>();
-        assert!(legacy_only.is_ok());
-        let legacy_only = legacy_only.unwrap_or_default();
-        assert_eq!(legacy_only.server.port, 8181);
     }
 
     #[test]
@@ -1964,59 +1632,6 @@ mod tests {
             .extract()?;
         assert_eq!(config.share.max_ciphertext_bytes, 10 * 1024 * 1024);
         Ok(())
-    }
-
-    #[test]
-    fn viewer_only_config_does_not_require_product_secrets() {
-        let mut config = AppConfig::default();
-        config.share.viewer_only = true;
-        config.os_accounts.api_url = "https://accounts-api.example".to_string();
-        config.os_accounts.iss = "https://accounts.example".to_string();
-
-        assert!(validate(&config).is_ok());
-    }
-
-    #[test]
-    fn viewer_only_config_still_validates_its_accounts_origin() {
-        let mut config = AppConfig::default();
-        config.share.viewer_only = true;
-        config.os_accounts.api_url = "not-a-url".to_string();
-        config.os_accounts.iss = "https://accounts.example".to_string();
-
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn viewer_only_config_names_the_invalid_fallback_accounts_origin() {
-        let mut config = AppConfig::default();
-        config.share.viewer_only = true;
-        config.os_accounts.api_url = "https://accounts-api.example".to_string();
-        config.os_accounts.iss = "not-a-url".to_string();
-
-        assert!(matches!(
-            validate(&config),
-            Err(ConfigError::InvalidRequired {
-                field: "os_accounts.iss",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn viewer_only_config_names_an_invalid_explicit_accounts_origin() {
-        let mut config = AppConfig::default();
-        config.share.viewer_only = true;
-        config.os_accounts.api_url = "https://accounts-api.example".to_string();
-        config.os_accounts.iss = "https://accounts.example".to_string();
-        config.share.viewer_accounts_url = "not-a-url".to_string();
-
-        assert!(matches!(
-            validate(&config),
-            Err(ConfigError::InvalidRequired {
-                field: "share.viewer_accounts_url",
-                ..
-            })
-        ));
     }
 
     #[test]
@@ -2122,17 +1737,12 @@ mod tests {
     #[test]
     fn config_debug_redacts_secrets() {
         let mut config = AppConfig::default();
-        config.os_accounts.app_api_key = "app_api_key_secret_value".to_string();
         config.local_dev.bearer_token = "local-secret-token".to_string();
         config.upstreams.groq.api_key = "gsk-secret".to_string();
         config.upstreams.openrouter.api_key = "sk-or-secret".to_string();
         config.upstreams.fal.api_key = "fal-secret".to_string();
         config.upstreams.tavily.api_key = "tvly-secret".to_string();
         let dump = format!("{config:?}");
-        assert!(
-            !dump.contains("app_api_key_secret_value"),
-            "app_api_key leaked in Debug: {dump}"
-        );
         assert!(!dump.contains("local-secret-token"));
         for secret in ["gsk-secret", "sk-or-secret", "fal-secret", "tvly-secret"] {
             assert!(!dump.contains(secret), "{secret} leaked in Debug: {dump}");
@@ -2325,45 +1935,6 @@ mod tests {
             AppConfig::default().server.max_issue_report_bytes,
             ISSUE_REPORT_ATTACHMENT_MAX_BYTES + (1024 * 1024)
         );
-    }
-
-    #[test]
-    fn production_ingress_accepts_the_issue_report_body_budget() -> Result<(), String> {
-        let compose = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../deploy/docker-compose.production.yml"
-        ));
-        let configured_limits = compose
-            .lines()
-            .filter_map(|line| {
-                line.trim()
-                    .strip_prefix("- CLIENT_MAX_BODY_SIZE=")
-                    .map(str::trim)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            configured_limits.len(),
-            1,
-            "production compose must declare one ingress body limit"
-        );
-        let configured_limit = configured_limits
-            .first()
-            .copied()
-            .ok_or_else(|| "production ingress body limit is missing".to_string())?;
-        let configured_mib = configured_limit
-            .strip_suffix('m')
-            .ok_or_else(|| "ingress limit should use nginx MiB units".to_string())?
-            .parse::<usize>()
-            .map_err(|error| format!("ingress limit should be numeric: {error}"))?;
-        let configured_bytes = configured_mib
-            .checked_mul(1024 * 1024)
-            .ok_or_else(|| "ingress body limit should fit usize".to_string())?;
-
-        assert!(
-            configured_bytes >= DEFAULT_MAX_ISSUE_REPORT_BYTES,
-            "production ingress body limit ({configured_bytes}) is below Clovy API's issue-report limit ({DEFAULT_MAX_ISSUE_REPORT_BYTES})"
-        );
-        Ok(())
     }
 
     #[test]
@@ -2583,80 +2154,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_missing_os_accounts_key() {
-        let mut config = valid_config();
-        config.os_accounts.app_api_key = String::new();
-
-        let result = validate(&config);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_accepts_missing_p3a_ingest_token() {
-        let mut config = valid_config();
-        config.os_accounts.p3a_ingest_token = String::new();
-
-        let result = validate(&config);
-
-        assert!(
-            result.is_ok(),
-            "missing P3A ingest token must not fail validation: {result:?}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_schemeless_os_accounts_api_url() {
-        let mut config = valid_config();
-        config.os_accounts.api_url = "accounts.opensoftware.co/api".to_string();
-
-        let result = validate(&config);
-
-        assert!(matches!(
-            result,
-            Err(ConfigError::InvalidRequired {
-                field: "os_accounts.api_url",
-                reason: "must be an absolute http or https URL"
-            })
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_os_accounts_placeholder_keys() {
-        for placeholder in OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS {
-            let mut config = valid_config();
-            config.os_accounts.app_api_key = (*placeholder).to_string();
-
-            let result = validate(&config);
-
-            assert!(result.is_err(), "accepted placeholder: {placeholder}");
-        }
-    }
-
-    #[test]
-    fn validate_rejects_provider_placeholder_keys() {
-        for placeholder in UPSTREAM_API_KEY_PLACEHOLDERS {
-            for upstream in 0..4 {
-                let mut config = valid_config();
-                let target = match upstream {
-                    0 => &mut config.upstreams.groq,
-                    1 => &mut config.upstreams.openrouter,
-                    2 => &mut config.upstreams.fal,
-                    _ => &mut config.upstreams.tavily,
-                };
-                target.api_key = (*placeholder).to_string();
-
-                let result = validate(&config);
-
-                assert!(
-                    result.is_err(),
-                    "accepted placeholder {placeholder} for upstream {upstream}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn only_a_real_service_key_counts_as_configured() {
         let upstream = |api_key: &str| UpstreamConfig {
             api_key: api_key.to_string(),
@@ -2675,17 +2172,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_local_dev_skips_os_accounts_requirements() {
-        let mut config = AppConfig::default();
-        config.local_dev.enabled = true;
-        config.upstreams.groq.api_key = "gsk-test".to_string();
-
-        let result = validate(&config);
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn validate_rejects_zero_model_catalog_refresh_interval() {
         let mut config = valid_config();
         config.server.model_catalog_refresh_secs = 0;
@@ -2698,7 +2184,6 @@ mod tests {
     #[test]
     fn validate_local_dev_allows_missing_provider_keys() {
         let mut config = AppConfig::default();
-        config.local_dev.enabled = true;
         config.upstreams.groq.api_key = String::new();
         config.upstreams.openrouter.api_key = "OPENROUTER_API_KEY_REPLACE_ME".to_string();
         config.upstreams.fal.api_key = "FAL_API_KEY_REPLACE_ME".to_string();
@@ -2712,7 +2197,6 @@ mod tests {
     #[test]
     fn validate_local_dev_rejects_blank_bearer_token() {
         let mut config = AppConfig::default();
-        config.local_dev.enabled = true;
         config.local_dev.bearer_token = "  ".to_string();
 
         let result = validate(&config);
@@ -2723,7 +2207,6 @@ mod tests {
     #[test]
     fn validate_local_dev_rejects_default_bearer_token_on_non_loopback_host() {
         let mut config = AppConfig::default();
-        config.local_dev.enabled = true;
         config.server.host = "0.0.0.0".to_string();
 
         let result = validate(&config);
@@ -2762,7 +2245,6 @@ mod tests {
         // address keeps the API off the network: any 127.0.0.0/8 address or ::1.
         for host in ["127.0.0.1", "127.0.0.2", "::1"] {
             let mut config = AppConfig::default();
-            config.local_dev.enabled = true;
             config.server.host = host.to_string();
 
             let result = validate(&config);
@@ -2776,7 +2258,6 @@ mod tests {
         // The fail-fast error must explain the risk and the fix, not just name
         // the field (security audit 2026-07-17).
         let mut config = AppConfig::default();
-        config.local_dev.enabled = true;
         config.server.host = "0.0.0.0".to_string();
 
         let result = validate(&config);
@@ -2799,7 +2280,6 @@ mod tests {
     #[test]
     fn validate_local_dev_allows_random_bearer_token_on_non_loopback_host() {
         let mut config = AppConfig::default();
-        config.local_dev.enabled = true;
         config.server.host = "0.0.0.0".to_string();
         config.local_dev.bearer_token =
             "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_string();
@@ -2815,7 +2295,6 @@ mod tests {
     #[test]
     fn validate_local_dev_rejects_non_user_id() {
         let mut config = AppConfig::default();
-        config.local_dev.enabled = true;
         config.local_dev.user_id = "local_dev".to_string();
 
         let result = validate(&config);

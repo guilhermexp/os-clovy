@@ -417,7 +417,6 @@ mod tests {
             diagnosis_model: Some("diagnosis-model".to_string()),
             diagnosis_timeout_secs: 1,
             diagnosis_max_per_user_per_hour: 1,
-            ..IssueReportsConfig::default()
         };
         let service = IssueReportService::new(IssueReportServiceDeps {
             sink: sink.clone(),

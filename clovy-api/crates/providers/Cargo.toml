@@ -17,7 +17,6 @@ bytes.workspace = true
 hound.workspace = true
 image.workspace = true
 mp4.workspace = true
-jsonwebtoken.workspace = true
 reqwest.workspace = true
 clovy-config.workspace = true
 clovy-domain.workspace = true

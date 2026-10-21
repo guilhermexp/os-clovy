@@ -11,6 +11,5 @@ pub(crate) mod notes;
 pub(crate) mod p3a;
 pub(crate) mod share;
 pub(crate) mod share_viewer;
-pub(crate) mod verify;
 pub(crate) mod video;
 pub(crate) mod web;

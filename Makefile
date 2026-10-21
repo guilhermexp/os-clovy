@@ -3,8 +3,7 @@
 # `make verify` locally should mean green CI. Use `make dev` to run clovy-api
 # and the desktop app together locally; production builds use `pnpm tauri:build`.
 .PHONY: help install \
-	dev dev-staging dev-api \
-	ephemeral-api ephemeral-api-down dev-with-ephemeral-api \
+	dev dev-api \
 	check format typecheck test-web \
 	tauri-fmt tauri-fmt-check tauri-lint tauri-test \
 	companion-fmt companion-fmt-check companion-lint companion-test \
@@ -33,32 +32,8 @@ install:  ## Install frontend deps (Rust builds via cargo)
 dev:  ## Run the desktop app + clovy-api together (Ctrl-C stops both)
 	pnpm tauri:dev
 
-# Uses real staging OS Accounts login; the local-dev bearer does not work against staging.
-dev-staging:  ## Run the desktop app against staging Clovy API (real OS Accounts login)
-	CLOVY_API_URL=https://june-api-staging.opensoftware.co \
-		OS_CLOVY_LOCAL_DEV=0 \
-		OS_ACCOUNTS_URL=https://os-accounts-portal-staging.up.railway.app \
-		OS_ACCOUNTS_API_URL=https://os-accounts-api-staging.up.railway.app \
-		CLOVY_DEV_SKIP_LOCAL_API=1 \
-		pnpm tauri:dev
-
 dev-api:  ## Run only clovy-api locally on :8080 (loads clovy-api/.env)
-	node scripts/clovy-api-env-compat.mjs
 	cd clovy-api && cargo run -p clovy-api-server -- serve
-
-# Ephemeral Phala CVM: the working-tree clovy-api inside a real TEE, on demand.
-# Cost model: tdx.small bills $0.058/hr from creation until you delete it, and
-# the ttl.sh image tag expires after 4h (the CVM keeps running, but a restart
-# past expiry cannot re-pull the image). `dev-with-ephemeral-api` always deletes
-# the CVM on exit; the other two leave it up, so remember `ephemeral-api-down`.
-ephemeral-api:  ## Deploy the working-tree clovy-api to a disposable Phala CVM
-	./scripts/ephemeral-clovy-api.sh up
-
-ephemeral-api-down:  ## Delete the ephemeral CVM
-	./scripts/ephemeral-clovy-api.sh down
-
-dev-with-ephemeral-api:  ## Run the app against a fresh ephemeral CVM; deletes it on exit
-	./scripts/ephemeral-clovy-api.sh dev
 
 # --- Frontend (src/, scripts/) ---
 check:  ## Biome check (format + lint, incl. the lucide ban)

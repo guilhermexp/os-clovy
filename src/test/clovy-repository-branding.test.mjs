@@ -15,7 +15,6 @@ describe("Clovy repository branding", () => {
       ".github/ISSUE_TEMPLATE/config.yml",
       ".github/ISSUE_TEMPLATE/feature_request.yml",
       "clovy-api/config.toml",
-      "clovy-api/crates/api/src/handlers/verify.rs",
       "clovy-api/crates/config/src/lib.rs",
       "docs/desktop-release-runner.md",
       "docs/private-connectors-implementation-plan.md",
@@ -51,9 +50,5 @@ describe("Clovy repository branding", () => {
       expect(source).not.toContain("https://t.me/osjune");
       expect(source).toContain("https://t.me/+B4Z8KUqEsRc4ZGVh");
     }
-    expect(read("clovy-api/config.toml")).toContain(
-      'source_repo_url = "https://github.com/open-software-network/os-clovy"',
-    );
   });
-
 });
