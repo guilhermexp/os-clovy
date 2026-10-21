@@ -654,6 +654,50 @@ mod tests {
         matchers::{method, path},
     };
 
+    /// Local mode is the only mode: a default config, with no OS Accounts
+    /// settings and no opt-in flag, authenticates the local bearer token and
+    /// rejects requests without it.
+    #[tokio::test]
+    async fn default_config_authenticates_the_local_token() {
+        let config = AppConfig::default();
+        let http = reqwest::Client::new();
+        let app = build_router(
+            &config,
+            HttpClients {
+                default: &http,
+                upstream: &http,
+                metered_inference: &http,
+                issue_reports: &http,
+            },
+            Arc::new(PricingTable::new(config.pricing.clone())),
+            RuntimeStores {
+                share: None,
+                companion: CompanionRuntime {
+                    store: None,
+                    snapshot: clovy_domain::CompanionSnapshot::default(),
+                    enabled: true,
+                    push: None,
+                },
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let url = format!("http://{address}/v1/video/status/vid_missing");
+
+        let with_token = http
+            .get(&url)
+            .bearer_auth(clovy_config::LOCAL_DEV_BEARER_TOKEN_PLACEHOLDER)
+            .send()
+            .await
+            .unwrap();
+        let without_token = http.get(&url).send().await.unwrap();
+        server.abort();
+
+        assert_ne!(with_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(without_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
     /// Local dev without service keys used to drop every priced model (an
     /// empty catalog, so dictation failed `model_not_priced`). The catalog now
     /// keeps the packaged Groq and `OpenRouter` rows plus the live `OpenRouter`

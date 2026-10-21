@@ -1919,6 +1919,20 @@ mod tests {
     }
 
     #[test]
+    fn local_mode_needs_no_os_accounts_settings_or_opt_in() {
+        // No OS Accounts URL or key and no local-mode flag: local mode is the
+        // only mode, so the bare default config is valid.
+        assert!(validate(&AppConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn packaged_config_binds_loopback_and_validates_without_env() {
+        let config = packaged_config_toml();
+        assert_eq!(config.server.host, "127.0.0.1");
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
     fn computer_use_accepts_the_released_june_version_field() {
         use figment::{
             Figment,

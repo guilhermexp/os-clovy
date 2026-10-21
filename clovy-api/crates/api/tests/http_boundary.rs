@@ -2040,6 +2040,26 @@ async fn integration_video_animate_rejects_body_over_configured_limit() -> Resul
 }
 
 #[tokio::test]
+async fn integration_attestation_and_accounts_sign_in_routes_are_gone() -> Result<(), Box<dyn Error>>
+{
+    let verify = send(get_request("/verify")?).await;
+    assert_eq!(verify.status(), StatusCode::NOT_FOUND);
+
+    let token_exchange = send(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/share-viewer/token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"code":"c","code_verifier":"v","redirect_uri":"http://127.0.0.1/s/callback"}"#,
+            ))?,
+    )
+    .await;
+    assert_eq!(token_exchange.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
 async fn integration_verify_page_is_public_html() -> Result<(), Box<dyn Error>> {
     let response = send(get_request("/verify")?).await;
 
