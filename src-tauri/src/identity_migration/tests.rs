@@ -158,6 +158,8 @@ fn dir_plan(base: &Path) -> MigrationPlan {
         },
         extra_directories: Vec::new(),
         credentials: Vec::new(),
+        source_executables: Vec::new(),
+        lock_wait: std::time::Duration::ZERO,
     }
 }
 
@@ -576,4 +578,336 @@ fn a_proof_source_reads_only_its_own_names() {
         );
     }
     assert!(source_override("not an identifier").is_none());
+}
+
+// --- Data safety (review findings I1 to I5) ---------------------------------
+
+fn activity_copy() -> CredentialCopy {
+    CredentialCopy {
+        source_service: "old.activity-db".into(),
+        legacy_service: None,
+        target_service: "new.activity-db".into(),
+    }
+}
+
+/// A notes database in WAL mode whose last rows live only in the WAL, held
+/// open by a connection the caller keeps alive.
+async fn notes_with_pending_wal(path: &Path) -> sqlx_sqlite::SqliteConnection {
+    use sqlx::connection::ConnectOptions;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut connection = sqlx_sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(sqlx_sqlite::SqliteJournalMode::Wal)
+        .pragma("wal_autocheckpoint", "0")
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query::query("CREATE TABLE probe(id INTEGER PRIMARY KEY, body TEXT)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    for index in 0..50 {
+        sqlx::query::query("INSERT INTO probe(body) VALUES (?)")
+            .bind(format!("row {index}"))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+    connection
+}
+
+async fn count_rows(path: &Path, table: &str) -> i64 {
+    use sqlx::connection::ConnectOptions;
+    use sqlx::row::Row;
+    let mut connection = sqlx_sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query::query(&format!("SELECT count(*) AS n FROM {table}"))
+        .fetch_one(&mut connection)
+        .await
+        .unwrap()
+        .get("n")
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_to_copy_while_the_old_app_is_running() {
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    // A process named like the old app's executable.
+    let name = format!("oldapp{}", std::process::id() % 100_000);
+    let binary = base.path().join(&name);
+    std::fs::copy("/bin/sleep", &binary).unwrap();
+    let mut old_app = std::process::Command::new(&binary)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    plan.source_executables = vec![name.clone()];
+    let before = tree_hash(&plan.data.source);
+
+    let result = migrate(&plan, &MemoryStore::default(), &mut StdCopier);
+    let _ = old_app.kill();
+    let _ = old_app.wait();
+
+    let error = result.expect_err("the old app is running");
+    assert!(error.blocked, "{error}");
+    assert!(error.to_string().contains(&name), "{error}");
+    assert!(is_empty_or_absent(&plan.data.target));
+    assert_eq!(tree_hash(&plan.data.source), before);
+}
+
+#[tokio::test]
+async fn databases_are_copied_as_single_file_snapshots() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    let source_db = plan.data.source.join("notes.sqlite3");
+    let writer = notes_with_pending_wal(&source_db).await;
+    assert!(plan.data.source.join("notes.sqlite3-wal").exists());
+    let before = tree_hash(&plan.data.source);
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    for companion in ["notes.sqlite3-wal", "notes.sqlite3-shm"] {
+        assert!(
+            !plan.data.target.join(companion).exists(),
+            "{companion} must not be copied: the snapshot is one file"
+        );
+    }
+    assert_eq!(
+        count_rows(&plan.data.target.join("notes.sqlite3"), "probe").await,
+        50
+    );
+    assert_eq!(tree_hash(&plan.data.source), before);
+    drop(writer);
+}
+
+#[tokio::test]
+async fn the_activity_database_is_snapshotted_with_its_key() {
+    use crate::activity::key::{ActivityKeyStore, MemoryKeyStore};
+    use crate::activity::store::{ActivityStore, NewFrame, TextSource, ACTIVITY_DB_FILE};
+    use chrono::{TimeZone, Utc};
+
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = dir_plan(base.path());
+    std::fs::create_dir_all(&plan.data.source).unwrap();
+    let keys = MemoryKeyStore::default();
+    // Left open: its WAL holds frames that are not in the main file yet.
+    let open_db = ActivityStore::open(&plan.data.source.join(ACTIVITY_DB_FILE), &keys)
+        .await
+        .unwrap();
+    for minute in 0..5 {
+        open_db
+            .insert_frame(&NewFrame {
+                captured_at: Utc.with_ymd_and_hms(2026, 10, 1, 9, minute, 0).unwrap(),
+                app_name: "Zed".into(),
+                bundle_id: None,
+                window_title: None,
+                browser_url: None,
+                text_source: TextSource::Accessibility,
+                text: Some(format!("frame {minute}")),
+                input_idle_ms: None,
+            })
+            .await
+            .unwrap();
+    }
+    plan.credentials.push(activity_copy());
+    let store = MemoryStore::with(&[(
+        "old.activity-db",
+        "sqlcipher-key",
+        keys.current().unwrap().as_str(),
+    )]);
+
+    migrate(&plan, &store, &mut StdCopier).expect("migrate");
+
+    assert!(!plan.data.target.join("activity.sqlite3-wal").exists());
+    let raw = std::fs::read(plan.data.target.join(ACTIVITY_DB_FILE)).unwrap();
+    assert!(
+        !raw.starts_with(b"SQLite format 3"),
+        "the snapshot stays encrypted"
+    );
+    let new_keys = MemoryKeyStore::default();
+    new_keys
+        .store(&store.value("new.activity-db", "sqlcipher-key").unwrap())
+        .unwrap();
+    let copied = ActivityStore::open(&plan.data.target.join(ACTIVITY_DB_FILE), &new_keys)
+        .await
+        .unwrap();
+    assert_eq!(copied.frames_after(0, 10).await.unwrap().len(), 5);
+    open_db.close().await;
+}
+
+#[test]
+fn a_different_target_credential_fails_without_publishing() {
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    plan.credentials.push(activity_copy());
+    let store = MemoryStore::with(&[
+        ("old.activity-db", "sqlcipher-key", "old-key"),
+        // Minted by an earlier launch whose migration failed.
+        ("new.activity-db", "sqlcipher-key", "orphan-key"),
+    ]);
+
+    let error = migrate(&plan, &store, &mut StdCopier).expect_err("conflicting key");
+
+    assert!(error.to_string().contains("new.activity-db"), "{error}");
+    assert!(is_empty_or_absent(&plan.data.target));
+    assert_eq!(
+        store.value("new.activity-db", "sqlcipher-key").as_deref(),
+        Some("orphan-key")
+    );
+}
+
+#[test]
+fn an_equal_target_credential_is_accepted() {
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    plan.credentials.push(activity_copy());
+    let store = MemoryStore::with(&[
+        ("old.activity-db", "sqlcipher-key", "same-key"),
+        ("new.activity-db", "sqlcipher-key", "same-key"),
+    ]);
+
+    migrate(&plan, &store, &mut StdCopier).expect("equal key");
+
+    assert!(plan.data.target.join("notes.sqlite3").exists());
+}
+
+fn lock_path(plan: &MigrationPlan) -> PathBuf {
+    let mut name = plan.data.target.file_name().unwrap().to_os_string();
+    name.push(".identity-migration.lock");
+    plan.data.target.with_file_name(name)
+}
+
+fn staging_for(plan: &MigrationPlan, pid: u32) -> PathBuf {
+    let mut name = plan.data.target.file_name().unwrap().to_os_string();
+    name.push(format!(".identity-migration-{pid}"));
+    plan.data.target.with_file_name(name)
+}
+
+#[cfg(unix)]
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
+#[test]
+fn a_launch_holding_the_lock_blocks_the_migration() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    // This very process, alive and running the same executable.
+    std::fs::write(lock_path(&plan), std::process::id().to_string()).unwrap();
+
+    let error = migrate(&plan, &MemoryStore::default(), &mut StdCopier)
+        .expect_err("another launch holds the lock");
+
+    assert!(error.blocked, "{error}");
+    assert!(is_empty_or_absent(&plan.data.target));
+    assert!(lock_path(&plan).exists(), "the holder's lock is left alone");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dead_holder_is_taken_over_and_only_dead_staging_is_removed() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    std::fs::write(lock_path(&plan), dead_pid().to_string()).unwrap();
+    let dead_staging = staging_for(&plan, dead_pid());
+    write(&dead_staging.join("partial"), b"left by a crashed launch");
+    let mut live = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let live_staging = staging_for(&plan, live.id());
+    write(&live_staging.join("partial"), b"owned by a live process");
+
+    let result = migrate(&plan, &MemoryStore::default(), &mut StdCopier);
+    let _ = live.kill();
+    let _ = live.wait();
+
+    result.expect("a dead holder does not block");
+    assert!(plan.data.target.join("notes.sqlite3").exists());
+    assert!(!dead_staging.exists());
+    assert!(live_staging.exists());
+    assert!(!lock_path(&plan).exists(), "the lock is released");
+}
+
+/// Records renames; can panic on the n-th one to stand in for a crash.
+struct RenameRecorder {
+    renames: Vec<PathBuf>,
+    panic_at: Option<usize>,
+}
+
+impl FileCopier for RenameRecorder {
+    fn copy_file(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::copy(from, to).map(|_| ())
+    }
+
+    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.renames.push(to.to_path_buf());
+        if self.panic_at == Some(self.renames.len()) {
+            panic!("process died while publishing");
+        }
+        std::fs::rename(from, to)
+    }
+}
+
+fn plan_with_webview(base: &Path) -> MigrationPlan {
+    let mut plan = dir_plan(base);
+    old_profile(&plan.data.source);
+    plan.extra_directories.push(DirectoryCopy {
+        source: base.join("old-webkit"),
+        target: base.join("new-webkit"),
+    });
+    write(&base.join("old-webkit").join("LocalStorage"), b"ui state");
+    plan
+}
+
+#[test]
+fn the_data_directory_is_published_last() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = plan_with_webview(base.path());
+    let mut recorder = RenameRecorder {
+        renames: Vec::new(),
+        panic_at: None,
+    };
+
+    migrate(&plan, &MemoryStore::default(), &mut recorder).expect("migrate");
+
+    assert_eq!(recorder.renames.last(), Some(&plan.data.target));
+}
+
+#[test]
+fn an_interrupted_publication_is_finished_by_the_next_launch() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = plan_with_webview(base.path());
+    let store = MemoryStore::default();
+
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut recorder = RenameRecorder {
+            renames: Vec::new(),
+            panic_at: Some(2),
+        };
+        migrate(&plan, &store, &mut recorder)
+    }));
+    assert!(crashed.is_err(), "the first launch died while publishing");
+
+    migrate(&plan, &store, &mut StdCopier).expect("the next launch");
+
+    assert!(plan.data.target.join("notes.sqlite3").exists());
+    assert_eq!(
+        std::fs::read(base.path().join("new-webkit").join("LocalStorage")).unwrap(),
+        b"ui state"
+    );
 }

@@ -59,6 +59,11 @@ pub struct MigrationPlan {
     /// The other directories (config when it differs, WebView store).
     pub extra_directories: Vec<DirectoryCopy>,
     pub credentials: Vec<CredentialCopy>,
+    /// Executable names of the source identity's app: nothing is copied while
+    /// one of them runs.
+    pub source_executables: Vec<String>,
+    /// How long to wait for another launch that is migrating the same target.
+    pub lock_wait: std::time::Duration,
 }
 
 /// The platform base directories the app identifier is appended to.
@@ -78,11 +83,15 @@ pub struct SourceIdentity {
     pub identifier: String,
     pub credential_prefix: String,
     pub legacy_credential_prefix: Option<String>,
+    /// The source app's executable names (`os-june`, `os-june.exe`).
+    pub executables: Vec<String>,
 }
 
 /// The June-era names: the only place the app still spells them.
 const JUNE_IDENTIFIER: &str = "co.opensoftware.june";
 const JUNE_CLOVY_CREDENTIAL_PREFIX: &str = "co.opensoftware.clovy";
+/// Every build before the rename ran as `os-june`, June and Clovy alike.
+const JUNE_EXECUTABLES: &[&str] = &["os-june", "os-june.exe"];
 
 /// Each credential service, and whether the old bridge kept a June-era twin.
 const CREDENTIAL_SERVICES: &[(&str, bool)] = &[
@@ -104,6 +113,10 @@ pub fn default_source(target_identifier: &str) -> Option<SourceIdentity> {
         identifier: JUNE_IDENTIFIER.into(),
         credential_prefix: JUNE_CLOVY_CREDENTIAL_PREFIX.into(),
         legacy_credential_prefix: Some(JUNE_IDENTIFIER.into()),
+        executables: JUNE_EXECUTABLES
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
     })
 }
 
@@ -121,6 +134,7 @@ pub fn source_override(identifier: &str) -> Option<SourceIdentity> {
         identifier: identifier.into(),
         credential_prefix: identifier.into(),
         legacy_credential_prefix: None,
+        executables: Vec::new(),
     })
 }
 
@@ -198,6 +212,8 @@ pub fn plan(
         data: profile(&dirs.data),
         extra_directories,
         credentials,
+        source_executables: source.executables.clone(),
+        lock_wait: std::time::Duration::from_secs(600),
     }
 }
 
@@ -212,6 +228,11 @@ pub trait CredentialStore {
 /// Copies one regular file; tests inject failures through it.
 pub trait FileCopier {
     fn copy_file(&mut self, from: &Path, to: &Path) -> std::io::Result<()>;
+
+    /// Publishes a staged folder; tests stand in a crash here.
+    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
 }
 
 pub struct StdCopier;
@@ -233,11 +254,26 @@ pub enum Outcome {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("identity migration failed: {0}")]
-pub struct MigrationError(pub String);
+#[error("identity migration failed: {message}")]
+pub struct MigrationError {
+    pub message: String,
+    /// Nothing was copied because something outside the app must change
+    /// first (the old app is running, another launch is migrating): the
+    /// launch must stop instead of starting on an empty profile.
+    pub blocked: bool,
+}
+
+impl MigrationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            blocked: false,
+        }
+    }
+}
 
 fn fail(context: impl std::fmt::Display, error: impl std::fmt::Display) -> MigrationError {
-    MigrationError(format!("{context}: {error}"))
+    MigrationError::new(format!("{context}: {error}"))
 }
 
 /// Regular files, their bytes, and symlinks under a tree. Sockets and other
@@ -327,7 +363,7 @@ fn measure(root: &Path) -> Result<TreeTotals, MigrationError> {
 fn staging_path(target: &Path) -> Result<PathBuf, MigrationError> {
     let name = target
         .file_name()
-        .ok_or_else(|| MigrationError(format!("{} has no name", target.display())))?;
+        .ok_or_else(|| MigrationError::new(format!("{} has no name", target.display())))?;
     let mut staged = name.to_os_string();
     staged.push(format!(".identity-migration-{}", std::process::id()));
     Ok(target.with_file_name(staged))
@@ -496,7 +532,7 @@ fn migrate_into(
         let copied = copy_tree(&copy.source, &staging, copier)?;
         let expected = measure(&copy.source)?;
         if copied != expected || measure(&staging)? != expected {
-            return Err(MigrationError(format!(
+            return Err(MigrationError::new(format!(
                 "{} changed or copied incompletely ({copied:?} of {expected:?})",
                 copy.source.display()
             )));
