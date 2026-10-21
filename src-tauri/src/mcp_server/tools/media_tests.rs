@@ -689,7 +689,6 @@ async fn media_generate_image_reaches_a_fake_clovy_api_over_http() {
             ])
             .env(CHILD, "1")
             .env("CLOVY_API_URL", format!("http://{address}"))
-            .env("OS_CLOVY_LOCAL_DEV", "1")
             .env("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "media-test-token")
             .output()
             .unwrap()

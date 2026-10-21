@@ -283,7 +283,6 @@ Run the app against a FRESH ephemeral CVM (its own flow, this one is not reused)
 
 Or use this one from a manual session (token is in $STATE_FILE, mode 600):
   export CLOVY_API_URL=$url
-  export OS_CLOVY_LOCAL_DEV=1
   export CLOVY_DEV_SKIP_LOCAL_API=1
   export OS_CLOVY_LOCAL_DEV_BEARER_TOKEN="\$(jq -r .token $STATE_FILE)"
 
@@ -368,9 +367,7 @@ cmd_dev() {
 
   echo "Starting the desktop app against $url ..."
   CLOVY_API_URL="$url" \
-    OS_CLOVY_LOCAL_DEV=1 \
     OS_CLOVY_LOCAL_DEV_BEARER_TOKEN="$token" \
-    OS_CLOVY_LOCAL_DEV_USER_ID="$LOCAL_DEV_USER_ID" \
     CLOVY_DEV_SKIP_LOCAL_API=1 \
     pnpm tauri:dev
 }
