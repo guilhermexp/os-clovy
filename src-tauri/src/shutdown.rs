@@ -572,7 +572,7 @@ mod tests {
     use std::sync::Arc;
 
     fn deadline_covers_ordered_leaves(aggregate_ms: u64, leaves_ms: &[u64]) -> bool {
-        aggregate_ms >= leaves_ms.iter().sum()
+        aggregate_ms >= leaves_ms.iter().sum::<u64>()
     }
 
     #[test]
