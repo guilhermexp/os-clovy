@@ -17,7 +17,7 @@ import {
   subscribeToOnboardingComplete,
 } from "../lib/onboarding";
 import { TELEMETRY_INFO_URL } from "../lib/p3a";
-import type { AccountStatus, RecordingSourceReadinessDto } from "../lib/tauri";
+import type { RecordingSourceReadinessDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
   dictationSettings: vi.fn(),
@@ -29,10 +29,8 @@ const mocks = vi.hoisted(() => ({
   setP3aEnabled: vi.fn(),
   p3aRecord: vi.fn(),
   setClovyPersona: vi.fn(),
-  osAccountsLogin: vi.fn(),
   clovyOpenCommunityPage: vi.fn(),
   clovyOpenVerifyPage: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
   listen: vi.fn(),
 }));
 
@@ -57,28 +55,13 @@ vi.mock("../lib/tauri", () => ({
   setP3aEnabled: mocks.setP3aEnabled,
   p3aRecord: mocks.p3aRecord,
   setClovyPersona: mocks.setClovyPersona,
-  osAccountsLogin: mocks.osAccountsLogin,
   clovyOpenCommunityPage: mocks.clovyOpenCommunityPage,
   clovyOpenVerifyPage: mocks.clovyOpenVerifyPage,
-  osAccountsCancelLogin: mocks.osAccountsCancelLogin,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: mocks.listen,
 }));
-
-const account: AccountStatus = {
-  signedIn: true,
-  configured: true,
-  user: { id: "u1", handle: "casey", displayName: "Casey Tester" },
-  balance: { credits: 5000, usdMillis: 5000 },
-  subscription: { subscribed: true, status: "trialing" },
-};
-
-const signedOutAccount: AccountStatus = {
-  signedIn: false,
-  configured: true,
-};
 
 type ListenHandler = (event: { payload: string }) => void;
 
@@ -154,7 +137,6 @@ describe("OnboardingFlow", () => {
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.checkRecordingSourceReadiness.mockResolvedValue(systemAudioReadiness(true));
     mocks.openPrivacySettings.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
     mocks.clovyOpenCommunityPage.mockResolvedValue(undefined);
     mocks.setDictationLanguage.mockResolvedValue(undefined);
     mocks.setDictationShortcut.mockResolvedValue(undefined);
@@ -182,8 +164,6 @@ describe("OnboardingFlow", () => {
 
   function flowProps(overrides: Partial<Parameters<typeof OnboardingFlow>[0]> = {}) {
     return {
-      account,
-      onAccountChanged: vi.fn(),
       onComplete: vi.fn(),
       ...overrides,
     };
@@ -257,7 +237,7 @@ describe("OnboardingFlow", () => {
     return stubNavigatorPlatform("MacIntel", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)");
   }
 
-  it("walks the full flow for a subscribed user", async () => {
+  it("walks the full flow", async () => {
     const user = userEvent.setup();
     const onComplete = await renderFlow();
 
@@ -496,55 +476,6 @@ describe("OnboardingFlow", () => {
 
     await waitFor(() => expect(mocks.dictationSettings).toHaveBeenCalledOnce());
     expect(mocks.setDictationShortcut).not.toHaveBeenCalled();
-  });
-
-  it("signs the user in from the first step", async () => {
-    const user = userEvent.setup();
-    const onAccountChanged = vi.fn();
-    mocks.osAccountsLogin.mockResolvedValue(account);
-    const { rerender } = render(
-      <OnboardingFlow {...flowProps({ account: signedOutAccount, onAccountChanged })} />,
-    );
-
-    await screen.findByRole("heading", { name: "Welcome to Clovy" });
-    await user.click(screen.getByRole("button", { name: "Continue with OpenSoftware" }));
-
-    expect(mocks.osAccountsLogin).toHaveBeenCalledOnce();
-    await waitFor(() => expect(onAccountChanged).toHaveBeenCalledWith(account));
-    rerender(<OnboardingFlow {...flowProps({ account, onAccountChanged })} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-  });
-
-  it("opens the Clovy community from the welcome step", async () => {
-    const user = userEvent.setup();
-    render(<OnboardingFlow {...flowProps({ account: signedOutAccount })} />);
-
-    await screen.findByRole("heading", { name: "Welcome to Clovy" });
-    await user.click(
-      screen.getByRole("button", {
-        name: "Join the Clovy community on Telegram",
-      }),
-    );
-
-    expect(mocks.clovyOpenCommunityPage).toHaveBeenCalledOnce();
-  });
-
-  it("shows Windows-accurate welcome copy", async () => {
-    const restoreNavigator = stubNavigatorPlatform(
-      "Win32",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    );
-    try {
-      render(<OnboardingFlow {...flowProps({ account: signedOutAccount })} />);
-
-      await screen.findByRole("heading", { name: "Welcome to Clovy" });
-      expect(screen.getByText("Write with your voice")).toBeInTheDocument();
-      expect(screen.getByText("Turn speech into polished text in any app.")).toBeInTheDocument();
-      expect(screen.getByText("Capture meetings")).toBeInTheDocument();
-      expect(screen.getByText("Delegate real work")).toBeInTheDocument();
-    } finally {
-      restoreNavigator();
-    }
   });
 
   it("resumes a legacy practice step at permissions", async () => {

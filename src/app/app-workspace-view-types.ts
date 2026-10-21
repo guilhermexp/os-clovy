@@ -5,7 +5,6 @@ import type { SettingsTab } from "../components/settings/AppSettings";
 import type { SidebarView } from "../components/sidebar/Sidebar";
 import type { TabNav } from "./tabs/tabs";
 import type {
-  AccountStatus,
   FolderDto,
   LiveTranscriptEventDto,
   NoteDto,
@@ -21,8 +20,6 @@ import type * as React from "react";
 
 export type RenderAppWorkspaceDependencies = {
   accessibilityStatus: string | undefined;
-  account: AccountStatus;
-  accountLoading: boolean;
   currentDataPartitionName: string;
   activeAgentSessionFolder: FolderDto | undefined;
   activeAgentSessionId: string | undefined;
@@ -40,7 +37,6 @@ export type RenderAppWorkspaceDependencies = {
   completedSessions: Record<string, string>;
   dispatch: React.Dispatch<NotesAction>;
   folderReturnTarget: { noteId: string; label: string } | undefined;
-  handleAccountChanged: (nextAccount: AccountStatus) => void;
   handleCreateFolder: (name: string, description?: string) => Promise<FolderDto | undefined>;
   handleCreateNote: (folderId?: string | null) => Promise<void>;
   handleDeleteFolder: (folderId: string) => Promise<void>;
@@ -115,7 +111,6 @@ export type RenderAppWorkspaceDependencies = {
   readyUpdate: UpdatePromptPayload<ClovyUpdate> | null;
   recordNoticesConsentPinned: boolean;
   recordingNoteId: string | undefined;
-  refreshAccount: () => Promise<AccountStatus | undefined>;
   rememberHomeSession: (sessionId: string) => void;
   runUpdateCheck: (mode: UpdateCheckMode, check?: () => Promise<ClovyUpdate | null>) => void;
   selectedNote: NoteDto | undefined;

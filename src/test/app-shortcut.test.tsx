@@ -24,7 +24,6 @@ import {
 import { CLOSE_TAB_EVENT, OPEN_SETTINGS_EVENT } from "../lib/menu-bar";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type {
-  AccountStatus,
   BootstrapResponse,
   NoteDto,
   RecordingSessionDto,
@@ -116,9 +115,6 @@ const mocks = vi.hoisted(() => ({
   dictationHelperCommand: vi.fn(),
   listDictationHistory: vi.fn(),
   osAccountsStatus: vi.fn(),
-  osAccountsLogin: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
-  osAccountsLogout: vi.fn(),
   agentHudShow: vi.fn(),
   agentOpenReady: vi.fn().mockResolvedValue(null),
   agentHudHide: vi.fn(),
@@ -270,11 +266,6 @@ vi.mock("../lib/tauri", () => ({
   dictationHelperCommand: mocks.dictationHelperCommand,
   listDictationHistory: mocks.listDictationHistory,
   dictationSettings: vi.fn().mockRejectedValue(new Error("dictation settings unavailable")),
-  osAccountsStatus: mocks.osAccountsStatus,
-  osAccountsStatusLocal: mocks.osAccountsStatus,
-  osAccountsLogin: mocks.osAccountsLogin,
-  osAccountsCancelLogin: mocks.osAccountsCancelLogin,
-  osAccountsLogout: mocks.osAccountsLogout,
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
@@ -487,22 +478,6 @@ describe("App shortcuts", () => {
       items: [],
       retentionDays: 7,
     });
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    });
-    mocks.osAccountsLogin.mockResolvedValue({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    });
-    mocks.osAccountsLogout.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
     mocks.agentOpenReady.mockResolvedValue(null);
     mocks.listAgentTasks.mockResolvedValue({ items: [] });
     mocks.listAgentSessions.mockResolvedValue([]);
@@ -553,10 +528,25 @@ describe("App shortcuts", () => {
       return Promise.resolve({});
     });
     mocks.listeners.clear();
+    // Tauri delivers each event to every subscriber, so keep all handlers per
+    // event instead of letting the last subscriber shadow the earlier ones.
+    const handlersByEvent = new Map<string, Set<(event: { payload?: unknown }) => void>>();
     mocks.listen.mockImplementation(
       async (event: string, handler: (event: { payload?: unknown }) => void) => {
-        mocks.listeners.set(event, handler);
-        return () => mocks.listeners.delete(event);
+        const handlers =
+          handlersByEvent.get(event) ?? new Set<(event: { payload?: unknown }) => void>();
+        handlersByEvent.set(event, handlers);
+        handlers.add(handler);
+        mocks.listeners.set(event, (payload) => {
+          for (const current of [...handlers]) current(payload);
+        });
+        return () => {
+          handlers.delete(handler);
+          if (handlers.size === 0) {
+            handlersByEvent.delete(event);
+            mocks.listeners.delete(event);
+          }
+        };
       },
     );
     mocks.updateNote.mockImplementation(async (input) => ({
@@ -1827,20 +1817,6 @@ describe("App shortcuts", () => {
     );
   });
 
-  it("clears the OS Accounts browser session from sidebar sign-out", async () => {
-    const user = userEvent.setup();
-
-    render(<App />);
-
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-
-    await user.click(screen.getByRole("button", { name: "alex@example.com, account menu" }));
-    await user.click(screen.getByRole("menuitem", { name: "Sign out" }));
-
-    expect(mocks.osAccountsLogout).toHaveBeenCalledWith({ clearBrowserSession: true });
-    expect(await screen.findByRole("heading", { name: "Welcome to Clovy" })).toBeInTheDocument();
-  });
-
   it("starts a new session with Command-N", async () => {
     const onNewSession = vi.fn();
     window.addEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
@@ -2664,98 +2640,6 @@ describe("App shortcuts", () => {
     }
   });
 
-  it("gates the app until the user signs in", async () => {
-    const user = userEvent.setup();
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: false,
-      configured: true,
-    });
-
-    render(<App />);
-
-    expect(await screen.findByRole("heading", { name: "Welcome to Clovy" })).toBeInTheDocument();
-    expect(mocks.bootstrapApp).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "New note" })).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "Continue with OpenSoftware" }));
-
-    await waitFor(() => expect(mocks.bootstrapApp).toHaveBeenCalledOnce());
-    // Clearing the gate lands in the persistent Clovy conversation, not a new note.
-    expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
-    expect(mocks.createNote).not.toHaveBeenCalled();
-  });
-
-  it("uses Windows dictation sign-in copy and opens a fresh agent session after sign-in", async () => {
-    const user = userEvent.setup();
-    const restoreNavigator = stubNavigatorPlatform(
-      "Win32",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    );
-    mocks.osAccountsStatus.mockResolvedValue({
-      signedIn: false,
-      configured: true,
-    });
-
-    try {
-      render(<App />);
-
-      expect(
-        await screen.findByText(
-          "Record conversations, turn them into notes, and dictate with your OpenSoftware account.",
-        ),
-      ).toBeInTheDocument();
-
-      await user.click(screen.getByRole("button", { name: "Continue with OpenSoftware" }));
-
-      expect(await screen.findByRole("heading", { name: HERO_GREETING })).toBeInTheDocument();
-      expect(screen.getByRole("tab", { name: "New session" })).toHaveAttribute(
-        "data-active",
-        "true",
-      );
-      expect(screen.getByRole("button", { name: "New session" })).toHaveAttribute(
-        "aria-current",
-        "page",
-      );
-    } finally {
-      restoreNavigator();
-    }
-  });
-
-  it("does not flash the sign-in gate while account status is loading", async () => {
-    let resolveStatus: ((status: AccountStatus) => void) | undefined;
-    mocks.osAccountsStatus.mockReturnValue(
-      new Promise<AccountStatus>((resolve) => {
-        resolveStatus = resolve;
-      }),
-    );
-
-    render(<App />);
-
-    expect(screen.queryByRole("heading", { name: "Welcome to Clovy" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
-    expect(mocks.bootstrapApp).not.toHaveBeenCalled();
-
-    resolveStatus?.({
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    });
-
-    expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
-  });
-
-  it("bypasses account gates in dev when account status is unavailable", async () => {
-    mocks.osAccountsStatus.mockRejectedValue(new Error("accounts unavailable"));
-
-    render(<App />);
-
-    expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
-    expect(mocks.bootstrapApp).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
-  });
-
   it("refreshes partition-scoped chat sessions when the data partition switches", async () => {
     render(<App />);
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
@@ -2987,8 +2871,9 @@ describe("App shortcuts", () => {
 
     render(<App />);
 
-    expect(
-      await screen.findByRole("button", { name: "Send message" }, { timeout: 8_000 }),
-    ).toBeInTheDocument();
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument(),
+      { timeout: 8_000 },
+    );
   }, 15_000);
 });

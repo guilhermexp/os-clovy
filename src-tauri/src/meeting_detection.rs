@@ -1011,14 +1011,6 @@ fn spawn_monitor(app: AppHandle) {
         loop {
             std::thread::sleep(POLL_INTERVAL);
 
-            if !crate::os_accounts::cached_signed_in() {
-                if let Some(event) = state.update(false, false, false) {
-                    emit_detection_event(&app, event, &[]);
-                }
-                observe_meeting_end(&app, None);
-                continue;
-            }
-
             let active_processes = match active_input_processes() {
                 Ok(active_processes) => {
                     warned_after_probe_error = false;

@@ -36,7 +36,6 @@ import {
   listAgentSessions,
   listProviderModels,
   openPrivacySettings,
-  osAccountsLogout,
   recoverRecording,
   revealPath,
   renameFolder,
@@ -125,11 +124,10 @@ import {
   setAgentHudEnabled,
   type AgentHudVisibilityChangedDetail,
 } from "../lib/agent-hud-settings";
-import type { FolderDto, AccountStatus } from "../lib/tauri";
+import type { FolderDto } from "../lib/tauri";
 import type { RecordingSourceMode } from "../lib/tauri";
 import { retryPendingAutostartDefault } from "../lib/autostart";
 import { applyOnboardingReplayFlag, isOnboardingComplete } from "../lib/onboarding";
-import { shouldBlockOnSignIn } from "../lib/account-gate";
 import { reconcileToStable, relaunchClovy, type ClovyUpdate } from "../lib/updater";
 import { attachScrollThumbFade } from "../lib/scroll-thumb-fade";
 import {
@@ -203,7 +201,7 @@ import { useSessionMetadata } from "./use-session-metadata";
 import { useNoteProcessingEvents } from "./use-note-processing-events";
 
 import { useAppState } from "./use-app-state";
-import { renderAppAccountGate } from "./app-account-gates";
+import { renderAppOnboarding } from "./app-onboarding";
 
 export function App() {
   // Subscribes the shell to the interface language: the render helpers and
@@ -319,11 +317,6 @@ export function App() {
     systemGranted,
     captureActive,
     sourceMode,
-    account,
-    accountError,
-    accountLoading,
-    refreshAccount,
-    setAccount,
     recordingNoteIdRef,
     crossPartitionRecordingNoteIdRef,
     calendarContextNotePartitionsRef,
@@ -436,24 +429,15 @@ export function App() {
     setUpdateProgress,
     setUpdateStatus,
   });
-  // A dev build without the OS Accounts env vars (fresh workspace, no .env)
-  // can never complete sign-in, so the account gates would be dead
-  // ends — skip them and let account-dependent features surface their own
-  // errors. Release builds always gate; so do dev builds once configured.
-  const devAccountsUnconfigured =
-    import.meta.env.DEV &&
-    !account.signedIn &&
-    (accountLoading || !!accountError || !account.configured);
-  const signInRequired = !devAccountsUnconfigured && shouldBlockOnSignIn(account);
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
     return isOnboardingComplete();
   });
-  // The wizard handles sign-in, personalization, and permissions.
-  const onboardingRequired = !accountLoading && !onboardingDone;
+  // The wizard handles personalization and permissions.
+  const onboardingRequired = !onboardingDone;
   // Onboarding holds bootstrap, update checks, and eager permission probes because the
   // wizard owns the permission prompts while it is on screen.
-  const appBlocked = accountLoading || signInRequired || onboardingRequired;
+  const appBlocked = onboardingRequired;
   meetingEndReadyRef.current = !appBlocked && bootstrapped;
   const publishAgentMenuBarState = useCallback(() => {
     void emitAgentMenuBarState(
@@ -793,30 +777,6 @@ export function App() {
     recordingStatusRef.current = undefined;
     setRecordingNote(undefined);
     dispatch({ type: "recordingStatusCleared" });
-  }
-
-  const handleAccountChanged = useCallback(
-    (nextAccount: AccountStatus) => {
-      if (signInRequired && !shouldBlockOnSignIn(nextAccount)) {
-        // The launch handshake armed at state init has likely expired (15s
-        // TTL) while the user sat on the sign-in gate — re-arm it so clearing
-        // the gate still opens onto a fresh session.
-        markAgentNewSessionPending();
-      }
-      setAccount(nextAccount);
-    },
-    [setAccount, signInRequired],
-  );
-
-  // Log out from the sidebar identity popover. Dropping the session flips
-  // shouldBlockOnSignIn back on, so the app falls through to the AccountGate.
-  async function handleSignOut() {
-    try {
-      await osAccountsLogout({ clearBrowserSession: true });
-      handleAccountChanged({ signedIn: false, configured: account.configured });
-    } catch (err) {
-      setError(messageFromError(err));
-    }
   }
 
   useEffect(() => {
@@ -2344,18 +2304,8 @@ export function App() {
     });
   }
 
-  const accountGate = renderAppAccountGate({
-    account,
-    accountError,
-    accountLoading,
-    devAccountsUnconfigured,
-    handleAccountChanged,
-    onboardingRequired,
-    refreshAccount,
-    setOnboardingDone,
-    signInRequired,
-  });
-  if (accountGate) return accountGate;
+  const onboarding = renderAppOnboarding({ onboardingRequired, setOnboardingDone });
+  if (onboarding) return onboarding;
 
   // The in-note RecorderBar covers the recording while you're looking at its
   // note. Elsewhere, the sidebar header carries a tiny recording presence; the
@@ -2382,8 +2332,6 @@ export function App() {
 
   const workspaceContent = renderAppWorkspace({
     accessibilityStatus,
-    account,
-    accountLoading,
     currentDataPartitionName,
     activeAgentSessionFolder,
     activeAgentSessionId,
@@ -2401,7 +2349,6 @@ export function App() {
     completedSessions,
     dispatch,
     folderReturnTarget,
-    handleAccountChanged,
     handleCreateFolder,
     handleCreateNote,
     handleDeleteFolder,
@@ -2460,7 +2407,6 @@ export function App() {
     readyUpdate,
     recordNoticesConsentPinned,
     recordingNoteId,
-    refreshAccount,
     rememberHomeSession,
     runUpdateCheck,
     selectedNote,
@@ -2490,7 +2436,6 @@ export function App() {
   const appLayout = renderAppLayout({
     accessibilityBannerDismissed,
     accessibilityBlocked,
-    account,
     activateTab,
     activeTabId,
     activeView,
@@ -2522,7 +2467,6 @@ export function App() {
     handleSelectNote,
     handleSetNoteFolder,
     handleSetSessionFolder,
-    handleSignOut,
     handleToggleSessionCompleted,
     homeStoredSessionId,
     mainPanelBodyRef,

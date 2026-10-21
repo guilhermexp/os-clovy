@@ -100,16 +100,14 @@
       "mobile": [
         {
           "scheme": [
-            "clovy",
-            "osjune"
+            "clovy"
           ],
           "appLink": false
         }
       ],
       "desktop": {
         "schemes": [
-          "clovy",
-          "osjune"
+          "clovy"
         ]
       }
     },

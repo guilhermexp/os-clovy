@@ -33,12 +33,8 @@ import { applyInterfaceLocale } from "../i18n/locale";
 function renderSettings(activeTab: SettingsTab) {
   return render(
     <AppSettings
-      account={{ signedIn: false, configured: false }}
-      accountLoading={false}
       sourceMode="microphoneOnly"
       checkingSourceReadiness={false}
-      onAccountChanged={() => {}}
-      onAccountRefresh={async () => undefined}
       onSourceModeChange={() => {}}
       onEnableSystemAudio={() => {}}
       onCheckForUpdates={() => {}}

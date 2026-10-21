@@ -19,8 +19,6 @@ import { getAgentHudEnabled } from "../lib/agent-hud-settings";
 import type { NoteDto } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { RecordingSourceMode, RecordingSourceReadinessDto } from "../lib/tauri";
-import { useAccountStatus } from "../lib/account-status";
-import { shouldReplayOnboarding } from "../lib/onboarding";
 import type { ClovyUpdate } from "../lib/updater";
 import { createInitialState, notesReducer } from "./state/app-state";
 import {
@@ -32,7 +30,6 @@ import {
 import { SIDEBAR_DEFAULT_WIDTH, type RecordingInactivityPrompt } from "./app-shell";
 
 export function useAppState() {
-  const replayOnboarding = shouldReplayOnboarding();
   const currentDataPartitionName = useCurrentDataPartitionName();
   const initialView: SidebarView = isMacLikePlatform()
     ? "home"
@@ -221,13 +218,6 @@ export function useAppState() {
     recordingState === "validating";
   const sourceMode: RecordingSourceMode =
     userWantsSystemAudio && systemGranted ? "microphonePlusSystem" : "microphoneOnly";
-  const {
-    account,
-    error: accountError,
-    loading: accountLoading,
-    refresh: refreshAccount,
-    setAccount,
-  } = useAccountStatus({ forceLogoutOnMount: replayOnboarding });
   // The note the active recording session belongs to. recordingStatus carries
   // no noteId, so without this the finish flow could only guess from the
   // currently selected note — wrong whenever the user browsed away while
@@ -381,11 +371,6 @@ export function useAppState() {
     systemGranted,
     captureActive,
     sourceMode,
-    account,
-    accountError,
-    accountLoading,
-    refreshAccount,
-    setAccount,
     recordingNoteIdRef,
     crossPartitionRecordingNoteIdRef,
     calendarContextNotePartitionsRef,

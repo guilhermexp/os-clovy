@@ -9,7 +9,6 @@ import {
 } from "../lib/data-partition";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import type {
-  AccountStatus,
   BootstrapResponse,
   NoteDto,
   RecoverableRecordingDto,
@@ -68,10 +67,6 @@ const mocks = vi.hoisted(() => ({
   listDictationHistory: vi.fn(),
   listDictionaryEntries: vi.fn(),
   deleteDictationHistoryItem: vi.fn(),
-  osAccountsStatus: vi.fn(),
-  osAccountsLogin: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
-  osAccountsLogout: vi.fn(),
   agentHudShow: vi.fn(),
   agentOpenReady: vi.fn().mockResolvedValue(null),
   agentHudHide: vi.fn(),
@@ -171,11 +166,6 @@ vi.mock("../lib/tauri", () => ({
   listDictationHistory: mocks.listDictationHistory,
   listDictionaryEntries: mocks.listDictionaryEntries,
   deleteDictationHistoryItem: mocks.deleteDictationHistoryItem,
-  osAccountsStatus: mocks.osAccountsStatus,
-  osAccountsStatusLocal: mocks.osAccountsStatus,
-  osAccountsLogin: mocks.osAccountsLogin,
-  osAccountsCancelLogin: mocks.osAccountsCancelLogin,
-  osAccountsLogout: mocks.osAccountsLogout,
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
@@ -316,13 +306,6 @@ describe("notes recording reliability", () => {
       activeRecoveries: [],
       providerConfigured: true,
     };
-    const account: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
-    };
 
     mocks.getCurrentWindow.mockReturnValue({
       show: vi.fn().mockResolvedValue(undefined),
@@ -404,10 +387,6 @@ describe("notes recording reliability", () => {
     });
     mocks.listDictionaryEntries.mockResolvedValue([]);
     mocks.deleteDictationHistoryItem.mockResolvedValue(undefined);
-    mocks.osAccountsStatus.mockResolvedValue(account);
-    mocks.osAccountsLogin.mockResolvedValue(account);
-    mocks.osAccountsLogout.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
     mocks.updateNote.mockImplementation(async (input) => ({
       ...first,
       ...input,

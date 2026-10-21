@@ -350,7 +350,6 @@ export function AgentWorkspace({
   initialSession,
   initialSessionId,
   homeMode = false,
-  homeUserDisplayName,
   onHomeSessionCreated,
   onOpenHomeTaskSession,
   origin,
@@ -2143,7 +2142,6 @@ export function AgentWorkspace({
   const homeGreetingVisible =
     homeMode && (!lastHomeTurn || lastHomeTurn.createdAt.localeCompare(homeCheckIn.createdAt) < 0);
   const homeGreeting = clovyHomeGreetingParts(new Date(), {
-    displayName: homeUserDisplayName,
     returning: homeConversationTurns.length > 0,
   });
   const homeNudgePrompts = clovyHomeNudgePrompts(new Date());

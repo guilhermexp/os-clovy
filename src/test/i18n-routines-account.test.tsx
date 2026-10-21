@@ -1,41 +1,18 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AccountGate } from "../components/account/AccountGate";
 import { RoutineModePicker } from "../components/routines/RoutineModePicker";
 import { formatRunTime } from "../components/routines/RoutineRunList";
 import { ROUTINE_TEMPLATES } from "../components/routines/routine-templates";
 import { SchedulePicker } from "../components/routines/SchedulePicker";
 import { applyInterfaceLocale } from "../i18n/locale";
-import type { AccountStatus } from "../lib/tauri";
 
-vi.mock("../lib/tauri", () => ({
-  osAccountsCancelLogin: vi.fn(),
-  osAccountsLogin: vi.fn(),
-}));
-
-const freeAccount: AccountStatus = {
-  signedIn: true,
-  configured: true,
-  user: { id: "usr_123", handle: "alex", displayName: "Alex" },
-  balance: { credits: 0, usdMillis: 0 },
-  subscription: { subscribed: false },
-};
+vi.mock("../lib/tauri", () => ({}));
 
 describe("routines and account in Portuguese", () => {
   beforeEach(() => {
     applyInterfaceLocale("pt-BR");
   });
   afterEach(() => applyInterfaceLocale("en"));
-
-  it("renders the sign-in gate with translated terms links", () => {
-    render(<AccountGate account={freeAccount} loading={false} onAccountChanged={vi.fn()} />);
-    expect(screen.getByText("Boas-vindas ao Clovy")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Termos" })).toHaveAttribute(
-      "href",
-      "https://accounts.opensoftware.co/terms",
-    );
-    expect(screen.getByRole("link", { name: "Política de privacidade" })).toBeInTheDocument();
-  });
 
   it("names schedule kinds and weekdays in Portuguese", () => {
     render(<SchedulePicker draft={{ kind: "weekly", day: 1, time: "09:00" }} onChange={vi.fn()} />);

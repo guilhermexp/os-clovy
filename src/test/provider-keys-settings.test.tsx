@@ -79,12 +79,8 @@ describe("Provider API keys settings", () => {
   function renderAppSettings() {
     return render(
       <AppSettings
-        account={{ signedIn: false, configured: false }}
-        accountLoading={false}
         sourceMode="microphoneOnly"
         checkingSourceReadiness={false}
-        onAccountChanged={() => {}}
-        onAccountRefresh={async () => undefined}
         onSourceModeChange={() => {}}
         onEnableSystemAudio={() => {}}
         activeTab="models"

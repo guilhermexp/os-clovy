@@ -719,7 +719,7 @@ pub async fn clovy_model_runtime_capabilities(model_id: &str) -> ClovyModelRunti
             .and_then(|model| model.context_tokens),
         supports_vision: generation_model_supports_vision_from_catalog(
             model_id,
-            crate::os_accounts::local_dev_enabled(),
+            true,
             models
                 .iter()
                 .map(|model| (model.id.as_str(), model.capabilities.as_slice())),
@@ -1527,7 +1527,7 @@ pub fn default_unattended_cli() -> Option<CliKind> {
 }
 
 pub fn load_local_env() {
-    crate::os_accounts::load_local_env();
+    crate::env_compat::load_local_env();
 }
 
 fn current_settings() -> ProviderModelSettings {

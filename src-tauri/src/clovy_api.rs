@@ -521,32 +521,32 @@ pub(crate) struct DictationTransport<'a, K: DictationTokens> {
     pub(crate) tokens: K,
 }
 
-/// The OS Accounts token for Clovy API calls.
+/// The bearer token for Clovy API calls.
 pub(crate) trait DictationTokens {
     fn access(&self) -> impl Future<Output = Result<String, AppError>> + Send;
     fn refresh(&self) -> impl Future<Output = Result<String, AppError>> + Send;
 }
 
-struct OsAccountsTokens;
+struct LocalTokens;
 
-impl DictationTokens for OsAccountsTokens {
+impl DictationTokens for LocalTokens {
     fn access(&self) -> impl Future<Output = Result<String, AppError>> + Send {
-        crate::os_accounts::access_token()
+        std::future::ready(Ok(crate::local_identity::access_token()))
     }
 
     fn refresh(&self) -> impl Future<Output = Result<String, AppError>> + Send {
-        crate::os_accounts::refresh_access_token()
+        std::future::ready(Ok(crate::local_identity::access_token()))
     }
 }
 
-fn production_dictation_transport() -> DictationTransport<'static, OsAccountsTokens> {
+fn production_dictation_transport() -> DictationTransport<'static, LocalTokens> {
     DictationTransport {
         clovy_client: http_client(),
         direct_client: direct_dictation_client(),
         clovy_base: clovy_api_url(),
         groq_base: GROQ_API_BASE.to_string(),
         openrouter_base: OPENROUTER_API_BASE.to_string(),
-        tokens: OsAccountsTokens,
+        tokens: LocalTokens,
     }
 }
 
@@ -1576,36 +1576,39 @@ pub async fn proxy_agent_chat_completions(
     resolve_current_remote_model(&mut body);
     let user_key_allowed = !managed_auto && body_model_allows_user_key(&body);
     let url = format!("{}/v1/chat/completions", clovy_api_url());
-    let mut token = crate::os_accounts::access_token().await?;
-    for attempt in 0..2 {
-        let request = agent_http_client()
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&body);
-        let response = with_provider_api_key("/v1/chat/completions", request, user_key_allowed)?
-            .send()
-            .await
-            .map_err(network_error)?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
-            token = crate::os_accounts::refresh_access_token().await?;
-            continue;
-        }
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("application/json")
-            .to_string();
-        let route = agent_route_metadata(&response);
-        return Ok(AgentChatCompletionsResponse {
-            status,
-            content_type,
-            route,
-            upstream: response,
-        });
+    let request = agent_http_client()
+        .post(&url)
+        .bearer_auth(crate::local_identity::access_token())
+        .json(&body);
+    let response = with_provider_api_key("/v1/chat/completions", request, user_key_allowed)?
+        .send()
+        .await
+        .map_err(network_error)?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(local_token_rejected());
     }
-    Err(AppError::new("unauthorized", "Not signed in."))
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let route = agent_route_metadata(&response);
+    Ok(AgentChatCompletionsResponse {
+        status,
+        content_type,
+        route,
+        upstream: response,
+    })
+}
+
+/// Clovy API refused the local bearer token; it must match the server's.
+fn local_token_rejected() -> AppError {
+    AppError::new(
+        "unauthorized",
+        "Clovy API rejected the local access token (OS_CLOVY_LOCAL_DEV_BEARER_TOKEN).",
+    )
 }
 
 /// Agent sessions, stored run configs, and resolved Auto pins keep the model id
@@ -3393,15 +3396,10 @@ async fn send_multipart(
     form: Form,
     user_key_allowed: bool,
 ) -> Result<reqwest::Response, AppError> {
-    // access_token() now pre-emptively refreshes if the cached JWT is stale,
-    // so multipart bodies (which can't be replayed on a 401) go out with a
-    // known-fresh token. Form is not Clone, so a retry-on-401 fallback isn't
-    // possible here anyway.
     let url = format!("{}{}", clovy_api_url(), path);
-    let token = crate::os_accounts::access_token().await?;
     let request = http_client()
         .post(&url)
-        .bearer_auth(token)
+        .bearer_auth(crate::local_identity::access_token())
         .multipart(form)
         .timeout(multipart_request_timeout(path));
     let response = with_provider_api_key(path, request, user_key_allowed)?
@@ -3429,20 +3427,15 @@ where
 {
     let client = http_client();
     let url = format!("{}{}", clovy_api_url(), path);
-    let mut token = crate::os_accounts::access_token().await?;
-    for attempt in 0..2 {
-        let request = build(client, url.clone(), token.clone());
-        let response = with_provider_api_key(path, request, user_key_allowed)?
-            .send()
-            .await
-            .map_err(network_error)?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
-            token = crate::os_accounts::refresh_access_token().await?;
-            continue;
-        }
-        return Ok(response);
+    let request = build(client, url, crate::local_identity::access_token());
+    let response = with_provider_api_key(path, request, user_key_allowed)?
+        .send()
+        .await
+        .map_err(network_error)?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(local_token_rejected());
     }
-    Err(AppError::new("unauthorized", "Not signed in."))
+    Ok(response)
 }
 
 async fn parse_response<T>(path: &str, response: reqwest::Response) -> Result<T, AppError>
@@ -3726,7 +3719,7 @@ fn clovy_api_operation_id(operation_id: &str) -> String {
 }
 
 pub(crate) fn clovy_api_url() -> String {
-    crate::os_accounts::load_local_env();
+    crate::env_compat::load_local_env();
     crate::env_compat::var("CLOVY_API_URL", "JUNE_API_URL")
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())

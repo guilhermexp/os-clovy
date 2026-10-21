@@ -22,8 +22,6 @@ import {
 export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies) {
   const {
     accessibilityStatus,
-    account,
-    accountLoading,
     currentDataPartitionName,
     activeAgentSessionFolder,
     activeAgentSessionId,
@@ -41,7 +39,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     completedSessions,
     dispatch,
     folderReturnTarget,
-    handleAccountChanged,
     handleCreateFolder,
     handleCreateNote,
     handleDeleteFolder,
@@ -100,7 +97,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     readyUpdate,
     recordNoticesConsentPinned,
     recordingNoteId,
-    refreshAccount,
     rememberHomeSession,
     runUpdateCheck,
     selectedNote,
@@ -144,15 +140,11 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
 
   return activeView === "settings" ? (
     <AppSettingsRoute
-      account={account}
-      accountLoading={accountLoading}
       sourceMode={sourceMode}
       sourceReadiness={sourceReadiness}
       checkingSourceReadiness={checkingSourceReadiness}
       microphonePermissionStatus={microphoneStatus}
       accessibilityPermissionStatus={accessibilityStatus}
-      onAccountChanged={handleAccountChanged}
-      onAccountRefresh={refreshAccount}
       onSourceModeChange={handleSourceModeChange}
       onEnableMicrophone={handleEnableMicrophone}
       onEnableAccessibility={handleEnableAccessibility}
@@ -222,7 +214,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     <AgentWorkspaceRoute
       key={`home:${currentDataPartitionName}`}
       homeMode
-      homeUserDisplayName={account.user?.displayName}
       initialSessionId={homeStoredSessionId}
       onHomeSessionCreated={rememberHomeSession}
       onOpenHomeTaskSession={(sessionId, title) => {

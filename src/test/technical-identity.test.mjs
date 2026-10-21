@@ -184,7 +184,7 @@ describe("Clovy technical identity", () => {
 
     expect(tauri.productName).toBe("Clovy");
     expect(tauri.identifier).toBe("co.opensoftware.june");
-    expect(tauri.plugins["deep-link"].desktop.schemes).toEqual(["clovy", "osjune"]);
+    expect(tauri.plugins["deep-link"].desktop.schemes).toEqual(["clovy"]);
     expect(tauri.plugins.updater.endpoints).toEqual([
       "https://github.com/open-software-network/os-june-releases/releases/latest/download/latest.json",
     ]);

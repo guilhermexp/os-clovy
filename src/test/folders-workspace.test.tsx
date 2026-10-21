@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FoldersWorkspace } from "../components/folders/FoldersWorkspace";
 import { Sidebar } from "../components/sidebar/Sidebar";
 import { LEGACY_NOTE_DND_MIME, NOTE_DND_MIME } from "../lib/dnd";
-import type { AccountStatus, FolderDto, NoteListItemDto } from "../lib/tauri";
+import type { FolderDto, NoteListItemDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
   listMemories: vi.fn(),
@@ -118,15 +118,6 @@ function baseProps() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
-    const key = localStorage.key(index);
-    if (
-      key?.startsWith("clovy:account-avatar-variant:") ||
-      key?.startsWith("clovy:account-avatar-pending:")
-    ) {
-      localStorage.removeItem(key);
-    }
-  }
 
   mocks.listMemories.mockResolvedValue([]);
   mocks.memorySettings.mockResolvedValue({ enabled: true });
@@ -334,101 +325,16 @@ describe("Sidebar primary navigation", () => {
       />,
     );
 
-    // The settings entry point is the user's name in the footer: click it to
-    // open the account popover, then choose Settings.
+    // The settings entry point is the footer menu: click it to open the
+    // popover, then choose Settings.
     const identityButton = screen.getByRole("button", {
-      name: /account menu/i,
+      name: /settings menu/i,
     });
     expect(identityButton.closest(".sidebar-footer")).not.toBeNull();
 
     await user.click(identityButton);
     await user.click(screen.getByRole("menuitem", { name: "Settings" }));
     expect(onChangeView).toHaveBeenCalledWith("settings");
-  });
-
-  it("shows account name, then email, then handle in the sidebar footer", () => {
-    const renderSidebar = (account: AccountStatus) =>
-      render(
-        <Sidebar
-          notes={notes}
-          activeView="notes"
-          account={account}
-          onChangeView={vi.fn()}
-          onSelectNote={vi.fn()}
-          onNewAgentSession={vi.fn()}
-          onRenameAgentSession={vi.fn()}
-          onSelectAgentSession={vi.fn()}
-        />,
-      );
-
-    const { unmount: unmountNamed } = renderSidebar({
-      signedIn: true,
-      configured: true,
-      user: {
-        id: "usr_123",
-        handle: "alex",
-        email: "alex@example.com",
-        displayName: "Alex Rivera",
-      },
-    });
-    const namedAccount = screen.getByRole("button", { name: "Alex Rivera, account menu" });
-    expect(namedAccount).toBeInTheDocument();
-    const namedAvatarStyle = namedAccount.querySelector(".account-avatar")?.getAttribute("style");
-    expect(namedAvatarStyle).toContain("--avatar-cloud-x");
-    unmountNamed();
-
-    const { unmount: unmountEmail } = renderSidebar({
-      signedIn: true,
-      configured: true,
-      user: {
-        id: "usr_123",
-        handle: "alex",
-        email: "alex.rivera@example.com",
-        displayName: " ",
-      },
-    });
-    const emailAccount = screen.getByRole("button", {
-      name: "alex.rivera@example.com, account menu",
-    });
-    expect(emailAccount).toBeInTheDocument();
-    expect(emailAccount.querySelector(".account-avatar")?.getAttribute("style")).toBe(
-      namedAvatarStyle,
-    );
-    unmountEmail();
-
-    const { unmount: unmountHandle } = renderSidebar({
-      signedIn: true,
-      configured: true,
-      user: {
-        id: "usr_123",
-        handle: "alex-rivera",
-        email: " ",
-      },
-    });
-    const handleAccount = screen.getByRole("button", {
-      name: "alex-rivera, account menu",
-    });
-    expect(handleAccount).toBeInTheDocument();
-    expect(handleAccount.querySelector(".account-avatar")?.getAttribute("style")).toBe(
-      namedAvatarStyle,
-    );
-    unmountHandle();
-
-    renderSidebar({
-      signedIn: true,
-      configured: true,
-      user: {
-        id: "usr_456",
-        handle: "alex-rivera-2",
-        displayName: "Alex Rivera",
-      },
-    });
-    const differentAccount = screen.getByRole("button", {
-      name: "Alex Rivera, account menu",
-    });
-    expect(differentAccount.querySelector(".account-avatar")?.getAttribute("style")).not.toBe(
-      namedAvatarStyle,
-    );
   });
 
   it("opens dictation history from the primary nav", async () => {
@@ -486,7 +392,7 @@ describe("Sidebar primary navigation", () => {
     await user.click(screen.getByRole("button", { name: "Shortcuts" }));
     expect(onSettingsTabChange).toHaveBeenCalledWith("shortcuts");
 
-    expect(screen.getByRole("button", { name: /account menu/i })).not.toHaveAttribute(
+    expect(screen.getByRole("button", { name: /settings menu/i })).not.toHaveAttribute(
       "data-active",
     );
   });

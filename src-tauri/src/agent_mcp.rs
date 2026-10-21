@@ -919,7 +919,7 @@ async fn authorize_oauth_server(
         &resource.resource,
         &scope,
     )?;
-    crate::os_accounts::open_in_browser(&authorization_url)
+    crate::system_browser::open_in_browser(&authorization_url)
         .map_err(|_| AgentMcpError::Transport)?;
     let code = timeout(
         OAUTH_CONNECT_TIMEOUT,

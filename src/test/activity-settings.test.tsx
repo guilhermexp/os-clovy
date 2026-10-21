@@ -508,12 +508,8 @@ describe("ActivitySettingsSection", () => {
 
       render(
         <AppSettings
-          account={{ signedIn: false, configured: false }}
-          accountLoading={false}
           sourceMode="microphoneOnly"
           checkingSourceReadiness={false}
-          onAccountChanged={() => {}}
-          onAccountRefresh={async () => undefined}
           onSourceModeChange={() => {}}
           onEnableSystemAudio={() => {}}
         />,
@@ -552,12 +548,8 @@ describe("ActivitySettingsSection", () => {
 
       render(
         <AppSettings
-          account={{ signedIn: false, configured: false }}
-          accountLoading={false}
           sourceMode="microphoneOnly"
           checkingSourceReadiness={false}
-          onAccountChanged={() => {}}
-          onAccountRefresh={async () => undefined}
           onSourceModeChange={() => {}}
           onEnableSystemAudio={() => {}}
         />,

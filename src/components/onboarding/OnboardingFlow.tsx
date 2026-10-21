@@ -9,15 +9,14 @@ import {
 } from "../../lib/onboarding";
 import { fallbackDictationCapabilities } from "../../lib/platform";
 import { dictationSettings, p3aRecord, setDictationShortcut } from "../../lib/tauri";
-import type { AccountStatus, DictationShortcutSetting } from "../../lib/tauri";
+import type { DictationShortcutSetting } from "../../lib/tauri";
 import { PermissionsStep } from "./steps/PermissionSteps";
 import { AreaStep } from "./steps/AreaStep";
 import { MoodStep } from "./steps/MoodStep";
-import { SignInStep } from "./steps/SignInStep";
 import { TelemetryConsentStep } from "./steps/TelemetryConsentStep";
 import { usePermissionStatuses, useSystemAudioStatus } from "./use-permission-status";
 
-type StepId = "sign-in" | "telemetry" | "area" | "mood" | "permissions";
+type StepId = "telemetry" | "area" | "mood" | "permissions";
 
 // The product default: bare fn, mirroring DictationShortcutSetting::bare_fn()
 // on the Rust side.
@@ -47,11 +46,9 @@ function isFactoryDefaultShortcut(shortcut: DictationShortcutSetting) {
   );
 }
 
-const ONBOARDING_STEPS: StepId[] = ["sign-in", "telemetry", "area", "mood", "permissions"];
+const ONBOARDING_STEPS: StepId[] = ["telemetry", "area", "mood", "permissions"];
 
 type Props = {
-  account: AccountStatus;
-  onAccountChanged: (next: AccountStatus) => void;
   onComplete: () => void;
 };
 
@@ -74,43 +71,19 @@ function browserOnboardingDemoStep(): StepId | null {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
   const params = new URLSearchParams(window.location.search);
   const step = params.get("clovyDemoStep") ?? params.get("juneDemoStep");
-  return step === "sign-in" ||
-    step === "telemetry" ||
-    step === "area" ||
-    step === "mood" ||
-    step === "permissions"
+  return step === "telemetry" || step === "area" || step === "mood" || step === "permissions"
     ? step
     : null;
 }
 
-export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props) {
+export function OnboardingFlow({ onComplete }: Props) {
   const t = useT();
   const capabilities = fallbackDictationCapabilities();
   const steps = ONBOARDING_STEPS;
-  const [stepIndex, setStepIndex] = useState(() => {
-    const initial = initialStepIndex(steps);
-    return account.signedIn && steps[initial] === "sign-in" ? 1 : initial;
-  });
+  const [stepIndex, setStepIndex] = useState(() => initialStepIndex(steps));
   const [area, setArea] = useState<OnboardingArea>(() => onboardingArea() ?? "work");
 
   const stepId = steps[stepIndex];
-
-  // Everything past sign-in needs an account; a resume point past it with a
-  // signed-out account (keychain cleared, signed out elsewhere) would strand
-  // the user on steps that can't work.
-  useEffect(() => {
-    if (!account.signedIn && stepId !== "sign-in") {
-      setStepIndex(0);
-    }
-  }, [account.signedIn, stepId]);
-
-  useEffect(() => {
-    if (account.signedIn && stepId === "sign-in") {
-      setStepIndex(1);
-    }
-  }, [account.signedIn, stepId]);
-
-  const firstReachableStepIndex = account.signedIn ? 1 : 0;
 
   useEffect(() => {
     setOnboardingResumeStep(stepId);
@@ -154,15 +127,13 @@ export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props)
   }
 
   function goBack() {
-    setStepIndex((index) => {
-      return Math.max(index - 1, firstReachableStepIndex);
-    });
+    setStepIndex((index) => Math.max(index - 1, 0));
   }
 
   return (
     <div className="onboarding-screen">
       <header className="onboarding-topbar">
-        {stepIndex > firstReachableStepIndex ? (
+        {stepIndex > 0 ? (
           <button
             type="button"
             className="onboarding-back"
@@ -188,9 +159,7 @@ export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props)
         </nav>
       </header>
       <div className="onboarding-body">
-        {stepId === "sign-in" ? (
-          <SignInStep account={account} onAccountChanged={onAccountChanged} onContinue={goNext} />
-        ) : stepId === "telemetry" ? (
+        {stepId === "telemetry" ? (
           <TelemetryConsentStep onContinue={goNext} />
         ) : stepId === "area" ? (
           <AreaStep

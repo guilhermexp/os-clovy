@@ -33,7 +33,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
   const {
     accessibilityBannerDismissed,
     accessibilityBlocked,
-    account,
     activateTab,
     activeTabId,
     activeView,
@@ -65,7 +64,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     handleSelectNote,
     handleSetNoteFolder,
     handleSetSessionFolder,
-    handleSignOut,
     handleToggleSessionCompleted,
     homeStoredSessionId,
     mainPanelBodyRef,
@@ -179,7 +177,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         activeView={activeView}
         homeEnabled={isMacLikePlatform()}
         homeStoredSessionId={homeStoredSessionId}
-        account={account}
         settingsTab={settingsTab}
         onSettingsTabChange={changeSettingsTab}
         onChangeView={(view) => {
@@ -205,7 +202,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           }
         }}
         onExitSettings={() => setActiveView(settingsReturnView)}
-        onSignOut={() => void handleSignOut()}
         onReportIssue={handleReportIssue}
         onSelectNote={(noteId) => {
           if (takeNewTabIntent()) {

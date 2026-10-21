@@ -2008,25 +2008,9 @@ fn permission_probe_status(
     }
 }
 
+/// The local identity carries no plan, so nothing is withheld from it.
 async fn plan_eligible() -> bool {
-    crate::os_accounts::os_accounts_status_local()
-        .await
-        .is_ok_and(|status| {
-            status.local_dev
-                || status.subscription.is_some_and(|subscription| {
-                    subscription_plan_eligible(
-                        subscription.subscribed,
-                        subscription.plan.as_deref(),
-                    )
-                })
-        })
-}
-
-fn subscription_plan_eligible(subscribed: bool, plan: Option<&str>) -> bool {
-    subscribed
-        && plan
-            .map(|plan| matches!(plan.trim().to_ascii_lowercase().as_str(), "pro" | "max"))
-            .unwrap_or(true)
+    true
 }
 
 #[allow(dead_code)] // Preserved for the neutral agent capability adapter follow-up.
@@ -6424,16 +6408,6 @@ mod tests {
                 "computer_use_dangerous_text_blocked"
             );
         }
-    }
-
-    #[test]
-    fn only_pro_max_and_legacy_paid_subscriptions_are_eligible() {
-        assert!(subscription_plan_eligible(true, Some("pro")));
-        assert!(subscription_plan_eligible(true, Some(" MAX ")));
-        assert!(subscription_plan_eligible(true, None));
-        assert!(!subscription_plan_eligible(false, Some("pro")));
-        assert!(!subscription_plan_eligible(true, Some("hobby")));
-        assert!(!subscription_plan_eligible(true, Some("enterprise")));
     }
 
     #[test]

@@ -5,7 +5,7 @@ import type { SettingsTab } from "../components/settings/AppSettings";
 import type { SidebarView } from "../components/sidebar/Sidebar";
 import type { TabItem } from "../components/tabs/TabBar";
 import type { TabNav } from "./tabs/tabs";
-import type { FolderDto, NoteDto, RecordingStatusDto, AccountStatus } from "../lib/tauri";
+import type { FolderDto, NoteDto, RecordingStatusDto } from "../lib/tauri";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { NoteChat } from "../components/note-chat/useNoteChat";
 import type { ClovyUpdate } from "../lib/updater";
@@ -21,7 +21,6 @@ import type * as React from "react";
 export type RenderAppLayoutDependencies = {
   accessibilityBannerDismissed: boolean;
   accessibilityBlocked: boolean;
-  account: AccountStatus;
   activateTab: (id: string) => void;
   activeTabId: string;
   activeView: SidebarView;
@@ -69,7 +68,6 @@ export type RenderAppLayoutDependencies = {
     folderId: string,
     options?: { rethrow?: boolean },
   ) => Promise<void>;
-  handleSignOut: () => Promise<void>;
   handleToggleSessionCompleted: (sessionId: string, completed: boolean) => Promise<void>;
   homeStoredSessionId: string | undefined;
   mainPanelBodyRef: React.MutableRefObject<HTMLDivElement | null>;

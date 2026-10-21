@@ -14,8 +14,6 @@ export type AgentWorkspaceProps = {
   initialSessionId?: string;
   /** Persistent relationship-level conversation, distinct from focused sessions. */
   homeMode?: boolean;
-  /** Best-effort account display name used only for Home's greeting. */
-  homeUserDisplayName?: string;
   onHomeSessionCreated?: (storedSessionId: string) => void;
   onOpenHomeTaskSession?: (storedSessionId: string, title: string) => void;
   origin?: AgentWorkspaceOrigin;

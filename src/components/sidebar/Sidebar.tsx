@@ -1,5 +1,4 @@
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
-import { IconArrowBoxRight } from "central-icons/IconArrowBoxRight";
 import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconRobot2 } from "central-icons/IconRobot2";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
@@ -47,7 +46,6 @@ import { createPortal } from "react-dom";
 import { markAgentNewSessionPending } from "../agent/session-persistence";
 import { CategoryIcon } from "../agent/composer/CategoryIcon";
 import { ClovyWordmark } from "../brand/ClovyLogo";
-import { AccountAvatar, accountDisplayName } from "../account/AccountAvatar";
 import { type ReportCategory, reportCategoryDef } from "../agent/composer/reportCategory";
 import {
   AGENT_DELETE_SESSION_EVENT,
@@ -66,7 +64,7 @@ import { useScrollFade } from "../../lib/use-scroll-fade";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import { useRecordingPresenceBounds } from "../../lib/recording-presence-bounds";
 import { isPrimaryShortcut, primaryShortcutLabel } from "../../lib/platform";
-import type { AccountStatus, NoteListItemDto, RecordingStatusDto } from "../../lib/tauri";
+import type { NoteListItemDto, RecordingStatusDto } from "../../lib/tauri";
 import { deleteAgentSession, listSessionPartitions } from "../../lib/tauri";
 import type { AgentSessionDto } from "../../lib/agent-runtime-contract";
 import {
@@ -132,16 +130,14 @@ export type SidebarView =
 type SidebarProps = {
   notes: NoteListItemDto[];
   activeView: SidebarView;
-  // Settings is its own page reached from the user's name; these default so
+  // Settings is its own page reached from the footer menu; these default so
   // tests that mount the sidebar for non-settings views can skip the plumbing.
-  account?: AccountStatus;
   settingsTab?: SettingsTab;
   onSettingsTabChange?: (tab: SettingsTab) => void;
   onChangeView: (view: SidebarView) => void;
   // Returns to wherever the user was before opening settings (falls back to
   // Notes when not wired, e.g. unit tests).
   onExitSettings?: () => void;
-  onSignOut?: () => void;
   onReportIssue?: (category: ReportCategory) => void;
   onSelectNote: (noteId: string) => void;
   onNewAgentSession: () => void;
@@ -317,12 +313,10 @@ export const HIDDEN_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set();
 export function Sidebar({
   notes,
   activeView,
-  account = { signedIn: false, configured: false },
   settingsTab = "general",
   onSettingsTabChange,
   onChangeView,
   onExitSettings,
-  onSignOut,
   onReportIssue,
   onSelectNote,
   onNewAgentSession,
@@ -598,7 +592,7 @@ export function Sidebar({
       },
       // Per-tab settings jumps surface only once a query is typed so ten
       // rows don't flood the default Quick actions list. General and
-      // Appearance carry their row-level terms so "theme" or "account"
+      // Appearance carry their row-level terms so "theme" or "permissions"
       // still finds the right tab.
       ...(normalized
         ? settingsTabsForCompanionPairing(companionPairingEnabled, activitySupported)
@@ -610,7 +604,7 @@ export function Sidebar({
                 icon: <IconSettingsGear4 size={15} />,
                 searchText: normalizeCommandQuery(
                   tab.id === "general"
-                    ? `settings general account permissions privacy ${tab.label}`
+                    ? `settings general permissions privacy ${tab.label}`
                     : tab.id === "appearance"
                       ? `settings appearance theme accent text size dark light mode ${tab.label}`
                       : tab.id === "activity"
@@ -626,9 +620,9 @@ export function Sidebar({
         : []),
     ].filter(matches);
 
-    // Support: the report entry points (reusing the identity menu's items and
-    // CategoryIcon), invite friends, and sign out — each guarded exactly like
-    // the identity menu so the prompt never offers an action the menu hides.
+    // Support: the report entry points (reusing the footer menu's items and
+    // CategoryIcon), guarded exactly like the footer menu so the prompt never
+    // offers an action the menu hides.
     const supportItems: CommandPromptItem[] = [
       ...(onReportIssue
         ? REPORT_MENU_ITEMS.map((item): CommandPromptItem => {
@@ -643,19 +637,6 @@ export function Sidebar({
             };
           })
         : []),
-      ...(account.signedIn && !account.localDev && onSignOut
-        ? [
-            {
-              id: "support:sign-out",
-              label: t("shell.identity.signOut"),
-              icon: <IconArrowBoxRight size={15} />,
-              searchText: normalizeCommandQuery(
-                `sign out log out logout ${t("shell.identity.signOut")}`,
-              ),
-              action: onSignOut,
-            } satisfies CommandPromptItem,
-          ]
-        : []),
     ].filter(matches);
 
     return [
@@ -664,8 +645,6 @@ export function Sidebar({
       { title: t("shell.command.group.support"), items: supportItems },
     ].filter((group) => group.items.length > 0);
   }, [
-    account.localDev,
-    account.signedIn,
     activitySupported,
     agentSessions,
     commandQuery,
@@ -679,7 +658,6 @@ export function Sidebar({
     onSelectAgentSession,
     onSelectNote,
     onSettingsTabChange,
-    onSignOut,
     recordingStatus,
     t,
   ]);
@@ -1255,8 +1233,7 @@ export function Sidebar({
 
       <footer className="sidebar-footer">
         {footerAccessory}
-        <SidebarIdentity
-          account={account}
+        <SidebarFooterMenu
           menuOpen={identityMenuOpen}
           onToggleMenu={() => setIdentityMenuOpen((open) => !open)}
           onCloseMenu={() => setIdentityMenuOpen(false)}
@@ -1269,14 +1246,6 @@ export function Sidebar({
               ? (category) => {
                   setIdentityMenuOpen(false);
                   onReportIssue(category);
-                }
-              : undefined
-          }
-          onSignOut={
-            onSignOut
-              ? () => {
-                  setIdentityMenuOpen(false);
-                  onSignOut();
                 }
               : undefined
           }
@@ -1706,35 +1675,30 @@ function isSearchShortcut(event: KeyboardEvent) {
   return event.key.toLowerCase() === "k" && isPrimaryShortcut(event);
 }
 
-// The user's name is the settings entry point: clicking it opens a small
-// popover whose actions open the settings page or sign out.
-// The report shortcuts in the account menu: the same set as the composer's
+// The report shortcuts in the footer menu: the same set as the composer's
 // "+" popover, minus attaching a file. Action-phrased to read as menu verbs.
 const REPORT_MENU_ITEMS: { category: ReportCategory; label: MessageKey }[] = [
   { category: "bug", label: "shell.identity.reportBug" },
   { category: "feedback", label: "shell.identity.sendFeedback" },
   { category: "feature", label: "shell.identity.requestFeature" },
 ];
-function SidebarIdentity({
-  account,
+// The footer entry point: clicking it opens a small popover whose actions open
+// the settings page or a report.
+function SidebarFooterMenu({
   menuOpen,
   onToggleMenu,
   onCloseMenu,
   onOpenSettings,
   onReportIssue,
-  onSignOut,
 }: {
-  account: AccountStatus;
   menuOpen: boolean;
   onToggleMenu: () => void;
   onCloseMenu: () => void;
   onOpenSettings: () => void;
   onReportIssue?: (category: ReportCategory) => void;
-  onSignOut?: () => void;
 }) {
   const t = useT();
   const wrapRef = useRef<HTMLDivElement>(null);
-  const name = accountDisplayName(account);
 
   useDismiss(wrapRef, menuOpen, onCloseMenu);
 
@@ -1745,11 +1709,11 @@ function SidebarIdentity({
         className="sidebar-nav-item sidebar-identity"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        aria-label={t("shell.identity.menuLabel", { name })}
+        aria-label={t("shell.identity.menuLabel")}
         onClick={onToggleMenu}
       >
-        <AccountAvatar account={account} className="sidebar-nav-icon" />
-        <span className="sidebar-nav-label">{name}</span>
+        <IconSettingsGear4 size={16} className="sidebar-nav-icon" />
+        <span className="sidebar-nav-label">{t("common.settings")}</span>
       </button>
       {menuOpen ? (
         <div className="sidebar-identity-menu" role="menu">
@@ -1772,15 +1736,6 @@ function SidebarIdentity({
                 </button>
               ))
             : null}
-          {account.signedIn && !account.localDev && onSignOut ? (
-            <>
-              <div className="context-menu-separator" role="separator" />
-              <button type="button" role="menuitem" onClick={onSignOut}>
-                <IconArrowBoxRight size={14} />
-                {t("shell.identity.signOut")}
-              </button>
-            </>
-          ) : null}
         </div>
       ) : null}
     </div>

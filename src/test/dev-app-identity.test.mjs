@@ -88,9 +88,9 @@ describe("macOS release identity", () => {
 describe("production identity compatibility", () => {
   it("locks immutable identities and canonical migration aliases", () => {
     expect(tauriConfig.identifier).toBe("co.opensoftware.june");
-    expect(tauriConfig.plugins["deep-link"].desktop.schemes).toEqual(["clovy", "osjune"]);
+    expect(tauriConfig.plugins["deep-link"].desktop.schemes).toEqual(["clovy"]);
     expect(tauriConfig.plugins["deep-link"].mobile).toEqual([
-      { scheme: ["clovy", "osjune"], appLink: false },
+      { scheme: ["clovy"], appLink: false },
     ]);
     expect(tauriConfig.plugins.updater).toEqual({
       pubkey:
@@ -107,12 +107,6 @@ describe("production identity compatibility", () => {
 
     const sourceIdentities = {
       "src-tauri/src/updates.rs": [`const STABLE_ENDPOINT: &str = "${stableUpdaterEndpoint}";`],
-      "src-tauri/src/os_accounts.rs": [
-        'const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.accounts";',
-        'const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.accounts";',
-        'const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.accounts";',
-        'const LEGACY_DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.accounts";',
-      ],
       "src-tauri/src/agent_runtime/secrets.rs": [
         'const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.agent-secrets";',
         'const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.dev.agent-secrets";',

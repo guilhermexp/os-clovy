@@ -46,7 +46,6 @@ import { autostartEnabled, autostartSupported, setAutostartEnabled } from "../..
 import { replayOnboarding } from "../../lib/onboarding";
 import { errorCode, messageForErrorCode } from "../../lib/errors";
 import type {
-  AccountStatus,
   DictationHelperEvent,
   DictationMicrophoneDeviceDto,
   DictationShortcutKind,
@@ -62,7 +61,6 @@ import type {
   RecordingSourceMode,
   RecordingSourceReadinessDto,
 } from "../../lib/tauri";
-import { AccountSettingsSection } from "../account/AccountSettings";
 import { KeycapShortcut } from "../shortcuts/KeycapShortcut";
 import { chordFromKeyEvent, shortcutFromCapturePayload } from "../shortcuts/use-shortcut-capture";
 import {
@@ -380,15 +378,11 @@ type AppSettingsProps = {
   memoryFolderFilter?: string;
   /** Drill from a memory's project tag into that project. */
   onOpenProject?: (folderId: string) => void;
-  account: AccountStatus;
-  accountLoading: boolean;
   sourceMode: RecordingSourceMode;
   sourceReadiness?: RecordingSourceReadinessDto;
   checkingSourceReadiness: boolean;
   microphonePermissionStatus?: string;
   accessibilityPermissionStatus?: string;
-  onAccountChanged: (next: AccountStatus) => void;
-  onAccountRefresh: () => Promise<AccountStatus | undefined>;
   onSourceModeChange: (mode: RecordingSourceMode) => void;
   onEnableMicrophone?: () => void;
   onEnableAccessibility?: () => void;
@@ -427,15 +421,11 @@ export function AppSettings({
   onFoldersImported,
   memoryFolderFilter,
   onOpenProject,
-  account,
-  accountLoading,
   sourceMode,
   sourceReadiness,
   checkingSourceReadiness,
   microphonePermissionStatus,
   accessibilityPermissionStatus,
-  onAccountChanged,
-  onAccountRefresh,
   onSourceModeChange,
   onEnableMicrophone,
   onEnableAccessibility,
@@ -1556,13 +1546,6 @@ export function AppSettings({
               title={t("settings.tabs.general")}
               blurb={t("settings.general.blurb")}
             />
-            <AccountSettingsSection
-              account={account}
-              loading={accountLoading}
-              onAccountChanged={onAccountChanged}
-              onRefresh={onAccountRefresh}
-            />
-
             <PermissionsSettingsSection
               microphonePermissionStatus={microphonePermissionStatus}
               microphoneReadiness={microphoneReadiness}

@@ -363,7 +363,7 @@ pub async fn companion_begin_pairing(
 ) -> Result<PairingQrPayload, AppError> {
     ensure_companion_pairing_enabled(&runtime)?;
     let _account_activity = CompanionAccountActivityGuard::begin(&runtime)?;
-    let account_user_id = crate::os_accounts::current_user_id().await?;
+    let account_user_id = crate::local_identity::user_id();
     let identity = load_or_create_identity(&account_user_id)?;
     let mut secret = [0_u8; KEY_BYTES];
     OsRng.fill_bytes(&mut secret);
@@ -496,7 +496,7 @@ pub async fn companion_approve_pairing(
         .clone()
         .unwrap_or_else(|| "iPhone".to_string());
     let repos = repositories(&app).await?;
-    let account_user_id = crate::os_accounts::current_user_id().await?;
+    let account_user_id = crate::local_identity::user_id();
     let mobile_id = mobile_device_id.to_string();
     let existing = repos.companion_device(&account_user_id, &mobile_id).await?;
     if existing.as_ref().is_some_and(|device| {
@@ -665,7 +665,7 @@ pub async fn companion_list_devices(
     runtime: State<'_, CompanionRuntime>,
 ) -> Result<Vec<LinkedDeviceDto>, AppError> {
     ensure_companion_pairing_enabled(&runtime)?;
-    let account_user_id = crate::os_accounts::current_user_id().await?;
+    let account_user_id = crate::local_identity::user_id();
     Ok(repositories(&app)
         .await?
         .list_companion_devices(&account_user_id)
@@ -769,7 +769,7 @@ pub async fn companion_list_browse_roots(
     runtime: State<'_, CompanionRuntime>,
 ) -> Result<Vec<BrowseRootDto>, AppError> {
     ensure_companion_pairing_enabled(&runtime)?;
-    let account_user_id = crate::os_accounts::current_user_id().await?;
+    let account_user_id = crate::local_identity::user_id();
     Ok(
         files::list_root_records(&repositories(&app).await?, &account_user_id)
             .await?
@@ -790,7 +790,7 @@ pub async fn companion_grant_browse_root(
     request: GrantBrowseRootRequest,
 ) -> Result<BrowseRootDto, AppError> {
     ensure_companion_pairing_enabled(&runtime)?;
-    let account_user_id = crate::os_accounts::current_user_id().await?;
+    let account_user_id = crate::local_identity::user_id();
     let root = files::grant_root(
         &repositories(&app).await?,
         &account_user_id,
@@ -814,7 +814,7 @@ pub async fn companion_revoke_browse_root(
     files::revoke_root(
         &app,
         &repositories(&app).await?,
-        &crate::os_accounts::current_user_id().await?,
+        &crate::local_identity::user_id(),
         root_id,
     )
     .await
@@ -836,7 +836,7 @@ pub async fn companion_consume_attachments(
     files::consume_attachments(
         &app,
         &repositories(&app).await?,
-        &crate::os_accounts::current_user_id().await?,
+        &crate::local_identity::user_id(),
         &reference_ids,
     )
     .await?;
@@ -859,11 +859,7 @@ pub async fn companion_rename_device(
     }
     repositories(&app)
         .await?
-        .rename_companion_device(
-            &crate::os_accounts::current_user_id().await?,
-            &request.device_id,
-            name,
-        )
+        .rename_companion_device(&crate::local_identity::user_id(), &request.device_id, name)
         .await?;
     Ok(())
 }
@@ -875,7 +871,7 @@ pub async fn companion_revoke_device(
     device_id: Uuid,
 ) -> Result<(), AppError> {
     ensure_companion_pairing_enabled(&runtime)?;
-    let account_user_id = crate::os_accounts::current_user_id().await?;
+    let account_user_id = crate::local_identity::user_id();
     revoke_device_remote(device_id).await?;
     repositories(&app)
         .await?
@@ -2210,7 +2206,9 @@ pub async fn prepare_account_logout(app: &AppHandle) -> Result<(), AppError> {
 
     let repos = repositories(app).await?;
     let persisted_account_user_id = repos.companion_account_user_id().await?;
-    let stored_account_user_id = match crate::os_accounts::stored_user_id().await {
+    let stored_account_user_id = match Ok::<Option<String>, AppError>(Some(
+        crate::local_identity::user_id(),
+    )) {
         Ok(account_user_id) => account_user_id,
         Err(error) if persisted_account_user_id.is_none() => return Err(error),
         Err(error) => {
@@ -2443,7 +2441,7 @@ where
 {
     let url = format!("{}{}", crate::clovy_api::clovy_api_url(), path);
     let client = companion_http_client()?;
-    let mut token = crate::os_accounts::access_token().await?;
+    let mut token = crate::local_identity::access_token();
     for attempt in 0..2 {
         let response = build(&client, url.clone(), token.clone())
             .send()
@@ -2455,7 +2453,7 @@ where
                 )
             })?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
-            token = crate::os_accounts::refresh_access_token().await?;
+            token = crate::local_identity::access_token();
             continue;
         }
         let status = response.status();

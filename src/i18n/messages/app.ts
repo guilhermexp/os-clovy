@@ -56,8 +56,6 @@ export default defineMessages({
     "app.sidebar.hide": "Hide sidebar",
     "app.sidebar.resize": "Resize sidebar",
     "app.sidebar.toggle": "Toggle sidebar",
-    "app.gate.startingAria": "Starting Clovy",
-    "app.gate.starting": "Starting Clovy...",
     "app.workspace.loading": "Loading view",
     "app.workspace.loadFailedTitle": "Couldn't open this view",
     "app.workspace.loadFailedBody": "Clovy couldn't load this part of the app. Try again.",
@@ -125,8 +123,6 @@ export default defineMessages({
     "app.sidebar.hide": "Ocultar barra lateral",
     "app.sidebar.resize": "Redimensionar barra lateral",
     "app.sidebar.toggle": "Alternar barra lateral",
-    "app.gate.startingAria": "Iniciando o Clovy",
-    "app.gate.starting": "Iniciando o Clovy...",
     "app.workspace.loading": "Carregando visualização",
     "app.workspace.loadFailedTitle": "Não foi possível abrir esta visualização",
     "app.workspace.loadFailedBody":

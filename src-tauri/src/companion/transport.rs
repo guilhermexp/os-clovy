@@ -173,7 +173,7 @@ async fn reconnect_loop(app: AppHandle) {
         }
         let has_active_device = match (
             repositories(&app).await,
-            crate::os_accounts::current_user_id().await,
+            Ok::<String, AppError>(crate::local_identity::user_id()),
         ) {
             (Ok(repos), Ok(account_user_id)) => repos
                 .list_companion_devices(&account_user_id)
@@ -242,9 +242,9 @@ fn relay_close_result(exchanged_frame: bool) -> Result<(), AppError> {
 }
 
 async fn connect_once(app: &AppHandle) -> Result<(), AppError> {
-    let account_user_id = crate::os_accounts::current_user_id().await?;
+    let account_user_id = crate::local_identity::user_id();
     let identity = load_or_create_identity(&account_user_id)?;
-    let token = crate::os_accounts::access_token().await?;
+    let token = crate::local_identity::access_token();
     let separator = if relay_websocket_url().contains('?') {
         '&'
     } else {

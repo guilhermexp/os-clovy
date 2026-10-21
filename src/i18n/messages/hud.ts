@@ -41,7 +41,6 @@ export default defineMessages({
     "hud.error.helperCommandInvalid": "The dictation helper rejected a command.",
     "hud.error.shortcutInvalid": "Shortcut configuration was invalid.",
     "hud.error.helperUnavailable": "Dictation helper process is not running.",
-    "hud.error.notSignedIn": "Sign in to use dictation.",
     "hud.error.responseInvalid":
       "Dictation returned a summary instead of dictated text. Try again.",
     "hud.error.audioWithoutText": "Dictation detected audio but produced no text. Try again.",
@@ -142,7 +141,6 @@ export default defineMessages({
     "hud.error.helperCommandInvalid": "O assistente de ditado recusou um comando.",
     "hud.error.shortcutInvalid": "A configuração do atalho é inválida.",
     "hud.error.helperUnavailable": "O processo auxiliar de ditado não está em execução.",
-    "hud.error.notSignedIn": "Entre na sua conta para usar o ditado.",
     "hud.error.responseInvalid":
       "O ditado devolveu um resumo em vez do texto ditado. Tente de novo.",
     "hud.error.audioWithoutText": "O ditado detectou áudio, mas não gerou texto. Tente de novo.",

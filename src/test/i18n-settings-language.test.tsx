@@ -28,12 +28,8 @@ const DICTATION_LANGUAGE_KEY_PATTERN = /dictation|transcription/i;
 function renderAppearance() {
   return render(
     <AppSettings
-      account={{ signedIn: false, configured: false }}
-      accountLoading={false}
       sourceMode="microphoneOnly"
       checkingSourceReadiness={false}
-      onAccountChanged={() => {}}
-      onAccountRefresh={async () => undefined}
       onSourceModeChange={() => {}}
       onEnableSystemAudio={() => {}}
       activeTab="appearance"

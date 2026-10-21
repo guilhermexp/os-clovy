@@ -1105,7 +1105,7 @@ pub async fn check_recording_source_readiness(
 /// dropped — same reason the accounts portal links go through a command.
 #[tauri::command]
 pub fn clovy_open_verify_page() -> Result<(), AppError> {
-    crate::os_accounts::open_in_browser(&crate::clovy_api::verify_url())
+    crate::system_browser::open_in_browser(&crate::clovy_api::verify_url())
 }
 
 const CLOVY_COMMUNITY_URL: &str = "https://t.me/+B4Z8KUqEsRc4ZGVh";
@@ -1113,7 +1113,7 @@ const CLOVY_COMMUNITY_URL: &str = "https://t.me/+B4Z8KUqEsRc4ZGVh";
 /// Opens the Clovy Telegram community in the default browser.
 #[tauri::command]
 pub fn clovy_open_community_page() -> Result<(), AppError> {
-    crate::os_accounts::open_in_browser(CLOVY_COMMUNITY_URL)
+    crate::system_browser::open_in_browser(CLOVY_COMMUNITY_URL)
 }
 
 /// Opens an arbitrary external link in the default browser. This is the
@@ -1134,7 +1134,7 @@ pub fn clovy_open_external_url(url: String) -> Result<(), AppError> {
             "Only http(s) links can be opened externally.",
         ));
     }
-    crate::os_accounts::open_in_browser(url.trim())
+    crate::system_browser::open_in_browser(url.trim())
 }
 
 /// Compatibility IPC aliases for frontend bundles from before the technical
@@ -1195,7 +1195,7 @@ pub async fn open_privacy_settings(request: OpenPrivacySettingsRequest) -> Resul
 #[cfg(target_os = "windows")]
 fn open_non_macos_privacy_settings(request: OpenPrivacySettingsRequest) -> Result<(), AppError> {
     match request.pane.as_str() {
-        "microphone" => crate::os_accounts::open_in_browser("ms-settings:privacy-microphone"),
+        "microphone" => crate::system_browser::open_in_browser("ms-settings:privacy-microphone"),
         _ => Err(AppError::new(
             "settings_open_unsupported",
             "This privacy settings shortcut is only supported on macOS.",

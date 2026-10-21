@@ -46,12 +46,12 @@ mod note_audio_export;
 mod note_save_flush;
 pub mod notifications;
 pub mod obsidian;
-pub mod os_accounts;
 pub mod p3a;
 mod process_group;
 pub mod providers;
 pub mod routines;
 mod shutdown;
+mod system_browser;
 pub mod theme_icon;
 pub mod updates;
 pub mod video_download_url;
@@ -404,12 +404,6 @@ pub fn run() {
             p3a::p3a_question_catalog,
             p3a::set_p3a_enabled,
             p3a::p3a_record,
-            os_accounts::os_accounts_status,
-            os_accounts::os_accounts_status_local,
-            os_accounts::os_accounts_login,
-            os_accounts::os_accounts_cancel_login,
-            os_accounts::os_accounts_logout,
-            os_accounts::os_accounts_set_avatar_seed,
             extension_host::extension_pairing_status,
             extension_host::register_browser_extension_host,
             connectors::commands::connectors_policy,
@@ -478,7 +472,6 @@ pub fn run() {
         .manage(computer_use::ComputerUseState::default())
         .manage(shutdown::ShutdownCoordinator::default())
         .manage(companion::CompanionRuntime::default())
-        .manage(os_accounts::LoginFlow::default())
         .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
         .manage(connectors::NotionConnectFlow::default())
@@ -518,7 +511,6 @@ pub fn run() {
             // and upcoming meetings) and wake the matching durable routine.
             connectors::triggers::start(app.handle());
             meeting_hud::setup(app);
-            os_accounts::setup_deep_link(app);
             #[cfg(target_os = "macos")]
             setup_main_window_lifecycle(app);
             Ok(())

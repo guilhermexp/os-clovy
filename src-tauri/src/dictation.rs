@@ -378,18 +378,6 @@ impl DictationTakeState {
         Some((current, operation(current, prepared)))
     }
 
-    fn run_if_current_helper_command<T>(
-        &self,
-        expected_generation: u64,
-        operation: impl FnOnce() -> T,
-    ) -> Option<T> {
-        let generation = self
-            .helper_command_generation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (*generation == expected_generation).then(operation)
-    }
-
     fn lock_helper_commands(&self) -> std::sync::MutexGuard<'_, u64> {
         self.helper_command_generation
             .lock()
@@ -1338,15 +1326,6 @@ impl ShortcutActivationController {
         self.pending_helper_take_id = None;
         self.reset_input_activation();
         true
-    }
-
-    fn finish_start_for_auth_failure(&mut self, take_id: &str) -> Option<bool> {
-        let owns_start = self.pending_helper_take_id.as_deref() == Some(take_id)
-            || self.helper_take_id.as_deref() == Some(take_id);
-        if !owns_start {
-            return None;
-        }
-        Some(self.finish_helper_take(take_id, None))
     }
 
     fn reset(&mut self) {
@@ -3140,7 +3119,7 @@ fn handle_shortcut_key_event(
     };
 
     if let Some(take_state) = app.try_state::<DictationTakeState>() {
-        take_state.run_new_helper_command_if(prepare_action, |start_attempt, action| {
+        take_state.run_new_helper_command_if(prepare_action, |_, action| {
             let (command, starts_recording, command_take_id) = action;
             let command_take_id = command_take_id.or_else(|| take_state.current_take_id());
             send_dictation_command(
@@ -3148,7 +3127,6 @@ fn handle_shortcut_key_event(
                 command,
                 &shortcut.label,
                 starts_recording,
-                Some(start_attempt),
                 command_take_id,
             );
         });
@@ -3161,7 +3139,6 @@ fn handle_shortcut_key_event(
             command,
             &shortcut.label,
             starts_recording,
-            None,
             command_take_id,
         );
     }
@@ -3190,17 +3167,6 @@ fn reset_shortcut_activation(app: &AppHandle) {
             controller.reset();
         }
     }
-}
-
-fn finish_shortcut_start_for_auth_failure(app: &AppHandle, take_id: &str) -> Option<bool> {
-    app.try_state::<ShortcutActivationState>()
-        .and_then(|state| {
-            state
-                .controller
-                .lock()
-                .ok()
-                .and_then(|mut controller| controller.finish_start_for_auth_failure(take_id))
-        })
 }
 
 fn dictation_take_id_from_event(event: &serde_json::Value) -> Option<&str> {
@@ -3515,21 +3481,8 @@ fn send_dictation_command(
     command: DictationCommand,
     shortcut_label: &str,
     starts_recording: bool,
-    start_attempt: Option<u64>,
     command_take_id: Option<String>,
 ) {
-    // The start path needs a signed-in OS Accounts session for the
-    // transcription that follows, but the token check must not sit between
-    // the key press and the microphone: capture is local and the token is
-    // only consumed once the recording ends. Awaiting it here delayed every
-    // start by an executor hop, blocked on a network refresh whenever the
-    // cached token was stale, and could reorder a fast press-release so
-    // stop_and_paste reached the helper before start_listening. Start
-    // immediately and check in parallel; a signed-out session discards the
-    // moments-old local recording and lands on the same sign-in surface as
-    // before. ToggleListening can also start, but we can't tell
-    // start-from-stop without extra state; transcribe_recording_ready acts
-    // as the backstop there.
     let forwarded = forward_dictation_command(
         app,
         command,
@@ -3539,60 +3492,6 @@ fn send_dictation_command(
     );
     if !forwarded && matches!(command, DictationCommand::ToggleListening) {
         reset_shortcut_activation(app);
-    }
-    if forwarded && matches!(command, DictationCommand::StartListening) {
-        let Some(start_attempt) = start_attempt else {
-            return;
-        };
-        let app = app.clone();
-        let label = shortcut_label.to_string();
-        tauri::async_runtime::spawn(async move {
-            match classify_dictation_auth(&crate::os_accounts::access_token().await) {
-                DictationAuthGate::Proceed => {}
-                // A transient outage at the key press must not kill a live
-                // dictation: let it record. The recording_ready backstop
-                // re-checks at the end and, if still unavailable, cleans up
-                // the finalized audio and shows a retriable error.
-                DictationAuthGate::Unavailable(_) => {}
-                DictationAuthGate::SignedOut => {
-                    let Some(take_state) = app.try_state::<DictationTakeState>() else {
-                        return;
-                    };
-                    let Some(take_id) = command_take_id.as_deref() else {
-                        return;
-                    };
-                    let should_focus = take_state
-                        .run_if_current_helper_command(start_attempt, || {
-                            // A helper may reject this attempted start while a
-                            // previously confirmed take keeps recording. Retire
-                            // only the start this auth result belongs to; if that
-                            // take was already rejected, the result is stale even
-                            // though no newer command advanced the generation.
-                            let preserved_confirmed_take =
-                                finish_shortcut_start_for_auth_failure(&app, take_id)?;
-                            let _ = forward_dictation_command(
-                                &app,
-                                DictationCommand::DiscardListening,
-                                &label,
-                                false,
-                                Some(take_id),
-                            );
-                            Some(emit_start_auth_not_signed_in(
-                                &app,
-                                take_id,
-                                preserved_confirmed_take,
-                            ))
-                        })
-                        .flatten();
-                    // Focusing does not change helper or HUD lifecycle state,
-                    // so keep the serialized section above limited to the
-                    // ownership-sensitive discard and error emission.
-                    if should_focus == Some(true) {
-                        focus_main_window(&app);
-                    }
-                }
-            }
-        });
     }
 }
 
@@ -3672,132 +3571,6 @@ fn forward_dictation_command(
         return false;
     }
     true
-}
-
-/// Instant (millis since the Unix epoch) of the last signed-out prompt.
-/// One press-release can hit two signed-out checks — the parallel
-/// fast-discard task on the down edge and the transcribe_recording_ready
-/// backstop on the up edge — and which of them fires (or both) depends on
-/// how far the recording got before the discard landed. Deduping here, at
-/// the notifier, collapses every ordering to a single prompt + focus pull
-/// without losing the prompt in the paths where only one check runs.
-static LAST_NOT_SIGNED_IN_AT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-const NOT_SIGNED_IN_DEDUPE_MS: u64 = 2_000;
-
-fn claim_not_signed_in_prompt() -> bool {
-    use std::sync::atomic::Ordering;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
-    let last = LAST_NOT_SIGNED_IN_AT_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last) < NOT_SIGNED_IN_DEDUPE_MS {
-        return false;
-    }
-    LAST_NOT_SIGNED_IN_AT_MS
-        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-}
-
-/// Emits a start-time auth failure while the caller holds the helper-command
-/// generation lock. This avoids recursively acquiring that lock through the
-/// general correlated emitter.
-fn emit_start_auth_not_signed_in(
-    app: &AppHandle,
-    take_id: &str,
-    preserved_confirmed_take: bool,
-) -> bool {
-    let mut event = dictation_not_signed_in_event();
-    add_dictation_take_id_to_event(&mut event, take_id);
-    if preserved_confirmed_take {
-        // The rejected start never owned the active recording. Keep the
-        // diagnostic event, but do not mutate that recording's lifecycle or
-        // consume the dedupe slot its own auth backstop may need.
-        emit_helper_event_without_lifecycle(app, event);
-        return false;
-    }
-    if !claim_not_signed_in_prompt() {
-        return false;
-    }
-    emit_dictation_event_value(app, event);
-    true
-}
-
-/// Emits the signed-out prompt and pulls the app forward, unless the same
-/// visible prompt fired within the dedupe window.
-fn notify_dictation_not_signed_in(app: &AppHandle, take_id: Option<&str>) {
-    let emitted_visible_prompt = if let Some(take_id) = take_id {
-        emit_correlated_not_signed_in(app, take_id)
-    } else if claim_not_signed_in_prompt() {
-        emit_dictation_event_value(app, dictation_not_signed_in_event());
-        true
-    } else {
-        false
-    };
-    if emitted_visible_prompt {
-        focus_main_window(app);
-    }
-}
-
-fn emit_correlated_not_signed_in(app: &AppHandle, take_id: &str) -> bool {
-    let mut event = dictation_not_signed_in_event();
-    add_dictation_take_id_to_event(&mut event, take_id);
-    let take_state = app.try_state::<DictationTakeState>();
-    let _helper_command_guard = take_state
-        .as_ref()
-        .map(|state| state.lock_helper_commands());
-    if !dictation_delivery_matches_active_take(app, take_id) {
-        // A late auth backstop is still useful in the event log, but it must
-        // neither mutate a replacement nor suppress that take's own prompt.
-        emit_helper_event_without_lifecycle(app, event);
-        return false;
-    }
-    if !claim_not_signed_in_prompt() {
-        return false;
-    }
-    emit_dictation_event_value(app, event);
-    true
-}
-
-fn dictation_not_signed_in_event() -> serde_json::Value {
-    serde_json::json!({
-        "type": "error",
-        "payload": {
-            "code": "not_signed_in",
-            "message": "Sign in to use dictation.",
-        },
-    })
-}
-
-/// How a dictation auth check should be handled. A transient OS Accounts
-/// failure is distinct from a genuine sign-out: the recording must be kept and
-/// a retriable error shown, never discarded behind a sign-in prompt.
-enum DictationAuthGate {
-    /// The token is usable; continue with transcription.
-    Proceed,
-    /// OS Accounts was momentarily unreachable. Keep the recording; show a
-    /// retriable error carrying the upstream message.
-    Unavailable(AppError),
-    /// The user is genuinely signed out. Discard and prompt to sign in.
-    SignedOut,
-}
-
-fn classify_dictation_auth(result: &Result<String, AppError>) -> DictationAuthGate {
-    match result {
-        Ok(_) => DictationAuthGate::Proceed,
-        Err(error) if crate::os_accounts::is_transient_auth_error(error) => {
-            DictationAuthGate::Unavailable(error.clone())
-        }
-        Err(_) => DictationAuthGate::SignedOut,
-    }
-}
-
-fn focus_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
 }
 
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
@@ -5536,51 +5309,6 @@ async fn transcribe_recording_ready_inner(
             speech_analysis_status = ?recording.speech_analysis_status,
             "dictation capture had low speech evidence; automatic paste will be suppressed"
         );
-    }
-    // Backstop for the toggle-start path (where the start-time gate in
-    // send_dictation_command can't tell start from stop) and for tokens that
-    // expired between start and finish.
-    let Some(access_token) =
-        run_dictation_take_step(take, crate::os_accounts::access_token()).await
-    else {
-        remove_cancelled_dictation_audio(&audio_path, None);
-        return;
-    };
-    match classify_dictation_auth(&access_token) {
-        DictationAuthGate::Proceed => {}
-        DictationAuthGate::Unavailable(error) => {
-            // OS Accounts is temporarily unreachable. The helper has already
-            // finalized this capture to a temp WAV, and there is no retained
-            // retry handle after recording_ready, so remove it before
-            // surfacing the retriable auth error.
-            remove_windows_dictation_audio(&recording.audio_path);
-            if send_dictation_take_command(
-                app,
-                take,
-                serde_json::json!({ "type": "discard_recording" }),
-            )
-            .is_some()
-            {
-                update_shortcut_helper_finalizing(app, false);
-                emit_dictation_take_event(app, take, app_error_event(error));
-            }
-            return;
-        }
-        DictationAuthGate::SignedOut => {
-            remove_windows_dictation_audio(&recording.audio_path);
-            if send_dictation_take_command(
-                app,
-                take,
-                serde_json::json!({ "type": "discard_recording" }),
-            )
-            .is_some()
-            {
-                update_shortcut_helper_finalizing(app, false);
-                notify_dictation_not_signed_in(app, Some(take.id()));
-            }
-            let _ = std::fs::remove_file(&audio_path);
-            return;
-        }
     }
     let provider = match dictation_transcription_provider(configured_transcription_provider()) {
         Ok(provider) => provider,
@@ -8829,12 +8557,6 @@ mod tests {
         let mut controller = ShortcutActivationController::default();
         controller.prepare_helper_start("take-b");
         assert!(controller.matches_helper_take("take-b", None));
-
-        assert_eq!(
-            controller.finish_start_for_auth_failure("take-b"),
-            Some(false)
-        );
-        assert!(!controller.matches_helper_take("take-b", None));
     }
 
     #[test]
@@ -10080,49 +9802,6 @@ mod tests {
     }
 
     #[test]
-    fn signed_out_pending_start_cleanup_preserves_the_confirmed_take() {
-        let mut controller = ShortcutActivationController::default();
-        controller.set_helper_listening(true, Some("take-a"));
-        controller.prepare_helper_start("take-b");
-
-        assert_eq!(
-            controller.finish_start_for_auth_failure("take-b"),
-            Some(true)
-        );
-        assert_eq!(controller.helper_take_id.as_deref(), Some("take-a"));
-        assert!(controller.pending_helper_take_id.is_none());
-        assert!(controller.helper_is_listening);
-    }
-
-    #[test]
-    fn signed_out_cleanup_ignores_an_already_rejected_start() {
-        let mut controller = ShortcutActivationController::default();
-        controller.set_helper_listening(true, Some("take-a"));
-        controller.prepare_helper_start("take-b");
-        assert_eq!(
-            controller.finish_for_helper_event(Some("take-b"), Some("take-a")),
-            HelperLifecycleDisposition::EmitOnly
-        );
-
-        assert_eq!(controller.finish_start_for_auth_failure("take-b"), None);
-        assert_eq!(controller.helper_take_id.as_deref(), Some("take-a"));
-        assert!(controller.helper_is_listening);
-    }
-
-    #[test]
-    fn signed_out_cleanup_finishes_the_confirmed_start_it_owns() {
-        let mut controller = ShortcutActivationController::default();
-        controller.set_helper_listening(true, Some("take-b"));
-
-        assert_eq!(
-            controller.finish_start_for_auth_failure("take-b"),
-            Some(false)
-        );
-        assert!(controller.helper_take_id.is_none());
-        assert!(!controller.helper_is_listening);
-    }
-
-    #[test]
     fn stale_terminal_event_cannot_finish_a_confirmed_replacement() {
         let mut controller = ShortcutActivationController::default();
         controller.set_helper_listening(true, Some("take-b"));
@@ -11342,113 +11021,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_helper_command_invalidates_an_older_auth_result() {
-        let state = DictationTakeState::default();
-        let (first, ()) = state.run_new_helper_command(|_| ());
-        assert!(state.run_if_current_helper_command(first, || ()).is_some());
-
-        let (second, ()) = state.run_new_helper_command(|_| ());
-
-        assert!(state.run_if_current_helper_command(first, || ()).is_none());
-        assert!(state.run_if_current_helper_command(second, || ()).is_some());
-    }
-
-    #[test]
-    fn start_attempt_waits_for_current_auth_discard_to_finish() {
-        use std::sync::mpsc;
-
-        let state = Arc::new(DictationTakeState::default());
-        let controller = Arc::new(Mutex::new(ShortcutActivationController::default()));
-        let (first, ()) = state.run_new_helper_command(|_| ());
-        let (auth_entered_tx, auth_entered_rx) = mpsc::channel();
-        let (release_auth_tx, release_auth_rx) = mpsc::channel();
-        let auth_state = Arc::clone(&state);
-        let auth_controller = Arc::clone(&controller);
-        let auth = thread::spawn(move || {
-            let result = auth_state.run_if_current_helper_command(first, || {
-                auth_entered_tx
-                    .send(())
-                    .expect("test should observe the auth discard");
-                release_auth_rx
-                    .recv()
-                    .expect("test should release the auth discard");
-                auth_controller
-                    .lock()
-                    .expect("shortcut controller should lock")
-                    .reset();
-            });
-            assert!(result.is_some());
-        });
-        auth_entered_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("auth discard should acquire the generation lock");
-
-        let (start_attempted_tx, start_attempted_rx) = mpsc::channel();
-        let (start_finished_tx, start_finished_rx) = mpsc::channel();
-        let start_state = Arc::clone(&state);
-        let start_controller = Arc::clone(&controller);
-        let start = thread::spawn(move || {
-            start_attempted_tx
-                .send(())
-                .expect("test should observe the replacement start attempt");
-            let (generation, ()) = start_state
-                .run_new_helper_command_if(
-                    || {
-                        let mut controller = start_controller
-                            .lock()
-                            .expect("shortcut controller should lock");
-                        let command = controller.handle_edge(
-                            ShortcutKeyEdge::Down,
-                            DictationShortcutKind::PushToTalk,
-                            Instant::now(),
-                        )?;
-                        controller.prepare_helper_start("take-b");
-                        Some(command)
-                    },
-                    |_, command| {
-                        assert_eq!(command, DictationCommand::StartListening);
-                    },
-                )
-                .expect("replacement shortcut should start");
-            start_finished_tx
-                .send(generation)
-                .expect("test should observe the replacement start");
-        });
-        start_attempted_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("replacement start should reach the serialized operation");
-        assert!(matches!(
-            start_finished_rx.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-
-        release_auth_tx
-            .send(())
-            .expect("test should release the auth discard");
-        auth.join().expect("auth discard thread should finish");
-        start
-            .join()
-            .expect("replacement start thread should finish");
-        assert_eq!(
-            start_finished_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("replacement start should finish after auth discard"),
-            first.wrapping_add(1)
-        );
-        assert_eq!(
-            controller
-                .lock()
-                .expect("shortcut controller should lock")
-                .handle_edge(
-                    ShortcutKeyEdge::Up,
-                    DictationShortcutKind::PushToTalk,
-                    Instant::now() + PUSH_TO_TALK_MIN_HOLD,
-                ),
-            Some(DictationCommand::StopAndPaste)
-        );
-    }
-
-    #[test]
     fn replacement_start_waits_for_a_terminal_control_write() {
         use std::sync::mpsc;
 
@@ -12392,75 +11964,5 @@ mod tests {
         });
 
         assert!(is_silent_transcription_error(&event));
-    }
-
-    #[test]
-    fn dictation_not_signed_in_event_carries_actionable_code() {
-        let mut event = dictation_not_signed_in_event();
-        annotate_silent_error(&mut event);
-
-        assert_eq!(event["type"], "error");
-        assert_eq!(event["payload"]["code"], "not_signed_in");
-        assert_eq!(event["payload"]["message"], "Sign in to use dictation.");
-        // Must be classified as non-silent so the HUD renders the actionable
-        // message instead of the "Nothing recorded" terminal state.
-        assert_eq!(event["payload"]["silent"], false);
-    }
-
-    #[test]
-    fn dictation_auth_gate_keeps_recording_on_transient_failure() {
-        let transient: Result<String, AppError> = Err(AppError::new(
-            "auth_refresh_unavailable",
-            "Couldn't reach your account.",
-        ));
-        assert!(matches!(
-            classify_dictation_auth(&transient),
-            DictationAuthGate::Unavailable(_)
-        ));
-    }
-
-    #[test]
-    fn dictation_auth_gate_signs_out_on_genuine_rejection() {
-        let signed_out: Result<String, AppError> =
-            Err(AppError::new("signed_out", "Not signed in."));
-        assert!(matches!(
-            classify_dictation_auth(&signed_out),
-            DictationAuthGate::SignedOut
-        ));
-        let expired: Result<String, AppError> = Err(AppError::new(
-            "session_expired",
-            "Your session expired. Sign in again.",
-        ));
-        assert!(matches!(
-            classify_dictation_auth(&expired),
-            DictationAuthGate::SignedOut
-        ));
-    }
-
-    #[test]
-    fn dictation_auth_gate_proceeds_with_a_token() {
-        let ok: Result<String, AppError> = Ok("token".to_string());
-        assert!(matches!(
-            classify_dictation_auth(&ok),
-            DictationAuthGate::Proceed
-        ));
-    }
-
-    #[test]
-    fn transient_auth_error_renders_as_a_visible_hud_error() {
-        // The kept-recording branch emits app_error_event for the transient
-        // failure; it must not be silent-classified, or the HUD would swallow
-        // it and the user would see nothing after their dictation vanished.
-        let error = AppError::new(
-            "auth_refresh_unavailable",
-            "Couldn't reach your account. Try again in a moment.",
-        );
-        let mut event = app_error_event(error);
-        annotate_silent_error(&mut event);
-
-        assert_eq!(event["type"], "error");
-        assert_eq!(event["payload"]["code"], "auth_refresh_unavailable");
-        assert_eq!(event["payload"]["silent"], false);
-        assert!(!is_silent_transcription_error(&event));
     }
 }

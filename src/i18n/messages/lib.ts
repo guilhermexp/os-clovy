@@ -45,7 +45,6 @@ export default defineMessages({
     "lib.errors.sharingUnavailable":
       "Sharing isn't available on this Clovy server yet. Try again after the next update.",
     "lib.errors.shareNotFound": "This share no longer exists. It may have been stopped.",
-    "lib.errors.notSignedIn": "Not signed in.",
     "lib.errors.insufficientCredits": "Your balance is too low. Upgrade to continue.",
     "lib.errors.emptyResponse": "Clovy returned no data.",
     "lib.errors.unreachable": "Couldn't reach Clovy.",
@@ -134,7 +133,6 @@ export default defineMessages({
     "lib.errors.llm.endpointModelRequired": "Enter a model ID.",
     "lib.errors.llm.endpointNameInvalid": "Enter a name of up to 80 characters.",
     "lib.errors.timedOut": "Operation timed out.",
-    "lib.errors.accountStatusTimeout": "Account status took too long. Please try again.",
     "lib.errors.fileDropUnreadable": "Could not read the dropped file.",
     "lib.errors.fileDropEmpty": "Drop files from Finder to attach them to Clovy.",
     "lib.errors.fileDropTooMany": {
@@ -473,7 +471,6 @@ export default defineMessages({
       "O compartilhamento ainda não está disponível neste servidor do Clovy. Tente de novo após a próxima atualização.",
     "lib.errors.shareNotFound":
       "Este compartilhamento não existe mais. Ele pode ter sido interrompido.",
-    "lib.errors.notSignedIn": "Você não entrou na sua conta.",
     "lib.errors.insufficientCredits": "Seu saldo está muito baixo. Faça upgrade para continuar.",
     "lib.errors.emptyResponse": "O Clovy não retornou dados.",
     "lib.errors.unreachable": "Não foi possível falar com o Clovy.",
@@ -566,7 +563,6 @@ export default defineMessages({
     "lib.errors.llm.endpointModelRequired": "Digite o ID de um modelo.",
     "lib.errors.llm.endpointNameInvalid": "Digite um nome com até 80 caracteres.",
     "lib.errors.timedOut": "A operação expirou.",
-    "lib.errors.accountStatusTimeout": "O status da conta demorou demais. Tente de novo.",
     "lib.errors.fileDropUnreadable": "Não foi possível ler o arquivo arrastado.",
     "lib.errors.fileDropEmpty": "Solte arquivos do Finder para anexá-los ao Clovy.",
     "lib.errors.fileDropTooMany": {

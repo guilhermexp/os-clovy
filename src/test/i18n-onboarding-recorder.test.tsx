@@ -1,12 +1,11 @@
 import { act, render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
 import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import { NoteRecoveryPrompt } from "../components/recorder/NoteRecoveryPrompt";
 import { RecorderBar } from "../components/recorder/RecorderBar";
-import { applyInterfaceLocale, getInterfaceLocale } from "../i18n/locale";
-import type { AccountStatus, RecordingStatusDto } from "../lib/tauri";
+import { applyInterfaceLocale } from "../i18n/locale";
+import type { RecordingStatusDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
   dictationSettings: vi.fn(),
@@ -36,8 +35,6 @@ vi.mock("../lib/tauri", () => ({
   setP3aEnabled: vi.fn(),
   p3aRecord: vi.fn().mockResolvedValue(undefined),
   setClovyPersona: vi.fn(),
-  osAccountsLogin: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
   clovyOpenCommunityPage: vi.fn(),
   listDictationHistory: mocks.listDictationHistory,
   listDictionaryEntries: mocks.listDictionaryEntries,
@@ -45,8 +42,6 @@ vi.mock("../lib/tauri", () => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen, emit: vi.fn() }));
-
-const signedOutAccount: AccountStatus = { signedIn: false, configured: true };
 
 const recordingStatus: RecordingStatusDto = {
   sessionId: "session-1",
@@ -101,51 +96,10 @@ afterEach(() => {
 });
 
 describe("onboarding i18n", () => {
-  it("renders the welcome step in English by default", () => {
-    applyInterfaceLocale("en");
-    render(
-      <OnboardingFlow account={signedOutAccount} onAccountChanged={vi.fn()} onComplete={vi.fn()} />,
-    );
-
-    expect(screen.getByRole("heading", { name: "Welcome to Clovy" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Interface language: English" })).toBeInTheDocument();
-  });
-
-  it("switches the welcome step to Portuguese from the language chooser", async () => {
-    applyInterfaceLocale("en");
-    const user = userEvent.setup();
-    render(
-      <OnboardingFlow account={signedOutAccount} onAccountChanged={vi.fn()} onComplete={vi.fn()} />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Interface language: English" }));
-    await user.click(screen.getByRole("option", { name: "Português (Brasil)" }));
-
-    expect(getInterfaceLocale()).toBe("pt-BR");
-    expect(screen.getByRole("heading", { name: "Boas-vindas ao Clovy" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Continuar com OpenSoftware" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("navigation", { name: "Progresso da configuração: etapa 1 de 5" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Idioma da interface: Português (Brasil)" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Política de privacidade" })).toHaveAttribute(
-      "href",
-      "https://accounts.opensoftware.co/privacy",
-    );
-  });
-
   it("renders the personality step in Portuguese", () => {
     applyInterfaceLocale("pt-BR");
     window.history.replaceState({}, "", "/?clovyDemoStep=mood");
-    render(
-      <OnboardingFlow
-        account={{ ...signedOutAccount, signedIn: true }}
-        onAccountChanged={vi.fn()}
-        onComplete={vi.fn()}
-      />,
-    );
+    render(<OnboardingFlow onComplete={vi.fn()} />);
 
     expect(
       screen.getByRole("heading", { name: "Escolha minha personalidade" }),
