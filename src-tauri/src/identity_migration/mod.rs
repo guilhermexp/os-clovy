@@ -639,7 +639,10 @@ fn sync_tree(root: &Path) -> Result<(), MigrationError> {
         if kind.is_dir() {
             sync_tree(&path)?;
         } else if kind.is_file() {
-            std::fs::File::open(&path)
+            // Windows flushes only a handle opened for writing.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| fail(format!("flushing {}", path.display()), e))?;
         }
