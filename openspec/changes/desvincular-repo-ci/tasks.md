@@ -14,7 +14,7 @@
 ## 3. Repositório
 
 - [x] 3.1 Remover `CODEOWNERS`, `os-platform.json`, `.conductor/`, skills e entradas do lock ligadas à organização; ajustar `Makefile` (D3). — `e0c0e0f3`; 5 skills e `skills-lock.json` removidos, alvos `skills-*` fora do `Makefile`.
-- [x] 3.2 README, SECURITY, CONTRIBUTING, templates de issue e `AGENTS.md` sem links da organização. — `82c5c069`.
+- [x] 3.2 README, SECURITY, CONTRIBUTING, templates de issue e `AGENTS.md` sem links da organização. — `82c5c069`. Ajuste do orquestrador em `docs/`: runbooks de release/runner/atestação apagados ou reescritos, PRD/config/compartilhamento corrigidos, ADRs 0003/0024/0035 superadas (0012/0055 em parte), `CONTEXT.md` (`e0ed3250`..`adb46428`).
 - [ ] 3.3 Remover `git fetch upstream` de `scripts/qualify-windows-build.ps1`; o orquestrador remove o remote `upstream` do checkout principal ao integrar (D4). — script feito em `ba4598d3`; falta remover o remote no checkout principal (orquestrador).
 - [x] 3.4 Guarda D5 no `make verify`. — `41244b09`: `scripts/check-org-references.mjs` (0 ocorrências; 167 na base) + suíte Vitest.
 
