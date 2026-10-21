@@ -384,7 +384,7 @@ fn copy_link(from: &Path, to: &Path, rewrite: &PathRewrite) -> Result<(), Migrat
     let link =
         std::fs::read_link(from).map_err(|e| fail(format!("reading {}", from.display()), e))?;
     let link = rewrite
-        .apply(&link.to_string_lossy())
+        .path(&link.to_string_lossy())
         .map(PathBuf::from)
         .unwrap_or(link);
     #[cfg(unix)]
@@ -423,20 +423,6 @@ fn measure(root: &Path, databases: &BTreeSet<PathBuf>) -> Result<TreeTotals, Mig
         }
     }
     Ok(totals)
-}
-
-fn regular_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), MigrationError> {
-    for entry in sorted_entries(root)? {
-        let path = entry.path();
-        let kind = std::fs::symlink_metadata(&path)
-            .map_err(|e| fail(format!("reading {}", path.display()), e))?;
-        if kind.is_dir() {
-            regular_files(&path, files)?;
-        } else if kind.is_file() {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// `<target name>.identity-migration-<pid>` beside the target, so the final
@@ -573,13 +559,20 @@ struct Undo {
 }
 
 impl Undo {
-    fn run(self, store: &dyn CredentialStore) {
+    /// Whether everything the run created is gone.
+    fn run(self, store: &dyn CredentialStore) -> bool {
+        let mut complete = true;
         for (service, account) in &self.credentials {
-            let _ = store.delete(service, account);
+            complete &= store.delete(service, account).is_ok();
         }
         for path in self.staged.iter().chain(&self.published) {
-            let _ = std::fs::remove_dir_all(path);
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(_) => complete = false,
+            }
         }
+        complete
     }
 }
 
@@ -616,8 +609,8 @@ fn write_journal(path: &Path, journal: &Journal) -> Result<(), MigrationError> {
     sync_parent(path)
 }
 
-/// Flushes a folder's entries now (unused until publication goes through the
-/// copier).
+/// Flushes a folder's entries now. Windows has no directory handle to flush;
+/// its renames are journaled by NTFS.
 pub(super) fn sync_directory_now(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
@@ -626,9 +619,10 @@ pub(super) fn sync_directory_now(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether the launch stops after the migration ran.
+/// Whether the launch stops after the migration ran: after any failure, so
+/// the new profile stays empty and nobody starts using it by mistake.
 pub(super) fn stops_the_launch(result: &Result<Outcome, MigrationError>) -> bool {
-    matches!(result, Err(error) if error.blocked)
+    result.is_err()
 }
 
 /// Flushes a folder's entries (a rename, a new file). Windows has no
@@ -659,15 +653,39 @@ fn sync_tree(root: &Path) -> Result<(), MigrationError> {
         if kind.is_dir() {
             sync_tree(&path)?;
         } else if kind.is_file() {
-            // Windows flushes only a handle opened for writing.
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .and_then(|file| file.sync_all())
+            flush_file(&path, &kind)
                 .map_err(|e| fail(format!("flushing {}", path.display()), e))?;
         }
     }
     sync_directory(root)
+}
+
+/// Flushes one staged file without changing its permissions. Unix flushes a
+/// read-only handle; Windows flushes only a writable one, so a read-only
+/// staged copy is made writable for the flush and read-only again after.
+fn flush_file(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        std::fs::File::open(path)?.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        let read_only = metadata.permissions().readonly();
+        if read_only {
+            let mut writable = metadata.permissions();
+            writable.set_readonly(false);
+            std::fs::set_permissions(path, writable)?;
+        }
+        let flushed = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.sync_all());
+        if read_only {
+            std::fs::set_permissions(path, metadata.permissions())?;
+        }
+        flushed
+    }
 }
 
 fn is_populated(path: &Path) -> bool {
@@ -709,7 +727,11 @@ fn resume(
             copier
                 .rename(&item.staging, &item.target)
                 .map_err(|e| fail(format!("publishing {}", item.target.display()), e))?;
-            sync_parent(&item.target)?;
+            if let Some(parent) = item.target.parent() {
+                copier
+                    .sync_directory(parent)
+                    .map_err(|e| fail(format!("flushing {}", parent.display()), e))?;
+            }
         }
         let _ = std::fs::remove_file(&path);
         return Ok(Some(Outcome::Resumed));
@@ -764,9 +786,19 @@ pub fn migrate(
     match migrate_into(plan, store, copier, &mut undo) {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
-            undo.run(store);
-            let _ = std::fs::remove_file(journal_path(plan));
-            Err(error)
+            if undo.run(store) {
+                let _ = std::fs::remove_file(journal_path(plan));
+                return Err(error);
+            }
+            // What could not be undone is still listed in the journal: the
+            // next launch finishes or undoes it, so it must stay.
+            Err(MigrationError {
+                message: format!(
+                    "{}; the rollback could not finish and the migration journal was kept",
+                    error.message
+                ),
+                blocked: true,
+            })
         }
     }
 }
@@ -833,10 +865,11 @@ fn migrate_into(
             for (database, database_key) in &context.databases {
                 rewrite.apply_to_database(database, database_key.as_deref())?;
             }
-            let mut texts = Vec::new();
-            regular_files(&staging, &mut texts)?;
-            for path in texts.iter().filter(|path| !staged.contains(*path)) {
-                rewrite.apply_to_text_file(path)?;
+            for name in database::PATH_FILES {
+                let path = staging.join(name);
+                if path.is_file() {
+                    rewrite.apply_to_path_file(&path)?;
+                }
             }
         }
         files += copied.files;
@@ -901,9 +934,14 @@ fn migrate_into(
         copier
             .rename(&item.staging, &item.target)
             .map_err(|e| fail(format!("publishing {}", item.target.display()), e))?;
-        sync_parent(&item.target)?;
+        // Published from here on: a failed flush must roll it back too.
         undo.staged.retain(|path| path != &item.staging);
-        undo.published.push(item.target);
+        undo.published.push(item.target.clone());
+        if let Some(parent) = item.target.parent() {
+            copier
+                .sync_directory(parent)
+                .map_err(|e| fail(format!("flushing {}", parent.display()), e))?;
+        }
     }
     for leftover in &undo.staged {
         let _ = std::fs::remove_dir_all(leftover);
@@ -996,11 +1034,11 @@ pub fn run_at_startup() {
     let _ = std::fs::write(PathBuf::from(log), format!("{line}\n"));
     // Starting now would create the new profile and the next launch would
     // never migrate: tell the owner what to do and stop.
-    if let Err(error) = &result {
-        if error.blocked {
+    if stops_the_launch(&result) {
+        if let Err(error) = &result {
             alert(&error.message);
-            std::process::exit(1);
         }
+        std::process::exit(1);
     }
 }
 

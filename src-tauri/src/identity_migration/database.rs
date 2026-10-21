@@ -13,8 +13,6 @@ const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 /// The one encrypted database; its key comes from the migrated credentials.
 pub(super) const ENCRYPTED_DATABASE: &str = "activity.sqlite3";
 const COMPANION_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
-/// Larger files are recordings or models, never path-bearing text.
-const MAX_TEXT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(super) fn is_plain_sqlite(path: &Path) -> bool {
     use std::io::Read;
@@ -184,13 +182,121 @@ fn stamps(members: &[(PathBuf, PathBuf)]) -> Result<Vec<Stamp>, MigrationError> 
         .collect()
 }
 
-/// Every spelling of "inside the old profile" and its new equivalent.
-///
-/// A root is rewritten only where a path starts with it: at the start of a
-/// value, or after whitespace, a quote or punctuation, and only when the path
-/// goes on with a separator or ends there. A path that merely contains the old
-/// folder (`/Volumes/Backup/Users/...`) or a look-alike sibling
-/// (`...-dev-backup`) stays as it is.
+/// Where the app stores absolute paths into its own profile, and only there:
+/// notes, transcripts, chat messages, captured activity and any other text
+/// that merely mentions the old folder is the user's content and stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    /// The whole value is a path.
+    Path,
+    /// JSON whose path-valued keys (`PATH_KEYS`) hold paths.
+    PathsInJson,
+    /// A JSON array of command arguments, any of which may be a path.
+    Arguments,
+}
+
+/// `(database file, table, column, kind)`.
+const PATH_FIELDS: &[(&str, &str, &str, Field)] = &[
+    (
+        "notes.sqlite3",
+        "recording_sessions",
+        "partial_path",
+        Field::Path,
+    ),
+    (
+        "notes.sqlite3",
+        "recording_sessions",
+        "final_path",
+        Field::Path,
+    ),
+    ("notes.sqlite3", "audio_artifacts", "path", Field::Path),
+    (
+        "notes.sqlite3",
+        "audio_artifacts",
+        "partial_path",
+        Field::Path,
+    ),
+    (
+        "notes.sqlite3",
+        "agent_sessions",
+        "workspace_path",
+        Field::Path,
+    ),
+    ("notes.sqlite3", "agent_artifacts", "path", Field::Path),
+    (
+        "notes.sqlite3",
+        "agent_artifacts",
+        "original_path",
+        Field::Path,
+    ),
+    (
+        "notes.sqlite3",
+        "agent_migration_manifests",
+        "source_path",
+        Field::Path,
+    ),
+    ("notes.sqlite3", "agent_mcp_servers", "command", Field::Path),
+    (
+        "notes.sqlite3",
+        "agent_mcp_servers",
+        "args_json",
+        Field::Arguments,
+    ),
+    (
+        "notes.sqlite3",
+        "agent_items",
+        "payload_json",
+        Field::PathsInJson,
+    ),
+    (
+        "notes.sqlite3",
+        "agent_runs",
+        "run_config_json",
+        Field::PathsInJson,
+    ),
+    (
+        "notes.sqlite3",
+        "agent_runs",
+        "interrupted_state_json",
+        Field::PathsInJson,
+    ),
+    (
+        "notes.sqlite3",
+        "routines",
+        "metadata_json",
+        Field::PathsInJson,
+    ),
+    (
+        ENCRYPTED_DATABASE,
+        "coding_agent_blocks",
+        "cwd",
+        Field::Path,
+    ),
+];
+
+/// JSON keys whose string values (or string array items) are paths: file
+/// attachments, artifacts, workspaces, captures, legacy routine scripts.
+const PATH_KEYS: &[&str] = &[
+    "path",
+    "partialPath",
+    "sourcePath",
+    "originalPath",
+    "workspace",
+    "workspacePath",
+    "capture_path",
+    "capturePath",
+    "cwd",
+    "attachments",
+    "legacyScriptStoredPath",
+];
+
+/// WebKit localStorage keys whose JSON value holds profile paths.
+const LOCAL_STORAGE_KEYS: &[&str] = &["clovy.agent.queuedFollowUps"];
+
+/// Profile files whose whole content is a path.
+pub(super) const PATH_FILES: &[&str] = &["extension-host-path"];
+
+/// The old profile roots and their new equivalents.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PathRewrite {
     /// `(old root, new root)`, longest first.
@@ -201,28 +307,20 @@ impl PathRewrite {
     pub(super) fn new(folders: &[(PathBuf, PathBuf)]) -> Self {
         let mut roots = Vec::new();
         for (old, new) in folders {
-            let mut forms = vec![(
+            roots.push((
                 old.to_string_lossy().into_owned(),
                 new.to_string_lossy().into_owned(),
-            )];
+            ));
             // The app stores canonical paths (`/private/var` for `/var`).
             if let (Ok(old_canonical), Some(parent), Some(name)) =
                 (old.canonicalize(), new.parent(), new.file_name())
             {
                 if let Ok(parent) = parent.canonicalize() {
-                    forms.push((
+                    roots.push((
                         old_canonical.to_string_lossy().into_owned(),
                         parent.join(name).to_string_lossy().into_owned(),
                     ));
                 }
-            }
-            for (old, new) in forms {
-                // Text that is not JSON may still carry JSON-escaped paths.
-                if old.contains('\\') {
-                    let escape = |value: &str| value.replace('\\', "\\\\");
-                    roots.push((escape(&old), escape(&new)));
-                }
-                roots.push((old, new));
             }
         }
         roots.sort_by_key(|(old, _): &(String, String)| std::cmp::Reverse(old.len()));
@@ -230,81 +328,106 @@ impl PathRewrite {
         Self { roots }
     }
 
-    /// The rewritten value, or `None` when nothing in it points inside. JSON
-    /// is rewritten string by string, so a value equal to the root is too.
-    pub(super) fn apply(&self, text: &str) -> Option<String> {
-        let trimmed = text.trim_start();
-        if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) {
-                return self.rewrite_json(&mut value).then(|| value.to_string());
-            }
-        }
-        self.apply_plain(text)
-    }
-
-    fn rewrite_json(&self, value: &mut serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::String(text) => match self.apply_plain(text) {
-                Some(rewritten) => {
-                    *text = rewritten;
-                    true
-                }
-                None => false,
-            },
-            serde_json::Value::Array(items) => items
-                .iter_mut()
-                .fold(false, |changed, item| self.rewrite_json(item) | changed),
-            serde_json::Value::Object(fields) => fields
-                .values_mut()
-                .fold(false, |changed, item| self.rewrite_json(item) | changed),
-            _ => false,
-        }
-    }
-
-    /// Rewrites each root that starts a path inside free text.
-    fn apply_plain(&self, text: &str) -> Option<String> {
-        let mut output = String::with_capacity(text.len());
-        let mut changed = false;
-        let mut index = 0;
-        let mut previous: Option<char> = None;
-        while index < text.len() {
-            let rest = &text[index..];
-            if starts_a_path(previous) {
-                if let Some((old, new)) = self.roots.iter().find(|(old, _)| {
-                    rest.starts_with(old.as_str()) && ends_a_root(&rest[old.len()..])
-                }) {
-                    output.push_str(new);
-                    index += old.len();
-                    previous = old.chars().last();
-                    changed = true;
-                    continue;
-                }
-            }
-            let character = rest.chars().next().unwrap_or_default();
-            output.push(character);
-            index += character.len_utf8();
-            previous = Some(character);
-        }
-        changed.then_some(output)
-    }
-
-    /// The strings any rewritten value must contain, to narrow the scans.
-    fn needles(&self) -> Vec<String> {
-        self.roots.iter().map(|(old, _)| old.clone()).collect()
-    }
-
     pub(super) fn is_empty(&self) -> bool {
         self.roots.is_empty()
     }
 
-    /// Rewrites every text value (and WebKit's UTF-16 localStorage values)
-    /// of every ordinary table. Virtual tables and their shadow tables are
-    /// left to their own triggers.
+    /// A path value into the old profile, moved to the new one: the root
+    /// itself, or the root followed by a directory separator. Anything else,
+    /// a sibling like `<root> (backup)` included, is not inside it.
+    pub(super) fn path(&self, value: &str) -> Option<String> {
+        self.roots.iter().find_map(|(old, new)| {
+            let rest = value.strip_prefix(old.as_str())?;
+            let inside = rest.is_empty()
+                || rest.starts_with('/')
+                || (cfg!(windows) && rest.starts_with('\\'));
+            inside.then(|| format!("{new}{rest}"))
+        })
+    }
+
+    fn field(&self, field: Field, value: &str) -> Option<String> {
+        match field {
+            Field::Path => self.path(value),
+            Field::PathsInJson | Field::Arguments => {
+                let mut json = serde_json::from_str::<serde_json::Value>(value).ok()?;
+                let changed = if field == Field::Arguments {
+                    match &mut json {
+                        serde_json::Value::Array(items) => self.rewrite_strings(items),
+                        _ => false,
+                    }
+                } else {
+                    self.rewrite_path_keys(&mut json)
+                };
+                changed.then(|| json.to_string())
+            }
+        }
+    }
+
+    fn rewrite_strings(&self, items: &mut [serde_json::Value]) -> bool {
+        let mut changed = false;
+        for item in items {
+            match item {
+                serde_json::Value::String(text) => {
+                    if let Some(rewritten) = self.path(text) {
+                        *text = rewritten;
+                        changed = true;
+                    }
+                }
+                other => changed |= self.rewrite_path_keys(other),
+            }
+        }
+        changed
+    }
+
+    fn rewrite_path_keys(&self, value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut changed = false;
+                for (key, item) in fields.iter_mut() {
+                    let is_path_key = PATH_KEYS.contains(&key.as_str());
+                    changed |= match item {
+                        serde_json::Value::String(text) if is_path_key => match self.path(text) {
+                            Some(rewritten) => {
+                                *text = rewritten;
+                                true
+                            }
+                            None => false,
+                        },
+                        serde_json::Value::Array(items) if is_path_key => {
+                            self.rewrite_strings(items)
+                        }
+                        other => self.rewrite_path_keys(other),
+                    };
+                }
+                changed
+            }
+            serde_json::Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+                self.rewrite_path_keys(item) | changed
+            }),
+            _ => false,
+        }
+    }
+
+    /// Rewrites the listed path fields of one staged database, by its file
+    /// name; any other database is left as it is.
     pub(super) fn apply_to_database(
         &self,
         path: &Path,
         key: Option<&str>,
     ) -> Result<u64, MigrationError> {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let fields: Vec<(&'static str, &'static str, Field)> = PATH_FIELDS
+            .iter()
+            .filter(|(database, ..)| *database == name)
+            .map(|(_, table, column, field)| (*table, *column, *field))
+            .collect();
+        let local_storage = name == "localstorage.sqlite3";
+        if fields.is_empty() && !local_storage {
+            return Ok(0);
+        }
         let rewrite = self.clone();
         let path = path.to_path_buf();
         let key = key.map(str::to_owned);
@@ -313,10 +436,15 @@ impl PathRewrite {
                 .connect()
                 .await
                 .map_err(|e| fail(format!("opening {}", path.display()), e))?;
-            let changed = rewrite
-                .rewrite_tables(&mut connection)
-                .await
-                .map_err(|e| fail(format!("rewriting paths in {}", path.display()), e))?;
+            let changed = async {
+                let mut changed = rewrite.rewrite_fields(&mut connection, &fields).await?;
+                if local_storage {
+                    changed += rewrite.rewrite_local_storage(&mut connection).await?;
+                }
+                Ok::<u64, sqlx::Error>(changed)
+            }
+            .await
+            .map_err(|e| fail(format!("rewriting paths in {}", path.display()), e))?;
             connection
                 .close()
                 .await
@@ -325,96 +453,87 @@ impl PathRewrite {
         })
     }
 
-    async fn rewrite_tables(&self, connection: &mut SqliteConnection) -> Result<u64, sqlx::Error> {
-        let tables: Vec<(String, String)> = sqlx::query::query(
-            "SELECT name, coalesce(sql, '') FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    async fn has_column(
+        connection: &mut SqliteConnection,
+        table: &str,
+        column: &str,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(
+            sqlx::query::query("SELECT 1 FROM pragma_table_info(?) WHERE name = ?")
+                .bind(table)
+                .bind(column)
+                .fetch_optional(&mut *connection)
+                .await?
+                .is_some(),
         )
-        .fetch_all(&mut *connection)
-        .await?
-        .iter()
-        .map(|row| (row.get(0), row.get(1)))
-        .collect();
-        let virtual_tables: Vec<String> = tables
-            .iter()
-            .filter(|(_, sql)| sql.to_ascii_uppercase().starts_with("CREATE VIRTUAL"))
-            .map(|(name, _)| name.clone())
-            .collect();
-        let needles = self.needles();
+    }
+
+    async fn rewrite_fields(
+        &self,
+        connection: &mut SqliteConnection,
+        fields: &[(&str, &str, Field)],
+    ) -> Result<u64, sqlx::Error> {
         let mut changed = 0;
-        for (table, sql) in &tables {
-            let shadow = virtual_tables
-                .iter()
-                .any(|virtual_table| table.starts_with(&format!("{virtual_table}_")));
-            if sql.to_ascii_uppercase().starts_with("CREATE VIRTUAL") || shadow {
+        for (table, column, field) in fields {
+            if !Self::has_column(connection, table, column).await? {
                 continue;
             }
-            let columns: Vec<String> = sqlx::query::query("SELECT name FROM pragma_table_info(?)")
-                .bind(table)
+            let (table, column) = (quote(table), quote(column));
+            let filter = self
+                .roots
+                .iter()
+                .map(|_| format!("instr({column}, ?) > 0"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let sql = format!(
+                "SELECT DISTINCT {column} FROM {table} WHERE typeof({column}) = 'text' AND ({filter})"
+            );
+            let mut select = sqlx::query::query(&sql);
+            for (old, _) in &self.roots {
+                select = select.bind(old.clone());
+            }
+            let values: Vec<String> = select
                 .fetch_all(&mut *connection)
                 .await?
                 .iter()
                 .map(|row| row.get(0))
                 .collect();
-            for column in &columns {
-                let quoted_table = quote(table);
-                let quoted_column = quote(column);
-                let filter = needles
-                    .iter()
-                    .map(|_| format!("instr({quoted_column}, ?) > 0"))
-                    .collect::<Vec<_>>()
-                    .join(" OR ");
-                let select = format!(
-                    "SELECT DISTINCT {quoted_column} FROM {quoted_table} WHERE typeof({quoted_column}) = 'text' AND ({filter})"
-                );
-                let mut statement = sqlx::query::query(&select);
-                for needle in &needles {
-                    statement = statement.bind(needle.clone());
-                }
-                let values: Vec<String> = statement
-                    .fetch_all(&mut *connection)
+            for value in values {
+                if let Some(rewritten) = self.field(*field, &value) {
+                    changed += sqlx::query::query(&format!(
+                        "UPDATE {table} SET {column} = ? WHERE {column} = ?"
+                    ))
+                    .bind(rewritten)
+                    .bind(value)
+                    .execute(&mut *connection)
                     .await?
-                    .iter()
-                    .map(|row| row.get(0))
-                    .collect();
-                for value in values {
-                    if let Some(rewritten) = self.apply(&value) {
-                        changed += sqlx::query::query(&format!(
-                            "UPDATE {quoted_table} SET {quoted_column} = ? WHERE {quoted_column} = ?"
-                        ))
-                        .bind(rewritten)
-                        .bind(value)
-                        .execute(&mut *connection)
-                        .await?
-                        .rows_affected();
-                    }
-                }
-                if table == "ItemTable" && column == "value" {
-                    changed += self
-                        .rewrite_utf16_values(connection, &quoted_table, &quoted_column)
-                        .await?;
+                    .rows_affected();
                 }
             }
         }
         Ok(changed)
     }
 
-    /// WebKit stores localStorage values as UTF-16 little-endian blobs.
-    async fn rewrite_utf16_values(
+    /// WebKit keeps localStorage values as UTF-16 little-endian blobs.
+    async fn rewrite_local_storage(
         &self,
         connection: &mut SqliteConnection,
-        table: &str,
-        column: &str,
     ) -> Result<u64, sqlx::Error> {
-        let values: Vec<Vec<u8>> = sqlx::query::query(&format!(
-            "SELECT DISTINCT {column} FROM {table} WHERE typeof({column}) = 'blob'"
-        ))
-        .fetch_all(&mut *connection)
-        .await?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
+        if !Self::has_column(connection, "ItemTable", "value").await? {
+            return Ok(0);
+        }
         let mut changed = 0;
-        for value in values {
+        for key in LOCAL_STORAGE_KEYS {
+            let Some(row) = sqlx::query::query(
+                "SELECT value FROM ItemTable WHERE key = ? AND typeof(value) = 'blob'",
+            )
+            .bind(*key)
+            .fetch_optional(&mut *connection)
+            .await?
+            else {
+                continue;
+            };
+            let value: Vec<u8> = row.get(0);
             if value.len() % 2 != 0 {
                 continue;
             }
@@ -425,41 +544,32 @@ impl PathRewrite {
             let Ok(text) = String::from_utf16(&units) else {
                 continue;
             };
-            if let Some(rewritten) = self.apply(&text) {
+            if let Some(rewritten) = self.field(Field::PathsInJson, &text) {
                 let encoded: Vec<u8> = rewritten
                     .encode_utf16()
                     .flat_map(u16::to_le_bytes)
                     .collect();
-                changed += sqlx::query::query(&format!(
-                    "UPDATE {table} SET {column} = ? WHERE {column} = ?"
-                ))
-                .bind(encoded)
-                .bind(value)
-                .execute(&mut *connection)
-                .await?
-                .rows_affected();
+                changed += sqlx::query::query("UPDATE ItemTable SET value = ? WHERE key = ?")
+                    .bind(encoded)
+                    .bind(*key)
+                    .execute(&mut *connection)
+                    .await?
+                    .rows_affected();
             }
         }
         Ok(changed)
     }
 
-    /// Rewrites a small UTF-8 file in place; binary and large files are left
-    /// as they are.
-    pub(super) fn apply_to_text_file(&self, path: &Path) -> Result<bool, MigrationError> {
-        let metadata =
-            std::fs::metadata(path).map_err(|e| fail(format!("reading {}", path.display()), e))?;
-        if metadata.len() > MAX_TEXT_FILE_BYTES || is_plain_sqlite(path) {
-            return Ok(false);
-        }
-        let bytes =
-            std::fs::read(path).map_err(|e| fail(format!("reading {}", path.display()), e))?;
-        let Ok(text) = std::str::from_utf8(&bytes) else {
+    /// Rewrites one of `PATH_FILES`, whose whole content is a path.
+    pub(super) fn apply_to_path_file(&self, path: &Path) -> Result<bool, MigrationError> {
+        let Ok(text) = std::fs::read_to_string(path) else {
             return Ok(false);
         };
-        let Some(rewritten) = self.apply(text) else {
+        let trimmed = text.trim_end();
+        let Some(rewritten) = self.path(trimmed) else {
             return Ok(false);
         };
-        std::fs::write(path, rewritten)
+        std::fs::write(path, format!("{rewritten}{}", &text[trimmed.len()..]))
             .map_err(|e| fail(format!("writing {}", path.display()), e))?;
         Ok(true)
     }
@@ -467,23 +577,4 @@ impl PathRewrite {
 
 fn quote(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-/// A path can start here: at the beginning, or after whitespace, a quote or
-/// punctuation, never in the middle of another path or word.
-fn starts_a_path(previous: Option<char>) -> bool {
-    match previous {
-        None => true,
-        Some(character) => character.is_whitespace() || "\"'`([{<=:,;|>".contains(character),
-    }
-}
-
-/// The root ends the path or continues into it with a separator.
-fn ends_a_root(rest: &str) -> bool {
-    match rest.chars().next() {
-        None => true,
-        Some('/') => true,
-        Some('\\') => cfg!(windows),
-        Some(character) => !(character.is_alphanumeric() || "._-~".contains(character)),
-    }
 }
