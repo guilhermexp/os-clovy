@@ -8,6 +8,7 @@ import { messageFromError } from "../../lib/errors";
 import {
   type LlmCliStatusDto,
   type LlmEndpointDto,
+  type LlmProviderRef,
   type LlmProvidersDto,
   type LlmUsage,
   type StructuredOutputLevel,
@@ -26,6 +27,7 @@ import { probeLocalGenerationEndpoint } from "../../lib/tauri";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
 import { InlineNotice } from "../ui/InlineNotice";
+import { RuntimeLogo } from "../brand/RuntimeLogo";
 
 export type LlmProvidersSectionProps = {
   onChatProviderChanged?: () => void;
@@ -413,6 +415,7 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
               ) : null}
             </div>
             <div className="settings-row-control">
+              <UsageProviderMark provider={usage.chat} endpoints={endpoints} />
               <select
                 className="dialog-input"
                 aria-label={t("settingsPanels.llm.usageChat")}
@@ -440,6 +443,7 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
               ) : null}
             </div>
             <div className="settings-row-control">
+              <UsageProviderMark provider={usage.notes} endpoints={endpoints} />
               <select
                 className="dialog-input"
                 aria-label={t("settingsPanels.llm.usageNotes")}
@@ -473,6 +477,7 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
               ) : null}
             </div>
             <div className="settings-row-control">
+              <UsageProviderMark provider={usage.activity} endpoints={endpoints} />
               <select
                 className="dialog-input"
                 aria-label={t("settingsPanels.llm.usageActivity")}
@@ -519,7 +524,10 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
             return (
               <div className="settings-row" key={cli.id}>
                 <div className="settings-row-info">
-                  <h4 className="settings-row-title">{cli.name}</h4>
+                  <h4 className="settings-row-title settings-row-title-with-mark">
+                    <RuntimeLogo id={cli.id} name={cli.name} size={16} decorative />
+                    {cli.name}
+                  </h4>
                   <p className="settings-row-description">
                     {details}
                     {testResult ? ` · ${testResult}` : ""}
@@ -588,7 +596,10 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
               return (
                 <div className="settings-row" key={endpoint.id}>
                   <div className="settings-row-info">
-                    <h4 className="settings-row-title">{endpoint.name}</h4>
+                    <h4 className="settings-row-title settings-row-title-with-mark">
+                      <RuntimeLogo id={endpoint.id} name={endpoint.name} size={16} decorative />
+                      {endpoint.name}
+                    </h4>
                     <p className="settings-row-description">{badges.join(" · ")}</p>
                   </div>
                   <div className="settings-row-control">
@@ -775,4 +786,21 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
       />
     </section>
   );
+}
+
+/** Native selects draw no icons, so the mark of the chosen CLI or endpoint
+ * sits beside the select. */
+function UsageProviderMark({
+  provider,
+  endpoints,
+}: {
+  provider: LlmProviderRef;
+  endpoints: ReadonlyArray<{ id: string; name: string }>;
+}) {
+  if (provider.kind === "cli") return <RuntimeLogo id={provider.id} size={16} decorative />;
+  if (provider.kind === "endpoint") {
+    const name = endpoints.find((endpoint) => endpoint.id === provider.id)?.name ?? provider.id;
+    return <RuntimeLogo id={provider.id} name={name} size={16} decorative />;
+  }
+  return null;
 }

@@ -98,7 +98,6 @@ describe("CLI chat engine follow-up queuing", () => {
               installed: true,
               reason: null,
               modelId: "__clovy_cli_engine__:claude",
-              clovyTools: "available",
             },
           ],
           endpoints: [],

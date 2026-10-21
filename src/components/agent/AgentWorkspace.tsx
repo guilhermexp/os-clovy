@@ -130,12 +130,8 @@ import {
 import { ComposerEditor, type ComposerEditorHandle } from "./composer/ComposerEditor";
 import { AgentAttachmentTile } from "./composer/AgentAttachmentTile";
 import { agentComposerClearance } from "./composer/layout";
-import {
-  ComposerModelPicker,
-  heroPrivacyFootnote,
-  useComposerModelPopoverPosition,
-} from "./composer/ModelPicker";
-import { ChatEngineNotice, ChatEnginePicker } from "./composer/ChatEnginePicker";
+import { ComposerModelPicker, useComposerModelPopoverPosition } from "./composer/ModelPicker";
+import { ChatEnginePicker } from "./composer/ChatEnginePicker";
 import {
   CLI_ENGINE_MODEL_PREFIX,
   type ChatEngineCatalog,
@@ -146,7 +142,6 @@ import {
   selectedChatEndpoint,
 } from "../../lib/chat-engine";
 import { type LlmCliId, llmSetUsage } from "../../lib/llm-providers";
-import { modelPrivacyBadge } from "../../lib/model-privacy";
 import { autoPillDesignation } from "../../lib/suggested-models";
 import { getCurrentDataPartitionName } from "../../lib/data-partition";
 import { AUTO_MODEL_ID, modelOptions, selectedModel } from "../settings/ModelPickerDialog";
@@ -2271,12 +2266,6 @@ export function AgentWorkspace({
                   </button>
                 ))}
               </div>
-              <p className="agent-hero-footnote">
-                {heroPrivacyFootnote(
-                  activeModel,
-                  activeModel ? modelPrivacyBadge(activeModel) : undefined,
-                )}
-              </p>
             </div>
           </main>
         ) : (
@@ -2908,7 +2897,6 @@ function AgentComposer({
           {notice}
         </div>
       ) : null}
-      {showModelPicker ? <ChatEngineNotice catalog={engineCatalog} model={model} /> : null}
       <div className="agent-composer-box" data-stacked={attachments.length ? "true" : undefined}>
         {attachments.length ? (
           <div className="agent-composer-attachments">
@@ -3006,7 +2994,6 @@ function AgentComposer({
                   onRefreshCatalog={onRefreshEngineCatalog}
                   anchorRef={formRef}
                   clovyModels={models}
-                  showNotice={false}
                 />
                 {activeEngine.kind === "clovy" ? (
                   <ComposerModelPicker

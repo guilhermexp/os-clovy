@@ -15,6 +15,9 @@
 pub mod approvals;
 pub mod commands;
 pub mod github;
+pub mod github_cli;
+#[cfg(test)]
+pub(crate) mod github_cli_fixtures;
 pub mod google;
 pub mod linear;
 pub mod notion;
@@ -132,6 +135,10 @@ pub struct ConnectorAccount {
     /// The Linear teams this account is scoped to. Always empty for Google
     /// rows, which have no team concept.
     pub selected_teams: Vec<SelectedTeamDto>,
+    /// A GitHub account whose credential is the GitHub CLI's own login
+    /// (`gh auth token`), read on every call and never stored by Clovy.
+    #[serde(default)]
+    pub via_gh: bool,
 }
 
 /// One Linear team the account is scoped to, as shown to the frontend.
@@ -657,6 +664,50 @@ async fn refresh_linear_access_token_with_freshness_gate(
     }
 }
 
+/// The account a connector tool call may use: connected, holding `scope`
+/// (directly or through a broader scope), and with teams when `teams` asks
+/// for them. Same rules for every credential source.
+pub fn check_account_grant(
+    accounts: &[ConnectorAccount],
+    account_id: &str,
+    provider: ConnectorProvider,
+    scope: &str,
+    teams: bool,
+) -> Result<ConnectorAccount, AppError> {
+    let account = accounts
+        .iter()
+        .find(|account| account.account_id == account_id && account.provider == provider)
+        .ok_or_else(|| {
+            AppError::new(
+                "connector_not_connected",
+                "This connector account is not connected.",
+            )
+        })?;
+    if account.status != ConnectorAccountStatus::Connected {
+        return Err(AppError::new(
+            "connector_reconnect_required",
+            "Reconnect this connector account in settings.",
+        ));
+    }
+    if !account
+        .scopes
+        .iter()
+        .any(|held| policy::scope_grants(held, scope))
+    {
+        return Err(AppError::new(
+            "connector_scope_missing",
+            "This connector account does not have the required permission.",
+        ));
+    }
+    if teams && account.selected_teams.is_empty() {
+        return Err(AppError::new(
+            "linear_teams_not_selected",
+            "Select at least one Linear team in settings.",
+        ));
+    }
+    Ok(account.clone())
+}
+
 fn github_not_connected_error() -> AppError {
     AppError::new(
         "connector_not_connected",
@@ -682,6 +733,19 @@ pub async fn github_access_token(
     app: &tauri::AppHandle,
     account_id: &str,
 ) -> Result<String, AppError> {
+    // A "via gh" account has no Clovy custody: its token comes from `gh` on
+    // every call (ADR-0066).
+    let repos = crate::commands::repositories(app).await?;
+    if let Some(record) = repos.get_connector_account(account_id).await? {
+        if github_cli::is_gh_account(&record.metadata) {
+            let env = crate::llm::shell_env::login_env().await;
+            let token = github_cli::access_token(&repos, &env, account_id).await;
+            if token.is_err() {
+                emit_connectors_changed(app);
+            }
+            return token;
+        }
+    }
     let stored = store::load_tokens(ConnectorProvider::Github, account_id)
         .await?
         .ok_or_else(github_not_connected_error)?;
@@ -839,6 +903,7 @@ async fn account_dto(
     // info" rather than failing the whole account list.
     let metadata: ConnectorAccountMetadata =
         serde_json::from_str(&record.metadata).unwrap_or_default();
+    let via_gh = github_cli::is_gh_account(&record.metadata);
     // Same best-effort stance for the team rows: account enumeration was
     // infallible before selected teams existed, and callers treat an Err as
     // "no accounts" (blanking the settings page and routine gates), so one
@@ -866,6 +931,7 @@ async fn account_dto(
         email: record.email,
         scopes: record.scopes,
         status: ConnectorAccountStatus::from_db(&record.status),
+        via_gh,
         workspace_name: metadata.workspace_name,
         workspace_url_key: metadata.workspace_url_key,
         selected_teams,
@@ -948,6 +1014,7 @@ fn append_notion_account(
             email: notion::notion_account_email().to_string(),
             scopes: Vec::new(),
             status,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),
@@ -964,6 +1031,7 @@ fn append_notion_account(
                 email: notion::notion_account_email().to_string(),
                 scopes: Vec::new(),
                 status: ConnectorAccountStatus::Unavailable,
+                via_gh: false,
                 workspace_name: None,
                 workspace_url_key: None,
                 selected_teams: Vec::new(),
@@ -1138,6 +1206,7 @@ pub async fn begin_connect(
         email,
         scopes: granted_scopes,
         status: ConnectorAccountStatus::Connected,
+        via_gh: false,
         workspace_name: None,
         workspace_url_key: None,
         selected_teams: Vec::new(),
@@ -1563,6 +1632,7 @@ pub async fn begin_connect_linear(
             email: identity.user_email.clone(),
             scopes: granted_scopes,
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: Some(identity.workspace_name.clone()).filter(|name| !name.is_empty()),
             workspace_url_key: Some(identity.workspace_url_key.clone()).filter(|key| !key.is_empty()),
             selected_teams,
@@ -1651,12 +1721,26 @@ pub async fn begin_connect_github(
             ),
         ));
     }
-    let client = require_github_client_id()?;
     let repos = crate::commands::repositories(app).await?;
 
     let reconnect_account_id = reconnect_account_id
         .map(str::trim)
         .filter(|id| !id.is_empty());
+
+    // A "via gh" account rides on the GitHub CLI's login: adding a bundle is
+    // a Clovy-side grant, never a device flow (ADR-0066).
+    if let Some(account_id) = reconnect_account_id {
+        if let Some(record) = repos.get_connector_account(account_id).await? {
+            if record.provider == ConnectorProvider::Github.as_str()
+                && github_cli::is_gh_account(&record.metadata)
+            {
+                let account = github_cli::grant_bundles(&repos, account_id, bundles).await?;
+                emit_connectors_changed(app);
+                return Ok(account);
+            }
+        }
+    }
+    let client = require_github_client_id()?;
 
     // Escalation/reconnect short-circuit: an existing, healthy account
     // that already holds every wanted scope needs no new device-flow round-trip.
@@ -1724,6 +1808,9 @@ pub async fn begin_connect_github(
     }
 
     // Same single-account rationale as Google and Linear, scoped to GitHub.
+    // The check and the writes below run under the GitHub account lifecycle
+    // lock so a concurrent "via gh" detection cannot add a second account.
+    let _lifecycle = github_cli::github_accounts_lock().lock().await;
     let existing_accounts = repos.list_connector_accounts().await?;
     if let Some(existing_id) = conflicting_existing_account(
         existing_accounts
@@ -1823,10 +1910,49 @@ pub async fn begin_connect_github(
         email: identity.login,
         scopes: granted_scopes,
         status: ConnectorAccountStatus::Connected,
+        via_gh: false,
         workspace_name: None,
         workspace_url_key: None,
         selected_teams: Vec::new(),
     })
+}
+
+fn github_cli_preferences_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, AppError> {
+    crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("app_data_dir_unavailable", error.to_string()))
+}
+
+pub fn start_github_cli_detection(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = connect_github_cli(&app, github_cli::ConnectMode::Automatic).await {
+            tracing::warn!(error_code = %error.code, "github cli detection at start failed");
+        }
+    });
+}
+
+/// Connect "GitHub (via gh)" when the GitHub CLI is signed in and no GitHub
+/// account exists (app start and Plugins), or on the explicit button.
+pub async fn connect_github_cli(
+    app: &tauri::AppHandle,
+    mode: github_cli::ConnectMode,
+) -> Result<Option<ConnectorAccount>, AppError> {
+    let repos = crate::commands::repositories(app).await?;
+    let env = crate::llm::shell_env::login_env().await;
+    let before = repos.list_connector_accounts().await?;
+    let account =
+        github_cli::detect_and_connect(&repos, &env, &github_cli_preferences_dir(app)?, mode)
+            .await?;
+    let after = repos.list_connector_accounts().await?;
+    let changed = before.len() != after.len()
+        || before
+            .iter()
+            .zip(&after)
+            .any(|(old, new)| old.account_id != new.account_id || old.status != new.status);
+    if changed {
+        emit_connectors_changed(app);
+    }
+    Ok(account)
 }
 
 /// Abort an in-flight connect (drains the browser-handoff wait).
@@ -1902,6 +2028,18 @@ pub async fn disconnect(
 ) -> Result<DisconnectOutcome, AppError> {
     let repos = crate::commands::repositories(app).await?;
     let account = repos.get_connector_account(account_id).await?;
+    if account
+        .as_ref()
+        .is_some_and(|record| github_cli::is_gh_account(&record.metadata))
+    {
+        // Nothing of the credential lives in Clovy; disconnecting also stops
+        // the automatic connection through gh.
+        github_cli::disconnect(&repos, &github_cli_preferences_dir(app)?, account_id).await?;
+        emit_connectors_changed(app);
+        return Ok(DisconnectOutcome {
+            provider_revocation_confirmed: None,
+        });
+    }
     let account_was_present = account.is_some();
     let providers: &[ConnectorProvider] = match account {
         Some(record) => match ConnectorProvider::from_db(&record.provider) {
@@ -2819,6 +2957,7 @@ mod tests {
             email: "user@example.com".to_string(),
             scopes: vec!["openid".to_string()],
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),
@@ -2837,6 +2976,7 @@ mod tests {
             email: String::new(),
             scopes: Vec::new(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: Some("Acme".to_string()),
             workspace_url_key: Some("acme".to_string()),
             selected_teams: vec![SelectedTeamDto {
@@ -2862,6 +3002,7 @@ mod tests {
             email: notion::notion_account_email().to_string(),
             scopes: Vec::new(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),

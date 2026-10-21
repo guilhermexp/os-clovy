@@ -1,5 +1,4 @@
 import { IconCheckmark2 } from "central-icons-filled/IconCheckmark2";
-import { IconCodeAssistant } from "central-icons/IconCodeAssistant";
 import { IconFolder1 } from "central-icons/IconFolder1";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatDate, useT } from "../../i18n";
@@ -12,6 +11,7 @@ import {
   type FolderDto,
 } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
+import { RuntimeLogo } from "../brand/RuntimeLogo";
 
 export function ImportClaudeProjectsDialog({
   open,
@@ -94,7 +94,7 @@ export function ImportClaudeProjectsDialog({
       onClose={onClose}
       title={t("notes.import.title")}
       description={t("notes.import.description")}
-      leading={<IconCodeAssistant size={16} />}
+      leading={<RuntimeLogo id="claude" size={16} decorative />}
       width={600}
       className="claude-projects-dialog"
       disableBackdropClose={importing}

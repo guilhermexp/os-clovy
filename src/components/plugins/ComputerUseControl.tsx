@@ -20,24 +20,15 @@ import { InlineNotice } from "../ui/InlineNotice";
 import { HoverTip } from "../ui/HoverTip";
 import { Switch } from "../ui/Switch";
 
-type ComputerUseControlProps = {
-  onOpenModels: () => void;
-};
-
 function statusLabel(status?: ComputerUseStatusDto) {
   if (!status) return translate("settingsPanels.computerUse.status.checking");
   if (!status.platformSupported) return translate("settingsPanels.computerUse.status.unavailable");
-  if (status.state === "rollout_disabled")
-    return translate("settingsPanels.computerUse.status.temporarilyUnavailable");
-  if (!status.planEligible) return translate("settingsPanels.computerUse.status.proRequired");
   if (!status.driverAvailable)
     return translate("settingsPanels.computerUse.status.driverUnavailable");
   if (!status.grantEnabled) return translate("settingsPanels.computerUse.status.off");
   if (status.ready) return translate("settingsPanels.computerUse.status.ready");
   if (!status.accessibility || !status.screenRecording)
     return translate("settingsPanels.computerUse.status.needsMacosAccess");
-  if (!status.modelSupportsVision)
-    return translate("settingsPanels.computerUse.status.needsVision");
   return translate("settingsPanels.computerUse.status.unavailable");
 }
 
@@ -90,7 +81,7 @@ function requestComputerUsePermission(permission: MacOSPermission) {
  * in the Plugins provider list avoids a second preference surface and never implies that macOS
  * TCC access was granted by Clovy's switch.
  */
-export function ComputerUseControl({ onOpenModels }: ComputerUseControlProps) {
+export function ComputerUseControl() {
   const t = useT();
   const tRich = useTRich();
   const [status, setStatus] = useState<ComputerUseStatusDto>();
@@ -214,11 +205,8 @@ export function ComputerUseControl({ onOpenModels }: ComputerUseControlProps) {
 
   const enabled = status?.grantEnabled === true;
   const supported = status?.platformSupported !== false;
-  const planEligible = status?.planEligible !== false;
   const driverReady = status?.driverAvailable !== false;
-  const rolloutDisabled = status?.state === "rollout_disabled";
-  const statusErrorShownInline =
-    rolloutDisabled || (supported && planEligible && !driverReady && status !== undefined);
+  const statusErrorShownInline = supported && !driverReady && status !== undefined;
   const permissionsMissing =
     enabled && status !== undefined && (!status.accessibility || !status.screenRecording);
   const nextPermission: MacOSPermission = status?.accessibility
@@ -284,12 +272,7 @@ export function ComputerUseControl({ onOpenModels }: ComputerUseControlProps) {
         <span className="computer-use-state-label">{statusLabel(status)}</span>
         <Switch
           checked={enabled}
-          disabled={
-            busy ||
-            !supported ||
-            status === undefined ||
-            (!enabled && (!planEligible || !driverReady || rolloutDisabled))
-          }
+          disabled={busy || !supported || status === undefined || (!enabled && !driverReady)}
           aria-label={t("settingsPanels.computerUse.enableAria")}
           onCheckedChange={(next) => void toggleGrant(next)}
         />
@@ -304,16 +287,7 @@ export function ComputerUseControl({ onOpenModels }: ComputerUseControlProps) {
           />
         ) : null}
 
-        {supported && status && rolloutDisabled ? (
-          <InlineNotice
-            tone="info"
-            icon={<IconExclamationCircle size={16} />}
-            eyebrow={t("settingsPanels.computerUse.status.temporarilyUnavailable")}
-            body={status.error || t("settingsPanels.computerUse.pausedBody")}
-          />
-        ) : null}
-
-        {supported && planEligible && !driverReady && !rolloutDisabled && status ? (
+        {supported && !driverReady && status ? (
           <InlineNotice
             tone="destructive"
             icon={<IconExclamationCircle size={16} />}
@@ -439,31 +413,6 @@ export function ComputerUseControl({ onOpenModels }: ComputerUseControlProps) {
                   <strong>{t("settingsPanels.computerUse.screenRecording")}</strong>
                   <span>{requirementState(status?.screenRecording === true, enabled)}</span>
                 </span>
-              </div>
-              <div className="computer-use-requirement">
-                <span
-                  className="computer-use-requirement-icon"
-                  data-ready={status?.modelSupportsVision}
-                >
-                  {status?.modelSupportsVision ? (
-                    <IconCircleCheck size={15} aria-hidden />
-                  ) : (
-                    <IconExclamationCircle size={15} aria-hidden />
-                  )}
-                </span>
-                <span className="computer-use-requirement-copy">
-                  <strong>{t("settingsPanels.computerUse.visionModel")}</strong>
-                  <span>{status?.generationModel || t("settingsPanels.computerUse.noModel")}</span>
-                </span>
-                {!status?.modelSupportsVision ? (
-                  <button
-                    type="button"
-                    className="btn btn-ghost computer-use-inline-action"
-                    onClick={onOpenModels}
-                  >
-                    {t("settingsPanels.computerUse.chooseModel")}
-                  </button>
-                ) : null}
               </div>
             </section>
 

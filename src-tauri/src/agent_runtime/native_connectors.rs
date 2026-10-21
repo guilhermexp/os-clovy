@@ -19,6 +19,7 @@ use crate::{
     domain::types::AppError,
 };
 use chrono::{DateTime, Utc};
+use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tauri::AppHandle;
@@ -509,6 +510,44 @@ fn descriptor(
     })
 }
 
+/// Where the GitHub tools get accounts and tokens: the app (Keychain or `gh`
+/// per account, ADR-0066) or a test double. Authorization is the same
+/// [`connectors::check_account_grant`] either way.
+pub(crate) trait GithubAccess: Send + Sync {
+    fn accounts(&self) -> BoxFuture<'_, Result<Vec<ConnectorAccount>, AppError>>;
+    fn token<'a>(&'a self, account_id: &'a str) -> BoxFuture<'a, Result<String, AppError>>;
+}
+
+struct AppGithub<'a>(&'a AppHandle);
+
+impl GithubAccess for AppGithub<'_> {
+    fn accounts(&self) -> BoxFuture<'_, Result<Vec<ConnectorAccount>, AppError>> {
+        Box::pin(connectors::list_runtime_accounts(self.0))
+    }
+    fn token<'a>(&'a self, account_id: &'a str) -> BoxFuture<'a, Result<String, AppError>> {
+        Box::pin(connectors::github_access_token(self.0, account_id))
+    }
+}
+
+/// The GitHub tools; `None` for any other name.
+pub(crate) async fn dispatch_github(
+    access: &dyn GithubAccess,
+    name: &str,
+    arguments: Value,
+) -> Option<Result<Value, AppError>> {
+    Some(match name {
+        "list_repositories" => github_list_repositories(access, arguments).await,
+        "get_pull_request" => github_get_pull_request(access, arguments).await,
+        "search_issues" => issues_search(access, arguments).await,
+        "get_issue" => issues_get(access, arguments).await,
+        "list_issue_comments" => issues_comments(access, arguments).await,
+        "create_issue" => issues_create(access, arguments).await,
+        "update_issue" => issues_update(access, arguments).await,
+        "add_comment" => issues_add_comment(access, arguments).await,
+        _ => return None,
+    })
+}
+
 /// Returns `Ok(None)` for a non-connector tool. A matching native tool is
 /// always re-authorized from live account state rather than trusting the
 /// descriptor emitted at run start.
@@ -530,15 +569,11 @@ pub async fn dispatch(
         "find_free_slots" => calendar_find_free_slots(app, arguments).await,
         "create_event" => calendar_create_event(app, arguments).await,
         "respond_to_invite" => calendar_respond_to_invite(app, arguments).await,
-        "list_repositories" => github_list_repositories(app, arguments).await,
-        "get_pull_request" => github_get_pull_request(app, arguments).await,
-        "search_issues" => issues_search(app, arguments).await,
-        "get_issue" => issues_get(app, arguments).await,
-        "list_issue_comments" => issues_comments(app, arguments).await,
-        "create_issue" => issues_create(app, arguments).await,
-        "update_issue" => issues_update(app, arguments).await,
-        "add_comment" => issues_add_comment(app, arguments).await,
-        _ => return Ok(None),
+        _ => {
+            return dispatch_github(&AppGithub(app), name, arguments)
+                .await
+                .transpose()
+        }
     }?;
     Ok(Some(result))
 }
@@ -550,39 +585,8 @@ async fn authorized_account(
     scope: &str,
     teams: bool,
 ) -> Result<ConnectorAccount, AppError> {
-    let account = connectors::list_runtime_accounts(app)
-        .await?
-        .into_iter()
-        .find(|account| account.account_id == account_id && account.provider == provider)
-        .ok_or_else(|| {
-            AppError::new(
-                "connector_not_connected",
-                "This connector account is not connected.",
-            )
-        })?;
-    if account.status != ConnectorAccountStatus::Connected {
-        return Err(AppError::new(
-            "connector_reconnect_required",
-            "Reconnect this connector account in settings.",
-        ));
-    }
-    if !account
-        .scopes
-        .iter()
-        .any(|held| policy::scope_grants(held, scope))
-    {
-        return Err(AppError::new(
-            "connector_scope_missing",
-            "This connector account does not have the required permission.",
-        ));
-    }
-    if teams && account.selected_teams.is_empty() {
-        return Err(AppError::new(
-            "linear_teams_not_selected",
-            "Select at least one Linear team in settings.",
-        ));
-    }
-    Ok(account)
+    let accounts = connectors::list_runtime_accounts(app).await?;
+    connectors::check_account_grant(&accounts, account_id, provider, scope, teams)
 }
 
 fn json_error(error: serde_json::Error) -> AppError {
@@ -894,27 +898,47 @@ async fn calendar_respond_to_invite(app: &AppHandle, arguments: Value) -> Result
     )
 }
 
-async fn github_token(app: &AppHandle, arguments: &Value, scope: &str) -> Result<String, AppError> {
-    let account = authorized_account(
-        app,
+async fn github_account(
+    access: &dyn GithubAccess,
+    arguments: &Value,
+    scope: &str,
+) -> Result<(ConnectorAccount, String), AppError> {
+    let accounts = access.accounts().await?;
+    let account = connectors::check_account_grant(
+        &accounts,
         &account_id(arguments)?,
         ConnectorProvider::Github,
         scope,
         false,
-    )
-    .await?;
-    connectors::github_access_token(app, &account.account_id).await
+    )?;
+    let token = access.token(&account.account_id).await?;
+    Ok((account, token))
 }
-async fn github_list_repositories(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
-    let token = github_token(app, &arguments, GITHUB_READ).await?;
-    as_value(
-        crate::connectors::github::list_repositories(&token)
-            .await
-            .map_err(app_error)?,
-    )
+async fn github_token(
+    access: &dyn GithubAccess,
+    arguments: &Value,
+    scope: &str,
+) -> Result<String, AppError> {
+    Ok(github_account(access, arguments, scope).await?.1)
 }
-async fn github_get_pull_request(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
-    let token = github_token(app, &arguments, GITHUB_READ).await?;
+async fn github_list_repositories(
+    access: &dyn GithubAccess,
+    arguments: Value,
+) -> Result<Value, AppError> {
+    let (account, token) = github_account(access, &arguments, GITHUB_READ).await?;
+    // A gh token is an OAuth token; the App installation endpoints refuse it.
+    let list = if account.via_gh {
+        crate::connectors::github::list_user_repositories(&token).await
+    } else {
+        crate::connectors::github::list_repositories(&token).await
+    };
+    as_value(list.map_err(app_error)?)
+}
+async fn github_get_pull_request(
+    access: &dyn GithubAccess,
+    arguments: Value,
+) -> Result<Value, AppError> {
+    let token = github_token(access, &arguments, GITHUB_READ).await?;
     as_value(
         crate::connectors::github::get_pull_request(
             &token,
@@ -937,9 +961,9 @@ fn require_github_provider(arguments: &Value) -> Result<(), AppError> {
         ))
     }
 }
-async fn issues_search(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
+async fn issues_search(access: &dyn GithubAccess, arguments: Value) -> Result<Value, AppError> {
     require_github_provider(&arguments)?;
-    let token = github_token(app, &arguments, GITHUB_READ).await?;
+    let token = github_token(access, &arguments, GITHUB_READ).await?;
     as_value(
         crate::connectors::github::search_issues(
             &token,
@@ -950,9 +974,9 @@ async fn issues_search(app: &AppHandle, arguments: Value) -> Result<Value, AppEr
         .map_err(app_error)?,
     )
 }
-async fn issues_get(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
+async fn issues_get(access: &dyn GithubAccess, arguments: Value) -> Result<Value, AppError> {
     require_github_provider(&arguments)?;
-    let token = github_token(app, &arguments, GITHUB_READ).await?;
+    let token = github_token(access, &arguments, GITHUB_READ).await?;
     as_value(
         crate::connectors::github::get_issue(
             &token,
@@ -964,9 +988,9 @@ async fn issues_get(app: &AppHandle, arguments: Value) -> Result<Value, AppError
         .map_err(app_error)?,
     )
 }
-async fn issues_comments(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
+async fn issues_comments(access: &dyn GithubAccess, arguments: Value) -> Result<Value, AppError> {
     require_github_provider(&arguments)?;
-    let token = github_token(app, &arguments, GITHUB_READ).await?;
+    let token = github_token(access, &arguments, GITHUB_READ).await?;
     as_value(
         crate::connectors::github::list_issue_comments(
             &token,
@@ -986,9 +1010,9 @@ fn parse_number(arguments: &Value) -> Result<u64, AppError> {
         .ok_or_else(|| AppError::new("invalid_arguments", "number must be an integer."))
 }
 
-async fn issues_create(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
+async fn issues_create(access: &dyn GithubAccess, arguments: Value) -> Result<Value, AppError> {
     require_github_provider(&arguments)?;
-    let token = github_token(app, &arguments, GITHUB_WRITE).await?;
+    let token = github_token(access, &arguments, GITHUB_WRITE).await?;
     let labels = string_list(&arguments, "labels");
     as_value(
         crate::connectors::github::create_issue(
@@ -1003,9 +1027,9 @@ async fn issues_create(app: &AppHandle, arguments: Value) -> Result<Value, AppEr
         .map_err(app_error)?,
     )
 }
-async fn issues_update(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
+async fn issues_update(access: &dyn GithubAccess, arguments: Value) -> Result<Value, AppError> {
     require_github_provider(&arguments)?;
-    let token = github_token(app, &arguments, GITHUB_WRITE).await?;
+    let token = github_token(access, &arguments, GITHUB_WRITE).await?;
     let labels = string_list(&arguments, "labels");
     as_value(
         crate::connectors::github::update_issue(
@@ -1021,9 +1045,12 @@ async fn issues_update(app: &AppHandle, arguments: Value) -> Result<Value, AppEr
         .map_err(app_error)?,
     )
 }
-async fn issues_add_comment(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
+async fn issues_add_comment(
+    access: &dyn GithubAccess,
+    arguments: Value,
+) -> Result<Value, AppError> {
     require_github_provider(&arguments)?;
-    let token = github_token(app, &arguments, GITHUB_WRITE).await?;
+    let token = github_token(access, &arguments, GITHUB_WRITE).await?;
     as_value(
         crate::connectors::github::add_comment(
             &token,
@@ -1059,6 +1086,7 @@ mod tests {
             email: "account@example.test".into(),
             scopes: scopes.iter().map(|scope| (*scope).into()).collect(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: (0..teams)

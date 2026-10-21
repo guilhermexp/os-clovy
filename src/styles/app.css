@@ -6430,6 +6430,11 @@ button.agent-user-attachment:hover {
   white-space: nowrap;
 }
 
+/* Brand mark of the active chat engine, ahead of its name. */
+.agent-composer-model-trigger .runtime-logo {
+  overflow: visible;
+}
+
 /* The model is the only flexible value in the compact trigger. Preference and
  * Effort keep their complete one-word labels while a long model name yields. */
 .agent-composer-model-trigger-name {
@@ -6566,11 +6571,48 @@ button.agent-user-attachment:hover {
 
 .agent-engine-popover {
   width: 260px;
+  /* Three short sections: when the position hook caps the height, the whole
+   * menu scrolls. Rows never shrink, so a two-line row (name over its reason)
+   * cannot collapse to one control height and spill onto the next row. */
+  overflow-y: auto;
+}
+
+.agent-engine-popover .agent-composer-model-menu {
+  flex: none;
+  overflow: visible;
+}
+
+.agent-engine-popover .agent-composer-model-row {
+  flex: none;
+}
+
+.agent-engine-popover .agent-composer-model-choice-copy {
+  flex: 1 1 auto;
+}
+
+.agent-engine-popover .agent-composer-model-choice-desc {
+  overflow-wrap: anywhere;
 }
 
 .agent-composer-model-row-copy {
   display: grid;
   min-width: 0;
+}
+
+/* The coding CLIs whose state folders the access card names. */
+.agent-cli-access-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-inline-start: auto;
+  color: var(--muted-foreground);
+}
+
+/* RuntimeLogo's decorative wrapper: keeps the mark's box in a text row. */
+.runtime-logo {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
 }
 
 .agent-composer-model-row-logo {
@@ -8204,12 +8246,6 @@ button.agent-user-attachment:hover {
   /* Shortcut affordance, not fixed identity: follow the active Appearance
    * preset, using its luminous companion on the dark canvas. */
   color: var(--primary);
-}
-
-.agent-hero-footnote {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
 }
 
 /* Sandbox picker — a mode trigger in the hero composer's toolbar, styled
@@ -13027,6 +13063,13 @@ button.agent-user-attachment:hover {
   font-size: var(--fs-lg);
   font-weight: 400;
   letter-spacing: 0;
+}
+
+/* A row title led by the brand mark of the runtime it names. */
+.settings-row-title-with-mark {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
 }
 
 .settings-mcp-client {
@@ -26642,6 +26685,13 @@ button.memory-project:hover {
   gap: var(--sp-2);
 }
 
+/* Where a connector's credential comes from ("via gh"): a quiet note beside
+ * the name, not a status. */
+.connector-source-tag {
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
 .connectors-notion-disclosures {
   display: flex;
   flex-direction: column;
@@ -27501,6 +27551,9 @@ button.connector-approvals-info {
 }
 
 .coding-agent-lane-tip-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
   font-weight: var(--fw-medium);
   color: var(--foreground);
 }

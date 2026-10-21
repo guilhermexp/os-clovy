@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -63,7 +63,6 @@ const DRIVER_MAX_LINE_BYTES: usize = 24 * 1024 * 1024;
 const SCREENSHOT_MAX_BYTES: usize = 12 * 1024 * 1024;
 const DEFAULT_MAX_ELEMENTS: usize = 100;
 const MAX_ELEMENTS: usize = 1000;
-const ROLLOUT_RETRY_AFTER_FAILURE: Duration = Duration::from_secs(30);
 const RELEASE_SELF_TEST_MAX_LINE_BYTES: usize = 256 * 1024;
 
 #[cfg(target_os = "macos")]
@@ -172,14 +171,11 @@ pub struct PendingComputerUseApproval {
 #[serde(rename_all = "camelCase")]
 pub struct ComputerUseStatus {
     pub platform_supported: bool,
-    pub plan_eligible: bool,
     pub grant_enabled: bool,
     pub driver_available: bool,
     pub driver_version: Option<String>,
     pub accessibility: bool,
     pub screen_recording: bool,
-    pub model_supports_vision: bool,
-    pub generation_model: String,
     pub ready: bool,
     pub state: String,
     pub error: Option<String>,
@@ -211,7 +207,7 @@ pub struct ComputerUseRunRequest {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PermissionProbe {
+pub(crate) struct PermissionProbe {
     accessibility: bool,
     screen_recording: bool,
 }
@@ -356,18 +352,6 @@ struct DriverLaunchSpec {
     args: Vec<String>,
 }
 
-#[derive(Clone)]
-struct RolloutGate {
-    enabled: bool,
-    reason: Option<String>,
-}
-
-struct CachedRolloutGate {
-    gate: RolloutGate,
-    checked_at: Instant,
-    ttl: Duration,
-}
-
 struct CleanupInProgress<'a>(&'a AtomicU32);
 
 impl<'a> CleanupInProgress<'a> {
@@ -398,9 +382,6 @@ impl Drop for DriverPrewarmInProgress<'_> {
     }
 }
 
-static ROLLOUT_GATE: OnceLock<Mutex<Option<CachedRolloutGate>>> = OnceLock::new();
-static ROLLOUT_REFRESH: OnceLock<AsyncMutex<()>> = OnceLock::new();
-static MACOS_VERSION: OnceLock<String> = OnceLock::new();
 #[cfg(debug_assertions)]
 static DEVELOPMENT_GRANT: AtomicBool = AtomicBool::new(false);
 
@@ -1655,291 +1636,118 @@ async fn read_permission_probe(
     })
 }
 
-async fn rollout_gate() -> RolloutGate {
-    let cache = ROLLOUT_GATE.get_or_init(|| Mutex::new(None));
-    let refresh = ROLLOUT_REFRESH.get_or_init(|| AsyncMutex::new(()));
-    rollout_gate_with_fetch(cache, refresh, || async {
-        crate::clovy_api::computer_use_rollout(macos_version().await).await
-    })
-    .await
+/// What the bundled driver check found.
+pub(crate) enum DriverCheck {
+    Missing(String),
+    Mismatch(String),
+    Ready(String),
 }
 
-fn fresh_rollout_gate(cache: &Mutex<Option<CachedRolloutGate>>) -> Option<RolloutGate> {
-    if let Ok(guard) = cache.lock() {
-        if let Some(cached) = guard.as_ref() {
-            if cached.checked_at.elapsed() < cached.ttl {
-                return Some(cached.gate.clone());
-            }
-        }
-    }
-    None
+/// The local facts Computer use status depends on (D4: nothing remote).
+pub(crate) struct StatusChecks {
+    pub platform_supported: bool,
+    pub grant_enabled: bool,
+    pub driver: DriverCheck,
+    pub permissions: Option<Result<PermissionProbe, AppError>>,
 }
 
-async fn rollout_gate_with_fetch<F, Fut>(
-    cache: &Mutex<Option<CachedRolloutGate>>,
-    refresh: &AsyncMutex<()>,
-    fetch: F,
-) -> RolloutGate
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<crate::clovy_api::ComputerUseRolloutDto, AppError>>,
-{
-    if let Some(gate) = fresh_rollout_gate(cache) {
-        return gate;
-    }
-
-    // Only the task holding this lock may refresh. Waiting tasks recheck the
-    // cache so a single response satisfies every caller after expiry.
-    let _refresh = refresh.lock().await;
-    if let Some(gate) = fresh_rollout_gate(cache) {
-        return gate;
-    }
-
-    let fetched = fetch().await;
-    let (gate, ttl) = match fetched {
-        Ok(decision) => (
-            RolloutGate {
-                enabled: decision.enabled,
-                reason: decision.reason,
-            },
-            Duration::from_secs(decision.cache_ttl_seconds.clamp(30, 3600)),
-        ),
-        Err(_) => {
-            // A previously received disable remains sticky through an outage.
-            // With no disable cached, fail closed briefly: remote inference is
-            // unavailable in the same condition, and an emergency switch must
-            // not silently become fail-open because its fetch failed.
-            let previous_disable = cache
-                .lock()
-                .ok()
-                .and_then(|guard| guard.as_ref().map(|cached| cached.gate.clone()))
-                .filter(|gate| !gate.enabled);
-            (
-                previous_disable.unwrap_or(RolloutGate {
-                    enabled: false,
-                    reason: Some("unavailable".to_string()),
-                }),
-                ROLLOUT_RETRY_AFTER_FAILURE,
-            )
-        }
+fn status_from_checks(checks: StatusChecks) -> ComputerUseStatus {
+    let StatusChecks {
+        platform_supported,
+        grant_enabled,
+        driver,
+        permissions,
+    } = checks;
+    let status = |state: &str, error: Option<String>| ComputerUseStatus {
+        platform_supported,
+        grant_enabled,
+        driver_available: false,
+        driver_version: None,
+        accessibility: false,
+        screen_recording: false,
+        ready: false,
+        state: state.to_string(),
+        error,
     };
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some(CachedRolloutGate {
-            gate: gate.clone(),
-            checked_at: Instant::now(),
-            ttl,
-        });
-    }
-    gate
-}
-
-async fn macos_version() -> &'static str {
-    if let Some(version) = MACOS_VERSION.get() {
-        return version.as_str();
-    }
-
-    #[cfg(target_os = "macos")]
-    let version = {
-        let mut command = Command::new("/usr/bin/sw_vers");
-        command.arg("-productVersion");
-        bounded_command_output(
-            command,
-            EXTERNAL_COMMAND_TIMEOUT,
-            "computer_use_macos_version_failed",
-            "The macOS version check failed.",
-        )
-        .await
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|version| version.trim().to_string())
-        .filter(|version| {
-            !version.is_empty()
-                && version.len() <= 64
-                && version
-                    .chars()
-                    .all(|character| character.is_ascii_digit() || character == '.')
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-    };
-    #[cfg(not(target_os = "macos"))]
-    let version = "unsupported".to_string();
-
-    let _ = MACOS_VERSION.set(version);
-    MACOS_VERSION.get().map(String::as_str).unwrap_or("unknown")
-}
-
-async fn status_inner(app: &AppHandle, computer_use: &ComputerUseState) -> ComputerUseStatus {
-    let platform_supported = cfg!(target_os = "macos");
-    let plan_eligible = plan_eligible().await;
-    let grant_enabled = grant_enabled(app).await;
-    let model_supports_vision = crate::providers::generation_model_supports_vision().await;
-    let generation_model = crate::providers::generation_model();
     if !platform_supported {
         return ComputerUseStatus {
-            platform_supported,
-            plan_eligible,
             grant_enabled: false,
-            driver_available: false,
-            driver_version: None,
-            accessibility: false,
-            screen_recording: false,
-            model_supports_vision,
-            generation_model,
-            ready: false,
-            state: "unsupported".to_string(),
-            error: None,
+            ..status("unsupported", None)
         };
     }
-    let rollout = rollout_gate().await;
-    if !rollout.enabled {
-        return ComputerUseStatus {
-            platform_supported,
-            plan_eligible,
-            grant_enabled,
-            driver_available: false,
-            driver_version: None,
-            accessibility: false,
-            screen_recording: false,
-            model_supports_vision,
-            generation_model,
-            ready: false,
-            state: "rollout_disabled".to_string(),
-            error: Some(if rollout.reason.as_deref() == Some("unavailable") {
-                "Computer use could not verify its safety rollout. Check your connection and try again."
-                    .to_string()
-            } else {
-                "Computer use is temporarily unavailable for this Clovy or macOS version."
-                    .to_string()
-            }),
-        };
+    let version = match driver {
+        DriverCheck::Missing(error) if grant_enabled => {
+            return status("driver_missing", Some(error));
+        }
+        DriverCheck::Missing(_) => return status("off", None),
+        DriverCheck::Mismatch(error) => return status("driver_mismatch", Some(error)),
+        DriverCheck::Ready(version) => version,
+    };
+    let driver_ready = ComputerUseStatus {
+        driver_available: true,
+        driver_version: Some(version),
+        ..status("off", None)
+    };
+    if !grant_enabled {
+        return driver_ready;
     }
-    if !plan_eligible {
-        return ComputerUseStatus {
-            platform_supported,
-            plan_eligible,
-            grant_enabled,
-            driver_available: false,
-            driver_version: None,
-            accessibility: false,
-            screen_recording: false,
-            model_supports_vision,
-            generation_model,
-            ready: false,
-            state: "plan_required".to_string(),
-            error: None,
-        };
+    let permissions = permission_probe_status(permissions.unwrap_or_else(|| {
+        Err(AppError::new(
+            "computer_use_permission_probe_missing",
+            "The macOS permission check did not run.",
+        ))
+    }));
+    ComputerUseStatus {
+        accessibility: permissions.accessibility,
+        screen_recording: permissions.screen_recording,
+        ready: permissions.ready,
+        state: permissions.state.to_string(),
+        error: permissions.error,
+        ..driver_ready
+    }
+}
+
+/// Computer use status from local facts only: the user's grant, the pinned
+/// bundled driver and its signature, and the macOS permissions (ADR-0067).
+/// No Clovy plan, vision model or remote rollout answer is consulted.
+async fn status_inner(app: &AppHandle, computer_use: &ComputerUseState) -> ComputerUseStatus {
+    let platform_supported = cfg!(target_os = "macos");
+    let grant_enabled = platform_supported && grant_enabled(app).await;
+    let mut checks = StatusChecks {
+        platform_supported,
+        grant_enabled,
+        driver: DriverCheck::Missing(String::new()),
+        permissions: None,
+    };
+    if !platform_supported {
+        return status_from_checks(checks);
     }
     let path = match bundled_driver_executable(app) {
         Ok(path) => path,
         Err(error) => {
-            return ComputerUseStatus {
-                platform_supported,
-                plan_eligible,
-                grant_enabled,
-                driver_available: false,
-                driver_version: None,
-                accessibility: false,
-                screen_recording: false,
-                model_supports_vision,
-                generation_model,
-                ready: false,
-                state: if grant_enabled {
-                    "driver_missing"
-                } else {
-                    "off"
-                }
-                .to_string(),
-                error: grant_enabled.then_some(error.message),
-            };
+            checks.driver = DriverCheck::Missing(error.message);
+            return status_from_checks(checks);
         }
     };
     if let Err(error) = verify_packaged_driver_signatures(computer_use, &path, false).await {
-        return ComputerUseStatus {
-            platform_supported,
-            plan_eligible,
-            grant_enabled,
-            driver_available: false,
-            driver_version: None,
-            accessibility: false,
-            screen_recording: false,
-            model_supports_vision,
-            generation_model,
-            ready: false,
-            state: "driver_mismatch".to_string(),
-            error: Some(error.message),
-        };
+        checks.driver = DriverCheck::Mismatch(error.message);
+        return status_from_checks(checks);
     }
-    let version = match driver_version(&path).await {
-        Ok(version) => version,
-        Err(error) => {
-            return ComputerUseStatus {
-                platform_supported,
-                plan_eligible,
-                grant_enabled,
-                driver_available: false,
-                driver_version: None,
-                accessibility: false,
-                screen_recording: false,
-                model_supports_vision,
-                generation_model,
-                ready: false,
-                state: "driver_mismatch".to_string(),
-                error: Some(error.message),
-            };
-        }
+    checks.driver = match driver_version(&path).await {
+        Ok(version) => DriverCheck::Ready(version),
+        Err(error) => DriverCheck::Mismatch(error.message),
     };
-    if !grant_enabled {
-        return ComputerUseStatus {
-            platform_supported,
-            plan_eligible,
-            grant_enabled,
-            driver_available: true,
-            driver_version: Some(version),
-            accessibility: false,
-            screen_recording: false,
-            model_supports_vision,
-            generation_model,
-            ready: false,
-            state: "off".to_string(),
-            error: None,
-        };
+    if grant_enabled && matches!(checks.driver, DriverCheck::Ready(_)) {
+        checks.permissions = Some(probe_permissions(computer_use, &path, false).await);
     }
-    let permissions = permission_probe_status(
-        probe_permissions(computer_use, &path, false).await,
-        model_supports_vision,
-    );
-    ComputerUseStatus {
-        platform_supported,
-        plan_eligible,
-        grant_enabled,
-        driver_available: true,
-        driver_version: Some(version),
-        accessibility: permissions.accessibility,
-        screen_recording: permissions.screen_recording,
-        model_supports_vision,
-        generation_model,
-        ready: permissions.ready,
-        state: permissions.state.to_string(),
-        error: permissions.error,
-    }
+    status_from_checks(checks)
 }
 
-fn permission_probe_status(
-    result: Result<PermissionProbe, AppError>,
-    model_supports_vision: bool,
-) -> PermissionProbeStatus {
+fn permission_probe_status(result: Result<PermissionProbe, AppError>) -> PermissionProbeStatus {
     match result {
         Ok(permissions) => {
-            let ready =
-                permissions.accessibility && permissions.screen_recording && model_supports_vision;
-            let state = if !permissions.accessibility || !permissions.screen_recording {
-                "permission_missing"
-            } else if !model_supports_vision {
-                "model_unsupported"
-            } else {
-                "ready"
-            };
+            let ready = permissions.accessibility && permissions.screen_recording;
+            let state = if ready { "ready" } else { "permission_missing" };
             PermissionProbeStatus {
                 accessibility: permissions.accessibility,
                 screen_recording: permissions.screen_recording,
@@ -1958,22 +1766,13 @@ fn permission_probe_status(
     }
 }
 
-/// The local identity carries no plan, so nothing is withheld from it.
-async fn plan_eligible() -> bool {
-    true
-}
-
 #[allow(dead_code)] // Preserved for the neutral agent capability adapter follow-up.
-pub(crate) async fn runtime_ready(app: &AppHandle, supports_vision: bool) -> bool {
+pub(crate) async fn runtime_ready(app: &AppHandle) -> bool {
     let state = app.state::<ComputerUseState>();
     let expected_epoch = app
         .try_state::<ComputerUseState>()
         .map(|state| state.epoch.load(Ordering::SeqCst));
-    let mut ready = if !rollout_gate().await.enabled
-        || !supports_vision
-        || !plan_eligible().await
-        || !grant_enabled(app).await
-    {
+    let mut ready = if !grant_enabled(app).await {
         false
     } else if let Ok(path) = bundled_driver_executable(app) {
         verify_packaged_driver_signatures(&state, &path, false)
@@ -2164,12 +1963,6 @@ pub async fn set_computer_use_grant(
     state: State<'_, ComputerUseState>,
     request: SetComputerUseGrantRequest,
 ) -> Result<ComputerUseStatus, AppError> {
-    if request.enabled && !plan_eligible().await {
-        return Err(AppError::new(
-            "computer_use_plan_required",
-            "Computer use requires an active Pro or Max plan.",
-        ));
-    }
     store_grant(&app, request.enabled).await?;
     if !request.enabled {
         stop_inner(&app, &state).await;
@@ -2191,18 +1984,6 @@ pub async fn computer_use_request_permissions(
         return Err(AppError::new(
             "computer_use_grant_required",
             "Enable Computer use before requesting macOS access.",
-        ));
-    }
-    if !plan_eligible().await {
-        return Err(AppError::new(
-            "computer_use_plan_required",
-            "Computer use requires an active Pro or Max plan.",
-        ));
-    }
-    if !rollout_gate().await.enabled {
-        return Err(AppError::new(
-            "computer_use_rollout_disabled",
-            "Computer use is temporarily unavailable for this Clovy or macOS version.",
         ));
     }
     stop_inner(&app, &state).await;
@@ -2689,24 +2470,14 @@ fn emit_approvals_changed(app: &AppHandle, state: &ComputerUseState) {
     );
 }
 
-pub(crate) async fn handle_proxy_action_for_call(app: &AppHandle, arguments: Value) -> Value {
+/// Runs a CLI turn's Computer use action through the broker and the per-app
+/// authorization. CLI turns are the only callers (ADR-0067).
+pub(crate) async fn handle_cli_action_for_call(app: &AppHandle, arguments: Value) -> Value {
     let state = app.state::<ComputerUseState>();
     match handle_action(app, &state, arguments).await {
         Ok(result) => result,
         Err(error) => mcp_error(&error.message),
     }
-}
-
-/// [`handle_proxy_action_for_call`] for a CLI turn: same broker and
-/// per-app authorization, with the CLI turn's eligibility
-/// ([`ActionOrigin::CliTurn`]).
-pub(crate) async fn handle_cli_action_for_call(app: &AppHandle, arguments: Value) -> Value {
-    ACTION_ORIGIN
-        .scope(
-            ActionOrigin::CliTurn,
-            handle_proxy_action_for_call(app, arguments),
-        )
-        .await
 }
 
 pub(crate) fn normalized_action(arguments: &Value) -> Result<String, AppError> {
@@ -2813,37 +2584,15 @@ fn ensure_task_generation_current(
     }
 }
 
-/// Who asked for a Computer use action. The native agent runs on Clovy's
-/// own generation model and plan; a CLI turn (`cli-substitui-agente-nativo`,
-/// slice 2.6) brings its own model and account, so its eligibility is the
-/// platform, the rollout gate, the user's Computer use grant, and the
-/// driver (macOS permissions are the driver's to check).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ActionOrigin {
-    NativeAgent,
-    CliTurn,
-}
-
-tokio::task_local! {
-    static ACTION_ORIGIN: ActionOrigin;
-}
-
-fn current_action_origin() -> ActionOrigin {
-    ACTION_ORIGIN
-        .try_with(|origin| *origin)
-        .unwrap_or(ActionOrigin::NativeAgent)
-}
-
-/// The facts eligibility depends on, asked lazily so a CLI turn never asks
-/// for the plan or the native model.
+/// The facts eligibility depends on: the platform, the user's Computer use
+/// grant and the bundled driver (macOS permissions are the driver's to
+/// check). Nothing remote and nothing about Clovy's plan or models
+/// (ADR-0067); the action only reaches here from a CLI turn's `clovy-mcp`.
 pub(crate) trait EligibilityProbe: Sync {
     fn macos(&self) -> bool {
         cfg!(target_os = "macos")
     }
-    fn rollout_enabled(&self) -> BoxedBool<'_>;
     fn grant_enabled(&self) -> BoxedBool<'_>;
-    fn plan_eligible(&self) -> BoxedBool<'_>;
-    fn native_model_supports_vision(&self) -> BoxedBool<'_>;
     fn driver(&self) -> Result<(), AppError>;
 }
 
@@ -2852,17 +2601,8 @@ pub(crate) type BoxedBool<'a> = std::pin::Pin<Box<dyn Future<Output = bool> + Se
 struct AppEligibility<'a>(&'a AppHandle);
 
 impl EligibilityProbe for AppEligibility<'_> {
-    fn rollout_enabled(&self) -> BoxedBool<'_> {
-        Box::pin(async { rollout_gate().await.enabled })
-    }
     fn grant_enabled(&self) -> BoxedBool<'_> {
         Box::pin(grant_enabled(self.0))
-    }
-    fn plan_eligible(&self) -> BoxedBool<'_> {
-        Box::pin(plan_eligible())
-    }
-    fn native_model_supports_vision(&self) -> BoxedBool<'_> {
-        Box::pin(crate::providers::generation_model_supports_vision())
     }
     fn driver(&self) -> Result<(), AppError> {
         bundled_driver_executable(self.0).map(|_| ())
@@ -2870,23 +2610,14 @@ impl EligibilityProbe for AppEligibility<'_> {
 }
 
 async fn ensure_action_eligible(app: &AppHandle) -> Result<(), AppError> {
-    check_eligibility(current_action_origin(), &AppEligibility(app)).await
+    check_eligibility(&AppEligibility(app)).await
 }
 
-pub(crate) async fn check_eligibility(
-    origin: ActionOrigin,
-    probe: &dyn EligibilityProbe,
-) -> Result<(), AppError> {
+pub(crate) async fn check_eligibility(probe: &dyn EligibilityProbe) -> Result<(), AppError> {
     if !probe.macos() {
         return Err(AppError::new(
             "computer_use_unsupported",
             "Computer use is available on macOS only.",
-        ));
-    }
-    if !probe.rollout_enabled().await {
-        return Err(AppError::new(
-            "computer_use_rollout_disabled",
-            "Computer use is temporarily unavailable for this Clovy or macOS version.",
         ));
     }
     if !probe.grant_enabled().await {
@@ -2894,20 +2625,6 @@ pub(crate) async fn check_eligibility(
             "computer_use_grant_required",
             "Computer use is off. Enable it in Plugins and finish setup.",
         ));
-    }
-    if origin == ActionOrigin::NativeAgent {
-        if !probe.plan_eligible().await {
-            return Err(AppError::new(
-                "computer_use_plan_required",
-                "Computer use requires an active Pro or Max plan.",
-            ));
-        }
-        if !probe.native_model_supports_vision().await {
-            return Err(AppError::new(
-                "computer_use_model_unsupported",
-                "The selected model cannot use Computer use. Switch to a vision-capable model.",
-            ));
-        }
     }
     probe.driver()
 }
@@ -5211,11 +4928,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    #[tokio::test]
-    async fn computer_use_needs_no_account_plan() {
-        assert!(plan_eligible().await);
-    }
-
     #[test]
     fn driver_prewarm_loses_to_stop_and_readiness_loss() {
         let state = ComputerUseState::default();
@@ -5377,15 +5089,80 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    fn checks(grant_enabled: bool, driver: DriverCheck, granted: Option<bool>) -> StatusChecks {
+        StatusChecks {
+            platform_supported: true,
+            grant_enabled,
+            driver,
+            permissions: granted.map(|granted| {
+                Ok(PermissionProbe {
+                    accessibility: granted,
+                    screen_recording: granted,
+                })
+            }),
+        }
+    }
+
+    /// D4: ready needs only the grant, the pinned driver and the macOS
+    /// permissions; no plan, vision model or rollout answer is an input.
+    #[test]
+    fn status_is_ready_from_local_facts_alone() {
+        let status = status_from_checks(checks(
+            true,
+            DriverCheck::Ready("0.4.2".to_string()),
+            Some(true),
+        ));
+
+        assert!(status.ready);
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.driver_version.as_deref(), Some("0.4.2"));
+        let json = serde_json::to_value(&status).unwrap();
+        for gone in ["planEligible", "modelSupportsVision", "generationModel"] {
+            assert!(json.get(gone).is_none(), "{gone} is still reported");
+        }
+    }
+
+    #[test]
+    fn status_states_follow_grant_driver_and_permissions() {
+        let off = status_from_checks(checks(false, DriverCheck::Ready("0.4.2".into()), None));
+        assert_eq!((off.state.as_str(), off.ready), ("off", false));
+        assert!(off.driver_available);
+
+        let missing = status_from_checks(checks(true, DriverCheck::Missing("gone".into()), None));
+        assert_eq!(missing.state, "driver_missing");
+        assert_eq!(missing.error.as_deref(), Some("gone"));
+        let hidden = status_from_checks(checks(false, DriverCheck::Missing("gone".into()), None));
+        assert_eq!((hidden.state.as_str(), hidden.error), ("off", None));
+
+        let mismatch = status_from_checks(checks(true, DriverCheck::Mismatch("sig".into()), None));
+        assert_eq!(mismatch.state, "driver_mismatch");
+
+        let denied = status_from_checks(checks(
+            true,
+            DriverCheck::Ready("0.4.2".into()),
+            Some(false),
+        ));
+        assert_eq!(
+            (denied.state.as_str(), denied.ready),
+            ("permission_missing", false)
+        );
+
+        let unsupported = status_from_checks(StatusChecks {
+            platform_supported: false,
+            ..checks(true, DriverCheck::Ready("0.4.2".into()), Some(true))
+        });
+        assert_eq!(
+            (unsupported.state.as_str(), unsupported.ready),
+            ("unsupported", false)
+        );
+    }
+
     #[test]
     fn permission_probe_timeout_is_not_reported_as_missing_permissions() {
-        let status = permission_probe_status(
-            Err(AppError::new(
-                "computer_use_driver_timeout",
-                "The Computer use driver did not respond in time.",
-            )),
-            true,
-        );
+        let status = permission_probe_status(Err(AppError::new(
+            "computer_use_driver_timeout",
+            "The Computer use driver did not respond in time.",
+        )));
 
         assert_eq!(status.state, "error");
         assert_ne!(
@@ -5678,44 +5455,6 @@ mod tests {
                 .expect("bounded read"),
             BoundedLine::TooLarge
         );
-    }
-
-    #[tokio::test]
-    async fn rollout_refresh_is_single_flight() {
-        let cache = std::sync::Arc::new(Mutex::new(Some(CachedRolloutGate {
-            gate: RolloutGate {
-                enabled: false,
-                reason: Some("stale".to_string()),
-            },
-            checked_at: Instant::now() - Duration::from_secs(2),
-            ttl: Duration::from_secs(1),
-        })));
-        let refresh = std::sync::Arc::new(AsyncMutex::new(()));
-        let fetch_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut tasks = Vec::new();
-
-        for _ in 0..8 {
-            let cache = std::sync::Arc::clone(&cache);
-            let refresh = std::sync::Arc::clone(&refresh);
-            let fetch_count = std::sync::Arc::clone(&fetch_count);
-            tasks.push(tokio::spawn(async move {
-                rollout_gate_with_fetch(&cache, &refresh, || async move {
-                    fetch_count.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    Ok(crate::clovy_api::ComputerUseRolloutDto {
-                        enabled: true,
-                        reason: None,
-                        cache_ttl_seconds: 300,
-                    })
-                })
-                .await
-            }));
-        }
-
-        for task in tasks {
-            assert!(task.await.expect("refresh task").enabled);
-        }
-        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(target_os = "macos")]

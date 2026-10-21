@@ -23,6 +23,8 @@ import {
   connectorsCancelConnect,
   connectorsConnect,
   connectorsDisconnect,
+  connectorsGithubCliConnect,
+  connectorsGithubCliDetect,
   connectorsList,
   notionConnectorConnect,
   notionConnectorDisconnect,
@@ -416,7 +418,7 @@ function connectDescription(
  * pairing have no account, email, or scopes. Local mode only: tokens live in
  * the Mac's Keychain and provider calls originate on this device.
  */
-export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: () => void }) {
+export function ConnectorsSection() {
   const t = useT();
   const { policy, error: policyError } = useConnectorPolicy();
   const oauthProviders =
@@ -464,6 +466,7 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
   // available for a deliberate reconnect-soon disconnect.
   const [revoke, setRevoke] = useState(true);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [ghConnecting, setGhConnecting] = useState(false);
   const [obsidian, setObsidian] = useState<ObsidianStatus | null>(null);
   const [obsidianError, setObsidianError] = useState<string | null>(null);
   const [obsidianBusy, setObsidianBusy] = useState(false);
@@ -507,6 +510,20 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
     return () => {
       cancelled = true;
       unlisten?.();
+    };
+  }, [refresh]);
+
+  // A signed-in GitHub CLI connects "GitHub (via gh)" on its own when there
+  // is no GitHub account yet; the backend answers quickly and never throws.
+  useEffect(() => {
+    let cancelled = false;
+    void connectorsGithubCliDetect()
+      .then((account) => {
+        if (account && !cancelled) void refresh();
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
     };
   }, [refresh]);
 
@@ -713,9 +730,27 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
     setConnectIsReconnect(false);
   }
 
+  async function connectViaGh() {
+    if (ghConnecting) return;
+    setGhConnecting(true);
+    try {
+      const account = await connectorsGithubCliConnect();
+      await refresh();
+      if (account) toast.success(t("settingsPanels.connectors.ghConnected"));
+    } catch (err) {
+      toast.error(messageFromError(err));
+    } finally {
+      setGhConnecting(false);
+    }
+  }
+
   async function reconnect(account: ConnectorAccount) {
     if (account.provider === "notion" || !policy) return;
     setNotConfigured(null);
+    if (account.viaGh) {
+      await connectViaGh();
+      return;
+    }
 
     // GitHub uses the device-authorization flow: the device-code panel only
     // renders inside the connect dialog. Route GitHub reconnects through the
@@ -794,7 +829,11 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
     if (!account || disconnecting) return;
     setDisconnecting(true);
     try {
-      const outcome = await connectorsDisconnect({ accountId: account.accountId, revoke });
+      const outcome = await connectorsDisconnect({
+        accountId: account.accountId,
+        // Clovy holds no gh credential to revoke.
+        revoke: account.viaGh ? false : revoke,
+      });
       await refresh();
       setDisconnectTarget(null);
       if (outcome?.providerRevocationConfirmed === false) {
@@ -979,7 +1018,17 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
                       <ConnectorProviderIcon provider={provider} />
                     </span>
                     <div className="connector-main">
-                      <span className="connector-name">{name}</span>
+                      <span className="connector-title-line">
+                        <span className="connector-name">{name}</span>
+                        {account?.viaGh ? (
+                          <span
+                            className="connector-source-tag"
+                            title={t("settingsPanels.connectors.viaGhTip")}
+                          >
+                            {t("settingsPanels.connectors.viaGh")}
+                          </span>
+                        ) : null}
+                      </span>
                       <p className="connector-subtitle" title={subtitle}>
                         {subtitle}
                       </p>
@@ -993,6 +1042,20 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
                         >
                           {status.label}
                         </span>
+                      ) : null}
+                      {!account && provider === "github" ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          aria-label={t("settingsPanels.connectors.connectWithGhName", { name })}
+                          disabled={accounts === null || ghConnecting || connectingThisProvider}
+                          aria-busy={ghConnecting || undefined}
+                          onClick={() => void connectViaGh()}
+                        >
+                          {ghConnecting
+                            ? t("settingsPanels.connectors.connecting")
+                            : t("settingsPanels.connectors.connectWithGh")}
+                        </button>
                       ) : null}
                       {!account ? (
                         <button
@@ -1081,7 +1144,7 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
               />
             </button>
           </li>
-          {advancedOpen ? <ComputerUseControl onOpenModels={onOpenModels} /> : null}
+          {advancedOpen ? <ComputerUseControl /> : null}
         </ul>
       </div>
 
@@ -1208,7 +1271,11 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
         title={t("settingsPanels.connectors.disconnectTitle", {
           name: disconnectTarget ? accountDisplayName(disconnectTarget) : "",
         })}
-        description={t("settingsPanels.connectors.disconnectDescription")}
+        description={
+          disconnectTarget?.viaGh
+            ? t("settingsPanels.connectors.disconnectGhDescription")
+            : t("settingsPanels.connectors.disconnectDescription")
+        }
         footer={
           <>
             <button
@@ -1233,19 +1300,21 @@ export function ConnectorsSection({ onOpenModels = () => {} }: { onOpenModels?: 
           </>
         }
       >
-        <label className="connectors-revoke-option" htmlFor="connectors-revoke">
-          <Checkbox
-            id="connectors-revoke"
-            checked={revoke}
-            disabled={disconnecting}
-            onChange={(event) => setRevoke(event.currentTarget.checked)}
-          />
-          {disconnectTarget
-            ? t("settingsPanels.connectors.revokeWith", {
-                provider: PROVIDER_NAMES[disconnectTarget.provider],
-              })
-            : t("settingsPanels.connectors.revokeWithProvider")}
-        </label>
+        {disconnectTarget?.viaGh ? null : (
+          <label className="connectors-revoke-option" htmlFor="connectors-revoke">
+            <Checkbox
+              id="connectors-revoke"
+              checked={revoke}
+              disabled={disconnecting}
+              onChange={(event) => setRevoke(event.currentTarget.checked)}
+            />
+            {disconnectTarget
+              ? t("settingsPanels.connectors.revokeWith", {
+                  provider: PROVIDER_NAMES[disconnectTarget.provider],
+                })
+              : t("settingsPanels.connectors.revokeWithProvider")}
+          </label>
+        )}
       </Dialog>
 
       <Dialog

@@ -210,9 +210,6 @@ pub async fn dispatch_tool(
             crate::activity::timeline::dispatch_agent_tool(&context.app, name, &arguments).await
         }
         "request_secret" => consume_secret_reference(context).await,
-        "computer_use" => {
-            Ok(crate::computer_use::handle_proxy_action_for_call(&context.app, arguments).await)
-        }
         name if crate::connectors::notion::runtime_name_to_provider(name).is_some() => {
             notion_tool(context, name, &arguments).await
         }

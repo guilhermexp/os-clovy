@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   connectorsConnect: vi.fn(),
   connectorsCancelConnect: vi.fn(),
   connectorsDisconnect: vi.fn(),
+  connectorsGithubCliDetect: vi.fn(),
+  connectorsGithubCliConnect: vi.fn(),
   extensionPairingStatus: vi.fn(),
   registerBrowserExtensionHost: vi.fn(),
   browserTransportPolicy: vi.fn(),
@@ -46,6 +48,8 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   connectorsConnect: mocks.connectorsConnect,
   connectorsCancelConnect: mocks.connectorsCancelConnect,
   connectorsDisconnect: mocks.connectorsDisconnect,
+  connectorsGithubCliDetect: mocks.connectorsGithubCliDetect,
+  connectorsGithubCliConnect: mocks.connectorsGithubCliConnect,
   extensionPairingStatus: mocks.extensionPairingStatus,
   registerBrowserExtensionHost: mocks.registerBrowserExtensionHost,
   browserTransportPolicy: mocks.browserTransportPolicy,
@@ -128,6 +132,8 @@ beforeEach(() => {
   );
   mocks.connectorsConnect.mockResolvedValue(account());
   mocks.connectorsDisconnect.mockResolvedValue(undefined);
+  mocks.connectorsGithubCliDetect.mockResolvedValue(null);
+  mocks.connectorsGithubCliConnect.mockResolvedValue(null);
   mocks.connectorsCancelConnect.mockResolvedValue(undefined);
   mocks.connectorsLinearTeams.mockResolvedValue({ teams: [], truncated: false });
   mocks.connectorsSetSelectedTeams.mockResolvedValue(linearAccount());
@@ -1271,5 +1277,94 @@ describe("ConnectorsSection — GitHub", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(mocks.connectorsCancelConnect).toHaveBeenCalled());
     rejectConnect({ code: "connector_connect_canceled", message: "canceled" });
+  });
+});
+
+describe("GitHub through the GitHub CLI", () => {
+  function ghAccount(overrides: Partial<ConnectorAccount> = {}): ConnectorAccount {
+    return account({
+      accountId: "4242",
+      provider: "github",
+      email: "octo",
+      scopes: ["read"],
+      viaGh: true,
+      ...overrides,
+    });
+  }
+
+  function githubRow() {
+    return screen.getByText("GitHub", { selector: ".connector-name" }).closest("li") as HTMLElement;
+  }
+
+  it("asks the backend to detect a signed-in gh when Plugins opens", async () => {
+    render(<ConnectorsSection />);
+    await waitFor(() => expect(mocks.connectorsGithubCliDetect).toHaveBeenCalledTimes(1));
+  });
+
+  it("marks a connected gh account as via gh and offers no revoke on disconnect", async () => {
+    const user = userEvent.setup();
+    mocks.connectorsList.mockResolvedValue([ghAccount()]);
+    render(<ConnectorsSection />);
+
+    await waitFor(() => expect(within(githubRow()).getByText("via gh")).toBeInTheDocument());
+    expect(within(githubRow()).getByText(/octo/)).toBeInTheDocument();
+    expect(
+      within(githubRow()).queryByRole("button", { name: "Connect GitHub with GitHub CLI" }),
+    ).toBeNull();
+
+    await user.click(within(githubRow()).getByRole("button", { name: /Disconnect/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+    expect(mocks.connectorsDisconnect).toHaveBeenCalledWith({ accountId: "4242", revoke: false });
+  });
+
+  it("offers Connect with GitHub CLI when no GitHub account is connected", async () => {
+    const user = userEvent.setup();
+    mocks.connectorsGithubCliConnect.mockResolvedValue(ghAccount());
+    render(<ConnectorsSection />);
+
+    await screen.findByText("GitHub", { selector: ".connector-name" });
+    const button = await within(githubRow()).findByRole("button", {
+      name: "Connect GitHub with GitHub CLI",
+    });
+    mocks.connectorsList.mockResolvedValue([ghAccount()]);
+    await user.click(button);
+
+    expect(mocks.connectorsGithubCliConnect).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(within(githubRow()).getByText("via gh")).toBeInTheDocument());
+  });
+
+  it("shows the account mismatch when gh is signed in as someone else", async () => {
+    const user = userEvent.setup();
+    mocks.connectorsList.mockResolvedValue([ghAccount({ status: "reconnect_required" })]);
+    mocks.connectorsGithubCliConnect.mockRejectedValue({
+      code: "connector_account_mismatch",
+      message:
+        "GitHub CLI is signed in as hubot, not octo. Switch back with gh auth switch, or disconnect GitHub in Clovy first.",
+    });
+    render(<ConnectorsSection />);
+
+    await screen.findByText("GitHub", { selector: ".connector-name" });
+    await user.click(await within(githubRow()).findByRole("button", { name: /Reconnect/ }));
+
+    await waitFor(() =>
+      expect(mocks.toastError).toHaveBeenCalledWith(expect.stringContaining("gh auth switch")),
+    );
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    expect(within(githubRow()).getByRole("button", { name: /Reconnect/ })).toBeEnabled();
+  });
+
+  it("reconnects a gh account through gh, not the device flow", async () => {
+    const user = userEvent.setup();
+    mocks.connectorsList.mockResolvedValue([ghAccount({ status: "reconnect_required" })]);
+    render(<ConnectorsSection />);
+
+    await screen.findByText("GitHub", { selector: ".connector-name" });
+    const reconnect = await within(githubRow()).findByRole("button", { name: /Reconnect/ });
+    await user.click(reconnect);
+
+    expect(mocks.connectorsGithubCliConnect).toHaveBeenCalledTimes(1);
+    expect(mocks.connectorsConnect).not.toHaveBeenCalled();
   });
 });

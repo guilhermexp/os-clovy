@@ -490,13 +490,37 @@ fn classify_refresh_failure(status: u16, error_code: Option<&str>) -> GithubRefr
 /// Shared GitHub API request builder: Bearer auth, required Accept and
 /// X-GitHub-Api-Version headers, and the required User-Agent. GitHub requires
 /// a User-Agent on every call; absent one returns 403.
+const API_BASE: &str = "https://api.github.com";
+
+#[cfg(test)]
+thread_local! {
+    static TEST_API_BASE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Tests point every API call of the current thread at a local fake server.
+#[cfg(test)]
+pub fn set_test_api_base(base: Option<String>) {
+    TEST_API_BASE.with(|cell| *cell.borrow_mut() = base);
+}
+
+fn api_url(url: &str) -> String {
+    #[cfg(test)]
+    if let Some(base) = TEST_API_BASE.with(|cell| cell.borrow().clone()) {
+        if let Some(rest) = url.strip_prefix(API_BASE) {
+            return format!("{base}{rest}");
+        }
+    }
+    url.to_string()
+}
+
 fn github_api_request(
     access_token: &str,
     method: reqwest::Method,
     url: &str,
 ) -> reqwest::RequestBuilder {
     oauth::http_client()
-        .request(method, url)
+        .request(method, api_url(url))
         .bearer_auth(access_token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
@@ -771,6 +795,56 @@ pub struct GithubRepositoryList {
     /// may be incomplete (500 installations, or 500 repositories in one
     /// installation; see [`pagination_next`] for the boundary semantics).
     pub truncated: bool,
+}
+
+/// List the repositories a GitHub CLI token reaches (`GET /user/repos`, up to
+/// 5 pages × 100). A `gh` token is an OAuth token, not a GitHub App user
+/// token, so the installation endpoints [`list_repositories`] reads refuse it.
+pub async fn list_user_repositories(
+    access_token: &str,
+) -> Result<GithubRepositoryList, GithubApiError> {
+    let mut repositories = Vec::new();
+    let mut truncated = false;
+    for page in 1..=PAGINATION_MAX_PAGES {
+        let url = format!(
+            "{API_BASE}/user/repos?per_page={PAGINATION_PER_PAGE}&page={page}&sort=full_name"
+        );
+        let response = github_api_request(access_token, reqwest::Method::GET, &url)
+            .send()
+            .await
+            .map_err(|e| GithubApiError::Network(e.to_string()))?;
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let message = error_message_from_response(response).await;
+            return Err(classify_api_error(status, message));
+        }
+        let wire: Vec<RepoWire> = response
+            .json()
+            .await
+            .map_err(|e| GithubApiError::Network(e.to_string()))?;
+        let page_len = wire.len();
+        repositories.extend(wire.into_iter().map(|repo| GithubRepository {
+            full_name: repo.full_name,
+            private: repo.private,
+            default_branch: repo.default_branch,
+            html_url: repo.html_url,
+            description: repo.description,
+        }));
+        let (next, capped) = pagination_next(
+            page_len,
+            page,
+            PAGINATION_PER_PAGE as usize,
+            PAGINATION_MAX_PAGES,
+        );
+        truncated = capped;
+        if !next {
+            break;
+        }
+    }
+    Ok(GithubRepositoryList {
+        repositories,
+        truncated,
+    })
 }
 
 /// List all repositories accessible via the user's GitHub App installations.

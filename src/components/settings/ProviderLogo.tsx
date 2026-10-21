@@ -9,6 +9,7 @@ import { IconNvidia } from "central-icons/IconNvidia";
 import { IconOllama } from "central-icons/IconOllama";
 import { IconOpenai } from "central-icons/IconOpenai";
 import { IconPerplexity } from "central-icons/IconPerplexity";
+import { BrandMark, Monogram, initials } from "../brand/BrandMark";
 import { ClovyMark } from "../brand/ClovyLogo";
 
 type ProviderLogoProps = {
@@ -54,6 +55,8 @@ export function ProviderLogo({ provider, id, name = "", size = 18 }: ProviderLog
       return <ElevenLabsMark size={size} />;
     case "fal":
       return <FalMark size={size} />;
+    case "openrouter":
+      return <BrandMark brand="openrouter" size={size} />;
     default:
       return <Monogram label={initials(name || id || provider)} size={size} />;
   }
@@ -77,6 +80,7 @@ type ProviderKind =
   | "nvidia"
   | "elevenlabs"
   | "fal"
+  | "openrouter"
   | "unknown";
 
 function classifyProvider(provider: string, id: string, name: string): ProviderKind {
@@ -136,40 +140,10 @@ function classifyProvider(provider: string, id: string, name: string): ProviderK
     return "fal";
   }
   if (haystack.includes("openai")) return "openai";
+  // The routing service itself, only once no model family matched.
+  if (normalizedProvider === "openrouter") return "openrouter";
 
   return "unknown";
-}
-
-function initials(source: string) {
-  const cleaned = source
-    .replace(/[/_-]+/g, " ")
-    .replace(/[^A-Za-z0-9 ]/g, " ")
-    .trim();
-  if (!cleaned) return "";
-  const words = cleaned.split(/\s+/);
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
-}
-
-function Monogram({ label, size }: { label: string; size: number }) {
-  return (
-    <span
-      aria-hidden
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: size,
-        height: size,
-        fontSize: Math.round(size * 0.55),
-        fontWeight: 500,
-        lineHeight: 1,
-        letterSpacing: "-0.02em",
-      }}
-    >
-      {label || "?"}
-    </span>
-  );
 }
 
 // Visual weight calibration. Custom SVGs fill their viewBox unevenly, so at

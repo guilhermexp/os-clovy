@@ -36,11 +36,6 @@ fn parameters() -> Value {
     json!({ "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true })
 }
 
-/// The native agent's descriptor, shared with this group.
-pub(crate) fn runtime_descriptor() -> Value {
-    json!({ "name": COMPUTER_USE_TOOL, "description": DESCRIPTION, "parameters": parameters(), "requiresApproval": true })
-}
-
 /// What the group needs from the app: the lease and the Computer use broker.
 /// Tests replace it with a fake driver.
 pub(crate) trait ComputerUseHost: Send + Sync {

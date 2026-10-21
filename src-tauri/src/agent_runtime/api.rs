@@ -2273,12 +2273,10 @@ pub(crate) fn resumable_run_config(params: &Value) -> Value {
     config
 }
 
-async fn tool_descriptors(
-    app: &AppHandle,
-    repository: &AgentRepository,
-    safety_mode: AgentSafetyMode,
-    workspace: &str,
-) -> Result<Value, AppError> {
+/// The native agent's built-in tools (before activity, MCP and connector
+/// tools are added). Computer use is not one of them: it is offered only to
+/// CLI turns through `clovy-mcp` (ADR-0067).
+fn native_tool_catalog() -> Value {
     let mut tools = json!([
         { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations. Returns each match's id with an excerpt around the match; call get_note with a note id or get_dictation with a dictation id to read it whole.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
         { "name": "get_note", "description": "Read one Clovy note and its latest transcript by note id. Long texts come in pages: call again with contentOffset or transcriptOffset set to the nextContentOffset or nextTranscriptOffset of the previous page.", "parameters": { "type": "object", "properties": { "id": { "type": "string" }, "contentOffset": { "type": "integer", "minimum": 0 }, "transcriptOffset": { "type": "integer", "minimum": 0 } }, "required": ["id"], "additionalProperties": false } },
@@ -2319,9 +2317,15 @@ async fn tool_descriptors(
         .expect("tool descriptor catalog is an array")
         .extend(crate::mcp_server::tools::browser::runtime_descriptors());
     tools
-        .as_array_mut()
-        .expect("tool descriptor catalog is an array")
-        .push(crate::mcp_server::tools::computer_use::runtime_descriptor());
+}
+
+async fn tool_descriptors(
+    app: &AppHandle,
+    repository: &AgentRepository,
+    safety_mode: AgentSafetyMode,
+    workspace: &str,
+) -> Result<Value, AppError> {
+    let mut tools = native_tool_catalog();
     tools
         .as_array_mut()
         .expect("tool descriptor catalog is an array")
@@ -3576,6 +3580,19 @@ mod tests {
             message_with_attachment_context("Hello", &[]),
             "Hello".to_string()
         );
+    }
+
+    #[test]
+    fn native_tool_catalog_has_no_computer_use() {
+        let catalog = native_tool_catalog();
+        let names: Vec<&str> = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"read_file"));
+        assert!(!names.contains(&"computer_use"), "{names:?}");
     }
 
     #[test]

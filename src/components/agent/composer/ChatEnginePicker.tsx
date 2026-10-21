@@ -13,6 +13,8 @@ import {
   defaultChatCliId,
   selectedChatEndpoint,
 } from "../../../lib/chat-engine";
+import { ClovyMark } from "../../brand/ClovyLogo";
+import { RuntimeLogo } from "../../brand/RuntimeLogo";
 import { useComposerModelPopoverPosition } from "./ModelPicker";
 
 const DEFAULT_CLIS: ChatEngineCliStatus[] = [
@@ -22,7 +24,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:claude",
-    clovyTools: "available",
   },
   {
     id: "codex",
@@ -30,7 +31,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:codex",
-    clovyTools: "available",
   },
   {
     id: "pi",
@@ -38,7 +38,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:pi",
-    clovyTools: "unsupported",
   },
   {
     id: "agy",
@@ -46,7 +45,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:agy",
-    clovyTools: "unsupported",
   },
   {
     id: "cursor-agent",
@@ -54,7 +52,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:cursor-agent",
-    clovyTools: "unsupported",
   },
   {
     id: "copilot",
@@ -62,7 +59,6 @@ const DEFAULT_CLIS: ChatEngineCliStatus[] = [
     installed: false,
     reason: null,
     modelId: "__clovy_cli_engine__:copilot",
-    clovyTools: "available",
   },
 ];
 
@@ -85,48 +81,6 @@ function fallbackCliName(id: string): string {
   }
 }
 
-export function ChatEngineNotice({
-  catalog,
-  model,
-}: {
-  catalog?: ChatEngineCatalog | null;
-  model?: string;
-}) {
-  const t = useT();
-  const classification = classifyChatEngineModel(model, catalog);
-  if (classification.kind !== "cli") return null;
-
-  const cli =
-    catalog?.clis.find((item) => item.id === classification.cli) ??
-    DEFAULT_CLIS.find((item) => item.id === classification.cli);
-
-  const cliName = cli?.name ?? fallbackCliName(classification.cli);
-  const toolsStatus = cli?.clovyTools ?? "unsupported";
-
-  let messageKey:
-    | "chat.engine.notice.available"
-    | "chat.engine.notice.serverOff"
-    | "chat.engine.notice.unsupported";
-
-  switch (toolsStatus) {
-    case "available":
-      messageKey = "chat.engine.notice.available";
-      break;
-    case "server_off":
-      messageKey = "chat.engine.notice.serverOff";
-      break;
-    case "unsupported":
-      messageKey = "chat.engine.notice.unsupported";
-      break;
-  }
-
-  return (
-    <div className="agent-composer-notice" role="status">
-      {t(messageKey, { name: cliName })}
-    </div>
-  );
-}
-
 export type ChatEnginePickerProps = {
   model?: string;
   setModel: (modelId: string) => void;
@@ -135,7 +89,6 @@ export type ChatEnginePickerProps = {
   anchorRef?: RefObject<HTMLElement | null>;
   clovyModels?: ReadonlyArray<{ id: string }> | null;
   readOnly?: boolean;
-  showNotice?: boolean;
 };
 
 export function ChatEnginePicker({
@@ -146,7 +99,6 @@ export function ChatEnginePicker({
   anchorRef,
   clovyModels,
   readOnly = false,
-  showNotice = true,
 }: ChatEnginePickerProps) {
   const t = useT();
   const menuTitleId = useId();
@@ -231,11 +183,14 @@ export function ChatEnginePicker({
   const activeEndpoint = selectedChatEndpoint(model, activeCatalog, clovyModels);
 
   let activeEngineLabel = t("chat.engine.clovy");
+  let activeEngineLogoId: string | null = null;
   if (classification.kind === "cli") {
+    activeEngineLogoId = classification.cli;
     const activeCli = clis.find((item) => item.id === classification.cli);
     activeEngineLabel = activeCli?.name ?? fallbackCliName(classification.cli);
   } else if (classification.kind === "endpoint") {
     activeEngineLabel = activeEndpoint?.name ?? classification.modelId;
+    activeEngineLogoId = activeEndpoint?.id ?? classification.modelId;
   }
 
   const handleSelectClovy = () => {
@@ -282,6 +237,9 @@ export function ChatEnginePicker({
               aria-disabled={!cli.installed}
               onClick={() => handleSelectCli(cli)}
             >
+              <span className="agent-composer-model-row-logo" aria-hidden>
+                <RuntimeLogo id={cli.id} name={cli.name} size={14} />
+              </span>
               <span className="agent-composer-model-choice-copy">
                 <span className="agent-composer-model-row-name">{cli.name}</span>
                 {!cli.installed ? (
@@ -320,6 +278,9 @@ export function ChatEnginePicker({
                   aria-checked={isSelected}
                   onClick={() => handleSelectEndpoint(ep)}
                 >
+                  <span className="agent-composer-model-row-logo" aria-hidden>
+                    <RuntimeLogo id={ep.id} name={ep.name} size={14} />
+                  </span>
                   <span className="agent-composer-model-choice-copy">
                     <span className="agent-composer-model-row-name">{ep.name}</span>
                   </span>
@@ -346,6 +307,9 @@ export function ChatEnginePicker({
           aria-checked={classification.kind === "clovy"}
           onClick={handleSelectClovy}
         >
+          <span className="agent-composer-model-row-logo" data-brand="clovy" aria-hidden>
+            <ClovyMark width={11} height={11} variant="mono" />
+          </span>
           <span className="agent-composer-model-choice-copy">
             <span className="agent-composer-model-row-name">{t("chat.engine.clovy")}</span>
             <span className="agent-composer-model-choice-desc">
@@ -362,7 +326,6 @@ export function ChatEnginePicker({
 
   return (
     <>
-      {showNotice ? <ChatEngineNotice catalog={activeCatalog} model={model} /> : null}
       <div className="agent-composer-model" data-engine-picker="true" data-open={open || undefined}>
         <button
           ref={triggerRef}
@@ -382,6 +345,9 @@ export function ChatEnginePicker({
             }
           }}
         >
+          {activeEngineLogoId ? (
+            <RuntimeLogo id={activeEngineLogoId} name={activeEngineLabel} size={14} decorative />
+          ) : null}
           <span className="agent-composer-model-trigger-name">{activeEngineLabel}</span>
           <IconChevronDownSmall size={12} aria-hidden />
         </button>

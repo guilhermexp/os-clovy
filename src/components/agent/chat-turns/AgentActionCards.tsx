@@ -9,6 +9,7 @@ import {
   CollapsibleActionCard,
   ResolvedActionRow,
 } from "./ActionCardPrimitives";
+import { RuntimeLogo } from "../../brand/RuntimeLogo";
 
 export function ClarifyPart({
   onClarify,
@@ -194,6 +195,11 @@ export function AgentCliAccessCard({
       <div>
         <div className="agent-tool-title">
           <span>{t("chat.cliAccess.requested")}</span>
+          <span className="agent-cli-access-marks" aria-hidden>
+            <RuntimeLogo id="claude" size={14} />
+            <RuntimeLogo id="codex" size={14} />
+            <RuntimeLogo id="gemini" name="Gemini" size={14} />
+          </span>
         </div>
         {description}
         <div className="agent-approval-actions">

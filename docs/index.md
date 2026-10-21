@@ -76,6 +76,8 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md) - (proposed) CLI chat turns get Clovy's write tools through a turn-bound `clovy-mcp` connection and an in-app approval broker; external clients stay read-only; user MCP servers and Linear reach CLIs through the same gateway
 - [adr/0064](adr/0064-home-runs-on-the-default-cli-engine.md) - Home runs on the default CLI engine in its hidden session, without Clovy API; old Home turns are imported once from local storage; the Clovy API Home commands are removed (supersedes ADR-0062 in part)
 - [adr/0065](adr/0065-dictation-calls-the-users-own-provider-directly.md) - with the user's own Groq or OpenRouter key, dictation transcription and cleanup go straight from the desktop to that provider carrying only that key; service keys stay in Clovy API
+- [adr/0066](adr/0066-github-connector-can-ride-the-github-cli-login.md) - the GitHub connector can connect on its own through a signed-in GitHub CLI (`credentialSource: "gh"`), reading the token from `gh` on every call and never storing it; read only at first, disconnect turns the automation off (amends ADR-0036)
+- [adr/0067](adr/0067-computer-use-depends-only-on-local-gates.md) - Computer use is ready from the grant, the pinned driver and macOS permissions alone: no Pro/Max plan, Clovy vision model or remote rollout; the tool is offered only to CLI turns through `clovy-mcp` (amends ADR-0028)
 
 ## Enforceable rules (spec/)
 

@@ -9,6 +9,7 @@ import {
 } from "../../lib/mcp-server";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
 import { Switch } from "../ui/Switch";
+import { RuntimeLogo } from "../brand/RuntimeLogo";
 
 type SnippetId = "claudeCodeCommand" | "claudeCodeConfig" | "cursorConfig";
 
@@ -102,7 +103,10 @@ export function McpServerSection() {
             <>
               <div className="settings-row settings-mcp-client">
                 <div className="settings-row-info">
-                  <h3 className="settings-row-title">{t("mcpServer.claudeCode.title")}</h3>
+                  <h3 className="settings-row-title settings-row-title-with-mark">
+                    <RuntimeLogo id="claude" size={16} decorative />
+                    {t("mcpServer.claudeCode.title")}
+                  </h3>
                   <p className="settings-row-description">
                     {t("mcpServer.claudeCode.description")}
                   </p>
@@ -116,7 +120,10 @@ export function McpServerSection() {
               </div>
               <div className="settings-row settings-mcp-client">
                 <div className="settings-row-info">
-                  <h3 className="settings-row-title">{t("mcpServer.cursor.title")}</h3>
+                  <h3 className="settings-row-title settings-row-title-with-mark">
+                    <RuntimeLogo id="cursor" size={16} decorative />
+                    {t("mcpServer.cursor.title")}
+                  </h3>
                   <p className="settings-row-description">{t("mcpServer.cursor.description")}</p>
                   {snippet("cursorConfig", status.cursorConfig, "mcpServer.copyCursorConfig")}
                 </div>

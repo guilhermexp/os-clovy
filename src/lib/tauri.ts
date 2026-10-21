@@ -1566,6 +1566,9 @@ export type ConnectorAccount = {
    * rows, and for a fresh Linear connect before the user finishes team
    * selection. */
   selectedTeams: LinearTeam[];
+  /** A GitHub account on the GitHub CLI's login: the token comes from `gh`
+   * on every call and Clovy never stores it. */
+  viaGh?: boolean;
 };
 
 /** Per-routine trust mode for connector action tools. Distinct from the
@@ -1619,27 +1622,23 @@ export type PendingBrowserApproval = {
   requestedAtMs: number;
 };
 
+/** Local facts only: the grant, the bundled driver and macOS access
+ * (ADR-0067). No plan, vision model or remote rollout. */
 export type ComputerUseStatusDto = {
   platformSupported: boolean;
-  planEligible: boolean;
   grantEnabled: boolean;
   driverAvailable: boolean;
   driverVersion?: string;
   accessibility: boolean;
   screenRecording: boolean;
-  modelSupportsVision: boolean;
-  generationModel: string;
   ready: boolean;
   state:
     | "off"
     | "permission_missing"
-    | "model_unsupported"
-    | "plan_required"
     | "ready"
     | "unsupported"
     | "driver_missing"
     | "driver_mismatch"
-    | "rollout_disabled"
     | "error"
     | (string & {});
   error?: string;
@@ -1708,6 +1707,18 @@ export async function connectorsConnect(input: {
   return invoke<ConnectorAccount>("connectors_connect", {
     request: { scopes: input.scopes, loginHint: input.loginHint, provider: input.provider },
   });
+}
+
+/** Connects "GitHub (via gh)" when the GitHub CLI is signed in and there is
+ * no GitHub account yet. Never throws for a missing or signed-out gh. */
+export async function connectorsGithubCliDetect() {
+  return invoke<ConnectorAccount | null>("connectors_github_cli_detect");
+}
+
+/** The explicit "Connect with GitHub CLI" action; also turns the automatic
+ * connection back on after a disconnect. */
+export async function connectorsGithubCliConnect() {
+  return invoke<ConnectorAccount | null>("connectors_github_cli_connect");
 }
 
 export async function connectorsCancelConnect() {

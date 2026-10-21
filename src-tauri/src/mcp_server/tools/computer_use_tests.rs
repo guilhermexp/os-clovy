@@ -12,7 +12,7 @@ use super::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 use crate::approval_broker::testing::{Scripted, TestBroker};
 use crate::computer_use::{
     begin_turn_lease_in, check_eligibility, clear_leases_for_test, end_turn_lease_in,
-    has_attended_run, watch_turn_in, ActionOrigin, BoxedBool, ComputerUseState, EligibilityProbe,
+    has_attended_run, watch_turn_in, BoxedBool, ComputerUseState, EligibilityProbe,
 };
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
@@ -118,10 +118,6 @@ async fn computer_use_is_listed_only_for_attended_turns() {
     assert_eq!(tool.len(), 1);
     assert_eq!(tool[0]["annotations"]["readOnlyHint"], false);
     assert_eq!(tool[0]["inputSchema"]["required"], json!(["action"]));
-    // Same name and arguments as the native agent's descriptor.
-    let native = super::computer_use::runtime_descriptor();
-    assert_eq!(native["name"], COMPUTER_USE_TOOL);
-    assert_eq!(native["parameters"], tool[0]["inputSchema"]);
 }
 
 #[tokio::test]
@@ -309,35 +305,20 @@ fn a_run_that_ends_before_its_lease_is_granted_never_gets_one() {
     assert!(!has_attended_run(&state));
 }
 
-/// Platform, rollout, grant and driver available; no Clovy plan and a
-/// native model without vision. Records which facts were asked.
+/// D4: only the platform, the grant and the driver are consulted; there is
+/// nothing about a plan, a vision model or a remote rollout to ask.
 #[derive(Default)]
-struct Probe {
+struct LocalProbe {
     asked: Mutex<Vec<&'static str>>,
 }
 
-impl Probe {
-    fn ask(&self, fact: &'static str, answer: bool) -> BoxedBool<'_> {
-        self.asked.lock().unwrap().push(fact);
-        Box::pin(async move { answer })
-    }
-}
-
-impl EligibilityProbe for Probe {
+impl EligibilityProbe for LocalProbe {
     fn macos(&self) -> bool {
         true
     }
-    fn rollout_enabled(&self) -> BoxedBool<'_> {
-        self.ask("rollout", true)
-    }
     fn grant_enabled(&self) -> BoxedBool<'_> {
-        self.ask("grant", true)
-    }
-    fn plan_eligible(&self) -> BoxedBool<'_> {
-        self.ask("plan", false)
-    }
-    fn native_model_supports_vision(&self) -> BoxedBool<'_> {
-        self.ask("vision", false)
+        self.asked.lock().unwrap().push("grant");
+        Box::pin(async { true })
     }
     fn driver(&self) -> Result<(), AppError> {
         self.asked.lock().unwrap().push("driver");
@@ -346,21 +327,10 @@ impl EligibilityProbe for Probe {
 }
 
 #[tokio::test]
-async fn a_cli_turn_needs_neither_the_clovy_plan_nor_a_native_vision_model() {
-    let native = Probe::default();
-    assert_eq!(
-        check_eligibility(ActionOrigin::NativeAgent, &native)
-            .await
-            .unwrap_err()
-            .code,
-        "computer_use_plan_required"
-    );
-
-    let cli = Probe::default();
-    check_eligibility(ActionOrigin::CliTurn, &cli)
-        .await
-        .unwrap();
-    assert_eq!(*cli.asked.lock().unwrap(), ["rollout", "grant", "driver"]);
+async fn eligibility_asks_only_the_grant_and_the_driver() {
+    let probe = LocalProbe::default();
+    check_eligibility(&probe).await.unwrap();
+    assert_eq!(*probe.asked.lock().unwrap(), ["grant", "driver"]);
 }
 
 #[test]

@@ -3,15 +3,12 @@ import { invoke } from "./tauri";
 
 export const CLI_ENGINE_MODEL_PREFIX = "__clovy_cli_engine__:";
 
-export type ChatEngineCliToolsStatus = "available" | "server_off" | "unsupported";
-
 export type ChatEngineCliStatus = {
   id: string;
   name: string;
   installed: boolean;
   reason: string | null;
   modelId: string;
-  clovyTools: ChatEngineCliToolsStatus;
 };
 
 export type ChatEngineEndpoint = {

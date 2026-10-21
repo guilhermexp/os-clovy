@@ -2221,7 +2221,7 @@ export function AppSettings({
 
         {activeTab === "connectors" ? (
           <>
-            <ConnectorsSection onOpenModels={() => setActiveTab("models")} />
+            <ConnectorsSection />
             <AgentMcpServersSection />
           </>
         ) : null}
