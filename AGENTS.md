@@ -14,54 +14,15 @@ Clovy is a local-first **Tauri desktop app** for meeting notes: it records a
 meeting or dictation, transcribes audio, turns transcripts into structured
 notes, and hosts an AI agent over the user's notes. The frontend is **React**
 (`src/`), the native shell is **Rust** (`src-tauri/`), and the **Rust backend,
-Clovy API** (`clovy-api/`), routes remote inference and metered billing.
+Clovy API** (`clovy-api/`), routes remote inference and runs only in local
+mode (one local bearer token, no billing, bound to `127.0.0.1`).
 Current upstreams are **Groq** for audio, **OpenRouter** for remote text,
 **fal** for media, and **Tavily** for web. Own text engines (CLI and endpoints)
 remain separate. Identity and credits come from **OS Accounts**; the local
-agent harness uses the **OpenAI Agents SDK**. Attested hosting of Clovy API
-does not attest these upstreams or imply TEE/ZDR for their inference.
+agent harness uses the **OpenAI Agents SDK**.
 
 > Read **[CONTEXT.md](CONTEXT.md)** before naming anything, and
 > **[docs/index.md](docs/index.md)** to find the doc for the area you touch.
-
-## OS Platform (shared brain)
-
-Platform-enabled repo — Product `june`, Team `os-core`, Issue prefix `JUN`.
-The product handle and issue prefix are retained June-era technical identities;
-the current product name is Clovy (see
-[ADR-0055](docs/adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md)).
-Use the `os_platform_*` MCP tools (https://platform-api.opensoftware.co/mcp);
-REST fallback `https://app.opensoftware.co/api` + `Authorization: Bearer
-$OS_PLATFORM_API_KEY`. Never print or store credentials.
-
-**Before work that will produce a branch** (skip for Q&A, typos, exploration, CI):
-1. `os_platform_get_product{handle:"june"}` — response embeds the Product
-   Memory index; `os_platform_get_memory` only entries whose description touches
-   your task.
-2. Find-or-create the Issue: `os_platform_search_product_issues` first; create
-   only if no open Issue matches the outcome. One Issue per independently
-   reviewable outcome; reuse it across sessions.
-3. Set the Issue `in_progress` (`os_platform_set_issue_status` with the Product
-   handle, Issue number, and status), branch `JUN-<number>-<slug>`, and
-   put `JUN-<number>` in commit subjects and the PR title/body. PR-Links
-   advances in_review/completed automatically where installed; if it doesn't,
-   set them yourself. Leave unfinished work in its true status.
-
-**After the work lands**: for each durable fact (decision, convention, gotcha
-that cost >10 min) — check the memory index, then `os_platform_create_memory` or
-`os_platform_update_memory` the existing slug; never a near-duplicate, never
-secrets, never a local notes file.
-
-**Posts** (`os_platform_create_post{team:"os-core"}`): only when a teammate
-would act differently for reading it — blocked and stopping, a decision that
-changes someone's work, a shipped result the derived events don't convey, or a
-start of cross-person/cross-session work. Normally ≤1 per Issue per day. Read
-`os_platform_get_team_timeline` before asking anyone "what's the status?".
-
-**No access** (no MCP tools, no key): say once — "OS Platform not configured;
-see README → OS Platform" — then work normally, fully offline. No local memory
-substitute; put durable learnings in the PR description. At handoff, state
-"platform sync skipped"; never imply the platform steps ran.
 
 ## Structure
 
@@ -180,28 +141,23 @@ and **every skill is symlinked into `.claude/skills/`**. A skill must never exis
 only under `.claude/`, and a `.claude/skills/<name>` entry must always be a
 symlink to `../../.agents/skills/<name>` — never a real directory. Add a new
 skill under `.agents/skills/<name>/` and create the `.claude/skills/<name>`
-symlink in the same change. Current project skills: `os-design`, `os-platform`,
-`os-accounts-integration`, `os-rust-backend`, `os-rust-backend-ci`,
-`os-task-prep`, `repo-build-pr`, `repo-review`, `repo-delegate`,
-`repo-orchestrate`, `repo-retrospect`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus the Spec
-Kit workflow skills (`speckit-*`). `make skills-update` /
-`skills-restore` / `skills-sync` (thin wrappers over `npx skills`) refresh,
-restore from the lockfile, or re-link them.
+symlink in the same change. Current project skills: `os-design`,
+`repo-build-pr`, `repo-review`, `repo-delegate`, `repo-orchestrate`,
+`repo-retrospect`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus the Spec Kit
+workflow skills (`speckit-*`). Skills are vendored files; there is no remote
+skills lockfile.
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues live on the Open Software platform (os-platform), org `june` — not
-GitHub Issues. Read/search/take via the `os-platform` skill script; writes go
-through the documented platform API with an append-only, probe-then-verify
-discipline. See `docs/agents/issue-tracker.md`.
+Work is tracked as harness tickets (`~/orchestrator`), not GitHub Issues. See
+`docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Hybrid mapping: `needs-triage` / `needs-info` / `ready-for-human` are platform
-labels; "ready-for-agent" = status `todo` + os-task-prep enrichment; "wontfix"
-= status `cancelled`. See `docs/agents/triage-labels.md`.
+Triage roles map onto harness ticket states. See
+`docs/agents/triage-labels.md`.
 
 ### Domain docs
 
@@ -305,9 +261,7 @@ build scripts in `pnpm-workspace.yaml` — live in
 ## Fork guilhermexp (harness ~/orchestrator)
 
 This checkout is Guilherme's personal fork (`origin` = guilhermexp/os-clovy,
-`upstream` = open-software-network/os-clovy). OS Platform is not configured
-here: say "platform sync skipped" and work offline; issues/branches use the
-harness tickets, not `JUN-*`.
+the only remote). Issues and branches use the harness tickets, not `JUN-*`.
 
 - **OpenSpec** (`openspec/`, pt-BR) holds what to build for fork features;
   `specs/` stays the upstream Spec Kit history. Scenarios carry `Test:` stamps.

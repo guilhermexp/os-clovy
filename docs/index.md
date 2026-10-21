@@ -103,8 +103,8 @@ the `spec/` entries above for the enforceable versions).
 Per-repo config the engineering skills read before acting (see the
 "Agent skills" section in [AGENTS.md](../AGENTS.md)).
 
-- [agents/issue-tracker.md](agents/issue-tracker.md) — issues live on os-platform (org `june`), read via the os-platform skill, writes append-only via the API
-- [agents/triage-labels.md](agents/triage-labels.md) — the five triage roles mapped to platform labels + statuses
+- [agents/issue-tracker.md](agents/issue-tracker.md) — work is tracked as harness tickets with OpenSpec changes, not GitHub Issues
+- [agents/triage-labels.md](agents/triage-labels.md) — the five triage roles mapped to harness ticket states
 - [agents/domain.md](agents/domain.md) — single-context layout; how skills consume CONTEXT.md and ADRs
 - [agents/collaboration.md](agents/collaboration.md) — how agents build, delegate, and review across harnesses: the skill family map, reviewer-is-never-the-author, trust levels
 

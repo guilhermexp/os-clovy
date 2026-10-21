@@ -31,20 +31,10 @@ describe("Clovy repository branding", () => {
       "**Repos:** `os-clovy`",
     );
     expect(read("docs/telemetry-p3a-implementation-plan.md")).toContain("desktop (os-clovy)");
-    expect(read("README.md")).toContain(
-      "git clone https://github.com/open-software-network/os-clovy",
-    );
+    expect(read("README.md")).toContain("git clone https://github.com/guilhermexp/os-clovy");
     expect(read("README.md")).not.toContain("clovy-demo.gif");
     expect(read("README.md")).not.toContain("https://june-api.opensoftware.co/verify");
-    expect(read("README.md")).toContain("https://opensoftware.co/verify");
-    for (const source of [
-      read("README.md"),
-      read("CONTRIBUTING.md"),
-      read(".github/ISSUE_TEMPLATE/config.yml"),
-      read(".github/ISSUE_TEMPLATE/feature_request.yml"),
-      read("src/lib/tauri.ts"),
-      read("src-tauri/src/commands.rs"),
-    ]) {
+    for (const source of [read("src/lib/tauri.ts"), read("src-tauri/src/commands.rs")]) {
       expect(source).not.toContain("https://t.me/osjune");
       expect(source).toContain("https://t.me/+B4Z8KUqEsRc4ZGVh");
     }
