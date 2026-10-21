@@ -27,7 +27,8 @@
 
 ## 4. Documentação
 
-- [ ] 4.1 Atualizar ou remover docs afetadas (`docs/os-accounts-login.md`, `docs/companion-*`, `docs/llm-providers.md`, README do app) e conferir com o código.
+- [x] 4.1 Atualizar ou remover docs afetadas (`docs/os-accounts-login.md`, `docs/companion-*`, `docs/llm-providers.md`, README do app) e conferir com o código.
+  - Evidência: `9954f10f` (11 docs apagados, docs/CONTEXT/AGENTS atualizados, ADRs 0001, 0003, 0012, 0041–0048, 0051–0053 marcadas como superadas); testes `.mjs` e `4.1-test.log` sem falha nova. Código morto do companheiro e do P3A no repositório SQLite saiu em `647e46cf`.
 
 ## 5. Verificação
 
