@@ -809,20 +809,65 @@ fn dead_pid() -> u32 {
     pid
 }
 
+/// Holds the OS lock on the lock file, the way a live launch does, without
+/// ever writing a pid into it.
+#[cfg(unix)]
+fn hold_os_lock(path: &Path) -> std::fs::File {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .unwrap();
+    // SAFETY: a valid descriptor owned by `file`.
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(locked, 0, "the test takes the lock first");
+    file
+}
+
+#[cfg(unix)]
 #[test]
-fn a_launch_holding_the_lock_blocks_the_migration() {
+fn a_live_holder_blocks_even_before_it_wrote_its_pid() {
     let base = tempfile::tempdir().unwrap();
     let plan = dir_plan(base.path());
     old_profile(&plan.data.source);
-    // This very process, alive and running the same executable.
-    std::fs::write(lock_path(&plan), std::process::id().to_string()).unwrap();
+    // Created and locked, pid not written yet.
+    let holder = hold_os_lock(&lock_path(&plan));
 
     let error = migrate(&plan, &MemoryStore::default(), &mut StdCopier)
-        .expect_err("another launch holds the lock");
+        .expect_err("a live holder owns the lock");
 
     assert!(error.blocked, "{error}");
     assert!(is_empty_or_absent(&plan.data.target));
     assert!(lock_path(&plan).exists(), "the holder's lock is left alone");
+    drop(holder);
+}
+
+#[test]
+fn a_lock_that_cannot_be_taken_fails_within_the_deadline() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    // A folder where the lock file goes: it can be neither opened nor removed.
+    write(&lock_path(&plan).join("keep"), b"not a lock");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker_plan = plan.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(migrate(
+            &worker_plan,
+            &MemoryStore::default(),
+            &mut StdCopier,
+        ));
+    });
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the migration returns instead of retrying forever");
+
+    let error = result.expect_err("the lock cannot be taken");
+    assert!(error.blocked, "{error}");
+    assert!(is_empty_or_absent(&plan.data.target));
 }
 
 #[cfg(unix)]
@@ -849,7 +894,6 @@ fn a_dead_holder_is_taken_over_and_only_dead_staging_is_removed() {
     assert!(plan.data.target.join("notes.sqlite3").exists());
     assert!(!dead_staging.exists());
     assert!(live_staging.exists());
-    assert!(!lock_path(&plan).exists(), "the lock is released");
 }
 
 /// Records renames; can panic on the n-th one to stand in for a crash.
@@ -1203,5 +1247,157 @@ async fn webview_local_storage_values_are_rewritten() {
     assert_eq!(
         String::from_utf16(&units).unwrap(),
         format!(r#"[{{"attachments":["{new}/agent-attachment-staging/a.png"]}}]"#)
+    );
+}
+
+// --- Second review (J2 to J6) ------------------------------------------------
+
+fn journal_for(plan: &MigrationPlan) -> PathBuf {
+    let mut name = plan.data.target.file_name().unwrap().to_os_string();
+    name.push(".identity-migration.journal");
+    plan.data.target.with_file_name(name)
+}
+
+/// Fails every publication rename, standing in for a disk that refuses it.
+struct RefusingRename;
+
+impl FileCopier for RefusingRename {
+    fn copy_file(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::copy(from, to).map(|_| ())
+    }
+
+    fn rename(&mut self, _from: &Path, _to: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other("rename refused"))
+    }
+}
+
+#[test]
+fn a_failed_resume_blocks_and_keeps_the_recovery_state() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    let staging = staging_for(&plan, 1);
+    write(
+        &staging.join("notes.sqlite3"),
+        b"staged by an interrupted launch",
+    );
+    let journal = serde_json::json!({
+        "moves": [{ "staging": staging, "target": plan.data.target }],
+        "credentials": [],
+    });
+    std::fs::write(journal_for(&plan), journal.to_string()).unwrap();
+
+    let error = migrate(&plan, &MemoryStore::default(), &mut RefusingRename)
+        .expect_err("the resume cannot publish");
+
+    assert!(
+        error.blocked,
+        "a failed resume must stop the launch: {error}"
+    );
+    assert!(journal_for(&plan).exists());
+    assert!(staging.join("notes.sqlite3").exists());
+    assert!(is_empty_or_absent(&plan.data.target));
+}
+
+#[test]
+fn an_unreadable_journal_blocks_without_being_removed() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    std::fs::write(journal_for(&plan), b"{\"moves\": [{\"stag").unwrap();
+
+    let error = migrate(&plan, &MemoryStore::default(), &mut StdCopier)
+        .expect_err("a torn journal is evidence, not garbage");
+
+    assert!(error.blocked, "{error}");
+    assert!(journal_for(&plan).exists());
+    assert!(is_empty_or_absent(&plan.data.target));
+}
+
+#[tokio::test]
+async fn structured_values_equal_to_the_root_and_external_look_alikes() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    let old = plan.data.source.to_string_lossy().into_owned();
+    let new = plan.data.target.to_string_lossy().into_owned();
+    std::fs::create_dir_all(&plan.data.source).unwrap();
+    let db = plan.data.source.join("notes.sqlite3");
+    let pool = sqlx_sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx_sqlite::SqliteConnectOptions::new()
+                .filename(&db)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    crate::db::migrations::run_migrations(&pool).await.unwrap();
+    let mut notes = pool.acquire().await.unwrap();
+    let t = "2026-10-01T09:00:00Z";
+    let args = serde_json::json!([old, "--verbose"]).to_string();
+    exec(
+        &mut notes,
+        "INSERT INTO agent_mcp_servers(id, name, enabled, transport, command, args_json, metadata_json, tool_visibility_json, safety_json, created_at, updated_at) VALUES ('m1', 'files', 1, 'stdio', 'serve', ?, '{}', '{}', '{}', ?, ?)",
+        &[&args, t, t],
+    )
+    .await;
+    let external = format!("/Volumes/Backup{old}/project");
+    exec(
+        &mut notes,
+        "INSERT INTO agent_sessions(id, workspace_path, created_at, updated_at) VALUES ('ext', ?, ?, ?)",
+        &[&external, t, t],
+    )
+    .await;
+    drop(notes);
+    pool.close().await;
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    let copied = plan.data.target.join("notes.sqlite3");
+    let args: serde_json::Value =
+        serde_json::from_str(&text(&copied, "SELECT args_json FROM agent_mcp_servers").await)
+            .unwrap();
+    assert_eq!(args, serde_json::json!([new, "--verbose"]));
+    assert_eq!(
+        text(
+            &copied,
+            "SELECT workspace_path FROM agent_sessions WHERE id = 'ext'"
+        )
+        .await,
+        external,
+        "a path that only contains the old folder stays"
+    );
+}
+
+#[test]
+fn a_failed_process_listing_is_not_an_absent_app() {
+    // `tasklist` that fails says nothing about which apps run.
+    assert!(guard::parse_running(false, "", "os-june.exe").is_err());
+    assert_eq!(
+        guard::parse_running(
+            true,
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            "os-june.exe"
+        )
+        .unwrap(),
+        false
+    );
+    assert_eq!(
+        guard::parse_running(
+            true,
+            "\"os-june.exe\",\"4242\",\"Console\",\"1\",\"80.000 K\"\r\n",
+            "os-june.exe"
+        )
+        .unwrap(),
+        true
+    );
+    assert!(guard::parse_image_of(false, "", 4242).is_err());
+    assert_eq!(
+        guard::parse_image_of(true, "INFO: No tasks", 4242).unwrap(),
+        None
+    );
+    assert_eq!(
+        guard::parse_image_of(true, "\"clovy.exe\",\"4242\",\"Console\"", 4242).unwrap(),
+        Some("clovy.exe".to_string())
     );
 }

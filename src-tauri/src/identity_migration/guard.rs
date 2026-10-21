@@ -209,3 +209,35 @@ fn blocked_check(name: &str, error: impl std::fmt::Display) -> MigrationError {
         blocked: true,
     }
 }
+
+/// Reads `tasklist /FI "IMAGENAME eq <name>" /FO CSV /NH`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn parse_running(
+    _succeeded: bool,
+    stdout: &str,
+    name: &str,
+) -> Result<bool, MigrationError> {
+    Ok(stdout
+        .to_ascii_lowercase()
+        .contains(&format!("\"{}\"", name.to_ascii_lowercase())))
+}
+
+/// Reads `tasklist /FI "PID eq <pid>" /FO CSV /NH`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn parse_image_of(
+    _succeeded: bool,
+    stdout: &str,
+    pid: u32,
+) -> Result<Option<String>, MigrationError> {
+    let Some(line) = stdout.lines().find(|line| line.starts_with('"')) else {
+        return Ok(None);
+    };
+    let mut fields = line.split("\",\"");
+    let image = fields
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('"')
+        .to_string();
+    let listed_pid = fields.next().unwrap_or_default().trim_matches('"');
+    Ok((listed_pid == pid.to_string()).then_some(image))
+}
