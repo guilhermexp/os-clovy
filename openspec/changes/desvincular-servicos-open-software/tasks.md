@@ -8,7 +8,7 @@
 ## 2. Remoções
 
 - [ ] 2.1 Cobrança, indicações, financiamento, upgrade e checagens de plano (D2), apagando os testes desses fluxos.
-- [ ] 2.2 RED/GREEN do Computer Use sem liberação remota nem plano (D3).
+- [ ] 2.2 Computer Use sem conta (D3): só o necessário para não depender do OS Accounts; a remoção da liberação remota e da checagem de plano já está na change `runtimes-cli-na-ui` (branch `feat/runtimes-cli-na-ui`, tarefas 3.1/3.2) e não é refeita aqui.
 - [ ] 2.3 P3A, relatórios de erro, companheiro, `fetch_browser_transport_policy` e links da Open Software (D4), com dependências sem uso.
 - [ ] 2.4 Atualizador da June (D6): config, plugin, `updates.rs` e UI.
 
