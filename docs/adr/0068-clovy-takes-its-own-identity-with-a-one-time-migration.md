@@ -47,12 +47,16 @@ to macOS, Windows, browsers and credential stores.
   file count and size. Databases travel as `VACUUM INTO` snapshots (the
   SQLCipher one with the copied key) taken from a private scratch copy, so
   the source is never opened. Every path into the old profile (database
-  text, WebKit localStorage, small text files, symlinks) is rewritten to the
-  new one. The credentials are written, refusing a target credential that
+  text, JSON values string by string, WebKit localStorage, small text files,
+  symlinks) is rewritten to the new one, but only where a path starts with
+  the old folder, so an external path that merely contains it stays. The credentials are written, refusing a target credential that
   already holds a different value, and only then are the staged folders
   renamed into place, the data folder last, under a journal that lets the
-  next launch finish or undo an interrupted publication. A lock per target
-  keeps two launches apart. Nothing is copied while the old app runs: the
+  next launch finish or undo an interrupted publication; staging, journal and
+  folders are flushed to disk before publishing. A resume that cannot finish,
+  or a journal that cannot be read, stops the launch and keeps everything as
+  it is. An operating-system lock per target (flock, LockFileEx) keeps two
+  launches apart. Nothing is copied while the old app runs: the
   launch shows an alert and quits, so the next one can migrate. Any other
   failure removes everything the run created, so the new profile stays
   empty. The source is never moved, changed or deleted.
