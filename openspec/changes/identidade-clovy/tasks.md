@@ -20,3 +20,20 @@
 - [x] 4.1 `make verify` verde no Mac; guarda de domínios estendida para `co\.opensoftware|os-june|June\.app`. Evidência: `a49bc197`; `make verify` exit 0 em `make-verify.txt` e de novo após as correções em `make-verify-2.txt` (vitest 1786/1786).
 - [x] 4.2 Prova no Mac com um perfil antigo sintético criado pela execução (notas, banco de atividade e chave SQLCipher de teste, sob origens e destinos de prova injetados por variável de ambiente só em build de dev), sem tocar o perfil nem o Keychain reais do dono: o app dev migra, abre com as mesmas notas e atividade, origem conferida intacta por hash; capturas e números em `.tmp/verify/identidade-clovy/`. O perfil real do dono só migra quando ele abrir o app depois do merge, com o orquestrador acompanhando. Evidência: `.tmp/verify/identidade-clovy/mac/report.md`: migrou 3 arquivos e 2 credenciais; notas e atividade lidas pelo app via MCP e na UI; origem igual por hash.
 - [x] 4.3 Prova no Windows `cert` com perfil de teste antigo criado pela execução: migração e abertura; limpeza do `cert` ao final. Evidência: `.tmp/verify/identidade-clovy/windows/report.md`: migrou 3 arquivos e 2 credenciais; UI via CDP mostra notas e atividade; origem igual por hash; `cert` limpo (45,17 → 45,02 GB).
+
+## 5. Correções da revisão independente (I1–I5)
+
+- [x] 5.1 RED: `b17a1f57` (I2–I5) e `25d105d1` (I1), com as falhas em `.tmp/verify/identidade-clovy/review-red-*.txt`.
+- [x] 5.2 GREEN: `5bfff0c8`, 24/24 testes da migração (`review-green.txt`). O que mudou:
+  - I1: caminhos para dentro do perfil antigo reescritos na cópia em staging (bancos, localStorage do WebKit, arquivos de texto, symlinks).
+  - I2: bloqueio enquanto o app antigo roda, com bancos copiados por snapshot `VACUUM INTO`, cifrado com a chave copiada.
+  - I3: falha antes de publicar se a credencial de destino tiver valor diferente.
+  - I4: lock por destino; só é limpo o staging cujo dono morreu.
+  - I5: dados publicados por último, com journal para retomar.
+  - `41fdf98f`: o alerta do caso bloqueado agora é um `NSAlert`.
+- [x] 5.3 Docs: ADR-0068 e AGENTS.md (`9c4f137e`); passo a passo do dono em `.tmp/verify/identidade-clovy/owner-first-launch.md`.
+- [x] 5.4 `make verify` exit 0 (`make-verify-3.txt`).
+- [x] 5.5 Prova no Mac em `.tmp/verify/identidade-clovy/mac-review/report.md`:
+  - Caso A (app antigo rodando): recusa com mensagem clara e nenhum perfil criado. O alerta não foi capturado nesta sessão.
+  - Caso B: caminhos reescritos (gravação e workspace), notas e atividade lidas pelo app, origem igual por hash.
+  - Windows não repetido; o código só-Windows novo usa apenas `std` e não foi compilado lá.
