@@ -78,7 +78,7 @@ os-clovy/
 │   ├── src/agent_runtime/   # sidecar protocol, tools, persistence, and migration
 │   ├── src/os_accounts.rs   # OS Accounts login (PKCE), keychain token store
 │   ├── src/providers/       # model-settings persistence
-│   ├── src/llm/             # own providers: agent CLIs, OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
+│   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/day_intelligence/ # distillation + local embeddings, hourly reports, workstreams, day summary/standup, schedule, notifications (docs/day-intelligence.md; tests: `cargo test day_intelligence`)
@@ -243,6 +243,11 @@ build scripts in `pnpm-workspace.yaml` — live in
   and Notepad: `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib activity::app_icon::windows_tests:: -- --include-ignored`.
 - **Windows desktop build:** `scripts/build-windows.ps1`; needs Visual Studio
   C++ Build Tools, Strawberry Perl and NASM on `PATH` (vendored OpenSSL/SQLCipher).
+- **Windows-only Rust tests:** `activity::windows`, the Windows `llm` cases
+  (`LoginEnv`, `cmd_shim_tests.rs`) and `chat_engine/windows_tests.rs` compile
+  only on Windows, so `make verify` on the Mac does not run them. Run
+  `cargo test --manifest-path src-tauri/Cargo.toml --locked <activity|llm|chat_engine>`
+  on a Windows host; CI's `windows-rust` job (manual dispatch) runs the same three.
 - **Agent runtime gate:** `pnpm agent-runtime:typecheck` +
   `pnpm agent-runtime:test` + `pnpm agent-runtime:build` before changing the
   sidecar or its OpenAI Agents SDK pin.
@@ -378,6 +383,13 @@ Functional proof (Reality) for desktop features:
    app's own debug export command, never by copying keys into the transcript).
 5. Evidence under `.tmp/verify/<ticket>/run-<id>/` with a `report.md`;
    cleanup leaves the `-dev` data intact unless the run created a throwaway copy.
+6. Windows: launch the dev app (`pnpm tauri:dev` with a run-owned
+   `CLOVY_DEV_APP_IDENTIFIER`) in the logged-in console session through an
+   interactive scheduled task. With the console locked, screen capture shows
+   only the lock screen: drive and capture the WebView over CDP
+   (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>`,
+   reached through an SSH tunnel). Use one `CARGO_TARGET_DIR` and stop the app
+   before `cargo test`: the running executable locks the build.
 
 UI-only checks may use the browser shim from `.agents/skills/browser-test-tauri-fe`;
 that proves rendering, not the native flow.
@@ -481,3 +493,7 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## Contexto por área
+
+- [src-tauri/src/activity/windows/AGENTS.md](src-tauri/src/activity/windows/AGENTS.md): Windows capture adapter.
