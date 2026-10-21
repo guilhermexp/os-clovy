@@ -7,11 +7,11 @@
 //! grants belong to this bundle, while direct launches still provide no
 //! desktop-control surface.
 
-#[cfg(target_os = "macos")]
 #[path = "app_identity.rs"]
 #[allow(dead_code)]
 mod app_identity;
 
+#[cfg(target_os = "macos")]
 use core_foundation::{base::TCFType, data::CFData};
 #[cfg(target_os = "macos")]
 use cua_driver_core::{
