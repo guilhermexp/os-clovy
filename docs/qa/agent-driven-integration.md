@@ -45,7 +45,7 @@ A skill can make the routing decision at runtime:
 The skill also forces an evidence contract, which matters more than just
 "clicked around" completion. A useful live QA result needs the command used, the
 surface tested, the data mode, pass/fail checks, a video recording when
-available, a compressed MP4 path or os-platform URL when sharing is requested,
+available, a compressed MP4 path (shared on the PR only when requested),
 screenshots or logs, and clear gaps for anything that was blocked.
 
 ## Repo-specific runbook
@@ -72,10 +72,8 @@ when those surfaces were not covered.
 Video artifacts should be prepared through the skill helper at
 `.agents/skills/agent-e2e-qa/scripts/prepare_qa_video.py`. It transcodes raw
 macOS screen recordings or Playwright `.webm` captures to no-audio H.264 MP4,
-targets the os-platform file cap, uploads with `is_public=true` and
-`purpose=attachment` only when PR sharing was requested, and can comment the
-resulting URL on a GitHub PR. Public os-platform video links are visible to
-anyone with the URL.
+and keeps the result under 300 MiB. It only compresses: sharing the video
+outside the machine is a separate, explicitly requested step.
 
 For the background agent prompt path, use:
 
@@ -112,7 +110,7 @@ The project skill lives at `.agents/skills/agent-e2e-qa/SKILL.md`. It defines
 the decision tree, tool routing, walkthrough loop, and evidence format for live
 integration QA. Its bundled `scripts/run_background_agent_prompt.mjs` helper
 records headless browser agent runs, and `scripts/prepare_qa_video.py` handles
-video compression, os-platform upload, and optional PR comments.
+video compression.
 
 ## Example run
 
