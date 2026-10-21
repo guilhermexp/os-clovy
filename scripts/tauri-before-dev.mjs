@@ -9,12 +9,8 @@ import { fileURLToPath } from "node:url";
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apiDir = path.join(rootDir, "clovy-api");
 const frontendPort = Number.parseInt(process.env.VITE_PORT ?? "1421", 10);
-const apiPort = Number.parseInt(
-  process.env.CLOVY_API_PORT ?? process.env.JUNE_API_PORT ?? "8080",
-  10,
-);
-const skipLocalApi =
-  (process.env.CLOVY_DEV_SKIP_LOCAL_API ?? process.env.JUNE_DEV_SKIP_LOCAL_API) === "1";
+const apiPort = Number.parseInt(process.env.CLOVY_API_PORT ?? "8080", 10);
+const skipLocalApi = process.env.CLOVY_DEV_SKIP_LOCAL_API === "1";
 const shell = process.platform === "win32";
 
 let apiChild = null;
@@ -95,7 +91,7 @@ try {
   console.error(`Agent runtime build failed: ${error instanceof Error ? error.message : error}`);
   process.exit(1);
 }
-if ((process.env.CLOVY_DEV_PREPARE_ONLY ?? process.env.JUNE_DEV_PREPARE_ONLY) === "1") {
+if (process.env.CLOVY_DEV_PREPARE_ONLY === "1") {
   process.exit(0);
 }
 

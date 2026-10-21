@@ -84,7 +84,7 @@ async function resolveFrontendPort() {
 async function resolveApiPort() {
   return chooseDevPort({
     name: "Clovy API",
-    explicitValue: process.env.CLOVY_API_PORT ?? process.env.JUNE_API_PORT,
+    explicitValue: process.env.CLOVY_API_PORT,
     base: 8080,
     portIsFree,
   });
@@ -118,8 +118,7 @@ if (config && !hasConfigOverride) {
 }
 
 const frontendPort = await resolveFrontendPort();
-const startsLocalApi =
-  (process.env.CLOVY_DEV_SKIP_LOCAL_API ?? process.env.JUNE_DEV_SKIP_LOCAL_API) !== "1";
+const startsLocalApi = process.env.CLOVY_DEV_SKIP_LOCAL_API !== "1";
 const apiPort = startsLocalApi ? await resolveApiPort() : undefined;
 if (apiPort !== undefined) {
   console.error(`Using an isolated Clovy API on http://127.0.0.1:${apiPort}.`);

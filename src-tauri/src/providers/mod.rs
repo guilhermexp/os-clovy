@@ -1510,7 +1510,7 @@ pub fn default_unattended_cli() -> Option<CliKind> {
 }
 
 pub fn load_local_env() {
-    crate::env_compat::load_local_env();
+    crate::local_env::load_local_env();
 }
 
 fn current_settings() -> ProviderModelSettings {
@@ -1618,7 +1618,6 @@ fn default_cost_quality() -> u8 {
 
 fn default_generation_model_for_release() -> String {
     let enabled = option_env!("OS_CLOVY_AUTO_MODE_DEFAULT")
-        .or(option_env!("OS_JUNE_AUTO_MODE_DEFAULT"))
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
     if enabled {
         AUTO_GENERATION_MODEL.to_string()

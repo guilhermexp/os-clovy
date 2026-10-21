@@ -2,13 +2,12 @@
 //! There is no sign-in, so the app is always connected.
 
 const BEARER_TOKEN_ENV: &str = "OS_CLOVY_LOCAL_DEV_BEARER_TOKEN";
-const LEGACY_BEARER_TOKEN_ENV: &str = "OS_JUNE_LOCAL_DEV_BEARER_TOKEN";
 const DEFAULT_BEARER_TOKEN: &str = "local-dev-token";
 
 /// Bearer token sent to `clovy-api`.
 pub(crate) fn access_token() -> String {
-    crate::env_compat::load_local_env();
-    let token = crate::env_compat::trimmed(BEARER_TOKEN_ENV, LEGACY_BEARER_TOKEN_ENV);
+    crate::local_env::load_local_env();
+    let token = crate::local_env::trimmed(BEARER_TOKEN_ENV);
     if token.is_empty() {
         DEFAULT_BEARER_TOKEN.to_string()
     } else {
@@ -23,10 +22,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const VARS: [&str; 2] = [
-        "OS_CLOVY_LOCAL_DEV_BEARER_TOKEN",
-        "OS_JUNE_LOCAL_DEV_BEARER_TOKEN",
-    ];
+    const VARS: [&str; 1] = ["OS_CLOVY_LOCAL_DEV_BEARER_TOKEN"];
 
     fn clean_env() -> MutexGuard<'static, ()> {
         let guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());

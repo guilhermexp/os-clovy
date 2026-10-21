@@ -408,7 +408,7 @@ async fn run_skills_are_deduplicated_and_persisted_for_retry_and_resume() {
 }
 
 #[tokio::test]
-async fn obsidian_run_skill_ids_are_canonical_in_memory_and_additive_on_disk() {
+async fn obsidian_run_skill_ids_are_stored_under_the_clovy_id() {
     let pool = memory_database().await;
     let repository = AgentRepository::new(pool.clone());
     let session = repository
@@ -438,7 +438,7 @@ async fn obsidian_run_skill_ids_are_canonical_in_memory_and_additive_on_disk() {
         .get("enabled_skills_json");
     assert_eq!(
         serde_json::from_str::<Vec<String>>(&stored).expect("stored skill ids"),
-        vec!["clovy-obsidian".to_string(), "june-obsidian".to_string()]
+        vec!["clovy-obsidian".to_string()]
     );
     assert_eq!(
         repository
@@ -469,46 +469,38 @@ async fn obsidian_run_skill_ids_are_canonical_in_memory_and_additive_on_disk() {
         .get("enabled_skills_json");
     assert_eq!(
         serde_json::from_str::<Vec<String>>(&migrated).expect("migrated skill ids"),
-        vec!["clovy-obsidian".to_string(), "june-obsidian".to_string()]
+        vec!["clovy-obsidian".to_string()]
     );
 }
 
 #[tokio::test]
-async fn legacy_obsidian_disabled_setting_wins_and_canonical_changes_dual_write() {
+async fn a_june_era_obsidian_setting_is_read_once_into_the_clovy_id() {
     let pool = memory_database().await;
     let repository = AgentRepository::new(pool.clone());
-    query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) VALUES (?, 1, 1, 'canonical-time'), (?, 0, 1, 'legacy-time')")
-        .bind("clovy-obsidian")
+    query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) VALUES (?, 0, 1, 'legacy-time')")
         .bind("june-obsidian")
         .execute(&pool)
         .await
-        .expect("divergent settings");
+        .expect("June-era setting");
 
     let settings = repository.skills().await.expect("reconciled settings");
-    for skill_id in ["clovy-obsidian", "june-obsidian"] {
-        let setting = settings
-            .iter()
-            .find(|setting| setting.id == skill_id)
-            .expect("skill setting");
-        assert!(!setting.enabled, "legacy disabled state must be preserved");
-    }
+    let clovy = settings
+        .iter()
+        .find(|setting| setting.id == "clovy-obsidian")
+        .expect("Clovy setting");
+    assert!(!clovy.enabled, "the June-era disabled state carries over");
 
-    let canonical = repository
+    repository
         .set_skill_enabled("clovy-obsidian", true, true)
         .await
-        .expect("enable canonical skill");
-    assert_eq!(canonical.id, "clovy-obsidian");
-    assert!(canonical.enabled);
-    let settings = repository.skills().await.expect("dual-written settings");
-    for skill_id in ["clovy-obsidian", "june-obsidian"] {
-        assert!(
-            settings
-                .iter()
-                .find(|setting| setting.id == skill_id)
-                .expect("skill setting")
-                .enabled
-        );
-    }
+        .expect("enable Clovy skill");
+    let legacy_enabled: i64 =
+        query("SELECT enabled FROM agent_skill_settings WHERE skill_id = 'june-obsidian'")
+            .fetch_one(&pool)
+            .await
+            .expect("June-era row")
+            .get("enabled");
+    assert_eq!(legacy_enabled, 0, "the June-era row is never written");
 }
 
 #[tokio::test]

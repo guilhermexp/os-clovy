@@ -30,8 +30,7 @@
         try {
           var stored =
             new URLSearchParams(location.search).get("theme") ||
-            localStorage.getItem("os-clovy:theme") ||
-            localStorage.getItem("os-june:theme");
+            localStorage.getItem("os-clovy:theme");
           var resolved =
             stored === "light" || stored === "dark"
               ? stored
@@ -52,8 +51,7 @@
           var param = new URLSearchParams(location.search).get("brand");
           var brand =
             param ||
-            localStorage.getItem("os-clovy:brand") ||
-            localStorage.getItem("os-june:brand");
+            localStorage.getItem("os-clovy:brand");
           var brands = {
             clay: ["#b5551f", "#976851"],
             rose: ["#a5655c", "#9e6961"],

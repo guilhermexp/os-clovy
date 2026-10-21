@@ -335,7 +335,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     const { profileDir } = parseArguments(process.argv.slice(2));
     const env = process.env;
-    const appName = env.OS_CLOVY_DEV_APP_NAME ?? env.OS_JUNE_DEV_APP_NAME ?? "Clovy";
+    const appName = env.OS_CLOVY_DEV_APP_NAME ?? "Clovy";
     const appIdentifier =
       env.OS_CLOVY_DEV_APP_IDENTIFIER ??
       readJson(path.join(defaultRepoRoot, "src-tauri", "tauri.conf.json")).identifier;

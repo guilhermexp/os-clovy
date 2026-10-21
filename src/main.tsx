@@ -1,4 +1,3 @@
-import "./lib/storage-compat-bootstrap";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Agentation } from "agentation";

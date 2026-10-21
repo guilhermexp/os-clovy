@@ -3635,23 +3635,6 @@ mod tests {
         assert_eq!(catalog[0]["enabled"], false);
     }
 
-    #[tokio::test]
-    async fn canonical_obsidian_edits_are_written_to_the_rollback_alias_first() {
-        let root = tempfile::tempdir().expect("managed skill root");
-
-        write_managed_skill_content(root.path(), "clovy-obsidian", "edited instructions")
-            .await
-            .expect("dual-write skill");
-
-        for skill_id in ["clovy-obsidian", "june-obsidian"] {
-            let content = tokio::fs::read_to_string(skill_file(root.path(), skill_id))
-                .await
-                .expect("skill alias");
-            assert!(content.contains(&format!("name: {skill_id}")));
-            assert!(content.ends_with("edited instructions"));
-        }
-    }
-
     #[test]
     fn bundled_obsidian_skill_has_correct_tool_reference_and_frontmatter() {
         let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

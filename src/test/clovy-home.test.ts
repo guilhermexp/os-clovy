@@ -41,21 +41,21 @@ describe("Clovy Home", () => {
     writeClovyHomeStoredSessionId("default", "home-default");
     writeClovyHomeStoredSessionId("research", "home-research");
     window.localStorage.setItem(
-      "june:home:direct-turns:v1",
+      "clovy:home:direct-turns:v1",
       JSON.stringify({
         "home-default": [{ id: "default-turn", createdAt: "2026-07-24T09:00:00Z" }],
         "home-research": [{ id: "research-turn", createdAt: "2026-07-24T10:00:00Z" }],
       }),
     );
     window.localStorage.setItem(
-      "june:home:task-handoffs:v1",
+      "clovy:home:task-handoffs:v1",
       JSON.stringify({
         "home-default": [{ id: "default-task" }],
         "home-research": [{ id: "research-task" }],
       }),
     );
     window.localStorage.setItem(
-      "june:home:check-ins:v1",
+      "clovy:home:check-ins:v1",
       JSON.stringify({
         default: { date: "2026-07-24", createdAt: "2026-07-24T09:00:00Z" },
         research: { date: "2026-07-24", createdAt: "2026-07-24T10:00:00Z" },
@@ -94,10 +94,10 @@ describe("Clovy Home", () => {
   it("purges current and legacy Home history when a profile is deleted permanently", () => {
     writeClovyHomeStoredSessionId("research", "home-research");
     for (const key of [
-      "june:home:direct-turns:v1",
-      "june:home:task-handoffs:v1",
-      "june.home.directTurns.v1",
-      "june.home.taskHandoffs.v1",
+      "clovy:home:direct-turns:v1",
+      "clovy:home:task-handoffs:v1",
+      "clovy.home.directTurns.v1",
+      "clovy.home.taskHandoffs.v1",
     ]) {
       window.localStorage.setItem(
         key,
@@ -109,10 +109,10 @@ describe("Clovy Home", () => {
 
     expect(readClovyHomeStoredSessionId("research")).toBeUndefined();
     for (const key of [
-      "june:home:direct-turns:v1",
-      "june:home:task-handoffs:v1",
-      "june.home.directTurns.v1",
-      "june.home.taskHandoffs.v1",
+      "clovy:home:direct-turns:v1",
+      "clovy:home:task-handoffs:v1",
+      "clovy.home.directTurns.v1",
+      "clovy.home.taskHandoffs.v1",
     ]) {
       expect(JSON.parse(window.localStorage.getItem(key) ?? "{}")).not.toHaveProperty(
         "home-research",

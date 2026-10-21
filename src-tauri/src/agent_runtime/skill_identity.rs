@@ -5,6 +5,8 @@ use std::{
 };
 
 pub const CLOVY_OBSIDIAN_SKILL_ID: &str = "clovy-obsidian";
+/// The id a profile copied from a June-era install may still store or hold on
+/// disk. It is read and mapped to the Clovy id, never written.
 pub const LEGACY_OBSIDIAN_SKILL_ID: &str = "june-obsidian";
 
 pub fn canonical_skill_id(skill_id: &str) -> &str {
@@ -23,15 +25,6 @@ pub fn canonical_skill_ids<'a>(skill_ids: impl IntoIterator<Item = &'a str>) -> 
         .collect()
 }
 
-pub fn compatible_skill_ids<'a>(skill_ids: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
-    let canonical = canonical_skill_ids(skill_ids);
-    let mut compatible = canonical.clone();
-    if canonical.contains(CLOVY_OBSIDIAN_SKILL_ID) {
-        compatible.insert(LEGACY_OBSIDIAN_SKILL_ID.to_string());
-    }
-    compatible
-}
-
 pub fn read_skill_ids(skill_id: &str) -> Vec<&str> {
     let canonical = canonical_skill_id(skill_id);
     if canonical == CLOVY_OBSIDIAN_SKILL_ID {
@@ -42,39 +35,23 @@ pub fn read_skill_ids(skill_id: &str) -> Vec<&str> {
 }
 
 pub fn write_skill_ids(skill_id: &str) -> Vec<&str> {
-    let canonical = canonical_skill_id(skill_id);
-    if canonical == CLOVY_OBSIDIAN_SKILL_ID {
-        vec![LEGACY_OBSIDIAN_SKILL_ID, CLOVY_OBSIDIAN_SKILL_ID]
-    } else {
-        vec![canonical]
-    }
+    vec![canonical_skill_id(skill_id)]
 }
 
 pub fn skill_file(root: &Path, skill_id: &str) -> PathBuf {
     root.join(skill_id).join("SKILL.md")
 }
 
-/// Reconciles the managed Obsidian skill before the bundled resource is seeded.
-///
-/// The legacy path is rollback-readable, so it wins whenever both copies exist.
-/// Clovy writes that path first and the canonical path second; a legacy-only
-/// change therefore means either an upgrade from June or an edit made after a
-/// rollback. A canonical-only copy is mirrored back so an older app can still
-/// load the skill.
+/// Reconciles the managed Obsidian skill before the bundled resource is seeded:
+/// a June-era copy is read once into the Clovy id and never written again.
 pub fn reconcile_managed_obsidian_skill(root: &Path) -> io::Result<()> {
     let canonical = skill_file(root, CLOVY_OBSIDIAN_SKILL_ID);
     let legacy = skill_file(root, LEGACY_OBSIDIAN_SKILL_ID);
-    if legacy.is_file() {
-        let content = fs::read_to_string(&legacy)?;
-        write_skill_file(&legacy, &content, LEGACY_OBSIDIAN_SKILL_ID)?;
-        write_skill_file(&canonical, &content, CLOVY_OBSIDIAN_SKILL_ID)
-    } else if canonical.is_file() {
-        let content = fs::read_to_string(&canonical)?;
-        write_skill_file(&canonical, &content, CLOVY_OBSIDIAN_SKILL_ID)?;
-        write_skill_file(&legacy, &content, LEGACY_OBSIDIAN_SKILL_ID)
-    } else {
-        Ok(())
+    if canonical.is_file() || !legacy.is_file() {
+        return Ok(());
     }
+    let content = fs::read_to_string(&legacy)?;
+    write_skill_file(&canonical, &content, CLOVY_OBSIDIAN_SKILL_ID)
 }
 
 pub fn skill_content_for_id(content: &str, skill_id: &str) -> String {
@@ -152,96 +129,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_managed_edits_are_promoted_and_remain_rollback_readable() {
+    fn a_june_era_skill_is_read_once_into_the_clovy_id() {
         let root = tempfile::tempdir().expect("managed skill root");
         let legacy = skill_file(root.path(), LEGACY_OBSIDIAN_SKILL_ID);
         fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy directory");
-        fs::write(
-            &legacy,
-            "---\nname: june-obsidian\ndescription: User description\ncustom: keep-me\n---\n\nUser-edited body\n",
-        )
-        .expect("legacy skill");
+        let original = "---\nname: june-obsidian\ndescription: User description\ncustom: keep-me\n---\n\nUser-edited body\n";
+        fs::write(&legacy, original).expect("legacy skill");
 
-        reconcile_managed_obsidian_skill(root.path()).expect("promote legacy skill");
+        reconcile_managed_obsidian_skill(root.path()).expect("read legacy skill");
 
         let canonical = fs::read_to_string(skill_file(root.path(), CLOVY_OBSIDIAN_SKILL_ID))
             .expect("canonical skill");
-        let legacy = fs::read_to_string(legacy).expect("legacy skill remains");
         assert!(canonical.contains("name: clovy-obsidian"));
-        assert!(legacy.contains("name: june-obsidian"));
-        for content in [canonical, legacy] {
-            assert!(content.contains("description: User description"));
-            assert!(content.contains("custom: keep-me"));
-            assert!(content.ends_with("User-edited body\n"));
-        }
-    }
-
-    #[test]
-    fn legacy_copy_wins_after_a_rollback_edit() {
-        let root = tempfile::tempdir().expect("managed skill root");
-        let canonical = skill_file(root.path(), CLOVY_OBSIDIAN_SKILL_ID);
-        let legacy = skill_file(root.path(), LEGACY_OBSIDIAN_SKILL_ID);
-        fs::create_dir_all(canonical.parent().expect("canonical parent"))
-            .expect("canonical directory");
-        fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy directory");
-        fs::write(
-            &canonical,
-            "---\nname: clovy-obsidian\n---\n\nstale canonical instructions",
-        )
-        .expect("canonical skill");
-        fs::write(
-            &legacy,
-            "---\nname: june-obsidian\n---\n\nedited after rollback",
-        )
-        .expect("legacy skill");
-
-        reconcile_managed_obsidian_skill(root.path()).expect("reconcile rollback edit");
-
+        assert!(canonical.contains("custom: keep-me"));
+        assert!(canonical.ends_with("User-edited body\n"));
         assert_eq!(
-            fs::read_to_string(canonical).expect("canonical skill"),
-            "---\nname: clovy-obsidian\n---\n\nedited after rollback"
-        );
-        assert_eq!(
-            fs::read_to_string(legacy).expect("legacy skill"),
-            "---\nname: june-obsidian\n---\n\nedited after rollback"
+            fs::read_to_string(&legacy).expect("legacy untouched"),
+            original
         );
     }
 
     #[test]
-    fn canonical_only_skill_is_mirrored_for_rollback() {
+    fn the_clovy_skill_is_never_mirrored_back() {
         let root = tempfile::tempdir().expect("managed skill root");
         let canonical = skill_file(root.path(), CLOVY_OBSIDIAN_SKILL_ID);
         fs::create_dir_all(canonical.parent().expect("canonical parent"))
             .expect("canonical directory");
-        fs::write(
-            &canonical,
-            "---\nname: clovy-obsidian\n---\n\ncanonical instructions",
-        )
-        .expect("canonical skill");
+        fs::write(&canonical, "---\nname: clovy-obsidian\n---\n\ninstructions")
+            .expect("canonical skill");
 
-        reconcile_managed_obsidian_skill(root.path()).expect("mirror canonical skill");
+        reconcile_managed_obsidian_skill(root.path()).expect("reconcile");
 
+        assert!(!skill_file(root.path(), LEGACY_OBSIDIAN_SKILL_ID).exists());
         assert_eq!(
-            fs::read_to_string(skill_file(root.path(), LEGACY_OBSIDIAN_SKILL_ID))
-                .expect("legacy alias"),
-            "---\nname: june-obsidian\n---\n\ncanonical instructions"
+            write_skill_ids(LEGACY_OBSIDIAN_SKILL_ID),
+            vec![CLOVY_OBSIDIAN_SKILL_ID]
         );
     }
 
     #[test]
-    fn persisted_ids_are_canonical_in_memory_and_additive_on_disk() {
-        let legacy = [LEGACY_OBSIDIAN_SKILL_ID, "research"];
+    fn stored_june_era_ids_read_as_the_clovy_id() {
         assert_eq!(
-            canonical_skill_ids(legacy),
+            canonical_skill_ids([LEGACY_OBSIDIAN_SKILL_ID, "research"]),
             BTreeSet::from([CLOVY_OBSIDIAN_SKILL_ID.to_string(), "research".to_string()])
-        );
-        assert_eq!(
-            compatible_skill_ids(legacy),
-            BTreeSet::from([
-                CLOVY_OBSIDIAN_SKILL_ID.to_string(),
-                LEGACY_OBSIDIAN_SKILL_ID.to_string(),
-                "research".to_string()
-            ])
         );
     }
 }

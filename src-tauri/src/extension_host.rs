@@ -368,7 +368,6 @@ fn shim_data_dir(
 /// Resolve the descriptor selected when the native host was registered.
 /// Chrome does not inherit Clovy's environment, so the shim must not recompute
 /// an `OS_CLOVY_USE_PROD_DATA_DIR` choice from its own process environment.
-/// The June-era variable remains a compatibility fallback.
 pub fn shim_descriptor_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -377,8 +376,7 @@ pub fn shim_descriptor_path() -> Option<PathBuf> {
             &home,
             COMPILED_APP_IDENTIFIER,
             cfg!(debug_assertions),
-            crate::env_compat::var_os("OS_CLOVY_USE_PROD_DATA_DIR", "OS_JUNE_USE_PROD_DATA_DIR")
-                .is_some(),
+            std::env::var_os("OS_CLOVY_USE_PROD_DATA_DIR").is_some(),
         ))
     }
     #[cfg(not(target_os = "macos"))]

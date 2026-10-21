@@ -1844,7 +1844,7 @@ fn validate_applied_migrations(
     // this catalog: workspaces share one dev database, so an unmerged branch
     // carrying an extra (append-only, additive per ADR-0037) migration would
     // otherwise brick every other workspace's build. Production builds — and
-    // dev builds pointed at production data via OS_JUNE_USE_PROD_DATA_DIR —
+    // dev builds pointed at production data via OS_CLOVY_USE_PROD_DATA_DIR —
     // keep refusing, as downgrade protection for real data.
     let tolerate_newer = cfg!(debug_assertions) && !crate::app_paths::use_prod_data_dir();
     validate_applied_migrations_with_tolerance(applied, migrations, tolerate_newer)

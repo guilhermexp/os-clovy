@@ -26,7 +26,6 @@ pub mod day_intelligence;
 pub mod db;
 pub mod dictation;
 pub mod domain;
-mod env_compat;
 pub mod experimental_settings;
 pub mod extension_host;
 pub mod feature_flags;
@@ -36,6 +35,7 @@ pub mod identity_migration;
 pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
+mod local_env;
 mod local_identity;
 pub mod macos_menu_icons;
 pub mod mcp_server;
@@ -209,8 +209,6 @@ pub fn run() {
             agent_runtime::api::set_agent_skill_enabled,
             agent_runtime::persona::clovy_persona,
             agent_runtime::persona::set_clovy_persona,
-            agent_runtime::persona::june_persona,
-            agent_runtime::persona::set_june_persona,
             agent_recorder::resolve_agent_recorder_request,
             browser_broker::browser_approvals_pending,
             browser_broker::browser_approval_respond,
@@ -538,11 +536,7 @@ fn setup_computer_use_asset_scope(app: &mut tauri::App) {
 fn should_register_single_instance_plugin() -> bool {
     single_instance_enabled_for_build(
         cfg!(debug_assertions),
-        crate::env_compat::var_os(
-            "OS_CLOVY_ENABLE_DEV_SINGLE_INSTANCE",
-            "OS_JUNE_ENABLE_DEV_SINGLE_INSTANCE",
-        )
-        .is_some(),
+        std::env::var_os("OS_CLOVY_ENABLE_DEV_SINGLE_INSTANCE").is_some(),
     )
 }
 

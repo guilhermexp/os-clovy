@@ -200,7 +200,7 @@ struct GoogleOAuthClient {
 }
 
 fn google_oauth_client() -> GoogleOAuthClient {
-    crate::env_compat::load_local_env();
+    crate::local_env::load_local_env();
     GoogleOAuthClient {
         client_id: env_or_build_trimmed(
             GOOGLE_OAUTH_CLIENT_ID_ENV,
@@ -229,7 +229,7 @@ fn require_oauth_client() -> Result<GoogleOAuthClient, AppError> {
 /// unlike [`google_oauth_client`] there is no second field to ship. Runtime
 /// env overrides the build-time value for local testing.
 fn linear_oauth_client_id() -> String {
-    crate::env_compat::load_local_env();
+    crate::local_env::load_local_env();
     env_or_build_trimmed(
         LINEAR_OAUTH_CLIENT_ID_ENV,
         option_env!("LINEAR_OAUTH_CLIENT_ID"),
@@ -275,7 +275,7 @@ impl GithubOAuthClient {
 }
 
 fn github_oauth_client() -> GithubOAuthClient {
-    crate::env_compat::load_local_env();
+    crate::local_env::load_local_env();
     GithubOAuthClient {
         client_id: env_or_build_trimmed(
             GITHUB_OAUTH_CLIENT_ID_ENV,
@@ -309,7 +309,7 @@ fn require_github_client_id() -> Result<GithubOAuthClient, AppError> {
 const GITHUB_APP_SLUG_ENV: &str = "GITHUB_APP_SLUG";
 
 fn github_app_slug() -> String {
-    crate::env_compat::load_local_env();
+    crate::local_env::load_local_env();
     env_or_build_trimmed(GITHUB_APP_SLUG_ENV, option_env!("GITHUB_APP_SLUG"))
 }
 
@@ -340,7 +340,7 @@ const LINEAR_OAUTH_LOOPBACK_PORT_ENV: &str = "LINEAR_OAUTH_LOOPBACK_PORT";
 /// (for an OAuth app registered with a custom callback URL), otherwise the
 /// registered defaults.
 fn linear_loopback_ports() -> Vec<u16> {
-    crate::env_compat::load_local_env();
+    crate::local_env::load_local_env();
     linear_loopback_ports_from(&env_trimmed(LINEAR_OAUTH_LOOPBACK_PORT_ENV))
 }
 

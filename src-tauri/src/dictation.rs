@@ -4464,9 +4464,7 @@ fn spawn_helper(app: &AppHandle) -> Result<HelperProcess, AppError> {
 
     let mut command = Command::new(&helper_path);
     #[cfg(target_os = "macos")]
-    command
-        .env("CLOVY_OWNER_PID", std::process::id().to_string())
-        .env("JUNE_OWNER_PID", std::process::id().to_string());
+    command.env("CLOVY_OWNER_PID", std::process::id().to_string());
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

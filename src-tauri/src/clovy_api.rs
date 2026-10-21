@@ -3340,10 +3340,10 @@ fn clovy_api_operation_id(operation_id: &str) -> String {
 }
 
 pub(crate) fn clovy_api_url() -> String {
-    crate::env_compat::load_local_env();
+    crate::local_env::load_local_env();
     resolve_clovy_api_url(
-        crate::env_compat::var("CLOVY_API_URL", "JUNE_API_URL").as_deref(),
-        option_env!("CLOVY_API_URL").or(option_env!("JUNE_API_URL")),
+        std::env::var("CLOVY_API_URL").ok().as_deref(),
+        option_env!("CLOVY_API_URL"),
     )
 }
 
@@ -4899,8 +4899,6 @@ data: \"data\":{\"content\":\"Joined\",\"titleSuggestion\":null,\"provider\":\"o
 /// - `CLOVY_QA_LOCAL_MODEL`: model id the endpoint serves
 ///   (default `llama3.1:8b`)
 ///
-/// June-era names remain lower-precedence compatibility aliases.
-///
 /// Each test skips (passes with a stderr note) when the endpoint is
 /// unreachable, so an accidental `--include-ignored` run does not fail.
 ///
@@ -4922,14 +4920,16 @@ mod live_local_tests {
     const DEFAULT_LIVE_MODEL: &str = "llama3.1:8b";
 
     fn live_base_url() -> String {
-        crate::env_compat::var("CLOVY_QA_LOCAL_BASE_URL", "JUNE_QA_LOCAL_BASE_URL")
+        std::env::var("CLOVY_QA_LOCAL_BASE_URL")
+            .ok()
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_LIVE_BASE_URL.to_string())
     }
 
     fn live_model() -> String {
-        crate::env_compat::var("CLOVY_QA_LOCAL_MODEL", "JUNE_QA_LOCAL_MODEL")
+        std::env::var("CLOVY_QA_LOCAL_MODEL")
+            .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_LIVE_MODEL.to_string())

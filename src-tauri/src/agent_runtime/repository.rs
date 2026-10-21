@@ -3,8 +3,8 @@ use super::domain::{
     AgentSessionDto, AgentSkillDto,
 };
 use super::skill_identity::{
-    canonical_skill_id, canonical_skill_ids, compatible_skill_ids, write_skill_ids,
-    CLOVY_OBSIDIAN_SKILL_ID, LEGACY_OBSIDIAN_SKILL_ID,
+    canonical_skill_id, canonical_skill_ids, write_skill_ids, CLOVY_OBSIDIAN_SKILL_ID,
+    LEGACY_OBSIDIAN_SKILL_ID,
 };
 use crate::domain::types::AppError;
 use sqlx::{query::query, row::Row};
@@ -234,7 +234,7 @@ impl AgentRepository {
         run_id: &str,
         skill_ids: &[String],
     ) -> Result<(), sqlx::Error> {
-        let compatible = compatible_skill_ids(skill_ids.iter().map(String::as_str));
+        let compatible = canonical_skill_ids(skill_ids.iter().map(String::as_str));
         query("UPDATE agent_runs SET enabled_skills_json = ? WHERE id = ?")
             .bind(
                 serde_json::to_string(&compatible)
@@ -254,7 +254,7 @@ impl AgentRepository {
         let stored: Vec<String> =
             serde_json::from_str(&row.get::<String, _>("enabled_skills_json"))
                 .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-        let compatible = compatible_skill_ids(stored.iter().map(String::as_str));
+        let compatible = canonical_skill_ids(stored.iter().map(String::as_str));
         let stored_set = stored.iter().cloned().collect::<BTreeSet<_>>();
         if compatible != stored_set {
             query("UPDATE agent_runs SET enabled_skills_json = ? WHERE id = ?")
@@ -1110,47 +1110,21 @@ impl AgentRepository {
         })
     }
 
+    /// A June-era row is read once into the Clovy id; it is never written.
     async fn reconcile_obsidian_skill_settings(&self) -> Result<(), sqlx::Error> {
-        let canonical = query(
-            "SELECT enabled, managed, updated_at FROM agent_skill_settings WHERE skill_id = ?",
-        )
-        .bind(CLOVY_OBSIDIAN_SKILL_ID)
-        .fetch_optional(&self.pool)
-        .await?;
-        let legacy = query(
-            "SELECT enabled, managed, updated_at FROM agent_skill_settings WHERE skill_id = ?",
-        )
-        .bind(LEGACY_OBSIDIAN_SKILL_ID)
-        .fetch_optional(&self.pool)
-        .await?;
-        let source = legacy.as_ref().or(canonical.as_ref());
-        let Some(source) = source else {
-            return Ok(());
-        };
-        let enabled = source.get::<i64, _>("enabled") != 0;
-        let managed = source.get::<i64, _>("managed") != 0;
-        let updated_at = source.get::<String, _>("updated_at");
-        let already_synced = canonical.as_ref().is_some_and(|row| {
-            row.get::<i64, _>("enabled") == i64::from(enabled)
-                && row.get::<i64, _>("managed") == i64::from(managed)
-        }) && legacy.as_ref().is_some_and(|row| {
-            row.get::<i64, _>("enabled") == i64::from(enabled)
-                && row.get::<i64, _>("managed") == i64::from(managed)
-        });
-        if already_synced {
+        let canonical = query("SELECT 1 FROM agent_skill_settings WHERE skill_id = ?")
+            .bind(CLOVY_OBSIDIAN_SKILL_ID)
+            .fetch_optional(&self.pool)
+            .await?;
+        if canonical.is_some() {
             return Ok(());
         }
-        let mut transaction = self.pool.begin().await?;
-        for skill_id in [LEGACY_OBSIDIAN_SKILL_ID, CLOVY_OBSIDIAN_SKILL_ID] {
-            query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(skill_id) DO UPDATE SET enabled = excluded.enabled, managed = excluded.managed, updated_at = excluded.updated_at")
-                .bind(skill_id)
-                .bind(enabled)
-                .bind(managed)
-                .bind(&updated_at)
-                .execute(&mut *transaction)
-                .await?;
-        }
-        transaction.commit().await
+        query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) SELECT ?, enabled, managed, updated_at FROM agent_skill_settings WHERE skill_id = ?")
+            .bind(CLOVY_OBSIDIAN_SKILL_ID)
+            .bind(LEGACY_OBSIDIAN_SKILL_ID)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 

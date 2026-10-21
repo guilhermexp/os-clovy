@@ -19,9 +19,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(debug_assertions)]
 const DEV_PLAINTEXT_TOKEN_STORE_ENV: &str = "OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE";
-const LEGACY_DEV_PLAINTEXT_TOKEN_STORE_ENV: &str = "OS_JUNE_DEV_PLAINTEXT_TOKEN_STORE";
 const USE_PROD_ACCOUNTS_TOKENS_ENV: &str = "OS_CLOVY_USE_PROD_ACCOUNTS_TOKENS";
-const LEGACY_USE_PROD_ACCOUNTS_TOKENS_ENV: &str = "OS_JUNE_USE_PROD_ACCOUNTS_TOKENS";
 
 /// The dev plaintext token file's basename for a provider (under
 /// `target/`). Kept separate per provider for the same reason the keychain
@@ -220,21 +218,14 @@ fn keychain_service_for_build(
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn use_prod_connector_tokens() -> bool {
-    crate::env_compat::load_local_env();
-    cfg!(debug_assertions)
-        && crate::env_compat::truthy(
-            USE_PROD_ACCOUNTS_TOKENS_ENV,
-            LEGACY_USE_PROD_ACCOUNTS_TOKENS_ENV,
-        )
+    crate::local_env::load_local_env();
+    cfg!(debug_assertions) && crate::local_env::truthy(USE_PROD_ACCOUNTS_TOKENS_ENV)
 }
 
 #[cfg(debug_assertions)]
 fn use_dev_plaintext_token_store() -> bool {
-    crate::env_compat::load_local_env();
-    crate::env_compat::truthy(
-        DEV_PLAINTEXT_TOKEN_STORE_ENV,
-        LEGACY_DEV_PLAINTEXT_TOKEN_STORE_ENV,
-    )
+    crate::local_env::load_local_env();
+    crate::local_env::truthy(DEV_PLAINTEXT_TOKEN_STORE_ENV)
 }
 
 #[cfg(any(debug_assertions, test))]

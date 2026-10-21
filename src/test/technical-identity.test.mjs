@@ -314,9 +314,8 @@ describe("Clovy technical identity", () => {
     expect(dictation).toContain('format!("clovy-dictation-{utterance_id}-normalized.wav")');
     expect(computerUseFixture).toContain('"clovy-cu-observer-window"');
     expect(computerUseFixture).not.toContain('"june-cu-observer-window"');
-    expect(index.indexOf('localStorage.getItem("os-clovy:theme")')).toBeLessThan(
-      index.indexOf('localStorage.getItem("os-june:theme")'),
-    );
+    expect(index).toContain('localStorage.getItem("os-clovy:theme")');
+    expect(index).not.toContain("os-june:");
     expect(onboardingPreview).toContain("clovy.replayOnboarding()");
     expect(onboardingPreview).toContain("window.__CLOVY_STUB__");
     expect(styleguide).toContain("else os-clovy:theme / system");
