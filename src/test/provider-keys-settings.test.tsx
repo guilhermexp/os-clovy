@@ -65,9 +65,6 @@ describe("Provider API keys settings", () => {
           models: [],
         });
       }
-      if (command === "p3a_settings") {
-        return Promise.resolve({ enabled: false });
-      }
       return Promise.reject(new Error("no tauri in tests"));
     });
   });

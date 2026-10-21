@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 import { ActivitySettingsSection } from "../components/settings/ActivitySettingsSection";
 import { AppSettings, SETTINGS_TABS } from "../components/settings/AppSettings";
-import { settingsTabsForCompanionPairing } from "../components/settings/settings-config";
+import { settingsTabsForPlatform } from "../components/settings/settings-config";
 import { applyInterfaceLocale } from "../i18n/locale";
 import type { ActivitySettingsDto, ActivityStatusDto } from "../lib/activity-capture";
 import { DEFAULT_CODING_AGENT_SOURCES } from "../lib/coding-agents";
@@ -584,10 +584,10 @@ describe("ActivitySettingsSection", () => {
         get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
       });
 
-      const companionTabsSupported = settingsTabsForCompanionPairing(true, true);
-      expect(companionTabsSupported.some((t) => t.id === "activity")).toBe(true);
-      const companionTabsUnsupported = settingsTabsForCompanionPairing(true, false);
-      expect(companionTabsUnsupported.some((t) => t.id === "activity")).toBe(false);
+      const tabsSupported = settingsTabsForPlatform(true);
+      expect(tabsSupported.some((t) => t.id === "activity")).toBe(true);
+      const tabsUnsupported = settingsTabsForPlatform(false);
+      expect(tabsUnsupported.some((t) => t.id === "activity")).toBe(false);
     } finally {
       Object.defineProperty(navigator, "platform", {
         configurable: true,

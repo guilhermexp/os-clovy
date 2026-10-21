@@ -5,7 +5,6 @@ import {
   downloadNoteAudio,
   finishRecording,
   getNote,
-  clovyOpenCommunityPage,
   clovyPersona,
   patchNote,
   recoverRecording,
@@ -123,12 +122,6 @@ describe("Tauri command contracts", () => {
     expect(mocks.invoke).toHaveBeenNthCalledWith(4, "recover_recording", {
       request: { sessionId: "session-2", action: "discard" },
     });
-  });
-
-  it("opens the Clovy community through a dedicated command", async () => {
-    await clovyOpenCommunityPage();
-
-    expect(mocks.invoke).toHaveBeenCalledWith("clovy_open_community_page");
   });
 
   it("loads and saves Clovy's persona through stable native commands", async () => {

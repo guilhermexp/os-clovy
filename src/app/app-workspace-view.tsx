@@ -62,7 +62,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
     handleRenameFolder,
-    handleReportIssue,
     handleResumeRecording,
     handleSaveNoteNow,
     handleReturnToAgentOriginFolder,
@@ -163,7 +162,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       updateReadyToRelaunch={readyUpdate != null}
       onRelaunch={handleRelaunchUpdate}
       onReconcileToStable={handleReconcileToStable}
-      onReportIssue={handleReportIssue}
       onStartBundleChat={handleStartBundleChat}
     />
   ) : activeView === "dictation" ? (

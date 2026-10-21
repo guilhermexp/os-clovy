@@ -368,8 +368,8 @@ pub struct ChatEngineCatalogDto {
     pub endpoints: Vec<EndpointEngineDto>,
 }
 
-/// The engine new chat work starts on (sessions, note chat, Home handoffs,
-/// companion sessions; ADR-0062).
+/// The engine new chat work starts on (sessions, note chat, Home handoffs;
+/// ADR-0062).
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatDefaultEngineDto {

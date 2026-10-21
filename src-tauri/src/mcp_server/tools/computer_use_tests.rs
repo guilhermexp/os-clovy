@@ -1,10 +1,8 @@
 //! `computer_use` over the approval broker (`TestBroker`) and a fake driver:
-//! one card per call answered once on the Mac or on a linked phone, the
-//! action run only after it with the call's permit, and the lease the turn
-//! binding grants.
+//! one card per call answered once on the Mac, the action run only after it,
+//! and the lease the turn binding grants.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
@@ -12,7 +10,6 @@ use serde_json::{json, Value};
 use super::computer_use::{ComputerUseHost, ComputerUseTools, COMPUTER_USE_TOOL};
 use super::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 use crate::approval_broker::testing::{Scripted, TestBroker};
-use crate::companion::{CliComputerUseRequest, CliComputerUseRequests};
 use crate::computer_use::{
     begin_turn_lease_in, check_eligibility, clear_leases_for_test, end_turn_lease_in,
     has_attended_run, watch_turn_in, ActionOrigin, BoxedBool, ComputerUseState, EligibilityProbe,
@@ -22,27 +19,20 @@ use crate::llm::cli::CliKind;
 use crate::mcp_server::protocol;
 use crate::mcp_server::turns::TurnBinding;
 
-/// A fake Computer use driver and phone: records what the group asked.
+/// A fake Computer use driver: records what the group asked.
 #[derive(Default)]
 struct FakeHost {
-    phone_linked: bool,
     driver_result: Mutex<Option<Value>>,
     leases: Mutex<Vec<String>>,
-    phone: CliComputerUseRequests,
-    offered: Mutex<Vec<(String, String)>>,
-    retired: Mutex<Vec<(String, bool)>>,
-    executed: Mutex<Vec<(String, Value)>>,
+    executed: Mutex<Vec<Value>>,
 }
 
 impl FakeHost {
-    fn new(phone_linked: bool) -> Arc<Self> {
-        Arc::new(Self {
-            phone_linked,
-            ..Self::default()
-        })
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
     }
 
-    fn executed(&self) -> Vec<(String, Value)> {
+    fn executed(&self) -> Vec<Value> {
         self.executed.lock().unwrap().clone()
     }
 }
@@ -53,51 +43,9 @@ impl ComputerUseHost for FakeHost {
         Ok(())
     }
 
-    fn offer_to_companion<'a>(
-        &'a self,
-        binding: &'a TurnBinding,
-        request_id: &'a str,
-        call_id: &'a str,
-        _arguments: &'a Value,
-    ) -> BoxFuture<'a, bool> {
+    fn execute(&self, arguments: Value) -> BoxFuture<'_, Value> {
         Box::pin(async move {
-            if !self.phone_linked {
-                return false;
-            }
-            self.phone.insert(
-                request_id,
-                CliComputerUseRequest {
-                    run_id: binding.run_id.clone(),
-                    stored_session_id: binding.session_id.clone(),
-                    tool_call_id: call_id.to_string(),
-                },
-            );
-            self.offered
-                .lock()
-                .unwrap()
-                .push((request_id.to_string(), call_id.to_string()));
-            true
-        })
-    }
-
-    fn retire_companion(&self, _binding: &TurnBinding, request_id: &str, approved: bool) {
-        self.retired
-            .lock()
-            .unwrap()
-            .push((request_id.to_string(), approved));
-    }
-
-    fn execute<'a>(
-        &'a self,
-        _binding: &'a TurnBinding,
-        call_id: &'a str,
-        arguments: Value,
-    ) -> BoxFuture<'a, Value> {
-        Box::pin(async move {
-            self.executed
-                .lock()
-                .unwrap()
-                .push((call_id.to_string(), arguments));
+            self.executed.lock().unwrap().push(arguments);
             self.driver_result
                 .lock()
                 .unwrap()
@@ -185,7 +133,7 @@ async fn unbound_and_unattended_calls_get_no_card_lease_or_action() {
         .unwrap_err();
     assert_eq!(unbound.code, "turn_required");
 
-    let host = FakeHost::new(true);
+    let host = FakeHost::new();
     let group = ComputerUseTools::with_host(host.clone());
     let routine = broker.turn(CliKind::Codex, false).await;
     let refused = group
@@ -199,16 +147,15 @@ async fn unbound_and_unattended_calls_get_no_card_lease_or_action() {
     assert_eq!(refused.code, "unattended_requires_approval");
     assert!(broker.requests().is_empty());
     assert!(host.leases.lock().unwrap().is_empty());
-    assert!(host.offered.lock().unwrap().is_empty());
     assert!(host.executed().is_empty());
 }
 
 #[tokio::test]
-async fn desktop_approval_runs_one_action_with_its_permit_and_a_second_answer_is_refused() {
+async fn desktop_approval_runs_one_action_and_a_second_answer_is_refused() {
     let broker = TestBroker::new([Scripted::Approve]).await;
     let data = data(&broker);
     let chat = broker.turn(CliKind::Claude, true).await;
-    let host = FakeHost::new(false);
+    let host = FakeHost::new();
     let group = ComputerUseTools::with_host(host.clone());
 
     let result = group
@@ -220,10 +167,7 @@ async fn desktop_approval_runs_one_action_with_its_permit_and_a_second_answer_is
     assert_eq!(cards[0]["toolName"], COMPUTER_USE_TOOL);
     assert_eq!(cards[0]["engine"], "cli");
     let executed = host.executed();
-    assert_eq!(executed.len(), 1);
-    // The action runs with the card's call id as its one permit.
-    assert_eq!(cards[0]["toolCallId"], executed[0].0.as_str());
-    assert_eq!(executed[0].1, capture());
+    assert_eq!(executed, [capture()]);
     assert_eq!(
         *host.leases.lock().unwrap(),
         std::slice::from_ref(&chat.run_id)
@@ -253,7 +197,7 @@ async fn denied_or_invalid_calls_never_reach_the_driver() {
     let broker = TestBroker::new([Scripted::Deny]).await;
     let data = data(&broker);
     let chat = broker.turn(CliKind::Codex, true).await;
-    let host = FakeHost::new(true);
+    let host = FakeHost::new();
     let group = ComputerUseTools::with_host(host.clone());
     let ctx = ctx(&data, &broker, &chat);
 
@@ -263,12 +207,6 @@ async fn denied_or_invalid_calls_never_reach_the_driver() {
         .unwrap_err();
     assert_eq!(denied.code, "user_denied");
     assert!(host.executed().is_empty());
-    // The phone's card is retired with the Mac's outcome.
-    let offered = host.offered.lock().unwrap().clone();
-    assert_eq!(
-        *host.retired.lock().unwrap(),
-        [(offered[0].0.clone(), false)]
-    );
 
     let invalid = group
         .call(&ctx, COMPUTER_USE_TOOL, &json!({ "action": "rm -rf" }))
@@ -280,94 +218,11 @@ async fn denied_or_invalid_calls_never_reach_the_driver() {
 }
 
 #[tokio::test]
-async fn phone_approval_settles_the_card_once_and_later_answers_are_refused() {
-    let broker = TestBroker::new([Scripted::Leave]).await;
-    let data = data(&broker);
-    let chat = broker.turn(CliKind::Claude, true).await;
-    let host = FakeHost::new(true);
-    let group = ComputerUseTools::with_host(host.clone());
-    let ctx = ctx(&data, &broker, &chat);
-
-    let phone = async {
-        // The phone answers once the card is up.
-        let card = loop {
-            if let Some(card) = broker.requests().into_iter().next() {
-                break card;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        };
-        let (request_id, _) = host.offered.lock().unwrap()[0].clone();
-        let request = host.phone.get(&request_id, &chat.session_id).unwrap();
-        crate::companion::resolve_cli_computer_use_card(
-            broker.broker(),
-            broker.pool(),
-            &request,
-            true,
-        )
-        .await
-        .unwrap();
-        (card, request)
-    };
-    let arguments = capture();
-    let (result, (card, request)) =
-        tokio::join!(group.call(&ctx, COMPUTER_USE_TOOL, &arguments), phone);
-    result.unwrap();
-
-    let executed = host.executed();
-    assert_eq!(executed.len(), 1);
-    assert_eq!(executed[0].0, request.tool_call_id);
-    assert_eq!(card["toolCallId"], request.tool_call_id.as_str());
-
-    // A second phone answer and a late Mac answer both find the card settled.
-    let again = crate::companion::resolve_cli_computer_use_card(
-        broker.broker(),
-        broker.pool(),
-        &request,
-        true,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(again.code, "agent_interruption_expired");
-    let late = desktop_answer(&broker, &card, "deny").await.unwrap_err();
-    assert_eq!(late.code, "agent_interruption_expired");
-    assert_eq!(host.executed().len(), 1);
-}
-
-#[tokio::test]
-async fn phone_denial_never_reaches_the_driver() {
-    let broker = TestBroker::new([Scripted::Leave]).await;
-    let data = data(&broker);
-    let chat = broker.turn(CliKind::Claude, true).await;
-    let host = FakeHost::new(true);
-    let group = ComputerUseTools::with_host(host.clone());
-    let ctx = ctx(&data, &broker, &chat);
-    let phone = async {
-        while broker.requests().is_empty() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let (request_id, _) = host.offered.lock().unwrap()[0].clone();
-        let request = host.phone.get(&request_id, &chat.session_id).unwrap();
-        crate::companion::resolve_cli_computer_use_card(
-            broker.broker(),
-            broker.pool(),
-            &request,
-            false,
-        )
-        .await
-        .unwrap();
-    };
-    let arguments = capture();
-    let (result, ()) = tokio::join!(group.call(&ctx, COMPUTER_USE_TOOL, &arguments), phone);
-    assert_eq!(result.unwrap_err().code, "user_denied");
-    assert!(host.executed().is_empty());
-}
-
-#[tokio::test]
 async fn driver_failure_is_a_tool_error() {
     let broker = TestBroker::new([Scripted::Approve]).await;
     let data = data(&broker);
     let chat = broker.turn(CliKind::Claude, true).await;
-    let host = FakeHost::new(false);
+    let host = FakeHost::new();
     *host.driver_result.lock().unwrap() = Some(json!({
         "content": [{ "type": "text", "text": "{\"error\":\"Computer use access to this app was denied, cancelled, or timed out.\"}" }],
         "isError": true,

@@ -37,12 +37,6 @@ const DEFAULT_SHARE_BASE_URL: &str = "https://june.link";
 pub(crate) const DEFAULT_DICTATION_CLEANUP_MODEL: &str = "nvidia/nemotron-3-nano-30b-a3b";
 // Mirrors Clovy API's authoritative 600-second request deadline.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(600);
-const BROWSER_TRANSPORT_POLICY_TIMEOUT: Duration = Duration::from_secs(10);
-// Adds 300 seconds of client-only grace around that server deadline for a
-// large request-body transfer and the terminal SSE event. This is not a
-// second server budget.
-const ISSUE_REPORT_MULTIPART_TIMEOUT: Duration = Duration::from_secs(900);
-const AGENT_DIAGNOSTICS_ATTACHMENT_NAME: &str = "clovy-agent-diagnostics.txt";
 const AGENT_HTTP_TIMEOUT: Duration = Duration::from_secs(600);
 const AGENT_PROXY_MAX_MESSAGES: usize = 64;
 const AGENT_PROXY_MAX_INSTRUCTION_MESSAGES: usize = 4;
@@ -369,33 +363,6 @@ struct DictateCleanupBody {
     app_context: Option<String>,
     style: String,
     model: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct P3aReportRequest {
-    pub schema: u32,
-    pub question_id: String,
-    pub epoch: String,
-    pub platform: String,
-    pub version_series: String,
-    pub bucket: u8,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct P3aReportBody {
-    schema: u32,
-    question_id: String,
-    epoch: String,
-    platform: String,
-    version_series: String,
-    bucket: u8,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct P3aReportResponse {
-    accepted: bool,
 }
 
 pub async fn transcribe_saved_audio(
@@ -1029,26 +996,6 @@ fn cleanup_user_message(
     sections.join("\n\n")
 }
 
-pub async fn submit_p3a_report(request: P3aReportRequest) -> Result<(), AppError> {
-    let body = P3aReportBody {
-        schema: request.schema,
-        question_id: request.question_id,
-        epoch: request.epoch,
-        platform: request.platform,
-        version_series: request.version_series,
-        bucket: request.bucket,
-    };
-    let response: P3aReportResponse = post_json("/v1/p3a/reports", &body, false).await?;
-    if response.accepted {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            "p3a_report_rejected",
-            "Telemetry report was rejected.",
-        ))
-    }
-}
-
 pub async fn list_models(model_type: &str) -> Result<Vec<ModelDto>, AppError> {
     let url = format!("{}/v1/models", clovy_api_url());
     let response = http_client()
@@ -1058,32 +1005,6 @@ pub async fn list_models(model_type: &str) -> Result<Vec<ModelDto>, AppError> {
         .await
         .map_err(network_error)?;
     parse_response("/v1/models", response).await
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserTransportPolicyDto {
-    pub attended_enabled: bool,
-    pub managed_enabled: bool,
-}
-
-/// Fetch the additive Browser use policy endpoint. A 404 is a successful
-/// absence signal from an older Clovy API and therefore maps to the fail-open
-/// default at the cache owner; transport and malformed-response failures stay
-/// distinct so they cannot overwrite the last known policy.
-pub async fn fetch_browser_transport_policy() -> Result<Option<BrowserTransportPolicyDto>, AppError>
-{
-    let path = "/v1/browser-transport-policy";
-    let response = http_client()
-        .get(format!("{}{}", clovy_api_url(), path))
-        .timeout(BROWSER_TRANSPORT_POLICY_TIMEOUT)
-        .send()
-        .await
-        .map_err(network_error)?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    parse_response(path, response).await.map(Some)
 }
 
 pub async fn computer_use_rollout(macos_version: &str) -> Result<ComputerUseRolloutDto, AppError> {
@@ -2394,260 +2315,6 @@ fn parse_explicit_classification(text: &str) -> Option<bool> {
     }
 }
 
-pub async fn submit_issue_report(
-    request: &crate::domain::types::SubmitIssueReportRequest,
-    app_version: &str,
-    agent_diagnostics: Option<&str>,
-) -> Result<crate::domain::types::SubmitIssueReportResponse, AppError> {
-    let description = request.description.trim();
-    if description.is_empty() {
-        return Err(AppError::new(
-            "issue_report_empty",
-            "Cannot send an empty issue report.",
-        ));
-    }
-
-    let IssueAttachmentParts {
-        parts,
-        included_names,
-        skipped_names,
-    } = issue_attachment_parts(&request.attachment_paths).await?;
-    let mut form = issue_report_form(request, app_version, agent_diagnostics);
-    for part in parts {
-        form = form.part("attachment", part);
-    }
-    if let Some(diagnostics) = agent_diagnostics {
-        form = form.part(
-            "attachment",
-            Part::text(diagnostics.to_string())
-                .file_name(AGENT_DIAGNOSTICS_ATTACHMENT_NAME)
-                .mime_str("text/plain; charset=utf-8")
-                .map_err(|error| {
-                    AppError::new("issue_report_attachment_invalid", error.to_string())
-                })?,
-        );
-    }
-
-    let first_response = send_multipart("/v1/issue-reports", form, false).await?;
-    let status = first_response.status();
-    let retry_after_ms = response_retry_after_ms(&first_response);
-    if status.is_success() && response_is_event_stream(&first_response) {
-        let mut response: crate::domain::types::SubmitIssueReportResponse =
-            parse_sse_response("/v1/issue-reports", first_response).await?;
-        merge_skipped_attachment_names(&mut response, skipped_names);
-        return Ok(response);
-    }
-    let body = first_response.text().await.map_err(network_error)?;
-
-    if issue_report_needs_names_only_retry(status, &body) {
-        // Older Clovy API deployments and a lower production ingress limit can
-        // reject a body containing files. Rebuild the form once without file
-        // parts so the issue report is still delivered with attachment names.
-        let mut omitted_names = request.attachment_names.clone();
-        extend_unique_names(&mut omitted_names, skipped_names);
-        extend_unique_names(&mut omitted_names, included_names);
-        if agent_diagnostics.is_some() {
-            extend_unique_names(
-                &mut omitted_names,
-                vec![AGENT_DIAGNOSTICS_ATTACHMENT_NAME.to_string()],
-            );
-        }
-        let retry_response = send_multipart(
-            "/v1/issue-reports",
-            issue_report_form(request, app_version, agent_diagnostics),
-            false,
-        )
-        .await?;
-        let mut response: crate::domain::types::SubmitIssueReportResponse =
-            parse_json_or_sse_response("/v1/issue-reports", retry_response).await?;
-        merge_skipped_attachment_names(&mut response, omitted_names);
-        return Ok(response);
-    }
-
-    let mut response: crate::domain::types::SubmitIssueReportResponse =
-        parse_response_body("/v1/issue-reports", status, retry_after_ms, &body)?;
-    merge_skipped_attachment_names(&mut response, skipped_names);
-    Ok(response)
-}
-
-fn issue_report_form(
-    request: &crate::domain::types::SubmitIssueReportRequest,
-    app_version: &str,
-    agent_diagnostics: Option<&str>,
-) -> Form {
-    let mut form = Form::new()
-        .text("description", request.description.trim().to_string())
-        .text("appVersion", app_version.to_string())
-        .text("platform", std::env::consts::OS)
-        // Keep-alive comments prevent ingress idle timeouts while Clovy API
-        // forwards platform-sized files to Open Software.
-        .text("stream", "true");
-    if let Some(category) = request
-        .category
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        form = form.text("category", category.to_string());
-    }
-    if let Some(stored_session_id) = request
-        .stored_session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        form = form.text("sessionId", stored_session_id.to_string());
-    }
-    if let Some(diagnosis) = request
-        .agent_diagnosis
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        form = form.text("agentDiagnosis", diagnosis.to_string());
-    }
-    for name in &request.attachment_names {
-        form = form.text("attachmentName", name.clone());
-    }
-    if agent_diagnostics.is_some() {
-        form = form.text(
-            "attachmentName",
-            AGENT_DIAGNOSTICS_ATTACHMENT_NAME.to_string(),
-        );
-    }
-    form
-}
-
-fn issue_report_needs_names_only_retry(status: reqwest::StatusCode, body: &str) -> bool {
-    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-        return true;
-    }
-    if status != reqwest::StatusCode::BAD_REQUEST {
-        return false;
-    }
-    serde_json::from_str::<ApiEnvelope<serde_json::Value>>(body)
-        .ok()
-        .and_then(|envelope| envelope.message)
-        .is_some_and(|message| {
-            matches!(message.as_str(), "multipart_invalid" | "payload_too_large")
-        })
-}
-
-fn extend_unique_names(names: &mut Vec<String>, additional: impl IntoIterator<Item = String>) {
-    for name in additional {
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-}
-
-fn merge_skipped_attachment_names(
-    response: &mut crate::domain::types::SubmitIssueReportResponse,
-    local_names: Vec<String>,
-) {
-    let mut combined = Vec::new();
-    extend_unique_names(&mut combined, local_names);
-    extend_unique_names(
-        &mut combined,
-        std::mem::take(&mut response.skipped_attachment_names),
-    );
-    response.skipped_attachment_names = combined;
-}
-
-fn issue_attachment_filename(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "attachment".to_string())
-}
-
-const ISSUE_ATTACHMENT_MAX_BYTES: u64 = 300 * 1024 * 1024;
-const ISSUE_ATTACHMENTS_TOTAL_MAX_BYTES: u64 = 300 * 1024 * 1024;
-
-struct IssueAttachmentParts {
-    parts: Vec<Part>,
-    included_names: Vec<String>,
-    skipped_names: Vec<String>,
-}
-
-/// Builds one streaming multipart part per readable, non-empty attachment.
-///
-/// Metadata is checked before a file is opened for streaming so an unreadable,
-/// empty, or over-budget file does not block the report or allocate its entire
-/// contents. The cumulative byte budget mirrors Clovy API's single-request
-/// attachment allowance and prevents the desktop from building a form Clovy API
-/// must reject. Every skipped file remains represented by its `attachmentName`.
-async fn issue_attachment_parts(paths: &[String]) -> Result<IssueAttachmentParts, AppError> {
-    let mut parts = Vec::new();
-    let mut included_names = Vec::new();
-    let mut skipped_names = Vec::new();
-    let mut included_bytes = 0_u64;
-    for path in paths {
-        let filename = issue_attachment_filename(path);
-        let metadata = match tokio::fs::metadata(path).await {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                eprintln!("skipping unreadable issue report attachment {path}: {error}");
-                skipped_names.push(filename);
-                continue;
-            }
-        };
-        let file_bytes = metadata.len();
-        if !metadata.is_file() || file_bytes == 0 {
-            eprintln!("skipping empty issue report attachment {path}");
-            skipped_names.push(filename);
-            continue;
-        }
-        if file_bytes > ISSUE_ATTACHMENT_MAX_BYTES
-            || included_bytes.saturating_add(file_bytes) > ISSUE_ATTACHMENTS_TOTAL_MAX_BYTES
-        {
-            eprintln!("skipping over-budget issue report attachment {path}: {file_bytes} bytes");
-            skipped_names.push(filename);
-            continue;
-        }
-        let part = match Part::file(path).await {
-            Ok(part) => part,
-            Err(error) => {
-                eprintln!("skipping unreadable issue report attachment {path}: {error}");
-                skipped_names.push(filename);
-                continue;
-            }
-        };
-        let part = part
-            .file_name(filename.clone())
-            .mime_str(issue_attachment_mime(path))
-            .map_err(|error| AppError::new("issue_report_attachment_invalid", error.to_string()))?;
-        included_bytes += file_bytes;
-        included_names.push(filename);
-        parts.push(part);
-    }
-    Ok(IssueAttachmentParts {
-        parts,
-        included_names,
-        skipped_names,
-    })
-}
-
-fn issue_attachment_mime(path: &str) -> &'static str {
-    let extension = Path::new(path)
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_lowercase());
-    match extension.as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("heic") => "image/heic",
-        Some("mp4") => "video/mp4",
-        Some("mov") => "video/quicktime",
-        Some("m4v") => "video/x-m4v",
-        Some("webm") => "video/webm",
-        Some("pdf") => "application/pdf",
-        Some("txt" | "log") => "text/plain",
-        _ => "application/octet-stream",
-    }
-}
-
 pub fn configured() -> bool {
     !clovy_api_url().is_empty()
 }
@@ -3401,20 +3068,12 @@ async fn send_multipart(
         .post(&url)
         .bearer_auth(crate::local_identity::access_token())
         .multipart(form)
-        .timeout(multipart_request_timeout(path));
+        .timeout(HTTP_TIMEOUT);
     let response = with_provider_api_key(path, request, user_key_allowed)?
         .send()
         .await
         .map_err(network_error)?;
     Ok(response)
-}
-
-fn multipart_request_timeout(path: &str) -> Duration {
-    if path == "/v1/issue-reports" {
-        ISSUE_REPORT_MULTIPART_TIMEOUT
-    } else {
-        HTTP_TIMEOUT
-    }
 }
 
 async fn authed_send<F>(
@@ -3779,7 +3438,6 @@ mod tests {
     use super::*;
 
     const NOTE_GENERATE_PATH: &str = "/v1/notes/generate";
-    const ISSUE_REPORT_PATH: &str = "/v1/issue-reports";
 
     // APP_VERSION (from Cargo.toml) is what both compatibility headers report,
     // while tauri.conf.json is what releases actually ship as. If
@@ -4155,26 +3813,6 @@ mod tests {
         })
     }
 
-    fn issue_report_success_envelope(skipped_attachment_names: &[&str]) -> String {
-        serde_json::json!({
-            "success": true,
-            "data": {
-                "received": true,
-                "skippedAttachmentNames": skipped_attachment_names,
-            }
-        })
-        .to_string()
-    }
-
-    fn buffered_response(content_type: &str, body: String) -> reqwest::Response {
-        tauri::http::Response::builder()
-            .status(reqwest::StatusCode::OK)
-            .header(reqwest::header::CONTENT_TYPE, content_type)
-            .body(body)
-            .expect("test response should build")
-            .into()
-    }
-
     fn parse_sse_chunks(chunks: &[&[u8]]) -> Result<Option<ApiTerminalEvent>, AppError> {
         let mut parser = ApiSseParser::default();
         for chunk in chunks {
@@ -4209,108 +3847,6 @@ mod tests {
         assert_eq!(response.title_suggestion.as_deref(), Some("Summary"));
         assert_eq!(response.provider, "openrouter");
         assert_eq!(response.prompt_version.as_deref(), Some("test-prompt"));
-    }
-
-    #[test]
-    fn issue_report_legacy_json_response_remains_compatible() {
-        let response: crate::domain::types::SubmitIssueReportResponse = parse_response_body(
-            ISSUE_REPORT_PATH,
-            reqwest::StatusCode::OK,
-            None,
-            &issue_report_success_envelope(&["legacy.mov"]),
-        )
-        .expect("legacy JSON envelope should parse");
-
-        assert!(response.received);
-        assert_eq!(response.skipped_attachment_names, vec!["legacy.mov"]);
-    }
-
-    #[test]
-    fn issue_report_multipart_timeout_adds_client_grace_only_for_that_path() {
-        let issue_report_timeout = multipart_request_timeout(ISSUE_REPORT_PATH);
-        assert_eq!(issue_report_timeout, Duration::from_secs(900));
-        assert!(issue_report_timeout > HTTP_TIMEOUT);
-        assert_eq!(
-            issue_report_timeout - HTTP_TIMEOUT,
-            Duration::from_secs(300)
-        );
-        for path in ["/v1/notes/transcribe", "/v1/dictate"] {
-            assert_eq!(multipart_request_timeout(path), HTTP_TIMEOUT);
-        }
-    }
-
-    #[test]
-    fn issue_report_sse_keep_alive_comments_then_result_parse_success() {
-        let stream = format!(
-            ": keep-alive\n\n: keep-alive\n\nevent: result\ndata: {}\n\n",
-            issue_report_success_envelope(&["platform.mov"])
-        );
-        let event = parse_sse_chunks(&[stream.as_bytes()])
-            .expect("SSE should parse")
-            .expect("SSE should contain a terminal event");
-
-        let response: crate::domain::types::SubmitIssueReportResponse =
-            parse_sse_terminal_event(ISSUE_REPORT_PATH, event)
-                .expect("result event should parse through the API envelope");
-
-        assert!(response.received);
-        assert_eq!(response.skipped_attachment_names, vec!["platform.mov"]);
-    }
-
-    #[test]
-    fn issue_report_sse_error_maps_like_buffered_non_success_response() {
-        let body = serde_json::json!({
-            "success": false,
-            "errorCode": 5000,
-            "message": "issue_report_delivery_failed",
-        });
-        let buffered = parse_response_body::<crate::domain::types::SubmitIssueReportResponse>(
-            ISSUE_REPORT_PATH,
-            reqwest::StatusCode::BAD_GATEWAY,
-            None,
-            &body.to_string(),
-        )
-        .expect_err("buffered delivery failure should fail");
-        let stream = format!(
-            "event: error\ndata: {}\n\n",
-            serde_json::json!({
-                "status": reqwest::StatusCode::BAD_GATEWAY.as_u16(),
-                "body": body,
-            })
-        );
-        let event = parse_sse_chunks(&[stream.as_bytes()])
-            .expect("SSE error should parse")
-            .expect("SSE should contain a terminal event");
-        let streamed = parse_sse_terminal_event::<crate::domain::types::SubmitIssueReportResponse>(
-            ISSUE_REPORT_PATH,
-            event,
-        )
-        .expect_err("streamed delivery failure should fail");
-
-        assert_eq!(streamed.code, buffered.code);
-        assert_eq!(streamed.message, buffered.message);
-        assert_eq!(streamed.details, buffered.details);
-    }
-
-    #[tokio::test]
-    async fn issue_report_names_only_retry_accepts_json_or_sse_response() {
-        let envelope = issue_report_success_envelope(&["fallback.mov"]);
-        let sse = format!(": keep-alive\n\nevent: result\ndata: {envelope}\n\n");
-        for (content_type, body) in [
-            ("application/json", envelope),
-            ("text/event-stream; charset=utf-8", sse),
-        ] {
-            let response: crate::domain::types::SubmitIssueReportResponse =
-                parse_json_or_sse_response(
-                    ISSUE_REPORT_PATH,
-                    buffered_response(content_type, body),
-                )
-                .await
-                .expect("retry response should parse");
-
-            assert!(response.received);
-            assert_eq!(response.skipped_attachment_names, vec!["fallback.mov"]);
-        }
     }
 
     #[test]
@@ -5367,136 +4903,6 @@ data: \"data\":{\"content\":\"Joined\",\"titleSuggestion\":null,\"provider\":\"o
             .unwrap()
             .contains("Standing content policy"));
         assert_eq!(messages[1]["content"], "hello");
-    }
-
-    #[test]
-    fn issue_attachment_mime_maps_videos() {
-        assert_eq!(issue_attachment_mime("/tmp/clip.mp4"), "video/mp4");
-        assert_eq!(
-            issue_attachment_mime("/tmp/Screen Recording.MOV"),
-            "video/quicktime"
-        );
-        assert_eq!(issue_attachment_mime("/tmp/clip.m4v"), "video/x-m4v");
-        assert_eq!(issue_attachment_mime("/tmp/clip.webm"), "video/webm");
-        assert_eq!(
-            issue_attachment_mime("/tmp/unknown.bin"),
-            "application/octet-stream"
-        );
-    }
-
-    fn create_sparse_file(path: &Path, len: u64) {
-        let file = std::fs::File::create(path).expect("create sparse file");
-        file.set_len(len).expect("size sparse file");
-    }
-
-    // JUN-238: a video larger than the former 10 MiB limit must remain an
-    // issue-report attachment part without reading the whole file into memory.
-    #[tokio::test]
-    async fn issue_attachment_parts_streams_video_above_legacy_limit() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let large = dir.path().join("clip.mov");
-        let empty = dir.path().join("empty.txt");
-        create_sparse_file(&large, (10 * 1024 * 1024) + 1);
-        std::fs::write(&empty, b"").expect("write empty");
-        let missing = dir.path().join("gone.mp4");
-
-        let paths: Vec<String> = [&large, &empty, &missing]
-            .iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect();
-        let result = issue_attachment_parts(&paths)
-            .await
-            .expect("parts should build");
-
-        assert_eq!(result.parts.len(), 1);
-        assert_eq!(result.included_names, vec!["clip.mov".to_string()]);
-        assert_eq!(
-            result.skipped_names,
-            vec!["empty.txt".to_string(), "gone.mp4".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn issue_attachment_parts_skip_per_file_and_cumulative_overages() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let accepted = dir.path().join("accepted.mov");
-        let exceeds_total = dir.path().join("exceeds-total.mp4");
-        let exceeds_file = dir.path().join("exceeds-file.webm");
-        create_sparse_file(&accepted, 200 * 1024 * 1024);
-        create_sparse_file(&exceeds_total, (100 * 1024 * 1024) + 1);
-        create_sparse_file(&exceeds_file, ISSUE_ATTACHMENT_MAX_BYTES + 1);
-
-        let paths = [&accepted, &exceeds_total, &exceeds_file]
-            .iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        let result = issue_attachment_parts(&paths)
-            .await
-            .expect("metadata checks should succeed");
-
-        assert_eq!(result.parts.len(), 1);
-        assert_eq!(result.included_names, vec!["accepted.mov".to_string()]);
-        assert_eq!(
-            result.skipped_names,
-            vec![
-                "exceeds-total.mp4".to_string(),
-                "exceeds-file.webm".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn issue_report_names_only_retry_is_limited_to_size_failures() {
-        assert!(issue_report_needs_names_only_retry(
-            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
-            "<html>ingress rejection</html>",
-        ));
-        for message in ["multipart_invalid", "payload_too_large"] {
-            let body = serde_json::json!({
-                "data": null,
-                "success": false,
-                "error_code": 4000,
-                "message": message,
-            })
-            .to_string();
-            assert!(issue_report_needs_names_only_retry(
-                reqwest::StatusCode::BAD_REQUEST,
-                &body,
-            ));
-        }
-        let validation = serde_json::json!({
-            "data": null,
-            "success": false,
-            "error_code": 4000,
-            "message": "description_required",
-        })
-        .to_string();
-        assert!(!issue_report_needs_names_only_retry(
-            reqwest::StatusCode::BAD_REQUEST,
-            &validation,
-        ));
-    }
-
-    #[test]
-    fn skipped_attachment_names_merge_without_duplicates() {
-        let mut response = crate::domain::types::SubmitIssueReportResponse {
-            received: true,
-            skipped_attachment_names: vec!["server.mov".to_string(), "local.mov".to_string()],
-        };
-
-        merge_skipped_attachment_names(
-            &mut response,
-            vec!["local.mov".to_string(), "fallback.mp4".to_string()],
-        );
-
-        assert_eq!(
-            response.skipped_attachment_names,
-            vec![
-                "local.mov".to_string(),
-                "fallback.mp4".to_string(),
-                "server.mov".to_string(),
-            ]
-        );
     }
 }
 

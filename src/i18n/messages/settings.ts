@@ -44,7 +44,6 @@ export default defineMessages({
     "settings.tabs.agent": "Agent",
     "settings.tabs.memory": "Memory",
     "settings.tabs.connectors": "Plugins",
-    "settings.tabs.linkedDevices": "Linked devices",
     "settings.tabs.about": "About",
     "settings.page.description": "Manage audio, dictation, AI models, and agent capabilities.",
     "settings.page.navAria": "Settings sections",
@@ -230,16 +229,10 @@ export default defineMessages({
     "settings.about.updates": "Updates",
     "settings.about.updatesDescription": "Check whether a newer version of Clovy is available.",
     "settings.about.checkForUpdates": "Check for updates",
-    "settings.about.community": "Community",
-    "settings.about.communityDescription": "Join us in the Clovy community on Telegram at {url}.",
-    "settings.about.joinCommunity": "Join community",
     "settings.about.verification": "Server verification",
     "settings.about.verificationDescription":
       "Clovy's server runs in a confidential VM. See exactly what code is running and how to verify it yourself.",
     "settings.about.verify": "Verify server",
-    "settings.about.reportIssue": "Report an issue",
-    "settings.about.reportIssueDescription":
-      "Describe the problem, attach files if you have them, and send the report to the Clovy team.",
     "settings.about.replayOnboarding": "Replay onboarding",
     "settings.about.replayOnboardingDescription":
       "Dev only. Forget that onboarding finished and reload into the first-run wizard.",
@@ -253,14 +246,6 @@ export default defineMessages({
     "settings.experiments.browserUseDescription":
       "Enable Browser use on this install while the public feature remains off. Turning it off applies fully after Clovy restarts.",
     "settings.experiments.browserUseAria": "Enable experimental Browser use",
-    "settings.experiments.companion": "Companion pairing",
-    "settings.experiments.companionDescription":
-      "Enable Linked devices and the Clovy Companion runtime on this install. Changes apply after Clovy restarts.",
-    "settings.experiments.companionPendingOff":
-      "Companion pairing remains available until Clovy restarts. It is saved as off for the next launch.",
-    "settings.experiments.companionPendingOn":
-      "Companion pairing is saved as on and will become available after Clovy restarts.",
-    "settings.experiments.companionAria": "Enable experimental Companion pairing",
     "settings.experiments.extension": "Browser extension (unpacked)",
     "settings.experiments.extensionDescription":
       "Open chrome://extensions, turn on Developer mode, choose Load unpacked, and select the revealed folder.",
@@ -302,19 +287,6 @@ export default defineMessages({
     "settings.permissions.status.checking": "Checking",
     "settings.permissions.status.available": "Available",
     "settings.permissions.status.unavailable": "Unavailable",
-
-    "settings.privacy.loadError": "Could not load privacy settings.",
-    "settings.privacy.on": "Anonymous usage statistics are on for this device.",
-    "settings.privacy.off":
-      "Anonymous usage statistics are off. Usage data stored on this device was deleted.",
-    "settings.privacy.updateError": "Could not update usage statistics. Try again.",
-    "settings.privacy.title": "Privacy",
-    "settings.privacy.description":
-      "Choose whether Clovy shares anonymous usage statistics with OpenSoftware. Off by default.",
-    "settings.privacy.share": "Share anonymous usage statistics",
-    "settings.privacy.shareDescription":
-      "Anonymous counts of feature usage, like how many dictation sessions happen in a week. Never your recordings, notes, or anything you write.",
-    "settings.privacy.learnHow": "Learn how it works",
 
     "settings.style.title": "Style",
     "settings.style.hudPlacement": "Indicator position",
@@ -413,7 +385,6 @@ export default defineMessages({
     "settings.tabs.agent": "Agente",
     "settings.tabs.memory": "Memória",
     "settings.tabs.connectors": "Plugins",
-    "settings.tabs.linkedDevices": "Dispositivos vinculados",
     "settings.tabs.about": "Sobre",
     "settings.page.description": "Gerencie áudio, ditado, modelos de IA e recursos do agente.",
     "settings.page.navAria": "Seções das configurações",
@@ -605,16 +576,10 @@ export default defineMessages({
     "settings.about.updatesDescription":
       "Verifique se há uma versão mais recente do Clovy disponível.",
     "settings.about.checkForUpdates": "Buscar atualizações",
-    "settings.about.community": "Comunidade",
-    "settings.about.communityDescription": "Participe da comunidade do Clovy no Telegram em {url}.",
-    "settings.about.joinCommunity": "Entrar na comunidade",
     "settings.about.verification": "Verificação do servidor",
     "settings.about.verificationDescription":
       "O servidor do Clovy roda em uma VM confidencial. Veja exatamente qual código está rodando e como verificar por conta própria.",
     "settings.about.verify": "Verificar servidor",
-    "settings.about.reportIssue": "Relatar um problema",
-    "settings.about.reportIssueDescription":
-      "Descreva o problema, anexe arquivos se tiver e envie o relato para a equipe do Clovy.",
     "settings.about.replayOnboarding": "Repetir a introdução",
     "settings.about.replayOnboardingDescription":
       "Só em desenvolvimento. Esquece que a introdução foi concluída e recarrega no assistente inicial.",
@@ -628,14 +593,6 @@ export default defineMessages({
     "settings.experiments.browserUseDescription":
       "Ativa o uso do navegador nesta instalação enquanto o recurso público continua desativado. Desativar só tem efeito completo depois que o Clovy reiniciar.",
     "settings.experiments.browserUseAria": "Ativar o uso do navegador experimental",
-    "settings.experiments.companion": "Pareamento do Companion",
-    "settings.experiments.companionDescription":
-      "Ativa Dispositivos vinculados e o runtime do Clovy Companion nesta instalação. As mudanças valem depois que o Clovy reiniciar.",
-    "settings.experiments.companionPendingOff":
-      "O pareamento do Companion continua disponível até o Clovy reiniciar. Ele está salvo como desativado para a próxima abertura.",
-    "settings.experiments.companionPendingOn":
-      "O pareamento do Companion está salvo como ativado e ficará disponível depois que o Clovy reiniciar.",
-    "settings.experiments.companionAria": "Ativar o pareamento do Companion experimental",
     "settings.experiments.extension": "Extensão do navegador (descompactada)",
     "settings.experiments.extensionDescription":
       "Abra chrome://extensions, ative o Modo do desenvolvedor, escolha Carregar sem compactação e selecione a pasta exibida.",
@@ -677,20 +634,6 @@ export default defineMessages({
     "settings.permissions.status.checking": "Verificando",
     "settings.permissions.status.available": "Disponível",
     "settings.permissions.status.unavailable": "Indisponível",
-
-    "settings.privacy.loadError": "Não foi possível carregar as configurações de privacidade.",
-    "settings.privacy.on": "As estatísticas de uso anônimas estão ativadas neste dispositivo.",
-    "settings.privacy.off":
-      "As estatísticas de uso anônimas estão desativadas. Os dados de uso salvos neste dispositivo foram excluídos.",
-    "settings.privacy.updateError":
-      "Não foi possível atualizar as estatísticas de uso. Tente de novo.",
-    "settings.privacy.title": "Privacidade",
-    "settings.privacy.description":
-      "Escolha se o Clovy compartilha estatísticas de uso anônimas com a OpenSoftware. Desativado por padrão.",
-    "settings.privacy.share": "Compartilhar estatísticas de uso anônimas",
-    "settings.privacy.shareDescription":
-      "Contagens anônimas do uso de recursos, como quantas sessões de ditado acontecem por semana. Nunca suas gravações, notas ou qualquer coisa que você escreva.",
-    "settings.privacy.learnHow": "Saiba como funciona",
 
     "settings.style.title": "Estilo",
     "settings.style.hudPlacement": "Posição do indicador",

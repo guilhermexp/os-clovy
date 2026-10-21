@@ -60,7 +60,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
     handleReorderTabs,
-    handleReportIssue,
     handleSelectNote,
     handleSetNoteFolder,
     handleSetSessionFolder,
@@ -202,7 +201,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           }
         }}
         onExitSettings={() => setActiveView(settingsReturnView)}
-        onReportIssue={handleReportIssue}
         onSelectNote={(noteId) => {
           if (takeNewTabIntent()) {
             openTab({ view: "meetings", noteId });

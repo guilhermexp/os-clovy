@@ -877,7 +877,6 @@ fn parse_sse_chunks(stream: &mut ModelStream, output: &mut Vec<Value>) -> Result
 /// An event persisted by [`persist_runtime_event`], ready to be emitted.
 pub(crate) struct PersistedRuntimeEvent {
     pub method: String,
-    pub params: Value,
     pub event_id: String,
     pub data: Value,
 }
@@ -892,63 +891,12 @@ pub(crate) async fn persist_and_emit_event(
 ) -> Result<(), AppError> {
     let Some(PersistedRuntimeEvent {
         method,
-        params,
         event_id,
         data,
     }) = persist_runtime_event(repository, frame).await?
     else {
         return Ok(());
     };
-    let method = method.as_str();
-    match method {
-        "interruption.requested" if is_computer_use_approval(&params) => {
-            let interruption_id = interruption_stable_id(&params, &event_id);
-            let arguments = params.get("arguments").unwrap_or(&Value::Null);
-            if let Some(tool_call_id) = params.get("callId").and_then(Value::as_str) {
-                if let Err(error) = crate::companion::register_computer_use_approval(
-                    app,
-                    &interruption_id,
-                    tool_call_id,
-                    &frame.session_id,
-                    arguments,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        code = %error.code,
-                        request_id = %interruption_id,
-                        tool_call_id,
-                        stored_session_id = %frame.session_id,
-                        "did not route Computer use approval to a linked companion"
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    request_id = %interruption_id,
-                    stored_session_id = %frame.session_id,
-                    "kept Computer use approval desktop-local because its tool call identity was missing"
-                );
-            }
-        }
-        "tool.started" | "tool.completed" | "tool.failed"
-            if params.get("name").and_then(Value::as_str) == Some("computer_use") =>
-        {
-            if let Some(tool_call_id) = params.get("callId").and_then(Value::as_str) {
-                let status = match method {
-                    "tool.started" => crate::companion::ComputerUseExecutionStatus::Started,
-                    "tool.completed" => crate::companion::ComputerUseExecutionStatus::Succeeded,
-                    _ => crate::companion::ComputerUseExecutionStatus::Failed,
-                };
-                crate::companion::publish_computer_use_execution_status(
-                    app,
-                    tool_call_id,
-                    &frame.session_id,
-                    status,
-                );
-            }
-        }
-        _ => {}
-    }
     app.emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": frame.session_id, "runId": frame.run_id, "sequence": frame.sequence, "eventId": event_id, "method": method, "data": data })).map_err(|error| AppError::new("agent_event_emit_failed", error.to_string()))?;
     Ok(())
 }
@@ -1260,7 +1208,6 @@ pub(crate) async fn persist_runtime_event(
     }
     Ok(Some(PersistedRuntimeEvent {
         method: method.to_string(),
-        params,
         event_id,
         data,
     }))

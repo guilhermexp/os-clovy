@@ -6,15 +6,6 @@ export default defineMessages({
     "onboarding.progress": "Setup progress: step {step} of {total}",
     "onboarding.skipForNow": "Skip for now",
 
-    // Telemetry consent
-    "onboarding.telemetry.title": "Help improve Clovy",
-    "onboarding.telemetry.subtitle": "Optional and off by default. Change it anytime in Settings.",
-    "onboarding.telemetry.rowTitle": "Share anonymous usage statistics",
-    "onboarding.telemetry.rowDescription":
-      "Anonymous counts of feature usage, like how many dictation sessions happen in a week. Never your recordings, notes, or anything you write. <link>Learn how it works</link>",
-    "onboarding.telemetry.saveError": "Could not save this choice. Try again.",
-    "onboarding.telemetry.saving": "Saving",
-
     // Area
     "onboarding.area.title": "Where could I help most?",
     "onboarding.area.subtitle": "Pick the part of life you'd most like me to make easier.",
@@ -103,15 +94,6 @@ export default defineMessages({
   "pt-BR": {
     "onboarding.progress": "Progresso da configuração: etapa {step} de {total}",
     "onboarding.skipForNow": "Pular por enquanto",
-
-    "onboarding.telemetry.title": "Ajude a melhorar o Clovy",
-    "onboarding.telemetry.subtitle":
-      "Opcional e desativado por padrão. Altere quando quiser nas Configurações.",
-    "onboarding.telemetry.rowTitle": "Compartilhar estatísticas de uso anônimas",
-    "onboarding.telemetry.rowDescription":
-      "Contagens anônimas de uso de recursos, como quantas sessões de ditado acontecem em uma semana. Nunca suas gravações, notas ou qualquer coisa que você escreva. <link>Saiba como funciona</link>",
-    "onboarding.telemetry.saveError": "Não foi possível salvar esta escolha. Tente de novo.",
-    "onboarding.telemetry.saving": "Salvando",
 
     "onboarding.area.title": "Onde posso ajudar mais?",
     "onboarding.area.subtitle":

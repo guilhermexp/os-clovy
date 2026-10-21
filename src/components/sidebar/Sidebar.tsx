@@ -21,7 +21,6 @@ import { IconPin } from "central-icons/IconPin";
 import { IconArchive } from "central-icons/IconArchive";
 import { IconArrowUndoUp } from "central-icons/IconArrowUndoUp";
 import { IconPlugin1 } from "central-icons/IconPlugin1";
-import { IconPhone } from "central-icons/IconPhone";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
@@ -44,9 +43,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { markAgentNewSessionPending } from "../agent/session-persistence";
-import { CategoryIcon } from "../agent/composer/CategoryIcon";
 import { ClovyWordmark } from "../brand/ClovyLogo";
-import { type ReportCategory, reportCategoryDef } from "../agent/composer/reportCategory";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
@@ -72,14 +69,13 @@ import {
   type SidebarDemoSessionsDetail,
 } from "../../lib/completed-sessions-demo-ids";
 import { useCurrentDataPartitionName } from "../../lib/data-partition";
-import { useExperimentalFlags } from "../../lib/experimental-flags";
 import {
   sessionMatchesDataPartition,
   sessionPartitionMap,
   type SessionPartitionMap,
 } from "../../lib/session-partition-filter";
 import { isMacLikePlatform, isWindowsPlatform } from "../../lib/platform";
-import { settingsTabsForCompanionPairing, type SettingsTab } from "../settings/settings-config";
+import { settingsTabsForPlatform, type SettingsTab } from "../settings/settings-config";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { DotSpinner } from "../DotSpinner";
 import { combineSourceAudioLevels, Waveform } from "../recorder/Waveform";
@@ -138,7 +134,6 @@ type SidebarProps = {
   // Returns to wherever the user was before opening settings (falls back to
   // Notes when not wired, e.g. unit tests).
   onExitSettings?: () => void;
-  onReportIssue?: (category: ReportCategory) => void;
   onSelectNote: (noteId: string) => void;
   onNewAgentSession: () => void;
   /** Whether the persistent Home conversation is available on this platform. */
@@ -288,14 +283,7 @@ const SETTINGS_SIDEBAR_GROUPS: {
   {
     id: "app",
     title: "shell.settingsNav.group.app",
-    items: [
-      {
-        id: "linked-devices",
-        label: "shell.settingsNav.linkedDevices",
-        icon: <IconPhone size={16} />,
-      },
-      { id: "about", label: "shell.settingsNav.about", icon: <IconCircleInfo size={16} /> },
-    ],
+    items: [{ id: "about", label: "shell.settingsNav.about", icon: <IconCircleInfo size={16} /> }],
   },
 ];
 
@@ -317,7 +305,6 @@ export function Sidebar({
   onSettingsTabChange,
   onChangeView,
   onExitSettings,
-  onReportIssue,
   onSelectNote,
   onNewAgentSession,
   homeEnabled = true,
@@ -342,7 +329,6 @@ export function Sidebar({
   const [commandQuery, setCommandQuery] = useState("");
   const [commandActiveIndex, setCommandActiveIndex] = useState(0);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [identityMenuOpen, setIdentityMenuOpen] = useState(false);
   const [activitySupported, setActivitySupported] = useState(
     () => isMacLikePlatform() || isWindowsPlatform(),
   );
@@ -355,7 +341,6 @@ export function Sidebar({
   const searchShortcut = primaryShortcutLabel("K");
   const newSessionShortcut = primaryShortcutLabel("N");
   const inSettings = activeView === "settings";
-  const { companionPairingEnabled } = useExperimentalFlags();
   const [allAgentSessions, setAgentSessions] = useState<AgentSessionDto[]>([]);
   // Chats belong to the data partition they were created under (ADR 0031).
   // The sidebar filters its list through the session-to-partition map and re-filters
@@ -595,7 +580,7 @@ export function Sidebar({
       // Appearance carry their row-level terms so "theme" or "permissions"
       // still finds the right tab.
       ...(normalized
-        ? settingsTabsForCompanionPairing(companionPairingEnabled, activitySupported)
+        ? settingsTabsForPlatform(activitySupported)
             .filter((tab) => !HIDDEN_SETTINGS_TABS.has(tab.id))
             .map(
               (tab): CommandPromptItem => ({
@@ -620,41 +605,19 @@ export function Sidebar({
         : []),
     ].filter(matches);
 
-    // Support: the report entry points (reusing the footer menu's items and
-    // CategoryIcon), guarded exactly like the footer menu so the prompt never
-    // offers an action the menu hides.
-    const supportItems: CommandPromptItem[] = [
-      ...(onReportIssue
-        ? REPORT_MENU_ITEMS.map((item): CommandPromptItem => {
-            const def = reportCategoryDef(item.category);
-            const label = t(item.label);
-            return {
-              id: `support:report-${item.category}`,
-              label,
-              icon: <CategoryIcon category={item.category} size={15} />,
-              searchText: normalizeCommandQuery(`${label} ${def?.keywords.join(" ") ?? ""}`),
-              action: () => onReportIssue(item.category),
-            };
-          })
-        : []),
-    ].filter(matches);
-
     return [
       { title: t("shell.command.group.recents"), items: recentItems },
       { title: t("shell.command.group.quickActions"), items: quickItems },
-      { title: t("shell.command.group.support"), items: supportItems },
     ].filter((group) => group.items.length > 0);
   }, [
     activitySupported,
     agentSessions,
     commandQuery,
-    companionPairingEnabled,
     completedSessionIds,
     homeEnabled,
     notes,
     onChangeView,
     onOpenRecording,
-    onReportIssue,
     onSelectAgentSession,
     onSelectNote,
     onSettingsTabChange,
@@ -715,7 +678,6 @@ export function Sidebar({
 
       setQuery("");
       setMenu(null);
-      setIdentityMenuOpen(false);
       setCommandPromptOpen(false);
       setAgentSessions(buildSidebarDevStateSessions());
       setSelectedAgentSessionId(SIDEBAR_DEV_SESSION_IDS.selected);
@@ -791,7 +753,6 @@ export function Sidebar({
 
   function openCommandPrompt() {
     setMenu(null);
-    setIdentityMenuOpen(false);
     setCommandQuery("");
     setCommandActiveIndex(0);
     setCommandPromptOpen(true);
@@ -998,7 +959,6 @@ export function Sidebar({
       {inSettings ? (
         <SettingsSidebarNav
           activeTab={settingsTab}
-          companionPairingEnabled={companionPairingEnabled}
           activitySupported={activitySupported}
           onSelectTab={(tab) => onSettingsTabChange?.(tab)}
           onBack={() => (onExitSettings ? onExitSettings() : onChangeView("notes"))}
@@ -1233,23 +1193,7 @@ export function Sidebar({
 
       <footer className="sidebar-footer">
         {footerAccessory}
-        <SidebarFooterMenu
-          menuOpen={identityMenuOpen}
-          onToggleMenu={() => setIdentityMenuOpen((open) => !open)}
-          onCloseMenu={() => setIdentityMenuOpen(false)}
-          onOpenSettings={() => {
-            setIdentityMenuOpen(false);
-            onChangeView("settings");
-          }}
-          onReportIssue={
-            onReportIssue
-              ? (category) => {
-                  setIdentityMenuOpen(false);
-                  onReportIssue(category);
-                }
-              : undefined
-          }
-        />
+        <SidebarSettingsButton onOpenSettings={() => onChangeView("settings")} />
       </footer>
 
       {menu?.kind === "agent-session" && menuAgentSession ? (
@@ -1421,13 +1365,11 @@ function buildSidebarDevStateSessions(): AgentSessionDto[] {
 
 function SettingsSidebarNav({
   activeTab,
-  companionPairingEnabled,
   activitySupported,
   onSelectTab,
   onBack,
 }: {
   activeTab: SettingsTab;
-  companionPairingEnabled: boolean;
   activitySupported: boolean;
   onSelectTab: (tab: SettingsTab) => void;
   onBack: () => void;
@@ -1438,10 +1380,7 @@ function SettingsSidebarNav({
   const groups = SETTINGS_SIDEBAR_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter(
-      (item) =>
-        !HIDDEN_SETTINGS_TABS.has(item.id) &&
-        (companionPairingEnabled || item.id !== "linked-devices") &&
-        (activitySupported || item.id !== "activity"),
+      (item) => !HIDDEN_SETTINGS_TABS.has(item.id) && (activitySupported || item.id !== "activity"),
     ),
   })).filter((group) => group.items.length > 0);
 
@@ -1675,69 +1614,15 @@ function isSearchShortcut(event: KeyboardEvent) {
   return event.key.toLowerCase() === "k" && isPrimaryShortcut(event);
 }
 
-// The report shortcuts in the footer menu: the same set as the composer's
-// "+" popover, minus attaching a file. Action-phrased to read as menu verbs.
-const REPORT_MENU_ITEMS: { category: ReportCategory; label: MessageKey }[] = [
-  { category: "bug", label: "shell.identity.reportBug" },
-  { category: "feedback", label: "shell.identity.sendFeedback" },
-  { category: "feature", label: "shell.identity.requestFeature" },
-];
-// The footer entry point: clicking it opens a small popover whose actions open
-// the settings page or a report.
-function SidebarFooterMenu({
-  menuOpen,
-  onToggleMenu,
-  onCloseMenu,
-  onOpenSettings,
-  onReportIssue,
-}: {
-  menuOpen: boolean;
-  onToggleMenu: () => void;
-  onCloseMenu: () => void;
-  onOpenSettings: () => void;
-  onReportIssue?: (category: ReportCategory) => void;
-}) {
+// The footer entry point: one row that opens the settings page.
+function SidebarSettingsButton({ onOpenSettings }: { onOpenSettings: () => void }) {
   const t = useT();
-  const wrapRef = useRef<HTMLDivElement>(null);
-
-  useDismiss(wrapRef, menuOpen, onCloseMenu);
-
   return (
-    <div className="sidebar-identity-wrap" ref={wrapRef}>
-      <button
-        type="button"
-        className="sidebar-nav-item sidebar-identity"
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        aria-label={t("shell.identity.menuLabel")}
-        onClick={onToggleMenu}
-      >
+    <div className="sidebar-identity-wrap">
+      <button type="button" className="sidebar-nav-item sidebar-identity" onClick={onOpenSettings}>
         <IconSettingsGear4 size={16} className="sidebar-nav-icon" />
         <span className="sidebar-nav-label">{t("common.settings")}</span>
       </button>
-      {menuOpen ? (
-        <div className="sidebar-identity-menu" role="menu">
-          <button type="button" role="menuitem" onClick={onOpenSettings}>
-            <IconSettingsGear4 size={14} />
-            {t("common.settings")}
-          </button>
-          {onReportIssue
-            ? REPORT_MENU_ITEMS.map((item) => (
-                <button
-                  key={item.category}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => onReportIssue(item.category)}
-                >
-                  <span className="sidebar-report-icon" data-category={item.category}>
-                    <CategoryIcon category={item.category} size={14} />
-                  </span>
-                  {t(item.label)}
-                </button>
-              ))
-            : null}
-        </div>
-      ) : null}
     </div>
   );
 }

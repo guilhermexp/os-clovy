@@ -41,8 +41,7 @@ use crate::{
             ShareDto, ShareGetRequest, ShareInviteKeyDto, ShareInviteKeySaveRequest,
             ShareInviteKeysGetRequest, ShareInvitesAddedDto, ShareKeyDto, ShareKeyGetRequest,
             ShareKeySaveRequest, ShareRevokeInviteRequest, ShareSummaryDto, SourceReadinessDto,
-            StartMeetingRecordingRequest, StartRecordingRequest, SubmitIssueReportRequest,
-            SubmitIssueReportResponse, SuggestAgentSessionTitleRequest,
+            StartMeetingRecordingRequest, StartRecordingRequest, SuggestAgentSessionTitleRequest,
             SuggestAgentSessionTitleResponse, UpdateDictionaryEntryRequest, UpdateNoteRequest,
             UpdateNoteResponse,
         },
@@ -64,7 +63,6 @@ use tokio::sync::OnceCell;
 
 const MEMORY_CONTENT_MAX_CHARS: usize = 4_000;
 const FOLDER_INSTRUCTIONS_MAX_CHARS: usize = 4_000;
-const ISSUE_REPORT_ATTACHMENT_LIMIT: usize = 20;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 static MEMORY_SETTINGS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -230,11 +228,9 @@ pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError
 
 #[tauri::command]
 pub fn experimental_flags_get(
-    app: AppHandle,
     state: tauri::State<'_, crate::experimental_settings::ExperimentalSettingsState>,
 ) -> Result<crate::experimental_settings::ExperimentalSettingsSnapshot, AppError> {
-    crate::experimental_settings::get(state.inner())
-        .map(|settings| crate::experimental_settings::snapshot(&app, settings))
+    crate::experimental_settings::get(state.inner()).map(crate::experimental_settings::snapshot)
 }
 
 #[tauri::command]
@@ -954,84 +950,6 @@ pub async fn suggest_agent_session_title(
 }
 
 #[tauri::command]
-pub async fn submit_issue_report(
-    app: AppHandle,
-    request: SubmitIssueReportRequest,
-) -> Result<SubmitIssueReportResponse, AppError> {
-    let app_version = app.package_info().version.to_string();
-    let diagnostics = if request.attachment_names.len() >= ISSUE_REPORT_ATTACHMENT_LIMIT
-        || request.attachment_paths.len() >= ISSUE_REPORT_ATTACHMENT_LIMIT
-    {
-        None
-    } else {
-        match issue_report_agent_diagnostics(&app, request.stored_session_id.as_deref()).await {
-            Ok(diagnostics) => diagnostics,
-            Err(error) => {
-                tracing::warn!(
-                    error_code = %error.code,
-                    "issue report diagnostics were unavailable; submitting the report without them"
-                );
-                None
-            }
-        }
-    };
-    crate::clovy_api::submit_issue_report(&request, &app_version, diagnostics.as_deref()).await
-}
-
-async fn issue_report_agent_diagnostics(
-    app: &AppHandle,
-    stored_session_id: Option<&str>,
-) -> Result<Option<String>, AppError> {
-    let Some(stored_session_id) = stored_session_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
-    let repositories = repositories(app).await?;
-    let row = sqlx::query::query(
-        "SELECT id, status, error_code, completed_at
-         FROM agent_runs
-         WHERE session_id = ?
-         ORDER BY started_at DESC
-         LIMIT 1",
-    )
-    .bind(stored_session_id)
-    .fetch_optional(&repositories.pool)
-    .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    use sqlx::row::Row as _;
-    if row.get::<String, _>("status") != "failed" {
-        return Ok(None);
-    }
-    let Some(error_code) = row.get::<Option<String>, _>("error_code") else {
-        return Ok(None);
-    };
-    let stored_session_id = diagnostic_field(stored_session_id, 128);
-    let agent_run_id = diagnostic_field(&row.get::<String, _>("id"), 128);
-    let error_code = diagnostic_field(&error_code, 128);
-    let completed_at = diagnostic_field(
-        row.get::<Option<String>, _>("completed_at")
-            .as_deref()
-            .unwrap_or("unknown"),
-        64,
-    );
-    Ok(Some(format!(
-        "Clovy agent runtime diagnostics\n\nStored session ID: {stored_session_id}\nAgent run ID: {agent_run_id}\nError code: {error_code}\nCompleted at: {completed_at}\n"
-    )))
-}
-
-fn diagnostic_field(value: &str, max_chars: usize) -> String {
-    crate::agent_runtime::host::sanitize_log(value)
-        .replace(['\r', '\n'], " ")
-        .chars()
-        .take(max_chars)
-        .collect()
-}
-
-#[tauri::command]
 pub async fn create_dictionary_entry(
     app: AppHandle,
     request: CreateDictionaryEntryRequest,
@@ -1108,14 +1026,6 @@ pub fn clovy_open_verify_page() -> Result<(), AppError> {
     crate::system_browser::open_in_browser(&crate::clovy_api::verify_url())
 }
 
-const CLOVY_COMMUNITY_URL: &str = "https://t.me/+B4Z8KUqEsRc4ZGVh";
-
-/// Opens the Clovy Telegram community in the default browser.
-#[tauri::command]
-pub fn clovy_open_community_page() -> Result<(), AppError> {
-    crate::system_browser::open_in_browser(CLOVY_COMMUNITY_URL)
-}
-
 /// Opens an arbitrary external link in the default browser. This is the
 /// generic sibling of the fixed-URL commands above: the frontend's global
 /// anchor interceptor (src/lib/external-links.ts) routes every external
@@ -1142,11 +1052,6 @@ pub fn clovy_open_external_url(url: String) -> Result<(), AppError> {
 #[tauri::command]
 pub fn june_open_verify_page() -> Result<(), AppError> {
     clovy_open_verify_page()
-}
-
-#[tauri::command]
-pub fn june_open_community_page() -> Result<(), AppError> {
-    clovy_open_community_page()
 }
 
 #[tauri::command]
@@ -2072,12 +1977,6 @@ pub async fn finish_recording(
         note_processing_progress_reporter(&app),
     )
     .await?;
-    if response.processing_started {
-        crate::p3a::record_question_best_effort(
-            app,
-            crate::p3a::questions::Question::NotesMeetingsRecorded,
-        );
-    }
     Ok(response)
 }
 

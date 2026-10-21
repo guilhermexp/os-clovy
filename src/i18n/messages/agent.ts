@@ -151,22 +151,6 @@ export default defineMessages({
     "agent.rename.nameLabel": "Name",
     "agent.rename.nameAria": "Session name",
 
-    // Report dialog
-    "agent.report.title": "Issue report",
-    "agent.report.pickerTitle": "Add report files",
-    "agent.report.sendFailed": "The issue report could not be sent. {error}",
-    "agent.report.addFiles": "Add files",
-    "agent.report.sending": "Sending",
-    "agent.report.send": "Send report",
-    "agent.report.sent":
-      "Your report was sent to the Clovy team. Thank you for helping improve Clovy.",
-    "agent.report.category": "Report category",
-    "agent.report.description": "Description",
-    "agent.report.diagnostics":
-      "Include recent failure details (clovy-agent-diagnostics.txt). This contains a stable error code and technical stored session and run IDs, not conversation content or tool output.",
-    "agent.report.attachedFiles": "Attached files",
-    "agent.report.removeFile": "Remove {name}",
-
     // Sessions list
     "agent.sessions.title": "Sessions",
     "agent.sessions.new": "New session",
@@ -366,22 +350,6 @@ export default defineMessages({
     "agent.rename.title": "Renomear sessão",
     "agent.rename.nameLabel": "Nome",
     "agent.rename.nameAria": "Nome da sessão",
-
-    // Report dialog
-    "agent.report.title": "Relato de problema",
-    "agent.report.pickerTitle": "Adicionar arquivos ao relato",
-    "agent.report.sendFailed": "Não foi possível enviar o relato. {error}",
-    "agent.report.addFiles": "Adicionar arquivos",
-    "agent.report.sending": "Enviando",
-    "agent.report.send": "Enviar relato",
-    "agent.report.sent":
-      "Seu relato foi enviado para a equipe do Clovy. Obrigado por ajudar a melhorar o Clovy.",
-    "agent.report.category": "Categoria do relato",
-    "agent.report.description": "Descrição",
-    "agent.report.diagnostics":
-      "Incluir detalhes de falhas recentes (clovy-agent-diagnostics.txt). Contém um código de erro estável e IDs técnicos de sessão armazenada e de execução, não o conteúdo da conversa nem a saída de ferramentas.",
-    "agent.report.attachedFiles": "Arquivos anexados",
-    "agent.report.removeFile": "Remover {name}",
 
     // Sessions list
     "agent.sessions.title": "Sessões",

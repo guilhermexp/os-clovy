@@ -16,7 +16,6 @@ import {
   setOnboardingResumeStep,
   subscribeToOnboardingComplete,
 } from "../lib/onboarding";
-import { TELEMETRY_INFO_URL } from "../lib/p3a";
 import type { RecordingSourceReadinessDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
@@ -26,10 +25,7 @@ const mocks = vi.hoisted(() => ({
   openPrivacySettings: vi.fn(),
   setDictationLanguage: vi.fn(),
   setDictationShortcut: vi.fn(),
-  setP3aEnabled: vi.fn(),
-  p3aRecord: vi.fn(),
   setClovyPersona: vi.fn(),
-  clovyOpenCommunityPage: vi.fn(),
   clovyOpenVerifyPage: vi.fn(),
   listen: vi.fn(),
 }));
@@ -52,10 +48,7 @@ vi.mock("../lib/tauri", () => ({
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationLanguage: mocks.setDictationLanguage,
   setDictationShortcut: mocks.setDictationShortcut,
-  setP3aEnabled: mocks.setP3aEnabled,
-  p3aRecord: mocks.p3aRecord,
   setClovyPersona: mocks.setClovyPersona,
-  clovyOpenCommunityPage: mocks.clovyOpenCommunityPage,
   clovyOpenVerifyPage: mocks.clovyOpenVerifyPage,
 }));
 
@@ -137,19 +130,8 @@ describe("OnboardingFlow", () => {
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.checkRecordingSourceReadiness.mockResolvedValue(systemAudioReadiness(true));
     mocks.openPrivacySettings.mockResolvedValue(undefined);
-    mocks.clovyOpenCommunityPage.mockResolvedValue(undefined);
     mocks.setDictationLanguage.mockResolvedValue(undefined);
     mocks.setDictationShortcut.mockResolvedValue(undefined);
-    mocks.setP3aEnabled.mockImplementation((enabled: boolean) =>
-      Promise.resolve({
-        settings: {
-          enabled,
-          consentVersion: 1,
-          consentedAtWeek: enabled ? "2026-W28" : null,
-        },
-      }),
-    );
-    mocks.p3aRecord.mockResolvedValue(undefined);
     mocks.setClovyPersona.mockResolvedValue(undefined);
     mocks.dictationSettings.mockResolvedValue({
       settings: {
@@ -171,8 +153,6 @@ describe("OnboardingFlow", () => {
 
   async function renderFlow(onComplete = vi.fn()) {
     render(<OnboardingFlow {...flowProps({ onComplete })} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Where could I help most?" });
     await userEvent.click(screen.getByRole("radio", { name: /Work/ }));
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -248,12 +228,8 @@ describe("OnboardingFlow", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 
-    expect(mocks.p3aRecord).toHaveBeenCalledWith("onboarding.completed");
     expect(onboardingArea()).toBe("work");
     expect(onboardingMood()).toBe("strategic");
-    expect(
-      mocks.p3aRecord.mock.calls.filter(([question]) => question.startsWith("onboarding.area.")),
-    ).toEqual([["onboarding.area.work"]]);
     expect(mocks.setClovyPersona).toHaveBeenCalledWith({
       area: "work",
       voice: 45,
@@ -263,37 +239,6 @@ describe("OnboardingFlow", () => {
     });
     // Completion is the caller's job (App marks it), not the flow's.
     expect(isOnboardingComplete()).toBe(false);
-  });
-
-  it("keeps anonymous usage statistics off by default", async () => {
-    render(<OnboardingFlow {...flowProps()} />);
-
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    expect(screen.queryByText("See exactly what is shared")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Learn how it works" })).toHaveAttribute(
-      "href",
-      TELEMETRY_INFO_URL,
-    );
-    expect(
-      screen.getByRole("switch", { name: "Share anonymous usage statistics" }),
-    ).toHaveAttribute("aria-checked", "false");
-
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(mocks.setP3aEnabled).toHaveBeenCalledWith(false);
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-  });
-
-  it("saves anonymous usage statistics consent when selected", async () => {
-    const user = userEvent.setup();
-    render(<OnboardingFlow {...flowProps()} />);
-
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    await user.click(screen.getByRole("switch", { name: "Share anonymous usage statistics" }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(mocks.setP3aEnabled).toHaveBeenCalledWith(true);
-    await screen.findByRole("heading", { name: "Where could I help most?" });
   });
 
   it("asks where Clovy should help before choosing a personality", async () => {
@@ -310,39 +255,7 @@ describe("OnboardingFlow", () => {
     await user.click(continueButton);
 
     expect(onboardingArea()).toBe("thinking");
-    expect(mocks.p3aRecord).not.toHaveBeenCalledWith("onboarding.area.thinking");
     await screen.findByRole("heading", { name: "Choose my personality" });
-  });
-
-  it("reports only the final area after going back and changing it", async () => {
-    const user = userEvent.setup();
-    const onComplete = vi.fn();
-    setOnboardingResumeStep("area");
-    render(<OnboardingFlow {...flowProps({ onComplete })} />);
-
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-    await user.click(screen.getByRole("radio", { name: /Work/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-
-    expect(mocks.p3aRecord).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Back" }));
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-    await user.click(screen.getByRole("radio", { name: /Personal/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Let Clovy listen and type" });
-
-    grantPermissions();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-
-    expect(
-      mocks.p3aRecord.mock.calls.filter(([question]) => question.startsWith("onboarding.area.")),
-    ).toEqual([["onboarding.area.personal"]]);
-    expect(mocks.p3aRecord).toHaveBeenCalledWith("onboarding.completed");
   });
 
   it("saves the selected mood before continuing to permissions", async () => {
@@ -437,7 +350,7 @@ describe("OnboardingFlow", () => {
       },
     });
     render(<OnboardingFlow {...flowProps()} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
+    await screen.findByRole("heading", { name: "Where could I help most?" });
 
     await waitFor(() =>
       expect(mocks.setDictationShortcut).toHaveBeenCalledWith(
@@ -472,7 +385,7 @@ describe("OnboardingFlow", () => {
       },
     });
     render(<OnboardingFlow {...flowProps()} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
+    await screen.findByRole("heading", { name: "Where could I help most?" });
 
     await waitFor(() => expect(mocks.dictationSettings).toHaveBeenCalledOnce());
     expect(mocks.setDictationShortcut).not.toHaveBeenCalled();

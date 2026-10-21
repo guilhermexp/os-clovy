@@ -5501,10 +5501,6 @@ fn deliver_dictation_outcome(
     // awaited history write. Normal transcripts keep the existing best-effort
     // background write so their paste path does not gain database latency.
     if let Some(transcript) = outcome.transcript.as_ref() {
-        crate::p3a::record_question_best_effort(
-            app.clone(),
-            crate::p3a::questions::Question::DictationSessions,
-        );
         if !history_already_persisted {
             spawn_dictation_history_write(
                 app.clone(),

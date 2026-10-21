@@ -15,7 +15,6 @@ pub mod claude_projects;
 pub mod clovy_api;
 pub mod coding_agents;
 pub mod commands;
-pub mod companion;
 pub mod computer_use;
 mod computer_use_cursor;
 mod computer_use_permission_drag;
@@ -46,7 +45,6 @@ mod note_audio_export;
 mod note_save_flush;
 pub mod notifications;
 pub mod obsidian;
-pub mod p3a;
 mod process_group;
 pub mod providers;
 pub mod routines;
@@ -241,23 +239,6 @@ pub fn run() {
             routines::routine_browser_access_set,
             commands::experimental_flags_get,
             commands::experimental_flags_set,
-            companion::companion_begin_pairing,
-            companion::companion_pairing_status,
-            companion::companion_approve_pairing,
-            companion::companion_list_devices,
-            companion::companion_list_browse_roots,
-            companion::companion_grant_browse_root,
-            companion::companion_revoke_browse_root,
-            companion::companion_consume_attachments,
-            companion::companion_computer_use_approval_settings,
-            companion::companion_set_computer_use_approval_enabled,
-            companion::companion_rename_device,
-            companion::companion_revoke_device,
-            companion::companion_complete_frontend_request,
-            companion::companion_cancel_frontend_request,
-            companion::companion_publish_agent_event,
-            companion::companion_list_agent_media,
-            companion::companion_read_agent_media_chunk,
             commands::create_note,
             commands::list_notes,
             commands::get_note,
@@ -297,7 +278,6 @@ pub fn run() {
             commands::set_folder_memory_disabled,
             commands::memory_settings,
             commands::set_memory_enabled,
-            commands::submit_issue_report,
             commands::share_create,
             commands::share_list,
             commands::share_get,
@@ -315,10 +295,8 @@ pub fn run() {
             commands::reveal_path,
             commands::unpack_bundled_extension,
             commands::clovy_open_verify_page,
-            commands::clovy_open_community_page,
             commands::clovy_open_external_url,
             commands::june_open_verify_page,
-            commands::june_open_community_page,
             commands::june_open_external_url,
             commands::start_meeting_recording,
             commands::start_recording,
@@ -400,10 +378,6 @@ pub fn run() {
             llm::commands::llm_delete_endpoint,
             llm::commands::llm_set_usage,
             llm::commands::llm_test_provider,
-            p3a::p3a_settings,
-            p3a::p3a_question_catalog,
-            p3a::set_p3a_enabled,
-            p3a::p3a_record,
             extension_host::extension_pairing_status,
             extension_host::register_browser_extension_host,
             connectors::commands::connectors_policy,
@@ -471,7 +445,6 @@ pub fn run() {
         .manage(Arc::new(browser_broker::BrowserBroker::default()))
         .manage(computer_use::ComputerUseState::default())
         .manage(shutdown::ShutdownCoordinator::default())
-        .manage(companion::CompanionRuntime::default())
         .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
         .manage(connectors::NotionConnectFlow::default())
@@ -496,16 +469,12 @@ pub fn run() {
             providers::setup(app);
             setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
-            p3a::setup(app);
             updates::setup(app);
             dictation::setup(app);
             agent_hud::setup(app);
             notifications::setup(app);
             meeting_detection::setup(app);
             extension_host::setup(app);
-            // Companion pairing is restart-required: setup latches the
-            // persisted experiment for every native and frontend boundary.
-            companion::setup(app.handle());
             routines::start_scheduler(app.handle());
             // Poll Google for the events routines subscribe to (email arrivals
             // and upcoming meetings) and wake the matching durable routine.

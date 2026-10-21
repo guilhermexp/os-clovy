@@ -325,15 +325,11 @@ describe("Sidebar primary navigation", () => {
       />,
     );
 
-    // The settings entry point is the footer menu: click it to open the
-    // popover, then choose Settings.
-    const identityButton = screen.getByRole("button", {
-      name: /settings menu/i,
-    });
-    expect(identityButton.closest(".sidebar-footer")).not.toBeNull();
+    // The settings entry point is the footer row.
+    const settingsButton = screen.getByRole("button", { name: "Settings" });
+    expect(settingsButton.closest(".sidebar-footer")).not.toBeNull();
 
-    await user.click(identityButton);
-    await user.click(screen.getByRole("menuitem", { name: "Settings" }));
+    await user.click(settingsButton);
     expect(onChangeView).toHaveBeenCalledWith("settings");
   });
 
@@ -392,9 +388,7 @@ describe("Sidebar primary navigation", () => {
     await user.click(screen.getByRole("button", { name: "Shortcuts" }));
     expect(onSettingsTabChange).toHaveBeenCalledWith("shortcuts");
 
-    expect(screen.getByRole("button", { name: /settings menu/i })).not.toHaveAttribute(
-      "data-active",
-    );
+    expect(screen.getByRole("button", { name: "Settings" })).not.toHaveAttribute("data-active");
   });
 });
 

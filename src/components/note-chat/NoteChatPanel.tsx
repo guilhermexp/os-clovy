@@ -249,8 +249,7 @@ export function NoteChatPanel({
   const modelPopoverRef = useRef<HTMLDivElement>(null);
   const modelSearchRef = useRef<HTMLInputElement>(null);
   // Catalog hydration is presentation-only. The session-local staged choice
-  // is authoritative until a run applies it, including choices acknowledged
-  // to a linked companion while this panel is already open.
+  // is authoritative until a run applies it.
   useEffect(() => {
     let stale = false;
     void listProviderModels("generation")

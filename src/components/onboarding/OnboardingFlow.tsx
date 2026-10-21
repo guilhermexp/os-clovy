@@ -8,15 +8,14 @@ import {
   type OnboardingArea,
 } from "../../lib/onboarding";
 import { fallbackDictationCapabilities } from "../../lib/platform";
-import { dictationSettings, p3aRecord, setDictationShortcut } from "../../lib/tauri";
+import { dictationSettings, setDictationShortcut } from "../../lib/tauri";
 import type { DictationShortcutSetting } from "../../lib/tauri";
 import { PermissionsStep } from "./steps/PermissionSteps";
 import { AreaStep } from "./steps/AreaStep";
 import { MoodStep } from "./steps/MoodStep";
-import { TelemetryConsentStep } from "./steps/TelemetryConsentStep";
 import { usePermissionStatuses, useSystemAudioStatus } from "./use-permission-status";
 
-type StepId = "telemetry" | "area" | "mood" | "permissions";
+type StepId = "area" | "mood" | "permissions";
 
 // The product default: bare fn, mirroring DictationShortcutSetting::bare_fn()
 // on the Rust side.
@@ -46,7 +45,7 @@ function isFactoryDefaultShortcut(shortcut: DictationShortcutSetting) {
   );
 }
 
-const ONBOARDING_STEPS: StepId[] = ["telemetry", "area", "mood", "permissions"];
+const ONBOARDING_STEPS: StepId[] = ["area", "mood", "permissions"];
 
 type Props = {
   onComplete: () => void;
@@ -71,9 +70,7 @@ function browserOnboardingDemoStep(): StepId | null {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
   const params = new URLSearchParams(window.location.search);
   const step = params.get("clovyDemoStep") ?? params.get("juneDemoStep");
-  return step === "telemetry" || step === "area" || step === "mood" || step === "permissions"
-    ? step
-    : null;
+  return step === "area" || step === "mood" || step === "permissions" ? step : null;
 }
 
 export function OnboardingFlow({ onComplete }: Props) {
@@ -120,10 +117,7 @@ export function OnboardingFlow({ onComplete }: Props) {
   }
 
   function completeOnboarding() {
-    void Promise.allSettled([
-      p3aRecord("onboarding.completed"),
-      p3aRecord(`onboarding.area.${area}`),
-    ]).finally(onComplete);
+    onComplete();
   }
 
   function goBack() {
@@ -159,9 +153,7 @@ export function OnboardingFlow({ onComplete }: Props) {
         </nav>
       </header>
       <div className="onboarding-body">
-        {stepId === "telemetry" ? (
-          <TelemetryConsentStep onContinue={goNext} />
-        ) : stepId === "area" ? (
+        {stepId === "area" ? (
           <AreaStep
             onContinue={(nextArea) => {
               setArea(nextArea);

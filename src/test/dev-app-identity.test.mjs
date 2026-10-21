@@ -131,10 +131,6 @@ describe("production identity compatibility", () => {
         'const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.notion-hosted-mcp";',
         'const LEGACY_DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.notion-hosted-mcp";',
       ],
-      "src-tauri/src/companion/mod.rs": [
-        'const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.companion.desktop.identity";',
-        'const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.companion.desktop.identity";',
-      ],
       "src-tauri/src/extension_host.rs": [
         'pub const NATIVE_HOST_NAME: &str = "co.opensoftware.clovy.extension";',
         'pub const LEGACY_NATIVE_HOST_NAME: &str = "co.opensoftware.june.extension";',

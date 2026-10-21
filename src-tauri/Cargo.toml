@@ -67,8 +67,6 @@ libc = "0.2"
 # Strips the Windows `\\?\` verbatim path prefix canonicalize() adds so it
 # never leaks into config.yaml or the UI. No-op on non-Windows.
 dunce = "1.0"
-clovy-companion-crypto = { path = "../crates/clovy-companion-crypto" }
-clovy-companion-protocol = { path = "../crates/clovy-companion-protocol" }
 rand = "0.8"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }

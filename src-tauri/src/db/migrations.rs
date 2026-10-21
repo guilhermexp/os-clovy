@@ -6,10 +6,6 @@ use sqlx_sqlite::{SqlitePool, SqliteTransaction};
 
 const SCHEMA_MIGRATIONS_TABLE: &str = "schema_migrations";
 
-const LEGACY_PENDING_COMPANION_MESSAGE: &str =
-    "This request may already have reached June. Check your Mac before trying a different request.";
-const OUTCOME_UNKNOWN_COMPANION_MESSAGE: &str = "This request may already have reached Clovy. Check your Mac, then choose the action again only if it is still needed.";
-
 #[derive(Clone, Copy)]
 struct ColumnDefinition {
     name: &'static str,
@@ -1441,62 +1437,7 @@ impl SchemaSnapshot {
 }
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    run_migration_catalog(pool, MIGRATIONS).await?;
-    // Prerelease companion builds recorded outcome-unknown mutations as
-    // retryable 'completed' busy responses. Rewriting them to non-retryable
-    // pending reservations must survive re-runs, so it stays outside the
-    // one-shot catalog and matches nothing once every legacy row is rewritten.
-    migrate_legacy_companion_reservations(pool).await
-}
-
-async fn migrate_legacy_companion_reservations(
-    pool: &SqlitePool,
-) -> Result<(), sqlx::error::Error> {
-    use clovy_companion_protocol::{FailureCode, ResultPayload};
-
-    let rows = query(
-        "SELECT device_id, operation_id, response
-         FROM companion_operations
-         WHERE operation_state = 'completed'
-           AND instr(CAST(response AS TEXT), ?) > 0",
-    )
-    .bind(LEGACY_PENDING_COMPANION_MESSAGE)
-    .fetch_all(pool)
-    .await?;
-    for row in rows {
-        let encoded: Vec<u8> = row.get("response");
-        let Ok(mut response) =
-            serde_json::from_slice::<clovy_companion_protocol::Response>(&encoded)
-        else {
-            continue;
-        };
-        let ResultPayload::Error(failure) = &mut response.result else {
-            continue;
-        };
-        if failure.code != FailureCode::Busy
-            || !failure.retryable
-            || failure.message != LEGACY_PENDING_COMPANION_MESSAGE
-        {
-            continue;
-        }
-        failure.code = FailureCode::OutcomeUnknown;
-        failure.message = OUTCOME_UNKNOWN_COMPANION_MESSAGE.to_string();
-        failure.retryable = false;
-        let Ok(encoded) = serde_json::to_vec(&response) else {
-            continue;
-        };
-        query(
-            "UPDATE companion_operations
-             SET operation_state = 'pending', response = ?
-             WHERE device_id = ? AND operation_id = ?",
-        )
-        .bind(encoded)
-        .bind(row.get::<String, _>("device_id"))
-        .bind(row.get::<String, _>("operation_id"))
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
+    run_migration_catalog(pool, MIGRATIONS).await
 }
 
 async fn run_migration_catalog(

@@ -69,7 +69,6 @@ describe("settings in English (default)", () => {
     renderSettings("about");
     expect(screen.getByRole("heading", { name: "About" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Check for updates" })).toBeInTheDocument();
-    expect(SETTINGS_TABS.find((tab) => tab.id === "linked-devices")?.label).toBe("Linked devices");
   });
 });
 
@@ -98,9 +97,6 @@ describe("settings in Portuguese (Brazil)", () => {
 
   it("reads tab labels in the current language", () => {
     expect(SETTINGS_TABS.find((tab) => tab.id === "general")?.label).toBe("Geral");
-    expect(SETTINGS_TABS.find((tab) => tab.id === "linked-devices")?.label).toBe(
-      "Dispositivos vinculados",
-    );
   });
 
   it("translates the mic test control", () => {

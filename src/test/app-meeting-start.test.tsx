@@ -99,10 +99,8 @@ vi.mock("../lib/experimental-flags", () => ({
   useExperimentalFlags: () => ({
     unlocked: false,
     browser_use: false,
-    companion_pairing: false,
     loaded: true,
     browserUseEnabled: false,
-    companionPairingEnabled: false,
   }),
 }));
 
@@ -157,8 +155,6 @@ vi.mock("../lib/tauri", () => ({
   completeNoteSaveFlush: mocks.completeNoteSaveFlush,
   NOTE_SAVE_FLUSH_REQUESTED_EVENT: "clovy://flush-pending-note-saves",
   checkRecordingSourceReadiness: mocks.checkRecordingSourceReadiness,
-  companionListAgentMedia: vi.fn(async () => []),
-  companionReadAgentMediaChunk: vi.fn(),
   openPrivacySettings: mocks.openPrivacySettings,
   startRecording: mocks.startRecording,
   pauseRecording: mocks.pauseRecording,

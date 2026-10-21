@@ -10,21 +10,12 @@ import { toast } from "../components/ui/Toaster";
 import { t, useLocale } from "../i18n";
 import { exportNoteAsPdf } from "../lib/note-pdf";
 import { useNoteChat } from "../components/note-chat/useNoteChat";
-import { useExperimentalFlags } from "../lib/experimental-flags";
 import { noteReadyToShare } from "../lib/share-payload";
 import { SETTINGS_TABS } from "../components/settings/AppSettings";
 import type { TabItem } from "../components/tabs/TabBar";
 import { reorderTabs } from "./tabs/tabs";
 import {
   checkRecordingSourceReadiness,
-  companionCompleteFrontendRequest,
-  companionListAgentMedia,
-  companionPublishAgentEvent,
-  companionReadAgentMediaChunk,
-  listAgentItems,
-  type CompanionAgentStatus,
-  type CompanionFrontendRequest,
-  type CompanionResultPayload,
   createFolder,
   createNote,
   dictationHelperCommand,
@@ -34,7 +25,6 @@ import {
   LIVE_TRANSCRIPT_EVENT,
   listSessionPartitions,
   listAgentSessions,
-  listProviderModels,
   openPrivacySettings,
   recoverRecording,
   revealPath,
@@ -46,7 +36,6 @@ import {
   NOTE_SAVE_FLUSH_REQUESTED_EVENT,
   patchNote,
   queueMeetingEndFinishRequest,
-  providerModelSettings,
   type LiveTranscriptEventDto,
   type MeetingEndStatus,
   type NoteDto,
@@ -63,25 +52,7 @@ import {
 } from "../lib/agent-events";
 import { selectSessionProjectContext } from "../lib/agent-project-context";
 import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
-import { errorCode, messageFromError } from "../lib/errors";
-import { boundedCompanionText, companionAgentMessagesFromItems } from "../lib/agent-chat-runtime";
-import {
-  companionFrontendConsumerAvailable,
-  queueCompanionFrontendRequest,
-} from "../lib/companion-frontend-router";
-import {
-  companionEngineClis,
-  companionModelOptions,
-  companionSessionModelSelection,
-  companionStoredModelId,
-} from "../lib/companion-models";
-import { companionSessionInActivePartition } from "../lib/companion-partition";
-import {
-  AGENT_SESSION_MODEL_CHANGED_EVENT,
-  type AgentSessionModelChangedDetail,
-  loadSessionModels,
-  rememberSessionModel,
-} from "../lib/agent-session-models";
+import { messageFromError } from "../lib/errors";
 import { readClovyHomeStoredSessionId, writeClovyHomeStoredSessionId } from "../lib/clovy-home";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import {
@@ -207,7 +178,6 @@ export function App() {
   // Subscribes the shell to the interface language: the render helpers and
   // tab titles below read `t` at render time.
   const locale = useLocale();
-  const { companionPairingEnabled } = useExperimentalFlags();
   const {
     currentDataPartitionName,
     dataPartitionRefreshRevision,
@@ -927,393 +897,6 @@ export function App() {
     setAgentOrigin,
   });
 
-  const companionScopedSessions = useCallback(async () => {
-    const partition = getCurrentDataPartitionName();
-    const [sessions, partitions] = await Promise.all([
-      listAgentSessions(),
-      refreshSessionPartitions(),
-    ]);
-    if (getCurrentDataPartitionName() !== partition) return [];
-    const fresh = filterAgentSessionsForDataPartition(sessions, partitions, partition);
-    const currentById = new Map(
-      agentMenuBarSessionsRef.current.map((session) => [session.id, session]),
-    );
-    const scoped = fresh.map((session) => {
-      const current = currentById.get(session.id);
-      return current?.title?.trim() ? { ...session, title: current.title } : session;
-    });
-    scoped.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    return scoped;
-  }, [refreshSessionPartitions]);
-
-  const openCompanionAgentSession = useCallback(
-    async (storedSessionId?: string | null) => {
-      if (!storedSessionId) {
-        setAgentOrigin(undefined);
-        setActiveView("agent");
-        setActiveAgentSession(undefined);
-        return;
-      }
-      const session = (await companionScopedSessions().catch(() => [])).find(
-        (candidate) => candidate.id === storedSessionId,
-      );
-      if (!session) return;
-      setAgentOrigin(undefined);
-      setActiveView("agent");
-      setActiveAgentSession(session);
-    },
-    [companionScopedSessions, setActiveAgentSession],
-  );
-
-  useEffect(() => {
-    if (!companionPairingEnabled) return;
-    type CompanionFocusTarget =
-      | "settings"
-      | { agent: { storedSessionId?: string | null } }
-      | { note: { noteId: string } };
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-    void listen<CompanionFocusTarget>("clovy://companion-focus", (event) => {
-      const target = event.payload;
-      if (target === "settings") {
-        openSettings();
-        return;
-      }
-      if ("note" in target) {
-        setActiveView("meetings");
-        void getNote(target.note.noteId)
-          .then((note) => dispatch({ type: "noteLoaded", note }))
-          .catch((error) => setError(messageFromError(error)));
-        return;
-      }
-      void openCompanionAgentSession(target.agent.storedSessionId);
-    }).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      aborted = true;
-      unlisten?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companionPairingEnabled, openSettings]);
-
-  useEffect(() => {
-    if (!companionPairingEnabled) return;
-    const publishModelChange = (event: Event) => {
-      const detail = (event as CustomEvent<AgentSessionModelChangedDetail>).detail;
-      if (!detail?.sessionId || !detail.storedModel) return;
-      void Promise.all([
-        listProviderModels("generation"),
-        providerModelSettings(),
-        companionEngineClis(),
-      ])
-        .then(async ([catalog, settings, engines]) => {
-          const session = await companionSessionInActivePartition(detail.sessionId);
-          if (!session) return;
-          const currentStoredModel = loadSessionModels()[session.id] ?? session.model;
-          if (currentStoredModel !== detail.storedModel) return;
-          return companionPublishAgentEvent({
-            type: "modelChanged",
-            data: {
-              selection: companionSessionModelSelection(
-                session.id,
-                currentStoredModel,
-                catalog.models,
-                settings.settings.costQuality,
-                engines,
-              ),
-            },
-          });
-        })
-        .catch(() => undefined);
-    };
-    window.addEventListener(AGENT_SESSION_MODEL_CHANGED_EVENT, publishModelChange);
-    return () => window.removeEventListener(AGENT_SESSION_MODEL_CHANGED_EVENT, publishModelChange);
-  }, [companionPairingEnabled]);
-
-  useEffect(() => {
-    if (!companionPairingEnabled) return;
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-
-    async function handleCompanionRequest(payload: CompanionFrontendRequest) {
-      try {
-        switch (payload.intent.type) {
-          case "agentSessionsList": {
-            const sessions = await companionScopedSessions();
-            const page = companionByteBoundedPage(
-              sessions.map((session) => ({
-                id: session.id,
-                title: boundedCompanionText(session.title.trim() || "New session", 512),
-                status: companionAgentSessionStatus(
-                  session,
-                  agentMenuBarWorkingSessionIdsRef.current,
-                  agentMenuBarWaitingSessionIdsRef.current,
-                ),
-                updatedAt: session.updatedAt,
-              })),
-              payload.intent.data.cursor,
-              payload.intent.data.limit,
-            );
-            await companionCompleteFrontendRequest(
-              payload.operationId,
-              page ? { type: "agentSessions", data: page } : companionCursorError("agent session"),
-            );
-            return;
-          }
-          case "agentMessagesList": {
-            const { storedSessionId, cursor, limit } = payload.intent.data;
-            const knownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            if (!knownSession) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const [items, media] = await Promise.all([
-              listAgentItems(storedSessionId),
-              companionListAgentMedia(storedSessionId),
-            ]);
-            const stillKnownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            if (!stillKnownSession) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const messages = companionAgentMessagesFromItems(items, media);
-            const page = companionByteBoundedPage([...messages].reverse(), cursor, limit);
-            page?.items.reverse();
-            await companionCompleteFrontendRequest(
-              payload.operationId,
-              page ? { type: "agentMessages", data: page } : companionCursorError("agent message"),
-            );
-            return;
-          }
-          case "modelsList": {
-            const [catalog, settings, engines] = await Promise.all([
-              listProviderModels("generation"),
-              providerModelSettings(),
-              companionEngineClis(),
-            ]);
-            await companionCompleteFrontendRequest(payload.operationId, {
-              type: "models",
-              data: {
-                models: companionModelOptions(
-                  catalog.models,
-                  settings.settings.providerApiKeysConfigured,
-                  engines,
-                ),
-              },
-            });
-            return;
-          }
-          case "sessionModelGet": {
-            const { storedSessionId } = payload.intent.data;
-            const [catalog, settings, engines] = await Promise.all([
-              listProviderModels("generation"),
-              providerModelSettings(),
-              companionEngineClis(),
-            ]);
-            const session = (await companionScopedSessions()).find(
-              (candidate) => candidate.id === storedSessionId,
-            );
-            if (!session) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            await companionCompleteFrontendRequest(payload.operationId, {
-              type: "sessionModel",
-              data: companionSessionModelSelection(
-                session.id,
-                loadSessionModels()[session.id] ?? session.model,
-                catalog.models,
-                settings.settings.costQuality,
-                engines,
-              ),
-            });
-            return;
-          }
-          case "sessionModelSet": {
-            const { storedSessionId, modelId } = payload.intent.data;
-            const [catalog, settings, engines] = await Promise.all([
-              listProviderModels("generation"),
-              providerModelSettings(),
-              companionEngineClis(),
-            ]);
-            const allowedModels = companionModelOptions(
-              catalog.models,
-              settings.settings.providerApiKeysConfigured,
-              engines,
-            );
-            if (!allowedModels.some((model) => model.id === modelId)) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "unsupported",
-                  message: "That model is not available in Clovy's recommended model set.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const session = (await companionScopedSessions()).find(
-              (candidate) => candidate.id === storedSessionId,
-            );
-            if (!session) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const storedModel = companionStoredModelId(modelId, settings.settings.costQuality);
-            rememberSessionModel(session.id, storedModel);
-            await companionCompleteFrontendRequest(payload.operationId, {
-              type: "sessionModel",
-              data: companionSessionModelSelection(
-                session.id,
-                storedModel,
-                catalog.models,
-                settings.settings.costQuality,
-                engines,
-              ),
-            });
-            return;
-          }
-          case "mediaFetch": {
-            const { storedSessionId, artifactId, offsetBytes } = payload.intent.data;
-            const knownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            if (!knownSession) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That generated media is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            let chunk: Awaited<ReturnType<typeof companionReadAgentMediaChunk>>;
-            try {
-              chunk = await companionReadAgentMediaChunk(storedSessionId, artifactId, offsetBytes);
-            } catch (error) {
-              const code = errorCode(error);
-              const notFound =
-                code === "companion_media_not_found" ||
-                code === "companion_agent_session_not_found";
-              const unsupported = code === "companion_media_chunk_invalid";
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: notFound ? "not_found" : unsupported ? "unsupported" : "internal",
-                  message: messageFromError(error),
-                  retryable: !notFound && !unsupported,
-                },
-              });
-              return;
-            }
-            const stillKnownSession = (await companionScopedSessions()).some(
-              (session) => session.id === storedSessionId,
-            );
-            await companionCompleteFrontendRequest(
-              payload.operationId,
-              stillKnownSession
-                ? { type: "mediaChunk", data: chunk }
-                : {
-                    type: "error",
-                    data: {
-                      code: "not_found",
-                      message: "That generated media is no longer available.",
-                      retryable: false,
-                    },
-                  },
-            );
-            return;
-          }
-          case "agentSend":
-          case "agentCancel": {
-            const storedSessionId = payload.intent.data.storedSessionId;
-            if (
-              storedSessionId &&
-              !(await companionScopedSessions()).some((session) => session.id === storedSessionId)
-            ) {
-              await companionCompleteFrontendRequest(payload.operationId, {
-                type: "error",
-                data: {
-                  code: "not_found",
-                  message: "That agent session is no longer available.",
-                  retryable: false,
-                },
-              });
-              return;
-            }
-            const consumerAvailable = companionFrontendConsumerAvailable();
-            queueCompanionFrontendRequest(payload);
-            if (consumerAvailable) return;
-            void openCompanionAgentSession(payload.intent.data.storedSessionId);
-            return;
-          }
-        }
-      } catch (error) {
-        await companionCompleteFrontendRequest(payload.operationId, {
-          type: "error",
-          data: {
-            code: "internal",
-            message: messageFromError(error),
-            retryable: true,
-          },
-        }).catch(() => undefined);
-      }
-    }
-
-    void listen<CompanionFrontendRequest>("clovy://companion-request", ({ payload }) => {
-      void handleCompanionRequest(payload);
-    }).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      aborted = true;
-      unlisten?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    companionPairingEnabled,
-    companionScopedSessions,
-    openCompanionAgentSession,
-    setActiveAgentSession,
-  ]);
-
   const agentSessionsRef = useRef(agentSessions);
   agentSessionsRef.current = agentSessions;
   useEffect(
@@ -1920,7 +1503,6 @@ export function App() {
     handleSetSessionFolder,
     handleToggleSessionCompleted,
     handleRemoveSessionFromFolder,
-    handleReportIssue,
     handleOpenNoteChatInAgent,
     handleStartBundleChat,
     handleNewAgentSessionInProject,
@@ -2372,7 +1954,6 @@ export function App() {
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
     handleRenameFolder,
-    handleReportIssue,
     handleResumeRecording,
     handleSaveNoteNow,
     handleReturnToAgentOriginFolder,
@@ -2463,7 +2044,6 @@ export function App() {
     handleRemoveSessionFromFolder,
     handleRenameAgentSession,
     handleReorderTabs,
-    handleReportIssue,
     handleSelectNote,
     handleSetNoteFolder,
     handleSetSessionFolder,
@@ -2537,68 +2117,3 @@ export function App() {
 }
 
 // The collapsed transform is driven by `aria-pressed` on the parent button.
-
-function companionByteBoundedPage<T>(
-  items: T[],
-  cursor: string | undefined,
-  limit: number,
-): { items: T[]; nextCursor?: string } | undefined {
-  const offset = companionCursorOffset(cursor);
-  if (offset === undefined) return undefined;
-  const page: T[] = [];
-  let encodedBytes = 0;
-  let index = offset;
-  while (index < items.length && page.length < limit) {
-    const item = items[index];
-    if (item === undefined) break;
-    const itemBytes = new TextEncoder().encode(JSON.stringify(item)).byteLength;
-    if (page.length > 0 && encodedBytes + itemBytes > 38 * 1024) break;
-    page.push(item);
-    encodedBytes += itemBytes;
-    index += 1;
-  }
-  return {
-    items: page,
-    ...(index < items.length ? { nextCursor: String(index) } : {}),
-  };
-}
-
-function companionCursorOffset(cursor: string | undefined) {
-  if (cursor !== undefined && !/^\d+$/.test(cursor)) return undefined;
-  const offset = cursor === undefined ? 0 : Number(cursor);
-  return Number.isSafeInteger(offset) && offset >= 0 ? offset : undefined;
-}
-
-function companionCursorError(scope: string): CompanionResultPayload {
-  return {
-    type: "error",
-    data: {
-      code: "invalid_request",
-      message: `The ${scope} cursor is invalid.`,
-      retryable: false,
-    },
-  };
-}
-
-function companionAgentSessionStatus(
-  session: AgentSessionDto,
-  workingSessionIds: ReadonlySet<string>,
-  waitingSessionIds: ReadonlySet<string>,
-): CompanionAgentStatus {
-  if (waitingSessionIds.has(session.id)) return "waitingForUser";
-  if (workingSessionIds.has(session.id)) return "running";
-  switch (session.status) {
-    case "running":
-      return "running";
-    case "waiting_for_user":
-      return "waitingForUser";
-    case "completed":
-      return "completed";
-    case "failed":
-      return "failed";
-    case "interrupted":
-      return "cancelled";
-    default:
-      return "idle";
-  }
-}

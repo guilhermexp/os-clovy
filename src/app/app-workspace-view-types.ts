@@ -1,5 +1,4 @@
 import type { AgentSessionsListHandle } from "../components/agent/AgentSessionsList";
-import type { ReportCategory } from "../components/agent/composer/reportCategory";
 import type { NotesListHandle } from "../components/notes-list/NotesList";
 import type { SettingsTab } from "../components/settings/AppSettings";
 import type { SidebarView } from "../components/sidebar/Sidebar";
@@ -68,7 +67,6 @@ export type RenderAppWorkspaceDependencies = {
   ) => Promise<void>;
   handleRenameAgentSession: (sessionId: string, title: string) => void;
   handleRenameFolder: (folderId: string, name: string, description?: string) => Promise<void>;
-  handleReportIssue: (category?: ReportCategory) => void;
   handleResumeRecording: (sessionId: string) => Promise<void>;
   handleSaveNoteNow: (noteId: string, patch: NoteEditablePatch) => Promise<void>;
   handleReturnToAgentOriginFolder: () => void;

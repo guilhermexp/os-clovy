@@ -21,14 +21,12 @@ import {
   useT,
 } from "../../i18n";
 import {
-  CLOVY_COMMUNITY_URL,
   dictationHotkeyStatus,
   dictationHelperCommand,
   dictationSettings,
   listProviderModels,
   localAudioFileSrc,
   providerModelSettings,
-  clovyOpenCommunityPage,
   clovyOpenVerifyPage,
   clearProviderApiKey,
   setDictationLanguage,
@@ -75,7 +73,6 @@ import { Switch } from "../ui/Switch";
 import { HoverTip } from "../ui/HoverTip";
 import { toast } from "../ui/Toaster";
 import { APP_COMMIT_HASH, APP_VERSION } from "../../app/build-info";
-import type { ReportCategory } from "../agent/composer/reportCategory";
 import { getStoredTheme, setStoredTheme, type ThemePreference } from "../../lib/theme";
 import { BRAND_PRESETS, getStoredBrand, setStoredBrand, type BrandId } from "../../lib/brand";
 import {
@@ -132,19 +129,13 @@ import { DEFAULT_VIDEO_MODEL, videoModelCatalog } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { AgentMcpServersSection } from "./AgentMcpServersSection";
 import { ConnectorsSection } from "./ConnectorsSection";
-import { LinkedDevicesSection } from "./LinkedDevicesSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
-import { PrivacySettingsSection } from "./PrivacySettingsSection";
 import { ActivitySettingsSection } from "./ActivitySettingsSection";
 import { activityStatus } from "../../lib/activity-capture";
-import {
-  SETTINGS_TABS,
-  settingsTabsForCompanionPairing,
-  type SettingsTab,
-} from "./settings-config";
+import { SETTINGS_TABS, settingsTabsForPlatform, type SettingsTab } from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
 import {
   getStoredDateFormat,
@@ -409,8 +400,6 @@ type AppSettingsProps = {
   // Confirmed leave-rc reconcile: downloads and installs the current stable,
   // even if it is older than the running prerelease build (Q4-Q8).
   onReconcileToStable?: () => void;
-  // Opens Agent with the direct issue report dialog preselected.
-  onReportIssue?: (category: ReportCategory) => void;
   // Opens a new agent session that runs a skill bundle's slash command.
   onStartBundleChat?: (prompt: string) => void;
   activitySupported?: boolean;
@@ -437,7 +426,6 @@ export function AppSettings({
   updateReadyToRelaunch,
   onRelaunch,
   onReconcileToStable,
-  onReportIssue,
   onStartBundleChat,
   activitySupported: activitySupportedProp,
 }: AppSettingsProps) {
@@ -560,10 +548,7 @@ export function AppSettings({
     };
   }, [activitySupportedProp]);
   const effectiveActivitySupported = activitySupportedProp ?? internalActivitySupported;
-  const settingsTabs = settingsTabsForCompanionPairing(
-    experimentalFlags.companionPairingEnabled,
-    effectiveActivitySupported,
-  );
+  const settingsTabs = settingsTabsForPlatform(effectiveActivitySupported);
   const capabilities = useDictationCapabilities();
   const systemAudioSupportedPlatform = capabilities.systemAudio || isSystemAudioSupportedPlatform();
   const defaultShortcuts =
@@ -1461,8 +1446,6 @@ export function AppSettings({
     void setExperimentalFlags({
       unlocked: true,
       browser_use: experimentalFlags.browser_use,
-      companion_pairing: experimentalFlags.companion_pairing,
-      companion_computer_use_approvals: experimentalFlags.companion_computer_use_approvals,
     })
       .then(() => toast(translate("settings.experiments.unlocked")))
       .catch((error) => setExperimentalError(messageFromError(error)))
@@ -1471,22 +1454,13 @@ export function AppSettings({
       });
   }
 
-  async function updateExperimentalFlags(update: {
-    unlocked?: boolean;
-    browser_use?: boolean;
-    companion_pairing?: boolean;
-    companion_computer_use_approvals?: boolean;
-  }) {
+  async function updateExperimentalFlags(update: { unlocked?: boolean; browser_use?: boolean }) {
     setExperimentalOperation("flags");
     setExperimentalError(undefined);
     try {
       await setExperimentalFlags({
         unlocked: update.unlocked ?? experimentalFlags.unlocked,
         browser_use: update.browser_use ?? experimentalFlags.browser_use,
-        companion_pairing: update.companion_pairing ?? experimentalFlags.companion_pairing,
-        companion_computer_use_approvals:
-          update.companion_computer_use_approvals ??
-          experimentalFlags.companion_computer_use_approvals,
       });
     } catch (error) {
       setExperimentalError(messageFromError(error));
@@ -1557,8 +1531,6 @@ export function AppSettings({
             />
 
             <StartupSettingsSection />
-
-            <PrivacySettingsSection />
           </>
         ) : null}
 
@@ -2361,10 +2333,6 @@ export function AppSettings({
           </>
         ) : null}
 
-        {activeTab === "linked-devices" && experimentalFlags.companionPairingEnabled ? (
-          <LinkedDevicesSection />
-        ) : null}
-
         {activeTab === "about" ? (
           <section className="settings-group" aria-labelledby="about-heading">
             <SettingsPageHeader
@@ -2476,26 +2444,6 @@ export function AppSettings({
 
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">{t("settings.about.community")}</h3>
-                    <p className="settings-row-description">
-                      {t("settings.about.communityDescription", {
-                        url: CLOVY_COMMUNITY_URL.replace("https://", ""),
-                      })}
-                    </p>
-                  </div>
-                  <div className="settings-row-control">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => void clovyOpenCommunityPage().catch(() => undefined)}
-                    >
-                      {t("settings.about.joinCommunity")}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="settings-row">
-                  <div className="settings-row-info">
                     <h3 className="settings-row-title">{t("settings.about.verification")}</h3>
                     <p className="settings-row-description">
                       {t("settings.about.verificationDescription")}
@@ -2511,26 +2459,6 @@ export function AppSettings({
                     </button>
                   </div>
                 </div>
-
-                {onReportIssue ? (
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">{t("settings.about.reportIssue")}</h3>
-                      <p className="settings-row-description">
-                        {t("settings.about.reportIssueDescription")}
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={() => onReportIssue("bug")}
-                      >
-                        {t("settings.about.reportIssue")}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
 
                 {import.meta.env.DEV ? (
                   // Dev builds only: same helper the devtools console exposes
@@ -2593,30 +2521,6 @@ export function AppSettings({
                         aria-label={t("settings.experiments.browserUseAria")}
                         onCheckedChange={(browser_use) =>
                           void updateExperimentalFlags({ browser_use })
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">{t("settings.experiments.companion")}</h3>
-                      <p className="settings-row-description">
-                        {experimentalFlags.companion_pairing ===
-                        experimentalFlags.companionPairingEnabled
-                          ? t("settings.experiments.companionDescription")
-                          : experimentalFlags.companionPairingEnabled
-                            ? t("settings.experiments.companionPendingOff")
-                            : t("settings.experiments.companionPendingOn")}
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <Switch
-                        checked={experimentalFlags.companion_pairing}
-                        disabled={experimentalOperation !== undefined}
-                        aria-label={t("settings.experiments.companionAria")}
-                        onCheckedChange={(companion_pairing) =>
-                          void updateExperimentalFlags({ companion_pairing })
                         }
                       />
                     </div>

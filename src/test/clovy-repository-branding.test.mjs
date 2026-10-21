@@ -23,7 +23,6 @@ describe("Clovy repository branding", () => {
       "docs/telemetry-p3a-implementation-plan.md",
       "scripts/check-cargo-release-age.py",
       "scripts/check-pnpm-release-age.py",
-      "src/lib/p3a.ts",
     ].map(read);
 
     for (const source of currentSurfaces) {
@@ -45,8 +44,6 @@ describe("Clovy repository branding", () => {
       read("CONTRIBUTING.md"),
       read(".github/ISSUE_TEMPLATE/config.yml"),
       read(".github/ISSUE_TEMPLATE/feature_request.yml"),
-      read("src/lib/tauri.ts"),
-      read("src-tauri/src/commands.rs"),
     ]) {
       expect(source).not.toContain("https://t.me/osjune");
       expect(source).toContain("https://t.me/+B4Z8KUqEsRc4ZGVh");

@@ -11,7 +11,6 @@ export type SettingsTab =
   | "agent"
   | "memory"
   | "connectors"
-  | "linked-devices"
   | "about";
 const SETTINGS_TAB_LABEL_KEYS: Record<SettingsTab, MessageKey> = {
   general: "settings.tabs.general",
@@ -24,7 +23,6 @@ const SETTINGS_TAB_LABEL_KEYS: Record<SettingsTab, MessageKey> = {
   agent: "settings.tabs.agent",
   memory: "settings.tabs.memory",
   connectors: "settings.tabs.connectors",
-  "linked-devices": "settings.tabs.linkedDevices",
   about: "settings.tabs.about",
 };
 
@@ -50,17 +48,9 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   settingsTab("agent"),
   settingsTab("memory"),
   settingsTab("connectors"),
-  settingsTab("linked-devices"),
   settingsTab("about"),
 ];
 
-export function settingsTabsForCompanionPairing(
-  companionPairingEnabled: boolean,
-  activitySupported: boolean,
-) {
-  return SETTINGS_TABS.filter(
-    (tab) =>
-      (companionPairingEnabled || tab.id !== "linked-devices") &&
-      (activitySupported || tab.id !== "activity"),
-  );
+export function settingsTabsForPlatform(activitySupported: boolean) {
+  return SETTINGS_TABS.filter((tab) => activitySupported || tab.id !== "activity");
 }
