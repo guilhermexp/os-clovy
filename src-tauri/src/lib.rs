@@ -31,6 +31,7 @@ pub mod extension_host;
 pub mod feature_flags;
 mod filesystem;
 mod http_client;
+pub mod identity_migration;
 pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
