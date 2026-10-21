@@ -596,12 +596,55 @@ fn journal_path(plan: &MigrationPlan) -> PathBuf {
     guard::sibling(&plan.data.target, ".identity-migration.journal")
 }
 
+/// Durable before anything is published: the content reaches the disk, then
+/// the rename, then the folder entry that names it.
 fn write_journal(path: &Path, journal: &Journal) -> Result<(), MigrationError> {
     let temporary = path.with_extension("journal.tmp");
     let bytes = serde_json::to_vec(journal).map_err(|e| fail("encoding the journal", e))?;
-    std::fs::write(&temporary, bytes)
+    std::fs::File::create(&temporary)
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, &bytes)?;
+            file.sync_all()
+        })
         .and_then(|()| std::fs::rename(&temporary, path))
-        .map_err(|e| fail(format!("writing {}", path.display()), e))
+        .map_err(|e| fail(format!("writing {}", path.display()), e))?;
+    sync_parent(path)
+}
+
+/// Flushes a folder's entries (a rename, a new file). Windows has no
+/// directory handle to flush; its renames are journaled by NTFS.
+fn sync_directory(path: &Path) -> Result<(), MigrationError> {
+    #[cfg(unix)]
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| fail(format!("flushing {}", path.display()), e))?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<(), MigrationError> {
+    match path.parent() {
+        Some(parent) => sync_directory(parent),
+        None => Ok(()),
+    }
+}
+
+/// Every staged file and folder on disk before the journal points at it.
+fn sync_tree(root: &Path) -> Result<(), MigrationError> {
+    for entry in sorted_entries(root)? {
+        let path = entry.path();
+        let kind = std::fs::symlink_metadata(&path)
+            .map_err(|e| fail(format!("reading {}", path.display()), e))?;
+        if kind.is_dir() {
+            sync_tree(&path)?;
+        } else if kind.is_file() {
+            std::fs::File::open(&path)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| fail(format!("flushing {}", path.display()), e))?;
+        }
+    }
+    sync_directory(root)
 }
 
 fn is_populated(path: &Path) -> bool {
@@ -617,14 +660,19 @@ fn resume(
     copier: &mut dyn FileCopier,
 ) -> Result<Option<Outcome>, MigrationError> {
     let path = journal_path(plan);
-    let Ok(raw) = std::fs::read(&path) else {
-        return Ok(None);
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(fail(format!("reading {}", path.display()), error)),
     };
-    let Ok(journal) = serde_json::from_slice::<Journal>(&raw) else {
-        // Written whole or not at all; an unreadable one published nothing.
-        let _ = std::fs::remove_file(&path);
-        return Ok(None);
-    };
+    // A journal is written whole and flushed before anything is published,
+    // so an unreadable one means the disk lost data: keep it as evidence.
+    let journal = serde_json::from_slice::<Journal>(&raw).map_err(|e| {
+        fail(
+            format!("the migration journal {} is unreadable", path.display()),
+            e,
+        )
+    })?;
     let finishable = journal
         .moves
         .iter()
@@ -638,6 +686,7 @@ fn resume(
             copier
                 .rename(&item.staging, &item.target)
                 .map_err(|e| fail(format!("publishing {}", item.target.display()), e))?;
+            sync_parent(&item.target)?;
         }
         let _ = std::fs::remove_file(&path);
         return Ok(Some(Outcome::Resumed));
@@ -662,7 +711,16 @@ pub fn migrate(
     copier: &mut dyn FileCopier,
 ) -> Result<Outcome, MigrationError> {
     let _lock = guard::MigrationLock::acquire(&plan.data.target, plan.lock_wait)?;
-    if let Some(outcome) = resume(plan, store, copier)? {
+    // A publication left halfway must be finished before anything else runs:
+    // if it cannot be, the launch stops with the recovery state untouched.
+    let resumed = resume(plan, store, copier).map_err(|error| MigrationError {
+        message: format!(
+            "{}; an interrupted migration is waiting to be finished, and nothing was cleaned up",
+            error.message
+        ),
+        blocked: true,
+    })?;
+    if let Some(outcome) = resumed {
         return Ok(outcome);
     }
     match decide(&plan.data.source, &plan.data.target) {
@@ -798,6 +856,9 @@ fn migrate_into(
     // The data folder is what the next launch's decision looks at, so it is
     // published last; the journal lets a launch that dies meanwhile resume.
     moves.sort_by_key(|item| item.target == plan.data.target);
+    for item in &moves {
+        sync_tree(&item.staging)?;
+    }
     let journal = journal_path(plan);
     write_journal(
         &journal,
@@ -817,6 +878,7 @@ fn migrate_into(
         copier
             .rename(&item.staging, &item.target)
             .map_err(|e| fail(format!("publishing {}", item.target.display()), e))?;
+        sync_parent(&item.target)?;
         undo.staged.retain(|path| path != &item.staging);
         undo.published.push(item.target);
     }

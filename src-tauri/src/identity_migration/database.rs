@@ -185,17 +185,21 @@ fn stamps(members: &[(PathBuf, PathBuf)]) -> Result<Vec<Stamp>, MigrationError> 
 }
 
 /// Every spelling of "inside the old profile" and its new equivalent.
+///
+/// A root is rewritten only where a path starts with it: at the start of a
+/// value, or after whitespace, a quote or punctuation, and only when the path
+/// goes on with a separator or ends there. A path that merely contains the old
+/// folder (`/Volumes/Backup/Users/...`) or a look-alike sibling
+/// (`...-dev-backup`) stays as it is.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PathRewrite {
-    /// `(old prefix, new prefix)`, longest first, each ending in a separator.
-    prefixes: Vec<(String, String)>,
-    /// Values that are exactly the old folder.
-    exact: Vec<(String, String)>,
+    /// `(old root, new root)`, longest first.
+    roots: Vec<(String, String)>,
 }
 
 impl PathRewrite {
     pub(super) fn new(folders: &[(PathBuf, PathBuf)]) -> Self {
-        let mut rewrite = Self::default();
+        let mut roots = Vec::new();
         for (old, new) in folders {
             let mut forms = vec![(
                 old.to_string_lossy().into_owned(),
@@ -213,58 +217,84 @@ impl PathRewrite {
                 }
             }
             for (old, new) in forms {
-                let separators: &[char] = if cfg!(windows) { &['\\', '/'] } else { &['/'] };
-                for separator in separators {
-                    rewrite
-                        .prefixes
-                        .push((format!("{old}{separator}"), format!("{new}{separator}")));
-                }
-                rewrite.exact.push((old.clone(), new.clone()));
-                // Inside JSON a backslash is written twice.
+                // Text that is not JSON may still carry JSON-escaped paths.
                 if old.contains('\\') {
                     let escape = |value: &str| value.replace('\\', "\\\\");
-                    rewrite.prefixes.push((
-                        format!("{}\\\\", escape(&old)),
-                        format!("{}\\\\", escape(&new)),
-                    ));
-                    rewrite.exact.push((escape(&old), escape(&new)));
+                    roots.push((escape(&old), escape(&new)));
                 }
+                roots.push((old, new));
             }
         }
-        rewrite
-            .prefixes
-            .sort_by_key(|(old, _)| std::cmp::Reverse(old.len()));
-        rewrite.prefixes.dedup();
-        rewrite.exact.dedup();
-        rewrite
+        roots.sort_by_key(|(old, _): &(String, String)| std::cmp::Reverse(old.len()));
+        roots.dedup();
+        Self { roots }
     }
 
-    /// The rewritten text, or `None` when nothing in it points inside.
+    /// The rewritten value, or `None` when nothing in it points inside. JSON
+    /// is rewritten string by string, so a value equal to the root is too.
     pub(super) fn apply(&self, text: &str) -> Option<String> {
-        if let Some((_, new)) = self.exact.iter().find(|(old, _)| old == text) {
-            return Some(new.clone());
-        }
-        let mut result: Option<String> = None;
-        for (old, new) in &self.prefixes {
-            let current = result.as_deref().unwrap_or(text);
-            if current.contains(old.as_str()) {
-                result = Some(current.replace(old.as_str(), new));
+        let trimmed = text.trim_start();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) {
+                return self.rewrite_json(&mut value).then(|| value.to_string());
             }
         }
-        result
+        self.apply_plain(text)
+    }
+
+    fn rewrite_json(&self, value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(text) => match self.apply_plain(text) {
+                Some(rewritten) => {
+                    *text = rewritten;
+                    true
+                }
+                None => false,
+            },
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .fold(false, |changed, item| self.rewrite_json(item) | changed),
+            serde_json::Value::Object(fields) => fields
+                .values_mut()
+                .fold(false, |changed, item| self.rewrite_json(item) | changed),
+            _ => false,
+        }
+    }
+
+    /// Rewrites each root that starts a path inside free text.
+    fn apply_plain(&self, text: &str) -> Option<String> {
+        let mut output = String::with_capacity(text.len());
+        let mut changed = false;
+        let mut index = 0;
+        let mut previous: Option<char> = None;
+        while index < text.len() {
+            let rest = &text[index..];
+            if starts_a_path(previous) {
+                if let Some((old, new)) = self.roots.iter().find(|(old, _)| {
+                    rest.starts_with(old.as_str()) && ends_a_root(&rest[old.len()..])
+                }) {
+                    output.push_str(new);
+                    index += old.len();
+                    previous = old.chars().last();
+                    changed = true;
+                    continue;
+                }
+            }
+            let character = rest.chars().next().unwrap_or_default();
+            output.push(character);
+            index += character.len_utf8();
+            previous = Some(character);
+        }
+        changed.then_some(output)
     }
 
     /// The strings any rewritten value must contain, to narrow the scans.
     fn needles(&self) -> Vec<String> {
-        self.prefixes
-            .iter()
-            .map(|(old, _)| old.clone())
-            .chain(self.exact.iter().map(|(old, _)| old.clone()))
-            .collect()
+        self.roots.iter().map(|(old, _)| old.clone()).collect()
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.prefixes.is_empty()
+        self.roots.is_empty()
     }
 
     /// Rewrites every text value (and WebKit's UTF-16 localStorage values)
@@ -437,4 +467,23 @@ impl PathRewrite {
 
 fn quote(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// A path can start here: at the beginning, or after whitespace, a quote or
+/// punctuation, never in the middle of another path or word.
+fn starts_a_path(previous: Option<char>) -> bool {
+    match previous {
+        None => true,
+        Some(character) => character.is_whitespace() || "\"'`([{<=:,;|>".contains(character),
+    }
+}
+
+/// The root ends the path or continues into it with a separator.
+fn ends_a_root(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true,
+        Some('/') => true,
+        Some('\\') => cfg!(windows),
+        Some(character) => !(character.is_alphanumeric() || "._-~".contains(character)),
+    }
 }

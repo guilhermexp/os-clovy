@@ -171,7 +171,10 @@ fn leftover_staging(base: &Path) -> Vec<String> {
     std::fs::read_dir(base)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name != "old" && name != "new")
+        // The lock file stays on disk by design: only staging is leftover.
+        .filter(|name| {
+            name != "old" && name != "new" && !name.ends_with(".identity-migration.lock")
+        })
         .collect()
 }
 
@@ -1373,24 +1376,18 @@ async fn structured_values_equal_to_the_root_and_external_look_alikes() {
 fn a_failed_process_listing_is_not_an_absent_app() {
     // `tasklist` that fails says nothing about which apps run.
     assert!(guard::parse_running(false, "", "os-june.exe").is_err());
-    assert_eq!(
-        guard::parse_running(
-            true,
-            "INFO: No tasks are running which match the specified criteria.\r\n",
-            "os-june.exe"
-        )
-        .unwrap(),
-        false
-    );
-    assert_eq!(
-        guard::parse_running(
-            true,
-            "\"os-june.exe\",\"4242\",\"Console\",\"1\",\"80.000 K\"\r\n",
-            "os-june.exe"
-        )
-        .unwrap(),
-        true
-    );
+    assert!(!guard::parse_running(
+        true,
+        "INFO: No tasks are running which match the specified criteria.\r\n",
+        "os-june.exe"
+    )
+    .unwrap());
+    assert!(guard::parse_running(
+        true,
+        "\"os-june.exe\",\"4242\",\"Console\",\"1\",\"80.000 K\"\r\n",
+        "os-june.exe"
+    )
+    .unwrap());
     assert!(guard::parse_image_of(false, "", 4242).is_err());
     assert_eq!(
         guard::parse_image_of(true, "INFO: No tasks", 4242).unwrap(),
