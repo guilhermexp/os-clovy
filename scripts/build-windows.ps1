@@ -97,7 +97,7 @@ try {
   if (Test-Path -LiteralPath $nsisDirectory -PathType Container) {
     Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe" | Remove-Item -Force
   }
-  $appExecutable = Join-Path $releaseDirectory "os-june.exe"
+  $appExecutable = Join-Path $releaseDirectory "clovy.exe"
   Remove-Item -LiteralPath $appExecutable -Force -ErrorAction SilentlyContinue
   $env:CLOVY_AGENT_RUNTIME_PREBUILT = "1"
   $env:CLOVY_AGENT_RUNTIME_TARGET = "windows"

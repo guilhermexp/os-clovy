@@ -22,7 +22,7 @@ import { applyInterfaceLocale } from "../i18n/locale";
 import type { McpServerStatusDto } from "../lib/mcp-server";
 
 const binaryPath = "/Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp";
-const channelDir = "/Users/me/Library/Application Support/co.opensoftware.june/mcp";
+const channelDir = "/Users/me/Library/Application Support/dev.guilhermexp.clovy/mcp";
 const claudeCodeConfig = JSON.stringify(
   { mcpServers: { clovy: { type: "stdio", command: binaryPath, args: ["--dir", channelDir] } } },
   null,

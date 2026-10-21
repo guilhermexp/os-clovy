@@ -8,6 +8,14 @@ pub const RELEASE_APP_IDENTIFIER: &str = "dev.guilhermexp.clovy";
 /// identifier, or a development identity such as `CLOVY_DEV_APP_IDENTIFIER`.
 pub const APP_IDENTIFIER: &str = env!("CLOVY_APP_IDENTIFIER");
 
+/// The app bundle's main executable (`Contents/MacOS/clovy`, `clovy.exe`).
+pub const MAIN_EXECUTABLE: &str = "clovy";
+
+/// A published helper's bundle identifier, e.g. `computer-use-driver`.
+pub fn release_helper_identifier(helper: &str) -> String {
+    format!("{RELEASE_APP_IDENTIFIER}.{helper}")
+}
+
 /// The credential service prefix: the identifier, with `-dev` in debug builds
 /// so a development binary never reads or rotates release credentials.
 pub fn credential_service_prefix_for(identifier: &str, debug_assertions: bool) -> String {

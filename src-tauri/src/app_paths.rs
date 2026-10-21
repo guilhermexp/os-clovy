@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn release_builds_use_the_configured_data_dir() {
-        let data_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let data_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_data_dir_for_build(data_dir.clone(), false, false),
@@ -204,17 +204,17 @@ mod tests {
 
     #[test]
     fn debug_builds_use_a_separate_dev_data_dir_by_default() {
-        let data_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let data_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_data_dir_for_build(data_dir, true, false),
-            PathBuf::from("/tmp/co.opensoftware.june-dev")
+            PathBuf::from("/tmp/dev.guilhermexp.clovy-dev")
         );
     }
 
     #[test]
     fn debug_builds_can_opt_into_the_configured_data_dir() {
-        let data_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let data_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_data_dir_for_build(data_dir.clone(), true, true),
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn release_builds_use_the_configured_config_dir() {
-        let config_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_config_dir_for_build(config_dir.clone(), false, false),
@@ -234,17 +234,17 @@ mod tests {
 
     #[test]
     fn debug_builds_use_a_separate_dev_config_dir_by_default() {
-        let config_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_config_dir_for_build(config_dir, true, false),
-            PathBuf::from("/tmp/co.opensoftware.june-dev")
+            PathBuf::from("/tmp/dev.guilhermexp.clovy-dev")
         );
     }
 
     #[test]
     fn debug_builds_can_opt_into_the_configured_config_dir() {
-        let config_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_config_dir_for_build(config_dir.clone(), true, true),

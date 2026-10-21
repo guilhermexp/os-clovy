@@ -7,7 +7,7 @@ fn native_messaging_shim_failure_writes_no_browser_content_to_stderr() {
         .path()
         .join("Library")
         .join("Application Support")
-        .join("co.opensoftware.june");
+        .join("dev.guilhermexp.clovy");
     std::fs::create_dir_all(&data_dir).expect("shim data directory");
     let browser_content =
         r#"{"url":"https://private.example/secret","page":"page-text","field":"field-value-123""#;
@@ -16,7 +16,7 @@ fn native_messaging_shim_failure_writes_no_browser_content_to_stderr() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_clovy-nm-shim"))
         .env("HOME", home.path())
-        .env("OS_JUNE_USE_PROD_DATA_DIR", "1")
+        .env("OS_CLOVY_USE_PROD_DATA_DIR", "1")
         .stdin(Stdio::null())
         .output()
         .expect("run native messaging shim");

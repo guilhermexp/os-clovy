@@ -194,7 +194,6 @@ impl Client {
             .arg(dir)
             .args(args)
             .env_remove("OS_CLOVY_USE_PROD_DATA_DIR")
-            .env_remove("OS_JUNE_USE_PROD_DATA_DIR")
             .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -452,7 +451,7 @@ async fn mcp_server_debug_binary_refuses_the_installed_app_data() {
     let home = tempfile::tempdir_in("/tmp").unwrap();
     let production = home
         .path()
-        .join("Library/Application Support/co.opensoftware.june");
+        .join("Library/Application Support/dev.guilhermexp.clovy");
     let dir = channel::channel_dir(&production);
     let store = activity_store(home.path()).await;
     let listener = channel::Listener::start(&dir, handler(notes_pool().await, store))

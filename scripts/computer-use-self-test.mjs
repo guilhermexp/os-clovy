@@ -271,7 +271,7 @@ function resolveSelfTestHost() {
   }
   const stamp = readJson(stampPath);
   const profile = stamp.clovyBuild?.profile === "release" ? "release" : "debug";
-  const host = path.join(rootDir, "src-tauri", "target", profile, "os-june");
+  const host = path.join(rootDir, "src-tauri", "target", profile, "clovy");
   if (!existsSync(host)) {
     throw new Error(
       `Computer use self-test host is missing: ${host}. Build Clovy first or pass --host.`,
@@ -557,7 +557,7 @@ function makeFixtureApp(tempDir, fixtureExecutable, role) {
 <plist version="1.0"><dict>
 <key>CFBundleDisplayName</key><string>${displayName}</string>
 <key>CFBundleExecutable</key><string>${executableName}</string>
-<key>CFBundleIdentifier</key><string>co.opensoftware.clovy.computer-use-self-test.${role}</string>
+<key>CFBundleIdentifier</key><string>dev.guilhermexp.clovy.computer-use-self-test.${role}</string>
 <key>CFBundleName</key><string>${displayName}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>

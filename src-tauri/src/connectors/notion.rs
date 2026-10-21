@@ -2819,11 +2819,6 @@ fn now_unix() -> i64 {
 mod store {
     use super::*;
 
-    const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.notion-hosted-mcp";
-    const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.notion-hosted-mcp";
-    const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.notion-hosted-mcp";
-    const LEGACY_DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.notion-hosted-mcp";
-
     pub async fn store(tokens: &StoredNotionConnection) -> Result<(), AppError> {
         let json = serde_json::to_string(tokens)
             .map_err(|e| AppError::new("notion_token_serialize_failed", e.to_string()))?;
@@ -2840,14 +2835,9 @@ mod store {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     async fn store_platform(json: String) -> Result<(), AppError> {
-        let (service, legacy_service) = keychain_services();
+        let service = keychain_service();
         tokio::task::spawn_blocking(move || {
-            crate::credential_compat::set_password(
-                service,
-                legacy_service,
-                NOTION_ACCOUNT_ID,
-                &json,
-            )
+            crate::credentials::set_password(&service, NOTION_ACCOUNT_ID, &json)
         })
         .await
         .map_err(|e| AppError::new("notion_keychain_write_failed", e.to_string()))?
@@ -2864,9 +2854,9 @@ mod store {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     async fn load_platform() -> Result<Option<StoredNotionConnection>, AppError> {
-        let (service, legacy_service) = keychain_services();
+        let service = keychain_service();
         let raw = tokio::task::spawn_blocking(move || {
-            crate::credential_compat::get_password(service, legacy_service, NOTION_ACCOUNT_ID)
+            crate::credentials::get_password(&service, NOTION_ACCOUNT_ID)
         })
         .await
         .map_err(|e| AppError::new("notion_keychain_read_failed", e.to_string()))?
@@ -2891,9 +2881,9 @@ mod store {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     async fn delete_platform() -> Result<(), AppError> {
-        let (service, legacy_service) = keychain_services();
+        let service = keychain_service();
         tokio::task::spawn_blocking(move || {
-            crate::credential_compat::delete_password(service, legacy_service, NOTION_ACCOUNT_ID)
+            crate::credentials::delete_password(&service, NOTION_ACCOUNT_ID)
         })
         .await
         .map_err(|e| AppError::new("notion_keychain_delete_failed", e.to_string()))?
@@ -2906,12 +2896,8 @@ mod store {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn keychain_services() -> (&'static str, &'static str) {
-        if cfg!(debug_assertions) {
-            (DEV_KEYCHAIN_SERVICE, LEGACY_DEV_KEYCHAIN_SERVICE)
-        } else {
-            (KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE)
-        }
+    fn keychain_service() -> String {
+        crate::app_identity::credential_service("notion-hosted-mcp")
     }
 }
 

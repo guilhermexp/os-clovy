@@ -161,8 +161,6 @@ final class SystemAudioRecorder {
             try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         }
         cleanupStaleAggregateDevices(named: "Clovy System Audio")
-        // Also sweep aggregates left behind by pre-rename "June" builds.
-        cleanupStaleAggregateDevices(named: "June System Audio")
         if !checkOnly {
             acquirePowerAssertion()
         }
@@ -812,7 +810,7 @@ let pidPath = argumentValue("--pid", from: CommandLine.arguments)
 let timelineOffsetMs = argumentValue("--timeline-offset-ms", from: CommandLine.arguments).flatMap(Double.init) ?? 0
 if !checkOnly && outputPath == nil {
     writeLog("missing output argument", logURL: logPath.map { URL(fileURLWithPath: $0) })
-    emitProcessStatus(["event": "error", "message": "Usage: june-system-audio-recorder --output /path/to/recording.wav"], statusPath: statusPath)
+    emitProcessStatus(["event": "error", "message": "Usage: clovy-system-audio-recorder --output /path/to/recording.wav"], statusPath: statusPath)
     exit(2)
 }
 

@@ -6,11 +6,6 @@
 
 use std::{collections::HashMap, sync::Mutex};
 
-#[cfg(not(test))]
-const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.llm-providers";
-#[cfg(not(test))]
-const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.llm-providers";
-
 pub trait SecretStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<String>, String>;
     fn set(&self, account: &str, value: &str) -> Result<(), String>;
@@ -42,12 +37,8 @@ pub struct KeychainSecretStore {
 
 #[cfg(not(test))]
 impl KeychainSecretStore {
-    fn service() -> &'static str {
-        if cfg!(debug_assertions) {
-            DEV_KEYCHAIN_SERVICE
-        } else {
-            KEYCHAIN_SERVICE
-        }
+    fn service() -> String {
+        crate::app_identity::credential_service("llm-providers")
     }
 }
 
@@ -62,7 +53,7 @@ impl SecretStore for KeychainSecretStore {
         {
             return Ok(cached);
         }
-        let value = match keyring::Entry::new(Self::service(), account)
+        let value = match keyring::Entry::new(&Self::service(), account)
             .and_then(|entry| entry.get_password())
         {
             Ok(value) => Some(value),
@@ -76,7 +67,7 @@ impl SecretStore for KeychainSecretStore {
     }
 
     fn set(&self, account: &str, value: &str) -> Result<(), String> {
-        keyring::Entry::new(Self::service(), account)
+        keyring::Entry::new(&Self::service(), account)
             .and_then(|entry| entry.set_password(value))
             .map_err(|error| error.to_string())?;
         if let Ok(mut cache) = self.cache.lock() {
@@ -86,7 +77,7 @@ impl SecretStore for KeychainSecretStore {
     }
 
     fn delete(&self, account: &str) -> Result<(), String> {
-        match keyring::Entry::new(Self::service(), account)
+        match keyring::Entry::new(&Self::service(), account)
             .and_then(|entry| entry.delete_credential())
         {
             Ok(()) | Err(keyring::Error::NoEntry) => {}

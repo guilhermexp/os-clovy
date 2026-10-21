@@ -875,7 +875,7 @@ fn release_self_test_driver_path_allowed(path: &Path) -> bool {
     let expected = if cfg!(debug_assertions) {
         Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(|repo| {
             repo.join(".tauri-helper")
-                .join("June Computer Use Driver.app")
+                .join("Clovy Computer Use Driver.app")
                 .join("Contents")
                 .join("MacOS")
                 .join("clovy-computer-use-driver")
@@ -888,7 +888,7 @@ fn release_self_test_driver_path_allowed(path: &Path) -> bool {
                     .join("Resources")
                     .join("native")
                     .join("bin")
-                    .join("June Computer Use Driver.app")
+                    .join("Clovy Computer Use Driver.app")
                     .join("Contents")
                     .join("MacOS")
                     .join("clovy-computer-use-driver"),
@@ -918,8 +918,8 @@ fn release_self_test_call_allowed(name: &str, arguments: &Value) -> bool {
     };
     matches!(
         identity.bundle_id.as_str(),
-        "co.opensoftware.clovy.computer-use-self-test.target"
-            | "co.opensoftware.clovy.computer-use-self-test.observer"
+        "dev.guilhermexp.clovy.computer-use-self-test.target"
+            | "dev.guilhermexp.clovy.computer-use-self-test.observer"
     ) && identity
         .executable_path
         .file_name()
@@ -1310,7 +1310,10 @@ fn packaged_driver_bundles(path: &Path) -> Result<Option<PackagedDriverBundles>,
     let (Some(helper), Some(outer)) = (app_ancestors.first(), app_ancestors.get(1)) else {
         return Ok(None);
     };
-    let expected_outer_executable = outer.join("Contents").join("MacOS").join("os-june");
+    let expected_outer_executable = outer
+        .join("Contents")
+        .join("MacOS")
+        .join(crate::app_identity::MAIN_EXECUTABLE);
     if !std::env::current_exe()
         .ok()
         .is_some_and(|current| same_path(&current, &expected_outer_executable))
@@ -4426,7 +4429,6 @@ fn blocked_app(app: &str) -> bool {
         .collect();
     [
         "clovy",
-        "june",
         "terminal",
         "iterm",
         "warp",
@@ -5266,16 +5268,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn permission_drag_publishes_the_bundle_owned_by_each_permission() {
-        let driver =
-            Path::new("/tmp/June Computer Use Driver.app/Contents/MacOS/clovy-computer-use-driver");
-        let host = Path::new("/Applications/June.app/Contents/MacOS/os-june");
+        let driver = Path::new(
+            "/tmp/Clovy Computer Use Driver.app/Contents/MacOS/clovy-computer-use-driver",
+        );
+        let host = Path::new("/Applications/Clovy.app/Contents/MacOS/clovy");
         assert_eq!(
             permission_drag_bundle_path(
                 crate::computer_use_permission_drag::PermissionDragTarget::Helper,
                 driver,
                 host,
             ),
-            Some(PathBuf::from("/tmp/June Computer Use Driver.app"))
+            Some(PathBuf::from("/tmp/Clovy Computer Use Driver.app"))
         );
         assert_eq!(
             permission_drag_bundle_path(
@@ -5283,15 +5286,16 @@ mod tests {
                 driver,
                 host,
             ),
-            Some(PathBuf::from("/Applications/June.app"))
+            Some(PathBuf::from("/Applications/Clovy.app"))
         );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn driver_launch_uses_launch_services_and_the_helper_bundle() {
-        let executable =
-            Path::new("/tmp/June Computer Use Driver.app/Contents/MacOS/clovy-computer-use-driver");
+        let executable = Path::new(
+            "/tmp/Clovy Computer Use Driver.app/Contents/MacOS/clovy-computer-use-driver",
+        );
         let launch = driver_launch_spec(
             executable,
             Path::new("/tmp/clovy-cua-test/driver.sock"),
@@ -5306,7 +5310,7 @@ mod tests {
         assert!(launch
             .args
             .iter()
-            .any(|arg| { arg == "/tmp/June Computer Use Driver.app" }));
+            .any(|arg| { arg == "/tmp/Clovy Computer Use Driver.app" }));
         assert!(launch
             .args
             .iter()
@@ -5503,7 +5507,6 @@ mod tests {
     fn blocked_apps_cover_self_terminal_security_and_credentials() {
         for app in [
             "Clovy",
-            "June",
             "Terminal",
             "iTerm2",
             "System Settings",

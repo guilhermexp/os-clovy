@@ -236,7 +236,7 @@ fn microphone_authorization_status() -> MicrophoneAuthorizationStatus {
 }
 
 /// TCC microphone grants are bundle-scoped: onboarding prompts through the
-/// dictation helper (`co.opensoftware.june.dictation-helper`), whose grant
+/// dictation helper (`dev.guilhermexp.clovy.dictation-helper`), whose grant
 /// never covers the main app bundle. The main app must trigger its own TCC
 /// prompt before capture, or a fresh install records only zeros.
 #[cfg(target_os = "macos")]

@@ -5,10 +5,9 @@
 use rand::RngCore;
 use zeroize::Zeroizing;
 
-const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.activity-db";
-/// Debug builds use the repo-wide `clovy-dev` service prefix so a development
-/// binary never reads or rotates the release key.
-const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.activity-db";
+/// The service name under `app_identity`'s prefix (`-dev` in debug builds, so
+/// a development binary never reads or rotates the release key).
+const KEYCHAIN_SERVICE_NAME: &str = "activity-db";
 const KEYCHAIN_USER: &str = "sqlcipher-key";
 pub const KEY_BYTES: usize = 32;
 
@@ -23,12 +22,12 @@ pub trait ActivityKeyStore: Send + Sync {
     fn delete(&self) -> Result<(), KeyStoreError>;
 }
 
-pub fn keychain_service_for_build(debug_assertions: bool) -> &'static str {
-    if debug_assertions {
-        DEV_KEYCHAIN_SERVICE
-    } else {
-        KEYCHAIN_SERVICE
-    }
+pub fn keychain_service_for_build(debug_assertions: bool) -> String {
+    crate::app_identity::credential_service_for(
+        crate::app_identity::APP_IDENTIFIER,
+        debug_assertions,
+        KEYCHAIN_SERVICE_NAME,
+    )
 }
 
 /// A fresh random key, hex encoded (64 chars).
@@ -48,7 +47,7 @@ pub fn is_valid_key_hex(value: &str) -> bool {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub struct KeychainKeyStore {
-    service: &'static str,
+    service: String,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -60,7 +59,7 @@ impl KeychainKeyStore {
     }
 
     fn entry(&self) -> Result<keyring::Entry, KeyStoreError> {
-        keyring::Entry::new(self.service, KEYCHAIN_USER)
+        keyring::Entry::new(&self.service, KEYCHAIN_USER)
             .map_err(|error| KeyStoreError(error.to_string()))
     }
 }
@@ -139,13 +138,9 @@ mod tests {
 
     #[test]
     fn dev_builds_use_a_separate_keychain_service() {
-        assert_eq!(
+        assert_ne!(
             keychain_service_for_build(true),
-            "co.opensoftware.clovy-dev.activity-db"
-        );
-        assert_eq!(
-            keychain_service_for_build(false),
-            "co.opensoftware.clovy.activity-db"
+            keychain_service_for_build(false)
         );
     }
 }

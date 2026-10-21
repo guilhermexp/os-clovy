@@ -3,7 +3,7 @@ const IDENTIFIER = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
 
 export function devAppIdentityForBranch(
   branchName,
-  { baseName = "Clovy", baseIdentifier = "co.opensoftware.june", identifierOverride } = {},
+  { baseName = "Clovy", baseIdentifier = "dev.guilhermexp.clovy", identifierOverride } = {},
 ) {
   // CLOVY_DEV_APP_IDENTIFIER: an explicit, isolated compiled identity (and so
   // an isolated `<identifier>-dev` data directory), e.g. for native proofs.

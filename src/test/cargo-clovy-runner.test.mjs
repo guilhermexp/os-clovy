@@ -51,7 +51,7 @@ const FAKE_CARGO = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_CARGO_LOG"
 if [ -n "$FAKE_CARGO_OUTPUT" ]; then
   mkdir -p "$FAKE_CARGO_OUT_DIR"
-  for bin in os-june clovy-mcp clovy-nm-shim; do
+  for bin in clovy clovy-mcp clovy-nm-shim; do
     cp "$FAKE_CARGO_OUTPUT" "$FAKE_CARGO_OUT_DIR/.$bin.new"
     mv -f "$FAKE_CARGO_OUT_DIR/.$bin.new" "$FAKE_CARGO_OUT_DIR/$bin"
   done
@@ -103,7 +103,7 @@ function runRunner(sandbox, { args, output, outDir, exitCode = 0 }) {
     HOME: sandbox.home,
     CLOVY_DEV_SIGNING_IDENTITY: "-",
     OS_CLOVY_DEV_APP_NAME: "Clovy",
-    OS_CLOVY_DEV_APP_IDENTIFIER: "co.opensoftware.june.runnertest",
+    OS_CLOVY_DEV_APP_IDENTIFIER: "dev.guilhermexp.clovy.runnertest",
     FAKE_CARGO_LOG: path.join(sandbox.root, "cargo.log"),
     FAKE_CARGO_OUTPUT: output ?? "",
     FAKE_CARGO_OUT_DIR: outDir,
@@ -134,7 +134,7 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
     const sandbox = createSandbox();
     const outDir = path.join(sandbox.crate, "target", "debug");
     const bundle = path.join(outDir, "Clovy Dev runnertest.app");
-    const executable = path.join(bundle, "Contents", "MacOS", "os-june");
+    const executable = path.join(bundle, "Contents", "MacOS", "clovy");
 
     const first = await runRunner(sandbox, {
       args: ["run", "--no-default-features", "--color", "always", "--", "--replay", "a b"],
@@ -145,14 +145,14 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
 
     expect(first.status, first.stderr).toBe(3);
     expect(readFileSync(path.join(sandbox.root, "cargo.log"), "utf8").trim()).toBe(
-      "build --bin os-june --bin clovy-mcp --bin clovy-nm-shim --no-default-features --color always",
+      "build --bin clovy --bin clovy-mcp --bin clovy-nm-shim --no-default-features --color always",
     );
     expect(first.app).toEqual([
       {
         variant: 1,
         pid: first.pid,
         responsible: first.pid,
-        bundle: "co.opensoftware.june.runnertest.dev",
+        bundle: "dev.guilhermexp.clovy.runnertest.dev",
         argv0: executable,
         args: ["--replay", "a b"],
       },
@@ -166,8 +166,8 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
       ).stdout,
     );
     expect(plist).toMatchObject({
-      CFBundleExecutable: "os-june",
-      CFBundleIdentifier: "co.opensoftware.june.runnertest.dev",
+      CFBundleExecutable: "clovy",
+      CFBundleIdentifier: "dev.guilhermexp.clovy.runnertest.dev",
       CFBundleName: "Clovy Dev runnertest",
     });
     expect(plist.NSMicrophoneUsageDescription).toEqual(expect.any(String));
@@ -178,7 +178,7 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
           sandbox.home,
           "Library",
           "WebKit",
-          "co.opensoftware.june.runnertest.dev",
+          "dev.guilhermexp.clovy.runnertest.dev",
           "WebsiteData",
           "LocalStorage",
         ),
@@ -220,7 +220,7 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.app.map(({ argv0 }) => argv0)).toEqual([
-      path.join(outDir, "Clovy Dev runnertest.app", "Contents", "MacOS", "os-june"),
+      path.join(outDir, "Clovy Dev runnertest.app", "Contents", "MacOS", "clovy"),
     ]);
   });
 });

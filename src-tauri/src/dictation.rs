@@ -3677,10 +3677,10 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
             paths.push(
                 repo_dir
                     .join(".tauri-helper")
-                    .join("June Dictation Helper.app")
+                    .join("Clovy Dictation Helper.app")
                     .join("Contents")
                     .join("MacOS")
-                    .join("june-dictation-helper"),
+                    .join("clovy-dictation-helper"),
             );
         }
         #[cfg(target_os = "windows")]
@@ -3688,7 +3688,7 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
             manifest_dir
                 .join("native")
                 .join("bin")
-                .join("june-dictation-helper.exe"),
+                .join("clovy-dictation-helper.exe"),
         );
     }
 
@@ -3696,25 +3696,25 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
         if let Some(exe_dir) = exe_path.parent() {
             #[cfg(target_os = "windows")]
             {
-                paths.push(exe_dir.join("june-dictation-helper.exe"));
+                paths.push(exe_dir.join("clovy-dictation-helper.exe"));
                 paths.push(
                     exe_dir
                         .join("native")
                         .join("bin")
-                        .join("june-dictation-helper.exe"),
+                        .join("clovy-dictation-helper.exe"),
                 );
                 paths.push(
                     exe_dir
                         .join("resources")
                         .join("native")
                         .join("bin")
-                        .join("june-dictation-helper.exe"),
+                        .join("clovy-dictation-helper.exe"),
                 );
             }
             #[cfg(target_os = "macos")]
             {
-                paths.push(exe_dir.join("june-dictation-helper"));
-                paths.push(exe_dir.join("../Resources/june-dictation-helper"));
+                paths.push(exe_dir.join("clovy-dictation-helper"));
+                paths.push(exe_dir.join("../Resources/clovy-dictation-helper"));
             }
         }
     }
@@ -3722,32 +3722,32 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
     if let Ok(resource_dir) = app.path().resource_dir() {
         #[cfg(target_os = "windows")]
         {
-            paths.push(resource_dir.join("june-dictation-helper.exe"));
+            paths.push(resource_dir.join("clovy-dictation-helper.exe"));
             paths.push(
                 resource_dir
                     .join("native")
                     .join("bin")
-                    .join("june-dictation-helper.exe"),
+                    .join("clovy-dictation-helper.exe"),
             );
         }
         #[cfg(target_os = "macos")]
         {
-            paths.push(resource_dir.join("june-dictation-helper"));
+            paths.push(resource_dir.join("clovy-dictation-helper"));
             paths.push(
                 resource_dir
                     .join("native")
                     .join("bin")
-                    .join("June Dictation Helper.app")
+                    .join("Clovy Dictation Helper.app")
                     .join("Contents")
                     .join("MacOS")
-                    .join("june-dictation-helper"),
+                    .join("clovy-dictation-helper"),
             );
             paths.push(
                 resource_dir
-                    .join("June Dictation Helper.app")
+                    .join("Clovy Dictation Helper.app")
                     .join("Contents")
                     .join("MacOS")
-                    .join("june-dictation-helper"),
+                    .join("clovy-dictation-helper"),
             );
         }
     }
@@ -3758,7 +3758,7 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
 /// The dictation helper binary's basename, used by the ownership-aware orphan
 /// reap below to confirm a recorded pid is still a dictation helper.
 #[cfg(target_os = "macos")]
-const DICTATION_HELPER_NAME: &str = "june-dictation-helper";
+const DICTATION_HELPER_NAME: &str = "clovy-dictation-helper";
 
 /// Filename prefix for the per-instance ownership records. One record per owning
 /// app pid (never a single shared file), so concurrent instances — allowed in
@@ -3900,7 +3900,7 @@ fn probe_start_time(pid: u32) -> StartTimeProbe {
 /// printable chars (`june-dictation-`) instead of the full 21-char name, so a
 /// basename that is a non-empty prefix of length ≥ 15 (the truncation length)
 /// counts as a match. No other expected process shares a 15-char prefix of
-/// `june-dictation-helper`, so this cannot false-positive. Handles both a bare
+/// `clovy-dictation-helper`, so this cannot false-positive. Handles both a bare
 /// `comm` and a full path (`rsplit('/')`).
 #[cfg(target_os = "macos")]
 fn comm_line_is_dictation_helper(comm_line: &str) -> bool {
@@ -8218,17 +8218,17 @@ mod tests {
     fn comm_line_identity_is_truncation_tolerant() {
         // Full path (comm= returned the executable path).
         assert!(comm_line_is_dictation_helper(
-            "/Applications/June Dictation Helper.app/Contents/MacOS/june-dictation-helper"
+            "/Applications/Clovy Dictation Helper.app/Contents/MacOS/clovy-dictation-helper"
         ));
         // Bare full name.
-        assert!(comm_line_is_dictation_helper("june-dictation-helper"));
+        assert!(comm_line_is_dictation_helper("clovy-dictation-helper"));
         // Kernel p_comm truncated to 15 chars: the real orphan MUST still read
         // as the helper, or it is deleted-not-killed and JUN-338 reopens.
-        assert!(comm_line_is_dictation_helper("june-dictation-"));
+        assert!(comm_line_is_dictation_helper("clovy-dictation"));
         // Trailing whitespace/newline from ps is tolerated.
-        assert!(comm_line_is_dictation_helper("june-dictation-helper\n"));
+        assert!(comm_line_is_dictation_helper("clovy-dictation-helper\n"));
         // A shorter prefix (< 15) is ambiguous and must NOT match.
-        assert!(!comm_line_is_dictation_helper("june-dictation"));
+        assert!(!comm_line_is_dictation_helper("clovy-dictatio"));
         // Unrelated process and empty output never match.
         assert!(!comm_line_is_dictation_helper("/usr/bin/login"));
         assert!(!comm_line_is_dictation_helper("bash"));

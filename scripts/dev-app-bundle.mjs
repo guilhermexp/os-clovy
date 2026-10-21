@@ -28,10 +28,10 @@ import {
 // The development app runs from a signed bundle beside Cargo's output so macOS
 // can show, grant, and keep its privacy permissions across restarts and
 // rebuilds (docs/development.md). The bundle keeps the packaged layout:
-// Contents/MacOS/os-june is the main executable the Computer use helper
+// Contents/MacOS/clovy is the main executable the Computer use helper
 // authenticates, with the MCP relay and native messaging shim beside it.
 const BUNDLE_FORMAT = 1;
-const MAIN_EXECUTABLE = "os-june";
+const MAIN_EXECUTABLE = "clovy";
 const SIBLING_EXECUTABLES = ["clovy-mcp", "clovy-nm-shim"];
 const BUNDLE_NAME_SUFFIX = " Dev";
 const BUNDLE_IDENTIFIER_SUFFIX = ".dev";

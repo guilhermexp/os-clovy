@@ -95,11 +95,10 @@ pub const LEGACY_NATIVE_HOST_NAME: &str = "co.opensoftware.june.extension";
 
 /// The release app's bundle identifier. Its data directory belongs to the
 /// installed app and holds the descriptor pointer every shim reads.
-const APP_BUNDLE_IDENTIFIER: &str = "co.opensoftware.june";
-/// The identifier this build was compiled with (`build.rs`): the release
-/// identifier, or a development identity such as `CLOVY_DEV_APP_IDENTIFIER`.
-/// The shim has no AppHandle, so it finds its own data directory from this.
-const COMPILED_APP_IDENTIFIER: &str = env!("CLOVY_APP_IDENTIFIER");
+const APP_BUNDLE_IDENTIFIER: &str = crate::app_identity::RELEASE_APP_IDENTIFIER;
+/// The identifier this build was compiled with. The shim has no AppHandle, so
+/// it finds its own data directory from this.
+const COMPILED_APP_IDENTIFIER: &str = crate::app_identity::APP_IDENTIFIER;
 
 const DESCRIPTOR_FILE_NAME: &str = "extension-host.json";
 const DESCRIPTOR_POINTER_FILE_NAME: &str = "extension-host-path";
@@ -1397,9 +1396,9 @@ mod tests {
     fn an_overridden_identity_routes_the_native_host_to_its_own_dev_profile() {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path();
-        let identity = "co.opensoftware.june.permproof";
-        let own_dev = app_support_dir(home).join("co.opensoftware.june.permproof-dev");
-        let normal_dev = app_support_dir(home).join("co.opensoftware.june-dev");
+        let identity = "dev.guilhermexp.clovy.permproof";
+        let own_dev = app_support_dir(home).join("dev.guilhermexp.clovy.permproof-dev");
+        let normal_dev = app_support_dir(home).join("dev.guilhermexp.clovy-dev");
 
         let selected = persist_descriptor_selection(home, &own_dev, identity)
             .expect("the build's own dev profile is selectable");
@@ -1432,8 +1431,8 @@ mod tests {
 
     #[test]
     fn debug_registration_never_falls_back_to_a_bundled_release_shim() {
-        let executable = std::path::Path::new("/repo/src-tauri/target/debug/June");
-        let resources = std::path::Path::new("/Applications/June.app/Contents/Resources");
+        let executable = std::path::Path::new("/repo/src-tauri/target/debug/clovy");
+        let resources = std::path::Path::new("/Applications/Clovy.app/Contents/Resources");
 
         assert_eq!(
             shim_candidates_for_build(Some(executable), Some(resources), true),

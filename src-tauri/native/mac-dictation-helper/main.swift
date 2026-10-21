@@ -1162,7 +1162,7 @@ final class FocusTargetController {
     // Debug builds carry `<published>.dev.w<worktree>` (src-tauri/build.rs), so
     // ignore this helper by its own bundle identifier as well as the release one.
     private let ignoredBundleIdentifiers: Set<String> = Set(
-        ["co.opensoftware.june.dictation-helper", Bundle.main.bundleIdentifier].compactMap { $0 }
+        ["dev.guilhermexp.clovy.dictation-helper", Bundle.main.bundleIdentifier].compactMap { $0 }
     )
 
     private init() {}
@@ -1287,7 +1287,7 @@ enum SelectedDeviceRecorderError: LocalizedError {
 final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private let output = AVCaptureAudioDataOutput()
-    private let queue = DispatchQueue(label: "co.opensoftware.clovy.dictation-recorder")
+    private let queue = DispatchQueue(label: "dev.guilhermexp.clovy.dictation-recorder")
     private let writer: AVAssetWriter
     private let writerInput: AVAssetWriterInput
     private var didStartWriting = false
@@ -1560,7 +1560,7 @@ enum AutoDetectInputMeterError: LocalizedError {
 final class AutoDetectInputMeter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private let output = AVCaptureAudioDataOutput()
-    private let queue = DispatchQueue(label: "co.opensoftware.clovy.dictation-auto-meter")
+    private let queue = DispatchQueue(label: "dev.guilhermexp.clovy.dictation-auto-meter")
     private let levelHandler: (Float) -> Void
     private var pendingLevel: Float = 0
     private var lastLevelEmit: TimeInterval = 0

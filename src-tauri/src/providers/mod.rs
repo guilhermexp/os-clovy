@@ -2186,11 +2186,11 @@ mod tests {
 
     #[test]
     fn provider_settings_path_derives_from_the_isolated_config_dir() {
-        let isolated_config_dir = PathBuf::from("/tmp/co.opensoftware.june-dev");
+        let isolated_config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy-dev");
 
         assert_eq!(
             provider_settings_path_from_config_dir(isolated_config_dir),
-            PathBuf::from("/tmp/co.opensoftware.june-dev/provider-settings.json")
+            PathBuf::from("/tmp/dev.guilhermexp.clovy-dev/provider-settings.json")
         );
     }
 

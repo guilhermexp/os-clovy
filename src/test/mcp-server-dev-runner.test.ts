@@ -47,7 +47,7 @@ describe("development runner", () => {
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(existsSync(join(target, "debug", "os-june"))).toBe(true);
+    expect(existsSync(join(target, "debug", "clovy"))).toBe(true);
     expect(existsSync(join(target, "debug", "clovy-mcp"))).toBe(true);
   });
 });

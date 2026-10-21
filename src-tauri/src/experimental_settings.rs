@@ -140,7 +140,7 @@ mod tests {
     fn test_path() -> PathBuf {
         std::env::temp_dir()
             .join(format!(
-                "os-june-experimental-settings-{}-{}",
+                "clovy-experimental-settings-{}-{}",
                 std::process::id(),
                 NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
             ))

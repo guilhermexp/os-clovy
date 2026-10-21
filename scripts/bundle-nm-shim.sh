@@ -76,11 +76,4 @@ else
     --sign - "$out"
 fi
 
-# Existing native-host manifests installed by June point at this basename.
-# Ship a byte-identical signed alias so an in-place app update cannot strand
-# an extension before the manifests are refreshed.
-legacy_out=".tauri-helper/june-nm-shim"
-cp -f "$out" "$legacy_out"
-chmod +x "$legacy_out"
-
-echo "bundled clovy-nm-shim and june-nm-shim compatibility alias from $src"
+echo "bundled clovy-nm-shim from $src"

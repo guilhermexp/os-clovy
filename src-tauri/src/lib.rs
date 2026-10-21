@@ -21,7 +21,7 @@ mod computer_use_cursor;
 mod computer_use_permission_drag;
 pub mod connectors;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-mod credential_compat;
+mod credentials;
 pub mod day_intelligence;
 pub mod db;
 pub mod dictation;
@@ -157,12 +157,9 @@ pub fn run() {
         // General -> Login Items. Enabling/disabling stays a user action in
         // Settings and onboarding; registering the plugin alone changes
         // nothing.
-        // Keep the June-era autostart entry name stable across the Clovy
-        // presentation rename. Changing this name would strand existing login
-        // items and make an enabled preference appear disabled after update.
         .plugin(
             tauri_plugin_autostart::Builder::new()
-                .app_name("June")
+                .app_name("Clovy")
                 .build(),
         )
         .on_menu_event(|app, event| {

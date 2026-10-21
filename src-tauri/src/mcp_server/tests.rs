@@ -475,7 +475,7 @@ fn context_reports_date_time_and_zone() {
 fn configuration_snippets_point_at_the_bundled_relay() {
     let launch = launch(
         Path::new("/Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp"),
-        Path::new("/Users/me/Library/Application Support/co.opensoftware.june/mcp"),
+        Path::new("/Users/me/Library/Application Support/dev.guilhermexp.clovy/mcp"),
     );
     let claude = claude_code_config(&launch);
     assert_eq!(
@@ -483,7 +483,7 @@ fn configuration_snippets_point_at_the_bundled_relay() {
         json!({ "mcpServers": { "clovy": {
             "type": "stdio",
             "command": "/Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp",
-            "args": ["--dir", "/Users/me/Library/Application Support/co.opensoftware.june/mcp"],
+            "args": ["--dir", "/Users/me/Library/Application Support/dev.guilhermexp.clovy/mcp"],
         }}})
     );
     assert_eq!(
@@ -496,7 +496,7 @@ fn configuration_snippets_point_at_the_bundled_relay() {
     );
     assert_eq!(
         claude_code_command(&launch),
-        "claude mcp add --scope user clovy -- /Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp --dir '/Users/me/Library/Application Support/co.opensoftware.june/mcp'"
+        "claude mcp add --scope user clovy -- /Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp --dir '/Users/me/Library/Application Support/dev.guilhermexp.clovy/mcp'"
     );
     assert_eq!(
         stdio::parse_dir(&["--dir".into(), "/tmp/x".into()]).unwrap(),

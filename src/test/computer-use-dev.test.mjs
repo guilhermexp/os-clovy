@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { computerUseBundleIdentifier } from "../../scripts/computer-use-dev.mjs";
 
 describe("Computer use development identity", () => {
-  const baseIdentifier = "co.opensoftware.june.computer-use-driver";
+  const baseIdentifier = "dev.guilhermexp.clovy.computer-use-driver";
 
   it("is stable within a worktree and isolated between worktrees", () => {
     const first = computerUseBundleIdentifier({
@@ -23,7 +23,7 @@ describe("Computer use development identity", () => {
 
     expect(first).toBe(same);
     expect(first).not.toBe(second);
-    expect(first).toMatch(/^co\.opensoftware\.june\.computer-use-driver\.dev\.w[0-9a-f]{12}$/);
+    expect(first).toMatch(/^dev\.guilhermexp\.clovy\.computer-use-driver\.dev\.w[0-9a-f]{12}$/);
   });
 
   it("keeps the production bundle identifier fixed", () => {

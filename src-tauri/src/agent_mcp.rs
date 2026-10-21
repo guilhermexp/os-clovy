@@ -54,10 +54,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_mcp_servers_enabled
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
-const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.agent-mcp";
-const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.agent-mcp";
-const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.agent-mcp";
-const LEGACY_DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.agent-mcp";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const OAUTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 const OAUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -462,10 +458,10 @@ pub struct KeychainMcpSecretStore;
 impl McpSecretStore for KeychainMcpSecretStore {
     fn put(&self, secret_ref: &str, bundle: &McpSecretBundle) -> Result<(), AgentMcpError> {
         let raw = serde_json::to_string(bundle).map_err(|_| AgentMcpError::SecureStorage)?;
-        platform_keychain_put(keychain_services(), secret_ref, raw)
+        platform_keychain_put(keychain_service(), secret_ref, raw)
     }
     fn get(&self, secret_ref: &str) -> Result<Option<McpSecretBundle>, AgentMcpError> {
-        let Some(raw) = platform_keychain_get(keychain_services(), secret_ref)? else {
+        let Some(raw) = platform_keychain_get(keychain_service(), secret_ref)? else {
             return Ok(None);
         };
         serde_json::from_str(&raw)
@@ -473,7 +469,7 @@ impl McpSecretStore for KeychainMcpSecretStore {
             .map_err(|_| AgentMcpError::SecureStorage)
     }
     fn delete(&self, secret_ref: &str) -> Result<(), AgentMcpError> {
-        platform_keychain_delete(keychain_services(), secret_ref)
+        platform_keychain_delete(keychain_service(), secret_ref)
     }
 }
 
@@ -1072,16 +1068,16 @@ async fn refresh_oauth_bundle(
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn platform_keychain_put(
-    services: (String, String),
+    service: String,
     secret_ref: &str,
     raw: String,
 ) -> Result<(), AgentMcpError> {
-    crate::credential_compat::set_password(&services.0, &services.1, secret_ref, &raw)
+    crate::credentials::set_password(&service, secret_ref, &raw)
         .map_err(|_| AgentMcpError::SecureStorage)
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_keychain_put(
-    _services: (String, String),
+    _service: String,
     _secret_ref: &str,
     _raw: String,
 ) -> Result<(), AgentMcpError> {
@@ -1089,43 +1085,29 @@ fn platform_keychain_put(
 }
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn platform_keychain_get(
-    services: (String, String),
+    service: String,
     secret_ref: &str,
 ) -> Result<Option<String>, AgentMcpError> {
-    crate::credential_compat::get_password(&services.0, &services.1, secret_ref)
-        .map_err(|_| AgentMcpError::SecureStorage)
+    crate::credentials::get_password(&service, secret_ref).map_err(|_| AgentMcpError::SecureStorage)
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_keychain_get(
-    _services: (String, String),
+    _service: String,
     _secret_ref: &str,
 ) -> Result<Option<String>, AgentMcpError> {
     Ok(None)
 }
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn platform_keychain_delete(
-    services: (String, String),
-    secret_ref: &str,
-) -> Result<(), AgentMcpError> {
-    crate::credential_compat::delete_password(&services.0, &services.1, secret_ref)
+fn platform_keychain_delete(service: String, secret_ref: &str) -> Result<(), AgentMcpError> {
+    crate::credentials::delete_password(&service, secret_ref)
         .map_err(|_| AgentMcpError::SecureStorage)
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_keychain_delete(
-    _services: (String, String),
-    _secret_ref: &str,
-) -> Result<(), AgentMcpError> {
+fn platform_keychain_delete(_service: String, _secret_ref: &str) -> Result<(), AgentMcpError> {
     Ok(())
 }
-fn keychain_services() -> (String, String) {
-    if cfg!(debug_assertions) {
-        (
-            DEV_KEYCHAIN_SERVICE.into(),
-            LEGACY_DEV_KEYCHAIN_SERVICE.into(),
-        )
-    } else {
-        (KEYCHAIN_SERVICE.into(), LEGACY_KEYCHAIN_SERVICE.into())
-    }
+fn keychain_service() -> String {
+    crate::app_identity::credential_service("agent-mcp")
 }
 
 #[derive(Clone)]

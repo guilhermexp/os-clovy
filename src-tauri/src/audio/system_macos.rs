@@ -418,7 +418,7 @@ pub fn helper_app_path() -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
         .join(".tauri-helper")
-        .join("June.app");
+        .join("Clovy Audio Capture.app");
     if dev_path.exists() {
         return dev_path;
     }
@@ -431,7 +431,7 @@ pub fn helper_app_path() -> PathBuf {
                 .join("Resources")
                 .join("native")
                 .join("bin")
-                .join("June.app");
+                .join("Clovy Audio Capture.app");
             if resource_path.exists() {
                 return resource_path;
             }
@@ -463,12 +463,7 @@ fn send_signal(pid: u32, signal: &str) {
 }
 
 fn terminate_existing_helpers() {
-    // Also match the pre-rename helper so a recorder left over from an older
-    // legacy June build still gets cleaned up.
-    let helper_names = [
-        "june-system-audio-recorder",
-        "os-june-system-audio-recorder",
-    ];
+    let helper_names = ["clovy-system-audio-recorder"];
     let mut pids: Vec<u32> = Vec::new();
     for helper_name in helper_names {
         let Ok(output) = Command::new("pgrep").arg("-f").arg(helper_name).output() else {

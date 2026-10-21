@@ -59,7 +59,7 @@ export CLOVY_DEV_SIGNING_IDENTITY
 # prevents Cargo from relinking that helper with the app's lower deployment
 # target or a different active Swift toolchain. The relay and the shim sit
 # beside the app executable (docs/mcp-server.md).
-cargo build --bin os-june --bin clovy-mcp --bin clovy-nm-shim ${cargo_args[@]+"${cargo_args[@]}"}
+cargo build --bin clovy --bin clovy-mcp --bin clovy-nm-shim ${cargo_args[@]+"${cargo_args[@]}"}
 
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [[ "$target_dir" != /* ]]; then

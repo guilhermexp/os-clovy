@@ -184,7 +184,7 @@ fn prepare_computer_use_driver() {
         .parent()
         .expect("src-tauri should have a repository parent")
         .join(".tauri-helper")
-        .join("June Computer Use Driver.app");
+        .join("Clovy Computer Use Driver.app");
     let executable = app_dir
         .join("Contents")
         .join("MacOS")
@@ -330,7 +330,7 @@ fn ensure_nm_shim_placeholder() {
     else {
         return;
     };
-    for name in ["clovy-nm-shim", "june-nm-shim", "clovy-mcp"] {
+    for name in ["clovy-nm-shim", "clovy-mcp"] {
         let shim = helper_dir.join(name);
         if shim.exists() {
             continue;
@@ -416,11 +416,11 @@ fn build_system_audio_helper() {
         .parent()
         .expect("src-tauri should have a repository parent")
         .join(".tauri-helper");
-    let app_dir = helper_dir.join("June.app");
+    let app_dir = helper_dir.join("Clovy Audio Capture.app");
     let contents_dir = app_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
     std::fs::create_dir_all(&macos_dir).expect("system audio helper app dir should be created");
-    let executable = macos_dir.join("june-system-audio-recorder");
+    let executable = macos_dir.join("clovy-system-audio-recorder");
 
     let executable_current = swift_helper_executable_current(&source, &executable);
     let mut should_sign = false;
@@ -447,7 +447,7 @@ fn build_system_audio_helper() {
     }
 
     let bundle_identifier =
-        helper_bundle_identifier(&manifest_dir, "co.opensoftware.june.audio-capture");
+        helper_bundle_identifier(&manifest_dir, "dev.guilhermexp.clovy.audio-capture");
     let plist = contents_dir.join("Info.plist");
     let plist_contents = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -459,7 +459,7 @@ fn build_system_audio_helper() {
   <key>CFBundleDisplayName</key>
   <string>Clovy</string>
   <key>CFBundleExecutable</key>
-  <string>june-system-audio-recorder</string>
+  <string>clovy-system-audio-recorder</string>
   <key>CFBundleIdentifier</key>
   <string>{bundle_identifier}</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -564,17 +564,19 @@ fn build_windows_dictation_helper() {
         );
     }
 
-    let mut built = target_dir.join("release").join("june-dictation-helper.exe");
+    let mut built = target_dir
+        .join("release")
+        .join("clovy-dictation-helper.exe");
     if let Some(target) = target.as_deref() {
         built = target_dir
             .join(target)
             .join("release")
-            .join("june-dictation-helper.exe");
+            .join("clovy-dictation-helper.exe");
     }
     let destination = manifest_dir
         .join("native")
         .join("bin")
-        .join("june-dictation-helper.exe");
+        .join("clovy-dictation-helper.exe");
     println!("cargo:rerun-if-changed={}", destination.display());
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)
@@ -675,14 +677,14 @@ fn build_dictation_helper() {
         .parent()
         .expect("src-tauri should have a repository parent")
         .join(".tauri-helper");
-    let app_dir = helper_dir.join("June Dictation Helper.app");
+    let app_dir = helper_dir.join("Clovy Dictation Helper.app");
     let contents_dir = app_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
     let resources_dir = contents_dir.join("Resources");
     std::fs::create_dir_all(&macos_dir).expect("dictation helper app dir should be created");
     std::fs::create_dir_all(&resources_dir)
         .expect("dictation helper resources dir should be created");
-    let executable = macos_dir.join("june-dictation-helper");
+    let executable = macos_dir.join("clovy-dictation-helper");
     let icon_source = manifest_dir.join("icons").join("icon.icns");
     let icon_destination = resources_dir.join("Clovy.icns");
 
@@ -712,7 +714,7 @@ fn build_dictation_helper() {
     }
 
     let bundle_identifier =
-        helper_bundle_identifier(&manifest_dir, "co.opensoftware.june.dictation-helper");
+        helper_bundle_identifier(&manifest_dir, "dev.guilhermexp.clovy.dictation-helper");
     let plist = contents_dir.join("Info.plist");
     let plist_contents = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -724,7 +726,7 @@ fn build_dictation_helper() {
   <key>CFBundleDisplayName</key>
   <string>Clovy Dictation Helper</string>
   <key>CFBundleExecutable</key>
-  <string>june-dictation-helper</string>
+  <string>clovy-dictation-helper</string>
   <key>CFBundleIdentifier</key>
   <string>{bundle_identifier}</string>
   <key>CFBundleIconFile</key>

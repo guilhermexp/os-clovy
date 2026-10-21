@@ -112,10 +112,10 @@ describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
     const store = path.join(sandbox, "authorizations.json");
     const authorizations = [
       { service: "Accessibility", bundle: helperIdentifier },
-      { service: "ScreenCapture", bundle: "co.opensoftware.june" },
-      { service: "Accessibility", bundle: "co.opensoftware.june.dev" },
-      { service: "ScreenCapture", bundle: "co.opensoftware.june.dev" },
-      { service: "Microphone", bundle: "co.opensoftware.june.dev" },
+      { service: "ScreenCapture", bundle: "dev.guilhermexp.clovy" },
+      { service: "Accessibility", bundle: "dev.guilhermexp.clovy.dev" },
+      { service: "ScreenCapture", bundle: "dev.guilhermexp.clovy.dev" },
+      { service: "Microphone", bundle: "dev.guilhermexp.clovy.dev" },
     ];
     writeFileSync(store, JSON.stringify(authorizations));
     const tauriArgs = path.join(sandbox, "tauri-args.txt");

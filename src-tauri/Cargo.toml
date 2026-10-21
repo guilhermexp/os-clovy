@@ -2,20 +2,20 @@
 name = "clovy"
 version = "0.0.40"
 description = "Clovy"
-authors = ["Open Software Network"]
+authors = ["guilhermexp"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.80.0"
 # Several binaries below; `cargo run` (tauri dev via scripts/cargo-clovy-runner.sh)
 # must keep launching the app.
-default-run = "os-june"
+default-run = "clovy"
 
 [lib]
 name = "clovy_lib"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "os-june"
+name = "clovy"
 path = "src/main.rs"
 
 # The native messaging shim Chrome spawns for the Clovy extension (JUN-287).

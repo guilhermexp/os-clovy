@@ -52,7 +52,7 @@ describe("Clovy technical identity", () => {
     expect(desktopCargo).toMatch(/^name = "clovy_lib"$/m);
     expect(desktopCargo).toMatch(/^name = "clovy-nm-shim"$/m);
     expect(windowsHelperCargo).toMatch(/^name = "clovy-windows-dictation-helper"$/m);
-    expect(windowsHelperCargo).toMatch(/^name = "june-dictation-helper"$/m);
+    expect(windowsHelperCargo).toMatch(/^name = "clovy-dictation-helper"$/m);
     expect(apiCargo).toContain('members = ["crates/*"]');
     expect(apiCargo).toContain('clovy-api = { path = "crates/api" }');
     expect(apiAppCargo).toMatch(/^name = "clovy-api-server"$/m);
@@ -65,44 +65,6 @@ describe("Clovy technical identity", () => {
     expect(legacyProtocolCargo).toContain(
       'clovy-companion-protocol = { path = "../clovy-companion-protocol" }',
     );
-  });
-
-  it("retains installed desktop identities", async () => {
-    const [
-      tauri,
-      macos,
-      macosInfoPlist,
-      macosLocalizedInfoPlist,
-      windows,
-      desktopCargo,
-      bundleShim,
-    ] = await Promise.all([
-      read("src-tauri/tauri.conf.json").then(JSON.parse),
-      read("src-tauri/tauri.macos.conf.json").then(JSON.parse),
-      read("src-tauri/Info.plist"),
-      read("src-tauri/resources/macos/en.lproj/InfoPlist.strings"),
-      read("src-tauri/tauri.windows.conf.json").then(JSON.parse),
-      read("src-tauri/Cargo.toml"),
-      read("scripts/bundle-nm-shim.sh"),
-    ]);
-
-    expect(tauri.productName).toBe("Clovy");
-    expect(tauri.identifier).toBe("co.opensoftware.june");
-    expect(tauri.plugins["deep-link"].desktop.schemes).toEqual(["clovy"]);
-    expect(macos.productName).toBe("June");
-    expect(macos.bundle.macOS.bundleName).toBe("Clovy");
-    expect(macosInfoPlist).toContain("<key>CFBundleDisplayName</key>\n  <string>June</string>");
-    expect(macosInfoPlist).toContain("<key>LSHasLocalizedDisplayName</key>\n  <true/>");
-    expect(macosLocalizedInfoPlist).toContain('CFBundleDisplayName = "Clovy";');
-    expect(macosLocalizedInfoPlist).toContain('CFBundleName = "Clovy";');
-    expect(macos.bundle.resources["resources/macos/en.lproj/InfoPlist.strings"]).toBe(
-      "en.lproj/InfoPlist.strings",
-    );
-    expect(macos.bundle.resources["../.tauri-helper/june-nm-shim"]).toBe("native/bin/june-nm-shim");
-    expect(bundleShim).toContain('legacy_out=".tauri-helper/june-nm-shim"');
-    expect(windows.productName).toBe("June");
-    expect(desktopCargo).toMatch(/^default-run = "os-june"$/m);
-    expect(desktopCargo).toMatch(/^name = "os-june"$/m);
   });
 
   it("uses Clovy for generated build metadata and local build coordination", async () => {
@@ -178,10 +140,7 @@ describe("Clovy technical identity", () => {
       expect(source).toContain("clovyComputerUseCapability");
       expect(source).toContain("juneComputerUseCapability");
     }
-    expect(computerUseSelfTest).toContain("co.opensoftware.clovy.computer-use-self-test.${role}");
-    expect(computerUseSelfTest).not.toContain(
-      "co.opensoftware.june.computer-use-self-test.${role}",
-    );
+    expect(computerUseSelfTest).toContain("dev.guilhermexp.clovy.computer-use-self-test.${role}");
     expect(computerUseDriver).toContain("clovy-helper-child-reaper");
     expect(computerUseDriver).not.toContain("june-helper-child-reaper");
     for (const source of [computerUseDriver, computerUseCursor]) {
@@ -206,53 +165,6 @@ describe("Clovy technical identity", () => {
     expect(soundsDemo).not.toContain("__juneSounds");
     expect(releaseAge).toContain("clovy-pnpm-release-age-check");
     expect(releaseAge).not.toContain("os-june-pnpm-release-age-check");
-  });
-
-  it("keeps rollback-safe bridges for credentials, browser storage, headers, and hosts", async () => {
-    const [
-      credentials,
-      storage,
-      storageBootstrap,
-      main,
-      hud,
-      agentHud,
-      meetingHud,
-      desktopApi,
-      backendApi,
-      extensionHost,
-      extensionProtocol,
-    ] = await Promise.all([
-      read("src-tauri/src/credential_compat.rs"),
-      read("src/lib/storage-compat.ts"),
-      read("src/lib/storage-compat-bootstrap.ts"),
-      read("src/main.tsx"),
-      read("src/hud.ts"),
-      read("src/agent-hud.ts"),
-      read("src/meeting-hud.ts"),
-      read("src-tauri/src/clovy_api.rs"),
-      read("clovy-api/crates/api/src/lib.rs"),
-      read("src-tauri/src/extension_host.rs"),
-      read("extension/src/protocol.ts"),
-    ]);
-
-    expect(credentials).toContain("canonical_service");
-    expect(credentials).toContain("legacy_service");
-    expect(storage).toContain('key.startsWith("clovy:")');
-    expect(storage).toContain('`june:${key.slice("clovy:".length)}`');
-    expect(storage).toContain('key.startsWith("os-clovy:")');
-    expect(storage).toContain('`os-june:${key.slice("os-clovy:".length)}`');
-    expect(storageBootstrap).toContain("installStorageCompatibilityBridge();");
-    for (const entrypoint of [main, hud, agentHud, meetingHud]) {
-      expect(entrypoint.startsWith('import "./lib/storage-compat-bootstrap";')).toBe(true);
-    }
-    for (const source of [desktopApi, backendApi]) {
-      expect(source).toContain("x-clovy-app-version");
-      expect(source).toContain("x-june-app-version");
-    }
-    for (const source of [extensionHost, extensionProtocol]) {
-      expect(source).toContain("co.opensoftware.clovy.extension");
-      expect(source).toContain("co.opensoftware.june.extension");
-    }
   });
 
   it("runs Clovy API checks when the canonical companion protocol changes", async () => {
@@ -396,8 +308,6 @@ describe("Clovy technical identity", () => {
     expect(tauri.app.security.assetProtocol.scope).toEqual([
       "$TEMP/clovy-dictation-*.m4a",
       "$TEMP/clovy-dictation-*.wav",
-      "$TEMP/os-june-dictation-*.m4a",
-      "$TEMP/os-june-dictation-*.wav",
     ]);
     expect(macHelper).toContain('appendingPathComponent("clovy-dictation-');
     expect(windowsHelper).toContain('.prefix("clovy-dictation-")');

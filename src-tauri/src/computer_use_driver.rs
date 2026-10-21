@@ -8,6 +8,10 @@
 //! desktop-control surface.
 
 #[cfg(target_os = "macos")]
+#[path = "app_identity.rs"]
+#[allow(dead_code)]
+mod app_identity;
+
 use core_foundation::{base::TCFType, data::CFData};
 #[cfg(target_os = "macos")]
 use cua_driver_core::{
@@ -378,10 +382,10 @@ fn process_is_clovy(pid: libc::pid_t, audit_token: Option<&[u8]>) -> bool {
                 .is_some_and(|token| packaged_process_signature_matches(token, helper_app));
     }
 
-    // Development builds are not nested. Accept only `os-june` built in one of
+    // Development builds are not nested. Accept only `clovy` built in one of
     // this checkout's Cargo profile directories: Cargo's own binary, or the
     // main executable of the dev runner's signed bundle directly inside that
-    // directory (`target/debug/Clovy Dev.app/Contents/MacOS/os-june`).
+    // directory (`target/debug/Clovy Dev.app/Contents/MacOS/clovy`).
     cfg!(debug_assertions)
         && development_process_path_is_clovy(
             &process_path,
@@ -391,7 +395,10 @@ fn process_is_clovy(pid: libc::pid_t, audit_token: Option<&[u8]>) -> bool {
 
 #[cfg(target_os = "macos")]
 fn packaged_main_executable(outer_app: &std::path::Path) -> PathBuf {
-    outer_app.join("Contents").join("MacOS").join("os-june")
+    outer_app
+        .join("Contents")
+        .join("MacOS")
+        .join(app_identity::MAIN_EXECUTABLE)
 }
 
 #[cfg(target_os = "macos")]
@@ -405,7 +412,7 @@ fn development_process_path_is_clovy(
         return false;
     };
     // The deepest accepted shape is
-    // `<triple>/<profile>/<bundle>.app/Contents/MacOS/os-june`.
+    // `<triple>/<profile>/<bundle>.app/Contents/MacOS/clovy`.
     let mut names = [OsStr::new(""); 6];
     let mut depth = 0;
     for component in relative.components() {
@@ -420,14 +427,14 @@ fn development_process_path_is_clovy(
     }
     let names = &names[..depth];
     let is_main_executable = |rest: &[&OsStr]| match rest {
-        [executable] => *executable == OsStr::new("os-june"),
+        [executable] => *executable == OsStr::new(app_identity::MAIN_EXECUTABLE),
         [bundle, contents, macos, executable] => {
             std::path::Path::new(bundle)
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
                 && *contents == OsStr::new("Contents")
                 && *macos == OsStr::new("MacOS")
-                && *executable == OsStr::new("os-june")
+                && *executable == OsStr::new(app_identity::MAIN_EXECUTABLE)
         }
         _ => false,
     };
@@ -481,8 +488,10 @@ fn socket_peer_audit_token(stream: &UnixStream) -> io::Result<[u8; 32]> {
 
 #[cfg(target_os = "macos")]
 fn packaged_process_signature_matches(audit_token: &[u8], helper_app: &std::path::Path) -> bool {
-    let Some(helper) = signature_details(helper_app, "co.opensoftware.june.computer-use-driver")
-    else {
+    let Some(helper) = signature_details(
+        helper_app,
+        &app_identity::release_helper_identifier("computer-use-driver"),
+    ) else {
         return false;
     };
     let Some(requirement) = clovy_process_requirement(&helper.team_identifier) else {
@@ -553,7 +562,8 @@ fn clovy_process_requirement(team_identifier: &str) -> Option<SecRequirement> {
         return None;
     }
     format!(
-        "anchor apple generic and identifier \"co.opensoftware.june\" and certificate leaf[subject.OU] = \"{team_identifier}\""
+        "anchor apple generic and identifier \"{}\" and certificate leaf[subject.OU] = \"{team_identifier}\"",
+        app_identity::RELEASE_APP_IDENTIFIER
     )
     .parse()
     .ok()
@@ -1166,10 +1176,10 @@ mod tests {
         std::fs::create_dir_all(target.join("swift-module-cache")).expect("non-profile directory");
 
         for accepted in [
-            "debug/os-june",
-            "debug/Clovy Dev.app/Contents/MacOS/os-june",
-            "aarch64-apple-darwin/release/os-june",
-            "aarch64-apple-darwin/release/Clovy Dev permproof.app/Contents/MacOS/os-june",
+            "debug/clovy",
+            "debug/Clovy Dev.app/Contents/MacOS/clovy",
+            "aarch64-apple-darwin/release/clovy",
+            "aarch64-apple-darwin/release/Clovy Dev permproof.app/Contents/MacOS/clovy",
         ] {
             assert!(
                 development_process_path_is_clovy(&target.join(accepted), &target),
@@ -1181,12 +1191,12 @@ mod tests {
             "debug/Clovy JUN-278 Codex",
             "debug/clovy-lookalike",
             "debug/Clovy Dev.app/Contents/MacOS/Clovy",
-            "debug/Clovy Dev.app/Contents/Resources/os-june",
-            "debug/bundle/macos/Clovy.app/Contents/MacOS/os-june",
-            "debug/../debug/os-june",
-            "swift-module-cache/os-june",
-            "swift-module-cache/Clovy Dev.app/Contents/MacOS/os-june",
-            "x86_64-apple-darwin/debug/os-june",
+            "debug/Clovy Dev.app/Contents/Resources/clovy",
+            "debug/bundle/macos/Clovy.app/Contents/MacOS/clovy",
+            "debug/../debug/clovy",
+            "swift-module-cache/clovy",
+            "swift-module-cache/Clovy Dev.app/Contents/MacOS/clovy",
+            "x86_64-apple-darwin/debug/clovy",
         ] {
             assert!(
                 !development_process_path_is_clovy(&target.join(rejected), &target),
@@ -1194,7 +1204,7 @@ mod tests {
             );
         }
         assert!(!development_process_path_is_clovy(
-            &workspace.path().join("elsewhere/debug/os-june"),
+            &workspace.path().join("elsewhere/debug/clovy"),
             &target
         ));
     }
@@ -1202,8 +1212,8 @@ mod tests {
     #[test]
     fn packaged_peer_uses_the_tauri_bundle_executable_name() {
         assert_eq!(
-            packaged_main_executable(std::path::Path::new("/Applications/June.app")),
-            std::path::PathBuf::from("/Applications/June.app/Contents/MacOS/os-june")
+            packaged_main_executable(std::path::Path::new("/Applications/Clovy.app")),
+            std::path::PathBuf::from("/Applications/Clovy.app/Contents/MacOS/clovy")
         );
     }
 

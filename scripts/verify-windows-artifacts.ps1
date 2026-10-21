@@ -66,11 +66,11 @@ try {
     return $matches[0]
   }
 
-  $app = Require-One "os-june.exe"
+  $app = Require-One "clovy.exe"
   # The MSVC target statically links WebView2Loader; only GNU builds ship its DLL.
   $runtime = Require-One "clovy-agent-runtime.exe"
   $checksum = Require-One "clovy-agent-runtime.exe.sha256"
-  $helper = Require-One "june-dictation-helper.exe"
+  $helper = Require-One "clovy-dictation-helper.exe"
   if ($runtime.DirectoryName -ne $checksum.DirectoryName -or $runtime.DirectoryName -ne $helper.DirectoryName) {
     throw "Runtime, checksum, and dictation helper are not adjacent in the payload."
   }

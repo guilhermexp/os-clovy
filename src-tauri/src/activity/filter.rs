@@ -7,9 +7,6 @@ use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
 use super::platform::WindowDescriptor;
 use super::settings::{parse_clock, ActivitySettings, WorkHours};
 
-/// Bundle id prefixes of Clovy itself (release, dev, and June-era builds).
-const CLOVY_BUNDLE_PREFIXES: &[&str] = &["co.opensoftware.june", "co.opensoftware.clovy"];
-
 /// Bundle id prefixes of browsers. Together with `BROWSER_NAME_WORDS` this is
 /// the one browser predicate (`is_browser`) used both for private-window
 /// detection (`macos::ax`) and for the unknown-URL rule below, so the two
@@ -201,10 +198,10 @@ pub fn has_private_window_marker(title: &str) -> bool {
 pub fn is_clovy_window(window: &WindowDescriptor, own_pid: i32) -> bool {
     window.pid == own_pid
         || window.bundle_id.as_deref().is_some_and(|bundle| {
+            // Release, dev (`.dev`), proof identities and helpers.
             let bundle = bundle.to_ascii_lowercase();
-            CLOVY_BUNDLE_PREFIXES
-                .iter()
-                .any(|prefix| bundle == *prefix || bundle.starts_with(&format!("{prefix}.")))
+            let own = crate::app_identity::RELEASE_APP_IDENTIFIER;
+            bundle == own || bundle.starts_with(&format!("{own}."))
         })
 }
 
@@ -487,12 +484,12 @@ mod tests {
             Some(SkipReason::ClovyWindow)
         );
         own.pid = 8;
-        own.bundle_id = Some("co.opensoftware.june".into());
+        own.bundle_id = Some("dev.guilhermexp.clovy.dev".into());
         assert_eq!(
             skip_reason(&own, &settings(), 7),
             Some(SkipReason::ClovyWindow)
         );
-        own.bundle_id = Some("co.opensoftware.junebug".into());
+        own.bundle_id = Some("dev.guilhermexp.clovybug".into());
         assert_eq!(skip_reason(&own, &settings(), 7), None);
     }
 

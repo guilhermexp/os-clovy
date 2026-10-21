@@ -792,7 +792,7 @@ pub(crate) async fn process_saved_audio(
     repos
         .set_note_status(note_id, ProcessingStatus::Transcribing, None)
         .await?;
-    let temp_dir = session_temp_dir("os-june-transcription", session_id);
+    let temp_dir = session_temp_dir("clovy-transcription", session_id);
     let _ = std::fs::remove_dir_all(&temp_dir);
     if let Err(error) = std::fs::create_dir_all(&temp_dir) {
         let error = AppError::new("audio_normalize_failed", error.to_string());
@@ -1303,7 +1303,7 @@ async fn process_saved_source_audio_pipeline(
             tracing::warn!(%session_id, %error, "failed to persist turn_detection checkpoint");
         }
 
-        let turn_wav_dir = session_temp_dir("os-june-turns", session_id);
+        let turn_wav_dir = session_temp_dir("clovy-turns", session_id);
         let _ = std::fs::remove_dir_all(&turn_wav_dir);
         std::fs::create_dir_all(&turn_wav_dir)
             .map_err(|error| AppError::new("audio_turn_failed", error.to_string()))?;
@@ -4412,7 +4412,7 @@ mod tests {
             .await
             .expect("recording session");
 
-        let temp_dir = session_temp_dir("os-june-transcription", &recording_session_id);
+        let temp_dir = session_temp_dir("clovy-transcription", &recording_session_id);
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::remove_file(&temp_dir);
         std::fs::write(&temp_dir, b"block note transcription directory creation")
@@ -4584,7 +4584,7 @@ mod tests {
         let source_path = source_dir.path().join("microphone.wav");
         write_loud_wav(&source_path, 48_000, 48_000);
 
-        let turn_wav_dir = session_temp_dir("os-june-turns", &recording_session_id);
+        let turn_wav_dir = session_temp_dir("clovy-turns", &recording_session_id);
         let _ = std::fs::remove_dir_all(&turn_wav_dir);
         let _ = std::fs::remove_file(&turn_wav_dir);
         std::fs::write(&turn_wav_dir, b"block turn directory creation")
@@ -4892,13 +4892,13 @@ mod tests {
 
     #[test]
     fn session_temp_dir_sanitizes_untrusted_session_ids() {
-        let temp_dir = session_temp_dir("os-june-turns", "../../outside/session");
+        let temp_dir = session_temp_dir("clovy-turns", "../../outside/session");
         let file_name = temp_dir
             .file_name()
             .and_then(|value| value.to_str())
             .expect("temp dir file name");
 
-        assert_eq!(file_name, "os-june-turns-______outside_session");
+        assert_eq!(file_name, "clovy-turns-______outside_session");
         assert!(!temp_dir
             .components()
             .any(|component| matches!(component, std::path::Component::ParentDir)));

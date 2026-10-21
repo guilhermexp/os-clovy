@@ -1407,7 +1407,7 @@ mod tests {
             "pid": 42,
             "kind": "hermes-gateway",
             "argv": [
-                "/Applications/June.app/Contents/Resources/native/hermes/bin/python3",
+                "/Applications/Clovy.app/Contents/Resources/native/hermes/bin/python3",
                 "-m",
                 "hermes_cli.main",
                 "--profile",
@@ -1487,7 +1487,7 @@ mod tests {
         let mut child = tokio::process::Command::new("/bin/bash")
             .args([
                 "-c",
-                "exec -a '/tmp/June.app/Contents/Resources/native/hermes/hermes_cli gateway run' sleep 30",
+                "exec -a '/tmp/Clovy.app/Contents/Resources/native/hermes/hermes_cli gateway run' sleep 30",
             ])
             .spawn()
             .expect("spawn fake legacy gateway");
@@ -1498,7 +1498,7 @@ mod tests {
                 "pid": pid,
                 "kind": "hermes-gateway",
                 "argv": [
-                    "/tmp/June.app/Contents/Resources/native/hermes/hermes_cli/main.py",
+                    "/tmp/Clovy.app/Contents/Resources/native/hermes/hermes_cli/main.py",
                     "gateway",
                     "run",
                     "--replace"
