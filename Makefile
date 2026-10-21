@@ -8,7 +8,7 @@
 	tauri-fmt tauri-fmt-check tauri-lint tauri-test \
 	companion-fmt companion-fmt-check companion-lint companion-test \
 	clovy-api-fmt clovy-api-fmt-check clovy-api-lint clovy-api-test \
-	fmt fmt-check lint test verify \
+	fmt fmt-check lint test verify org-references-check \
 	local-ci signoff-pr signoff-frontend signoff-rust-macos
 
 .DEFAULT_GOAL := help
@@ -117,7 +117,10 @@ lint: check tauri-lint companion-lint clovy-api-lint  ## Lint everything
 
 test: test-web tauri-test companion-test clovy-api-test  ## Run all test suites
 
-verify: check typecheck test-web tauri-fmt-check tauri-lint tauri-test companion-fmt-check companion-lint companion-test clovy-api-fmt-check clovy-api-lint clovy-api-test  ## Full CI-parity gate
+org-references-check:  ## Fail on Open Software organization references in repo/CI files
+	node scripts/check-org-references.mjs
+
+verify: org-references-check check typecheck test-web tauri-fmt-check tauri-lint tauri-test companion-fmt-check companion-lint companion-test clovy-api-fmt-check clovy-api-lint clovy-api-test  ## Full CI-parity gate
 
 local-ci:  ## Run path-aware local PR checks and post required signoff/* statuses
 	./scripts/local-ci.sh
