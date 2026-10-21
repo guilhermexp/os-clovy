@@ -98,7 +98,9 @@ extreme churn, but it cannot open an abuse bypass or grow memory without bound.
 
 ## Backward compatibility
 
-Previously issued email-invite links retain their OS Accounts authentication.
+Previously issued email-invite links still require an authenticated viewer (in
+local mode, the configured local viewer token); the browser viewer no longer
+signs recipients in.
 The anonymous endpoint refuses every non-reserved invite row, so knowing an old
 invite id cannot downgrade it to bearer access. The browser viewer recognizes
 the new `link.*` fragment and uses anonymous viewing; legacy fragments continue
@@ -128,14 +130,13 @@ cannot make local content permanently undeletable; other errors fail closed.
 ## Viewer
 
 The static `/s/{share_id}` shell has a strict self-only CSP and no analytics.
-Production links use `https://june.link/s/{share_id}#…`. That hostname is served
-by an isolated viewer-only Clovy API CVM with its own ingress and certificate;
-it reads the same encrypted-share database but cannot create or mutate shares
-or invoke product APIs. `https://june-api.opensoftware.co` remains on its own
-CVM and ingress. Staging and local builds keep the viewer on their configured
-API origin. This preserves the viewer's self-only network policy while keeping
-production links short and branded, and makes a june.link DNS/certificate
-failure incapable of taking the primary API off port 443.
+Links use the configured Clovy API origin (`{origin}/s/{share_id}#…`). The
+isolated viewer-only deployment and short-link domain were removed with the
+rest of the hosted infrastructure by the `desvincular-repo-ci` change. The
+browser viewer opens only passcode/link shares: legacy email invites need a
+signed-in recipient, and the viewer's OS Accounts sign-in was removed with
+it, so the page asks the recipient to open the share in Clovy or request a
+link.
 
 For a new link it:
 
