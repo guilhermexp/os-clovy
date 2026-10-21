@@ -47,7 +47,7 @@ export default defineMessages({
     "settings.tabs.about": "About",
     "settings.page.description": "Manage audio, dictation, AI models, and agent capabilities.",
     "settings.page.navAria": "Settings sections",
-    "settings.general.blurb": "Your account and everyday Clovy preferences.",
+    "settings.general.blurb": "Everyday Clovy preferences.",
 
     "settings.autoPreference.cost": "Economy",
     "settings.autoPreference.balanced": "Balanced",
@@ -369,7 +369,7 @@ export default defineMessages({
     "settings.tabs.about": "Sobre",
     "settings.page.description": "Gerencie áudio, ditado, modelos de IA e recursos do agente.",
     "settings.page.navAria": "Seções das configurações",
-    "settings.general.blurb": "Sua conta e as preferências do dia a dia do Clovy.",
+    "settings.general.blurb": "As preferências do dia a dia do Clovy.",
 
     "settings.autoPreference.cost": "Economia",
     "settings.autoPreference.balanced": "Equilibrado",
