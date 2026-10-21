@@ -8,8 +8,13 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+mod database;
+mod guard;
 #[cfg(test)]
 mod tests;
+
+use database::PathRewrite;
+use std::collections::BTreeSet;
 
 /// Whether the first launch should copy a source directory into a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +251,8 @@ impl FileCopier for StdCopier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Skipped(Decision),
+    /// An earlier launch's interrupted publication was finished.
+    Resumed,
     Migrated {
         files: u64,
         bytes: u64,
@@ -277,7 +284,8 @@ fn fail(context: impl std::fmt::Display, error: impl std::fmt::Display) -> Migra
 }
 
 /// Regular files, their bytes, and symlinks under a tree. Sockets and other
-/// special files (a live MCP socket) are neither copied nor counted.
+/// special files (a live MCP socket) are neither copied nor counted, and a
+/// database counts as one file whatever the size of its snapshot.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct TreeTotals {
     files: u64,
@@ -285,30 +293,78 @@ struct TreeTotals {
     links: u64,
 }
 
+impl TreeTotals {
+    fn add(&mut self, other: TreeTotals) {
+        self.files += other.files;
+        self.bytes += other.bytes;
+        self.links += other.links;
+    }
+}
+
+/// What one directory copy needs besides the copier.
+struct CopyContext<'a> {
+    key: Option<&'a str>,
+    rewrite: &'a PathRewrite,
+    scratch: PathBuf,
+    /// Source databases that were snapshotted, and their staged copies.
+    snapshotted: BTreeSet<PathBuf>,
+    databases: Vec<(PathBuf, Option<String>)>,
+}
+
+fn sorted_entries(source: &Path) -> Result<Vec<std::fs::DirEntry>, MigrationError> {
+    let mut entries = std::fs::read_dir(source)
+        .map_err(|e| fail(format!("reading {}", source.display()), e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| fail(format!("reading {}", source.display()), e))?;
+    // A database before its WAL: whether the WAL is copied depends on it.
+    entries.sort_by_key(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        (database::companion_of(&name).is_some(), name)
+    });
+    Ok(entries)
+}
+
 fn copy_tree(
     source: &Path,
     target: &Path,
     copier: &mut dyn FileCopier,
+    context: &mut CopyContext,
 ) -> Result<TreeTotals, MigrationError> {
     let mut totals = TreeTotals::default();
     std::fs::create_dir(target).map_err(|e| fail(format!("creating {}", target.display()), e))?;
-    let entries =
-        std::fs::read_dir(source).map_err(|e| fail(format!("reading {}", source.display()), e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| fail(format!("reading {}", source.display()), e))?;
+    for entry in sorted_entries(source)? {
         let from = entry.path();
         let to = target.join(entry.file_name());
+        let name = entry.file_name().to_string_lossy().into_owned();
         let kind = std::fs::symlink_metadata(&from)
             .map_err(|e| fail(format!("reading {}", from.display()), e))?;
         if kind.is_dir() {
-            let nested = copy_tree(&from, &to, copier)?;
-            totals.files += nested.files;
-            totals.bytes += nested.bytes;
-            totals.links += nested.links;
+            totals.add(copy_tree(&from, &to, copier, context)?);
         } else if kind.file_type().is_symlink() {
-            copy_link(&from, &to)?;
+            copy_link(&from, &to, context.rewrite)?;
             totals.links += 1;
         } else if kind.is_file() {
+            if database::companion_of(&name).is_some_and(|database| {
+                context.snapshotted.contains(&from.with_file_name(database))
+            }) {
+                continue;
+            }
+            let key = if database::is_plain_sqlite(&from) {
+                Some(None)
+            } else if name == database::ENCRYPTED_DATABASE && context.key.is_some() {
+                Some(context.key)
+            } else {
+                None
+            };
+            if let Some(key) = key {
+                let written = database::snapshot(&from, &to, key, &context.scratch, copier)?;
+                if written == database::Snapshot::Written {
+                    context.snapshotted.insert(from.clone());
+                    context.databases.push((to, key.map(str::to_owned)));
+                    totals.files += 1;
+                    continue;
+                }
+            }
             copier
                 .copy_file(&from, &to)
                 .map_err(|e| fail(format!("copying {}", from.display()), e))?;
@@ -319,9 +375,13 @@ fn copy_tree(
     Ok(totals)
 }
 
-fn copy_link(from: &Path, to: &Path) -> Result<(), MigrationError> {
+fn copy_link(from: &Path, to: &Path, rewrite: &PathRewrite) -> Result<(), MigrationError> {
     let link =
         std::fs::read_link(from).map_err(|e| fail(format!("reading {}", from.display()), e))?;
+    let link = rewrite
+        .apply(&link.to_string_lossy())
+        .map(PathBuf::from)
+        .unwrap_or(link);
     #[cfg(unix)]
     let created = std::os::unix::fs::symlink(&link, to);
     #[cfg(windows)]
@@ -333,43 +393,64 @@ fn copy_link(from: &Path, to: &Path) -> Result<(), MigrationError> {
     created.map_err(|e| fail(format!("linking {}", to.display()), e))
 }
 
-fn measure(root: &Path) -> Result<TreeTotals, MigrationError> {
+/// The totals a copy of `root` must reach, counting each of `databases` as
+/// one file and skipping its companions.
+fn measure(root: &Path, databases: &BTreeSet<PathBuf>) -> Result<TreeTotals, MigrationError> {
     let mut totals = TreeTotals::default();
-    let entries =
-        std::fs::read_dir(root).map_err(|e| fail(format!("reading {}", root.display()), e))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|e| fail(format!("reading {}", root.display()), e))?
-            .path();
+    for entry in sorted_entries(root)? {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
         let kind = std::fs::symlink_metadata(&path)
             .map_err(|e| fail(format!("reading {}", path.display()), e))?;
         if kind.is_dir() {
-            let nested = measure(&path)?;
-            totals.files += nested.files;
-            totals.bytes += nested.bytes;
-            totals.links += nested.links;
+            totals.add(measure(&path, databases)?);
         } else if kind.file_type().is_symlink() {
             totals.links += 1;
         } else if kind.is_file() {
-            totals.files += 1;
-            totals.bytes += kind.len();
+            if databases.contains(&path) {
+                totals.files += 1;
+            } else if !database::companion_of(&name)
+                .is_some_and(|database| databases.contains(&path.with_file_name(database)))
+            {
+                totals.files += 1;
+                totals.bytes += kind.len();
+            }
         }
     }
     Ok(totals)
 }
 
+fn regular_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), MigrationError> {
+    for entry in sorted_entries(root)? {
+        let path = entry.path();
+        let kind = std::fs::symlink_metadata(&path)
+            .map_err(|e| fail(format!("reading {}", path.display()), e))?;
+        if kind.is_dir() {
+            regular_files(&path, files)?;
+        } else if kind.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// `<target name>.identity-migration-<pid>` beside the target, so the final
 /// rename stays on one volume.
 fn staging_path(target: &Path) -> Result<PathBuf, MigrationError> {
-    let name = target
-        .file_name()
-        .ok_or_else(|| MigrationError::new(format!("{} has no name", target.display())))?;
-    let mut staged = name.to_os_string();
-    staged.push(format!(".identity-migration-{}", std::process::id()));
-    Ok(target.with_file_name(staged))
+    if target.file_name().is_none() {
+        return Err(MigrationError::new(format!(
+            "{} has no name",
+            target.display()
+        )));
+    }
+    Ok(guard::sibling(
+        target,
+        &format!(".identity-migration-{}", std::process::id()),
+    ))
 }
 
-/// Staging folders an interrupted earlier launch left behind.
+/// Staging folders an earlier launch left behind, removed only when their
+/// owner is gone (or is this process).
 fn remove_stale_staging(target: &Path) {
     let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
         return;
@@ -379,7 +460,11 @@ fn remove_stale_staging(target: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(owner) = guard::staging_owner(&name, &prefix) else {
+            continue;
+        };
+        if owner == std::process::id() || !guard::is_alive(owner) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -493,20 +578,113 @@ impl Undo {
     }
 }
 
+/// The publication in progress, persisted before the first rename so a
+/// launch that dies halfway is finished (or undone) by the next one.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Journal {
+    moves: Vec<Move>,
+    credentials: Vec<(String, String)>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Move {
+    staging: PathBuf,
+    target: PathBuf,
+}
+
+fn journal_path(plan: &MigrationPlan) -> PathBuf {
+    guard::sibling(&plan.data.target, ".identity-migration.journal")
+}
+
+fn write_journal(path: &Path, journal: &Journal) -> Result<(), MigrationError> {
+    let temporary = path.with_extension("journal.tmp");
+    let bytes = serde_json::to_vec(journal).map_err(|e| fail("encoding the journal", e))?;
+    std::fs::write(&temporary, bytes)
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .map_err(|e| fail(format!("writing {}", path.display()), e))
+}
+
+fn is_populated(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// Finishes a publication an earlier launch left halfway. When a staged
+/// folder is missing it cannot be finished: what it published and the
+/// credentials it wrote are removed, and the migration starts over.
+fn resume(
+    plan: &MigrationPlan,
+    store: &dyn CredentialStore,
+    copier: &mut dyn FileCopier,
+) -> Result<Option<Outcome>, MigrationError> {
+    let path = journal_path(plan);
+    let Ok(raw) = std::fs::read(&path) else {
+        return Ok(None);
+    };
+    let Ok(journal) = serde_json::from_slice::<Journal>(&raw) else {
+        // Written whole or not at all; an unreadable one published nothing.
+        let _ = std::fs::remove_file(&path);
+        return Ok(None);
+    };
+    let finishable = journal
+        .moves
+        .iter()
+        .all(|item| is_populated(&item.target) || item.staging.is_dir());
+    if finishable {
+        for item in &journal.moves {
+            if is_populated(&item.target) {
+                continue;
+            }
+            let _ = std::fs::remove_dir(&item.target);
+            copier
+                .rename(&item.staging, &item.target)
+                .map_err(|e| fail(format!("publishing {}", item.target.display()), e))?;
+        }
+        let _ = std::fs::remove_file(&path);
+        return Ok(Some(Outcome::Resumed));
+    }
+    for item in &journal.moves {
+        if item.staging.is_dir() {
+            let _ = std::fs::remove_dir_all(&item.staging);
+        } else {
+            let _ = std::fs::remove_dir_all(&item.target);
+        }
+    }
+    for (service, account) in &journal.credentials {
+        let _ = store.delete(service, account);
+    }
+    let _ = std::fs::remove_file(&path);
+    Ok(None)
+}
+
 pub fn migrate(
     plan: &MigrationPlan,
     store: &dyn CredentialStore,
     copier: &mut dyn FileCopier,
 ) -> Result<Outcome, MigrationError> {
+    let _lock = guard::MigrationLock::acquire(&plan.data.target, plan.lock_wait)?;
+    if let Some(outcome) = resume(plan, store, copier)? {
+        return Ok(outcome);
+    }
     match decide(&plan.data.source, &plan.data.target) {
         Decision::Migrate => {}
         other => return Ok(Outcome::Skipped(other)),
+    }
+    let running = guard::running_executables(&plan.source_executables)?;
+    if !running.is_empty() {
+        return Err(MigrationError {
+            message: format!(
+                "{} from the previous identity is still running; quit it and reopen Clovy",
+                running.join(", ")
+            ),
+            blocked: true,
+        });
     }
     let mut undo = Undo::default();
     match migrate_into(plan, store, copier, &mut undo) {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             undo.run(store);
+            let _ = std::fs::remove_file(journal_path(plan));
             Err(error)
         }
     }
@@ -518,36 +696,89 @@ fn migrate_into(
     copier: &mut dyn FileCopier,
     undo: &mut Undo,
 ) -> Result<Outcome, MigrationError> {
+    // Read first: the activity key opens the database being snapshotted, and
+    // a denied credential fails before anything is copied.
+    let credentials = read_credentials(plan, store)?;
+    let key = credentials
+        .iter()
+        .find(|credential| {
+            credential.service.ends_with(".activity-db") && credential.account == "sqlcipher-key"
+        })
+        .map(|credential| credential.value.to_string());
+    let directories: Vec<&DirectoryCopy> = std::iter::once(&plan.data)
+        .chain(&plan.extra_directories)
+        .collect();
+    let rewrite = PathRewrite::new(
+        &directories
+            .iter()
+            .map(|copy| (copy.source.clone(), copy.target.clone()))
+            .collect::<Vec<_>>(),
+    );
+
     let mut moves = Vec::new();
     let mut files = 0;
     let mut bytes = 0;
-    let directories = std::iter::once(&plan.data).chain(&plan.extra_directories);
-    for copy in directories {
+    for copy in &directories {
         if decide(&copy.source, &copy.target) != Decision::Migrate {
             continue;
         }
         remove_stale_staging(&copy.target);
         let staging = staging_path(&copy.target)?;
+        let scratch = guard::sibling(&staging, ".scratch");
         undo.staged.push(staging.clone());
-        let copied = copy_tree(&copy.source, &staging, copier)?;
-        let expected = measure(&copy.source)?;
-        if copied != expected || measure(&staging)? != expected {
+        undo.staged.push(scratch.clone());
+        let mut context = CopyContext {
+            key: key.as_deref(),
+            rewrite: &rewrite,
+            scratch,
+            snapshotted: BTreeSet::new(),
+            databases: Vec::new(),
+        };
+        let copied = copy_tree(&copy.source, &staging, copier, &mut context)?;
+        let expected = measure(&copy.source, &context.snapshotted)?;
+        let staged: BTreeSet<PathBuf> = context
+            .databases
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect();
+        if copied != expected || measure(&staging, &staged)? != expected {
             return Err(MigrationError::new(format!(
                 "{} changed or copied incompletely ({copied:?} of {expected:?})",
                 copy.source.display()
             )));
         }
+        // Paths into the old profile now point into the new one.
+        if !rewrite.is_empty() {
+            for (database, database_key) in &context.databases {
+                rewrite.apply_to_database(database, database_key.as_deref())?;
+            }
+            let mut texts = Vec::new();
+            regular_files(&staging, &mut texts)?;
+            for path in texts.iter().filter(|path| !staged.contains(*path)) {
+                rewrite.apply_to_text_file(path)?;
+            }
+        }
         files += copied.files;
         bytes += copied.bytes;
-        moves.push((staging, copy.target.clone()));
+        moves.push(Move {
+            staging,
+            target: copy.target.clone(),
+        });
     }
 
     // The activity key must arrive before anything opens activity.sqlite3,
-    // or the app would create a new database under a new key.
-    let credentials = read_credentials(plan, store)?;
+    // and a key minted by an earlier failed launch would make the copied
+    // database unreadable: an existing different value stops everything.
     for credential in &credentials {
-        if read(store, &credential.service, &credential.account)?.is_some() {
-            continue;
+        match read(store, &credential.service, &credential.account)? {
+            Some(existing) if existing == *credential.value => continue,
+            Some(_) => {
+                return Err(MigrationError::new(format!(
+                    "credential {} ({}) already exists with a different value; remove it and reopen Clovy",
+                    credential.service, credential.account
+                )))
+            }
+            None => {}
         }
         store
             .set(&credential.service, &credential.account, &credential.value)
@@ -564,14 +795,35 @@ fn migrate_into(
             .push((credential.service.clone(), credential.account.clone()));
     }
 
-    for (staging, target) in moves {
+    // The data folder is what the next launch's decision looks at, so it is
+    // published last; the journal lets a launch that dies meanwhile resume.
+    moves.sort_by_key(|item| item.target == plan.data.target);
+    let journal = journal_path(plan);
+    write_journal(
+        &journal,
+        &Journal {
+            moves,
+            credentials: undo.credentials.clone(),
+        },
+    )?;
+    let moves = serde_json::from_slice::<Journal>(
+        &std::fs::read(&journal).map_err(|e| fail(format!("reading {}", journal.display()), e))?,
+    )
+    .map_err(|e| fail("reading the journal", e))?
+    .moves;
+    for item in moves {
         // Only an empty folder can be here (decided above).
-        let _ = std::fs::remove_dir(&target);
-        std::fs::rename(&staging, &target)
-            .map_err(|e| fail(format!("publishing {}", target.display()), e))?;
-        undo.staged.retain(|path| path != &staging);
-        undo.published.push(target);
+        let _ = std::fs::remove_dir(&item.target);
+        copier
+            .rename(&item.staging, &item.target)
+            .map_err(|e| fail(format!("publishing {}", item.target.display()), e))?;
+        undo.staged.retain(|path| path != &item.staging);
+        undo.published.push(item.target);
     }
+    for leftover in &undo.staged {
+        let _ = std::fs::remove_dir_all(leftover);
+    }
+    let _ = std::fs::remove_file(&journal);
     Ok(Outcome::Migrated {
         files,
         bytes,
@@ -582,6 +834,9 @@ fn migrate_into(
 /// Names a synthetic source profile for a development build's proof run.
 #[cfg(debug_assertions)]
 const DEV_SOURCE_ENV: &str = "CLOVY_DEV_IDENTITY_MIGRATION_SOURCE";
+/// The executable name of that synthetic profile's "old app".
+#[cfg(debug_assertions)]
+const DEV_SOURCE_APP_ENV: &str = "CLOVY_DEV_IDENTITY_MIGRATION_SOURCE_APP";
 
 fn startup_source(target_identifier: &str) -> Option<SourceIdentity> {
     #[cfg(debug_assertions)]
@@ -590,7 +845,12 @@ fn startup_source(target_identifier: &str) -> Option<SourceIdentity> {
         .filter(|value| !value.trim().is_empty())
     {
         // An explicit proof source never falls back to the June profile.
-        return source_override(value.trim());
+        return source_override(value.trim()).map(|mut source| {
+            if let Ok(app) = std::env::var(DEV_SOURCE_APP_ENV) {
+                source.executables = vec![app.trim().to_string()];
+            }
+            source
+        });
     }
     default_source(target_identifier)
 }
@@ -649,6 +909,41 @@ pub fn run_at_startup() {
     let mut log = plan.data.target.clone().into_os_string();
     log.push(".identity-migration.log");
     let _ = std::fs::write(PathBuf::from(log), format!("{line}\n"));
+    // Starting now would create the new profile and the next launch would
+    // never migrate: tell the owner what to do and stop.
+    if let Err(error) = &result {
+        if error.blocked {
+            alert(&error.message);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// A native alert before any window exists.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn alert(message: &str) {
+    let message = format!("Clovy could not move your data to its new identity yet.\n\n{message}");
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display alert \"Clovy\" message (item 1 of argv) as critical",
+            "-e",
+            "end run",
+            &message,
+        ])
+        .status();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show($env:CLOVY_ALERT, 'Clovy') | Out-Null",
+        ])
+        .env("CLOVY_ALERT", &message)
+        .status();
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

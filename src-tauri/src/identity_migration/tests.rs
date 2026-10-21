@@ -643,6 +643,15 @@ fn refuses_to_copy_while_the_old_app_is_running() {
     let name = format!("oldapp{}", std::process::id() % 100_000);
     let binary = base.path().join(&name);
     std::fs::copy("/bin/sleep", &binary).unwrap();
+    // macOS kills a copied system binary until it is signed again.
+    #[cfg(target_os = "macos")]
+    assert!(std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&binary)
+        .output()
+        .unwrap()
+        .status
+        .success());
     let mut old_app = std::process::Command::new(&binary)
         .arg("30")
         .spawn()
@@ -940,7 +949,6 @@ async fn text(path: &Path, sql: &str) -> String {
 
 #[tokio::test]
 async fn paths_into_the_old_profile_are_rewritten_in_the_copy() {
-    use sqlx::connection::ConnectOptions;
     let base = tempfile::tempdir().unwrap();
     let plan = dir_plan(base.path());
     let old = plan.data.source.to_string_lossy().into_owned();
@@ -977,37 +985,37 @@ async fn paths_into_the_old_profile_are_rewritten_in_the_copy() {
     let config = serde_json::json!({ "workspace": workspace }).to_string();
     let t = "2026-10-01T09:00:00Z";
     exec(
-        &mut *notes,
+        &mut notes,
         "INSERT INTO notes(id, created_at, updated_at) VALUES ('n1', ?, ?)",
         &[t, t],
     )
     .await;
     exec(
-        &mut *notes,
+        &mut notes,
         "INSERT INTO recording_sessions(id, note_id, status, started_at, partial_path, final_path) VALUES ('r1', 'n1', 'complete', ?, ?, ?)",
         &[t, &format!("{old}/recordings/n1/r1/mic.partial.wav"), &format!("{old_canonical}/recordings/n1/r1/mic.wav")],
     )
     .await;
     exec(
-        &mut *notes,
+        &mut notes,
         "INSERT INTO audio_artifacts(id, note_id, recording_session_id, path, format, duration_ms, size_bytes, checksum, created_at) VALUES ('a1', 'n1', 'r1', ?, 'wav', 1, 1, 'x', ?)",
         &[&format!("{old}/recordings/n1/r1/mic.wav"), t],
     )
     .await;
     exec(
-        &mut *notes,
+        &mut notes,
         "INSERT INTO agent_sessions(id, workspace_path, created_at, updated_at) VALUES ('s1', ?, ?, ?), ('s2', '/Users/someone/Projects/app', ?, ?), ('s3', ?, ?, ?)",
         &[&workspace, t, t, t, t, &format!("{old}-backup/agent-workspaces/s3"), t, t],
     )
     .await;
     exec(
-        &mut *notes,
+        &mut notes,
         "INSERT INTO agent_runs(id, session_id, status, model, started_at, updated_at, run_config_json) VALUES ('run1', 's1', 'completed', 'auto', ?, ?, ?)",
         &[t, t, &config],
     )
     .await;
     exec(
-        &mut *notes,
+        &mut notes,
         "INSERT INTO agent_items(id, session_id, run_id, sequence, kind, payload_json, created_at) VALUES ('i1', 's1', 'run1', 0, 'user_message', ?, ?)",
         &[&payload, t],
     )
