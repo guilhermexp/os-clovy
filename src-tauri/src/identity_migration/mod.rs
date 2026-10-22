@@ -5,8 +5,9 @@
 //! names, before anything opens a database. The copy is all or nothing and
 //! never touches the source.
 //!
-//! macOS only: the June-era profiles live on the owner's Mac, and Clovy on
-//! Windows always starts with a new profile.
+//! macOS development builds only: the June-era dev profile lives on the
+//! owner's Mac. A release starts with an empty profile and never reads the
+//! June-era names, and Clovy on Windows always starts with a new profile.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -112,8 +113,8 @@ const CREDENTIAL_SERVICES: &[(&str, bool)] = &[
     ("github", true),
 ];
 
-/// The June-era identity, migrated only into the release identifier (and its
-/// `-dev` profile). A development identity of its own never reads it.
+/// The June-era identity, migrated only into the release identifier's `-dev`
+/// profile. A development identity of its own never reads it.
 pub fn default_source(target_identifier: &str) -> Option<SourceIdentity> {
     (target_identifier == crate::app_identity::RELEASE_APP_IDENTIFIER).then(|| SourceIdentity {
         identifier: JUNE_IDENTIFIER.into(),
@@ -144,42 +145,33 @@ pub fn source_override(identifier: &str) -> Option<SourceIdentity> {
     })
 }
 
-fn profile_dir_name(identifier: &str, debug: bool) -> String {
-    if debug {
-        format!("{identifier}-dev")
-    } else {
-        identifier.to_string()
-    }
+/// Only a development build migrates, so every profile is the `-dev` one.
+fn profile_dir_name(identifier: &str) -> String {
+    format!("{identifier}-dev")
 }
 
 /// The development app bundle is `<identifier>.dev` (ADR-0060).
-fn webkit_dir_name(identifier: &str, debug: bool) -> String {
-    if debug {
-        format!("{identifier}.dev")
-    } else {
-        identifier.to_string()
-    }
+fn webkit_dir_name(identifier: &str) -> String {
+    format!("{identifier}.dev")
 }
 
 /// The June-era service names: `-dev` suffix, except agent secrets (`.dev`).
-fn source_service(prefix: &str, debug: bool, name: &str) -> String {
-    match (debug, name) {
-        (false, _) => format!("{prefix}.{name}"),
-        (true, "agent-secrets") => format!("{prefix}.dev.{name}"),
-        (true, _) => format!("{prefix}-dev.{name}"),
+fn source_service(prefix: &str, name: &str) -> String {
+    match name {
+        "agent-secrets" => format!("{prefix}.dev.{name}"),
+        _ => format!("{prefix}-dev.{name}"),
     }
 }
 
 pub fn plan(
     dirs: &PlatformDirs,
     target_identifier: &str,
-    debug: bool,
     source: &SourceIdentity,
 ) -> MigrationPlan {
     let from = &source.identifier;
     let profile = |base: &Path| DirectoryCopy {
-        source: base.join(profile_dir_name(from, debug)),
-        target: base.join(profile_dir_name(target_identifier, debug)),
+        source: base.join(profile_dir_name(from)),
+        target: base.join(profile_dir_name(target_identifier)),
     };
     let mut extra_directories = Vec::new();
     if dirs.config != dirs.data {
@@ -187,22 +179,22 @@ pub fn plan(
     }
     if let Some(webkit) = &dirs.webkit {
         extra_directories.push(DirectoryCopy {
-            source: webkit.join(webkit_dir_name(from, debug)),
-            target: webkit.join(webkit_dir_name(target_identifier, debug)),
+            source: webkit.join(webkit_dir_name(from)),
+            target: webkit.join(webkit_dir_name(target_identifier)),
         });
     }
     let credentials = CREDENTIAL_SERVICES
         .iter()
         .map(|(name, bridged)| CredentialCopy {
-            source_service: source_service(&source.credential_prefix, debug, name),
+            source_service: source_service(&source.credential_prefix, name),
             legacy_service: source
                 .legacy_credential_prefix
                 .as_deref()
                 .filter(|_| *bridged)
-                .map(|prefix| source_service(prefix, debug, name)),
+                .map(|prefix| source_service(prefix, name)),
             target_service: crate::app_identity::credential_service_for(
                 target_identifier,
-                debug,
+                true,
                 name,
             ),
         })
@@ -949,14 +941,11 @@ fn migrate_into(
 }
 
 /// Names a synthetic source profile for a development build's proof run.
-#[cfg(debug_assertions)]
 const DEV_SOURCE_ENV: &str = "CLOVY_DEV_IDENTITY_MIGRATION_SOURCE";
 /// The executable name of that synthetic profile's "old app".
-#[cfg(debug_assertions)]
 const DEV_SOURCE_APP_ENV: &str = "CLOVY_DEV_IDENTITY_MIGRATION_SOURCE_APP";
 
 fn startup_source(target_identifier: &str) -> Option<SourceIdentity> {
-    #[cfg(debug_assertions)]
     if let Some(value) = std::env::var(DEV_SOURCE_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -975,9 +964,8 @@ fn startup_source(target_identifier: &str) -> Option<SourceIdentity> {
 /// Runs once per launch, before Tauri creates a window or opens a database.
 pub fn run_at_startup() {
     let target = crate::app_identity::APP_IDENTIFIER;
-    let debug = cfg!(debug_assertions);
     // A development build pointed at release data must not migrate into it.
-    if debug && crate::app_paths::use_prod_data_dir() {
+    if crate::app_paths::use_prod_data_dir() {
         return;
     }
     let Some(source) = startup_source(target) else {
@@ -991,7 +979,7 @@ pub fn run_at_startup() {
         config,
         webkit: dirs::home_dir().map(|home| home.join("Library").join("WebKit")),
     };
-    let plan = plan(&dirs, target, debug, &source);
+    let plan = plan(&dirs, target, &source);
     let plan = match macos_bundle_identifier() {
         Some(bundle) => retarget_webkit(plan, &dirs, target, &source.identifier, &bundle),
         None => plan,

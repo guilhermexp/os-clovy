@@ -123,3 +123,14 @@ to macOS, Windows, browsers and credential stores.
   root or starts with the root and a separator. A rewritten YAML file loses
   its comments and formatting; a file its reader could not parse stays as it
   is.
+
+## Addendum (2026-10-22): only the development build migrates
+
+The owner's own release (`release-propria`) starts with an empty profile: the
+production June profile has been idle since September and is not carried over.
+`identity_migration` and its startup call are compiled only under
+`cfg(all(target_os = "macos", debug_assertions))`, and the plan maps only the
+`-dev` names (`co.opensoftware.june-dev` to `dev.guilhermexp.clovy-dev`, the
+`.dev` WebKit store, the `-dev`/`.dev` credential services). A release binary
+contains no migration code and never reads `co.opensoftware.june`. Guarded by
+`the_release_build_never_migrates`.

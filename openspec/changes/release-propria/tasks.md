@@ -2,8 +2,8 @@
 
 ## 1. Release não migra (D9)
 
-- [ ] 1.1 RED: teste `the_release_build_never_migrates` falha com a chamada atual; commit RED.
-- [ ] 1.2 GREEN: chamada de `identity_migration` sob `cfg(all(target_os = "macos", debug_assertions))` e origem de produção removida sem código morto; `cargo test identity_migration` e `node scripts/check-org-references.mjs` passam.
+- [x] 1.1 RED: teste `the_release_build_never_migrates` falha com a chamada atual; commit RED.
+- [x] 1.2 GREEN: chamada de `identity_migration` sob `cfg(all(target_os = "macos", debug_assertions))` e origem de produção removida sem código morto; `cargo test identity_migration` e `node scripts/check-org-references.mjs` passam.
 
 ## 2. Chave e configuração do updater (D4, D5)
 

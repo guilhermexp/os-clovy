@@ -468,7 +468,7 @@ fn the_dev_plan_maps_every_june_name_to_the_new_dev_names() {
     };
     let source = default_source(RELEASE).unwrap();
 
-    let plan = plan(&dirs, RELEASE, true, &source);
+    let plan = plan(&dirs, RELEASE, &source);
 
     assert_eq!(
         plan.data,
@@ -528,7 +528,7 @@ fn a_proof_source_reads_only_its_own_names() {
         webkit: None,
     };
 
-    let plan = plan(&dirs, "dev.guilhermexp.clovy.proofnew", true, &source);
+    let plan = plan(&dirs, "dev.guilhermexp.clovy.proofnew", &source);
 
     assert_eq!(
         plan.data.source,
