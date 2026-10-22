@@ -27736,9 +27736,21 @@ button.connector-approvals-info {
   text-wrap: pretty;
 }
 
-/* Failed checks and downloads tint the text destructive; the mark stays muted. */
+/* Failed checks and downloads tint the text destructive; the mark stays muted.
+ * The error names its cause, so it wraps (up to three lines) instead of
+ * truncating. */
 .update-status-text-failed {
+  display: -webkit-box;
   color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  text-wrap: pretty;
+}
+
+.update-card:has(.update-status-text-failed) .update-status-row {
+  align-items: start;
 }
 
 /* Actions sit under the copy column (mark slot plus row gap), the primary
