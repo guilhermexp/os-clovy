@@ -55,6 +55,15 @@
 - [x] 9.5 Novo ensaio com `dry_run=true` no HEAD final; conferência em `.tmp/verify/release-propria/dry-run.md`.
 - [x] 9.6 N2 mudou a instalação no Windows: prova 8.2 repetida na `ssh cert` com a mesma limpeza; registro em `.tmp/verify/release-propria/windows-revisao-1.md`.
 
+## 10. Revisão 2 (R1–R3)
+
+- [x] 10.1 R1: a trava guarda os takes de ditado em curso por id, sem prazo; um take entra quando o início é admitido ou quando o helper avisa que começou, e um take que o helper começa durante a instalação é descartado.
+- [x] 10.2 R2: o take da trava só termina no evento terminal real (`paste_completed`, que também confirma o composer, descarte, `agent_session_prompt` ou erro); `final_transcript` e `paste_target` não terminam; a trava não lê mais a flag da bandeja.
+- [x] 10.3 R3: adiamento e admissão decididos sob o mesmo lock; adiamento antes da vaga impede a instalação, depois dela é recusado com `update_install_started`; evento `Installing` tira o cartão de espera e o "Mais tarde".
+- [ ] 10.4 `make verify` numa worktree limpa, saída em `.tmp/verify/release-propria/make-verify-revisao-2.txt`.
+- [ ] 10.5 Novo ensaio com `dry_run=true`; conferência em `.tmp/verify/release-propria/dry-run.md`.
+- [ ] 10.6 `install_update` no Windows mudou (evento `Installing`, adiamento na trava): prova 8.2 repetida na `ssh cert`; registro em `.tmp/verify/release-propria/windows-revisao-2.md`.
+
 ## Workflow follow-up
 
 - Depois do merge da `identidade-clovy` na `main`: rebase desta branch, revisão, aceite e merge.
