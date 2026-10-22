@@ -70,11 +70,24 @@ impl UpdateGate {
         Ok(RecordingStart { gate: self })
     }
 
-    pub fn begin_dictation_start(&self) -> Result<(), AppError> {
-        self.begin_dictation_start_at(Instant::now())
+    /// Admits a dictation take before its start command reaches the helper.
+    pub fn begin_dictation_take(&self, take_id: &str) -> Result<(), AppError> {
+        self.begin_dictation_take_at(take_id, Instant::now())
     }
 
-    fn begin_dictation_start_at(&self, now: Instant) -> Result<(), AppError> {
+    /// The helper reported a take as started.
+    pub fn observe_dictation_start(&self, take_id: &str) -> DictationStart {
+        let _ = take_id;
+        DictationStart::Keep
+    }
+
+    /// The take reached its terminal event.
+    pub fn end_dictation_take(&self, take_id: &str) {
+        let _ = take_id;
+    }
+
+    fn begin_dictation_take_at(&self, take_id: &str, now: Instant) -> Result<(), AppError> {
+        let _ = take_id;
         let mut state = self.lock();
         if state.installing {
             return Err(installing_error());
@@ -141,6 +154,14 @@ fn installing_error() -> AppError {
     )
 }
 
+/// What to do with a take the helper reports as started.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DictationStart {
+    Keep,
+    /// An update is installing: the take must be discarded.
+    Stop,
+}
+
 /// The owner postponed an install that was waiting for a capture to end.
 #[derive(Debug, PartialEq, Eq)]
 pub struct InstallPostponed;
@@ -184,17 +205,45 @@ mod tests {
     }
 
     #[test]
-    fn a_recent_dictation_start_holds_the_install_until_the_grace_ends() {
+    fn an_admitted_dictation_take_holds_the_install_with_no_deadline() {
         let gate = UpdateGate::new();
         let started = Instant::now();
-        gate.begin_dictation_start_at(started).unwrap();
-        let soon = started + Duration::from_secs(1);
+        gate.begin_dictation_take_at("take-a", started).unwrap();
+        // A permission prompt can keep the helper from confirming for minutes.
+        let much_later = started + Duration::from_secs(3600);
         assert_eq!(
-            gate.try_begin_install_at(soon, || false).err(),
+            gate.try_begin_install_at(much_later, || false).err(),
             Some(CaptureBusy)
         );
-        let later = started + DICTATION_START_GRACE + Duration::from_secs(1);
-        assert!(gate.try_begin_install_at(later, || false).is_ok());
+    }
+
+    #[test]
+    fn a_dictation_take_holds_the_install_until_its_own_end() {
+        let gate = UpdateGate::new();
+        gate.begin_dictation_take("take-a").unwrap();
+        gate.begin_dictation_take("take-b").unwrap();
+        gate.end_dictation_take("take-a");
+        assert_eq!(gate.try_begin_install(|| false).err(), Some(CaptureBusy));
+        gate.end_dictation_take("take-b");
+        assert!(gate.try_begin_install(|| false).is_ok());
+    }
+
+    #[test]
+    fn a_take_the_helper_started_on_its_own_holds_the_install() {
+        let gate = UpdateGate::new();
+        assert_eq!(gate.observe_dictation_start("take-h"), DictationStart::Keep);
+        let much_later = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(
+            gate.try_begin_install_at(much_later, || false).err(),
+            Some(CaptureBusy)
+        );
+    }
+
+    #[test]
+    fn a_take_the_helper_starts_during_the_install_is_stopped() {
+        let gate = UpdateGate::new();
+        let _install = gate.try_begin_install(|| false).unwrap();
+        assert_eq!(gate.observe_dictation_start("take-h"), DictationStart::Stop);
     }
 
     #[test]
@@ -203,7 +252,10 @@ mod tests {
         let _install = gate.try_begin_install(|| false).unwrap();
         let recording = gate.begin_recording_start().err().map(|error| error.code);
         assert_eq!(recording.as_deref(), Some("update_installing"));
-        let dictation = gate.begin_dictation_start().err().map(|error| error.code);
+        let dictation = gate
+            .begin_dictation_take("take-a")
+            .err()
+            .map(|error| error.code);
         assert_eq!(dictation.as_deref(), Some("update_installing"));
     }
 
@@ -250,6 +302,6 @@ mod tests {
         let gate = UpdateGate::new();
         drop(gate.try_begin_install(|| false).unwrap());
         assert!(gate.begin_recording_start().is_ok());
-        assert!(gate.begin_dictation_start().is_ok());
+        assert!(gate.begin_dictation_take("take-a").is_ok());
     }
 }

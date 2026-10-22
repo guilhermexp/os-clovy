@@ -1944,7 +1944,7 @@ pub fn dictation_helper_command(
                         (starts_recording, take_id)
                     });
                 if starts_recording {
-                    admit_dictation_start(&app)?;
+                    admit_dictation_start(&app, take_id.as_deref())?;
                 }
 
                 let mut command = command;
@@ -3509,7 +3509,7 @@ fn forward_dictation_command(
         cancel_dictation_take(app, command_take_id);
     }
     if starts_recording {
-        if let Err(error) = admit_dictation_start(app) {
+        if let Err(error) = admit_dictation_start(app, command_take_id) {
             emit_dictation_event_value(app, app_error_event(error));
             return false;
         }
@@ -7096,11 +7096,14 @@ pub fn dictation_take_active() -> bool {
 
 /// Lets a take start unless an update is installing; a refused start clears
 /// the shortcut state it prepared.
-fn admit_dictation_start(app: &AppHandle) -> Result<(), AppError> {
+fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), AppError> {
     crate::update_gate::UPDATE_GATE
-        .begin_dictation_start()
+        .begin_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE))
         .inspect_err(|_| reset_shortcut_activation(app))
 }
+
+/// The gate's key for a take whose start or events carry no take id.
+const UNTAGGED_DICTATION_TAKE: &str = "untagged";
 
 fn sync_dictation_indicator(app: &AppHandle, event_type: Option<&str>) {
     let Some(active) = indicator_action_for_event(event_type) else {
