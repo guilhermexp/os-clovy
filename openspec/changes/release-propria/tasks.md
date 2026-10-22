@@ -69,8 +69,8 @@
 - [x] 11.1 S1: `handle_helper_event_line` aplica o fim do take na trava pelo id do próprio evento antes dos filtros de take atual e de interface; `final_transcript(A) → início(B) → paste_completed(A) → terminal(B)` deixa a trava vazia.
 - [x] 11.2 S1, varredura: descarte, erro, `agent_session_prompt`, recuperação por cópia (erro) e perda do helper passam pelo mesmo ponto; um take que o Rust cancela ou substitui sai da trava ao cancelar o token (a transcrição dele volta sem evento), e um `recording_ready` stale sai em `claim_finalized`; um take já entregando continua até o `paste_completed`.
 - [x] 11.3 S2: o helper do Mac recusa com `error` `recording_start_busy` e o id do take um toggle que chega durante a finalização; o helper do Windows já recusa o início durante `awaiting_transcript` com o mesmo erro e o id, sem mudança.
-- [ ] 11.4 `make verify` numa worktree limpa, saída em `.tmp/verify/release-propria/make-verify-revisao-3.txt`.
-- [ ] 11.5 Novo ensaio com `dry_run=true`; conferência em `.tmp/verify/release-propria/dry-run.md`. A prova 8.2 não se repete: o caminho de instalação do Windows (`install_update`) não mudou.
+- [x] 11.4 `make verify` numa worktree limpa, saída em `.tmp/verify/release-propria/make-verify-revisao-3.txt`.
+- [x] 11.5 Novo ensaio com `dry_run=true`; conferência em `.tmp/verify/release-propria/dry-run.md`. A prova 8.2 não se repete: o caminho de instalação do Windows (`install_update`) não mudou.
 
 ## Workflow follow-up
 
