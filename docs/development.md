@@ -275,7 +275,7 @@ but do not launch, with the official Node 24 PATH and a run-owned identifier:
 PATH="$HOME/.local/share/node-official/node24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   pnpm tauri:build -- --debug --bundles app \
   --config src-tauri/tauri.macos.conf.json \
-  --config '{"identifier":"dev.guilhermexp.clovy.targetproof20261012","bundle":{"createUpdaterArtifacts":false}}'
+  --config '{"identifier":"dev.guilhermexp.clovy.targetproof20261012"}'
 ```
 
 This compiles a separate data identity; editing Info.plist is insufficient.

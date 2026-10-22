@@ -305,7 +305,7 @@ Functional proof (Reality) for desktop features:
 
 1. Isolation: debug builds only. The owner's `dev.guilhermexp.clovy-dev` profile
    is not a throwaway fixture. For automation compile a separate identifier:
-   `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"dev.guilhermexp.clovy.timelineproof","bundle":{"createUpdaterArtifacts":false}}'`
+   `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"dev.guilhermexp.clovy.timelineproof"}'`
    (Node 24 PATH below). Choose a run-owned identifier/profile; copy the dev
    profile without its live MCP socket before launch. This example uses
    `~/Library/Application Support/dev.guilhermexp.clovy.timelineproof-dev`.
@@ -391,7 +391,7 @@ end-to-end capabilities or an account's actual price.
 ```json
 {
   "command": {
-    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none pnpm tauri:build -- --bundles app --config src-tauri/tauri.macos.conf.json --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'"],
+    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none pnpm tauri:build -- --bundles app"],
     "cwd": "."
   }
 }
@@ -405,9 +405,12 @@ proc-macro dylibs when Cargo strips build dependencies ("mis-aligned LINKEDIT
 string pool", then `can't find crate for zerofrom_derive`);
 `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` avoids it without touching the
 shipped binary; debug proof builds need `CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP=none`
-(otherwise `can't find crate for bytemuck_derive`). The fork has no updater signing key, so the recipe turns off
-updater artifacts (passing the macOS config explicitly, since any `--config`
-disables the script's default one).
+(otherwise `can't find crate for bytemuck_derive`) and the release override too,
+because the computer use driver always compiles in release. Updater artifacts
+stay off locally (`bundle.createUpdaterArtifacts` is unset), so local builds
+need no updater key; only the release workflow adds
+`src-tauri/tauri.release.conf.json` with the owner's key
+([docs/release-macos.md](docs/release-macos.md), ADR-0069).
 
 <!-- repowise:start -->
 ## Repowise — diagnóstico de código

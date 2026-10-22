@@ -23,7 +23,7 @@
 - [x] 4.1 RED: teste do script de release do Mac decidindo entre ad hoc, identidade e notarização pelas variáveis presentes (modo de checagem, sem `codesign`); commit RED.
 - [x] 4.2 GREEN: `scripts/build-macos-release.sh` (a partir de `build-signed-dmg.sh`, que sai junto com `tauri:build:signed-dmg`), com `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` e `tauri.release.conf.json` quando houver chave do updater; teste de 4.1 passa.
 - [ ] 4.3 Build local ad hoc com a chave do updater: gera `Clovy_universal.dmg`, `Clovy.app.tar.gz` e `.sig`; `verify-macos-app-name.mjs`, `lipo -archs` (arm64 e x86_64) e `codesign --verify --deep --strict` passam; saídas em `.tmp/verify/release-propria/mac-local/`.
-- [ ] 4.4 `docs/release-macos.md`: receita nova, variáveis opcionais da Apple, quarentena no primeiro download e permissões pedidas de novo a cada atualização com assinatura ad hoc.
+- [x] 4.4 `docs/release-macos.md`: receita nova, variáveis opcionais da Apple, quarentena no primeiro download e permissões pedidas de novo a cada atualização com assinatura ad hoc.
 
 ## 5. Build do Windows (D7)
 
