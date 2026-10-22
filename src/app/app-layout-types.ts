@@ -9,9 +9,11 @@ import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { NoteChat } from "../components/note-chat/useNoteChat";
 import type { RecordingInactivityPrompt } from "./app-shell";
 import type { NotesAction, NotesState } from "./state/app-state";
+import type { UpdateHubProps } from "./app-effects/update-ui";
 import type * as React from "react";
 
 export type RenderAppLayoutDependencies = {
+  updateHub: UpdateHubProps;
   accessibilityBannerDismissed: boolean;
   accessibilityBlocked: boolean;
   activateTab: (id: string) => void;

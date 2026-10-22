@@ -48,6 +48,12 @@ export default defineMessages({
     "settings.page.description": "Manage audio, dictation, AI models, and agent capabilities.",
     "settings.page.navAria": "Settings sections",
     "settings.general.blurb": "Everyday Clovy preferences.",
+    "settings.updates.title": "Updates",
+    "settings.updates.description":
+      "Clovy looks for a new version each time it opens and asks before installing it.",
+    "settings.updates.installed": "Installed version",
+    "settings.updates.check": "Check for updates",
+    "settings.updates.checking": "Checking...",
 
     "settings.autoPreference.cost": "Economy",
     "settings.autoPreference.balanced": "Balanced",
@@ -370,6 +376,12 @@ export default defineMessages({
     "settings.page.description": "Gerencie áudio, ditado, modelos de IA e recursos do agente.",
     "settings.page.navAria": "Seções das configurações",
     "settings.general.blurb": "As preferências do dia a dia do Clovy.",
+    "settings.updates.title": "Atualizações",
+    "settings.updates.description":
+      "O Clovy procura uma versão nova sempre que abre e pergunta antes de instalar.",
+    "settings.updates.installed": "Versão instalada",
+    "settings.updates.check": "Procurar atualizações",
+    "settings.updates.checking": "Procurando...",
 
     "settings.autoPreference.cost": "Economia",
     "settings.autoPreference.balanced": "Equilibrado",

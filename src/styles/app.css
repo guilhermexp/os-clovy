@@ -27570,3 +27570,323 @@ button.connector-approvals-info {
 .coding-agent-lane-tip-prompt {
   color: var(--muted-foreground);
 }
+
+/* In-app update card in the sidebar footer: offer, wait, restart and status.
+ * One quiet card at a time, the same chrome for every state. */
+.sidebar[data-collapsed="true"] .update-popover {
+  display: none;
+}
+
+.update-popover {
+  width: 100%;
+  min-width: 0;
+  color: var(--foreground);
+  -webkit-app-region: no-drag;
+  animation: update-popover-in var(--t-med) var(--ease-spring) both;
+}
+
+.update-relaunch-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 16px;
+  align-items: start;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2);
+  /* Same transparent-over-foreground hairline as --popover-border, a touch
+   * stronger: 10% washes out on a pure-white card over the sidebar. */
+  border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+  transition: box-shadow var(--t-slow) var(--ease-spring);
+}
+
+.update-relaunch-card:hover:not(:disabled) {
+  box-shadow: var(--shadow-sm);
+}
+
+.update-relaunch-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.update-relaunch-card:disabled {
+  cursor: default;
+}
+
+/* Bare Clovy mark, no tile: faint at rest, warms to brand on hover. The fixed
+ * mark-sized box mirrors .update-status-mark, so swapping to the dot spinner
+ * never reflows the copy. */
+.update-relaunch-mark {
+  display: inline-grid;
+  place-items: center;
+  width: var(--sp-4);
+  height: var(--sp-4);
+  margin-top: 2px;
+  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+  transition: color var(--t-slow) var(--ease-spring);
+}
+
+.update-relaunch-mark svg {
+  width: var(--sp-4);
+  height: auto;
+}
+
+.update-relaunch-card:hover:not(:disabled) .update-relaunch-mark {
+  color: var(--brand);
+}
+
+.update-relaunch-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.update-relaunch-title {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-relaunch-copy > span:last-child {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-relaunch-copy > .update-relaunch-status {
+  color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
+}
+
+.update-relaunch-arrow {
+  align-self: center;
+  justify-self: end;
+  color: var(--muted-foreground);
+  transition: transform var(--t-slow) var(--ease-spring);
+}
+
+.update-relaunch-card:hover:not(:disabled) .update-relaunch-arrow {
+  transform: translateX(3px);
+}
+
+/* Same chrome as .update-relaunch-card without the hover shadow: only its
+ * buttons act. Left padding sits a step wider so the mark slot does not hug
+ * the card edge. */
+.update-card {
+  display: grid;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2);
+  padding-left: var(--sp-3);
+  border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--foreground);
+}
+
+.update-status-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* The fixed mark-sized box gives the busy dot spinner and the settled Clovy
+ * mark the same footprint, so swapping them never reflows the text. */
+.update-status-mark {
+  display: inline-grid;
+  place-items: center;
+  width: var(--sp-4);
+  height: var(--sp-4);
+  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+}
+
+.update-status-mark svg {
+  width: var(--sp-4);
+  height: auto;
+}
+
+.update-status-text,
+.update-card-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The wait message is a sentence: it wraps instead of truncating. */
+.update-card-text {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  text-wrap: pretty;
+}
+
+/* Failed checks and downloads tint the text destructive; the mark stays muted. */
+.update-status-text-failed {
+  color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
+}
+
+/* Actions sit under the copy column (mark slot plus row gap), the primary
+ * action last, so the card reads as one sentence with its answer. */
+.update-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+  padding-left: calc(var(--sp-4) + var(--sp-3));
+}
+
+.update-card-action {
+  height: var(--control-sm);
+  padding: 0 var(--sp-3);
+}
+
+.update-status-close {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.update-status-close:hover {
+  background: var(--surface-subtle);
+  color: var(--foreground);
+}
+
+.update-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-left: calc(var(--sp-4) + var(--sp-3));
+}
+
+.update-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: var(--r-pill);
+  background: var(--surface-subtle);
+}
+
+.update-progress-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: inherit;
+  /* Lighter than --foreground so the bar reads quiet; --muted-foreground stays
+   * clearly ahead of the --surface-subtle track in both themes. */
+  background: var(--muted-foreground);
+  clip-path: inset(0 var(--update-progress-clip, 100%) 0 0 round var(--r-pill));
+  transition: clip-path var(--t-fast) var(--ease-out);
+}
+
+.update-progress-percent {
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  line-height: 1;
+}
+
+/* Number pop-in for the download percent: each digit is keyed by
+ * position+character in React, so only a digit that changed remounts and
+ * replays the rise. */
+.update-digit-group {
+  --update-digit-dur: calc(var(--t-med) + var(--t-med));
+  --update-digit-distance: var(--sp-3);
+  --update-digit-blur: var(--sp-px);
+  --update-digit-ease: var(--ease-pop);
+
+  display: inline-flex;
+  align-items: baseline;
+}
+
+.update-digit {
+  display: inline-block;
+  animation: update-digit-pop-in var(--update-digit-dur) var(--update-digit-ease) both;
+  will-change: transform, opacity, filter;
+}
+
+@keyframes update-digit-pop-in {
+  from {
+    transform: translateY(var(--update-digit-distance));
+    opacity: 0;
+    filter: blur(var(--update-digit-blur));
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes update-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--sp-2)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Timed auto-dismiss of the up-to-date confirmation mirrors the entrance. The
+ * status clears just after this finishes (UP_TO_DATE_EXIT_MS). */
+.update-popover[data-leaving="true"] {
+  animation: update-popover-out var(--t-med) var(--ease-out) both;
+}
+
+@keyframes update-popover-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(var(--sp-2)) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The attribute selector outranks the bare class, so the exit needs its own
+   * entry here: the timed hide becomes an instant disappearance. */
+  .update-popover,
+  .update-popover[data-leaving="true"] {
+    animation: none;
+  }
+
+  .update-popover[data-leaving="true"] {
+    visibility: hidden;
+  }
+
+  .update-digit {
+    animation: none;
+  }
+
+  .update-relaunch-card,
+  .update-relaunch-arrow {
+    transition: none;
+  }
+
+  .update-relaunch-card:hover:not(:disabled) .update-relaunch-arrow {
+    transform: none;
+  }
+}

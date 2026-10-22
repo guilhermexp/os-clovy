@@ -22,6 +22,8 @@ import {
 export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies) {
   const {
     accessibilityStatus,
+    checkingForUpdates,
+    onCheckForUpdates,
     currentDataPartitionName,
     activeAgentSessionFolder,
     activeAgentSessionId,
@@ -135,6 +137,8 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
 
   return activeView === "settings" ? (
     <AppSettingsRoute
+      onCheckForUpdates={onCheckForUpdates}
+      checkingForUpdates={checkingForUpdates}
       sourceMode={sourceMode}
       sourceReadiness={sourceReadiness}
       checkingSourceReadiness={checkingSourceReadiness}

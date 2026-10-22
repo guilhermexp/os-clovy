@@ -414,6 +414,10 @@ pub fn run() {
             computer_use::computer_use_end_run,
             computer_use::computer_use_approvals_pending,
             computer_use::computer_use_approval_respond,
+            updates::updates_enabled,
+            updates::fetch_update,
+            updates::install_update,
+            updates::relaunch_for_update,
             activity::activity_status,
             activity::activity_save_settings,
             activity::activity_set_paused,
@@ -465,6 +469,7 @@ pub fn run() {
             providers::setup(app);
             setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
+            updates::setup(app);
             dictation::setup(app);
             agent_hud::setup(app);
             notifications::setup(app);

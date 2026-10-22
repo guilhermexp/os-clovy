@@ -16,6 +16,9 @@ import type { NotesAction, NotesState } from "./state/app-state";
 import type * as React from "react";
 
 export type RenderAppWorkspaceDependencies = {
+  checkingForUpdates: boolean;
+  // Set only in a release build: the manual update check from Settings.
+  onCheckForUpdates?: () => void;
   accessibilityStatus: string | undefined;
   currentDataPartitionName: string;
   activeAgentSessionFolder: FolderDto | undefined;

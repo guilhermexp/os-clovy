@@ -143,6 +143,8 @@ import { renderAppLayout } from "./app-layout";
 
 import { createAppDomainActions } from "./app-domain-actions";
 
+import { useAppUpdateActions } from "./use-app-update-actions";
+
 import { createNoteActions } from "./note-actions";
 import { NoteSaveController } from "./note-save-controller";
 
@@ -782,6 +784,17 @@ export function App() {
     noteChatOpenRef,
     noteChatSessionIdRef,
     recordingStatusRef,
+  });
+
+  const flushNotesForUpdate = useCallback(
+    () => noteSaveController.flushAll(),
+    [noteSaveController],
+  );
+  const { updatesEnabled, runUpdateCheck, checkingForUpdates, updateHub } = useAppUpdateActions({
+    appBlocked,
+    recordingActive: captureActive,
+    dictationWorkflowActiveRef,
+    flushNotes: flushNotesForUpdate,
   });
 
   useEffect(() => {
@@ -1780,6 +1793,8 @@ export function App() {
 
   const workspaceContent = renderAppWorkspace({
     accessibilityStatus,
+    checkingForUpdates,
+    onCheckForUpdates: updatesEnabled ? () => runUpdateCheck("manual") : undefined,
     currentDataPartitionName,
     activeAgentSessionFolder,
     activeAgentSessionId,
@@ -1877,6 +1892,7 @@ export function App() {
   });
 
   const appLayout = renderAppLayout({
+    updateHub,
     accessibilityBannerDismissed,
     accessibilityBlocked,
     activateTab,

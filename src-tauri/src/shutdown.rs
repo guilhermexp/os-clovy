@@ -18,6 +18,12 @@ const SHUTDOWN_AGGREGATE_DEADLINE_MS: u64 = 20_000;
 const SHUTDOWN_AGGREGATE_DEADLINE: Duration = Duration::from_millis(SHUTDOWN_AGGREGATE_DEADLINE_MS);
 const AGENT_RUNTIME_SHUTDOWN_BUDGET_MS: u64 = 2_000;
 const EXIT_FALLBACK_DEADLINE: Duration = SHUTDOWN_AGGREGATE_DEADLINE;
+#[cfg(windows)]
+const UPDATER_AGGREGATE_DEADLINE_MS: u64 = SHUTDOWN_AGGREGATE_DEADLINE_MS
+    + crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS
+    + AGENT_RUNTIME_SHUTDOWN_BUDGET_MS;
+#[cfg(windows)]
+const UPDATER_AGGREGATE_DEADLINE: Duration = Duration::from_millis(UPDATER_AGGREGATE_DEADLINE_MS);
 const MUTEX_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -161,16 +167,18 @@ pub(crate) fn handle_exit_requested(
     }
 
     // Tauri ignores this for its built-in restart code, but ordinary exit must
-    // remain alive while the coordinator owns teardown.
+    // remain alive while the coordinator owns teardown. Clovy's updater avoids
+    // the restart exception by latching Restart directly through its command.
     api.prevent_exit();
     if code == Some(tauri::RESTART_EXIT_CODE) && coordinator.is_idle() {
         // A direct `app.restart()`/`request_restart()` caller can bypass
         // `prevent_exit` (and a main-thread restart skips ExitRequested
-        // entirely). Only this coordinator's finalizer may restart.
+        // entirely). All restart callers except this coordinator's finalizer
+        // must use `shutdown::request_restart`, which latches Running first.
         tracing::error!("restart reached ExitRequested without the shutdown coordinator");
         debug_assert!(
             !coordinator.is_idle(),
-            "only the shutdown coordinator may restart, not Tauri restart directly"
+            "restart callers must use shutdown::request_restart, not Tauri restart directly"
         );
     }
     let target = if code == Some(tauri::RESTART_EXIT_CODE) {
@@ -191,7 +199,8 @@ pub(crate) fn handle_exit_requested(
 
 /// Last-chance cleanup for termination paths that Tao delivers only as
 /// `RunEvent::Exit` (including macOS logout/application termination). Normal
-/// quits have already latched Running or Finalizing and remain no-ops here.
+/// quits and update relaunches have already latched Running or Finalizing and
+/// remain no-ops here.
 pub(crate) fn handle_exit(app: &tauri::AppHandle) {
     let coordinator = app.state::<ShutdownCoordinator>();
     let cleanup_app = app.clone();
@@ -215,6 +224,92 @@ pub(crate) fn handle_exit(app: &tauri::AppHandle) {
         }
         BoundedCleanupResult::Skipped | BoundedCleanupResult::TimedOut => {}
     }
+}
+
+pub(crate) fn request_restart(app: &tauri::AppHandle) -> Result<(), AppError> {
+    request(app, ShutdownTarget::Restart)
+}
+
+/// Prepares Windows for the updater's non-cancellable `install_inner` exit.
+///
+/// This runs before entering `Update::install`, while returning an error can
+/// still prevent process finalization. A second renderer flush after native
+/// cleanup catches edits queued while the helpers were shutting down.
+#[cfg(windows)]
+pub(crate) fn prepare_for_updater_exit(app: &tauri::AppHandle) -> Result<(), AppError> {
+    let coordinator = app.state::<ShutdownCoordinator>();
+    let cleanup_app = app.clone();
+    match coordinator.begin(ShutdownTarget::Restart) {
+        BeginShutdown::Started(target) => {
+            let cleanup_deadline = ShutdownDeadline::after(UPDATER_AGGREGATE_DEADLINE);
+            let outcome = run_bounded_cleanup(UPDATER_AGGREGATE_DEADLINE, move || {
+                tauri::async_runtime::block_on(run_updater_cleanup(&cleanup_app, cleanup_deadline))
+            });
+            match outcome {
+                // Stay in Running until the updater's on_before_exit callback.
+                // `Update::install` can still fail while extracting the
+                // package, and that failure must leave ordinary shutdown
+                // retryable.
+                Some(CleanupOutcome::Completed) => Ok(()),
+                Some(CleanupOutcome::NoteSaveFlushFailed) => {
+                    coordinator.cancel(target);
+                    Err(AppError::new(
+                        "update_note_save_failed",
+                        "Pending note edits could not be saved. Try installing the update again.",
+                    ))
+                }
+                None => {
+                    coordinator.cancel(target);
+                    tracing::warn!(
+                        timeout_ms = UPDATER_AGGREGATE_DEADLINE.as_millis(),
+                        "Windows updater cleanup hit its aggregate deadline"
+                    );
+                    Err(AppError::new(
+                        "update_cleanup_timed_out",
+                        "Clovy could not finish preparing for the update. Try installing it again.",
+                    ))
+                }
+            }
+        }
+        BeginShutdown::AlreadyRunning(_) => Err(AppError::new(
+            "update_cleanup_incomplete",
+            "Clovy is already shutting down. Try installing the update again.",
+        )),
+    }
+}
+
+/// Called only by the updater after package extraction has succeeded and
+/// immediately before it launches the installer and exits the process.
+#[cfg(windows)]
+pub(crate) fn finalize_updater_exit(app: &tauri::AppHandle) {
+    app.state::<ShutdownCoordinator>()
+        .mark_finalizing(ShutdownTarget::Restart);
+    app.cleanup_before_exit();
+}
+
+/// Restores ordinary shutdown when `Update::install` fails before its
+/// on-before-exit callback.
+#[cfg(windows)]
+pub(crate) fn cancel_updater_exit(app: &tauri::AppHandle) {
+    app.state::<ShutdownCoordinator>()
+        .cancel(ShutdownTarget::Restart);
+}
+
+#[cfg(windows)]
+async fn run_updater_cleanup(app: &tauri::AppHandle, deadline: ShutdownDeadline) -> CleanupOutcome {
+    let outcome = run_cleanup(app, deadline).await;
+    if outcome != CleanupOutcome::Completed {
+        return outcome;
+    }
+
+    if !crate::note_save_flush::request(app).await {
+        tracing::warn!(
+            timeout_ms = crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS,
+            "final Windows updater note-save flush failed"
+        );
+        return CleanupOutcome::NoteSaveFlushFailed;
+    }
+    CleanupOutcome::Completed
 }
 
 fn request(app: &tauri::AppHandle, requested: ShutdownTarget) -> Result<(), AppError> {

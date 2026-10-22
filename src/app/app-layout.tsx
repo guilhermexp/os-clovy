@@ -26,10 +26,12 @@ import {
   SIDEBAR_MIN_WIDTH,
   sidebarMaxWidth,
 } from "./app-shell";
+import { UpdateHub } from "./app-effects/update-ui";
 import type { RenderAppLayoutDependencies } from "./app-layout-types";
 
 export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
   const {
+    updateHub,
     accessibilityBannerDismissed,
     accessibilityBlocked,
     activateTab,
@@ -222,6 +224,7 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         recordingTitle={recordingNoteTitle}
         onOpenRecording={() => (pillIsDemo ? undefined : void handleOpenRecordingNote())}
         collapsed={sidebarCollapsed}
+        footerAccessory={<UpdateHub {...updateHub} />}
       />
       <div
         className="sidebar-resize-handle"

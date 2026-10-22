@@ -1,3 +1,201 @@
+//! The in-app updater: one stable channel, release builds only.
+//!
+//! The manifest endpoint and the public key live in `plugins.updater` in
+//! `tauri.conf.json` (the owner's own releases, ADR-0069), so this module
+//! never names a URL. A development build never checks or installs: it must
+//! not pull a release over the development bundle.
+
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
+
+use crate::domain::types::AppError;
+
+/// Whether this build checks for and installs updates. The frontend reads it
+/// to decide whether to check at launch and to show the Settings action.
+#[tauri::command]
+pub fn updates_enabled() -> bool {
+    !cfg!(debug_assertions)
+}
+
+/// Registers the slot for the update found by the last check.
+pub fn setup(app: &mut tauri::App) {
+    app.manage(PendingUpdate::default());
+}
+
+/// What `fetch_update` reports to the frontend: just enough to offer it.
+/// Mirrors the fields `update-decision.ts` reads off an update (`version`,
+/// `body`); the live `Update` handle stays in Rust (see `PendingUpdate`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMeta {
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// Download progress streamed to the frontend over an IPC `Channel`. The shape
+/// is adjacently tagged (`{ event, data }`) so the frontend throttling can read
+/// it as an event stream.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", content = "data")]
+pub enum DownloadEvent {
+    #[serde(rename_all = "camelCase")]
+    Started {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_length: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Progress {
+        chunk_length: usize,
+    },
+    Finished,
+}
+
+/// Holds the `Update` returned by the most recent `fetch_update` so that a
+/// follow-up `install_update` can run it. The handle is not serializable and
+/// must stay Rust-side, so the frontend drives install through commands rather
+/// than holding the update itself.
+#[derive(Default)]
+pub struct PendingUpdate(pub Mutex<Option<tauri_plugin_updater::Update>>);
+
+fn disabled(code: &str) -> AppError {
+    AppError::new(code, "Updates are off in development builds.")
+}
+
+/// Checks the configured manifest for a newer version. The plugin verifies
+/// the package signature against the configured public key at install time,
+/// so a package signed by another key never installs. The found `Update` is
+/// stashed for `install_update`; a `None` result clears any stale handle.
+#[tauri::command]
+pub async fn fetch_update(
+    app: AppHandle,
+    pending: State<'_, PendingUpdate>,
+) -> Result<Option<UpdateMeta>, AppError> {
+    if !updates_enabled() {
+        return Err(disabled("update_check_failed"));
+    }
+    let updater = app.updater_builder();
+    #[cfg(windows)]
+    let updater = {
+        let exit_app = app.clone();
+        updater.on_before_exit(move || {
+            crate::shutdown::finalize_updater_exit(&exit_app);
+        })
+    };
+    let update = updater
+        .build()
+        .map_err(|error| AppError::new("update_check_failed", error.to_string()))?
+        .check()
+        .await
+        .map_err(|error| AppError::new("update_check_failed", error.to_string()))?;
+
+    let meta = update.as_ref().map(|update| UpdateMeta {
+        version: update.version.clone(),
+        body: update.body.clone(),
+    });
+
+    *pending
+        .0
+        .lock()
+        .map_err(|_| AppError::new("update_check_failed", "Update lock failed."))? = update;
+
+    Ok(meta)
+}
+
+/// Downloads and installs the update staged by `fetch_update`, streaming
+/// progress over `on_event`. The update is consumed; a failed install requires
+/// a fresh `fetch_update` (the frontend re-checks before retrying).
+#[tauri::command]
+pub async fn install_update(
+    _app: AppHandle,
+    pending: State<'_, PendingUpdate>,
+    on_event: Channel<DownloadEvent>,
+) -> Result<(), AppError> {
+    if !updates_enabled() {
+        return Err(disabled("update_install_failed"));
+    }
+    let update = pending
+        .0
+        .lock()
+        .map_err(|_| AppError::new("update_install_failed", "Update lock failed."))?
+        .take()
+        .ok_or_else(|| AppError::new("update_install_failed", "No update is staged."))?;
+
+    let progress_channel = on_event.clone();
+    let finished_channel = on_event;
+    let mut started = false;
+
+    #[cfg(windows)]
+    {
+        // `Update::install` exits the process and its before-exit callback
+        // cannot cancel that action. Download first, then finish Clovy's
+        // fallible cleanup while an error can still keep the renderer alive.
+        let bytes = update
+            .download(
+                move |chunk_length, content_length| {
+                    if !started {
+                        started = true;
+                        let _ = progress_channel.send(DownloadEvent::Started { content_length });
+                    }
+                    let _ = progress_channel.send(DownloadEvent::Progress { chunk_length });
+                },
+                move || {
+                    let _ = finished_channel.send(DownloadEvent::Finished);
+                },
+            )
+            .await
+            .map_err(|error| AppError::new("update_install_failed", error.to_string()))?;
+        crate::shutdown::prepare_for_updater_exit(&_app)?;
+        if let Err(error) = update.install(bytes) {
+            crate::shutdown::cancel_updater_exit(&_app);
+            return Err(AppError::new("update_install_failed", error.to_string()));
+        }
+    }
+
+    #[cfg(not(windows))]
+    update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                // The Rust API has no separate "started" callback, so synthesize
+                // it from the first chunk to preserve the event sequence.
+                if !started {
+                    started = true;
+                    let _ = progress_channel.send(DownloadEvent::Started { content_length });
+                }
+                let _ = progress_channel.send(DownloadEvent::Progress { chunk_length });
+            },
+            move || {
+                let _ = finished_channel.send(DownloadEvent::Finished);
+            },
+        )
+        .await
+        .map_err(|error| AppError::new("update_install_failed", error.to_string()))?;
+
+    Ok(())
+}
+
+/// Relaunches Clovy after an in-app update has been staged through the same
+/// idempotent shutdown coordinator used by ordinary app quit.
+///
+/// A plain process relaunch (and `AppHandle::restart()` on the main thread)
+/// restarts without a guaranteed pass through the `RunEvent::Exit` cleanup that
+/// reaps Clovy's children. On an update the `.app` bundle is swapped, so a
+/// skipped teardown orphans the dictation helper, which keeps the global
+/// CGEventTap and its stdio, and the relaunched instance then cannot bring up a
+/// clean helper. The coordinator latches Restart, performs teardown off the
+/// main event loop, and schedules the final restart on the main thread after
+/// cleanup or its hard aggregate deadline.
+#[tauri::command]
+pub async fn relaunch_for_update(app: AppHandle) -> Result<(), AppError> {
+    if !updates_enabled() {
+        return Err(disabled("update_relaunch_failed"));
+    }
+    crate::shutdown::request_restart(&app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

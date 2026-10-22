@@ -376,6 +376,10 @@ type AppSettingsProps = {
   // Opens a new agent session that runs a skill bundle's slash command.
   onStartBundleChat?: (prompt: string) => void;
   activitySupported?: boolean;
+  // Runs the updater's manual check. Absent in a development build, which
+  // never checks, so the Updates section does not render.
+  onCheckForUpdates?: () => void;
+  checkingForUpdates?: boolean;
 };
 
 export function AppSettings({
@@ -396,6 +400,8 @@ export function AppSettings({
   onTabChange,
   onDetailPinnedChange,
   onStartBundleChat,
+  onCheckForUpdates,
+  checkingForUpdates = false,
   activitySupported: activitySupportedProp,
 }: AppSettingsProps) {
   const [settings, setSettings] = useState<DictationSettingsDto>(DEFAULT_SETTINGS);
@@ -1439,6 +1445,10 @@ export function AppSettings({
             />
 
             <StartupSettingsSection />
+
+            {onCheckForUpdates ? (
+              <UpdatesSettingsSection onCheck={onCheckForUpdates} checking={checkingForUpdates} />
+            ) : null}
           </>
         ) : null}
 
@@ -2395,6 +2405,39 @@ type PermissionStatusView = {
  * LaunchAgent is the single source of truth), so state here can never drift
  * from what System Settings shows. Hidden in browser previews, where no
  * autostart backend exists. */
+function UpdatesSettingsSection({ onCheck, checking }: { onCheck: () => void; checking: boolean }) {
+  const t = useT();
+  return (
+    <section className="settings-group" aria-labelledby="updates-heading">
+      <h2 id="updates-heading" className="settings-group-heading">
+        {t("settings.updates.title")}
+      </h2>
+      <p className="settings-group-description">{t("settings.updates.description")}</p>
+      <div className="settings-card">
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-info">
+              <h3 className="settings-row-title">{t("settings.updates.installed")}</h3>
+              <p className="settings-row-description">{APP_VERSION}</p>
+            </div>
+            <div className="settings-row-control">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={checking}
+                aria-busy={checking || undefined}
+                onClick={onCheck}
+              >
+                {checking ? t("settings.updates.checking") : t("settings.updates.check")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function StartupSettingsSection() {
   const t = useT();
   const [enabled, setEnabled] = useState<boolean>();
