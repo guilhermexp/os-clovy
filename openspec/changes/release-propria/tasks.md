@@ -15,7 +15,7 @@
 
 - [x] 3.1 RED: restaurar de `f7f068d6^` os testes `update-decision.test.ts`, `updater.test.ts` e os de `shutdown.rs`, ajustados para canal único e build dev sem verificação (`updates_are_disabled_in_dev_builds`); commit RED.
 - [x] 3.2 GREEN: restaurar `updates.rs`, `src/lib/updater.ts`, `update-decision.ts`, `use-app-update-actions*.ts`, `update-ui.tsx`, o adiamento do reinício em `shutdown.rs` e a ação em Ajustes → Geral, sem `ReleaseChannel`, `release-settings.json` nem endpoint rc; testes de 3.1 passam.
-- [ ] 3.3 Interface do aviso e de Ajustes → Geral revisada com `/impeccable` (pt-BR e inglês nas mensagens i18n); capturas no app de prova em `.tmp/verify/release-propria/`.
+- [x] 3.3 Interface do aviso e de Ajustes → Geral revisada com `/impeccable` (pt-BR e inglês nas mensagens i18n); capturas no app de prova em `.tmp/verify/release-propria/`.
 - [x] 3.4 ADR nova do updater próprio e adendo datado na ADR-0001; `docs/index.md` atualizado.
 
 ## 4. Build do Mac (D6)
@@ -44,7 +44,7 @@
 ## 8. Prova
 
 - [x] 8.1 `make verify` com exit 0 e saída em `.tmp/verify/release-propria/make-verify.txt`.
-- [ ] 8.2 Windows na máquina de prova (`ssh cert`, só no perfil `cert-`, sem credencial do GitHub): instalar o `setup.exe` do ensaio, abrir, conferir versão e que nenhuma migração rodou; desinstalar e apagar o perfil criado; registro em `.tmp/verify/release-propria/windows.md`.
+- [x] 8.2 Windows na máquina de prova (`ssh cert`, só no perfil `cert-`, sem credencial do GitHub): instalar o `setup.exe` do ensaio, abrir, conferir versão e que nenhuma migração rodou; desinstalar e apagar o perfil criado; registro em `.tmp/verify/release-propria/windows.md`.
 
 ## Workflow follow-up
 
