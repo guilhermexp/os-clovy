@@ -282,6 +282,9 @@ fi
 if [[ "${CLOVY_COMPUTER_USE_LIVE_SELF_TEST:-0}" == "1" ]]; then
   computer_use_self_test_args+=(--live)
 fi
+if [[ "$signing" == "adhoc" ]]; then
+  computer_use_self_test_args+=(--adhoc)
+fi
 ./scripts/computer-use-release-self-test.sh "${computer_use_self_test_args[@]}"
 
 shopt -s nullglob

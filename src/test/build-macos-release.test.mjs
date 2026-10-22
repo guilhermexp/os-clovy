@@ -107,5 +107,9 @@ describe("macOS release build plan", () => {
     expect(script).toContain("CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none");
     expect(script).toContain("src-tauri/tauri.release.conf.json");
     expect(script).toContain("clovy-signing.keychain-db");
+    // An ad hoc release cannot carry the Developer ID the helper check expects.
+    expect(script).toContain("computer_use_self_test_args+=(--adhoc)");
+    const selfTest = readFileSync("scripts/computer-use-release-self-test.sh", "utf8");
+    expect(selfTest).toContain("args+=(--require-release-profile)");
   });
 });

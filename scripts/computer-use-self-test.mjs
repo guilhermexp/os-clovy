@@ -94,6 +94,7 @@ function parseArguments(args) {
     permissionsOnly: false,
     promptPermissions: false,
     requireDeveloperId: false,
+    requireReleaseProfile: false,
   };
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
@@ -118,6 +119,11 @@ function parseArguments(args) {
         break;
       case "--require-developer-id":
         parsed.requireDeveloperId = true;
+        break;
+      // An ad hoc release: the helper must still be the release build, but it
+      // carries no Developer ID.
+      case "--require-release-profile":
+        parsed.requireReleaseProfile = true;
         break;
       default:
         throw new Error(`Unknown Computer use self-test argument: ${args[index]}`);
@@ -197,8 +203,11 @@ function validateBundle() {
   ) {
     throw new Error("Computer use helper stamp does not match Clovy's pinned source build.");
   }
-  if (options.requireDeveloperId && stamp.clovyBuild?.profile !== "release") {
-    throw new Error("A signed Computer use release must contain a release-profile helper.");
+  if (
+    (options.requireDeveloperId || options.requireReleaseProfile) &&
+    stamp.clovyBuild?.profile !== "release"
+  ) {
+    throw new Error("A Computer use release must contain a release-profile helper.");
   }
   const sbom = readJson(
     path.join(bundleDir, "Contents", "Resources", "clovy-cua-driver.spdx.json"),
