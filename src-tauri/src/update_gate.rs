@@ -116,6 +116,11 @@ impl UpdateGate {
         self.lock().dictation_takes.remove(take_id);
     }
 
+    #[cfg(test)]
+    pub fn has_dictation_take(&self, take_id: &str) -> bool {
+        self.lock().dictation_takes.contains(take_id)
+    }
+
     /// The helper is gone: no take can still be capturing or delivering.
     pub fn end_all_dictation_takes(&self) {
         self.lock().dictation_takes.clear();

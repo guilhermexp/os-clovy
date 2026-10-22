@@ -7142,6 +7142,17 @@ fn sync_update_gate_take(app: &AppHandle, event: &serde_json::Value) {
     }
 }
 
+/// Applies a helper event's end of take to the update gate by the event's own
+/// take id. Runs before any active-take or interface filter, which may drop
+/// the event for the HUD and the take lifecycle but must never keep a finished
+/// take holding the install.
+fn end_gate_take_for_helper_event(
+    gate: &crate::update_gate::UpdateGate,
+    event: &serde_json::Value,
+) {
+    let _ = (gate, event);
+}
+
 /// Discards a take the helper started while an update installs. Sent off the
 /// event thread so it never waits on the helper lock from inside an event.
 fn stop_take_during_update(app: &AppHandle, take_id: String) {
@@ -8619,6 +8630,71 @@ mod tests {
                 "{event_type} ends the take"
             );
         }
+    }
+
+    #[test]
+    fn a_late_terminal_event_for_an_older_take_still_ends_it_in_the_gate() {
+        let gate = crate::update_gate::UpdateGate::new();
+        let event = |event_type: &str, take_id: &str| serde_json::json!({ "type": event_type, "payload": { "takeId": take_id } });
+        // final_transcript(A), then B starts, then A's paste completes late:
+        // the active-take filter drops paste_completed(A) for the HUD.
+        gate.begin_dictation_take("take-a").unwrap();
+        end_gate_take_for_helper_event(&gate, &event("final_transcript", "take-a"));
+        gate.begin_dictation_take("take-b").unwrap();
+        end_gate_take_for_helper_event(&gate, &event("paste_completed", "take-a"));
+        end_gate_take_for_helper_event(&gate, &event("paste_completed", "take-b"));
+        assert!(gate.try_begin_install(|| false).is_ok());
+    }
+
+    #[test]
+    fn every_terminal_event_of_a_stale_take_ends_it_in_the_gate() {
+        for event_type in ["recording_discarded", "error", "agent_session_prompt"] {
+            let gate = crate::update_gate::UpdateGate::new();
+            gate.begin_dictation_take("take-stale").unwrap();
+            end_gate_take_for_helper_event(
+                &gate,
+                &serde_json::json!({ "type": event_type, "payload": { "takeId": "take-stale" } }),
+            );
+            assert!(
+                gate.try_begin_install(|| false).is_ok(),
+                "{event_type} left the take in the gate"
+            );
+        }
+        let gate = crate::update_gate::UpdateGate::new();
+        gate.begin_dictation_take("take-x").unwrap();
+        end_gate_take_for_helper_event(&gate, &serde_json::json!({ "type": "helper_unavailable" }));
+        assert!(gate.try_begin_install(|| false).is_ok());
+    }
+
+    #[test]
+    fn a_take_rust_cancels_leaves_the_gate() {
+        // A superseded or discarded take produces no delivery, and its
+        // transcription task returns without emitting anything.
+        let gate = &crate::update_gate::UPDATE_GATE;
+        let state = DictationTakeState::default();
+        gate.begin_dictation_take("gate-cancel-a").unwrap();
+        let take_a = state.begin("gate-cancel-a".into());
+        assert!(take_a.try_begin_processing());
+        gate.begin_dictation_take("gate-cancel-b").unwrap();
+        state.begin("gate-cancel-b".into());
+        assert!(!gate.has_dictation_take("gate-cancel-a"));
+        assert!(state.cancel(Some("gate-cancel-b")));
+        assert!(!gate.has_dictation_take("gate-cancel-b"));
+    }
+
+    #[test]
+    fn a_take_already_delivering_stays_in_the_gate_when_superseded() {
+        let gate = &crate::update_gate::UPDATE_GATE;
+        let state = DictationTakeState::default();
+        gate.begin_dictation_take("gate-delivering-a").unwrap();
+        let take_a = state.begin("gate-delivering-a".into());
+        assert!(take_a.try_begin_processing());
+        let _claim = take_a.try_begin_delivery().unwrap();
+        state.begin("gate-delivering-b".into());
+        // Its paste is in flight; paste_completed or an error will end it.
+        assert!(gate.has_dictation_take("gate-delivering-a"));
+        gate.end_dictation_take("gate-delivering-a");
+        gate.end_dictation_take("gate-delivering-b");
     }
 
     #[test]
