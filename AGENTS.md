@@ -233,7 +233,8 @@ build scripts in `pnpm-workspace.yaml` — live in
   (`Clovy.app`, executable `clovy`); Rust spells the identifier only in
   `src-tauri/src/app_identity.rs`, and credential services derive from the
   compiled identifier. The June-era names survive only as sources of the
-  one-time `identity_migration` and of one-way reads; never write a June-era
+  one-time `identity_migration` (macOS only; Windows always starts with an
+  empty profile) and of one-way reads; never write a June-era
   name again ([ADR-0068](docs/adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md),
   superseding ADR-0055).
 - **Service-managed upstream provider keys live only in Clovy API, never in the desktop binary.**
@@ -403,7 +404,8 @@ With Xcode 27, release builds under `MACOSX_DEPLOYMENT_TARGET=14.0` corrupt
 proc-macro dylibs when Cargo strips build dependencies ("mis-aligned LINKEDIT
 string pool", then `can't find crate for zerofrom_derive`);
 `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` avoids it without touching the
-shipped binary. The fork has no updater signing key, so the recipe turns off
+shipped binary; debug proof builds need `CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP=none`
+(otherwise `can't find crate for bytemuck_derive`). The fork has no updater signing key, so the recipe turns off
 updater artifacts (passing the macOS config explicitly, since any `--config`
 disables the script's default one).
 
