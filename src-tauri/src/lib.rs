@@ -151,11 +151,14 @@ pub fn run() {
     builder
         // deep-link registers immediately after single-instance to keep the
         // single-instance -> deep-link handoff (documented above) adjacent and
-        // obvious.
+        // obvious; the updater is order-independent so it follows.
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Endpoint and public key come from `plugins.updater` in
+        // tauri.conf.json; only a release build checks (see `updates`).
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Launch-at-login. LaunchAgent (not AppleScript) so the entry
         // survives macOS upgrades and shows up under System Settings ->
         // General -> Login Items. Enabling/disabling stays a user action in

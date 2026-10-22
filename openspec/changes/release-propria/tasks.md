@@ -7,8 +7,8 @@
 
 ## 2. Chave e configuração do updater (D4, D5)
 
-- [ ] 2.1 Gerar o par com `pnpm tauri signer generate` e senha aleatória; privada e senha em `~/.config/clovy/updater.key{,.password}` com modo 0600; conferir com `stat` e que nada entrou no repositório (`git status`).
-- [ ] 2.2 Gravar `TAURI_SIGNING_PRIVATE_KEY` e `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` com `gh secret set -R guilhermexp/os-clovy` lendo do arquivo; conferir com `gh secret list` (só nomes).
+- [x] 2.1 Gerar o par com `pnpm tauri signer generate` e senha aleatória; privada e senha em `~/.config/clovy/updater.key{,.password}` com modo 0600; conferir com `stat` e que nada entrou no repositório (`git status`).
+- [x] 2.2 Gravar `TAURI_SIGNING_PRIVATE_KEY` e `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` com `gh secret set -R guilhermexp/os-clovy` lendo do arquivo; conferir com `gh secret list` (só nomes).
 - [ ] 2.3 `plugins.updater` em `tauri.conf.json` (chave pública e endpoint `releases/latest/download/latest.json`), `src-tauri/tauri.release.conf.json` com `createUpdaterArtifacts: true`, dependências `tauri-plugin-updater` e `tauri-plugin-process` (Cargo e package.json), capability e registro no `lib.rs`; `pnpm tauri:build` local sem a chave privada continua passando (`make verify`).
 
 ## 3. Atualização no app (D2, D3)

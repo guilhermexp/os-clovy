@@ -108,6 +108,12 @@
           "clovy"
         ]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdDODFEM0NBQjZENzU4MzYKUldRMldOZTJ5dE9CZkZHa0NQeU0vdW9BNmRVZnErcXZsTytXZXVwYzkvVFNmT0xzN3VmdlVaQ3EK",
+      "endpoints": [
+        "https://github.com/guilhermexp/os-clovy/releases/latest/download/latest.json"
+      ]
     }
   },
   "bundle": {
