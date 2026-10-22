@@ -150,3 +150,18 @@ describe("dictation helper: the cue cut uses the file's own clock (R1)", () => {
     );
   });
 });
+
+describe("dictation helper: every admitted start gets an answer (update gate)", () => {
+  it("rejects a toggle start that arrives while the previous take finalizes", () => {
+    // Rust registers the take id it sends with a start in the update gate,
+    // which only lets go on that take's terminal event. A toggle ignored in
+    // silence while finalizing would hold every update back for good.
+    const toggle = code(body("func toggle(shortcut: String, takeID: String? = nil)"));
+    const finalizing = toggle.indexOf("} else if let takeID {");
+    expect(finalizing).toBeGreaterThan(toggle.indexOf("} else if !isFinalizing {"));
+    const reject = toggle.slice(finalizing);
+    expect(reject).toContain('emit("error", takePayload([');
+    expect(reject).toContain('"code": "recording_start_busy"');
+    expect(reject).toContain("], takeID: takeID))");
+  });
+});
