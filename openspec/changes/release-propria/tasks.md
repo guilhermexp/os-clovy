@@ -35,7 +35,7 @@
 - [x] 6.1 RED: `src/test/release-version-check.test.mjs` (tag igual, diferente, release existente) e teste do gerador do `latest.json` (três plataformas, URLs do release, conteúdo dos `.sig`); commit RED.
 - [x] 6.2 GREEN: `scripts/check-release-version.mjs` e `scripts/release-manifest.mjs`; testes de 6.1 passam.
 - [x] 6.3 `.github/workflows/release.yml` conforme D8 (ações por SHA, permissões mínimas, `concurrency`, `dry_run` padrão `true`); YAML válido e `actionlint` sem erro.
-- [ ] 6.4 Ensaio: `gh workflow run release.yml -R guilhermexp/os-clovy --ref feat/release-propria -f tag=v0.0.40 -f dry_run=true`; os três jobs passam, os seis arquivos saem como artefatos do run e cada `.sig` confere com a chave pública; link do run e conferência em `.tmp/verify/release-propria/dry-run.md`.
+- [x] 6.4 Ensaio: `gh workflow run release.yml -R guilhermexp/os-clovy --ref feat/release-propria -f tag=v0.0.40 -f dry_run=true`; os três jobs passam, os seis arquivos saem como artefatos do run e cada `.sig` confere com a chave pública; link do run e conferência em `.tmp/verify/release-propria/dry-run.md`.
 
 ## 7. Limpeza (D11)
 
