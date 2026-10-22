@@ -6,7 +6,6 @@
 //! not pull a release over the development bundle.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::ipc::Channel;
@@ -35,7 +34,6 @@ pub fn updates_enabled() -> bool {
 /// Registers the slot for the update found by the last check.
 pub fn setup(app: &mut tauri::App) {
     app.manage(PendingUpdate::default());
-    app.manage(InstallPostponement::default());
 }
 
 /// What `fetch_update` reports to the frontend: just enough to offer it.
@@ -76,10 +74,6 @@ pub enum DownloadEvent {
 /// than holding the update itself.
 #[derive(Default)]
 pub struct PendingUpdate(pub Mutex<Option<tauri_plugin_updater::Update>>);
-
-/// Set by the owner's "later" while an install waits for a capture to end.
-#[derive(Default)]
-pub struct InstallPostponement(pub AtomicBool);
 
 fn disabled(code: &str) -> AppError {
     AppError::new(code, "Updates are off in development builds.")
@@ -133,7 +127,6 @@ pub async fn fetch_update(
 pub async fn install_update(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
-    postponement: State<'_, InstallPostponement>,
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), AppError> {
     if !updates_enabled() {
@@ -145,7 +138,7 @@ pub async fn install_update(
         .map_err(|_| AppError::new("update_install_failed", "Update lock failed."))?
         .take()
         .ok_or_else(|| AppError::new("update_install_failed", "No update is staged."))?;
-    postponement.0.store(false, Ordering::SeqCst);
+    UPDATE_GATE.begin_install_attempt();
 
     let progress_channel = on_event.clone();
     let finished_channel = on_event.clone();
@@ -175,14 +168,9 @@ pub async fn install_update(
     // Held until the process exits; a failed install drops it and captures
     // can start again.
     let _install_slot = UPDATE_GATE
-        .wait_for_install_slot(
-            capture_active,
-            CAPTURE_POLL,
-            move || {
-                let _ = waiting_channel.send(DownloadEvent::WaitingForCapture);
-            },
-            &postponement.0,
-        )
+        .wait_for_install_slot(capture_active, CAPTURE_POLL, move || {
+            let _ = waiting_channel.send(DownloadEvent::WaitingForCapture);
+        })
         .await
         .map_err(|_| AppError::new("update_install_postponed", "The update was postponed."))?;
 
@@ -210,10 +198,11 @@ pub async fn install_update(
 }
 
 /// Stops an install that is waiting for a capture to end. The downloaded
-/// package is dropped; the next attempt checks again.
+/// package is dropped; the next attempt checks again. Refused once the
+/// install has begun.
 #[tauri::command]
-pub fn postpone_update_install(postponement: State<'_, InstallPostponement>) {
-    postponement.0.store(true, Ordering::SeqCst);
+pub fn postpone_update_install() -> Result<(), AppError> {
+    UPDATE_GATE.postpone_install()
 }
 
 /// Relaunches Clovy after an in-app update has been staged through the same

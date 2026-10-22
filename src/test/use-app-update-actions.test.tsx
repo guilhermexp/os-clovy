@@ -11,7 +11,7 @@ const updater = vi.hoisted(() => ({
 vi.mock("../lib/updater", () => updater);
 
 import { useAppUpdateActions } from "../app/use-app-update-actions";
-import type { ClovyUpdate } from "../lib/updater";
+import type { ClovyUpdate, DownloadEvent } from "../lib/updater";
 
 function stagedUpdate(): ClovyUpdate {
   return {
@@ -81,6 +81,62 @@ describe("useAppUpdateActions", () => {
 
     act(() => hook.result.current.updateHub.onRelaunch());
     await waitFor(() => expect(updater.relaunchClovy).toHaveBeenCalledTimes(2));
+  });
+
+  it("drops the wait card and its later action once the install starts", async () => {
+    let emit: (event: DownloadEvent) => void = () => {};
+    const update: ClovyUpdate = {
+      version: "0.1.1",
+      downloadAndInstall: vi.fn(
+        (onEvent) =>
+          new Promise<void>(() => {
+            emit = (event) => onEvent?.(event);
+          }),
+      ),
+    };
+    const { hook } = await renderOffered(false, update);
+    act(() => hook.result.current.updateHub.onInstall());
+    await waitFor(() => expect(update.downloadAndInstall).toHaveBeenCalled());
+
+    act(() => emit({ event: "WaitingForCapture" }));
+    expect(hook.result.current.updateHub.waitingForCapture).toBe(true);
+
+    act(() => emit({ event: "Installing" }));
+    expect(hook.result.current.updateHub.waitingForCapture).toBe(false);
+    expect(hook.result.current.updateHub.status).toBe("Installing update...");
+  });
+
+  it("reports a later that arrives after the install began", async () => {
+    updater.postponeUpdateInstall.mockRejectedValueOnce({
+      code: "update_install_started",
+      message: "The update is already installing. Clovy restarts in a moment.",
+    });
+    let emit: (event: { event: "WaitingForCapture" }) => void = () => {};
+    let rejectInstall: (error: unknown) => void = () => {};
+    const update: ClovyUpdate = {
+      version: "0.1.1",
+      downloadAndInstall: vi.fn(
+        (onEvent) =>
+          new Promise<void>((_, reject) => {
+            emit = (event) => onEvent?.(event);
+            rejectInstall = reject;
+          }),
+      ),
+    };
+    const { hook } = await renderOffered(false, update);
+    act(() => hook.result.current.updateHub.onInstall());
+    await waitFor(() => expect(update.downloadAndInstall).toHaveBeenCalled());
+    act(() => emit({ event: "WaitingForCapture" }));
+
+    await act(async () => hook.result.current.updateHub.onPostpone());
+    // The postpone lost the race, so a failure of the install it did not stop
+    // is still the owner's to see.
+    await act(async () =>
+      rejectInstall({ code: "update_install_failed", message: "Package extraction failed." }),
+    );
+
+    await waitFor(() => expect(hook.result.current.updateHub.failed).toBe(true));
+    expect(hook.result.current.updateHub.status).toContain("Package extraction failed.");
   });
 
   it("shows the wait card while Rust holds the install for a capture", async () => {

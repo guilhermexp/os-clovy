@@ -26,6 +26,7 @@ struct GateState {
 
 pub struct UpdateGate {
     state: Mutex<GateState>,
+    postponed: AtomicBool,
 }
 
 /// The install could not begin: a capture is running or starting.
@@ -51,6 +52,7 @@ impl UpdateGate {
                 starting_recordings: 0,
                 dictation_takes: BTreeSet::new(),
             }),
+            postponed: AtomicBool::new(false),
         }
     }
 
@@ -128,11 +130,10 @@ impl UpdateGate {
         capture_active: impl Fn() -> bool,
         poll: Duration,
         on_wait: impl FnOnce(),
-        postponed: &AtomicBool,
     ) -> Result<InstallSlot<'_>, InstallPostponed> {
         let mut on_wait = Some(on_wait);
         loop {
-            if postponed.load(Ordering::SeqCst) {
+            if self.postponed.load(Ordering::SeqCst) {
                 return Err(InstallPostponed);
             }
             if let Ok(slot) = self.try_begin_install(&capture_active) {
@@ -143,6 +144,19 @@ impl UpdateGate {
             }
             tokio::time::sleep(poll).await;
         }
+    }
+}
+
+impl UpdateGate {
+    /// A new install attempt starts: an earlier "later" no longer applies.
+    pub fn begin_install_attempt(&self) {
+        self.postponed.store(false, Ordering::SeqCst);
+    }
+
+    /// The owner chose "later" while the install waits for a capture.
+    pub fn postpone_install(&self) -> Result<(), AppError> {
+        self.postponed.store(true, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -258,13 +272,11 @@ mod tests {
         let gate = UpdateGate::new();
         let polls = std::sync::atomic::AtomicUsize::new(0);
         let waited = std::cell::Cell::new(0);
-        let postponed = AtomicBool::new(false);
         let slot = gate
             .wait_for_install_slot(
                 || polls.fetch_add(1, Ordering::SeqCst) < 2,
                 Duration::from_millis(1),
                 || waited.set(waited.get() + 1),
-                &postponed,
             )
             .await;
         assert!(slot.is_ok());
@@ -275,20 +287,44 @@ mod tests {
     #[tokio::test]
     async fn the_owner_can_postpone_a_waiting_install() {
         let gate = UpdateGate::new();
-        let postponed = AtomicBool::new(false);
+        gate.begin_install_attempt();
         let slot = gate
             .wait_for_install_slot(
-                || {
-                    postponed.store(true, Ordering::SeqCst);
-                    true
-                },
+                || true,
                 Duration::from_millis(1),
-                || {},
-                &postponed,
+                || gate.postpone_install().unwrap(),
             )
             .await;
         assert_eq!(slot.err(), Some(InstallPostponed));
         assert!(gate.begin_recording_start().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_postpone_that_arrives_first_keeps_the_install_from_starting() {
+        let gate = UpdateGate::new();
+        gate.begin_install_attempt();
+        gate.postpone_install().unwrap();
+        let slot = gate
+            .wait_for_install_slot(|| false, Duration::from_millis(1), || {})
+            .await;
+        assert_eq!(slot.err(), Some(InstallPostponed));
+    }
+
+    #[test]
+    fn a_postpone_after_the_install_began_is_refused() {
+        let gate = UpdateGate::new();
+        gate.begin_install_attempt();
+        let _install = gate.try_begin_install(|| false).unwrap();
+        let refused = gate.postpone_install().err().map(|error| error.code);
+        assert_eq!(refused.as_deref(), Some("update_install_started"));
+    }
+
+    #[test]
+    fn a_new_attempt_forgets_an_earlier_postpone() {
+        let gate = UpdateGate::new();
+        gate.postpone_install().unwrap();
+        gate.begin_install_attempt();
+        assert!(gate.try_begin_install(|| false).is_ok());
     }
 
     #[test]
