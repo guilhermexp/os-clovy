@@ -292,7 +292,7 @@ describe("Clovy technical identity", () => {
       onboardingPreview,
       styleguide,
     ] = await Promise.all([
-      read("scripts/build-signed-dmg.sh"),
+      read("scripts/build-macos-release.sh"),
       read("src-tauri/tauri.conf.json").then(JSON.parse),
       read("src-tauri/native/mac-dictation-helper/main.swift"),
       read("src-tauri/native/windows-dictation-helper/src/audio.rs"),

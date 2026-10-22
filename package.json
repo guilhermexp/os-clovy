@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-dev.mjs",
     "tauri:build": "node scripts/tauri-build.mjs",
-    "tauri:build:signed-dmg": "./scripts/build-signed-dmg.sh",
+    "tauri:build:release-mac": "./scripts/build-macos-release.sh",
     "agent-runtime:build": "pnpm --filter @clovy/agent-runtime build",
     "agent-runtime:test": "pnpm --filter @clovy/agent-runtime test",
     "agent-runtime:typecheck": "pnpm --filter @clovy/agent-runtime typecheck",

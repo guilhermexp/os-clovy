@@ -14,6 +14,12 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+check_only=0
+if [[ "${1:-}" == "--check" ]]; then
+  check_only=1
+  shift
+fi
+
 ensure_temp_dir() {
   if [[ -z "$TEMP_DIR" ]]; then
     TEMP_DIR="$(mktemp -d)"
@@ -69,78 +75,109 @@ if [[ -f "$SIGNING_ENV_FILE" ]]; then
   done < "$SIGNING_ENV_FILE"
 fi
 
-missing=0
-for name in \
-  APPLE_CERTIFICATE_PASSWORD \
-  APPLE_SIGNING_IDENTITY \
-  APPLE_API_ISSUER \
-  APPLE_API_KEY
-do
-  if [[ -z "${!name:-}" ]]; then
-    echo "${name} is required to build a distributable signed and notarized DMG." >&2
+# What the variables present select. Without APPLE_SIGNING_IDENTITY the app
+# and its helpers are signed ad hoc and nothing is notarized; with it they are
+# signed by that identity; with the identity and an App Store Connect key the
+# DMG is also notarized and stapled. TAURI_SIGNING_PRIVATE_KEY turns on the
+# signed updater package (src-tauri/tauri.release.conf.json).
+signing="adhoc"
+notarize="no"
+updater="off"
+identity_value="${APPLE_SIGNING_IDENTITY:-}"
+[[ -n "${identity_value// /}" ]] && signing="identity"
+[[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] && updater="on"
+
+notary_key_source=""
+if [[ -n "${APPLE_API_KEY_PATH:-}${APPLE_API_KEY_P8:-}${APPLE_API_KEY_P8_BASE64:-}" ]]; then
+  notary_key_source="set"
+fi
+if [[ -n "${APPLE_API_ISSUER:-}${APPLE_API_KEY:-}$notary_key_source" ]]; then
+  if [[ "$signing" != "identity" ]]; then
+    echo "Notarization settings need APPLE_SIGNING_IDENTITY: an ad hoc build cannot be notarized." >&2
+    exit 1
+  fi
+  missing=0
+  for name in APPLE_API_ISSUER APPLE_API_KEY; do
+    if [[ -z "${!name:-}" ]]; then
+      echo "${name} is required to notarize the DMG." >&2
+      missing=1
+    fi
+  done
+  if [[ -z "$notary_key_source" ]]; then
+    echo "One of APPLE_API_KEY_PATH, APPLE_API_KEY_P8, or APPLE_API_KEY_P8_BASE64 is required to notarize the DMG." >&2
     missing=1
   fi
-done
-
-if [[ -z "${APPLE_CERTIFICATE:-}" && -z "${APPLE_CERTIFICATE_PATH:-}" ]]; then
-  echo "APPLE_CERTIFICATE or APPLE_CERTIFICATE_PATH is required to build a distributable signed and notarized DMG." >&2
-  missing=1
+  [[ "$missing" -eq 0 ]] || exit 1
+  notarize="yes"
 fi
 
-if [[ -z "${APPLE_API_KEY_PATH:-}" && -z "${APPLE_API_KEY_P8:-}" && -z "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
-  echo "One of APPLE_API_KEY_PATH, APPLE_API_KEY_P8, or APPLE_API_KEY_P8_BASE64 is required." >&2
-  missing=1
+if [[ "$check_only" == "1" ]]; then
+  printf 'signing=%s\nnotarize=%s\nupdater=%s\n' "$signing" "$notarize" "$updater"
+  exit 0
 fi
 
-if [[ "$missing" -ne 0 ]]; then
-  exit 1
-fi
-
-if [[ -n "${APPLE_CERTIFICATE_PATH:-}" ]]; then
-  if [[ "$APPLE_CERTIFICATE_PATH" != /* ]]; then
-    APPLE_CERTIFICATE_PATH="$ROOT_DIR/$APPLE_CERTIFICATE_PATH"
-  fi
-  if [[ ! -f "$APPLE_CERTIFICATE_PATH" ]]; then
-    echo "APPLE_CERTIFICATE_PATH does not point to a readable file: $APPLE_CERTIFICATE_PATH" >&2
+# A certificate in the environment (CI) goes into a throwaway keychain; a
+# local identity is read from the login keychain as it is.
+if [[ "$signing" == "identity" && -n "${APPLE_CERTIFICATE:-}${APPLE_CERTIFICATE_PATH:-}" ]]; then
+  if [[ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+    echo "APPLE_CERTIFICATE_PASSWORD is required to import the signing certificate." >&2
     exit 1
   fi
-  CERTIFICATE_FILE="$APPLE_CERTIFICATE_PATH"
-  export APPLE_CERTIFICATE="$(base64 -i "$APPLE_CERTIFICATE_PATH" | tr -d '\n')"
+  if [[ -n "${APPLE_CERTIFICATE_PATH:-}" ]]; then
+    if [[ "$APPLE_CERTIFICATE_PATH" != /* ]]; then
+      APPLE_CERTIFICATE_PATH="$ROOT_DIR/$APPLE_CERTIFICATE_PATH"
+    fi
+    if [[ ! -f "$APPLE_CERTIFICATE_PATH" ]]; then
+      echo "APPLE_CERTIFICATE_PATH does not point to a readable file: $APPLE_CERTIFICATE_PATH" >&2
+      exit 1
+    fi
+    CERTIFICATE_FILE="$APPLE_CERTIFICATE_PATH"
+  else
+    if ! printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >/dev/null 2>&1; then
+      echo "APPLE_CERTIFICATE is not valid one-line base64. Regenerate it with: base64 -i /path/to/certificate.p12 | tr -d '\\n'" >&2
+      exit 1
+    fi
+    ensure_temp_dir
+    CERTIFICATE_FILE="$TEMP_DIR/apple-certificate.p12"
+    printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_FILE"
+  fi
+  import_signing_certificate
+fi
+
+if [[ "$notarize" == "yes" ]]; then
+  if [[ -n "${APPLE_API_KEY_PATH:-}" ]]; then
+    if [[ "$APPLE_API_KEY_PATH" != /* ]]; then
+      export APPLE_API_KEY_PATH="$ROOT_DIR/$APPLE_API_KEY_PATH"
+    fi
+    if [[ ! -f "$APPLE_API_KEY_PATH" ]]; then
+      echo "APPLE_API_KEY_PATH does not point to a readable file: $APPLE_API_KEY_PATH" >&2
+      exit 1
+    fi
+  elif [[ -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
+    ensure_temp_dir
+    export APPLE_API_KEY_PATH="$TEMP_DIR/AuthKey_${APPLE_API_KEY}.p8"
+    printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$APPLE_API_KEY_PATH"
+  else
+    ensure_temp_dir
+    export APPLE_API_KEY_PATH="$TEMP_DIR/AuthKey_${APPLE_API_KEY}.p8"
+    printf '%s' "$APPLE_API_KEY_P8" | perl -pe 's/\\n/\n/g' > "$APPLE_API_KEY_PATH"
+  fi
 else
-  if ! printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >/dev/null 2>&1; then
-    echo "APPLE_CERTIFICATE is not valid one-line base64. Regenerate it with: base64 -i /path/to/certificate.p12 | tr -d '\\n'" >&2
-    exit 1
-  fi
-  ensure_temp_dir
-  CERTIFICATE_FILE="$TEMP_DIR/apple-certificate.p12"
-  printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_FILE"
+  # Tauri notarizes on its own whenever these are set; an ad hoc or
+  # identity-only build must not try.
+  unset APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH
 fi
 
-import_signing_certificate
-
-if [[ -n "${APPLE_API_KEY_PATH:-}" ]]; then
-  if [[ "$APPLE_API_KEY_PATH" != /* ]]; then
-    export APPLE_API_KEY_PATH="$ROOT_DIR/$APPLE_API_KEY_PATH"
-  fi
-  if [[ ! -f "$APPLE_API_KEY_PATH" ]]; then
-    echo "APPLE_API_KEY_PATH does not point to a readable file: $APPLE_API_KEY_PATH" >&2
-    exit 1
-  fi
-elif [[ -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
-  ensure_temp_dir
-  export APPLE_API_KEY_PATH="$TEMP_DIR/AuthKey_${APPLE_API_KEY}.p8"
-  printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$APPLE_API_KEY_PATH"
-elif [[ -n "${APPLE_API_KEY_P8:-}" ]]; then
-  ensure_temp_dir
-  export APPLE_API_KEY_PATH="$TEMP_DIR/AuthKey_${APPLE_API_KEY}.p8"
-  printf '%s' "$APPLE_API_KEY_P8" | perl -pe 's/\\n/\n/g' > "$APPLE_API_KEY_PATH"
-fi
+# Xcode 27 corrupts proc-macro dylibs when Cargo strips release build
+# dependencies under MACOSX_DEPLOYMENT_TARGET=14.0; the shipped binary is
+# unaffected by keeping them unstripped.
+export CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none
 
 cd "$ROOT_DIR"
-# Build a universal Node 24 SEA after the Developer ID certificate is imported.
-# The official architecture-specific Node executables are checksummed before
-# injection; the resulting universal runtime is signed before Tauri signs the
-# outer application bundle.
+# Build a universal Node 24 SEA after any signing certificate is imported. The
+# official architecture-specific Node executables are checksummed before
+# injection; the resulting universal runtime is signed (by the identity, or ad
+# hoc) before Tauri signs the outer application bundle.
 node_version="$(node -p 'process.versions.node')"
 if [[ "$node_version" != 24.* ]]; then
   echo "Node 24 is required to build the agent runtime, got $node_version." >&2
@@ -190,7 +227,7 @@ for ((index = 0; index < ${#build_args[@]}; index += 1)); do
     fi
     requested_target="${build_args[$((index + 1))]}"
     if [[ "$requested_target" != "$computer_use_target" ]]; then
-      echo "Signed macOS releases require --target $computer_use_target, got $requested_target." >&2
+      echo "macOS releases require --target $computer_use_target, got $requested_target." >&2
       exit 2
     fi
     ((index += 1))
@@ -199,16 +236,22 @@ for ((index = 0; index < ${#build_args[@]}; index += 1)); do
   if [[ "$argument" == --target=* ]]; then
     requested_target="${argument#--target=}"
     if [[ "$requested_target" != "$computer_use_target" ]]; then
-      echo "Signed macOS releases require --target $computer_use_target, got $requested_target." >&2
+      echo "macOS releases require --target $computer_use_target, got $requested_target." >&2
       exit 2
     fi
     continue
   fi
   tauri_build_args+=("$argument")
 done
+if [[ "$signing" == "adhoc" ]]; then
+  tauri_build_args+=(--config '{"bundle":{"macOS":{"signingIdentity":"-"}}}')
+fi
+if [[ "$updater" == "on" ]]; then
+  tauri_build_args+=(--config src-tauri/tauri.release.conf.json)
+fi
 pnpm computer-use:prepare -- "${computer_use_prepare_args[@]}"
 # Trailing args after `--` reach the cargo runner; --locked keeps the
-# signed build from re-resolving past Cargo.lock (spec/package-install-security.md).
+# release build from re-resolving past Cargo.lock (spec/package-install-security.md).
 pnpm tauri build --bundles app,dmg --target "$computer_use_target" "${tauri_build_args[@]}" -- --locked
 
 # Validate the copy inside the signed app, not the pre-bundle staging resource.
@@ -245,7 +288,7 @@ runtime_entitlements="$(codesign -d --entitlements - "$runtime" 2>&1)"
 grep -q 'com.apple.security.cs.allow-jit' <<< "$runtime_entitlements"
 grep -q 'com.apple.security.cs.allow-unsigned-executable-memory' <<< "$runtime_entitlements"
 if find "$app/Contents/Resources" \( -iname '*hermes*' -o -iname 'python.exe' -o -iname 'python3' \) -print -quit | grep -q .; then
-  echo "The signed app still contains a Hermes or Python payload." >&2
+  echo "The app still contains a Hermes or Python payload." >&2
   exit 1
 fi
 packaged_runtime_smoke_dir="$TEMP_DIR/Clovy packaged runtime smoke"
@@ -260,12 +303,14 @@ dmgs=(
   "$ROOT_DIR"/src-tauri/target/*-apple-darwin/release/bundle/dmg/*.dmg
   "$ROOT_DIR"/src-tauri/target/release/bundle/dmg/*.dmg
 )
-if [[ "${#dmgs[@]}" -eq 0 ]]; then
-  echo "No DMG artifacts found after build." >&2
+
+if [[ "${#dmgs[@]}" -ne 1 ]]; then
+  echo "Expected exactly one DMG after build, found ${#dmgs[@]}." >&2
   exit 1
 fi
+dmg="${dmgs[0]}"
 
-for dmg in "${dmgs[@]}"; do
+if [[ "$notarize" == "yes" ]]; then
   xcrun notarytool submit "$dmg" \
     --key "$APPLE_API_KEY_PATH" \
     --key-id "$APPLE_API_KEY" \
@@ -274,4 +319,20 @@ for dmg in "${dmgs[@]}"; do
   xcrun stapler staple "$dmg"
   xcrun stapler validate "$dmg"
   spctl --assess --type install --verbose "$dmg"
-done
+fi
+
+# Stable names, so the latest release always serves the same file names.
+out_dir="${CLOVY_RELEASE_OUT_DIR:-$ROOT_DIR/src-tauri/target/release-artifacts/macos}"
+rm -rf "$out_dir"
+mkdir -p "$out_dir"
+cp "$dmg" "$out_dir/Clovy_universal.dmg"
+if [[ "$updater" == "on" ]]; then
+  bundle_dir="$(dirname "$app")"
+  [[ -s "$bundle_dir/Clovy.app.tar.gz" && -s "$bundle_dir/Clovy.app.tar.gz.sig" ]] || {
+    echo "The updater package or its signature is missing next to $app." >&2
+    exit 1
+  }
+  cp "$bundle_dir/Clovy.app.tar.gz" "$bundle_dir/Clovy.app.tar.gz.sig" "$out_dir/"
+fi
+echo "macOS release ($signing, notarized: $notarize, updater: $updater) in $out_dir:"
+ls -1 "$out_dir"
