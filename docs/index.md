@@ -10,7 +10,7 @@ Read first, in order: **[CONTEXT.md](../CONTEXT.md)** (domain glossary) →
 Append-only; supersede with a new number or a dated addendum, never rewrite the
 decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 
-- [adr/0001](adr/0001-auto-updates-via-tauri-updater.md) — auto-updates via the Tauri updater on a separate public releases repo (superseded in this fork: the updater was removed)
+- [adr/0001](adr/0001-auto-updates-via-tauri-updater.md) — auto-updates via the Tauri updater on a separate public releases repo (amended by ADR-0069: the fork publishes its own releases)
 - [adr/0002](adr/0002-live-transcript-preview-strategy.md) — live transcript preview as an ephemeral companion, not the source of truth
 - [adr/0003](adr/0003-release-candidate-channel-and-promotion.md) — rc channel + promote-to-stable (every stable release starts as an RC) (superseded by desvincular-repo-ci; the in-app channel choice was removed by desvincular-servicos-open-software)
 - [adr/0004](adr/0004-out-of-process-system-audio-helper.md) — macOS system audio via an out-of-process helper (file IPC + Unix signals)
@@ -79,6 +79,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0066](adr/0066-github-connector-can-ride-the-github-cli-login.md) - the GitHub connector can connect on its own through a signed-in GitHub CLI (`credentialSource: "gh"`), reading the token from `gh` on every call and never storing it; read only at first, disconnect turns the automation off (amends ADR-0036)
 - [adr/0067](adr/0067-computer-use-depends-only-on-local-gates.md) - Computer use is ready from the grant, the pinned driver and macOS permissions alone: no Pro/Max plan, Clovy vision model or remote rollout; the tool is offered only to CLI turns through `clovy-mcp` (amends ADR-0028)
 - [adr/0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md) - supersedes ADR-0055: the app becomes `dev.guilhermexp.clovy` (`Clovy.app`, `clovy`), the extension gets the owner's key pair, and the first launch on macOS copies the June-era profile and credentials once (Windows starts clean); the compatibility bridges are removed
+- [adr/0069](adr/0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md) - amends ADR-0001: releases on `guilhermexp/os-clovy` with one stable channel and the owner's minisign key; only release builds check, every install waits for the owner and for recordings to end; Mac signing optional
 
 ## Enforceable rules (spec/)
 

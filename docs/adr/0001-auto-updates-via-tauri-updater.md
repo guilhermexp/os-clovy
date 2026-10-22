@@ -55,3 +55,9 @@ auto-update. The rc/stable release-channel switching is recorded in
 ## Superada pela change desvincular-servicos-open-software
 
 Neste fork o app desktop não tem mais o atualizador da June: o plugin updater, `updates.rs`, a UI e o item de menu "Check for Updates" foram removidos (2026-10-21).
+
+## Addendum (2026-10-22): the fork's own updater
+
+The updater returns for the owner's own releases, on `guilhermexp/os-clovy`
+itself, with one stable channel and the owner's own signing key. See
+[ADR-0069](0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md).
