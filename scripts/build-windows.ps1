@@ -81,7 +81,7 @@ try {
 
   Set-Location -LiteralPath $repoRoot
   New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-  Get-ChildItem -LiteralPath $OutputDirectory -File -Filter "*-setup.exe" | Remove-Item -Force
+  Get-ChildItem -LiteralPath $OutputDirectory -File -Filter "*-setup.exe*" | Remove-Item -Force
   $cargoMetadataOutput = & cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1
   if ($LASTEXITCODE -ne 0) { throw "Could not resolve Cargo's target directory." }
   $cargoTargetDirectory = ("$cargoMetadataOutput" | ConvertFrom-Json).target_directory
@@ -95,13 +95,20 @@ try {
   $releaseDirectory = Join-Path $cargoTargetDirectory "$targetTriple\release"
   $nsisDirectory = Join-Path $releaseDirectory "bundle\nsis"
   if (Test-Path -LiteralPath $nsisDirectory -PathType Container) {
-    Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe" | Remove-Item -Force
+    Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe*" | Remove-Item -Force
   }
   $appExecutable = Join-Path $releaseDirectory "clovy.exe"
   Remove-Item -LiteralPath $appExecutable -Force -ErrorAction SilentlyContinue
   $env:CLOVY_AGENT_RUNTIME_PREBUILT = "1"
   $env:CLOVY_AGENT_RUNTIME_TARGET = "windows"
-  & node scripts/tauri-build.mjs --target $targetTriple --no-sign
+  # With the updater key (release workflow) Tauri also writes the installer's
+  # minisign signature; Authenticode stays off either way.
+  $hasUpdaterKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+  $tauriArgs = @("--target", $targetTriple, "--no-sign")
+  if ($hasUpdaterKey) {
+    $tauriArgs += @("--config", "src-tauri/tauri.windows.conf.json", "--config", "src-tauri/tauri.release.conf.json")
+  }
+  & node scripts/tauri-build.mjs @tauriArgs
   if ($LASTEXITCODE -ne 0) { throw "Unsigned Tauri release build failed." }
   if ($hadPrebuilt) { $env:CLOVY_AGENT_RUNTIME_PREBUILT = $previousPrebuilt } else { Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT }
   if ($hadRuntimeTarget) { $env:CLOVY_AGENT_RUNTIME_TARGET = $previousRuntimeTarget } else { Remove-Item Env:CLOVY_AGENT_RUNTIME_TARGET }
@@ -112,12 +119,15 @@ try {
 
   $stagedPath = Join-Path $OutputDirectory $installers[0].Name
   Copy-Item -LiteralPath $installers[0].FullName -Destination $stagedPath -Force
+  if ($hasUpdaterKey) {
+    Copy-Item -LiteralPath "$($installers[0].FullName).sig" -Destination "$stagedPath.sig" -Force
+  }
   try {
     & (Join-Path $PSScriptRoot "verify-windows-artifacts.ps1") -InstallerPath $stagedPath -SevenZipPath $sevenZipPath
     if ($LASTEXITCODE -ne 0) { throw "Staged installer verification failed." }
   }
   catch {
-    Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stagedPath, "$stagedPath.sig" -Force -ErrorAction SilentlyContinue
     throw
   }
   Write-Host "Unsigned Windows installer: $stagedPath"

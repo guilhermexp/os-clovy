@@ -28,6 +28,22 @@ if ($nodeHostExit -ne 0 -or $nodeHost -ne "win32:x64") { throw "Native x64 Node 
 $installer = Get-Item -LiteralPath $InstallerPath
 if ($installer.Length -le 0) { throw "Installer is empty: $($installer.FullName)" }
 
+# A release build (updater key present) must ship the installer's minisign
+# signature next to it; latest.json carries its content.
+$hasUpdaterKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+if ($hasUpdaterKey) {
+  $signaturePath = "$($installer.FullName).sig"
+  if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf) -or (Get-Item -LiteralPath $signaturePath).Length -le 0) {
+    throw "The updater signature is missing next to the installer: $signaturePath"
+  }
+  $signatureText = [System.Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String((Get-Content -LiteralPath $signaturePath -Raw).Trim())
+  )
+  if (-not $signatureText.StartsWith("untrusted comment:")) {
+    throw "The updater signature is not a minisign signature: $signaturePath"
+  }
+}
+
 if (-not $SevenZipPath) {
   $command = Get-Command 7z.exe -ErrorAction SilentlyContinue
   if ($command) { $SevenZipPath = $command.Source }
@@ -102,7 +118,8 @@ try {
   $repoRoot = Split-Path -Parent $PSScriptRoot
   & node (Join-Path $repoRoot "scripts/build-agent-runtime.mjs") --verify $runtime.FullName
   if ($LASTEXITCODE -ne 0) { throw "Extracted agent runtime verification failed." }
-  Write-Host "Verified unsigned Windows installer payload: $($installer.FullName)"
+  $updaterNote = if ($hasUpdaterKey) { " with its updater signature" } else { "" }
+  Write-Host "Verified unsigned Windows installer payload$($updaterNote): $($installer.FullName)"
 }
 finally {
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

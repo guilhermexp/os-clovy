@@ -1,10 +1,26 @@
 # Building Clovy for Windows
 
-Clovy has no published Windows releases or release workflow: the signing and
-publishing pipeline belonged to the original organization and was removed by
-the `desvincular-repo-ci` change. Build the NSIS installer locally with
+Windows releases come from `.github/workflows/release.yml` (see
+[ADR-0069](adr/0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md)
+and [release-macos.md](release-macos.md)): its `windows` job runs
+`scripts/build-windows.ps1` with the updater key and publishes the NSIS
+installer and its `.sig`. You can also build the installer locally with
 `scripts/build-windows.ps1` (prerequisites in `AGENTS.md`) and validate it
 with the checks below.
+
+The installer has no Authenticode signature, so SmartScreen warns on the first
+run ("More info", then "Run anyway"). Updates are verified by the updater's own
+minisign signature, not by Authenticode:
+
+- With `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`)
+  set, `build-windows.ps1` adds `src-tauri/tauri.release.conf.json`, and the
+  output directory holds `Clovy_<version>_x64-setup.exe` and
+  `Clovy_<version>_x64-setup.exe.sig`. `verify-windows-artifacts.ps1` then
+  requires that `.sig` (a minisign signature) next to the installer.
+- Without the key the build is the same unsigned installer with no `.sig`, and
+  the verifier does not look for one.
+
+Either way the verifier still requires `NotSigned` from Authenticode.
 
 The installer installs `clovy.exe` under `$env:LOCALAPPDATA\Clovy` with the owner
 as publisher, per

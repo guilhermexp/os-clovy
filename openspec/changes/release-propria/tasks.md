@@ -27,8 +27,8 @@
 
 ## 5. Build do Windows (D7)
 
-- [ ] 5.1 RED: teste do verificador exigindo o `.sig` quando a chave do updater existe; commit RED.
-- [ ] 5.2 GREEN: `build-windows.ps1` passa `tauri.release.conf.json` e copia o `.sig` quando há chave; `verify-windows-artifacts.ps1` exige o `.sig` nesse caso e continua exigindo `NotSigned` no Authenticode; `docs/release-windows.md` atualizado.
+- [x] 5.1 RED: teste do verificador exigindo o `.sig` quando a chave do updater existe; commit RED.
+- [x] 5.2 GREEN: `build-windows.ps1` passa `tauri.release.conf.json` e copia o `.sig` quando há chave; `verify-windows-artifacts.ps1` exige o `.sig` nesse caso e continua exigindo `NotSigned` no Authenticode; `docs/release-windows.md` atualizado.
 
 ## 6. Workflow e manifesto (D8, D10)
 
