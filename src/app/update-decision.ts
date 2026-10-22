@@ -1,6 +1,7 @@
 // DownloadEvent is owned by the IPC boundary (lib/updater.ts); re-exported here
 // so importers do not reach from app/ back up into lib/ for it.
 import { t } from "../i18n";
+import { messageFromError } from "../lib/errors";
 import type { DownloadEvent } from "../lib/updater";
 export type { DownloadEvent };
 
@@ -207,8 +208,9 @@ function normalizeNotes(notes?: string) {
   return trimmed ? trimmed : undefined;
 }
 
+// Native commands reject with an AppError object ({ code, message }), not an Error.
 function messageFromUnknown(error: unknown) {
-  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error) return messageFromError(error);
   if (typeof error === "string") return error;
   return t("app.update.unknownError");
 }
