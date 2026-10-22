@@ -7,6 +7,9 @@ name: release
 on:
   push:
     tags: ["v*.*.*"]
+    # TEMPORARY: registers the workflow so it can be dispatched from this
+    # branch before it reaches main; removed in the next commit.
+    branches: [feat/release-propria]
   workflow_dispatch:
     inputs:
       tag:
