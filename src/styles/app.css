@@ -27749,7 +27749,7 @@ button.connector-approvals-info {
   text-wrap: pretty;
 }
 
-.update-card:has(.update-status-text-failed) .update-status-row {
+.update-card-failed .update-status-row {
   align-items: start;
 }
 

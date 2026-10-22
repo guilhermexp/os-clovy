@@ -215,7 +215,9 @@ function UpdateStatusCard({
 
   return (
     <aside
-      className="update-popover update-card"
+      className={
+        failed ? "update-popover update-card update-card-failed" : "update-popover update-card"
+      }
       data-leaving={leaving || undefined}
       role={failed ? "alert" : "status"}
       aria-live="polite"
