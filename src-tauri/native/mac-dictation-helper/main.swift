@@ -1997,6 +1997,13 @@ final class DictationController {
         } else if !isFinalizing {
             emit("hotkey_trigger", ["action": "start", "shortcut": shortcut])
             start(takeID: takeID)
+        } else if let takeID {
+            // Rust sent this toggle as a start and holds its take id until a
+            // terminal event (the update gate): refuse it out loud.
+            emit("error", takePayload([
+                "code": "recording_start_busy",
+                "message": "Dictation is still finishing the previous take.",
+            ], takeID: takeID))
         }
     }
 
