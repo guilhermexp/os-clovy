@@ -123,8 +123,8 @@ export function useAppUpdateActions({
     };
   }, [display.status]);
 
-  // Dictation state lives in a ref; while the owner waits on an accepted
-  // update, re-read it so the update moves on once the take ends.
+  // Dictation state lives in a ref. Every step reads it synchronously before
+  // acting; this poll only notices when a take the update waits for ends.
   useEffect(() => {
     if (!accepted) return;
     setDictationActive(dictationWorkflowActiveRef.current);
@@ -144,6 +144,10 @@ export function useAppUpdateActions({
   });
 
   useEffect(() => {
+    if ((step === "install" || step === "relaunch") && dictationWorkflowActiveRef.current) {
+      setDictationActive(true);
+      return;
+    }
     if (step === "install" && offer) {
       setPreparing(true);
       setProgress(null);
@@ -184,7 +188,7 @@ export function useAppUpdateActions({
           setStatus(t("app.update.relaunchFailed", { message: messageFromError(error) }), true);
         });
     }
-  }, [flushNotes, offer, setStatus, step]);
+  }, [dictationWorkflowActiveRef, flushNotes, offer, setStatus, step]);
 
   const hub: UpdateHubProps = {
     offer,
@@ -198,14 +202,20 @@ export function useAppUpdateActions({
     preparing,
     relaunching,
     progress,
-    onInstall: () => setAccepted(true),
+    onInstall: () => {
+      setDictationActive(dictationWorkflowActiveRef.current);
+      setAccepted(true);
+    },
     onPostpone: () => {
       setAccepted(false);
       // Nothing downloaded yet: hide the offer until the next check. An
       // installed update stays as a restart card.
       if (!ready) setOffer(null);
     },
-    onRelaunch: () => setAccepted(true),
+    onRelaunch: () => {
+      setDictationActive(dictationWorkflowActiveRef.current);
+      setAccepted(true);
+    },
     onDismissStatus: () => setStatus(null),
   };
 
