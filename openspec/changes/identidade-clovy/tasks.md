@@ -75,6 +75,6 @@
   - L3: execuções pausadas aposentadas na cópia (cartões `expired`, execução e sessão `interrupted` com `identity_migrated`, `interrupted_state_json` zerado);
   - L4/L5: `hermes/config.yaml` (MCP `command`/`cmd`/`args`), `hermes/cron/jobs.json` (`script`/`workdir`) e `obsidian.json` (`vaultPath`) na lista de caminhos.
 - [x] 8.3 Docs: adendo na ADR-0068, spec, design, proposal e `owner-first-launch.md` (Windows não migra; sessões pausadas não voltam).
-- [x] 8.4 `make verify` exit 0 (`mac-review4/make-verify-8.txt`).
-- [x] 8.5 Prova no Mac (`mac-review4/report.md`).
-- [x] 8.6 CI Windows (`desktop.yml` na branch).
+- [x] 8.4 `make verify` exit 0 (`mac-review4/make-verify-8.txt`, worktree limpa em `97c85371`; vitest 1786/1786).
+- [x] 8.5 Prova no Mac (`mac-review4/report.md`): rollback gravado com resto impossível de apagar bloqueia no `NSAlert`; depois termina e migra de novo; nada retomável; caminhos de Hermes e Obsidian reescritos; origem igual por hash; sem Keychain.
+- [x] 8.6 CI 39700732378 (`mac-review4/windows-ci.md`): Windows compila e passa (184/0); só as falhas conhecidas (vitest codesign, clippy Rust 1.99).
