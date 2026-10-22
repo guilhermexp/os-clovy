@@ -1955,7 +1955,11 @@ pub fn dictation_helper_command(
                 if command_type == "discard_recording" {
                     cancel_dictation_take(&app, take_id.as_deref());
                 }
-                send_helper_command(&state, command)
+                send_helper_command(&state, command).inspect_err(|_| {
+                    if starts_recording {
+                        release_unsent_dictation_take(take_id.as_deref());
+                    }
+                })
             });
             return result;
         }
@@ -3464,6 +3468,7 @@ fn untagged_take_event_disposition(
 }
 
 fn emit_helper_event_without_lifecycle(app: &AppHandle, mut event: serde_json::Value) {
+    sync_update_gate_take(app, &event);
     if let Some(payload) = event
         .get_mut("payload")
         .and_then(serde_json::Value::as_object_mut)
@@ -3515,6 +3520,9 @@ fn forward_dictation_command(
         }
     }
     let Some(state) = app.try_state::<HelperState>() else {
+        if starts_recording {
+            release_unsent_dictation_take(command_take_id);
+        }
         emit_dictation_event_value(
             app,
             app_error_event(AppError::new(
@@ -3573,6 +3581,9 @@ fn forward_dictation_command(
         }
     }
     if let Err(error) = send_helper_command(&state, helper_command) {
+        if starts_recording {
+            release_unsent_dictation_take(command_take_id);
+        }
         if let Some(request_id) = composer_request_id.as_deref() {
             clear_shortcut_composer_request(app, request_id);
         }
@@ -7034,6 +7045,7 @@ fn app_error_event(error: AppError) -> serde_json::Value {
 }
 
 fn emit_dictation_event_value(app: &AppHandle, mut event: serde_json::Value) {
+    sync_update_gate_take(app, &event);
     annotate_silent_error(&mut event);
     let event_type = event.get("type").and_then(serde_json::Value::as_str);
     sync_capture_mic_duck(event_type);
@@ -7088,10 +7100,67 @@ fn mic_duck_action_for_event(event_type: Option<&str>) -> Option<bool> {
 /// the "active" set, so without the compare-and-swap every audio frame would
 /// marshal a blocking tray update to the main thread (the same reason
 /// `mic_duck_action_for_event` returns `None` for `audio_level`).
-/// Whether a dictation take is in flight, from start through paste. An update
-/// install waits for it to end.
-pub fn dictation_take_active() -> bool {
-    DICTATION_ACTIVE.load(Ordering::SeqCst)
+/// How a dictation event moves the update gate's record of takes in flight
+/// (`crate::update_gate`). This is the gate's only notion of "a dictation
+/// is running"; it does not reuse the menu-bar indicator.
+#[derive(Debug, PartialEq, Eq)]
+enum GateTakeTransition<'a> {
+    Started(&'a str),
+    Ended(&'a str),
+    AllEnded,
+}
+
+fn gate_take_transition<'a>(
+    event_type: Option<&str>,
+    take_id: Option<&'a str>,
+) -> Option<GateTakeTransition<'a>> {
+    let take_id = take_id.unwrap_or(UNTAGGED_DICTATION_TAKE);
+    match event_type {
+        Some("helper_unavailable" | "shutdown_ack") => Some(GateTakeTransition::AllEnded),
+        Some("recording_ready" | "listening_started") => Some(GateTakeTransition::Started(take_id)),
+        Some(
+            "recording_discarded"
+            | "final_transcript"
+            | "paste_completed"
+            | "agent_session_prompt"
+            | "error",
+        ) => Some(GateTakeTransition::Ended(take_id)),
+        _ => None,
+    }
+}
+
+/// Keeps the update gate in step with every dictation event, whichever emit
+/// path it takes. A take the helper starts while an update installs is
+/// discarded at once.
+fn sync_update_gate_take(app: &AppHandle, event: &serde_json::Value) {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    let gate = &crate::update_gate::UPDATE_GATE;
+    match gate_take_transition(event_type, dictation_take_id_from_event(event)) {
+        Some(GateTakeTransition::Started(take_id)) => {
+            if gate.observe_dictation_start(take_id) == crate::update_gate::DictationStart::Stop {
+                stop_take_during_update(app, take_id.to_string());
+            }
+        }
+        Some(GateTakeTransition::Ended(take_id)) => gate.end_dictation_take(take_id),
+        Some(GateTakeTransition::AllEnded) => gate.end_all_dictation_takes(),
+        None => {}
+    }
+}
+
+/// Discards a take the helper started while an update installs. Sent off the
+/// event thread so it never waits on the helper lock from inside an event.
+fn stop_take_during_update(app: &AppHandle, take_id: String) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        tracing::warn!("discarding a dictation take that started during an update install");
+        cancel_dictation_take(&app, Some(&take_id));
+        if let Some(state) = app.try_state::<HelperState>() {
+            let _ = send_helper_command(
+                &state,
+                serde_json::json!({ "type": "discard_recording", "takeId": take_id }),
+            );
+        }
+    });
 }
 
 /// Lets a take start unless an update is installing; a refused start clears
@@ -7100,6 +7169,11 @@ fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), A
     crate::update_gate::UPDATE_GATE
         .begin_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE))
         .inspect_err(|_| reset_shortcut_activation(app))
+}
+
+/// An admitted start never reached the helper, so no event will end it.
+fn release_unsent_dictation_take(take_id: Option<&str>) {
+    crate::update_gate::UPDATE_GATE.end_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE));
 }
 
 /// The gate's key for a take whose start or events carry no take id.

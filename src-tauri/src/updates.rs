@@ -19,12 +19,10 @@ use crate::update_gate::UPDATE_GATE;
 /// How often an install waiting for a capture checks again.
 const CAPTURE_POLL: Duration = Duration::from_millis(500);
 
-/// A meeting recording runs or is still writing its files, or a dictation
-/// take is in flight.
+/// A meeting recording runs or is still writing its files. Dictation takes
+/// are tracked inside the gate itself.
 fn capture_active() -> bool {
-    crate::audio::capture::is_capture_active()
-        || crate::audio::capture::is_capture_finalizing()
-        || crate::dictation::dictation_take_active()
+    crate::audio::capture::is_capture_active() || crate::audio::capture::is_capture_finalizing()
 }
 
 /// Whether this build checks for and installs updates. The frontend reads it

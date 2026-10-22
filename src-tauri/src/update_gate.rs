@@ -7,22 +7,21 @@
 //! Capture starts and the install decision take the same lock, so neither can
 //! slip past the other.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::domain::types::AppError;
-
-/// A dictation start is sent to the helper before the helper reports the take
-/// as running. Until then the start itself holds the install back.
-pub const DICTATION_START_GRACE: Duration = Duration::from_secs(10);
 
 pub static UPDATE_GATE: UpdateGate = UpdateGate::new();
 
 struct GateState {
     installing: bool,
     starting_recordings: usize,
-    last_dictation_start: Option<Instant>,
+    /// Dictation takes in flight, by take id: from the admitted start command
+    /// (or the helper's start event) to the take's terminal event.
+    dictation_takes: BTreeSet<String>,
 }
 
 pub struct UpdateGate {
@@ -50,7 +49,7 @@ impl UpdateGate {
             state: Mutex::new(GateState {
                 installing: false,
                 starting_recordings: 0,
-                last_dictation_start: None,
+                dictation_takes: BTreeSet::new(),
             }),
         }
     }
@@ -71,29 +70,40 @@ impl UpdateGate {
     }
 
     /// Admits a dictation take before its start command reaches the helper.
+    /// It holds the install back, with no deadline, until its terminal event.
     pub fn begin_dictation_take(&self, take_id: &str) -> Result<(), AppError> {
-        self.begin_dictation_take_at(take_id, Instant::now())
-    }
-
-    /// The helper reported a take as started.
-    pub fn observe_dictation_start(&self, take_id: &str) -> DictationStart {
-        let _ = take_id;
-        DictationStart::Keep
-    }
-
-    /// The take reached its terminal event.
-    pub fn end_dictation_take(&self, take_id: &str) {
-        let _ = take_id;
-    }
-
-    fn begin_dictation_take_at(&self, take_id: &str, now: Instant) -> Result<(), AppError> {
-        let _ = take_id;
         let mut state = self.lock();
         if state.installing {
             return Err(installing_error());
         }
-        state.last_dictation_start = Some(now);
+        state.dictation_takes.insert(take_id.to_string());
         Ok(())
+    }
+
+    /// The helper reported a take as started. A take that did not pass
+    /// through `begin_dictation_take` is registered the same way, unless an
+    /// update is installing: then it must be stopped.
+    pub fn observe_dictation_start(&self, take_id: &str) -> DictationStart {
+        let mut state = self.lock();
+        if state.dictation_takes.contains(take_id) {
+            return DictationStart::Keep;
+        }
+        if state.installing {
+            return DictationStart::Stop;
+        }
+        state.dictation_takes.insert(take_id.to_string());
+        DictationStart::Keep
+    }
+
+    /// The take reached its terminal event, or its start never reached the
+    /// helper.
+    pub fn end_dictation_take(&self, take_id: &str) {
+        self.lock().dictation_takes.remove(take_id);
+    }
+
+    /// The helper is gone: no take can still be capturing or delivering.
+    pub fn end_all_dictation_takes(&self) {
+        self.lock().dictation_takes.clear();
     }
 
     /// `capture_active` runs under the gate lock, so a capture that is not
@@ -102,19 +112,8 @@ impl UpdateGate {
         &self,
         capture_active: impl FnOnce() -> bool,
     ) -> Result<InstallSlot<'_>, CaptureBusy> {
-        self.try_begin_install_at(Instant::now(), capture_active)
-    }
-
-    fn try_begin_install_at(
-        &self,
-        now: Instant,
-        capture_active: impl FnOnce() -> bool,
-    ) -> Result<InstallSlot<'_>, CaptureBusy> {
         let mut state = self.lock();
-        let dictation_starting = state
-            .last_dictation_start
-            .is_some_and(|started| now.saturating_duration_since(started) < DICTATION_START_GRACE);
-        if state.starting_recordings > 0 || dictation_starting || capture_active() {
+        if state.starting_recordings > 0 || !state.dictation_takes.is_empty() || capture_active() {
             return Err(CaptureBusy);
         }
         state.installing = true;
@@ -207,14 +206,11 @@ mod tests {
     #[test]
     fn an_admitted_dictation_take_holds_the_install_with_no_deadline() {
         let gate = UpdateGate::new();
-        let started = Instant::now();
-        gate.begin_dictation_take_at("take-a", started).unwrap();
-        // A permission prompt can keep the helper from confirming for minutes.
-        let much_later = started + Duration::from_secs(3600);
-        assert_eq!(
-            gate.try_begin_install_at(much_later, || false).err(),
-            Some(CaptureBusy)
-        );
+        gate.begin_dictation_take("take-a").unwrap();
+        // A permission prompt can keep the helper from confirming for minutes;
+        // the gate keeps no clock, so only the take's end releases it.
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(gate.try_begin_install(|| false).err(), Some(CaptureBusy));
     }
 
     #[test]
@@ -232,11 +228,9 @@ mod tests {
     fn a_take_the_helper_started_on_its_own_holds_the_install() {
         let gate = UpdateGate::new();
         assert_eq!(gate.observe_dictation_start("take-h"), DictationStart::Keep);
-        let much_later = Instant::now() + Duration::from_secs(3600);
-        assert_eq!(
-            gate.try_begin_install_at(much_later, || false).err(),
-            Some(CaptureBusy)
-        );
+        assert_eq!(gate.try_begin_install(|| false).err(), Some(CaptureBusy));
+        gate.end_all_dictation_takes();
+        assert!(gate.try_begin_install(|| false).is_ok());
     }
 
     #[test]
