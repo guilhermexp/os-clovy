@@ -35,6 +35,9 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   no_speech: "hud.error.noSpeech",
   // A capture start refused while an update installs (src-tauri/src/update_gate.rs)
   update_installing: "hud.error.updateInstalling",
+  // Update restart outcomes (src-tauri/src/updates.rs, shutdown.rs)
+  update_relaunch_cancelled: "app.update.relaunchCancelled",
+  update_capture_active: "app.update.captureActive",
   dictation_helper_unavailable: [
     {
       key: "hud.error.recordingUnsupported",

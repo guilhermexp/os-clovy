@@ -51,6 +51,9 @@ export default defineMessages({
     "app.update.failed": "Update failed: {message}",
     "app.update.checkFailed": "Update check failed: {message}",
     "app.update.relaunchFailed": "Restart failed: {message}",
+    "app.update.relaunchCancelled":
+      "Pending note edits could not be saved, so Clovy did not restart. Try again.",
+    "app.update.captureActive": "A recording or dictation is running. Restart when it ends.",
     "app.update.relaunchAria": "Restart to update to Clovy {version}",
     "app.update.relaunching": "Restarting...",
     "app.update.relaunch": "Restart to update",
@@ -125,6 +128,10 @@ export default defineMessages({
     "app.update.failed": "Falha na atualização: {message}",
     "app.update.checkFailed": "Falha ao procurar atualizações: {message}",
     "app.update.relaunchFailed": "Falha ao reiniciar: {message}",
+    "app.update.relaunchCancelled":
+      "Não deu para salvar as edições pendentes, então o Clovy não reiniciou. Tente de novo.",
+    "app.update.captureActive":
+      "Uma gravação ou um ditado está em andamento. Reinicie quando terminar.",
     "app.update.relaunchAria": "Reiniciar para atualizar para o Clovy {version}",
     "app.update.relaunching": "Reiniciando...",
     "app.update.relaunch": "Reiniciar para atualizar",

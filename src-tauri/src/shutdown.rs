@@ -155,7 +155,19 @@ impl ShutdownCoordinator {
     /// Blocks until the in-flight shutdown either finalizes or is cancelled
     /// (a failed note-save barrier returns the phase to Idle).
     fn wait_for_resolution(&self) -> ShutdownResolution {
-        ShutdownResolution::Finalizing
+        let mut phase = self.lock_phase();
+        loop {
+            match *phase {
+                ShutdownPhase::Idle => return ShutdownResolution::Cancelled,
+                ShutdownPhase::Finalizing(_) => return ShutdownResolution::Finalizing,
+                ShutdownPhase::Running(_) => {
+                    phase = self
+                        .phase_changed
+                        .wait(phase)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+        }
     }
 }
 
@@ -167,8 +179,13 @@ pub(crate) enum ShutdownResolution {
 }
 
 fn restart_result(resolution: ShutdownResolution) -> Result<(), AppError> {
-    let _ = resolution;
-    Ok(())
+    match resolution {
+        ShutdownResolution::Finalizing => Ok(()),
+        ShutdownResolution::Cancelled => Err(AppError::new(
+            "update_relaunch_cancelled",
+            "Pending note edits could not be saved, so Clovy did not restart. Try again.",
+        )),
+    }
 }
 
 /// Intercepts ordinary Tauri exit requests while the main event loop can still
@@ -244,8 +261,20 @@ pub(crate) fn handle_exit(app: &tauri::AppHandle) {
     }
 }
 
-pub(crate) fn request_restart(app: &tauri::AppHandle) -> Result<(), AppError> {
-    request(app, ShutdownTarget::Restart)
+/// Starts (or joins) a restart and resolves when it either finalizes or is
+/// cancelled, so the caller can offer another try after a failed note-save
+/// barrier instead of waiting forever.
+pub(crate) async fn request_restart(app: &tauri::AppHandle) -> Result<(), AppError> {
+    request(app, ShutdownTarget::Restart)?;
+    let waiting_app = app.clone();
+    let resolution = tauri::async_runtime::spawn_blocking(move || {
+        waiting_app
+            .state::<ShutdownCoordinator>()
+            .wait_for_resolution()
+    })
+    .await
+    .map_err(|error| AppError::new("update_relaunch_failed", error.to_string()))?;
+    restart_result(resolution)
 }
 
 /// Prepares Windows for the updater's non-cancellable `install_inner` exit.

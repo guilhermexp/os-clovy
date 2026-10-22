@@ -228,13 +228,23 @@ pub fn postpone_update_install(postponement: State<'_, InstallPostponement>) {
 /// CGEventTap and its stdio, and the relaunched instance then cannot bring up a
 /// clean helper. The coordinator latches Restart, performs teardown off the
 /// main event loop, and schedules the final restart on the main thread after
-/// cleanup or its hard aggregate deadline.
+/// cleanup or its hard aggregate deadline. The command resolves with that
+/// outcome: a restart cancelled by a failed note-save barrier rejects with
+/// `update_relaunch_cancelled`, and the app stays open for another try.
 #[tauri::command]
 pub async fn relaunch_for_update(app: AppHandle) -> Result<(), AppError> {
     if !updates_enabled() {
         return Err(disabled("update_relaunch_failed"));
     }
-    crate::shutdown::request_restart(&app)
+    // The restart ends the process too: no capture may run or start until it
+    // finalizes. A cancelled restart drops the slot and resolves as an error.
+    let _restart_slot = UPDATE_GATE.try_begin_install(capture_active).map_err(|_| {
+        AppError::new(
+            "update_capture_active",
+            "A recording or dictation is running. Restart when it ends.",
+        )
+    })?;
+    crate::shutdown::request_restart(&app).await
 }
 
 #[cfg(test)]

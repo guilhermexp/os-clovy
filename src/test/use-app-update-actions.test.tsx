@@ -66,6 +66,23 @@ describe("useAppUpdateActions", () => {
     }
   });
 
+  it("lets the owner retry a restart that the shutdown cancelled", async () => {
+    updater.relaunchClovy.mockRejectedValueOnce({
+      code: "update_relaunch_cancelled",
+      message: "Pending note edits could not be saved, so Clovy did not restart. Try again.",
+    });
+    const { hook } = await renderOffered(false);
+    act(() => hook.result.current.updateHub.onInstall());
+
+    await waitFor(() => expect(updater.relaunchClovy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(hook.result.current.updateHub.relaunching).toBe(false));
+    expect(hook.result.current.updateHub.ready).toBe(true);
+    expect(hook.result.current.updateHub.failed).toBe(true);
+
+    act(() => hook.result.current.updateHub.onRelaunch());
+    await waitFor(() => expect(updater.relaunchClovy).toHaveBeenCalledTimes(2));
+  });
+
   it("shows the wait card while Rust holds the install for a capture", async () => {
     let rejectInstall: (error: unknown) => void = () => {};
     const update: ClovyUpdate = {
