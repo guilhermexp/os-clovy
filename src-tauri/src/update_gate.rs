@@ -62,6 +62,11 @@ impl UpdateGate {
     }
 
     pub fn begin_recording_start(&self) -> Result<RecordingStart<'_>, AppError> {
+        let mut state = self.lock();
+        if state.installing {
+            return Err(installing_error());
+        }
+        state.starting_recordings += 1;
         Ok(RecordingStart { gate: self })
     }
 
@@ -69,7 +74,12 @@ impl UpdateGate {
         self.begin_dictation_start_at(Instant::now())
     }
 
-    fn begin_dictation_start_at(&self, _now: Instant) -> Result<(), AppError> {
+    fn begin_dictation_start_at(&self, now: Instant) -> Result<(), AppError> {
+        let mut state = self.lock();
+        if state.installing {
+            return Err(installing_error());
+        }
+        state.last_dictation_start = Some(now);
         Ok(())
     }
 
@@ -84,9 +94,17 @@ impl UpdateGate {
 
     fn try_begin_install_at(
         &self,
-        _now: Instant,
-        _capture_active: impl FnOnce() -> bool,
+        now: Instant,
+        capture_active: impl FnOnce() -> bool,
     ) -> Result<InstallSlot<'_>, CaptureBusy> {
+        let mut state = self.lock();
+        let dictation_starting = state
+            .last_dictation_start
+            .is_some_and(|started| now.saturating_duration_since(started) < DICTATION_START_GRACE);
+        if state.starting_recordings > 0 || dictation_starting || capture_active() {
+            return Err(CaptureBusy);
+        }
+        state.installing = true;
         Ok(InstallSlot { gate: self })
     }
 
@@ -100,24 +118,49 @@ impl UpdateGate {
         on_wait: impl FnOnce(),
         postponed: &AtomicBool,
     ) -> Result<InstallSlot<'_>, InstallPostponed> {
-        let _ = (capture_active, poll, on_wait, postponed);
-        Ok(InstallSlot { gate: self })
+        let mut on_wait = Some(on_wait);
+        loop {
+            if postponed.load(Ordering::SeqCst) {
+                return Err(InstallPostponed);
+            }
+            if let Ok(slot) = self.try_begin_install(&capture_active) {
+                return Ok(slot);
+            }
+            if let Some(on_wait) = on_wait.take() {
+                on_wait();
+            }
+            tokio::time::sleep(poll).await;
+        }
     }
+}
+
+fn installing_error() -> AppError {
+    AppError::new(
+        "update_installing",
+        "Clovy is installing an update and restarts in a moment.",
+    )
 }
 
 /// The owner postponed an install that was waiting for a capture to end.
 #[derive(Debug, PartialEq, Eq)]
 pub struct InstallPostponed;
 
+impl Default for UpdateGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for RecordingStart<'_> {
     fn drop(&mut self) {
-        drop(self.gate.lock());
+        let mut state = self.gate.lock();
+        state.starting_recordings = state.starting_recordings.saturating_sub(1);
     }
 }
 
 impl Drop for InstallSlot<'_> {
     fn drop(&mut self) {
-        drop(self.gate.lock());
+        self.gate.lock().installing = false;
     }
 }
 

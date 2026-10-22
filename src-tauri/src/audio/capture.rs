@@ -318,6 +318,9 @@ pub fn start_capture_with_cancel(
     source_mode: RecordingSourceMode,
     handshake: Arc<CaptureStartHandshake>,
 ) -> Result<StartedRecording, AppError> {
+    // Holds an update install back until this recording is published in
+    // `ACTIVE_RECORDING` (or fails); refused while an update installs.
+    let _update_gate = crate::update_gate::UPDATE_GATE.begin_recording_start()?;
     {
         // Waits for a recording that is still finalizing to release its
         // devices; that recording is no longer in `ACTIVE_RECORDING`.
@@ -769,6 +772,15 @@ pub fn is_capture_active() -> bool {
         .lock()
         .map(|active| active.is_some())
         .unwrap_or(false)
+}
+
+/// A finished recording is still writing its files (or a start is waiting on
+/// that lock). An update install must not end the app in between.
+pub fn is_capture_finalizing() -> bool {
+    matches!(
+        RECORDING_FINALIZATION.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    )
 }
 
 /// Takes the active recording and finalizes it. Blocks for as long as the

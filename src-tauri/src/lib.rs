@@ -418,6 +418,7 @@ pub fn run() {
             updates::updates_enabled,
             updates::fetch_update,
             updates::install_update,
+            updates::postpone_update_install,
             updates::relaunch_for_update,
             activity::activity_status,
             activity::activity_save_settings,

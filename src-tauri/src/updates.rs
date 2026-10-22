@@ -6,12 +6,26 @@
 //! not pull a release over the development bundle.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::domain::types::AppError;
+use crate::update_gate::UPDATE_GATE;
+
+/// How often an install waiting for a capture checks again.
+const CAPTURE_POLL: Duration = Duration::from_millis(500);
+
+/// A meeting recording runs or is still writing its files, or a dictation
+/// take is in flight.
+fn capture_active() -> bool {
+    crate::audio::capture::is_capture_active()
+        || crate::audio::capture::is_capture_finalizing()
+        || crate::dictation::dictation_take_active()
+}
 
 /// Whether this build checks for and installs updates. The frontend reads it
 /// to decide whether to check at launch and to show the Settings action.
@@ -23,6 +37,7 @@ pub fn updates_enabled() -> bool {
 /// Registers the slot for the update found by the last check.
 pub fn setup(app: &mut tauri::App) {
     app.manage(PendingUpdate::default());
+    app.manage(InstallPostponement::default());
 }
 
 /// What `fetch_update` reports to the frontend: just enough to offer it.
@@ -52,6 +67,9 @@ pub enum DownloadEvent {
         chunk_length: usize,
     },
     Finished,
+    /// The package is downloaded and waits for a recording or dictation to
+    /// end before it installs.
+    WaitingForCapture,
 }
 
 /// Holds the `Update` returned by the most recent `fetch_update` so that a
@@ -60,6 +78,10 @@ pub enum DownloadEvent {
 /// than holding the update itself.
 #[derive(Default)]
 pub struct PendingUpdate(pub Mutex<Option<tauri_plugin_updater::Update>>);
+
+/// Set by the owner's "later" while an install waits for a capture to end.
+#[derive(Default)]
+pub struct InstallPostponement(pub AtomicBool);
 
 fn disabled(code: &str) -> AppError {
     AppError::new(code, "Updates are off in development builds.")
@@ -105,13 +127,15 @@ pub async fn fetch_update(
     Ok(meta)
 }
 
-/// Downloads and installs the update staged by `fetch_update`, streaming
-/// progress over `on_event`. The update is consumed; a failed install requires
-/// a fresh `fetch_update` (the frontend re-checks before retrying).
+/// Downloads the update staged by `fetch_update`, waits for any recording or
+/// dictation to end, then installs it. Progress and the wait stream over
+/// `on_event`. The update is consumed; a failed or postponed install requires a
+/// fresh `fetch_update` (the frontend re-checks before retrying).
 #[tauri::command]
 pub async fn install_update(
-    _app: AppHandle,
+    app: AppHandle,
     pending: State<'_, PendingUpdate>,
+    postponement: State<'_, InstallPostponement>,
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), AppError> {
     if !updates_enabled() {
@@ -123,44 +147,20 @@ pub async fn install_update(
         .map_err(|_| AppError::new("update_install_failed", "Update lock failed."))?
         .take()
         .ok_or_else(|| AppError::new("update_install_failed", "No update is staged."))?;
+    postponement.0.store(false, Ordering::SeqCst);
 
     let progress_channel = on_event.clone();
-    let finished_channel = on_event;
+    let finished_channel = on_event.clone();
+    let waiting_channel = on_event;
     let mut started = false;
 
-    #[cfg(windows)]
-    {
-        // `Update::install` exits the process and its before-exit callback
-        // cannot cancel that action. Download first, then finish Clovy's
-        // fallible cleanup while an error can still keep the renderer alive.
-        let bytes = update
-            .download(
-                move |chunk_length, content_length| {
-                    if !started {
-                        started = true;
-                        let _ = progress_channel.send(DownloadEvent::Started { content_length });
-                    }
-                    let _ = progress_channel.send(DownloadEvent::Progress { chunk_length });
-                },
-                move || {
-                    let _ = finished_channel.send(DownloadEvent::Finished);
-                },
-            )
-            .await
-            .map_err(|error| AppError::new("update_install_failed", error.to_string()))?;
-        crate::shutdown::prepare_for_updater_exit(&_app)?;
-        if let Err(error) = update.install(bytes) {
-            crate::shutdown::cancel_updater_exit(&_app);
-            return Err(AppError::new("update_install_failed", error.to_string()));
-        }
-    }
-
-    #[cfg(not(windows))]
-    update
-        .download_and_install(
+    // Download first: installing exits the process on Windows (and the macOS
+    // restart follows it), so it must not start while a capture runs.
+    let bytes = update
+        .download(
             move |chunk_length, content_length| {
-                // The Rust API has no separate "started" callback, so synthesize
-                // it from the first chunk to preserve the event sequence.
+                // The Rust API has no separate "started" callback, so
+                // synthesize it from the first chunk.
                 if !started {
                     started = true;
                     let _ = progress_channel.send(DownloadEvent::Started { content_length });
@@ -174,7 +174,48 @@ pub async fn install_update(
         .await
         .map_err(|error| AppError::new("update_install_failed", error.to_string()))?;
 
+    // Held until the process exits; a failed install drops it and captures
+    // can start again.
+    let _install_slot = UPDATE_GATE
+        .wait_for_install_slot(
+            capture_active,
+            CAPTURE_POLL,
+            move || {
+                let _ = waiting_channel.send(DownloadEvent::WaitingForCapture);
+            },
+            &postponement.0,
+        )
+        .await
+        .map_err(|_| AppError::new("update_install_postponed", "The update was postponed."))?;
+
+    #[cfg(windows)]
+    {
+        // `Update::install` exits the process and its before-exit callback
+        // cannot cancel that action. Finish Clovy's fallible cleanup while an
+        // error can still keep the renderer alive.
+        crate::shutdown::prepare_for_updater_exit(&app)?;
+        if let Err(error) = update.install(bytes) {
+            crate::shutdown::cancel_updater_exit(&app);
+            return Err(AppError::new("update_install_failed", error.to_string()));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = &app;
+        update
+            .install(bytes)
+            .map_err(|error| AppError::new("update_install_failed", error.to_string()))?;
+    }
+
     Ok(())
+}
+
+/// Stops an install that is waiting for a capture to end. The downloaded
+/// package is dropped; the next attempt checks again.
+#[tauri::command]
+pub fn postpone_update_install(postponement: State<'_, InstallPostponement>) {
+    postponement.0.store(true, Ordering::SeqCst);
 }
 
 /// Relaunches Clovy after an in-app update has been staged through the same
@@ -245,6 +286,12 @@ mod tests {
     fn finished_event_has_no_data_field() {
         let json = serde_json::to_string(&DownloadEvent::Finished).unwrap();
         assert_eq!(json, r#"{"event":"Finished"}"#);
+    }
+
+    #[test]
+    fn waiting_for_capture_event_has_no_data_field() {
+        let json = serde_json::to_string(&DownloadEvent::WaitingForCapture).unwrap();
+        assert_eq!(json, r#"{"event":"WaitingForCapture"}"#);
     }
 
     #[test]

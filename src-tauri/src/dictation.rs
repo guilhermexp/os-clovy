@@ -1920,7 +1920,7 @@ pub fn dictation_helper_command(
                     .get("takeId")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
-                let (_, take_id) = app
+                let (starts_recording, take_id) = app
                     .try_state::<ShortcutActivationState>()
                     .and_then(|activation| {
                         activation.controller.lock().ok().map(|mut controller| {
@@ -1943,6 +1943,9 @@ pub fn dictation_helper_command(
                         });
                         (starts_recording, take_id)
                     });
+                if starts_recording {
+                    admit_dictation_start(&app)?;
+                }
 
                 let mut command = command;
                 if let (Some(take_id), Some(object)) = (take_id.as_deref(), command.as_object_mut())
@@ -3504,6 +3507,12 @@ fn forward_dictation_command(
 ) -> bool {
     if matches!(command, DictationCommand::DiscardListening) {
         cancel_dictation_take(app, command_take_id);
+    }
+    if starts_recording {
+        if let Err(error) = admit_dictation_start(app) {
+            emit_dictation_event_value(app, app_error_event(error));
+            return false;
+        }
     }
     let Some(state) = app.try_state::<HelperState>() else {
         emit_dictation_event_value(
@@ -7079,6 +7088,20 @@ fn mic_duck_action_for_event(event_type: Option<&str>) -> Option<bool> {
 /// the "active" set, so without the compare-and-swap every audio frame would
 /// marshal a blocking tray update to the main thread (the same reason
 /// `mic_duck_action_for_event` returns `None` for `audio_level`).
+/// Whether a dictation take is in flight, from start through paste. An update
+/// install waits for it to end.
+pub fn dictation_take_active() -> bool {
+    DICTATION_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Lets a take start unless an update is installing; a refused start clears
+/// the shortcut state it prepared.
+fn admit_dictation_start(app: &AppHandle) -> Result<(), AppError> {
+    crate::update_gate::UPDATE_GATE
+        .begin_dictation_start()
+        .inspect_err(|_| reset_shortcut_activation(app))
+}
+
 fn sync_dictation_indicator(app: &AppHandle, event_type: Option<&str>) {
     let Some(active) = indicator_action_for_event(event_type) else {
         return;

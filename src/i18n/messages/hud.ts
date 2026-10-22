@@ -29,6 +29,7 @@ export default defineMessages({
     "hud.error.missingRecording": "No recorded audio was available to transcribe.",
     "hud.error.emptyTranscript": "No transcript text was available to paste.",
     "hud.error.noSpeech": "No speech detected.",
+    "hud.error.updateInstalling": "Clovy is installing an update and restarts in a moment.",
     "hud.error.pasteManually":
       "Clovy couldn't paste automatically. Your transcript is on the clipboard, so you can paste it with Cmd+V.",
     "hud.error.clipboardWriteFailed": "Could not write transcript to the clipboard.",
@@ -128,6 +129,7 @@ export default defineMessages({
     "hud.error.missingRecording": "Nenhum áudio gravado estava disponível para transcrever.",
     "hud.error.emptyTranscript": "Nenhum texto transcrito estava disponível para colar.",
     "hud.error.noSpeech": "Nenhuma fala detectada.",
+    "hud.error.updateInstalling": "O Clovy está instalando uma atualização e reinicia em instantes.",
     "hud.error.pasteManually":
       "O Clovy não conseguiu colar automaticamente. Sua transcrição está na área de transferência, então você pode colar com Cmd+V.",
     "hud.error.clipboardWriteFailed":

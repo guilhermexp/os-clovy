@@ -8,7 +8,9 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 export type DownloadEvent =
   | { event: "Started"; data: { contentLength?: number } }
   | { event: "Progress"; data: { chunkLength: number } }
-  | { event: "Finished" };
+  | { event: "Finished" }
+  // Downloaded; the install waits for a recording or dictation to end.
+  | { event: "WaitingForCapture" };
 
 /** What `fetch_update` reports: enough to offer, not the live update handle. */
 type UpdateMeta = {
@@ -51,6 +53,14 @@ function installStagedUpdate(onEvent?: (event: DownloadEvent) => void): Promise<
   const channel = new Channel<DownloadEvent>();
   if (onEvent) channel.onmessage = onEvent;
   return invoke("install_update", { onEvent: channel });
+}
+
+/**
+ * Stops an install that waits for a capture to end. The pending
+ * `install_update` call then rejects with `update_install_postponed`.
+ */
+export function postponeUpdateInstall() {
+  return invoke("postpone_update_install");
 }
 
 /**

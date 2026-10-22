@@ -5,6 +5,7 @@ const updater = vi.hoisted(() => ({
   updatesEnabled: vi.fn(async () => true),
   checkClovyUpdate: vi.fn(),
   relaunchClovy: vi.fn(async () => undefined),
+  postponeUpdateInstall: vi.fn(async () => undefined),
 }));
 
 vi.mock("../lib/updater", () => updater);
@@ -19,8 +20,7 @@ function stagedUpdate(): ClovyUpdate {
   };
 }
 
-async function renderOffered(dictationActive: boolean) {
-  const update = stagedUpdate();
+async function renderOffered(dictationActive: boolean, update = stagedUpdate()) {
   updater.checkClovyUpdate.mockResolvedValue(update);
   const dictationWorkflowActiveRef = { current: dictationActive };
   const hook = renderHook(() =>
@@ -64,5 +64,33 @@ describe("useAppUpdateActions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows the wait card while Rust holds the install for a capture", async () => {
+    let rejectInstall: (error: unknown) => void = () => {};
+    const update: ClovyUpdate = {
+      version: "0.1.1",
+      downloadAndInstall: vi.fn(
+        (onEvent) =>
+          new Promise<void>((_, reject) => {
+            onEvent?.({ event: "Finished" });
+            onEvent?.({ event: "WaitingForCapture" });
+            rejectInstall = reject;
+          }),
+      ),
+    };
+    const { hook } = await renderOffered(false, update);
+    act(() => hook.result.current.updateHub.onInstall());
+    await waitFor(() => expect(hook.result.current.updateHub.waitingForCapture).toBe(true));
+
+    act(() => hook.result.current.updateHub.onPostpone());
+    expect(updater.postponeUpdateInstall).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rejectInstall({ code: "update_install_postponed", message: "The update was postponed." });
+    });
+    await waitFor(() => expect(hook.result.current.updateHub.offer).toBeNull());
+    expect(hook.result.current.updateHub.waitingForCapture).toBe(false);
+    expect(hook.result.current.updateHub.status).toBeNull();
   });
 });

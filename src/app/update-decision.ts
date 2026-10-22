@@ -84,7 +84,8 @@ export type PrepareUpdateDeps<TUpdate extends UpdaterUpdate> = {
 };
 
 export type UpdateInstallProgress = {
-  state: "downloading" | "installing";
+  // waitingForCapture: downloaded, the install waits for a capture to end.
+  state: "downloading" | "waitingForCapture" | "installing";
   downloadedBytes?: number;
   contentLength?: number;
 };
@@ -197,6 +198,10 @@ async function downloadAndInstallClovyUpdate<TUpdate extends UpdaterUpdate>(
         downloadedBytes,
         contentLength,
       });
+      return;
+    }
+    if (event.event === "WaitingForCapture") {
+      reportProgress({ state: "waitingForCapture", downloadedBytes, contentLength });
       return;
     }
     reportProgress({ state: "installing", downloadedBytes, contentLength });

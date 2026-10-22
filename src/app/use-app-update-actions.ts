@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { t } from "../i18n";
 import { messageFromError } from "../lib/errors";
-import { checkClovyUpdate, relaunchClovy, updatesEnabled, type ClovyUpdate } from "../lib/updater";
+import {
+  checkClovyUpdate,
+  postponeUpdateInstall,
+  relaunchClovy,
+  updatesEnabled,
+  type ClovyUpdate,
+} from "../lib/updater";
 import type { UpdateHubProps } from "./app-effects/update-ui";
 import {
   INITIAL_UPDATE_STATUS_DISPLAY,
@@ -46,6 +52,11 @@ export function useAppUpdateActions({
   const [checking, setChecking] = useState(false);
   const [progress, setProgress] = useState<UpdateInstallProgress | null>(null);
   const [dictationActive, setDictationActive] = useState(false);
+  // The package is downloaded and Rust holds the install until a capture
+  // started during the download ends.
+  const [installWaiting, setInstallWaiting] = useState(false);
+  // "Later" while Rust waits: the install call then rejects, quietly.
+  const installPostponedRef = useRef(false);
   const [display, dispatchDisplay] = useReducer(
     updateStatusDisplayReducer,
     INITIAL_UPDATE_STATUS_DISPLAY,
@@ -152,9 +163,16 @@ export function useAppUpdateActions({
       setPreparing(true);
       setProgress(null);
       setStatus(t("app.update.downloading"));
+      installPostponedRef.current = false;
       void prepareClovyUpdate({
         update: offer.update,
         reportProgress: (next) => {
+          if (next.state === "waitingForCapture") {
+            setInstallWaiting(true);
+            setProgress(null);
+            setStatus(null);
+            return;
+          }
           setProgress(next);
           setStatus(
             next.state === "installing" ? t("app.update.preparing") : t("app.update.downloading"),
@@ -162,6 +180,7 @@ export function useAppUpdateActions({
         },
         reportReady: () => {
           setPreparing(false);
+          setInstallWaiting(false);
           setReady(true);
           setProgress(null);
           setStatus(null);
@@ -169,9 +188,15 @@ export function useAppUpdateActions({
         reportFailure: (message) => {
           // The staged update is consumed: a retry starts with a new check.
           setPreparing(false);
+          setInstallWaiting(false);
           setAccepted(false);
           setOffer(null);
           setProgress(null);
+          if (installPostponedRef.current) {
+            installPostponedRef.current = false;
+            setStatus(null);
+            return;
+          }
           setStatus(t("app.update.failed", { message }), true);
         },
       });
@@ -194,7 +219,7 @@ export function useAppUpdateActions({
     offer,
     accepted,
     ready,
-    waitingForCapture: step === "wait",
+    waitingForCapture: step === "wait" || installWaiting,
     status: display.status,
     failed: display.failed,
     statusLeaving: display.leaving,
@@ -207,6 +232,12 @@ export function useAppUpdateActions({
       setAccepted(true);
     },
     onPostpone: () => {
+      if (installWaiting) {
+        // Rust drops the downloaded package and rejects the install call.
+        installPostponedRef.current = true;
+        void postponeUpdateInstall().catch(() => undefined);
+        return;
+      }
       setAccepted(false);
       // Nothing downloaded yet: hide the offer until the next check. An
       // installed update stays as a restart card.
