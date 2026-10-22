@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn updates_are_disabled_in_dev_builds() {
         // Tests run as a development build: it never checks or installs.
-        assert!(cfg!(debug_assertions));
+        const { assert!(cfg!(debug_assertions)) };
         assert!(!updates_enabled());
     }
 
