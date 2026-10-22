@@ -314,7 +314,9 @@ impl DictationTakeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = current.as_ref() {
-            if id.is_some_and(|id| existing.id() != id) {
+            if let Some(id) = id.filter(|id| existing.id() != *id) {
+                // Dropped untranscribed: nothing else will end it in the gate.
+                crate::update_gate::UPDATE_GATE.end_dictation_take(id);
                 return DictationFinalizedTake::Stale;
             }
             if existing.try_begin_processing() {
@@ -325,7 +327,10 @@ impl DictationTakeState {
                 DICTATION_TAKE_PROCESSING | DICTATION_TAKE_DELIVERING => {
                     DictationFinalizedTake::Duplicate
                 }
-                _ => DictationFinalizedTake::Stale,
+                _ => {
+                    crate::update_gate::UPDATE_GATE.end_dictation_take(existing.id());
+                    DictationFinalizedTake::Stale
+                }
             };
         }
         let id = id
