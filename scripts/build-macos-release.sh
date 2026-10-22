@@ -75,6 +75,16 @@ if [[ -f "$SIGNING_ENV_FILE" ]]; then
   done < "$SIGNING_ENV_FILE"
 fi
 
+# CI passes an absent secret as an empty variable, and Tauri tries to import a
+# certificate as soon as APPLE_CERTIFICATE exists: an empty value is no value.
+apple_variables=(
+  APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_CERTIFICATE_PATH
+  APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH APPLE_API_KEY_P8 APPLE_API_KEY_P8_BASE64
+)
+for name in "${apple_variables[@]}"; do
+  [[ -n "${!name:-}" ]] || unset "$name"
+done
+
 # What the variables present select. Without APPLE_SIGNING_IDENTITY the app
 # and its helpers are signed ad hoc and nothing is notarized; with it they are
 # signed by that identity; with the identity and an App Store Connect key the
@@ -111,8 +121,15 @@ if [[ -n "${APPLE_API_ISSUER:-}${APPLE_API_KEY:-}$notary_key_source" ]]; then
   notarize="yes"
 fi
 
+# An ad hoc build signs nothing with a certificate: Tauri must not see one.
+if [[ "$signing" == "adhoc" ]]; then
+  unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_CERTIFICATE_PATH
+fi
+
 if [[ "$check_only" == "1" ]]; then
-  printf 'signing=%s\nnotarize=%s\nupdater=%s\n' "$signing" "$notarize" "$updater"
+  tauri_apple_env="$(env | awk -F= '/^APPLE_/ {print $1}' | sort | paste -sd, -)"
+  printf 'signing=%s\nnotarize=%s\nupdater=%s\ntauri_apple_env=%s\n' \
+    "$signing" "$notarize" "$updater" "$tauri_apple_env"
   exit 0
 fi
 
