@@ -153,6 +153,29 @@ describe("checkForClovyUpdate", () => {
     expect(reportFailure).toHaveBeenCalledWith("signature mismatch");
   });
 
+  it("reports the message of a native update error", async () => {
+    const reportFailure = vi.fn();
+
+    await checkForClovyUpdate(
+      {
+        check: async () => {
+          throw {
+            code: "update_check_failed",
+            message: "Could not fetch a valid release JSON from the remote",
+          };
+        },
+        offer: vi.fn(),
+        reportNoUpdate: vi.fn(),
+        reportFailure,
+      },
+      "manual",
+    );
+
+    expect(reportFailure).toHaveBeenCalledWith(
+      "Could not fetch a valid release JSON from the remote",
+    );
+  });
+
   it("uses neutral detail for an unstructured failure", async () => {
     const reportFailure = vi.fn();
 
