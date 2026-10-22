@@ -7095,11 +7095,6 @@ fn mic_duck_action_for_event(event_type: Option<&str>) -> Option<bool> {
     }
 }
 
-/// Pushes the menu-bar dictation indicator to match the current take, but only
-/// on an actual edge. `audio_level` fires continuously while listening and is in
-/// the "active" set, so without the compare-and-swap every audio frame would
-/// marshal a blocking tray update to the main thread (the same reason
-/// `mic_duck_action_for_event` returns `None` for `audio_level`).
 /// How a dictation event moves the update gate's record of takes in flight
 /// (`crate::update_gate`). This is the gate's only notion of "a dictation
 /// is running"; it does not reuse the menu-bar indicator.
@@ -7118,13 +7113,13 @@ fn gate_take_transition<'a>(
     match event_type {
         Some("helper_unavailable" | "shutdown_ack") => Some(GateTakeTransition::AllEnded),
         Some("recording_ready" | "listening_started") => Some(GateTakeTransition::Started(take_id)),
-        Some(
-            "recording_discarded"
-            | "final_transcript"
-            | "paste_completed"
-            | "agent_session_prompt"
-            | "error",
-        ) => Some(GateTakeTransition::Ended(take_id)),
+        // The real end of a take. final_transcript and paste_target are not:
+        // the Windows helper still writes the clipboard, focuses and pastes
+        // after them, and a composer delivery waits for the composer's answer
+        // (paste_completed or a composer error).
+        Some("recording_discarded" | "paste_completed" | "agent_session_prompt" | "error") => {
+            Some(GateTakeTransition::Ended(take_id))
+        }
         _ => None,
     }
 }
@@ -7179,6 +7174,11 @@ fn release_unsent_dictation_take(take_id: Option<&str>) {
 /// The gate's key for a take whose start or events carry no take id.
 const UNTAGGED_DICTATION_TAKE: &str = "untagged";
 
+/// Pushes the menu-bar dictation indicator to match the current take, but only
+/// on an actual edge. `audio_level` fires continuously while listening and is in
+/// the "active" set, so without the compare-and-swap every audio frame would
+/// marshal a blocking tray update to the main thread (the same reason
+/// `mic_duck_action_for_event` returns `None` for `audio_level`).
 fn sync_dictation_indicator(app: &AppHandle, event_type: Option<&str>) {
     let Some(active) = indicator_action_for_event(event_type) else {
         return;
