@@ -540,6 +540,23 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn updater_deadline_covers_cleanup_and_the_final_note_flush() {
+        assert!(deadline_covers_ordered_leaves(
+            UPDATER_AGGREGATE_DEADLINE_MS,
+            &[
+                SHUTDOWN_AGGREGATE_DEADLINE_MS,
+                crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS,
+                AGENT_RUNTIME_SHUTDOWN_BUDGET_MS,
+            ],
+        ));
+        assert_eq!(
+            UPDATER_AGGREGATE_DEADLINE.as_millis(),
+            u128::from(UPDATER_AGGREGATE_DEADLINE_MS)
+        );
+    }
+
     #[test]
     fn exit_fallback_runs_only_while_the_coordinator_is_idle() {
         let coordinator = ShutdownCoordinator::default();

@@ -54,6 +54,7 @@ pub mod routines;
 mod shutdown;
 mod system_browser;
 pub mod theme_icon;
+pub mod updates;
 pub mod video_download_url;
 
 use serde::Deserialize;
