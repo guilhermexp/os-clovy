@@ -8596,6 +8596,52 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_take_outlives_the_transcript_until_delivery_ends() {
+        // On Windows the helper emits final_transcript before it writes the
+        // clipboard, focuses the target and pastes; a composer delivery then
+        // waits for the composer's answer. None of that may be cut.
+        for event_type in ["final_transcript", "paste_target", "finalizing_transcript"] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), Some("take-a")),
+                None,
+                "{event_type} must not end the take"
+            );
+        }
+        for event_type in [
+            "paste_completed",
+            "recording_discarded",
+            "agent_session_prompt",
+            "error",
+        ] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), Some("take-a")),
+                Some(GateTakeTransition::Ended("take-a")),
+                "{event_type} ends the take"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gate_take_starts_and_the_helper_going_away_ends_every_take() {
+        for event_type in ["recording_ready", "listening_started"] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), Some("take-a")),
+                Some(GateTakeTransition::Started("take-a"))
+            );
+        }
+        for event_type in ["helper_unavailable", "shutdown_ack"] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), None),
+                Some(GateTakeTransition::AllEnded)
+            );
+        }
+        assert_eq!(
+            gate_take_transition(Some("audio_level"), Some("take-a")),
+            None
+        );
+    }
+
+    #[test]
     fn indicator_turns_on_for_every_active_phase() {
         // Must match DICTATION_ACTIVE_EVENTS in src/lib/dictation-events.ts.
         for event in [
