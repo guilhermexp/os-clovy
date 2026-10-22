@@ -4,6 +4,9 @@
 //! directories, the WebView store and the credential items into the new
 //! names, before anything opens a database. The copy is all or nothing and
 //! never touches the source.
+//!
+//! macOS only: the June-era profiles live on the owner's Mac, and Clovy on
+//! Windows always starts with a new profile.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -76,9 +79,7 @@ pub struct MigrationPlan {
 pub struct PlatformDirs {
     pub data: PathBuf,
     pub config: PathBuf,
-    /// Windows: `%LOCALAPPDATA%`, where WebView2 keeps `EBWebView`.
-    pub local_data: Option<PathBuf>,
-    /// macOS: `~/Library/WebKit`, keyed by the bundle identifier.
+    /// `~/Library/WebKit`, keyed by the bundle identifier.
     pub webkit: Option<PathBuf>,
 }
 
@@ -88,7 +89,7 @@ pub struct SourceIdentity {
     pub identifier: String,
     pub credential_prefix: String,
     pub legacy_credential_prefix: Option<String>,
-    /// The source app's executable names (`os-june`, `os-june.exe`).
+    /// The source app's executable names (`os-june`).
     pub executables: Vec<String>,
 }
 
@@ -96,7 +97,7 @@ pub struct SourceIdentity {
 const JUNE_IDENTIFIER: &str = "co.opensoftware.june";
 const JUNE_CLOVY_CREDENTIAL_PREFIX: &str = "co.opensoftware.clovy";
 /// Every build before the rename ran as `os-june`, June and Clovy alike.
-const JUNE_EXECUTABLES: &[&str] = &["os-june", "os-june.exe"];
+const JUNE_EXECUTABLES: &[&str] = &["os-june"];
 
 /// Each credential service, and whether the old bridge kept a June-era twin.
 const CREDENTIAL_SERVICES: &[(&str, bool)] = &[
@@ -188,13 +189,6 @@ pub fn plan(
         extra_directories.push(DirectoryCopy {
             source: webkit.join(webkit_dir_name(from, debug)),
             target: webkit.join(webkit_dir_name(target_identifier, debug)),
-        });
-    }
-    // Tauri gives WebView2 `<local data>/<identifier>` in every build.
-    if let Some(local) = &dirs.local_data {
-        extra_directories.push(DirectoryCopy {
-            source: local.join(from),
-            target: local.join(target_identifier),
         });
     }
     let credentials = CREDENTIAL_SERVICES
@@ -387,15 +381,7 @@ fn copy_link(from: &Path, to: &Path, rewrite: &PathRewrite) -> Result<(), Migrat
         .path(&link.to_string_lossy())
         .map(PathBuf::from)
         .unwrap_or(link);
-    #[cfg(unix)]
-    let created = std::os::unix::fs::symlink(&link, to);
-    #[cfg(windows)]
-    let created = if from.is_dir() {
-        std::os::windows::fs::symlink_dir(&link, to)
-    } else {
-        std::os::windows::fs::symlink_file(&link, to)
-    };
-    created.map_err(|e| fail(format!("linking {}", to.display()), e))
+    std::os::unix::fs::symlink(&link, to).map_err(|e| fail(format!("linking {}", to.display()), e))
 }
 
 /// The totals a copy of `root` must reach, counting each of `databases` as
@@ -559,21 +545,63 @@ struct Undo {
 }
 
 impl Undo {
-    /// Whether everything the run created is gone.
-    fn run(self, store: &dyn CredentialStore) -> bool {
-        let mut complete = true;
-        for (service, account) in &self.credentials {
-            complete &= store.delete(service, account).is_ok();
+    /// Records the rollback in the journal, then removes everything the run
+    /// created. Once recorded, the leftovers are never taken for a finished
+    /// publication: a launch that cannot remove them all stops, and the next
+    /// one tries again.
+    fn run(self, journal: &Path, store: &dyn CredentialStore) -> Result<(), MigrationError> {
+        if self.staged.is_empty() && self.published.is_empty() && self.credentials.is_empty() {
+            return Ok(());
         }
-        for path in self.staged.iter().chain(&self.published) {
-            match std::fs::remove_dir_all(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(_) => complete = false,
-            }
-        }
-        complete
+        let rollback = Journal {
+            moves: Vec::new(),
+            credentials: self.credentials,
+            rollback: Some(self.staged.into_iter().chain(self.published).collect()),
+        };
+        // Nothing is removed yet: a journal that still describes the
+        // publication can still be finished.
+        write_journal(journal, &rollback).map_err(|error| MigrationError {
+            message: format!(
+                "the rollback could not be recorded, so nothing was removed ({})",
+                error.message
+            ),
+            blocked: true,
+        })?;
+        finish_rollback(journal, &rollback, store)
     }
+}
+
+/// Removes what a recorded rollback lists; the journal goes only when all of
+/// it is gone.
+fn finish_rollback(
+    path: &Path,
+    journal: &Journal,
+    store: &dyn CredentialStore,
+) -> Result<(), MigrationError> {
+    let mut left = Vec::new();
+    for (service, account) in &journal.credentials {
+        if let Err(error) = store.delete(service, account) {
+            left.push(format!("credential {service} ({account}): {error}"));
+        }
+    }
+    for folder in journal.rollback.iter().flatten() {
+        match std::fs::remove_dir_all(folder) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => left.push(format!("{}: {error}", folder.display())),
+        }
+    }
+    if !left.is_empty() {
+        return Err(MigrationError {
+            message: format!(
+                "the rollback of a failed migration could not remove {}; the migration journal was kept",
+                left.join("; ")
+            ),
+            blocked: true,
+        });
+    }
+    std::fs::remove_file(path).map_err(|e| fail(format!("removing {}", path.display()), e))?;
+    sync_parent(path)
 }
 
 /// The publication in progress, persisted before the first rename so a
@@ -582,6 +610,10 @@ impl Undo {
 struct Journal {
     moves: Vec<Move>,
     credentials: Vec<(String, String)>,
+    /// Recorded before a failed run removes anything: the folders to remove
+    /// with `credentials`. Nothing a rollback lists counts as published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -609,14 +641,9 @@ fn write_journal(path: &Path, journal: &Journal) -> Result<(), MigrationError> {
     sync_parent(path)
 }
 
-/// Flushes a folder's entries now. Windows has no directory handle to flush;
-/// its renames are journaled by NTFS.
+/// Flushes a folder's entries now.
 pub(super) fn sync_directory_now(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    std::fs::File::open(path)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    std::fs::File::open(path)?.sync_all()
 }
 
 /// Whether the launch stops after the migration ran: after any failure, so
@@ -625,16 +652,9 @@ pub(super) fn stops_the_launch(result: &Result<Outcome, MigrationError>) -> bool
     result.is_err()
 }
 
-/// Flushes a folder's entries (a rename, a new file). Windows has no
-/// directory handle to flush; its renames are journaled by NTFS.
+/// Flushes a folder's entries (a rename, a new file).
 fn sync_directory(path: &Path) -> Result<(), MigrationError> {
-    #[cfg(unix)]
-    std::fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|e| fail(format!("flushing {}", path.display()), e))?;
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    sync_directory_now(path).map_err(|e| fail(format!("flushing {}", path.display()), e))
 }
 
 fn sync_parent(path: &Path) -> Result<(), MigrationError> {
@@ -653,48 +673,22 @@ fn sync_tree(root: &Path) -> Result<(), MigrationError> {
         if kind.is_dir() {
             sync_tree(&path)?;
         } else if kind.is_file() {
-            flush_file(&path, &kind)
+            // A read-only handle flushes too, so permissions stay as copied.
+            std::fs::File::open(&path)
+                .and_then(|file| file.sync_all())
                 .map_err(|e| fail(format!("flushing {}", path.display()), e))?;
         }
     }
     sync_directory(root)
 }
 
-/// Flushes one staged file without changing its permissions. Unix flushes a
-/// read-only handle; Windows flushes only a writable one, so a read-only
-/// staged copy is made writable for the flush and read-only again after.
-fn flush_file(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
-    #[cfg(not(windows))]
-    {
-        let _ = metadata;
-        std::fs::File::open(path)?.sync_all()
-    }
-    #[cfg(windows)]
-    {
-        let read_only = metadata.permissions().readonly();
-        if read_only {
-            let mut writable = metadata.permissions();
-            writable.set_readonly(false);
-            std::fs::set_permissions(path, writable)?;
-        }
-        let flushed = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .and_then(|file| file.sync_all());
-        if read_only {
-            std::fs::set_permissions(path, metadata.permissions())?;
-        }
-        flushed
-    }
-}
-
 fn is_populated(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }
 
-/// Finishes a publication an earlier launch left halfway. When a staged
-/// folder is missing it cannot be finished: what it published and the
-/// credentials it wrote are removed, and the migration starts over.
+/// Finishes what an earlier launch left halfway. A recorded rollback is
+/// finished; a publication is finished unless a staged folder is missing,
+/// and then it is rolled back. After a rollback the migration starts over.
 fn resume(
     plan: &MigrationPlan,
     store: &dyn CredentialStore,
@@ -714,6 +708,10 @@ fn resume(
             e,
         )
     })?;
+    if journal.rollback.is_some() {
+        finish_rollback(&path, &journal, store)?;
+        return Ok(None);
+    }
     let finishable = journal
         .moves
         .iter()
@@ -736,17 +734,18 @@ fn resume(
         let _ = std::fs::remove_file(&path);
         return Ok(Some(Outcome::Resumed));
     }
-    for item in &journal.moves {
-        if item.staging.is_dir() {
-            let _ = std::fs::remove_dir_all(&item.staging);
-        } else {
-            let _ = std::fs::remove_dir_all(&item.target);
-        }
+    // A staged folder is gone: what was published is removed, the staged
+    // folders that are left too.
+    let (staged, published) = journal
+        .moves
+        .into_iter()
+        .partition::<Vec<_>, _>(|item| item.staging.is_dir());
+    Undo {
+        staged: staged.into_iter().map(|item| item.staging).collect(),
+        published: published.into_iter().map(|item| item.target).collect(),
+        credentials: journal.credentials,
     }
-    for (service, account) in &journal.credentials {
-        let _ = store.delete(service, account);
-    }
-    let _ = std::fs::remove_file(&path);
+    .run(&path, store)?;
     Ok(None)
 }
 
@@ -760,7 +759,7 @@ pub fn migrate(
     // if it cannot be, the launch stops with the recovery state untouched.
     let resumed = resume(plan, store, copier).map_err(|error| MigrationError {
         message: format!(
-            "{}; an interrupted migration is waiting to be finished, and nothing was cleaned up",
+            "{}; an interrupted migration is waiting to be finished or undone, and its journal was kept",
             error.message
         ),
         blocked: true,
@@ -785,21 +784,15 @@ pub fn migrate(
     let mut undo = Undo::default();
     match migrate_into(plan, store, copier, &mut undo) {
         Ok(outcome) => Ok(outcome),
-        Err(error) => {
-            if undo.run(store) {
-                let _ = std::fs::remove_file(journal_path(plan));
-                return Err(error);
-            }
-            // What could not be undone is still listed in the journal: the
-            // next launch finishes or undoes it, so it must stay.
-            Err(MigrationError {
-                message: format!(
-                    "{}; the rollback could not finish and the migration journal was kept",
-                    error.message
-                ),
+        // What could not be undone stays listed in the journal for the next
+        // launch.
+        Err(error) => match undo.run(&journal_path(plan), store) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(MigrationError {
+                message: format!("{}; {}", error.message, rollback.message),
                 blocked: true,
-            })
-        }
+            }),
+        },
     }
 }
 
@@ -865,10 +858,10 @@ fn migrate_into(
             for (database, database_key) in &context.databases {
                 rewrite.apply_to_database(database, database_key.as_deref())?;
             }
-            for name in database::PATH_FILES {
+            for (name, kind) in database::PATH_FILES {
                 let path = staging.join(name);
                 if path.is_file() {
-                    rewrite.apply_to_path_file(&path)?;
+                    rewrite.apply_to_path_file(&path, *kind)?;
                 }
             }
         }
@@ -921,6 +914,7 @@ fn migrate_into(
         &Journal {
             moves,
             credentials: undo.credentials.clone(),
+            rollback: None,
         },
     )?;
     let moves = serde_json::from_slice::<Journal>(
@@ -979,7 +973,6 @@ fn startup_source(target_identifier: &str) -> Option<SourceIdentity> {
 }
 
 /// Runs once per launch, before Tauri creates a window or opens a database.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn run_at_startup() {
     let target = crate::app_identity::APP_IDENTIFIER;
     let debug = cfg!(debug_assertions);
@@ -996,19 +989,9 @@ pub fn run_at_startup() {
     let dirs = PlatformDirs {
         data,
         config,
-        local_data: if cfg!(windows) {
-            dirs::data_local_dir()
-        } else {
-            None
-        },
-        webkit: if cfg!(target_os = "macos") {
-            dirs::home_dir().map(|home| home.join("Library").join("WebKit"))
-        } else {
-            None
-        },
+        webkit: dirs::home_dir().map(|home| home.join("Library").join("WebKit")),
     };
     let plan = plan(&dirs, target, debug, &source);
-    #[cfg(target_os = "macos")]
     let plan = match macos_bundle_identifier() {
         Some(bundle) => retarget_webkit(plan, &dirs, target, &source.identifier, &bundle),
         None => plan,
@@ -1043,12 +1026,10 @@ pub fn run_at_startup() {
 }
 
 /// A native alert before any window exists.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn alert(message: &str) {
     let message = format!("Clovy could not move your data to its new identity yet.\n\n{message}");
     // Shown by Clovy itself on the main thread: an alert from a helper
     // process can be dismissed without ever reaching the owner.
-    #[cfg(target_os = "macos")]
     if let Some(mtm) = objc2::MainThreadMarker::new() {
         use objc2_app_kit::{NSAlert, NSAlertStyle, NSApplication, NSApplicationActivationPolicy};
         use objc2_foundation::NSString;
@@ -1063,23 +1044,10 @@ fn alert(message: &str) {
         alert.setInformativeText(&NSString::from_str(&message));
         alert.runModal();
     }
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show($env:CLOVY_ALERT, 'Clovy') | Out-Null",
-        ])
-        .env("CLOVY_ALERT", &message)
-        .status();
 }
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn run_at_startup() {}
 
 /// The WebKit store follows the running bundle's identifier, which a debug
 /// proof bundle sets to the bare identifier instead of `<identifier>.dev`.
-#[cfg(target_os = "macos")]
 fn retarget_webkit(
     mut plan: MigrationPlan,
     dirs: &PlatformDirs,
@@ -1099,7 +1067,6 @@ fn retarget_webkit(
     plan
 }
 
-#[cfg(target_os = "macos")]
 fn macos_bundle_identifier() -> Option<String> {
     use core_foundation::bundle::CFBundle;
     use core_foundation::string::CFString;
@@ -1109,12 +1076,10 @@ fn macos_bundle_identifier() -> Option<String> {
     value.downcast::<CFString>().map(|value| value.to_string())
 }
 
-/// The system credential store: the login Keychain on macOS, the Credential
-/// Manager on Windows, both as the `keyring` crate names their items.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// The system credential store: the login Keychain, as the `keyring` crate
+/// names its items.
 struct SystemStore;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl CredentialStore for SystemStore {
     fn accounts(&self, service: &str) -> Result<Vec<String>, String> {
         platform_accounts(service)
@@ -1144,7 +1109,6 @@ impl CredentialStore for SystemStore {
 
 /// Account names of the generic passwords under `service`. Only attributes
 /// are read, so listing never asks the user for access.
-#[cfg(target_os = "macos")]
 fn platform_accounts(service: &str) -> Result<Vec<String>, String> {
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
 
@@ -1164,58 +1128,4 @@ fn platform_accounts(service: &str) -> Result<Vec<String>, String> {
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(Vec::new()),
         Err(error) => Err(error.to_string()),
     }
-}
-
-/// `keyring` names a Windows credential `<account>.<service>` and keeps the
-/// account in `UserName`.
-#[cfg(target_os = "windows")]
-fn platform_accounts(service: &str) -> Result<Vec<String>, String> {
-    use windows::Win32::Foundation::ERROR_NOT_FOUND;
-    use windows::Win32::Security::Credentials::{
-        CredEnumerateW, CredFree, CREDENTIALW, CRED_TYPE_GENERIC,
-    };
-
-    let mut count = 0_u32;
-    let mut credentials: *mut *mut CREDENTIALW = std::ptr::null_mut();
-    // SAFETY: CredEnumerateW fills `credentials` with `count` pointers that
-    // stay valid until the single CredFree below.
-    let listed = unsafe {
-        CredEnumerateW(
-            windows::core::PCWSTR::null(),
-            None,
-            &mut count,
-            &mut credentials,
-        )
-    };
-    if let Err(error) = listed {
-        if error.code() == ERROR_NOT_FOUND.to_hresult() {
-            return Ok(Vec::new());
-        }
-        return Err(error.to_string());
-    }
-    let suffix = format!(".{service}");
-    let mut accounts = Vec::new();
-    // SAFETY: see above; each pointer is read before the free.
-    unsafe {
-        for index in 0..count as usize {
-            let credential = &**credentials.add(index);
-            if credential.Type != CRED_TYPE_GENERIC
-                || credential.TargetName.is_null()
-                || credential.UserName.is_null()
-            {
-                continue;
-            }
-            let (Ok(target), Ok(user)) = (
-                credential.TargetName.to_string(),
-                credential.UserName.to_string(),
-            ) else {
-                continue;
-            };
-            if target.strip_suffix(&suffix) == Some(user.as_str()) {
-                accounts.push(user);
-            }
-        }
-        CredFree(credentials as *const std::ffi::c_void);
-    }
-    Ok(accounts)
 }

@@ -201,7 +201,6 @@ fn copies_the_whole_profile_and_leaves_the_source_unchanged() {
     let base = tempfile::tempdir().unwrap();
     let plan = dir_plan(base.path());
     old_profile(&plan.data.source);
-    #[cfg(unix)]
     std::os::unix::fs::symlink("notes.sqlite3", plan.data.source.join("notes-link")).unwrap();
     let before = tree_hash(&plan.data.source);
 
@@ -465,7 +464,6 @@ fn the_dev_plan_maps_every_june_name_to_the_new_dev_names() {
     let dirs = PlatformDirs {
         data: PathBuf::from("/home/Library/Application Support"),
         config: PathBuf::from("/home/Library/Application Support"),
-        local_data: None,
         webkit: Some(PathBuf::from("/home/Library/WebKit")),
     };
     let source = default_source(RELEASE).unwrap();
@@ -522,38 +520,11 @@ fn the_dev_plan_maps_every_june_name_to_the_new_dev_names() {
 }
 
 #[test]
-fn the_release_plan_on_windows_copies_the_webview_store_folder() {
-    let dirs = PlatformDirs {
-        data: PathBuf::from(r"C:\Users\u\AppData\Roaming"),
-        config: PathBuf::from(r"C:\Users\u\AppData\Roaming"),
-        local_data: Some(PathBuf::from(r"C:\Users\u\AppData\Local")),
-        webkit: None,
-    };
-    let source = default_source(RELEASE).unwrap();
-
-    let plan = plan(&dirs, RELEASE, false, &source);
-
-    assert_eq!(plan.data.source, dirs.data.join("co.opensoftware.june"));
-    assert_eq!(plan.data.target, dirs.data.join(RELEASE));
-    assert_eq!(
-        plan.extra_directories,
-        vec![DirectoryCopy {
-            source: PathBuf::from(r"C:\Users\u\AppData\Local").join("co.opensoftware.june"),
-            target: PathBuf::from(r"C:\Users\u\AppData\Local").join(RELEASE),
-        }]
-    );
-    assert!(plan.credentials.iter().any(|copy| copy.source_service
-        == "co.opensoftware.clovy.activity-db"
-        && copy.target_service == "dev.guilhermexp.clovy.activity-db"));
-}
-
-#[test]
 fn a_proof_source_reads_only_its_own_names() {
     let source = source_override("dev.guilhermexp.clovy.proofold").expect("override");
     let dirs = PlatformDirs {
         data: PathBuf::from("/s"),
         config: PathBuf::from("/s"),
-        local_data: None,
         webkit: None,
     };
 
@@ -636,7 +607,6 @@ async fn count_rows(path: &Path, table: &str) -> i64 {
         .get("n")
 }
 
-#[cfg(unix)]
 #[test]
 fn refuses_to_copy_while_the_old_app_is_running() {
     let base = tempfile::tempdir().unwrap();
@@ -647,7 +617,6 @@ fn refuses_to_copy_while_the_old_app_is_running() {
     let binary = base.path().join(&name);
     std::fs::copy("/bin/sleep", &binary).unwrap();
     // macOS kills a copied system binary until it is signed again.
-    #[cfg(target_os = "macos")]
     assert!(std::process::Command::new("/usr/bin/codesign")
         .args(["--force", "--sign", "-"])
         .arg(&binary)
@@ -804,7 +773,6 @@ fn staging_for(plan: &MigrationPlan, pid: u32) -> PathBuf {
     plan.data.target.with_file_name(name)
 }
 
-#[cfg(unix)]
 fn dead_pid() -> u32 {
     let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
     let pid = child.id();
@@ -814,7 +782,6 @@ fn dead_pid() -> u32 {
 
 /// Holds the OS lock on the lock file, the way a live launch does, without
 /// ever writing a pid into it.
-#[cfg(unix)]
 fn hold_os_lock(path: &Path) -> std::fs::File {
     use std::os::fd::AsRawFd;
     let file = std::fs::OpenOptions::new()
@@ -829,7 +796,6 @@ fn hold_os_lock(path: &Path) -> std::fs::File {
     file
 }
 
-#[cfg(unix)]
 #[test]
 fn a_live_holder_blocks_even_before_it_wrote_its_pid() {
     let base = tempfile::tempdir().unwrap();
@@ -873,7 +839,6 @@ fn a_lock_that_cannot_be_taken_fails_within_the_deadline() {
     assert!(is_empty_or_absent(&plan.data.target));
 }
 
-#[cfg(unix)]
 #[test]
 fn a_dead_holder_is_taken_over_and_only_dead_staging_is_removed() {
     let base = tempfile::tempdir().unwrap();
@@ -1404,33 +1369,6 @@ async fn structured_values_equal_to_the_root_and_external_look_alikes() {
     );
 }
 
-#[test]
-fn a_failed_process_listing_is_not_an_absent_app() {
-    // `tasklist` that fails says nothing about which apps run.
-    assert!(guard::parse_running(false, "", "os-june.exe").is_err());
-    assert!(!guard::parse_running(
-        true,
-        "INFO: No tasks are running which match the specified criteria.\r\n",
-        "os-june.exe"
-    )
-    .unwrap());
-    assert!(guard::parse_running(
-        true,
-        "\"os-june.exe\",\"4242\",\"Console\",\"1\",\"80.000 K\"\r\n",
-        "os-june.exe"
-    )
-    .unwrap());
-    assert!(guard::parse_image_of(false, "", 4242).is_err());
-    assert_eq!(
-        guard::parse_image_of(true, "INFO: No tasks", 4242).unwrap(),
-        None
-    );
-    assert_eq!(
-        guard::parse_image_of(true, "\"clovy.exe\",\"4242\",\"Console\"", 4242).unwrap(),
-        Some("clovy.exe".to_string())
-    );
-}
-
 // --- Third review (K1 to K5) -------------------------------------------------
 
 /// Publishes for real, then fails to flush the folder that names the first
@@ -1474,7 +1412,6 @@ fn a_failed_flush_after_publishing_rolls_the_published_folder_back() {
     assert!(!journal_for(&plan).exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn read_only_files_are_copied_and_stay_read_only() {
     use std::os::unix::fs::PermissionsExt;
@@ -1682,7 +1619,7 @@ fn the_migration_runs_only_on_macos() {
             "CredEnumerateW",
             "LockFileEx",
             "tasklist",
-            ".exe",
+            ".exe\"",
             "local_data",
         ] {
             assert!(

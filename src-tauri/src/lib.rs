@@ -31,6 +31,7 @@ pub mod extension_host;
 pub mod feature_flags;
 mod filesystem;
 mod http_client;
+#[cfg(target_os = "macos")]
 pub mod identity_migration;
 pub mod image_safety;
 pub mod interface_locale;
@@ -119,6 +120,8 @@ pub fn run() {
     providers::load_local_env();
     // Before Tauri creates a window (and its WebView store) or opens a
     // database: the first launch copies the June-era identity (ADR-0068).
+    // Only macOS has a June-era profile to copy; Windows starts clean.
+    #[cfg(target_os = "macos")]
     identity_migration::run_at_startup();
     let context = tauri::generate_context!();
     let mut builder = tauri::Builder::default();

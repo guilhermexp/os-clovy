@@ -256,12 +256,6 @@ const PATH_FIELDS: &[(&str, &str, &str, Field)] = &[
     ),
     (
         "notes.sqlite3",
-        "agent_runs",
-        "interrupted_state_json",
-        Field::PathsInJson,
-    ),
-    (
-        "notes.sqlite3",
         "routines",
         "metadata_json",
         Field::PathsInJson,
@@ -293,8 +287,32 @@ const PATH_KEYS: &[&str] = &[
 /// WebKit localStorage keys whose JSON value holds profile paths.
 const LOCAL_STORAGE_KEYS: &[&str] = &["clovy.agent.queuedFollowUps"];
 
-/// Profile files whose whole content is a path.
-pub(super) const PATH_FILES: &[&str] = &["extension-host-path"];
+/// How a profile file holds its paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathFile {
+    /// The whole content is a path.
+    Whole,
+    /// A JSON object whose listed top-level keys are paths.
+    JsonKeys(&'static [&'static str]),
+    /// The legacy Hermes routines: each job's `script` and `workdir`.
+    HermesJobs,
+    /// The legacy Hermes MCP servers: each server's command and arguments.
+    HermesMcpServers,
+}
+
+/// Profile files that hold paths into the profile, by their place in it.
+pub(super) const PATH_FILES: &[(&str, PathFile)] = &[
+    ("extension-host-path", PathFile::Whole),
+    ("obsidian.json", PathFile::JsonKeys(&["vaultPath"])),
+    ("hermes/cron/jobs.json", PathFile::HermesJobs),
+    ("hermes/config.yaml", PathFile::HermesMcpServers),
+];
+
+const NOTES_DATABASE: &str = "notes.sqlite3";
+/// Why a paused run stopped: its serialized SDK state nests the old paths
+/// where they cannot be rewritten, so no run stays resumable after the
+/// migration.
+const RETIRED_RUN_MESSAGE: &str = "Clovy moved to its new identity before this run finished.";
 
 /// The old profile roots and their new equivalents.
 #[derive(Debug, Clone, Default)]
@@ -338,9 +356,7 @@ impl PathRewrite {
     pub(super) fn path(&self, value: &str) -> Option<String> {
         self.roots.iter().find_map(|(old, new)| {
             let rest = value.strip_prefix(old.as_str())?;
-            let inside = rest.is_empty()
-                || rest.starts_with('/')
-                || (cfg!(windows) && rest.starts_with('\\'));
+            let inside = rest.is_empty() || rest.starts_with('/');
             inside.then(|| format!("{new}{rest}"))
         })
     }
@@ -425,6 +441,7 @@ impl PathRewrite {
             .map(|(_, table, column, field)| (*table, *column, *field))
             .collect();
         let local_storage = name == "localstorage.sqlite3";
+        let notes = name == NOTES_DATABASE;
         if fields.is_empty() && !local_storage {
             return Ok(0);
         }
@@ -440,6 +457,9 @@ impl PathRewrite {
                 let mut changed = rewrite.rewrite_fields(&mut connection, &fields).await?;
                 if local_storage {
                     changed += rewrite.rewrite_local_storage(&mut connection).await?;
+                }
+                if notes {
+                    changed += retire_paused_runs(&mut connection).await?;
                 }
                 Ok::<u64, sqlx::Error>(changed)
             }
@@ -560,19 +580,169 @@ impl PathRewrite {
         Ok(changed)
     }
 
-    /// Rewrites one of `PATH_FILES`, whose whole content is a path.
-    pub(super) fn apply_to_path_file(&self, path: &Path) -> Result<bool, MigrationError> {
+    /// Rewrites one of `PATH_FILES`. A file its reader could not parse
+    /// either is left as it is.
+    pub(super) fn apply_to_path_file(
+        &self,
+        path: &Path,
+        kind: PathFile,
+    ) -> Result<bool, MigrationError> {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Ok(false);
         };
-        let trimmed = text.trim_end();
-        let Some(rewritten) = self.path(trimmed) else {
+        let rewritten = match kind {
+            PathFile::Whole => {
+                let trimmed = text.trim_end();
+                self.path(trimmed)
+                    .map(|rewritten| format!("{rewritten}{}", &text[trimmed.len()..]))
+            }
+            PathFile::JsonKeys(keys) => self.json_file(&text, |json| self.json_keys(json, keys)),
+            PathFile::HermesJobs => self.json_file(&text, |json| {
+                let jobs = match json {
+                    serde_json::Value::Object(root) => root
+                        .get_mut("jobs")
+                        .and_then(serde_json::Value::as_array_mut),
+                    serde_json::Value::Array(jobs) => Some(jobs),
+                    _ => None,
+                };
+                jobs.into_iter().flatten().fold(false, |changed, job| {
+                    self.json_keys(job, &["script", "workdir"]) | changed
+                })
+            }),
+            PathFile::HermesMcpServers => self.hermes_mcp_servers(&text),
+        };
+        let Some(rewritten) = rewritten else {
             return Ok(false);
         };
-        std::fs::write(path, format!("{rewritten}{}", &text[trimmed.len()..]))
+        std::fs::write(path, rewritten)
             .map_err(|e| fail(format!("writing {}", path.display()), e))?;
         Ok(true)
     }
+
+    fn json_file(
+        &self,
+        text: &str,
+        rewrite: impl FnOnce(&mut serde_json::Value) -> bool,
+    ) -> Option<String> {
+        let mut json = serde_json::from_str::<serde_json::Value>(text).ok()?;
+        if !rewrite(&mut json) {
+            return None;
+        }
+        serde_json::to_string_pretty(&json)
+            .ok()
+            .map(|json| format!("{json}\n"))
+    }
+
+    /// The string values of `keys` in a JSON object.
+    fn json_keys(&self, value: &mut serde_json::Value, keys: &[&str]) -> bool {
+        let Some(fields) = value.as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        for key in keys {
+            if let Some(serde_json::Value::String(text)) = fields.get_mut(*key) {
+                if let Some(rewritten) = self.path(text) {
+                    *text = rewritten;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// `mcp_servers` (or `mcpServers`) of the legacy Hermes config, as the
+    /// legacy import reads it: `command` or `cmd`, and each of `args`.
+    fn hermes_mcp_servers(&self, text: &str) -> Option<String> {
+        use serde_yaml::Value;
+        let mut root = serde_yaml::from_str::<Value>(text).ok()?;
+        let key = if root.get("mcp_servers").is_some() {
+            "mcp_servers"
+        } else {
+            "mcpServers"
+        };
+        let servers = root.get_mut(key).and_then(Value::as_mapping_mut)?;
+        let mut changed = false;
+        let mut rewrite = |value: &mut Value| {
+            if let Value::String(text) = value {
+                if let Some(rewritten) = self.path(text) {
+                    *text = rewritten;
+                    changed = true;
+                }
+            }
+        };
+        for server in servers.values_mut().filter_map(Value::as_mapping_mut) {
+            for key in ["command", "cmd"] {
+                if let Some(value) = server.get_mut(key) {
+                    rewrite(value);
+                }
+            }
+            if let Some(Value::Sequence(args)) = server.get_mut("args") {
+                args.iter_mut().for_each(&mut rewrite);
+            }
+        }
+        if !changed {
+            return None;
+        }
+        serde_yaml::to_string(&root).ok()
+    }
+}
+
+/// Retires every paused agent run of the staged notes database, the way a
+/// cancelled pause is retired: its pending cards expire, the run and its
+/// session stop waiting, and no serialized SDK state is left to resume. The
+/// routine projection follows the run at the next startup's reconciliation.
+async fn retire_paused_runs(connection: &mut SqliteConnection) -> Result<u64, sqlx::Error> {
+    for (table, column) in [
+        ("agent_runs", "interrupted_state_json"),
+        ("agent_items", "payload_json"),
+        ("agent_sessions", "status"),
+    ] {
+        if !PathRewrite::has_column(connection, table, column).await? {
+            return Ok(0);
+        }
+    }
+    let now = crate::db::repositories::timestamp();
+    let mut changed = sqlx::query::query(
+        "UPDATE agent_items
+         SET payload_json = json_set(payload_json, '$.status', 'expired', '$.resolvedAt', ?)
+         WHERE kind = 'interruption'
+           AND CASE WHEN json_valid(payload_json)
+                    THEN json_extract(payload_json, '$.status') = 'pending'
+                    ELSE 0 END",
+    )
+    .bind(&now)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    changed += sqlx::query::query(
+        "UPDATE agent_sessions SET status = 'interrupted', updated_at = ?, last_error = ?
+         WHERE status = 'waiting_for_user'",
+    )
+    .bind(&now)
+    .bind(RETIRED_RUN_MESSAGE)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    changed += sqlx::query::query(
+        "UPDATE agent_runs
+         SET status = 'interrupted', updated_at = ?, completed_at = COALESCE(completed_at, ?),
+             error_code = 'identity_migrated', error_message = ?
+         WHERE status = 'waiting_for_user'",
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(RETIRED_RUN_MESSAGE)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    changed += sqlx::query::query(
+        "UPDATE agent_runs SET interrupted_state_json = NULL
+         WHERE interrupted_state_json IS NOT NULL",
+    )
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    Ok(changed)
 }
 
 fn quote(identifier: &str) -> String {
