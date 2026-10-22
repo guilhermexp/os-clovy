@@ -1597,15 +1597,20 @@ fn an_interrupted_rollback_blocks_the_next_launch_until_it_finishes() {
     );
 }
 
+/// The module and its startup call exist only in a macOS development build.
+const DEV_MACOS_ONLY: &str = "#[cfg(all(target_os = \"macos\", debug_assertions))]";
+
 #[test]
 fn the_migration_runs_only_on_macos() {
     let lib = include_str!("../lib.rs");
     assert!(
-        lib.contains("#[cfg(target_os = \"macos\")]\npub mod identity_migration;"),
+        lib.contains(&format!("{DEV_MACOS_ONLY}\npub mod identity_migration;")),
         "the module is macOS-only"
     );
     assert!(
-        lib.contains("#[cfg(target_os = \"macos\")]\n    identity_migration::run_at_startup();"),
+        lib.contains(&format!(
+            "{DEV_MACOS_ONLY}\n    identity_migration::run_at_startup();"
+        )),
         "the startup call is macOS-only"
     );
     for (name, source) in [
@@ -1627,6 +1632,28 @@ fn the_migration_runs_only_on_macos() {
                 "{name} still has Windows-only code: {windows_only}"
             );
         }
+    }
+}
+
+#[test]
+fn the_release_build_never_migrates() {
+    let lib = include_str!("../lib.rs");
+    assert_eq!(
+        lib.matches("identity_migration").count(),
+        2,
+        "only the gated module and its gated call name the migration"
+    );
+    assert!(lib.contains(&format!("{DEV_MACOS_ONLY}\npub mod identity_migration;")));
+    assert!(lib.contains(&format!(
+        "{DEV_MACOS_ONLY}\n    identity_migration::run_at_startup();"
+    )));
+    // No release profile names are left to map: every plan reads `-dev`.
+    let module = include_str!("mod.rs");
+    for release_only in ["debug: bool", "cfg!(debug_assertions)", "(false, _)"] {
+        assert!(
+            !module.contains(release_only),
+            "the migration still maps a release profile: {release_only}"
+        );
     }
 }
 
