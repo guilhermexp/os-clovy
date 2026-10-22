@@ -129,7 +129,8 @@ export default defineMessages({
     "hud.error.missingRecording": "Nenhum áudio gravado estava disponível para transcrever.",
     "hud.error.emptyTranscript": "Nenhum texto transcrito estava disponível para colar.",
     "hud.error.noSpeech": "Nenhuma fala detectada.",
-    "hud.error.updateInstalling": "O Clovy está instalando uma atualização e reinicia em instantes.",
+    "hud.error.updateInstalling":
+      "O Clovy está instalando uma atualização e reinicia em instantes.",
     "hud.error.pasteManually":
       "O Clovy não conseguiu colar automaticamente. Sua transcrição está na área de transferência, então você pode colar com Cmd+V.",
     "hud.error.clipboardWriteFailed":
