@@ -10,7 +10,9 @@ export type DownloadEvent =
   | { event: "Progress"; data: { chunkLength: number } }
   | { event: "Finished" }
   // Downloaded; the install waits for a recording or dictation to end.
-  | { event: "WaitingForCapture" };
+  | { event: "WaitingForCapture" }
+  // The install took its slot: it can no longer be postponed.
+  | { event: "Installing" };
 
 /** What `fetch_update` reports: enough to offer, not the live update handle. */
 type UpdateMeta = {
@@ -57,7 +59,8 @@ function installStagedUpdate(onEvent?: (event: DownloadEvent) => void): Promise<
 
 /**
  * Stops an install that waits for a capture to end. The pending
- * `install_update` call then rejects with `update_install_postponed`.
+ * `install_update` call then rejects with `update_install_postponed`. Rejects
+ * with `update_install_started` once the install has begun.
  */
 export function postponeUpdateInstall() {
   return invoke("postpone_update_install");

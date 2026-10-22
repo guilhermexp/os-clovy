@@ -66,6 +66,9 @@ pub enum DownloadEvent {
     /// The package is downloaded and waits for a recording or dictation to
     /// end before it installs.
     WaitingForCapture,
+    /// The install holds its slot: it can no longer be postponed, and on
+    /// Windows the app exits as it finishes.
+    Installing,
 }
 
 /// Holds the `Update` returned by the most recent `fetch_update` so that a
@@ -142,7 +145,8 @@ pub async fn install_update(
 
     let progress_channel = on_event.clone();
     let finished_channel = on_event.clone();
-    let waiting_channel = on_event;
+    let waiting_channel = on_event.clone();
+    let installing_channel = on_event;
     let mut started = false;
 
     // Download first: installing exits the process on Windows (and the macOS
@@ -173,6 +177,7 @@ pub async fn install_update(
         })
         .await
         .map_err(|_| AppError::new("update_install_postponed", "The update was postponed."))?;
+    let _ = installing_channel.send(DownloadEvent::Installing);
 
     #[cfg(windows)]
     {
@@ -283,6 +288,12 @@ mod tests {
     fn finished_event_has_no_data_field() {
         let json = serde_json::to_string(&DownloadEvent::Finished).unwrap();
         assert_eq!(json, r#"{"event":"Finished"}"#);
+    }
+
+    #[test]
+    fn installing_event_has_no_data_field() {
+        let json = serde_json::to_string(&DownloadEvent::Installing).unwrap();
+        assert_eq!(json, r#"{"event":"Installing"}"#);
     }
 
     #[test]

@@ -8,7 +8,6 @@
 //! slip past the other.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -22,11 +21,25 @@ struct GateState {
     /// Dictation takes in flight, by take id: from the admitted start command
     /// (or the helper's start event) to the take's terminal event.
     dictation_takes: BTreeSet<String>,
+    /// The owner chose "later" for the current install attempt. Read and set
+    /// under the same lock as the install slot, so a postpone either stops
+    /// the install or is refused because the install already began.
+    postponed: bool,
+}
+
+impl GateState {
+    /// Takes the install slot when no capture runs or starts.
+    fn admit_install(&mut self, capture_active: impl FnOnce() -> bool) -> bool {
+        if self.starting_recordings > 0 || !self.dictation_takes.is_empty() || capture_active() {
+            return false;
+        }
+        self.installing = true;
+        true
+    }
 }
 
 pub struct UpdateGate {
     state: Mutex<GateState>,
-    postponed: AtomicBool,
 }
 
 /// The install could not begin: a capture is running or starting.
@@ -51,8 +64,8 @@ impl UpdateGate {
                 installing: false,
                 starting_recordings: 0,
                 dictation_takes: BTreeSet::new(),
+                postponed: false,
             }),
-            postponed: AtomicBool::new(false),
         }
     }
 
@@ -115,10 +128,9 @@ impl UpdateGate {
         capture_active: impl FnOnce() -> bool,
     ) -> Result<InstallSlot<'_>, CaptureBusy> {
         let mut state = self.lock();
-        if state.starting_recordings > 0 || !state.dictation_takes.is_empty() || capture_active() {
+        if !state.admit_install(capture_active) {
             return Err(CaptureBusy);
         }
-        state.installing = true;
         Ok(InstallSlot { gate: self })
     }
 
@@ -133,11 +145,14 @@ impl UpdateGate {
     ) -> Result<InstallSlot<'_>, InstallPostponed> {
         let mut on_wait = Some(on_wait);
         loop {
-            if self.postponed.load(Ordering::SeqCst) {
-                return Err(InstallPostponed);
-            }
-            if let Ok(slot) = self.try_begin_install(&capture_active) {
-                return Ok(slot);
+            {
+                let mut state = self.lock();
+                if state.postponed {
+                    return Err(InstallPostponed);
+                }
+                if state.admit_install(&capture_active) {
+                    return Ok(InstallSlot { gate: self });
+                }
             }
             if let Some(on_wait) = on_wait.take() {
                 on_wait();
@@ -150,12 +165,20 @@ impl UpdateGate {
 impl UpdateGate {
     /// A new install attempt starts: an earlier "later" no longer applies.
     pub fn begin_install_attempt(&self) {
-        self.postponed.store(false, Ordering::SeqCst);
+        self.lock().postponed = false;
     }
 
-    /// The owner chose "later" while the install waits for a capture.
+    /// The owner chose "later" while the install waits for a capture. Once
+    /// the install holds its slot it can no longer be stopped.
     pub fn postpone_install(&self) -> Result<(), AppError> {
-        self.postponed.store(true, Ordering::SeqCst);
+        let mut state = self.lock();
+        if state.installing {
+            return Err(AppError::new(
+                "update_install_started",
+                "The update is already installing. Clovy restarts in a moment.",
+            ));
+        }
+        state.postponed = true;
         Ok(())
     }
 }
@@ -201,6 +224,7 @@ impl Drop for InstallSlot<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn an_active_capture_holds_the_install() {

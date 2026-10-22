@@ -167,8 +167,9 @@ export function useAppUpdateActions({
       void prepareClovyUpdate({
         update: offer.update,
         reportProgress: (next) => {
+          // Installing (Rust took the slot) ends the wait and its "later".
+          setInstallWaiting(next.state === "waitingForCapture");
           if (next.state === "waitingForCapture") {
-            setInstallWaiting(true);
             setProgress(null);
             setStatus(null);
             return;
@@ -233,9 +234,13 @@ export function useAppUpdateActions({
     },
     onPostpone: () => {
       if (installWaiting) {
-        // Rust drops the downloaded package and rejects the install call.
+        // Rust drops the downloaded package and rejects the install call. If
+        // the install already took its slot, Rust refuses the postpone and
+        // the install's own outcome stays visible.
         installPostponedRef.current = true;
-        void postponeUpdateInstall().catch(() => undefined);
+        void postponeUpdateInstall().catch(() => {
+          installPostponedRef.current = false;
+        });
         return;
       }
       setAccepted(false);
