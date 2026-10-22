@@ -11,6 +11,9 @@ as publisher, per
 [ADR-0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md);
 `scripts/verify-windows-artifacts.ps1` checks the payload.
 
+The one-time identity migration of ADR-0068 runs only on macOS: Clovy on
+Windows always starts with a new profile.
+
 ## Windows support
 
 The Windows installer supports the app shell, microphone

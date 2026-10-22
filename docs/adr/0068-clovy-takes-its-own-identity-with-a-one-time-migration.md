@@ -92,3 +92,34 @@ to macOS, Windows, browsers and credential stores.
 - Released June-era wire and persisted names that are not identity (Clovy API
   headers and error codes, toolset ids such as `june_gmail`, the
   `__june_*__` model prefixes) are out of scope and stay as they are.
+
+## Addendum (2026-10-21): macOS only, recorded rollbacks, paused runs
+
+- **The migration runs only on macOS.** The owner has no June-era profile on
+  Windows, so Clovy on Windows always starts with a new profile. The module
+  and its startup call compile only on macOS; the Windows credential listing,
+  `LockFileEx` lock, `tasklist` checks, WebView2 folder and backslash path
+  handling were removed. The lock is `flock`. This also retires a Windows-only
+  defect: the SQL prefilter searched for the raw root while JSON stores it
+  escaped (`C:\\Users\\…`), so listed JSON fields were never rewritten there.
+- **A rollback is recorded before anything is removed.** A failed run writes
+  the rollback (the folders it created and the credentials it wrote) to the
+  journal, flushed like the rest of it, and only then deletes. The next launch
+  finishes a recorded rollback, or stops if it cannot remove everything; the
+  leftovers of a rollback are never taken for a finished publication. A
+  publication that cannot be finished (a staged folder is gone) is rolled back
+  the same way. If the rollback cannot be recorded, nothing is removed and the
+  launch stops with the publication journal intact.
+- **Paused agent runs are not resumed after the migration.** Their serialized
+  SDK state nests paths to the old profile inside an opaque string, which is
+  not rewritten. The staged notes database expires pending interruption cards,
+  marks waiting runs and sessions `interrupted` (`identity_migrated`) and
+  clears every `interrupted_state_json`; the routine projection follows at the
+  next startup's reconciliation.
+- **The path list also covers the legacy Hermes import and Obsidian.**
+  `hermes/config.yaml` (each MCP server's `command`/`cmd` and `args`),
+  `hermes/cron/jobs.json` (each job's `script` and `workdir`) and
+  `obsidian.json` (`vaultPath`), with the same rule: only a value that is the
+  root or starts with the root and a separator. A rewritten YAML file loses
+  its comments and formatting; a file its reader could not parse stays as it
+  is.

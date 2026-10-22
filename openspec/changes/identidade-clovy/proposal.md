@@ -16,7 +16,7 @@ O dono decidiu trocar o identificador e apagar esses vestígios.
 
 - **BREAKING** Identificador `dev.guilhermexp.clovy` (dev: `dev.guilhermexp.clovy.dev`, perfil de dev `dev.guilhermexp.clovy-dev`) e apps auxiliares `dev.guilhermexp.clovy.<helper>`.
 - **BREAKING** Nome "Clovy" em tudo que é visível ou registrado: `Clovy.app`, executável `clovy`, apps e binários auxiliares `Clovy …`/`clovy-…`, inicialização automática "Clovy", esquema de URL só `clovy://`, editor e `authors` com o nome do dono.
-- Migração única na primeira abertura: copia dados e configurações das pastas antigas para as novas (Mac e Windows, produção e dev), o armazenamento do WebView e os itens do Keychain/Gerenciador de Credenciais para os nomes novos, incluindo a chave SQLCipher do banco de atividade. As pastas e itens antigos ficam intactos.
+- Migração única na primeira abertura: copia dados e configurações das pastas antigas para as novas (só no Mac, produção e dev; no Windows o app começa limpo), o armazenamento do WebView e os itens do Keychain para os nomes novos, incluindo a chave SQLCipher do banco de atividade. As pastas e itens antigos ficam intactos.
 - Serviços de credencial e hosts de mensagens nativas com o prefixo novo; a extensão ganha chave própria (id novo) e é carregada sem passar pela loja da Open Software.
 - Saem as camadas de compatibilidade June, exceto a leitura única de origem da migração.
 - Docs, ADR (substituindo a ADR-0055 de identidade imutável), scripts de verificação e testes atualizados.

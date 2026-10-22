@@ -65,3 +65,16 @@
 - [x] 7.4 `make verify` exit 0 (`make-verify-7.txt`).
 - [x] 7.5 Prova no Mac (`mac-review3/report.md`): falha forçada bloqueia no `NSAlert` sem criar perfil; nota e mensagem com o caminho antigo intactas; campos de caminho reescritos; objeto Git 0444 preservado; origem igual por hash.
 - [x] 7.6 CI Windows 39671302382: compila; os 4 testes `identity_migration` do filtro passam; só a falha de clipboard preexistente.
+
+## 8. Quarta revisão (L1–L5)
+
+- [x] 8.1 RED `74ef4004` (4 falhas, `mac-review4/review4-red.txt`; o teste do vault fora do perfil já passava e fica como guarda).
+- [x] 8.2 GREEN `f3b2e658`, 36/36 (`mac-review4/review4-green.txt`):
+  - L1: o rollback é gravado no journal (fsync) antes de qualquer remoção; a abertura seguinte o termina ou bloqueia; publicação sem staging também vira rollback gravado;
+  - L2: migração só no macOS (módulo e chamada sob `cfg(target_os = "macos")`); removidos a enumeração de credenciais do Windows, `LockFileEx`, `tasklist`, a pasta do WebView2, o caminho com barra invertida, o flush com handle gravável e a feature `Win32_Security_Credentials`;
+  - L3: execuções pausadas aposentadas na cópia (cartões `expired`, execução e sessão `interrupted` com `identity_migrated`, `interrupted_state_json` zerado);
+  - L4/L5: `hermes/config.yaml` (MCP `command`/`cmd`/`args`), `hermes/cron/jobs.json` (`script`/`workdir`) e `obsidian.json` (`vaultPath`) na lista de caminhos.
+- [x] 8.3 Docs: adendo na ADR-0068, spec, design, proposal e `owner-first-launch.md` (Windows não migra; sessões pausadas não voltam).
+- [x] 8.4 `make verify` exit 0 (`mac-review4/make-verify-8.txt`).
+- [x] 8.5 Prova no Mac (`mac-review4/report.md`).
+- [x] 8.6 CI Windows (`desktop.yml` na branch).
