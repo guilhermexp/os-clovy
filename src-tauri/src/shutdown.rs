@@ -151,6 +151,24 @@ impl ShutdownCoordinator {
     fn is_idle(&self) -> bool {
         matches!(*self.lock_phase(), ShutdownPhase::Idle)
     }
+
+    /// Blocks until the in-flight shutdown either finalizes or is cancelled
+    /// (a failed note-save barrier returns the phase to Idle).
+    fn wait_for_resolution(&self) -> ShutdownResolution {
+        ShutdownResolution::Finalizing
+    }
+}
+
+/// How a shutdown request ended for its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownResolution {
+    Finalizing,
+    Cancelled,
+}
+
+fn restart_result(resolution: ShutdownResolution) -> Result<(), AppError> {
+    let _ = resolution;
+    Ok(())
 }
 
 /// Intercepts ordinary Tauri exit requests while the main event loop can still
@@ -573,6 +591,39 @@ mod tests {
 
     fn deadline_covers_ordered_leaves(aggregate_ms: u64, leaves_ms: &[u64]) -> bool {
         aggregate_ms >= leaves_ms.iter().sum::<u64>()
+    }
+
+    #[test]
+    fn a_cancelled_restart_resolves_as_cancelled() {
+        let coordinator = Arc::new(ShutdownCoordinator::default());
+        coordinator.begin(ShutdownTarget::Restart);
+        let waiter = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || coordinator.wait_for_resolution())
+        };
+        thread::sleep(Duration::from_millis(20));
+        coordinator.cancel(ShutdownTarget::Restart);
+        assert_eq!(waiter.join().unwrap(), ShutdownResolution::Cancelled);
+    }
+
+    #[test]
+    fn a_finalizing_restart_resolves_as_finalizing() {
+        let coordinator = Arc::new(ShutdownCoordinator::default());
+        coordinator.begin(ShutdownTarget::Restart);
+        let waiter = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || coordinator.wait_for_resolution())
+        };
+        thread::sleep(Duration::from_millis(20));
+        coordinator.mark_finalizing(ShutdownTarget::Restart);
+        assert_eq!(waiter.join().unwrap(), ShutdownResolution::Finalizing);
+    }
+
+    #[test]
+    fn a_cancelled_restart_reports_a_retryable_error() {
+        let error = restart_result(ShutdownResolution::Cancelled).unwrap_err();
+        assert_eq!(error.code, "update_relaunch_cancelled");
+        assert!(restart_result(ShutdownResolution::Finalizing).is_ok());
     }
 
     #[test]
