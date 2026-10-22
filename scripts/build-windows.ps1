@@ -101,8 +101,10 @@ try {
   Remove-Item -LiteralPath $appExecutable -Force -ErrorAction SilentlyContinue
   $env:CLOVY_AGENT_RUNTIME_PREBUILT = "1"
   $env:CLOVY_AGENT_RUNTIME_TARGET = "windows"
-  # With the updater key (release workflow) Tauri also writes the installer's
-  # minisign signature; Authenticode stays off either way.
+  # Authenticode stays off (--no-sign). With the updater key (release
+  # workflow) the installer also gets its minisign signature below: --no-sign
+  # skips Tauri's own updater signing too, so the .sig comes from
+  # `tauri signer sign`, which reads the same TAURI_SIGNING_* variables.
   $hasUpdaterKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
   $tauriArgs = @("--target", $targetTriple, "--no-sign")
   if ($hasUpdaterKey) {
@@ -116,6 +118,11 @@ try {
   $installers = @(Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe")
   if ($installers.Count -ne 1) { throw "Expected exactly one release NSIS installer; found $($installers.Count)." }
   if ($installers[0].Length -le 0) { throw "Release NSIS installer is empty." }
+
+  if ($hasUpdaterKey) {
+    & pnpm tauri signer sign $installers[0].FullName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Signing the installer with the updater key failed." }
+  }
 
   $stagedPath = Join-Path $OutputDirectory $installers[0].Name
   Copy-Item -LiteralPath $installers[0].FullName -Destination $stagedPath -Force
