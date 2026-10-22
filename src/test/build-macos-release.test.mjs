@@ -71,6 +71,27 @@ describe("macOS release build plan", () => {
     expect(stderr).toContain("APPLE_API_ISSUER");
   });
 
+  it("passes no Apple variable to Tauri when CI sends absent secrets as empty", () => {
+    const empty = Object.fromEntries(
+      [
+        "APPLE_SIGNING_IDENTITY",
+        "APPLE_CERTIFICATE",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "APPLE_API_ISSUER",
+        "APPLE_API_KEY",
+        "APPLE_API_KEY_P8_BASE64",
+      ].map((name) => [name, ""]),
+    );
+    const { status, plan: result } = plan(empty);
+    expect(status).toBe(0);
+    expect(result).toMatchObject({ signing: "adhoc", notarize: "no", tauri_apple_env: "" });
+  });
+
+  it("keeps an ad hoc build from importing a certificate it was given", () => {
+    const { plan: result } = plan({ APPLE_CERTIFICATE: "cDEy", APPLE_CERTIFICATE_PASSWORD: "x" });
+    expect(result).toMatchObject({ signing: "adhoc", tauri_apple_env: "" });
+  });
+
   it("creates signed updater artifacts when the updater key is present", () => {
     const { status, plan: result } = plan({ TAURI_SIGNING_PRIVATE_KEY: "key" });
     expect(status).toBe(0);
