@@ -48,8 +48,9 @@ the updater's unauthenticated GET.
 
 - With ad hoc signing, macOS asks again for microphone, screen recording,
   accessibility and system audio after each update, and the first downloaded
-  `.dmg` needs "Open Anyway" in Privacy & Security. Both go away once the Apple
-  secrets exist.
+  `.dmg` needs "Open Anyway" in Privacy & Security. Computer use does not run
+  either: its driver authenticates the host by Apple team. All three go away
+  once the Apple secrets exist.
 - A tag `vX.Y.Z` that disagrees with the four version files fails before any
   build; a failed platform build publishes nothing.
 - Rolling back is deleting the bad release: `/latest` falls back to the previous

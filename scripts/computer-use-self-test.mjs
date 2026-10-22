@@ -41,6 +41,14 @@ async function main() {
   try {
     validateBundle();
     validateDirectLaunchRefusal();
+    if (options.requireReleaseProfile) {
+      // The driver authenticates its host by Apple team (computer_use_driver.rs),
+      // so an ad hoc release cannot start it: only the static checks apply.
+      console.error(
+        "Computer use static checks passed for an ad hoc release; the driver needs a Team ID signature to run.",
+      );
+      return;
+    }
     const host = resolveSelfTestHost();
     const startHost = (permissionPrompt) =>
       startMcp(host, [

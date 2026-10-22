@@ -76,6 +76,9 @@ Until the Apple secrets exist, the release is signed ad hoc and not notarized:
   Microphone, Screen Recording (system audio), Accessibility and the other
   grants. Grant them again after updating. This goes away once releases are
   signed with an Apple identity.
+- **No Computer use.** The Computer use driver only accepts a host signed by
+  an Apple team (`computer_use_driver.rs`), so an ad hoc release cannot start
+  it; the release self-test checks only the bundled helper in that case.
 
 ## macOS support
 
