@@ -217,6 +217,10 @@ impl DictationTakeToken {
             return false;
         }
         self.inner.cancellation.send_replace(true);
+        // A cancelled take never delivers, and its transcription task returns
+        // without an event, so it stops holding an update install here. A
+        // take already delivering cannot be cancelled; its paste ends it.
+        crate::update_gate::UPDATE_GATE.end_dictation_take(self.id());
         true
     }
 
@@ -4938,6 +4942,11 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
                 .map(|state| state.lock_helper_commands())
         })
         .flatten();
+    // The filters below may drop this event for the HUD and the take
+    // lifecycle; the update gate still has to see a take end.
+    if let Some(event) = event.as_ref() {
+        end_gate_take_for_helper_event(&crate::update_gate::UPDATE_GATE, event);
+    }
     note_helper_take_protocol(app, event.as_ref());
 
     if matches!(event_type, Some("audio_level" | "focus_target"))
@@ -7150,7 +7159,12 @@ fn end_gate_take_for_helper_event(
     gate: &crate::update_gate::UpdateGate,
     event: &serde_json::Value,
 ) {
-    let _ = (gate, event);
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    match gate_take_transition(event_type, dictation_take_id_from_event(event)) {
+        Some(GateTakeTransition::Ended(take_id)) => gate.end_dictation_take(take_id),
+        Some(GateTakeTransition::AllEnded) => gate.end_all_dictation_takes(),
+        Some(GateTakeTransition::Started(_)) | None => {}
+    }
 }
 
 /// Discards a take the helper started while an update installs. Sent off the
