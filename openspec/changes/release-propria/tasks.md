@@ -46,6 +46,15 @@
 - [x] 8.1 `make verify` com exit 0 e saída em `.tmp/verify/release-propria/make-verify.txt`.
 - [x] 8.2 Windows na máquina de prova (`ssh cert`, só no perfil `cert-`, sem credencial do GitHub): instalar o `setup.exe` do ensaio, abrir, conferir versão e que nenhuma migração rodou; desinstalar e apagar o perfil criado; registro em `.tmp/verify/release-propria/windows.md`.
 
+## 9. Revisão 1 (N1–N3)
+
+- [x] 9.1 N1: aceitar a atualização com um ditado já ativo espera o ditado; cada passo lê `dictationWorkflowActiveRef.current` de forma síncrona e o polling só detecta o fim (`src/test/use-app-update-actions.test.tsx`).
+- [x] 9.2 N2: `install_update` baixa, espera a trava de atualização (`src-tauri/src/update_gate.rs`) e só então instala; gravação ativa, iniciando ou finalizando e ditado ativo ou recém-iniciado seguram a instalação (evento `WaitingForCapture`, cartão de espera, "Mais tarde" cancela); com a instalação em curso, gravação e ditado recusam o início com `update_installing`.
+- [x] 9.3 N3: `relaunch_for_update` resolve com o resultado do shutdown; um reinício cancelado pela barreira de notas rejeita com `update_relaunch_cancelled`, o hook limpa `relaunching` e o cartão permite tentar de novo.
+- [ ] 9.4 `make verify` numa worktree limpa do HEAD, saída em `.tmp/verify/release-propria/make-verify-revisao-1.txt`.
+- [ ] 9.5 Novo ensaio com `dry_run=true` no HEAD final; conferência em `.tmp/verify/release-propria/dry-run.md`.
+- [ ] 9.6 N2 mudou a instalação no Windows: prova 8.2 repetida na `ssh cert` com a mesma limpeza; registro em `.tmp/verify/release-propria/windows-revisao-1.md`.
+
 ## Workflow follow-up
 
 - Depois do merge da `identidade-clovy` na `main`: rebase desta branch, revisão, aceite e merge.
