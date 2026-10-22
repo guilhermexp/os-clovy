@@ -8697,6 +8697,22 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_recording_leaves_the_gate() {
+        // Rust drops a recording that is not the current take's without
+        // transcribing it or sending the helper anything back.
+        let gate = &crate::update_gate::UPDATE_GATE;
+        let state = DictationTakeState::default();
+        state.begin("gate-current".into());
+        gate.begin_dictation_take("gate-stale").unwrap();
+        assert!(matches!(
+            state.claim_finalized(Some("gate-stale")),
+            DictationFinalizedTake::Stale
+        ));
+        assert!(!gate.has_dictation_take("gate-stale"));
+        gate.end_dictation_take("gate-current");
+    }
+
+    #[test]
     fn a_take_already_delivering_stays_in_the_gate_when_superseded() {
         let gate = &crate::update_gate::UPDATE_GATE;
         let state = DictationTakeState::default();
