@@ -1589,3 +1589,290 @@ fn every_failed_migration_stops_the_launch() {
     ))));
     assert!(!stops_the_launch(&Ok(Outcome::Resumed)));
 }
+
+// --- Fourth review (L1 to L5) ------------------------------------------------
+
+/// Publishes for real, then fails the flush after the data folder was
+/// published and makes part of it impossible to remove, so the rollback
+/// stops halfway.
+struct StuckRollback {
+    stuck: PathBuf,
+}
+
+impl FileCopier for StuckRollback {
+    fn copy_file(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::copy(from, to).map(|_| ())
+    }
+
+    fn sync_directory(&mut self, _path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&self.stuck, std::fs::Permissions::from_mode(0o555))?;
+        Err(std::io::Error::other("flush failed"))
+    }
+}
+
+#[test]
+fn an_interrupted_rollback_blocks_the_next_launch_until_it_finishes() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile::tempdir().unwrap();
+    let mut plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    plan.credentials.push(activity_copy());
+    let store = MemoryStore::with(&[("old.activity-db", "sqlcipher-key", "k")]);
+    let stuck = plan.data.target.join("recordings");
+
+    let first = migrate(
+        &plan,
+        &store,
+        &mut StuckRollback {
+            stuck: stuck.clone(),
+        },
+    )
+    .expect_err("the flush fails and the rollback cannot finish");
+    assert!(first.blocked, "{first}");
+    assert_eq!(store.value("new.activity-db", "sqlcipher-key"), None);
+    assert!(
+        plan.data.target.exists(),
+        "part of the published folder is left"
+    );
+
+    // The leftovers are not a finished publication.
+    let second = migrate(&plan, &store, &mut StdCopier)
+        .expect_err("an unfinished rollback blocks the next launch");
+    assert!(second.blocked, "{second}");
+    assert!(journal_for(&plan).exists());
+    assert_eq!(store.value("new.activity-db", "sqlcipher-key"), None);
+
+    // Once the leftovers can be removed, the rollback finishes and the
+    // migration starts over.
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let third = migrate(&plan, &store, &mut StdCopier).expect("the rollback finishes");
+    assert!(matches!(third, Outcome::Migrated { .. }), "{third:?}");
+    assert!(!journal_for(&plan).exists());
+    assert_eq!(
+        tree_hash(&plan.data.target),
+        tree_hash(&plan.data.source),
+        "the new profile is a whole copy"
+    );
+    assert_eq!(
+        store.value("new.activity-db", "sqlcipher-key").as_deref(),
+        Some("k")
+    );
+}
+
+#[test]
+fn the_migration_runs_only_on_macos() {
+    let lib = include_str!("../lib.rs");
+    assert!(
+        lib.contains("#[cfg(target_os = \"macos\")]\npub mod identity_migration;"),
+        "the module is macOS-only"
+    );
+    assert!(
+        lib.contains("#[cfg(target_os = \"macos\")]\n    identity_migration::run_at_startup();"),
+        "the startup call is macOS-only"
+    );
+    for (name, source) in [
+        ("mod.rs", include_str!("mod.rs")),
+        ("guard.rs", include_str!("guard.rs")),
+        ("database.rs", include_str!("database.rs")),
+    ] {
+        for windows_only in [
+            "cfg(windows)",
+            "target_os = \"windows\"",
+            "CredEnumerateW",
+            "LockFileEx",
+            "tasklist",
+            ".exe",
+            "local_data",
+        ] {
+            assert!(
+                !source.contains(windows_only),
+                "{name} still has Windows-only code: {windows_only}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn no_agent_run_stays_resumable_after_the_migration() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    let old = plan.data.source.to_string_lossy().into_owned();
+    std::fs::create_dir_all(&plan.data.source).unwrap();
+    let pool = sqlx_sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx_sqlite::SqliteConnectOptions::new()
+                .filename(plan.data.source.join("notes.sqlite3"))
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    crate::db::migrations::run_migrations(&pool).await.unwrap();
+    let mut notes = pool.acquire().await.unwrap();
+    let t = "2026-10-01T09:00:00Z";
+    // The SDK state nests the old workspace inside a serialized string.
+    let state = serde_json::Value::String(
+        serde_json::json!({
+            "clovyVersion": 1,
+            "sdkState": serde_json::json!({ "cwd": format!("{old}/agent-workspaces/s1") }).to_string(),
+        })
+        .to_string(),
+    )
+    .to_string();
+    exec(
+        &mut notes,
+        "INSERT INTO agent_sessions(id, workspace_path, status, created_at, updated_at) VALUES ('s1', ?, 'waiting_for_user', ?, ?)",
+        &[&format!("{old}/agent-workspaces/s1"), t, t],
+    )
+    .await;
+    exec(
+        &mut notes,
+        "INSERT INTO agent_runs(id, session_id, status, model, started_at, updated_at, interrupted_state_json) VALUES ('waiting', 's1', 'waiting_for_user', 'auto', ?, ?, ?), ('done', 's1', 'completed', 'auto', ?, ?, ?)",
+        &[t, t, &state, t, t, &state],
+    )
+    .await;
+    let interruption =
+        serde_json::json!({ "id": "approve-1", "kind": "approval", "status": "pending" })
+            .to_string();
+    exec(
+        &mut notes,
+        "INSERT INTO agent_items(id, session_id, run_id, sequence, kind, payload_json, created_at) VALUES ('i1', 's1', 'waiting', 0, 'interruption', ?, ?)",
+        &[&interruption, t],
+    )
+    .await;
+    drop(notes);
+    pool.close().await;
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    let copied = plan.data.target.join("notes.sqlite3");
+    let count = |sql: &'static str| {
+        let copied = copied.clone();
+        async move { text(&copied, &format!("SELECT CAST(({sql}) AS TEXT)")).await }
+    };
+    assert_eq!(
+        count("SELECT count(*) FROM agent_runs WHERE interrupted_state_json IS NOT NULL").await,
+        "0"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM agent_runs WHERE status = 'waiting_for_user'").await,
+        "0"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM agent_sessions WHERE status = 'waiting_for_user'").await,
+        "0"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM agent_items WHERE kind = 'interruption' AND json_extract(payload_json, '$.status') = 'pending'").await,
+        "0"
+    );
+    assert_eq!(
+        text(&copied, "SELECT status FROM agent_runs WHERE id = 'done'").await,
+        "completed",
+        "a finished run keeps its outcome"
+    );
+}
+
+#[test]
+fn hermes_import_paths_and_the_obsidian_vault_are_rewritten() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    let old = plan.data.source.to_string_lossy().into_owned();
+    let new = plan.data.target.to_string_lossy().into_owned();
+    let config = serde_json::json!({
+        "model": "auto",
+        "mcp_servers": {
+            "files": {
+                "command": format!("{old}/hermes/bin/files-server"),
+                "args": [format!("{old}/hermes/data"), "--verbose", format!("{old} (backup)/data")],
+            },
+            "legacy": { "cmd": format!("{old}/hermes/bin/legacy"), "args": [] },
+            "external": { "command": "/usr/local/bin/tool", "args": ["/tmp/x"] },
+        },
+    });
+    write(
+        &plan.data.source.join("hermes/config.yaml"),
+        serde_yaml::to_string(&config).unwrap().as_bytes(),
+    );
+    let jobs = serde_json::json!({
+        "jobs": [
+            { "id": "j1", "script": format!("{old}/hermes/scripts/daily.sh"), "workdir": format!("{old}/hermes") },
+            { "id": "j2", "script": format!("echo {old}/x"), "workdir": "/Users/someone/elsewhere" },
+        ],
+    });
+    write(
+        &plan.data.source.join("hermes/cron/jobs.json"),
+        jobs.to_string().as_bytes(),
+    );
+    write(
+        &plan.data.source.join("obsidian.json"),
+        serde_json::json!({ "vaultPath": format!("{old}/vault") })
+            .to_string()
+            .as_bytes(),
+    );
+    let before = tree_hash(&plan.data.source);
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    let config: serde_json::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(plan.data.target.join("hermes/config.yaml")).unwrap(),
+    )
+    .unwrap();
+    let servers = &config["mcp_servers"];
+    assert_eq!(
+        servers["files"]["command"],
+        format!("{new}/hermes/bin/files-server")
+    );
+    assert_eq!(
+        servers["files"]["args"],
+        serde_json::json!([
+            format!("{new}/hermes/data"),
+            "--verbose",
+            format!("{old} (backup)/data")
+        ])
+    );
+    assert_eq!(servers["legacy"]["cmd"], format!("{new}/hermes/bin/legacy"));
+    assert_eq!(servers["external"]["command"], "/usr/local/bin/tool");
+    assert_eq!(servers["external"]["args"], serde_json::json!(["/tmp/x"]));
+    assert_eq!(config["model"], "auto");
+    let jobs: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plan.data.target.join("hermes/cron/jobs.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        jobs["jobs"][0]["script"],
+        format!("{new}/hermes/scripts/daily.sh")
+    );
+    assert_eq!(jobs["jobs"][0]["workdir"], format!("{new}/hermes"));
+    assert_eq!(
+        jobs["jobs"][1]["script"],
+        format!("echo {old}/x"),
+        "an inline program is not a path"
+    );
+    assert_eq!(jobs["jobs"][1]["workdir"], "/Users/someone/elsewhere");
+    let obsidian: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plan.data.target.join("obsidian.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(obsidian["vaultPath"], format!("{new}/vault"));
+    assert_eq!(tree_hash(&plan.data.source), before);
+}
+
+#[test]
+fn an_obsidian_vault_outside_the_profile_stays() {
+    let base = tempfile::tempdir().unwrap();
+    let plan = dir_plan(base.path());
+    old_profile(&plan.data.source);
+    let vault = serde_json::json!({ "vaultPath": "/Users/someone/Documents/Vault" }).to_string();
+    write(&plan.data.source.join("obsidian.json"), vault.as_bytes());
+
+    migrate(&plan, &MemoryStore::default(), &mut StdCopier).expect("migrate");
+
+    let obsidian: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plan.data.target.join("obsidian.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(obsidian["vaultPath"], "/Users/someone/Documents/Vault");
+}
