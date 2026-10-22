@@ -39,11 +39,11 @@
 
 ## 7. Limpeza (D11)
 
-- [ ] 7.1 `stable-release-provenance.mjs` e seus testes ajustados aos nomes do Clovy ou apagados se nada mais os usa; receitas com `createUpdaterArtifacts:false` e o texto "no updater signing key" corrigidos em `AGENTS.md`, `docs/development.md` e `docs/release-macos.md`; `make verify` com exit 0.
+- [x] 7.1 `stable-release-provenance.mjs` e seus testes ajustados aos nomes do Clovy ou apagados se nada mais os usa; receitas com `createUpdaterArtifacts:false` e o texto "no updater signing key" corrigidos em `AGENTS.md`, `docs/development.md` e `docs/release-macos.md`; `make verify` com exit 0.
 
 ## 8. Prova
 
-- [ ] 8.1 `make verify` com exit 0 e saída em `.tmp/verify/release-propria/make-verify.txt`.
+- [x] 8.1 `make verify` com exit 0 e saída em `.tmp/verify/release-propria/make-verify.txt`.
 - [ ] 8.2 Windows na máquina de prova (`ssh cert`, só no perfil `cert-`, sem credencial do GitHub): instalar o `setup.exe` do ensaio, abrir, conferir versão e que nenhuma migração rodou; desinstalar e apagar o perfil criado; registro em `.tmp/verify/release-propria/windows.md`.
 
 ## Workflow follow-up
