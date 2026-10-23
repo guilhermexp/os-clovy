@@ -6,6 +6,7 @@ mod focus;
 mod hotkeys;
 mod permissions;
 mod protocol;
+mod solo_key;
 
 use audio::Recorder;
 use focus::PinnedTarget;

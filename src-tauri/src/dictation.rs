@@ -587,6 +587,12 @@ pub struct DictationSettings {
 
 impl Default for DictationSettings {
     fn default() -> Self {
+        Self::default_for_platform(cfg!(target_os = "windows"))
+    }
+}
+
+impl DictationSettings {
+    fn default_for_platform(_windows: bool) -> Self {
         Self {
             push_to_talk_shortcut: DictationShortcutSetting::control_option_d(),
             toggle_shortcut: DictationShortcutSetting::control_option_t(),
@@ -841,8 +847,12 @@ impl DictationShortcutSetting {
             && self.press_count == other.press_count
     }
 
-    fn normalized_or_default(mut self, kind: DictationShortcutKind) -> Self {
-        if cfg!(target_os = "windows")
+    fn normalized_or_default(self, kind: DictationShortcutKind) -> Self {
+        self.normalized_for_platform(kind, cfg!(target_os = "windows"))
+    }
+
+    fn normalized_for_platform(mut self, kind: DictationShortcutKind, windows: bool) -> Self {
+        if windows
             && (self.press_count != 1
                 || self.modifiers.function
                 || is_modifier_only_input(&self.code, &self.modifiers))
@@ -991,6 +1001,17 @@ struct ShortcutActivationController {
 enum ShortcutKeyEdge {
     Down,
     Up,
+    /// Another key joined a lone-key shortcut while it was held (Windows
+    /// Right Ctrl + C): whatever the press started is dropped.
+    Cancel,
+}
+
+fn shortcut_key_edge(event_type: &str) -> Option<ShortcutKeyEdge> {
+    match event_type {
+        "fn_key_down" | "shortcut_key_down" => Some(ShortcutKeyEdge::Down),
+        "fn_key_up" | "shortcut_key_up" => Some(ShortcutKeyEdge::Up),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1069,6 +1090,7 @@ impl ShortcutActivationController {
                 None => None,
             },
             (DictationShortcutKind::Toggle, ShortcutKeyEdge::Up) => None,
+            (_, ShortcutKeyEdge::Cancel) => None,
         }
     }
 
@@ -3086,10 +3108,8 @@ fn handle_shortcut_key_event(
         return;
     };
 
-    let edge = match event_type {
-        "fn_key_down" | "shortcut_key_down" => ShortcutKeyEdge::Down,
-        "fn_key_up" | "shortcut_key_up" => ShortcutKeyEdge::Up,
-        _ => return,
+    let Some(edge) = shortcut_key_edge(event_type) else {
+        return;
     };
     if edge == ShortcutKeyEdge::Down {
         // A pooled connection idle for over a minute is reopened while the
@@ -9785,6 +9805,140 @@ mod tests {
         .expect_err("Windows must reject double-press shortcuts");
 
         assert_eq!(err.code, "dictation_shortcut_unsupported");
+    }
+
+    fn lone(code: &str, label: &str) -> DictationShortcutInput {
+        DictationShortcutInput {
+            code: code.to_string(),
+            modifiers: DictationShortcutModifiers::default(),
+            label: label.to_string(),
+            press_count: Some(1),
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_accepts_a_lone_right_modifier() {
+        for (code, label) in [
+            ("ControlRight", "Right Ctrl"),
+            ("AltRight", "Right Alt"),
+            ("ShiftRight", "Right Shift"),
+        ] {
+            let shortcut = lone(code, label)
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+            assert_eq!(shortcut.code, code);
+            assert_eq!(shortcut.label, label);
+            assert_eq!(shortcut.modifiers, DictationShortcutModifiers::default());
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_accepts_a_lone_key_windows_sees() {
+        for code in ["F13", "F24", "Pause", "ScrollLock", "Insert"] {
+            lone(code, code)
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_needs_a_modifier_for_ordinary_keys() {
+        for code in ["KeyD", "F5", "Space"] {
+            let error = lone(code, code)
+                .into_setting_for_platform(true)
+                .expect_err(code);
+            assert_eq!(error.code, "dictation_shortcut_modifier_required", "{code}");
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_rejects_a_lone_left_modifier() {
+        for code in ["ControlLeft", "AltLeft", "ShiftLeft"] {
+            let error = lone(code, code)
+                .into_setting_for_platform(true)
+                .expect_err(code);
+            assert_eq!(error.code, "dictation_shortcut_unsupported", "{code}");
+        }
+    }
+
+    #[test]
+    fn mac_shortcut_input_keeps_its_own_lone_key_rules() {
+        assert!(lone("ControlRight", "Right Ctrl")
+            .into_setting_for_platform(false)
+            .is_err());
+    }
+
+    #[test]
+    fn windows_default_push_to_talk_is_right_ctrl() {
+        let windows = DictationSettings::default_for_platform(true);
+        assert_eq!(windows.push_to_talk_shortcut.code, "ControlRight");
+        assert_eq!(windows.push_to_talk_shortcut.label, "Right Ctrl");
+        assert_eq!(windows.toggle_shortcut.code, "KeyT");
+        let mac = DictationSettings::default_for_platform(false);
+        assert_eq!(mac.push_to_talk_shortcut.code, "KeyD");
+    }
+
+    #[test]
+    fn windows_saved_lone_shortcuts_survive_loading() {
+        for code in ["ControlRight", "F13", "Pause"] {
+            let saved = lone(code, code).into_setting_for_platform(true).unwrap();
+            let loaded = saved
+                .clone()
+                .normalized_for_platform(DictationShortcutKind::PushToTalk, true);
+            assert_eq!(loaded, saved, "{code}");
+        }
+        // A saved chord stays a saved chord: an existing install keeps it.
+        let chord = DictationShortcutSetting::control_option_d();
+        assert_eq!(
+            chord
+                .clone()
+                .normalized_for_platform(DictationShortcutKind::PushToTalk, true),
+            chord
+        );
+    }
+
+    #[test]
+    fn push_to_talk_cancel_discards_the_take() {
+        let mut controller = ShortcutActivationController::default();
+        let down = Instant::now();
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Down,
+                DictationShortcutKind::PushToTalk,
+                down
+            ),
+            Some(DictationCommand::StartListening)
+        );
+        let later = down + PUSH_TO_TALK_MIN_HOLD * 3;
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Cancel,
+                DictationShortcutKind::PushToTalk,
+                later
+            ),
+            Some(DictationCommand::DiscardListening)
+        );
+        // The release that follows does nothing more.
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Up,
+                DictationShortcutKind::PushToTalk,
+                later
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn helper_cancel_event_maps_to_the_cancel_edge() {
+        assert_eq!(
+            shortcut_key_edge("shortcut_key_cancel"),
+            Some(ShortcutKeyEdge::Cancel)
+        );
+        assert_eq!(
+            shortcut_key_edge("shortcut_key_down"),
+            Some(ShortcutKeyEdge::Down)
+        );
     }
 
     #[test]
