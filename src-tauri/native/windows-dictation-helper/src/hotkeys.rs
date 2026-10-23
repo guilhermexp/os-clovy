@@ -501,6 +501,38 @@ fn apply_gesture_step(
 
 /// What the keyboard hook procedure decides by itself, at the moment of a
 /// key edge: whether this is a lone toggle-Alt release to mask.
+/// One key edge as the keyboard hook sees it.
+#[derive(Clone, Copy, Debug)]
+struct HookEdge {
+    vk: u32,
+    down: bool,
+    injected: bool,
+    repeat: bool,
+    altgr: bool,
+}
+
+/// The synchronous part of the keyboard hook: the flags of the message it
+/// posts, and whether to mask this release from the app's menu bar now.
+/// `still_down` asks Windows which keys are down at this moment.
+fn hook_edge(edge: HookEdge, _still_down: &dyn Fn(u32) -> bool) -> (isize, bool) {
+    let mut flags = 0;
+    if edge.down {
+        flags |= KEY_DOWN_BIT;
+    }
+    if edge.injected {
+        flags |= KEY_INJECTED_BIT;
+    }
+    if edge.repeat {
+        flags |= KEY_REPEAT_BIT;
+    }
+    if edge.altgr {
+        flags |= KEY_ALTGR_BIT;
+        return (flags, false);
+    }
+    let mask = decide_alt_mask(edge.vk, edge.down, edge.injected, edge.repeat);
+    (flags, mask)
+}
+
 fn decide_alt_mask(vk: u32, is_down: bool, injected: bool, repeat: bool) -> bool {
     ALT_RELEASE_MASK.with(|mask| {
         mask.borrow_mut()
@@ -610,6 +642,7 @@ fn handle_keyboard_event(
         down: is_down,
         injected,
         repeat,
+        alone: true,
     };
     feed_gestures(state, input, now_ms, event_sink);
     if repeated {
@@ -1208,36 +1241,23 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let is_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
         if is_down || is_up {
             let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-            let mut flags = 0;
-            if is_down {
-                flags |= KEY_DOWN_BIT;
-            }
-            if event.flags & LLKHF_INJECTED != 0 {
-                flags |= KEY_INJECTED_BIT;
-            }
-            // The hook runs before Windows updates the async key state, so
-            // this is whether the key was already down: auto-repeat.
-            if is_down && unsafe { GetAsyncKeyState(event.vkCode as i32) } < 0 {
-                flags |= KEY_REPEAT_BIT;
-            }
-            // AltGr layouts send a synthetic Left Ctrl (scan code 0x21D)
-            // with Right Alt; it is not a key the user pressed.
-            if event.vkCode == VK_LCONTROL as u32 && event.scanCode == ALTGR_FAKE_CTRL_SCAN_CODE {
-                flags |= KEY_ALTGR_BIT;
-            }
+            let edge = HookEdge {
+                vk: event.vkCode,
+                down: is_down,
+                injected: event.flags & LLKHF_INJECTED != 0,
+                // The hook runs before Windows updates the async key state,
+                // so this is whether the key was already down: auto-repeat.
+                repeat: is_down && unsafe { GetAsyncKeyState(event.vkCode as i32) } < 0,
+                // AltGr layouts send a synthetic Left Ctrl (scan code 0x21D)
+                // with Right Alt; it is not a key the user pressed.
+                altgr: event.vkCode == VK_LCONTROL as u32
+                    && event.scanCode == ALTGR_FAKE_CTRL_SCAN_CODE,
+            };
+            let (flags, mask) = hook_edge(edge, &|vk| key_is_down(vk));
             // A lone tap of the toggle's Alt: tap the mask key now, while Alt
             // is still down for the app, so its release does not open the
-            // menu bar. Decided here, from the hook's own events: the posted
-            // messages may not have been handled yet. Chords (Alt+Tab) are
-            // left alone.
-            if flags & KEY_ALTGR_BIT == 0
-                && decide_alt_mask(
-                    event.vkCode,
-                    is_down,
-                    flags & KEY_INJECTED_BIT != 0,
-                    flags & KEY_REPEAT_BIT != 0,
-                )
-            {
+            // menu bar.
+            if mask {
                 mask_alt_menu();
             }
             let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
@@ -1680,6 +1700,67 @@ mod tests {
         assert!(!decide_alt_mask(VK_TAB as u32, true, false, false));
         assert!(!decide_alt_mask(VK_TAB as u32, false, false, false));
         assert!(!decide_alt_mask(alt, false, false, false), "Alt+Tab");
+    }
+
+    /// The review's order: C held at the Alt-down, C released before the
+    /// Alt-down message is handled. The gesture and the mask must decide
+    /// "alone" from the same hook snapshot: no tap counted, no mask.
+    #[test]
+    fn the_gesture_and_the_mask_share_the_hooks_snapshot() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            ShortcutCommand {
+                press_count: 2,
+                ..lone(ShortcutKind::Toggle, "AltLeft", "Left Alt+Left Alt")
+            },
+        );
+        let (events, event_sink) = recorder();
+        let (alt, c) = (VK_LMENU as u32, 0x43);
+        let c_held = std::cell::Cell::new(true);
+        let still_down = |vk: u32| vk == c && c_held.get();
+        let edge = |vk, down| HookEdge {
+            vk,
+            down,
+            injected: false,
+            repeat: false,
+            altgr: false,
+        };
+        let (c_down, _) = hook_edge(edge(c, true), &still_down);
+        let (alt_down, _) = hook_edge(edge(alt, true), &still_down);
+        c_held.set(false);
+        let (c_up, _) = hook_edge(edge(c, false), &still_down);
+        // Only now does the thread handle the posted messages.
+        handle_hook_message(&mut state, c, c_down, 0, &event_sink);
+        handle_hook_message(&mut state, alt, alt_down, 10, &event_sink);
+        handle_hook_message(&mut state, c, c_up, 20, &event_sink);
+        let (alt_up, masked) = hook_edge(edge(alt, false), &still_down);
+        handle_hook_message(&mut state, alt, alt_up, 80, &event_sink);
+        assert!(!masked, "not a lone tap: no mask");
+        let decisions: Vec<&'static str> = events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .filter_map(|event| match event {
+                HotkeyEvent::Diagnostic { diagnostic, .. } if diagnostic.key == "AltLeft" => {
+                    Some(diagnostic.decision)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decisions, ["ignored", "released"], "not a tap either");
+
+        // The next quick tap is a first tap: masked, and no toggle yet.
+        let (down, _) = hook_edge(edge(alt, true), &still_down);
+        handle_hook_message(&mut state, alt, down, 200, &event_sink);
+        let (up, masked) = hook_edge(edge(alt, false), &still_down);
+        handle_hook_message(&mut state, alt, up, 260, &event_sink);
+        assert!(masked);
+        assert!(!events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(event, HotkeyEvent::KeyDown { .. })));
     }
 
     /// A quick Ctrl tap, then Ctrl+C: copying, so no toggle and no indicator.

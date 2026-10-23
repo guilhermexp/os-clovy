@@ -63,11 +63,14 @@ pub const DOUBLE_TAP_MS: u64 = 340;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
     /// A key edge; `repeat` is a down whose key was already down before it.
+    /// `alone`: on a down, no other key was held at that moment, as the hook
+    /// saw it (the one snapshot the gesture and the Alt mask both use).
     Key {
         vk: u32,
         down: bool,
         injected: bool,
         repeat: bool,
+        alone: bool,
     },
     /// A mouse button press or a wheel turn.
     Mouse { injected: bool },
@@ -165,6 +168,7 @@ impl Gesture {
                 down,
                 injected,
                 repeat,
+                ..
             } if vk == self.target => {
                 if injected {
                     let edge = if down { "down" } else { "up" };
@@ -661,6 +665,18 @@ mod tests {
             down,
             injected: false,
             repeat: false,
+            alone: true,
+        }
+    }
+
+    /// A down the hook saw while another key was held.
+    fn key_not_alone(vk: u32) -> Input {
+        Input::Key {
+            vk,
+            down: true,
+            injected: false,
+            repeat: false,
+            alone: false,
         }
     }
 
@@ -670,7 +686,36 @@ mod tests {
             down,
             injected: true,
             repeat: false,
+            alone: true,
         }
+    }
+
+    /// The hook's snapshot decides "alone", not a later look at which keys
+    /// are down: C held at the Alt-down, released before the gesture hears
+    /// of that down, still leaves the press ordinary.
+    #[test]
+    fn the_press_is_alone_only_if_the_hook_saw_it_alone() {
+        let mut gesture = Gesture::new(VK_LMENU, true, Some(2));
+        gesture.on_input(key(KEY_C, true), 0, &NOTHING_HELD);
+        let down = gesture
+            .on_input(key_not_alone(VK_LMENU), 10, &NOTHING_HELD)
+            .diagnostic
+            .expect("logged");
+        assert_eq!(down.reason, "other_key_held");
+        gesture.on_input(key(KEY_C, false), 20, &NOTHING_HELD);
+        let mut events = play(
+            &mut gesture,
+            &[(10 + HOLD_MS, None), (100, Some(key(VK_LMENU, false)))],
+        );
+        // And the next quick tap is a first tap, not a second.
+        events.extend(play(
+            &mut gesture,
+            &[
+                (200, Some(key(VK_LMENU, true))),
+                (260, Some(key(VK_LMENU, false))),
+            ],
+        ));
+        assert_eq!(events, []);
     }
 
     /// Feeds timed inputs (`None` is a timer tick) and collects the events.
@@ -840,6 +885,7 @@ mod tests {
             down: true,
             injected: false,
             repeat: true,
+            alone: true,
         };
         assert_eq!(
             play(
