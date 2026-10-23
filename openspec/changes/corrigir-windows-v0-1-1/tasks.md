@@ -60,7 +60,7 @@
 - [x] 9.3 W2 RED: o `codex exec` pontual sobe os MCPs e os plugins do usuário; o `agy --print` também; commit RED.
 - [x] 9.4 W2 GREEN: o Codex pontual desliga plugins, apps, hooks, `notify` e cada servidor MCP resolvido pelo próprio `codex mcp list --json`, mantendo a config (sandbox do Windows) e a autenticação; o `agy` pontual é recusado com mensagem clara enquanto houver MCP ou plugin ativo (o `agy` 1.3 não tem como desligá-los por chamada); prova com o codex real no Mac (`revisao-1/w2-green-real.txt`: nenhum MCP, plugin ou `notify` sob a chamada).
 - [x] 9.5 W3 RED: o prompt inteiro do `agy` no argv passa do limite de linha de comando do Windows sem aviso; commit RED.
-- [ ] 9.6 W3 GREEN: tamanho da linha de comando do Windows contado em UTF-16 com o escape; acima do limite, erro claro antes de criar o processo.
+- [x] 9.6 W3 GREEN: tamanho da linha de comando do Windows contado em UTF-16 com o escape; acima do limite, erro claro antes de criar o processo, na geração pontual e no chat. O `agy` 1.3 não lê o prompt pela entrada padrão no modo texto ("empty prompt", testado no Mac), por isso ele segue no argv.
 - [ ] 9.7 W4 RED: Ctrl+F13, Shift+Insert e Ctrl+Pause são recusados na validação e na normalização do Windows; commit RED.
 - [ ] 9.8 W4 GREEN: essas combinações valem no Windows, sem mudar o macOS.
 - [ ] 9.9 W1 RED: um filho criado entre o `spawn()` e a adoção escapa do Job Object; commit RED.

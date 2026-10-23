@@ -410,12 +410,39 @@ pub fn windows_command_line_units(program: &std::path::Path, args: &[String]) ->
 /// Refuses, before anything is spawned, a call whose command line Windows
 /// would not accept (`windows` is `cfg!(windows)` outside tests).
 pub fn check_command_line(
-    _kind: CliKind,
-    _program: &std::path::Path,
-    _args: &[String],
-    _windows: bool,
+    kind: CliKind,
+    program: &std::path::Path,
+    args: &[String],
+    windows: bool,
 ) -> Result<(), LlmError> {
-    Ok(())
+    if !windows {
+        return Ok(());
+    }
+    let mut units = windows_command_line_units(program, args);
+    let batch = program
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    if batch {
+        // `cmd.exe /e:ON /v:OFF /d /c "…"` around it, and `%` escaped as
+        // `%%cd:~,%`.
+        units += 30
+            + 9 * args
+                .iter()
+                .map(|arg| arg.matches('%').count())
+                .sum::<usize>();
+    }
+    if units <= WINDOWS_COMMAND_LINE_MAX {
+        return Ok(());
+    }
+    Err(LlmError::CliFailed {
+        cli: kind,
+        detail: format!(
+            "the input is too long for its command line on Windows ({units} of {WINDOWS_COMMAND_LINE_MAX} characters). Choose another provider for this, or use a shorter input."
+        ),
+    })
 }
 
 /// Extracts the model's answer from a finished CLI call.

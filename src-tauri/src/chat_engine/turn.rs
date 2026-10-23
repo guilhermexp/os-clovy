@@ -352,6 +352,14 @@ async fn run_process<S: FrameSink>(
     state: &mut TurnState<'_, S>,
 ) -> TurnEnd {
     let context = state.context;
+    if let Err(crate::llm::LlmError::CliFailed { detail, .. }) = crate::llm::cli::check_command_line(
+        context.kind,
+        &context.program,
+        &invocation.args,
+        cfg!(windows),
+    ) {
+        return TurnEnd::SpawnFailed(detail);
+    }
     let mut command = crate::hide_console::tokio_command(&context.program);
     command
         .args(&invocation.args)

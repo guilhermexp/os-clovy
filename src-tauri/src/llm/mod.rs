@@ -317,6 +317,7 @@ pub async fn run_cli(
         let at = invocation.args.len().saturating_sub(1);
         invocation.args.splice(at..at, off);
     }
+    cli::check_command_line(kind, &program, &invocation.args, cfg!(windows))?;
     let mut output = process::run(process::ProcessSpec {
         program,
         args: invocation.args.clone(),
