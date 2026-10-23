@@ -12313,6 +12313,26 @@ mod tests {
         }
     }
 
+    /// Started in app A, stopped in app B: the helper pins B at the stop and
+    /// says so in `finalizing_transcript`, which pins the indicator.
+    #[test]
+    fn the_windows_stop_names_the_app_the_text_goes_to() {
+        let mut event = serde_json::json!({
+            "type": "finalizing_transcript",
+            "payload": {
+                "takeId": "take-1",
+                "targetProcessId": 1234,
+                "targetWindowHandle": 5678,
+            }
+        });
+        complete_windows_target(&mut event, notepad);
+        assert_eq!(event["payload"]["target"]["app"], "Bloco de Notas");
+        assert_eq!(
+            event["payload"]["target"]["bundleIdentifier"],
+            "notepad.exe"
+        );
+    }
+
     #[test]
     fn a_windows_target_is_left_alone_when_unknown_or_already_named() {
         let mut unknown = serde_json::json!({
