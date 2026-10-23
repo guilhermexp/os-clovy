@@ -148,7 +148,11 @@ impl Gesture {
     /// Whether the key's next release belongs to the toggle gesture (a tap
     /// it counts), so a lone Alt must not reach the app as a menu key.
     pub fn consumes_release(&self) -> bool {
-        false
+        match self.phase {
+            Phase::Pending => self.toggle_presses.is_some(),
+            Phase::SecondTap => true,
+            Phase::Idle | Phase::Holding | Phase::Spent => false,
+        }
     }
 
     /// Feeds one input. `still_down` asks Windows whether a key is down now:

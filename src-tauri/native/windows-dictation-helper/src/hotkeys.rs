@@ -4,7 +4,10 @@ use crate::solo_key::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        mpsc, Arc,
+    },
     thread,
     time::Instant,
 };
@@ -360,6 +363,7 @@ fn rebuild_gestures(state: &mut HotkeyThreadState) {
     }
     state.gestures = gestures;
     kill_timer(&mut state.gesture_timer_id);
+    publish_menu_mask(state);
 }
 
 /// Which shortcut a gesture event or diagnostic belongs to.
@@ -412,6 +416,7 @@ fn tick_gestures(state: &mut HotkeyThreadState, now_ms: u64, event_sink: &EventS
 
 /// A timer runs only while a press waits for its hold threshold.
 fn sync_gesture_timer(state: &mut HotkeyThreadState) {
+    publish_menu_mask(state);
     let waiting = state
         .gestures
         .iter()
@@ -492,8 +497,23 @@ fn apply_gesture_step(
 /// The Alt key whose next release the toggle gesture consumes, or 0. Read
 /// by the keyboard hook, which must mask that release before Windows hands
 /// it to the app as a menu key.
-fn menu_mask_target(_state: &HotkeyThreadState) -> u32 {
-    0
+fn menu_mask_target(state: &HotkeyThreadState) -> u32 {
+    state
+        .gestures
+        .iter()
+        .find(|gesture| {
+            (gesture.target() == VK_LMENU as u32 || gesture.target() == VK_RMENU as u32)
+                && gesture.consumes_release()
+        })
+        .map_or(0, Gesture::target)
+}
+
+/// What [`menu_mask_target`] said last, for the keyboard hook procedure (it
+/// runs on the hotkey thread but has no access to its state).
+static MENU_MASK_ON_RELEASE: AtomicU32 = AtomicU32::new(0);
+
+fn publish_menu_mask(state: &HotkeyThreadState) {
+    MENU_MASK_ON_RELEASE.store(menu_mask_target(state), Ordering::SeqCst);
 }
 
 /// Taps an unassigned key while Alt is held, so releasing a lone Alt that
@@ -1204,6 +1224,19 @@ unsafe extern "system" fn low_level_keyboard_proc(
             // with Right Alt; it is not a key the user pressed.
             if event.vkCode == VK_LCONTROL as u32 && event.scanCode == ALTGR_FAKE_CTRL_SCAN_CODE {
                 flags |= KEY_ALTGR_BIT;
+            }
+            // A lone Alt tap the toggle gesture counts: tap the mask key now,
+            // while Alt is still down for the app, so its release does not
+            // open the menu bar. Chords (Alt+Tab) never get here: they spend
+            // the gesture, which clears the target.
+            if is_up
+                && flags & KEY_INJECTED_BIT == 0
+                && event.vkCode != 0
+                && MENU_MASK_ON_RELEASE
+                    .compare_exchange(event.vkCode, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                mask_alt_menu();
             }
             let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
             unsafe {

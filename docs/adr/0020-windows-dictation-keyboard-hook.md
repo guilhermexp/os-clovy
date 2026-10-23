@@ -146,7 +146,12 @@ look like a chord).
   `GetAsyncKeyState` on each new press; a fresh press while push-to-talk was
   still running cancels that take and starts over.
 - **A lone Alt that dictated** gets an unassigned key (VK 0xE8) tapped while
-  held, so its release does not open the focused app's menu bar.
+  held, so its release does not open the focused app's menu bar. So does
+  every Alt release the toggle gesture counts (each tap of a double tap, a
+  single-tap toggle): the keyboard hook procedure taps the mask key itself,
+  before passing the release on, from a target the hotkey thread publishes
+  (`MENU_MASK_ON_RELEASE`). A chord (Alt+Tab) spends the gesture and clears
+  the target; a plain Alt tap with no toggle on Alt still opens the menu.
 - **Every decision is logged**: the hook sends `shortcut_trigger_diagnostic`
   (key as a modifier code or `other`, edge, injected, alone, held time,
   decision, reason) and the app logs what it did with each edge
