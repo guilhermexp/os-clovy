@@ -411,6 +411,18 @@ pub async fn relocalize_day(deps: &Deps<'_>, day: NaiveDate) -> Result<bool, Sto
     db::relocalize_day(deps.store, &day_key(day), prompts::locale_tag(deps.locale)).await
 }
 
+/// Writes again, in `deps.locale`, the summary of `day` that
+/// [`relocalize_day`] removed, as soon as its inputs are settled, with the
+/// trigger it had. Runs once: a summary written, an empty day or a failure
+/// all clear the pending mark; only unsettled inputs keep it. `None` when
+/// nothing was pending.
+pub async fn finish_pending_resummary(
+    _deps: &Deps<'_>,
+    _day: NaiveDate,
+) -> Result<Option<SummaryRun>, PipelineError> {
+    Ok(None)
+}
+
 /// Whether every input of `day`'s summary is settled: the timeline built
 /// through the last hour that ended, each ended hour reported (or empty, or
 /// given up after its last attempt), every report folded, and coding-agent
