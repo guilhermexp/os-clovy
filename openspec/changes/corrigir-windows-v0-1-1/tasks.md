@@ -19,6 +19,8 @@
 - [ ] 4.1 RED com a causa encontrada em 1.1 (teste que reproduz a argv/ambiente/saída que falha); commit RED.
 - [ ] 4.2 GREEN: correção da causa; teste passa; mensagem clara se o problema for configuração do Codex no Windows.
 
+> Em aberto (2026-10-23): no `cert`, a v0.1.0 respondeu no chat com o Codex nativo e com o `codex.cmd` do npm (`.tmp/verify/corrigir-windows-v0-1-1/reproducao.md`, 2b). Não há causa reproduzida para um RED, e D1 proíbe corrigir por hipótese. O que se reproduziu no chat (consoles e processos órfãos ao cancelar) foi corrigido nos grupos 2 e 3. Falta o erro real do Windows do dono (mensagem na tela e o `[windows] sandbox` do `~/.codex/config.toml` dele).
+
 ## 5. Codex e Antigravity em notas, texto e atividade (D5)
 
 - [x] 5.1 RED: testes da invocação pontual do `codex` e do `agy` (flags, pasta temporária, sem sessão) e da seleção por uso aceita; `cursor-agent` continua recusado; commit RED.
