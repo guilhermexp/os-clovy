@@ -82,6 +82,17 @@ pub fn restore(dir: &std::path::Path) -> Option<UiLocale> {
     Some(locale)
 }
 
+/// Asks the main window for its language (`ask`) until it is `known`, waiting
+/// longer between asks up to 30 s. One ask at startup is not enough: on
+/// Windows the WebView loads alongside a long `setup`, and neither the
+/// window's broadcast nor Rust's first request has a guaranteed order.
+pub fn ask_until_known(
+    _ask: impl Fn(),
+    _known: impl Fn() -> bool,
+    _wait: impl Fn(std::time::Duration),
+) {
+}
+
 /// File in the app config dir holding the last interface language, so text
 /// generated before the webview loads already uses it.
 pub const SAVED_LOCALE_FILE: &str = "interface-locale.json";
@@ -365,6 +376,28 @@ mod tests {
         assert_eq!(UiLocale::from_payload("\"fr\""), UiLocale::En);
         assert_eq!(UiLocale::from_payload("not json"), UiLocale::En);
         assert_eq!(UiLocale::from_payload(""), UiLocale::En);
+    }
+
+    #[test]
+    fn rust_keeps_asking_for_the_language_until_it_is_known() {
+        use std::cell::{Cell, RefCell};
+        use std::time::Duration;
+        let asks = Cell::new(0);
+        let waits = RefCell::new(Vec::new());
+        ask_until_known(
+            || asks.set(asks.get() + 1),
+            || asks.get() >= 4,
+            |wait| waits.borrow_mut().push(wait),
+        );
+        assert_eq!(asks.get(), 4);
+        let waits = waits.into_inner();
+        assert_eq!(waits.len(), 4);
+        assert!(waits.windows(2).all(|pair| pair[0] <= pair[1]), "{waits:?}");
+        assert!(waits.iter().all(|wait| *wait <= Duration::from_secs(30)));
+
+        let asked = Cell::new(false);
+        ask_until_known(|| asked.set(true), || true, |_| {});
+        assert!(!asked.get(), "a known language is not asked for");
     }
 
     #[test]
