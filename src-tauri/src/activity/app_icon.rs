@@ -261,10 +261,27 @@ mod windows_icon {
     }
 
     fn icon_png_from_file(path: &Path) -> Option<Vec<u8>> {
-        let _apartment = ComApartment::enter()?;
+        icon_png_from_file_traced(path).ok()
+    }
+
+    /// The calling thread's COM apartment, for failure reports in tests.
+    #[cfg(test)]
+    pub(super) fn current_apartment() -> String {
+        use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+        let mut kind = APTTYPE::default();
+        let mut qualifier = APTTYPEQUALIFIER::default();
+        match unsafe { CoGetApartmentType(&mut kind, &mut qualifier) } {
+            Ok(()) => format!("type {} qualifier {}", kind.0, qualifier.0),
+            Err(error) => format!("none ({:?})", error.code()),
+        }
+    }
+
+    /// [`icon_png_from_file`], saying which step failed.
+    pub(super) fn icon_png_from_file_traced(path: &Path) -> Result<Vec<u8>, String> {
+        let _apartment = ComApartment::enter().ok_or("CoInitializeEx failed")?;
         let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut info = SHFILEINFOW::default();
-        if unsafe {
+        let found = unsafe {
             SHGetFileInfoW(
                 PCWSTR(path_wide.as_ptr()),
                 FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -272,17 +289,21 @@ mod windows_icon {
                 std::mem::size_of::<SHFILEINFOW>() as u32,
                 SHGFI_ICON | SHGFI_LARGEICON,
             )
-        } == 0
-            || info.hIcon.0.is_null()
-        {
-            return None;
+        };
+        if found == 0 || info.hIcon.0.is_null() {
+            return Err(format!(
+                "SHGetFileInfoW returned {found} (icon null: {}, last error {:?})",
+                info.hIcon.0.is_null(),
+                windows::core::Error::from_win32().code()
+            ));
         }
         let icon = OwnedIcon(info.hIcon);
         let factory: IWICImagingFactory =
             unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
-                .ok()?;
-        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }.ok()?;
-        encode_bitmap_source_to_png(&factory, &bitmap)
+                .map_err(|error| format!("CoCreateInstance(WIC) {:?}", error.code()))?;
+        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }
+            .map_err(|error| format!("CreateBitmapFromHICON {:?}", error.code()))?;
+        encode_bitmap_source_to_png(&factory, &bitmap).ok_or_else(|| "PNG encoding".to_string())
     }
 
     fn icon_png_from_apps_folder(identity: &str) -> Option<Vec<u8>> {
@@ -366,7 +387,23 @@ mod windows_tests {
         let icons: Vec<Vec<u8>> = ["cmd.exe", "explorer.exe"]
             .into_iter()
             .map(|executable| {
-                let url = app_icon_data_url(executable).expect("installed Windows app icon");
+                let url = app_icon_data_url(executable).unwrap_or_else(|| {
+                    // Say where it failed, and whether trying again helps.
+                    let path = crate::activity::windows::window::executable_path(executable);
+                    let first = path
+                        .as_deref()
+                        .map(super::windows_icon::icon_png_from_file_traced);
+                    let later = (1..=20).find_map(|attempt| {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        app_icon_data_url(executable).map(|_| attempt)
+                    });
+                    panic!(
+                        "installed Windows app icon: {executable} resolved to {path:?}; \
+                         extraction: {:?}; recovered on retry: {later:?}; thread apartment: {:?}",
+                        first.map(|result| result.map(|png| png.len())),
+                        super::windows_icon::current_apartment()
+                    )
+                });
                 let payload = url.strip_prefix("data:image/png;base64,").expect("PNG URL");
                 let png = base64::engine::general_purpose::STANDARD
                     .decode(payload)
