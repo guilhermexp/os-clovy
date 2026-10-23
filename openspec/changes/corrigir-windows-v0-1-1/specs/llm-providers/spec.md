@@ -13,7 +13,7 @@ Chamadas de geração pontual a CLIs SHALL rodar sem persistir sessão no CLI, s
 - **THEN** a escolha é aceita e a invocação usa o modo mais restrito do `agy`
 - Test: unit — seleção por uso e montagem da invocação do `agy`
 
-#### Scenario: CLI ainda recusado
+#### Scenario: CLI que mantém ferramentas
 - **WHEN** o usuário tenta escolher `cursor-agent` para notas
 - **THEN** a escolha é recusada com a explicação de que as ferramentas desse CLI não podem ser desligadas, e nenhum processo é iniciado
 - Test: unit — seleção por uso e invocação recusadas com CLI falso instalado
