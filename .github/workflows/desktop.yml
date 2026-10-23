@@ -330,10 +330,8 @@ jobs:
           restore-keys: |
             tauri-cargo-target-${{ runner.os }}-
 
-      - name: Test Windows activity capture
-        shell: pwsh
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked activity
-
+      # CLI resolution, process trees, and the chat engine run before the
+      # activity suite, whose known clipboard/OCR failures would skip them.
       - name: Test Windows CLI resolution
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked llm
@@ -341,6 +339,10 @@ jobs:
       - name: Test Windows CLI chat engine
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine
+
+      - name: Test Windows activity capture
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked activity
 
       - name: Build and verify unsigned Windows installer
         shell: pwsh
