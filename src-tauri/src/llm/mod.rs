@@ -1219,7 +1219,7 @@ mod tests {
 
         std::fs::write(
             config.join("config.json"),
-            r#"{"plugins":{"on":{"enabled":false},"turned-on":{"enabled":false}}}"#,
+            r#"{"plugins":{"on":{"enabled":false},"turned-on":{"enabled":false},"turned-off":{"enabled":false}}}"#,
         )
         .unwrap();
         assert_eq!(cli::agy_extensions_on(dir.path()), None);

@@ -360,10 +360,28 @@ pub fn agy_extensions_on(home: &std::path::Path) -> Option<String> {
         }
     }
     if let Ok(entries) = std::fs::read_dir(config.join("plugins")) {
+        // agy records whether a plugin is on in its `config.json`
+        // (`plugins.<dir>.enabled`, keyed by directory); a plugin with no
+        // entry follows its own `plugin.json` (`"disabled": true` ships off).
+        let choices = json_file(&config.join("config.json"))
+            .and_then(|config| config.get("plugins").cloned())
+            .unwrap_or(Value::Null);
         on.extend(
             entries
                 .flatten()
-                .map(|entry| format!("plugin {}", entry.file_name().to_string_lossy())),
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| {
+                    match choices
+                        .get(name)
+                        .and_then(|choice| choice.get("enabled"))
+                        .and_then(Value::as_bool)
+                    {
+                        Some(enabled) => enabled,
+                        None => !agy_plugin_ships_off(&config.join("plugins").join(name)),
+                    }
+                })
+                .map(|name| format!("plugin {name}")),
         );
     }
     (!on.is_empty()).then(|| {
@@ -372,6 +390,27 @@ pub fn agy_extensions_on(home: &std::path::Path) -> Option<String> {
             on.join(", ")
         )
     })
+}
+
+/// A JSON file agy reads, tolerating the byte order mark Windows editors
+/// write (agy itself accepts it).
+fn json_file(path: &std::path::Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
+}
+
+/// Whether a plugin's own manifest declares it off by default. agy reads the
+/// manifest at the plugin root, `.antigravity-plugin/` or `.gemini-plugin/`.
+fn agy_plugin_ships_off(plugin: &std::path::Path) -> bool {
+    [
+        plugin.join("plugin.json"),
+        plugin.join(".antigravity-plugin").join("plugin.json"),
+        plugin.join(".gemini-plugin").join("plugin.json"),
+    ]
+    .iter()
+    .find_map(|manifest| json_file(manifest))
+    .and_then(|manifest| manifest.get("disabled").and_then(Value::as_bool))
+    .unwrap_or(false)
 }
 
 /// Longest command line `CreateProcessW` accepts, in UTF-16 units, without
