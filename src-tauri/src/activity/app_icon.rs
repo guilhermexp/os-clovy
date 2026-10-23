@@ -419,6 +419,76 @@ mod windows_tests {
         assert_eq!(app_icon_data_url("clovy-never-installed.exe"), None);
     }
 
+    /// The first icon extractions of a process, from several threads at once
+    /// (the UI asks for several apps' icons together), must all draw. Runs in
+    /// fresh child processes: the parent suite has already used the Shell.
+    #[test]
+    fn first_icon_extractions_of_a_process_from_parallel_threads_all_draw() {
+        if std::env::var("CLOVY_TEST_ISOLATED_ICONS").is_err() {
+            for round in 0..3 {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg("activity::app_icon::windows_tests::first_icon_extractions_of_a_process_from_parallel_threads_all_draw")
+                    .arg("--nocapture")
+                    .env("CLOVY_TEST_ISOLATED_ICONS", "1")
+                    .output()
+                    .expect("spawn the isolated icon test");
+                assert!(
+                    output.status.success(),
+                    "round {round}: isolated icon child failed with {:?}:\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+
+        let paths: Vec<std::path::PathBuf> = [
+            "cmd.exe",
+            "explorer.exe",
+            "notepad.exe",
+            "regedit.exe",
+            "taskmgr.exe",
+            "mmc.exe",
+            "charmap.exe",
+            "calc.exe",
+        ]
+        .into_iter()
+        .filter_map(crate::activity::windows::window::executable_path)
+        .collect();
+        assert!(paths.len() >= 4, "system executables found: {paths:?}");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(paths.len()));
+        let results: Vec<(std::path::PathBuf, Result<usize, String>)> = paths
+            .into_iter()
+            .map(|path| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let result = super::icon_png(&path.file_name().unwrap().to_string_lossy())
+                        .map(|png| png.len())
+                        .ok_or_else(|| {
+                            super::windows_icon::icon_png_from_file_traced(&path)
+                                .err()
+                                .unwrap_or_else(|| "drew on a second try".to_string())
+                        });
+                    (path, result)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        let failed: Vec<_> = results
+            .iter()
+            .filter(|(_, result)| result.is_err())
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "first extractions that failed: {failed:?}"
+        );
+    }
+
     #[test]
     #[ignore = "requires installed Calculator and Notepad packages"]
     fn test_fresh_icon_cache_resolves_installed_packaged_aumid() {
