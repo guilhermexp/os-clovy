@@ -10,11 +10,8 @@
 use std::collections::HashSet;
 
 /// Virtual-key codes the rules need.
-pub const VK_LSHIFT: u32 = 0xA0;
 pub const VK_RSHIFT: u32 = 0xA1;
-pub const VK_LCONTROL: u32 = 0xA2;
 pub const VK_RCONTROL: u32 = 0xA3;
-pub const VK_LMENU: u32 = 0xA4;
 pub const VK_RMENU: u32 = 0xA5;
 
 /// What a lone-modifier shortcut saw.
@@ -203,6 +200,8 @@ mod tests {
     use super::*;
 
     const KEY_C: u32 = 0x43;
+    const VK_LSHIFT: u32 = 0xA0;
+    const VK_LCONTROL: u32 = 0xA2;
 
     fn feed(machine: &mut SoloModifier, events: &[(u32, bool)]) -> Vec<SoloEvent> {
         events
