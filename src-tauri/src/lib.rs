@@ -40,6 +40,7 @@ pub mod llm;
 mod local_env;
 mod local_identity;
 pub mod macos_menu_icons;
+pub mod main_window;
 pub mod mcp_server;
 pub mod meeting_calendar_context;
 pub mod meeting_detection;
