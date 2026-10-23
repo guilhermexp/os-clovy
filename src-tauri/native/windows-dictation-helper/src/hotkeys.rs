@@ -1312,6 +1312,87 @@ mod tests {
         );
     }
 
+    fn captured(events: &[HotkeyEvent]) -> Option<ShortcutCommand> {
+        events.iter().find_map(|event| match event {
+            HotkeyEvent::Captured { shortcut, .. } => Some(shortcut.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn capture_takes_left_modifiers_alone_and_a_toggle_as_a_double_tap() {
+        for (kind, presses, label) in [
+            (ShortcutKind::PushToTalk, 1, "Left Ctrl"),
+            (ShortcutKind::Toggle, 2, "Left Ctrl+Left Ctrl"),
+        ] {
+            let mut state = HotkeyThreadState {
+                capture: Some(CaptureState { kind }),
+                ..HotkeyThreadState::default()
+            };
+            let (events, event_sink) = recorder();
+            let ctrl = VK_LCONTROL as u32;
+            handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+            handle_hook_message(&mut state, ctrl, 0, 90, &event_sink);
+            let shortcut = captured(&events.lock().expect("event lock")).expect("captured");
+            assert_eq!(shortcut.code, "ControlLeft");
+            assert_eq!(shortcut.press_count, presses);
+            assert_eq!(shortcut.label, label);
+        }
+    }
+
+    #[test]
+    fn a_shared_left_ctrl_registers_without_a_system_hotkey() {
+        let mut state = HotkeyThreadState::default();
+        state.shortcuts.insert(
+            ShortcutKind::PushToTalk,
+            lone(ShortcutKind::PushToTalk, "ControlLeft", "Left Ctrl"),
+        );
+        state.shortcuts.insert(
+            ShortcutKind::Toggle,
+            ShortcutCommand {
+                press_count: 2,
+                ..lone(ShortcutKind::Toggle, "ControlLeft", "Left Ctrl+Left Ctrl")
+            },
+        );
+        let (events, event_sink) = recorder();
+        let mut calls = 0;
+        register_shortcuts_with(&mut state, &event_sink, |_, _, _| {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(calls, 0);
+        assert!(events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(event, HotkeyEvent::Ready { .. })));
+    }
+
+    #[test]
+    fn left_ctrl_c_never_starts_a_dictation() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            lone(ShortcutKind::PushToTalk, "ControlLeft", "Left Ctrl"),
+        );
+        let (events, event_sink) = recorder();
+        let ctrl = VK_LCONTROL as u32;
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+        handle_hook_message(&mut state, 0x43, KEY_DOWN_BIT, 40, &event_sink);
+        handle_hook_message(&mut state, 0x43, 0, 60, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 400, &event_sink);
+        assert!(!events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(
+                event,
+                HotkeyEvent::KeyDown { .. }
+                    | HotkeyEvent::KeyUp { .. }
+                    | HotkeyEvent::KeyCancel { .. }
+            )));
+    }
+
     fn drain_set(state: &mut HotkeyThreadState, shortcut: ShortcutCommand) {
         let (tx, rx) = mpsc::channel();
         tx.send(HotkeyMessage::Set(shortcut)).unwrap();

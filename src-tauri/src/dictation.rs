@@ -10042,8 +10042,45 @@ mod tests {
     }
 
     #[test]
-    fn windows_shortcut_input_rejects_a_lone_left_modifier() {
-        for code in ["ControlLeft", "AltLeft", "ShiftLeft"] {
+    fn windows_shortcut_input_accepts_ctrl_alt_and_shift_of_either_side() {
+        for (code, label) in [
+            ("ControlLeft", "Left Ctrl"),
+            ("AltLeft", "Left Alt"),
+            ("ShiftLeft", "Left Shift"),
+            ("ControlRight", "Right Ctrl"),
+            ("AltRight", "Right Alt"),
+            ("ShiftRight", "Right Shift"),
+        ] {
+            let shortcut = lone(code, label)
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+            assert_eq!(shortcut.code, code);
+            assert_eq!(shortcut.press_count, 1);
+        }
+    }
+
+    /// The Mac Fn toggle gesture: a double tap of the same lone modifier.
+    #[test]
+    fn windows_lone_modifiers_take_a_double_tap_and_nothing_else_does() {
+        let double = |code: &str, label: &str| DictationShortcutInput {
+            press_count: Some(2),
+            ..lone(code, label)
+        };
+        let shortcut = double("ControlLeft", "Left Ctrl+Left Ctrl")
+            .into_setting_for_platform(true)
+            .expect("a double-tapped lone modifier");
+        assert_eq!(shortcut.press_count, 2);
+        for (code, label) in [("F13", "F13+F13"), ("Pause", "Pause+Pause")] {
+            let error = double(code, label)
+                .into_setting_for_platform(true)
+                .expect_err(code);
+            assert_eq!(error.code, "dictation_shortcut_unsupported", "{code}");
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_refuses_the_windows_key_alone() {
+        for code in ["MetaLeft", "MetaRight"] {
             let error = lone(code, code)
                 .into_setting_for_platform(true)
                 .expect_err(code);
@@ -10132,13 +10169,25 @@ mod tests {
 
     #[test]
     fn windows_saved_lone_shortcuts_survive_loading() {
-        for code in ["ControlRight", "F13", "Pause"] {
+        for code in ["ControlRight", "ControlLeft", "AltLeft", "F13", "Pause"] {
             let saved = lone(code, code).into_setting_for_platform(true).unwrap();
             let loaded = saved
                 .clone()
                 .normalized_for_platform(DictationShortcutKind::PushToTalk, true);
             assert_eq!(loaded, saved, "{code}");
         }
+        let double_tap = DictationShortcutInput {
+            press_count: Some(2),
+            ..lone("ShiftLeft", "Left Shift+Left Shift")
+        }
+        .into_setting_for_platform(true)
+        .unwrap();
+        assert_eq!(
+            double_tap
+                .clone()
+                .normalized_for_platform(DictationShortcutKind::Toggle, true),
+            double_tap
+        );
         // A saved chord stays a saved chord: an existing install keeps it.
         let chord = DictationShortcutSetting::control_option_d();
         assert_eq!(
