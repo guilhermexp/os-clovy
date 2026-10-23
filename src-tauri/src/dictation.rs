@@ -7507,6 +7507,16 @@ fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> ser
     })
 }
 
+/// The Windows helper names the pinned window only by handle and process;
+/// the dictation indicator needs `target` (app name and identity, for the
+/// icon), as the Mac helper sends it. Fills it for the start and paste
+/// events when `describe` can identify the app.
+fn complete_windows_target(
+    _event: &mut serde_json::Value,
+    _describe: impl Fn(i64, u32) -> Option<(String, String)>,
+) {
+}
+
 /// A log line for what the app did with a shortcut edge.
 fn shortcut_edge_log_event(
     kind: DictationShortcutKind,
@@ -12227,6 +12237,61 @@ mod tests {
         assert_eq!(entry["textChars"], 28);
         assert!(entry.to_string().contains("textChars"));
         assert!(!entry.to_string().contains("Sensitive dictated sentence"));
+    }
+
+    fn notepad(hwnd: i64, pid: u32) -> Option<(String, String)> {
+        (hwnd == 5678 && pid == 1234)
+            .then(|| ("Bloco de Notas".to_string(), "notepad.exe".to_string()))
+    }
+
+    #[test]
+    fn windows_start_and_paste_events_name_the_target_app() {
+        for event_type in ["listening_started", "paste_target"] {
+            let mut event = serde_json::json!({
+                "type": event_type,
+                "payload": {
+                    "takeId": "take-1",
+                    "targetProcessId": 1234,
+                    "targetWindowHandle": 5678,
+                    "targetWindowTitle": "notas.txt - Bloco de Notas",
+                }
+            });
+            complete_windows_target(&mut event, notepad);
+            assert_eq!(
+                event["payload"]["target"],
+                serde_json::json!({
+                    "app": "Bloco de Notas",
+                    "bundleIdentifier": "notepad.exe",
+                    "processIdentifier": 1234,
+                }),
+                "{event_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_windows_target_is_left_alone_when_unknown_or_already_named() {
+        let mut unknown = serde_json::json!({
+            "type": "listening_started",
+            "payload": { "targetProcessId": 1, "targetWindowHandle": 2 }
+        });
+        complete_windows_target(&mut unknown, notepad);
+        assert!(unknown["payload"].get("target").is_none());
+
+        let named = serde_json::json!({"app": "Terminal", "bundleIdentifier": "wt.exe"});
+        let mut already = serde_json::json!({
+            "type": "paste_target",
+            "payload": { "targetProcessId": 1234, "targetWindowHandle": 5678, "target": named }
+        });
+        complete_windows_target(&mut already, notepad);
+        assert_eq!(already["payload"]["target"]["app"], "Terminal");
+
+        let mut other = serde_json::json!({
+            "type": "recording_ready",
+            "payload": { "targetProcessId": 1234, "targetWindowHandle": 5678 }
+        });
+        complete_windows_target(&mut other, notepad);
+        assert!(other["payload"].get("target").is_none());
     }
 
     #[test]
