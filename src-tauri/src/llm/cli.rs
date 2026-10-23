@@ -242,6 +242,18 @@ pub fn build_invocation(
                 "sandbox_workspace_write.network_access=false",
                 "-c",
                 "analytics.enabled=false",
+                // Plugins and apps bring MCP servers that run outside the
+                // sandbox; the user's own servers are turned off by name
+                // ([`codex_mcp_off_args`]). Hooks and the `notify` program
+                // also run outside it and receive the call's content.
+                "-c",
+                "features.plugins=false",
+                "-c",
+                "features.apps=false",
+                "-c",
+                "features.hooks=false",
+                "-c",
+                "notify=[]",
                 "--output-last-message",
                 CODEX_LAST_MESSAGE_FILE,
             ]);
@@ -281,6 +293,84 @@ pub fn build_invocation(
         remove_env,
         files,
         output_file,
+    })
+}
+
+/// Lists the MCP servers a one-shot codex call would start, resolved by
+/// codex itself across every config layer, with plugins and apps already
+/// off as in the call.
+pub const CODEX_MCP_LIST_ARGS: [&str; 7] = [
+    "-c",
+    "features.plugins=false",
+    "-c",
+    "features.apps=false",
+    "mcp",
+    "list",
+    "--json",
+];
+
+/// `-c mcp_servers.<name>.enabled=false` for every server in the output of
+/// [`CODEX_MCP_LIST_ARGS`]. `--ignore-user-config` would also drop the
+/// user's Windows sandbox and model settings, so servers are turned off one
+/// by one. A list that does not parse, or a name that `-c` cannot address
+/// as a single key, fails the call: nothing is sent to codex.
+pub fn codex_mcp_off_args(list: &str) -> Result<Vec<String>, String> {
+    let servers: Vec<Value> = serde_json::from_str(list.trim())
+        .map_err(|_| "could not list its MCP servers to turn them off".to_string())?;
+    let mut args = Vec::new();
+    for server in servers {
+        let name = server.get("name").and_then(Value::as_str).unwrap_or("");
+        let addressable = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !addressable {
+            return Err(format!(
+                "could not turn off the MCP server {name:?}; rename it with letters, digits, - or _"
+            ));
+        }
+        args.push("-c".to_string());
+        args.push(format!("mcp_servers.{name}.enabled=false"));
+    }
+    Ok(args)
+}
+
+/// Why agy cannot take a one-shot call with the configuration under `home`:
+/// print mode starts every enabled MCP server and plugin outside
+/// `--sandbox`, and agy has no per-call switch to turn them off.
+pub fn agy_extensions_on(home: &std::path::Path) -> Option<String> {
+    let config = home.join(".gemini").join("config");
+    let mut on = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(config.join("mcp_config.json")) {
+        let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+            return Some("its MCP configuration could not be read".to_string());
+        };
+        if let Some(servers) = parsed.get("mcpServers").and_then(Value::as_object) {
+            on.extend(
+                servers
+                    .iter()
+                    .filter(|(_, server)| {
+                        !server
+                            .get("disabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                    .map(|(name, _)| format!("MCP server {name}")),
+            );
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(config.join("plugins")) {
+        on.extend(
+            entries
+                .flatten()
+                .map(|entry| format!("plugin {}", entry.file_name().to_string_lossy())),
+        );
+    }
+    (!on.is_empty()).then(|| {
+        format!(
+            "it would start {} outside its sandbox. Turn them off with `agy mcp disable` or `agy plugin disable`, or choose another provider.",
+            on.join(", ")
+        )
     })
 }
 

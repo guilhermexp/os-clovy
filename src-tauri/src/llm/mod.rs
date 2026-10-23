@@ -278,10 +278,21 @@ pub async fn run_cli(
     request: &GenerateRequest,
     env: &shell_env::LoginEnv,
 ) -> Result<String, LlmError> {
-    let invocation = cli::build_invocation(kind, request)?;
+    let mut invocation = cli::build_invocation(kind, request)?;
     let program = env
         .which(kind.id())
         .ok_or(LlmError::CliNotInstalled(kind))?;
+    if kind == CliKind::Agy {
+        let home = env.home().or_else(|| {
+            env.vars()
+                .get("USERPROFILE")
+                .filter(|home| !home.is_empty())
+                .map(std::path::PathBuf::from)
+        });
+        if let Some(detail) = home.as_deref().and_then(cli::agy_extensions_on) {
+            return Err(LlmError::CliFailed { cli: kind, detail });
+        }
+    }
     let scratch = tempfile::Builder::new()
         .prefix("clovy-llm-")
         .tempdir()
@@ -300,6 +311,12 @@ pub async fn run_cli(
         child_env.remove(*name);
     }
     child_env.extend(invocation.set_env.iter().cloned());
+    if kind == CliKind::Codex {
+        let off = codex_mcp_off_args(kind, &program, &child_env, scratch.path()).await?;
+        // Before the trailing `-` (prompt on stdin).
+        let at = invocation.args.len().saturating_sub(1);
+        invocation.args.splice(at..at, off);
+    }
     let mut output = process::run(process::ProcessSpec {
         program,
         args: invocation.args.clone(),
@@ -320,6 +337,34 @@ pub async fn run_cli(
             .map_err(|detail| LlmError::CliFailed { cli: kind, detail })?;
     }
     cli::parse_output(kind, &output, request.schema.is_some())
+}
+
+/// Asks codex which MCP servers the call would start and returns the
+/// overrides that turn each one off ([`cli::codex_mcp_off_args`]).
+async fn codex_mcp_off_args(
+    kind: CliKind,
+    program: &std::path::Path,
+    env: &std::collections::BTreeMap<String, String>,
+    cwd: &std::path::Path,
+) -> Result<Vec<String>, LlmError> {
+    const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+    let failed = |detail: String| LlmError::CliFailed { cli: kind, detail };
+    let listed = process::run(process::ProcessSpec {
+        program: program.to_path_buf(),
+        args: cli::CODEX_MCP_LIST_ARGS.map(str::to_string).to_vec(),
+        env: env.clone(),
+        cwd: cwd.to_path_buf(),
+        stdin: None,
+        timeout: LIST_TIMEOUT,
+    })
+    .await
+    .map_err(|_| failed("could not list its MCP servers to turn them off".to_string()))?;
+    if !listed.success {
+        return Err(failed(
+            "could not list its MCP servers to turn them off".to_string(),
+        ));
+    }
+    cli::codex_mcp_off_args(&listed.stdout).map_err(failed)
 }
 
 /// Result of a connection test.
@@ -734,6 +779,95 @@ mod tests {
         assert_eq!(level, StructuredOutputLevel::JsonSchema);
     }
 
+    /// The real codex with the user's own config (MCP servers and plugins):
+    /// while the one-shot call runs, no MCP server is started below it.
+    #[tokio::test]
+    #[cfg(unix)]
+    #[ignore = "requires an installed, signed-in codex CLI with MCP servers configured"]
+    async fn live_codex_one_shot_starts_no_mcp_server() {
+        use std::sync::atomic::AtomicBool;
+        let env = shell_env::login_env().await;
+        let done = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let root = std::process::id();
+                let mut seen = std::collections::BTreeSet::new();
+                while !done.load(Ordering::SeqCst) {
+                    seen.extend(descendants(root));
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                seen
+            })
+        };
+        let answer = run_cli(
+            CliKind::Codex,
+            &GenerateRequest {
+                prompt: "Answer with the single word: ok".to_string(),
+                timeout: Some(Duration::from_secs(180)),
+                ..GenerateRequest::default()
+            },
+            env.as_ref(),
+        )
+        .await;
+        done.store(true, Ordering::SeqCst);
+        let seen = watcher.join().unwrap();
+        for command in &seen {
+            println!("child: {command}");
+        }
+        assert!(answer.unwrap().to_lowercase().contains("ok"));
+        assert!(seen.iter().any(|command| command.contains("codex")));
+        // Anything but codex itself and this watcher: MCP servers, plugin
+        // servers, and the user's `notify` program.
+        let servers: Vec<_> = seen
+            .iter()
+            .filter(|command| !command.contains("codex") && !command.starts_with("ps "))
+            .filter(|command| {
+                ["mcp", "node_repl", "cua-repl", "SkyComputerUse"]
+                    .iter()
+                    .any(|needle| command.contains(needle))
+            })
+            .collect();
+        assert!(servers.is_empty(), "MCP servers started: {servers:?}");
+    }
+
+    /// Commands of every live process below `root`.
+    #[cfg(unix)]
+    fn descendants(root: u32) -> Vec<String> {
+        let Ok(output) = std::process::Command::new("ps")
+            .args(["-axo", "pid=,ppid=,command="])
+            .output()
+        else {
+            return Vec::new();
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let rows: Vec<(u32, u32, String)> = text
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?.parse().ok()?;
+                let ppid = parts.next()?.parse().ok()?;
+                Some((pid, ppid, parts.collect::<Vec<_>>().join(" ")))
+            })
+            .collect();
+        let mut below = std::collections::BTreeSet::from([root]);
+        loop {
+            let before = below.len();
+            for (pid, ppid, _) in &rows {
+                if below.contains(ppid) {
+                    below.insert(*pid);
+                }
+            }
+            if below.len() == before {
+                break;
+            }
+        }
+        rows.into_iter()
+            .filter(|(pid, _, _)| *pid != root && below.contains(pid))
+            .map(|(_, _, command)| command)
+            .collect()
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn llm_cli_ignoring_its_schema_flag_is_not_credited_with_schema_support() {
@@ -945,6 +1079,8 @@ mod tests {
         for config in [
             "features.plugins=false",
             "features.apps=false",
+            "features.hooks=false",
+            "notify=[]",
             "mcp_servers.evil.enabled=false",
             "mcp_servers.node_repl.enabled=false",
         ] {
