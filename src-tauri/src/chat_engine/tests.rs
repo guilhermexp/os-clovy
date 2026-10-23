@@ -749,6 +749,109 @@ echo '{"type":"turn.completed"}'"#,
     );
 }
 
+/// What to configure when Codex reports that its Windows sandbox is not set
+/// up or its setup failed (texts from codex-rs `core/src/exec.rs`,
+/// `windows-sandbox-rs/src/setup_error.rs` and the TUI).
+#[cfg(unix)]
+fn assert_sandbox_hint(text: &str, detail: &str) {
+    assert!(
+        text.contains("codex sandbox setup --elevated --current-user"),
+        "{text}"
+    );
+    assert!(text.contains("administrator"), "{text}");
+    assert!(text.contains(detail), "keeps what Codex said: {text}");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_engine_codex_windows_sandbox_failure_says_what_to_configure() {
+    let kind = CliKind::Codex;
+    let harness = Harness::new(kind).await;
+    let detail =
+        "windows sandbox: orchestrator_helper_launch_failed: failed to launch setup helper";
+    let program = harness.fake_cli(
+        kind,
+        &format!(
+            r#"
+echo '{{"type":"thread.started","thread_id":"t1"}}'
+echo '{{"type":"turn.failed","error":{{"message":"{detail}"}}}}'
+exit 1
+"#
+        ),
+    );
+    let (_, emitted) = harness.turn(kind, &program, "Hi", None).await;
+    let (method, data) = emitted.last().unwrap();
+    assert_eq!(method, "run.failed");
+    assert_sandbox_hint(data["message"].as_str().unwrap(), detail);
+
+    // Only on stderr, the way an older codex exits.
+    let stderr =
+        "Windows sandbox setup failed: helper_firewall_rule_create_or_add_failed: access denied";
+    let program = harness.fake_cli(
+        kind,
+        &format!(
+            r#"
+echo '{{"type":"thread.started","thread_id":"t2"}}'
+echo '{stderr}' >&2
+exit 1
+"#
+        ),
+    );
+    let (_, emitted) = harness.turn(kind, &program, "Hi", None).await;
+    let (method, data) = emitted.last().unwrap();
+    assert_eq!(method, "run.failed");
+    assert_sandbox_hint(data["message"].as_str().unwrap(), stderr);
+}
+
+/// A command that could not start in the sandbox fails the tool step; the
+/// step says what to configure, and the turn still ends normally.
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_engine_codex_command_blocked_by_the_windows_sandbox_says_what_to_configure() {
+    let kind = CliKind::Codex;
+    let harness = Harness::new(kind).await;
+    let detail = "windows sandbox: helper_sandbox_lock_failed: SetFileAttributesW failed";
+    let program = harness.fake_cli(
+        kind,
+        &format!(
+            r#"
+echo '{{"type":"thread.started","thread_id":"t1"}}'
+echo '{{"type":"item.started","item":{{"id":"c1","type":"command_execution","command":"dir","aggregated_output":"","exit_code":null,"status":"in_progress"}}}}'
+echo '{{"type":"item.completed","item":{{"id":"c1","type":"command_execution","command":"dir","aggregated_output":"{detail}","exit_code":null,"status":"failed"}}}}'
+echo '{{"type":"item.completed","item":{{"id":"a","type":"agent_message","text":"I could not run it."}}}}'
+echo '{{"type":"turn.completed"}}'
+"#
+        ),
+    );
+    let (_, emitted) = harness.turn(kind, &program, "List files", None).await;
+    let failed = emitted
+        .iter()
+        .find(|(method, _)| method == "tool.failed")
+        .map(|(_, data)| data.clone())
+        .expect("the blocked command is shown as failed");
+    assert_sandbox_hint(failed["error"].as_str().unwrap(), detail);
+    assert_eq!(emitted.last().unwrap().0, "run.completed");
+}
+
+/// Other failures keep Codex's own words.
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_engine_codex_other_failures_get_no_sandbox_hint() {
+    let kind = CliKind::Codex;
+    let harness = Harness::new(kind).await;
+    let program = harness.fake_cli(
+        kind,
+        r#"
+echo '{"type":"thread.started","thread_id":"t1"}'
+echo '{"type":"turn.failed","error":{"message":"You have hit your usage limit."}}'
+exit 1
+"#,
+    );
+    let (_, emitted) = harness.turn(kind, &program, "Hi", None).await;
+    let (_, data) = emitted.last().unwrap();
+    assert_eq!(data["message"], json!("You have hit your usage limit."));
+}
+
 #[tokio::test]
 #[cfg(unix)]
 async fn chat_engine_new_cli_conversation_gets_earlier_messages_of_the_session() {

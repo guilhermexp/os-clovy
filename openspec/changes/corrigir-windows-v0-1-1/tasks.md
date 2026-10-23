@@ -65,7 +65,7 @@
 - [x] 9.8 W4 GREEN: essas combinações valem no Windows, na validação e na normalização, sem mudar o macOS; teste do helper confirma o registro com os modificadores (roda no job Windows).
 - [ ] 9.9 W1 RED: um filho criado entre o `spawn()` e a adoção escapa do Job Object; commit RED.
 - [ ] 9.10 W1 GREEN: o processo nasce suspenso, entra no job e só então é retomado; falha de atribuição vira erro visível (chat, geração pontual, ferramenta de shell).
-- [ ] 9.11 Grupo 4 RED: falha de sandbox do Codex no Windows aparece como erro genérico no chat; commit RED.
+- [x] 9.11 Grupo 4 RED: falha de sandbox do Codex no Windows aparece como erro genérico no chat; commit RED.
 - [ ] 9.12 Grupo 4 GREEN: o chat mostra o que configurar.
 - [ ] 9.13 `make verify` com exit 0 numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`, os quatro jobs verdes.
 - [ ] 9.14 `cert` com o instalador do ensaio: chat com Codex e cancelamento sem órfãos; Codex pontual sem MCP subir; limpeza no fim.
