@@ -622,6 +622,8 @@ fn setup_interface_locale_listener(app: &tauri::App) {
             menu_bar::relocalize(&main_thread_handle);
         });
     });
+    // The main window may have broadcast before this listener existed: ask.
+    let _ = app.emit(interface_locale::INTERFACE_LOCALE_REQUEST_EVENT, ());
 }
 
 fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {

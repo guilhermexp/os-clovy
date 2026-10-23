@@ -11,6 +11,9 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const INTERFACE_LOCALE_EVENT: &str = "clovy://interface-locale";
+/// Sent once the listener exists: the main window may have broadcast before
+/// it (Tauri builds the configured window before `setup`), so it answers.
+pub const INTERFACE_LOCALE_REQUEST_EVENT: &str = "clovy://interface-locale-request";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiLocale {

@@ -20,6 +20,8 @@ export const INTERFACE_LOCALE_STORAGE_KEY = "os-clovy:interface-locale";
 export const INTERFACE_LOCALE_CHANGED_EVENT = "clovy://interface-locale-change";
 /** Cross-window Tauri event: HUD webviews and the native app/tray menus. */
 export const INTERFACE_LOCALE_TAURI_EVENT = "clovy://interface-locale";
+/** Rust asks the main window for the language once its listener exists. */
+export const INTERFACE_LOCALE_REQUEST_EVENT = "clovy://interface-locale-request";
 
 /** Native names: each option is written in its own language so a reader who
  * picked the wrong one can always find their way back. */
@@ -148,6 +150,23 @@ export function initInterfaceLocale() {
   if (raw !== locale) persist(locale);
   applyInterfaceLocale(locale);
   broadcast(locale);
+  answerLocaleRequests();
+}
+
+/**
+ * The window can load before Rust registers its listener (Tauri builds the
+ * configured window before `setup`), losing the broadcast above. Rust asks
+ * once its listener exists; the window answers, and broadcasts once more when
+ * it can hear the request, so one of the two always lands.
+ */
+function answerLocaleRequests() {
+  if (!inTauri()) return;
+  void import("@tauri-apps/api/event")
+    .then(({ listen }) =>
+      listen(INTERFACE_LOCALE_REQUEST_EVENT, () => broadcast(getInterfaceLocale())),
+    )
+    .then(() => broadcast(getInterfaceLocale()))
+    .catch(() => {});
 }
 
 /**
