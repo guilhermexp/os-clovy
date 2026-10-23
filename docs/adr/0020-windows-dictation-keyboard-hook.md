@@ -170,3 +170,11 @@ Alt is masked when that press went down alone (keys held before it are
 checked with `GetAsyncKeyState`) and no key, button or wheel turn joined it.
 Injected input is ignored; a press long enough to start push-to-talk is
 masked as well, which changes nothing since push-to-talk already masked it.
+
+Update the same day: the gestures read "alone" from that hook view too. The
+keyboard hook keeps the keys held (`solo_key::KeySnapshot`, keys whose
+release never came dropped with `GetAsyncKeyState` at the edge), decides
+whether each down went down alone, masks with that answer and sends it in
+the posted message (`KEY_NOT_ALONE_BIT`). `Gesture` no longer looks at live
+key state, so the mask and the gesture cannot disagree when a key is
+released between the hook call and the handling of its message.

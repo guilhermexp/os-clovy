@@ -111,3 +111,4 @@ A revisão confirmou Y1, Y3, Y5 e a trava do ícone e deixou dois P2 para a v0.1
 - [x] 12.1 Z1: a pendência `resummary:<dia>:<gatilho>` de ontem também é processada junto do catch-up, e não fica presa depois da meia-noite.
 - [x] 12.2 Z2: a máscara da soltura do Alt é decidida de forma síncrona dentro do gancho, sem depender de a mensagem postada já ter sido consumida.
 - [x] 12.3 `make verify` numa worktree limpa; CI Windows sem falhas novas; push.
+- [x] 12.4 Z2, revisão: uma fonte só para "sozinha". O gancho calcula na hora do evento se a tecla desceu sozinha (`KeySnapshot`), usa isso na máscara e manda na mensagem postada (`KEY_NOT_ALONE_BIT`); o `Gesture` consome essa decisão e não consulta mais o `GetAsyncKeyState`. RED com a ordem C seguro, Alt desce, C solta antes da mensagem, Alt solta.

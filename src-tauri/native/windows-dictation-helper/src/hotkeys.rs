@@ -1,7 +1,7 @@
 use crate::protocol::{ShortcutCommand, ShortcutKind, ShortcutModifiers};
 use crate::solo_key::{
     self, AltReleaseMask, CaptureTracker, Diagnostic, Gesture, GestureEvent, GestureStep, Input,
-    SoloCapture,
+    KeySnapshot, SoloCapture,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -108,6 +108,9 @@ const KEY_ALTGR_BIT: isize = 4;
 /// A down whose key was already down: auto-repeat. Read in the hook, which
 /// runs before Windows updates the key's async state.
 const KEY_REPEAT_BIT: isize = 8;
+/// A down the hook saw while another key was held ([`KeySnapshot`]): the
+/// one answer the gestures and the Alt mask share.
+const KEY_NOT_ALONE_BIT: isize = 16;
 
 #[derive(Clone, Debug)]
 pub struct HotkeyManager {
@@ -367,7 +370,7 @@ fn rebuild_gestures(state: &mut HotkeyThreadState) {
                 && (gesture.target() == VK_LMENU as u32 || gesture.target() == VK_RMENU as u32)
         })
         .map(Gesture::target);
-    ALT_RELEASE_MASK.with(|mask| mask.borrow_mut().set_target(toggle_alt));
+    HOOK_VIEW.with(|view| view.borrow_mut().mask.set_target(toggle_alt));
     state.gestures = gestures;
     kill_timer(&mut state.gesture_timer_id);
 }
@@ -394,11 +397,10 @@ fn handle_mouse_event(
 }
 
 fn feed_gestures(state: &mut HotkeyThreadState, input: Input, now_ms: u64, event_sink: &EventSink) {
-    let still_down = |vk: u32| key_is_down(vk);
     let steps: Vec<(usize, GestureStep)> = state
         .gestures
         .iter_mut()
-        .map(|gesture| gesture.on_input(input, now_ms, &still_down))
+        .map(|gesture| gesture.on_input(input, now_ms))
         .enumerate()
         .collect();
     for (index, step) in steps {
@@ -513,8 +515,10 @@ struct HookEdge {
 
 /// The synchronous part of the keyboard hook: the flags of the message it
 /// posts, and whether to mask this release from the app's menu bar now.
-/// `still_down` asks Windows which keys are down at this moment.
-fn hook_edge(edge: HookEdge, _still_down: &dyn Fn(u32) -> bool) -> (isize, bool) {
+/// `still_down` asks Windows which keys are down at this moment. Whether a
+/// down was alone is decided here once ([`KeySnapshot`]): the mask uses it
+/// now and the message carries it to the gestures (`KEY_NOT_ALONE_BIT`).
+fn hook_edge(edge: HookEdge, still_down: &dyn Fn(u32) -> bool) -> (isize, bool) {
     let mut flags = 0;
     if edge.down {
         flags |= KEY_DOWN_BIT;
@@ -529,23 +533,33 @@ fn hook_edge(edge: HookEdge, _still_down: &dyn Fn(u32) -> bool) -> (isize, bool)
         flags |= KEY_ALTGR_BIT;
         return (flags, false);
     }
-    let mask = decide_alt_mask(edge.vk, edge.down, edge.injected, edge.repeat);
-    (flags, mask)
+    HOOK_VIEW.with(|view| {
+        let view = &mut *view.borrow_mut();
+        let alone = edge.injected || view.keys.on_key(edge.vk, edge.down, still_down);
+        if edge.down && !alone {
+            flags |= KEY_NOT_ALONE_BIT;
+        }
+        let mask = view
+            .mask
+            .on_key(edge.vk, edge.down, edge.injected, edge.repeat, alone);
+        (flags, mask)
+    })
 }
 
-fn decide_alt_mask(vk: u32, is_down: bool, injected: bool, repeat: bool) -> bool {
-    ALT_RELEASE_MASK.with(|mask| {
-        mask.borrow_mut()
-            .on_key(vk, is_down, injected, repeat, &|vk| key_is_down(vk))
-    })
+/// What the hook procedures keep for themselves.
+#[derive(Default)]
+struct HookView {
+    keys: KeySnapshot,
+    mask: AltReleaseMask,
 }
 
 thread_local! {
     /// The hooks run on the hotkey thread, called by Windows in its message
     /// loop before posted messages are handled: this is their own view of
-    /// the toggle's lone Alt, fed by every hook event as it happens.
-    static ALT_RELEASE_MASK: std::cell::RefCell<AltReleaseMask> =
-        std::cell::RefCell::new(AltReleaseMask::default());
+    /// the keys held and of the toggle's lone Alt, fed by every hook event as
+    /// it happens.
+    static HOOK_VIEW: std::cell::RefCell<HookView> =
+        std::cell::RefCell::new(HookView::default());
 }
 
 /// Taps an unassigned key while Alt is held, so releasing a lone Alt that
@@ -609,15 +623,21 @@ fn handle_hook_message(
         }
         return;
     }
-    handle_keyboard_event(state, vk, is_down, injected, repeat, now_ms, event_sink);
+    // The hook's own answer, decided at the edge: never looked up again.
+    let alone = flags & KEY_NOT_ALONE_BIT == 0;
+    handle_keyboard_event(
+        state, vk, is_down, injected, repeat, alone, now_ms, event_sink,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_keyboard_event(
     state: &mut HotkeyThreadState,
     vk: u32,
     is_down: bool,
     injected: bool,
     repeat: bool,
+    alone: bool,
     now_ms: u64,
     event_sink: &EventSink,
 ) {
@@ -642,7 +662,7 @@ fn handle_keyboard_event(
         down: is_down,
         injected,
         repeat,
-        alone: true,
+        alone,
     };
     feed_gestures(state, input, now_ms, event_sink);
     if repeated {
@@ -1291,7 +1311,7 @@ unsafe extern "system" fn low_level_mouse_proc(code: i32, wparam: usize, lparam:
         ) {
             let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
             let injected = (event.flags & LLMHF_INJECTED != 0) as isize;
-            ALT_RELEASE_MASK.with(|mask| mask.borrow_mut().on_mouse(injected != 0));
+            HOOK_VIEW.with(|view| view.borrow_mut().mask.on_mouse(injected != 0));
             let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
             unsafe { PostThreadMessageW(thread_id, HOTKEY_MOUSE_EVENT, 0, injected) };
         }
@@ -1692,14 +1712,24 @@ mod tests {
             },
         );
         let alt = VK_LMENU as u32;
-        assert!(!decide_alt_mask(alt, true, false, false));
-        assert!(decide_alt_mask(alt, false, false, false), "first tap");
-        assert!(!decide_alt_mask(alt, true, false, false));
-        assert!(decide_alt_mask(alt, false, false, false), "second tap");
-        assert!(!decide_alt_mask(alt, true, false, false));
-        assert!(!decide_alt_mask(VK_TAB as u32, true, false, false));
-        assert!(!decide_alt_mask(VK_TAB as u32, false, false, false));
-        assert!(!decide_alt_mask(alt, false, false, false), "Alt+Tab");
+        let mask = |vk, down| {
+            let edge = HookEdge {
+                vk,
+                down,
+                injected: false,
+                repeat: false,
+                altgr: false,
+            };
+            hook_edge(edge, &|_| false).1
+        };
+        assert!(!mask(alt, true));
+        assert!(mask(alt, false), "first tap");
+        assert!(!mask(alt, true));
+        assert!(mask(alt, false), "second tap");
+        assert!(!mask(alt, true));
+        assert!(!mask(VK_TAB as u32, true));
+        assert!(!mask(VK_TAB as u32, false));
+        assert!(!mask(alt, false), "Alt+Tab");
     }
 
     /// The review's order: C held at the Alt-down, C released before the
