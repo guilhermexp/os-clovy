@@ -140,14 +140,68 @@ describe("shortcut capture on Windows", () => {
     expect(error.textContent).toMatch(/Right Ctrl/);
   });
 
-  it("hints at lone keys while capturing, and names them in Portuguese", async () => {
+  it("records Ctrl, Alt or Shift of the left side alone and names it in Portuguese", async () => {
     applyInterfaceLocale("pt-BR");
     await renderShortcuts("Alterar");
     const [change] = screen.getAllByRole("button", { name: "Alterar" });
     await userEvent.setup().click(change);
     expect(
-      await screen.findByText(/uma tecla que funciona sozinha, como o Ctrl direito/),
+      await screen.findByText(/Ctrl, Alt ou Shift sozinho, de qualquer lado/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/segure para ditar/)).toBeInTheDocument();
+
+    helperEvent("shortcut_captured", {
+      kind: "push_to_talk",
+      shortcut: {
+        code: "AltLeft",
+        label: "Left Alt",
+        modifiers: { command: false, control: false, option: false, shift: false, function: false },
+        pressCount: 1,
+      },
+    });
+    await waitFor(() =>
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith(
+        "push_to_talk",
+        expect.objectContaining({ code: "AltLeft", pressCount: 1 }),
+      ),
+    );
+    expect(await screen.findByText("Alt esquerdo")).toBeInTheDocument();
+  });
+
+  it("saves a lone modifier on the toggle as a double tap", async () => {
+    applyInterfaceLocale("pt-BR");
+    mocks.setDictationShortcut.mockImplementation(async (_kind, shortcut) => ({
+      ...settings,
+      toggleShortcut: { keyCode: 0, ...shortcut },
+    }));
+    await renderShortcuts("Alterar");
+    const [, change] = screen.getAllByRole("button", { name: "Alterar" });
+    await userEvent.setup().click(change);
+    expect(await screen.findByText(/dois toques ligam e desligam/)).toBeInTheDocument();
+
+    helperEvent("shortcut_captured", {
+      kind: "toggle",
+      shortcut: {
+        code: "ControlLeft",
+        label: "Left Ctrl+Left Ctrl",
+        modifiers: { command: false, control: false, option: false, shift: false, function: false },
+        pressCount: 2,
+      },
+    });
+    await waitFor(() =>
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith(
+        "toggle",
+        expect.objectContaining({ code: "ControlLeft", pressCount: 2 }),
+      ),
+    );
+    expect(await screen.findAllByText("Ctrl esquerdo")).toHaveLength(2);
+  });
+
+  it("names lone right-hand keys in Portuguese", async () => {
+    applyInterfaceLocale("pt-BR");
+    await renderShortcuts("Alterar");
+    const [change] = screen.getAllByRole("button", { name: "Alterar" });
+    await userEvent.setup().click(change);
 
     helperEvent("shortcut_captured", {
       kind: "push_to_talk",

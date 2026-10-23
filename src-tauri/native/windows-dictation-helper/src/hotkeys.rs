@@ -1,15 +1,22 @@
 use crate::protocol::{ShortcutCommand, ShortcutKind, ShortcutModifiers};
-use crate::solo_key::{self, CaptureTracker, SoloCapture, SoloEvent, SoloModifier};
+use crate::solo_key::{
+    self, CaptureTracker, Diagnostic, Gesture, GestureEvent, GestureStep, Input, SoloCapture,
+};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        mpsc, Arc,
+    },
     thread,
+    time::Instant,
 };
 use windows_sys::Win32::{
     Foundation::GetLastError,
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+            GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0,
+            INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
             MOD_SHIFT, MOD_WIN, VK_0, VK_A, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_F12,
             VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_OEM_1, VK_OEM_2,
             VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS,
@@ -19,8 +26,10 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetMessageW, KillTimer, PeekMessageW,
             PostThreadMessageW, SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-            KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN,
-            WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+            KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
+            WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+            WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
+            WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
         },
     },
 };
@@ -29,6 +38,15 @@ const HOTKEY_PUSH_TO_TALK: i32 = 1;
 const HOTKEY_TOGGLE: i32 = 2;
 const HOTKEY_RECONFIGURE: u32 = WM_APP + 1;
 const HOTKEY_KEYBOARD_EVENT: u32 = WM_APP + 2;
+/// A mouse button press or wheel turn, for lone-modifier chords
+/// (Ctrl + click, Ctrl + wheel); lParam is 1 when injected.
+const HOTKEY_MOUSE_EVENT: u32 = WM_APP + 3;
+/// How often a pending lone-modifier press is checked against its hold
+/// threshold.
+const GESTURE_TICK_MS: u32 = 20;
+/// An unassigned virtual key: tapped while a lone Alt dictates so its
+/// release does not open the focused app's menu bar.
+const VK_MENU_MASK: u16 = 0xE8;
 const CAPTURE_TIMEOUT_MS: u32 = 12_000;
 const PUSH_RELEASE_POLL_MS: u32 = 50;
 const ALTGR_FAKE_CTRL_SCAN_CODE: u32 = 0x21D;
@@ -76,7 +94,22 @@ pub enum HotkeyEvent {
         kind: ShortcutKind,
         shortcut: ShortcutCommand,
     },
+    /// What the hook saw for a lone-modifier shortcut and what it did, for
+    /// the dictation event log.
+    Diagnostic {
+        kind: ShortcutKind,
+        diagnostic: Diagnostic,
+        action: &'static str,
+    },
 }
+
+/// The hook's view of one key edge, packed into the posted message's lParam.
+const KEY_DOWN_BIT: isize = 1;
+const KEY_INJECTED_BIT: isize = 2;
+const KEY_ALTGR_BIT: isize = 4;
+/// A down whose key was already down: auto-repeat. Read in the hook, which
+/// runs before Windows updates the key's async state.
+const KEY_REPEAT_BIT: isize = 8;
 
 #[derive(Clone, Debug)]
 pub struct HotkeyManager {
@@ -135,9 +168,11 @@ struct CaptureState {
 #[derive(Default)]
 struct HotkeyThreadState {
     shortcuts: HashMap<ShortcutKind, ShortcutCommand>,
-    /// Lone-modifier shortcuts, watched through the keyboard hook because
+    /// Lone-modifier shortcuts, one gesture per key (push-to-talk and a
+    /// double-tap toggle may share it), watched through the hooks because
     /// `RegisterHotKey` cannot take a modifier alone.
-    solo: HashMap<ShortcutKind, SoloModifier>,
+    gestures: Vec<Gesture>,
+    gesture_timer_id: Option<usize>,
     capture_keys: CaptureTracker,
     registered: HashSet<i32>,
     pressed_keys: HashSet<u32>,
@@ -165,8 +200,17 @@ fn hotkey_thread(
             0,
         )
     };
+    let mouse_hook = unsafe {
+        SetWindowsHookExW(
+            WH_MOUSE_LL,
+            Some(low_level_mouse_proc),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
     let _ = ready_tx.send(thread_id);
 
+    let started = Instant::now();
     let mut state = HotkeyThreadState::default();
     if hook.is_null() {
         event_sink(HotkeyEvent::RegistrationFailed {
@@ -188,14 +232,30 @@ fn hotkey_thread(
         }
         match msg.message {
             HOTKEY_RECONFIGURE => {}
-            HOTKEY_KEYBOARD_EVENT => {
-                handle_keyboard_event(&mut state, msg.wParam as u32, msg.lParam != 0, &event_sink)
-            }
+            HOTKEY_KEYBOARD_EVENT => handle_hook_message(
+                &mut state,
+                msg.wParam as u32,
+                msg.lParam,
+                started.elapsed().as_millis() as u64,
+                &event_sink,
+            ),
+            HOTKEY_MOUSE_EVENT => handle_mouse_event(
+                &mut state,
+                msg.lParam != 0,
+                started.elapsed().as_millis() as u64,
+                &event_sink,
+            ),
             WM_TIMER => {
                 if state.capture_timer_id == Some(msg.wParam) {
                     end_capture_on_timeout(&mut state, &event_sink);
                 } else if state.push_release_timer_id == Some(msg.wParam) {
                     poll_active_push_to_talk(&mut state, &event_sink);
+                } else if state.gesture_timer_id == Some(msg.wParam) {
+                    tick_gestures(
+                        &mut state,
+                        started.elapsed().as_millis() as u64,
+                        &event_sink,
+                    );
                 }
             }
             WM_HOTKEY if state.capture.is_none() => match msg.wParam as i32 {
@@ -230,8 +290,12 @@ fn hotkey_thread(
 
     release_active_push_to_talk(&mut state, &event_sink);
     unregister_all(&mut state);
+    kill_timer(&mut state.gesture_timer_id);
     if !hook.is_null() {
         let _ = unsafe { UnhookWindowsHookEx(hook) };
+    }
+    if !mouse_hook.is_null() {
+        let _ = unsafe { UnhookWindowsHookEx(mouse_hook) };
     }
 }
 
@@ -245,17 +309,8 @@ fn drain_messages(
         match message {
             HotkeyMessage::Set(shortcut) => {
                 release_active_push_to_talk(state, event_sink);
-                match solo_key::solo_vk(&shortcut.code)
-                    .filter(|_| solo_key::is_solo_modifier_code(&shortcut.code))
-                {
-                    Some(vk) => {
-                        state.solo.insert(shortcut.kind, SoloModifier::new(vk));
-                    }
-                    None => {
-                        state.solo.remove(&shortcut.kind);
-                    }
-                }
                 state.shortcuts.insert(shortcut.kind, shortcut);
+                rebuild_gestures(state);
                 shortcuts_changed = true;
             }
             HotkeyMessage::StartCapture(kind) => {
@@ -280,27 +335,286 @@ fn drain_messages(
     false
 }
 
+/// One gesture per lone-modifier key among the shortcuts: push-to-talk on
+/// it, and the toggle when it uses the same key (a tap or a double tap).
+fn rebuild_gestures(state: &mut HotkeyThreadState) {
+    let lone = |kind| {
+        state
+            .shortcuts
+            .get(&kind)
+            .and_then(|shortcut: &ShortcutCommand| {
+                solo_key::is_solo_modifier_code(&shortcut.code)
+                    .then(|| solo_key::solo_vk(&shortcut.code))
+                    .flatten()
+                    .map(|vk| (vk, u32::from(shortcut.press_count)))
+            })
+    };
+    let push = lone(ShortcutKind::PushToTalk).map(|(vk, _)| vk);
+    let toggle = lone(ShortcutKind::Toggle);
+    let mut gestures = Vec::new();
+    if let Some(vk) = push {
+        let presses = toggle
+            .filter(|(key, _)| *key == vk)
+            .map(|(_, presses)| presses);
+        gestures.push(Gesture::new(vk, true, presses));
+    }
+    if let Some((vk, presses)) = toggle.filter(|(key, _)| Some(*key) != push) {
+        gestures.push(Gesture::new(vk, false, Some(presses)));
+    }
+    state.gestures = gestures;
+    kill_timer(&mut state.gesture_timer_id);
+    publish_menu_mask(state);
+}
+
+/// Which shortcut a gesture event or diagnostic belongs to.
+fn gesture_kind(gesture: &Gesture, event: Option<GestureEvent>) -> ShortcutKind {
+    if event == Some(GestureEvent::Toggle) || !gesture.pushes() {
+        ShortcutKind::Toggle
+    } else {
+        ShortcutKind::PushToTalk
+    }
+}
+
+fn handle_mouse_event(
+    state: &mut HotkeyThreadState,
+    injected: bool,
+    now_ms: u64,
+    event_sink: &EventSink,
+) {
+    if state.capture.is_some() {
+        return;
+    }
+    feed_gestures(state, Input::Mouse { injected }, now_ms, event_sink);
+}
+
+fn feed_gestures(state: &mut HotkeyThreadState, input: Input, now_ms: u64, event_sink: &EventSink) {
+    let still_down = |vk: u32| key_is_down(vk);
+    let steps: Vec<(usize, GestureStep)> = state
+        .gestures
+        .iter_mut()
+        .map(|gesture| gesture.on_input(input, now_ms, &still_down))
+        .enumerate()
+        .collect();
+    for (index, step) in steps {
+        apply_gesture_step(state, index, step, event_sink);
+    }
+    sync_gesture_timer(state);
+}
+
+fn tick_gestures(state: &mut HotkeyThreadState, now_ms: u64, event_sink: &EventSink) {
+    let steps: Vec<(usize, GestureStep)> = state
+        .gestures
+        .iter_mut()
+        .map(|gesture| gesture.on_tick(now_ms))
+        .enumerate()
+        .collect();
+    for (index, step) in steps {
+        apply_gesture_step(state, index, step, event_sink);
+    }
+    sync_gesture_timer(state);
+}
+
+/// A timer runs only while a press waits for its hold threshold.
+fn sync_gesture_timer(state: &mut HotkeyThreadState) {
+    publish_menu_mask(state);
+    let waiting = state
+        .gestures
+        .iter()
+        .any(|gesture| gesture.deadline().is_some());
+    if waiting && state.gesture_timer_id.is_none() {
+        state.gesture_timer_id =
+            nonzero_timer_id(unsafe { SetTimer(std::ptr::null_mut(), 0, GESTURE_TICK_MS, None) });
+    } else if !waiting {
+        kill_timer(&mut state.gesture_timer_id);
+    }
+}
+
+/// Turns a gesture's decision into the shortcut edge dictation expects, and
+/// logs it.
+fn apply_gesture_step(
+    state: &mut HotkeyThreadState,
+    index: usize,
+    step: GestureStep,
+    event_sink: &EventSink,
+) {
+    let Some(gesture) = state.gestures.get(index) else {
+        return;
+    };
+    let target = gesture.target();
+    let kind = gesture_kind(gesture, step.event);
+    let label = state
+        .shortcuts
+        .get(&kind)
+        .map(|shortcut| shortcut.label.clone());
+    let action = match (label, step.event) {
+        (_, None) => "none",
+        (None, Some(_)) => "no_shortcut",
+        (Some(label), Some(GestureEvent::PushDown)) if !state.active_push_to_talk => {
+            state.active_push_to_talk = true;
+            if target == VK_LMENU as u32 || target == VK_RMENU as u32 {
+                mask_alt_menu();
+            }
+            event_sink(HotkeyEvent::KeyDown {
+                kind,
+                shortcut: label,
+            });
+            "push_start"
+        }
+        (Some(label), Some(GestureEvent::PushUp)) if state.active_push_to_talk => {
+            state.active_push_to_talk = false;
+            event_sink(HotkeyEvent::KeyUp {
+                kind,
+                shortcut: label,
+            });
+            "push_end"
+        }
+        (Some(label), Some(GestureEvent::PushCancel)) if state.active_push_to_talk => {
+            state.active_push_to_talk = false;
+            event_sink(HotkeyEvent::KeyCancel {
+                kind,
+                shortcut: label,
+            });
+            "push_cancel"
+        }
+        (Some(label), Some(GestureEvent::Toggle)) => {
+            event_sink(HotkeyEvent::KeyDown {
+                kind,
+                shortcut: label,
+            });
+            "toggle"
+        }
+        (Some(_), Some(_)) => "already_handled",
+    };
+    if let Some(diagnostic) = step.diagnostic {
+        event_sink(HotkeyEvent::Diagnostic {
+            kind,
+            diagnostic,
+            action,
+        });
+    }
+}
+
+/// The Alt key whose next release the toggle gesture consumes, or 0. Read
+/// by the keyboard hook, which must mask that release before Windows hands
+/// it to the app as a menu key.
+fn menu_mask_target(state: &HotkeyThreadState) -> u32 {
+    state
+        .gestures
+        .iter()
+        .find(|gesture| {
+            (gesture.target() == VK_LMENU as u32 || gesture.target() == VK_RMENU as u32)
+                && gesture.consumes_release()
+        })
+        .map_or(0, Gesture::target)
+}
+
+/// What [`menu_mask_target`] said last, for the keyboard hook procedure (it
+/// runs on the hotkey thread but has no access to its state).
+static MENU_MASK_ON_RELEASE: AtomicU32 = AtomicU32::new(0);
+
+fn publish_menu_mask(state: &HotkeyThreadState) {
+    MENU_MASK_ON_RELEASE.store(menu_mask_target(state), Ordering::SeqCst);
+}
+
+/// Taps an unassigned key while Alt is held, so releasing a lone Alt that
+/// dictated does not focus the app's menu bar. The tap is injected, so the
+/// gestures ignore it.
+fn mask_alt_menu() {
+    let key = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_MENU_MASK,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [key(0), key(KEYEVENTF_KEYUP)];
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+}
+
+fn handle_hook_message(
+    state: &mut HotkeyThreadState,
+    vk: u32,
+    flags: isize,
+    now_ms: u64,
+    event_sink: &EventSink,
+) {
+    let is_down = flags & KEY_DOWN_BIT != 0;
+    let injected = flags & KEY_INJECTED_BIT != 0;
+    let repeat = flags & KEY_REPEAT_BIT != 0;
+    if flags & KEY_ALTGR_BIT != 0 {
+        // AltGr layouts send a synthetic Left Ctrl with Right Alt; it is not a
+        // key the user pressed, but a Left Ctrl shortcut should say why it
+        // did not count.
+        if state.capture.is_none() {
+            for gesture in &state.gestures {
+                if gesture.target() == vk {
+                    event_sink(HotkeyEvent::Diagnostic {
+                        kind: gesture_kind(gesture, None),
+                        diagnostic: Diagnostic {
+                            key: solo_key::key_name(vk),
+                            edge: if is_down { "down" } else { "up" },
+                            injected,
+                            alone: false,
+                            held_ms: None,
+                            decision: "ignored",
+                            reason: "altgr",
+                        },
+                        action: "none",
+                    });
+                }
+            }
+        }
+        return;
+    }
+    handle_keyboard_event(state, vk, is_down, injected, repeat, now_ms, event_sink);
+}
+
 fn handle_keyboard_event(
     state: &mut HotkeyThreadState,
     vk: u32,
     is_down: bool,
+    injected: bool,
+    repeat: bool,
+    now_ms: u64,
     event_sink: &EventSink,
 ) {
+    // `pressed_keys` alone would read a fresh press of a key whose release
+    // was missed as auto-repeat forever; the hook's own repeat flag decides.
     let repeated = if is_down {
-        !state.pressed_keys.insert(vk)
+        state.pressed_keys.insert(vk);
+        repeat
     } else {
         !state.pressed_keys.remove(&vk)
     };
+
+    if let Some(capture) = state.capture {
+        if !repeated {
+            handle_capture_key(state, capture, vk, is_down, event_sink);
+        }
+        return;
+    }
+
+    let input = Input::Key {
+        vk,
+        down: is_down,
+        injected,
+        repeat,
+    };
+    feed_gestures(state, input, now_ms, event_sink);
     if repeated {
         return;
     }
-
-    if let Some(capture) = state.capture {
-        handle_capture_key(state, capture, vk, is_down, event_sink);
-        return;
-    }
-
-    handle_solo_modifiers(state, vk, is_down, event_sink);
 
     if !is_down && state.active_push_to_talk {
         let should_release =
@@ -313,64 +627,6 @@ fn handle_keyboard_event(
                 });
         if should_release {
             release_active_push_to_talk(state, event_sink);
-        }
-    }
-}
-
-/// Lone-modifier shortcuts: push-to-talk starts on the lone press, stops on
-/// its release, and is dropped when another key joins (Right Ctrl + C keeps
-/// copying); toggle fires on a clean release.
-fn handle_solo_modifiers(
-    state: &mut HotkeyThreadState,
-    vk: u32,
-    is_down: bool,
-    event_sink: &EventSink,
-) {
-    let mut fired = Vec::new();
-    for (kind, machine) in state.solo.iter_mut() {
-        if let Some(event) = machine.on_key(vk, is_down) {
-            fired.push((*kind, event));
-        }
-    }
-    for (kind, event) in fired {
-        let Some(label) = state
-            .shortcuts
-            .get(&kind)
-            .map(|shortcut| shortcut.label.clone())
-        else {
-            continue;
-        };
-        match (kind, event) {
-            (ShortcutKind::PushToTalk, SoloEvent::Down) if !state.active_push_to_talk => {
-                state.active_push_to_talk = true;
-                event_sink(HotkeyEvent::KeyDown {
-                    kind,
-                    shortcut: label,
-                });
-            }
-            (ShortcutKind::PushToTalk, SoloEvent::Chord) if state.active_push_to_talk => {
-                state.active_push_to_talk = false;
-                event_sink(HotkeyEvent::KeyCancel {
-                    kind,
-                    shortcut: label,
-                });
-            }
-            (ShortcutKind::PushToTalk, SoloEvent::Up { clean: true })
-                if state.active_push_to_talk =>
-            {
-                state.active_push_to_talk = false;
-                event_sink(HotkeyEvent::KeyUp {
-                    kind,
-                    shortcut: label,
-                });
-            }
-            (ShortcutKind::Toggle, SoloEvent::Up { clean: true }) => {
-                event_sink(HotkeyEvent::KeyDown {
-                    kind,
-                    shortcut: label,
-                });
-            }
-            _ => {}
         }
     }
 }
@@ -389,24 +645,31 @@ fn handle_capture_key(
     match state.capture_keys.on_key(vk, is_down, is_modifier_vk(vk)) {
         Some(SoloCapture::Modifier(vk)) => {
             if let Some((code, label)) = solo_key::solo_code(vk) {
-                finish_capture(
+                // A lone modifier toggles with a double tap, as Fn does on
+                // the Mac: a single tap of Ctrl happens all the time.
+                let (label, press_count) = match capture.kind {
+                    ShortcutKind::Toggle => (format!("{label}+{label}"), 2),
+                    ShortcutKind::PushToTalk => (label.to_string(), 1),
+                };
+                finish_capture_with_presses(
                     state,
                     capture,
                     vk,
                     code,
-                    label.to_string(),
+                    label,
                     ShortcutModifiers::default(),
+                    press_count,
                     event_sink,
                 );
             }
             return;
         }
-        Some(SoloCapture::LeftModifier(_)) => {
+        Some(SoloCapture::Unsupported(_)) => {
             fail_capture(
                 state,
                 capture,
-                "left_modifier",
-                "Use Ctrl, Alt, or Shift on the right side of the keyboard, or add a key.",
+                "modifier_required",
+                "Shortcut must include Ctrl, Alt, Shift, or Win.",
                 event_sink,
             );
             return;
@@ -463,12 +726,26 @@ fn finish_capture(
     modifiers: ShortcutModifiers,
     event_sink: &EventSink,
 ) {
+    finish_capture_with_presses(state, capture, vk, code, label, modifiers, 1, event_sink);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_capture_with_presses(
+    state: &mut HotkeyThreadState,
+    capture: CaptureState,
+    vk: u32,
+    code: &str,
+    label: String,
+    modifiers: ShortcutModifiers,
+    press_count: u8,
+    event_sink: &EventSink,
+) {
     let shortcut = ShortcutCommand {
         key_code: vk,
         code: code.to_string(),
         label,
         kind: capture.kind,
-        press_count: 1,
+        press_count,
         modifiers,
     };
     state.capture = None;
@@ -548,9 +825,7 @@ fn fail_capture_with(
 
 fn register_shortcuts(state: &mut HotkeyThreadState, event_sink: &EventSink) {
     // The hook was not fed during a capture; start the lone-key rules over.
-    for machine in state.solo.values_mut() {
-        *machine = SoloModifier::new(machine.target());
-    }
+    rebuild_gestures(state);
     register_shortcuts_with(state, event_sink, |id, modifiers, vk| {
         if unsafe { RegisterHotKey(std::ptr::null_mut(), id, modifiers, vk) } != 0 {
             Ok(())
@@ -586,7 +861,10 @@ fn register_shortcuts_with(
             continue;
         };
         let solo = solo_key::solo_vk(&shortcut.code).is_some();
-        if shortcut.press_count != 1
+        // A double tap exists only for lone modifiers (the hook counts taps).
+        let presses_ok = shortcut.press_count == 1
+            || (shortcut.press_count == 2 && solo_key::is_solo_modifier_code(&shortcut.code));
+        if !presses_ok
             || shortcut.modifiers.function
             || (!solo && !has_standard_modifier(shortcut.modifiers))
         {
@@ -930,10 +1208,35 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let is_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
         if is_down || is_up {
             let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            let mut flags = 0;
+            if is_down {
+                flags |= KEY_DOWN_BIT;
+            }
+            if event.flags & LLKHF_INJECTED != 0 {
+                flags |= KEY_INJECTED_BIT;
+            }
+            // The hook runs before Windows updates the async key state, so
+            // this is whether the key was already down: auto-repeat.
+            if is_down && unsafe { GetAsyncKeyState(event.vkCode as i32) } < 0 {
+                flags |= KEY_REPEAT_BIT;
+            }
             // AltGr layouts send a synthetic Left Ctrl (scan code 0x21D)
             // with Right Alt; it is not a key the user pressed.
             if event.vkCode == VK_LCONTROL as u32 && event.scanCode == ALTGR_FAKE_CTRL_SCAN_CODE {
-                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+                flags |= KEY_ALTGR_BIT;
+            }
+            // A lone Alt tap the toggle gesture counts: tap the mask key now,
+            // while Alt is still down for the app, so its release does not
+            // open the menu bar. Chords (Alt+Tab) never get here: they spend
+            // the gesture, which clears the target.
+            if is_up
+                && flags & KEY_INJECTED_BIT == 0
+                && event.vkCode != 0
+                && MENU_MASK_ON_RELEASE
+                    .compare_exchange(event.vkCode, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                mask_alt_menu();
             }
             let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
             unsafe {
@@ -941,9 +1244,33 @@ unsafe extern "system" fn low_level_keyboard_proc(
                     thread_id,
                     HOTKEY_KEYBOARD_EVENT,
                     event.vkCode as usize,
-                    is_down as isize,
+                    flags,
                 )
             };
+        }
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+/// Mouse buttons and the wheel, only so a lone-modifier shortcut can tell a
+/// Ctrl + click or Ctrl + wheel from a lone press. Moves are passed straight
+/// on; nothing about the pointer is kept.
+unsafe extern "system" fn low_level_mouse_proc(code: i32, wparam: usize, lparam: isize) -> isize {
+    if code >= 0 && lparam != 0 {
+        let message = wparam as u32;
+        if matches!(
+            message,
+            WM_LBUTTONDOWN
+                | WM_RBUTTONDOWN
+                | WM_MBUTTONDOWN
+                | WM_XBUTTONDOWN
+                | WM_MOUSEWHEEL
+                | WM_MOUSEHWHEEL
+        ) {
+            let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+            let injected = (event.flags & LLMHF_INJECTED != 0) as isize;
+            let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+            unsafe { PostThreadMessageW(thread_id, HOTKEY_MOUSE_EVENT, 0, injected) };
         }
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
@@ -1175,12 +1502,15 @@ mod tests {
         );
         let (events, event_sink) = recorder();
         let ctrl = VK_RCONTROL as u32;
-        handle_keyboard_event(&mut state, ctrl, true, &event_sink);
-        handle_keyboard_event(&mut state, ctrl, false, &event_sink);
-        handle_keyboard_event(&mut state, ctrl, true, &event_sink);
-        handle_keyboard_event(&mut state, 0x43, true, &event_sink); // C
-        handle_keyboard_event(&mut state, 0x43, false, &event_sink);
-        handle_keyboard_event(&mut state, ctrl, false, &event_sink);
+        let down = KEY_DOWN_BIT;
+        handle_hook_message(&mut state, ctrl, down, 0, &event_sink);
+        tick_gestures(&mut state, solo_key::HOLD_MS, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 300, &event_sink);
+        handle_hook_message(&mut state, ctrl, down, 400, &event_sink);
+        tick_gestures(&mut state, 400 + solo_key::HOLD_MS, &event_sink);
+        handle_hook_message(&mut state, 0x43, down, 650, &event_sink); // C
+        handle_hook_message(&mut state, 0x43, 0, 660, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 700, &event_sink);
         let names: Vec<&str> = events
             .lock()
             .expect("event lock")
@@ -1194,6 +1524,199 @@ mod tests {
             .filter(|name| *name != "other")
             .collect();
         assert_eq!(names, ["down", "up", "down", "cancel"]);
+    }
+
+    #[test]
+    fn each_hook_decision_is_reported_with_what_it_did() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            lone(ShortcutKind::PushToTalk, "ControlRight", "Right Ctrl"),
+        );
+        let (events, event_sink) = recorder();
+        let ctrl = VK_RCONTROL as u32;
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+        tick_gestures(&mut state, solo_key::HOLD_MS, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 300, &event_sink);
+        handle_hook_message(
+            &mut state,
+            VK_LCONTROL as u32,
+            KEY_DOWN_BIT | KEY_ALTGR_BIT,
+            310,
+            &event_sink,
+        );
+        // An injected press is logged and does nothing.
+        handle_hook_message(
+            &mut state,
+            ctrl,
+            KEY_DOWN_BIT | KEY_INJECTED_BIT,
+            400,
+            &event_sink,
+        );
+        let lines: Vec<(&'static str, &'static str, Option<u64>)> = events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .filter_map(|event| match event {
+                HotkeyEvent::Diagnostic {
+                    diagnostic, action, ..
+                } => Some((diagnostic.decision, *action, diagnostic.held_ms)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("pending", "none", None),
+                ("push_start", "push_start", Some(solo_key::HOLD_MS)),
+                ("push_end", "push_end", Some(300)),
+                ("ignored", "none", None),
+            ]
+        );
+    }
+
+    fn captured(events: &[HotkeyEvent]) -> Option<ShortcutCommand> {
+        events.iter().find_map(|event| match event {
+            HotkeyEvent::Captured { shortcut, .. } => Some(shortcut.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn capture_takes_left_modifiers_alone_and_a_toggle_as_a_double_tap() {
+        for (kind, presses, label) in [
+            (ShortcutKind::PushToTalk, 1, "Left Ctrl"),
+            (ShortcutKind::Toggle, 2, "Left Ctrl+Left Ctrl"),
+        ] {
+            let mut state = HotkeyThreadState {
+                capture: Some(CaptureState { kind }),
+                ..HotkeyThreadState::default()
+            };
+            let (events, event_sink) = recorder();
+            let ctrl = VK_LCONTROL as u32;
+            handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+            handle_hook_message(&mut state, ctrl, 0, 90, &event_sink);
+            let shortcut = captured(&events.lock().expect("event lock")).expect("captured");
+            assert_eq!(shortcut.code, "ControlLeft");
+            assert_eq!(shortcut.press_count, presses);
+            assert_eq!(shortcut.label, label);
+        }
+    }
+
+    #[test]
+    fn a_shared_left_ctrl_registers_without_a_system_hotkey() {
+        let mut state = HotkeyThreadState::default();
+        state.shortcuts.insert(
+            ShortcutKind::PushToTalk,
+            lone(ShortcutKind::PushToTalk, "ControlLeft", "Left Ctrl"),
+        );
+        state.shortcuts.insert(
+            ShortcutKind::Toggle,
+            ShortcutCommand {
+                press_count: 2,
+                ..lone(ShortcutKind::Toggle, "ControlLeft", "Left Ctrl+Left Ctrl")
+            },
+        );
+        let (events, event_sink) = recorder();
+        let mut calls = 0;
+        register_shortcuts_with(&mut state, &event_sink, |_, _, _| {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(calls, 0);
+        assert!(events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(event, HotkeyEvent::Ready { .. })));
+    }
+
+    #[test]
+    fn left_ctrl_c_never_starts_a_dictation() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            lone(ShortcutKind::PushToTalk, "ControlLeft", "Left Ctrl"),
+        );
+        let (events, event_sink) = recorder();
+        let ctrl = VK_LCONTROL as u32;
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+        handle_hook_message(&mut state, 0x43, KEY_DOWN_BIT, 40, &event_sink);
+        handle_hook_message(&mut state, 0x43, 0, 60, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 400, &event_sink);
+        assert!(!events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(
+                event,
+                HotkeyEvent::KeyDown { .. }
+                    | HotkeyEvent::KeyUp { .. }
+                    | HotkeyEvent::KeyCancel { .. }
+            )));
+    }
+
+    /// Both taps of a lone-Alt double tap are masked from the app's menu
+    /// bar; Alt+Tab is not.
+    #[test]
+    fn the_hook_masks_the_alt_releases_the_toggle_consumes() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            ShortcutCommand {
+                press_count: 2,
+                ..lone(ShortcutKind::Toggle, "AltLeft", "Left Alt+Left Alt")
+            },
+        );
+        let (_, event_sink) = recorder();
+        let alt = VK_LMENU as u32;
+        assert_eq!(menu_mask_target(&state), 0);
+        handle_hook_message(&mut state, alt, KEY_DOWN_BIT, 0, &event_sink);
+        assert_eq!(menu_mask_target(&state), alt, "first tap");
+        handle_hook_message(&mut state, alt, 0, 80, &event_sink);
+        handle_hook_message(&mut state, alt, KEY_DOWN_BIT, 200, &event_sink);
+        assert_eq!(menu_mask_target(&state), alt, "second tap");
+        handle_hook_message(&mut state, alt, 0, 280, &event_sink);
+        assert_eq!(menu_mask_target(&state), 0);
+
+        handle_hook_message(&mut state, alt, KEY_DOWN_BIT, 5_000, &event_sink);
+        handle_hook_message(&mut state, VK_TAB as u32, KEY_DOWN_BIT, 5_030, &event_sink);
+        assert_eq!(menu_mask_target(&state), 0, "Alt+Tab");
+    }
+
+    /// A quick Ctrl tap, then Ctrl+C: copying, so no toggle and no indicator.
+    #[test]
+    fn a_tap_then_ctrl_c_never_toggles_dictation() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            lone(ShortcutKind::PushToTalk, "ControlLeft", "Left Ctrl"),
+        );
+        drain_set(
+            &mut state,
+            ShortcutCommand {
+                press_count: 2,
+                ..lone(ShortcutKind::Toggle, "ControlLeft", "Left Ctrl+Left Ctrl")
+            },
+        );
+        let (events, event_sink) = recorder();
+        let ctrl = VK_LCONTROL as u32;
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 80, &event_sink);
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 200, &event_sink);
+        handle_hook_message(&mut state, 0x43, KEY_DOWN_BIT, 230, &event_sink);
+        handle_hook_message(&mut state, 0x43, 0, 260, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 300, &event_sink);
+        assert!(!events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(
+                event,
+                HotkeyEvent::KeyDown { .. }
+                    | HotkeyEvent::KeyUp { .. }
+                    | HotkeyEvent::KeyCancel { .. }
+            )));
     }
 
     fn drain_set(state: &mut HotkeyThreadState, shortcut: ShortcutCommand) {

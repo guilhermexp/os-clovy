@@ -1176,6 +1176,75 @@ mod tests {
         );
     }
 
+    /// agy keeps whether a plugin is on in its own `config.json`
+    /// (`plugins.<dir>.enabled`), falling back to the plugin's `plugin.json`
+    /// (`"disabled": true` ships it off). Only plugins that are on count.
+    #[test]
+    fn llm_agy_counts_only_plugins_agy_itself_has_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".gemini/config");
+        let plugins = config.join("plugins");
+        for name in ["on", "turned-off", "ships-off", "turned-on", "nested-off"] {
+            std::fs::create_dir_all(plugins.join(name)).unwrap();
+        }
+        std::fs::write(
+            plugins.join("ships-off/plugin.json"),
+            r#"{"disabled": true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugins.join("turned-on/plugin.json"),
+            r#"{"disabled": true}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugins.join("nested-off/.antigravity-plugin")).unwrap();
+        std::fs::write(
+            plugins.join("nested-off/.antigravity-plugin/plugin.json"),
+            r#"{"name": "nested-off", "disabled": true}"#,
+        )
+        .unwrap();
+        // Saved by Notepad: a byte order mark first.
+        std::fs::write(
+            config.join("config.json"),
+            "\u{feff}{\"plugins\":{\"turned-off\":{\"enabled\":false},\"turned-on\":{\"enabled\":true}}}",
+        )
+        .unwrap();
+
+        let detail = cli::agy_extensions_on(dir.path()).expect("two plugins are on");
+        assert!(detail.contains("plugin on"), "{detail}");
+        assert!(detail.contains("plugin turned-on"), "{detail}");
+        for off in ["turned-off", "ships-off", "nested-off"] {
+            assert!(!detail.contains(off), "{off}: {detail}");
+        }
+
+        std::fs::write(
+            config.join("config.json"),
+            r#"{"plugins":{"on":{"enabled":false},"turned-on":{"enabled":false},"turned-off":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(cli::agy_extensions_on(dir.path()), None);
+    }
+
+    /// A missing `config.json` is no configuration; one agy cannot read or
+    /// parse may hold `enabled: false` entries Clovy cannot see, so it
+    /// blocks the call with a diagnostic instead of letting plugins start.
+    #[test]
+    fn llm_agy_refuses_a_config_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".gemini/config");
+        std::fs::create_dir_all(&config).unwrap();
+        assert_eq!(cli::agy_extensions_on(dir.path()), None, "no config at all");
+
+        std::fs::write(config.join("config.json"), "{\"plugins\": {").unwrap();
+        let detail = cli::agy_extensions_on(dir.path()).expect("malformed config blocks");
+        assert!(detail.contains("config.json"), "{detail}");
+
+        std::fs::remove_file(config.join("config.json")).unwrap();
+        std::fs::create_dir(config.join("config.json")).unwrap();
+        let detail = cli::agy_extensions_on(dir.path()).expect("unreadable config blocks");
+        assert!(detail.contains("config.json"), "{detail}");
+    }
+
     fn registry_with_activity(
         provider: ProviderRef,
         level: Option<StructuredOutputLevel>,

@@ -870,7 +870,12 @@ impl DictationShortcutSetting {
     }
 
     fn normalized_for_platform(mut self, kind: DictationShortcutKind, windows: bool) -> Self {
-        if windows && self.press_count == 1 && is_windows_lone_key(&self.code, &self.modifiers) {
+        let double_tap =
+            self.press_count == 2 && is_windows_lone_modifier(&self.code, &self.modifiers);
+        if windows
+            && (self.press_count == 1 || double_tap)
+            && is_windows_lone_key(&self.code, &self.modifiers)
+        {
             self.key_code = key_code_for_code(&self.code).unwrap_or(0);
             return self;
         }
@@ -1442,14 +1447,23 @@ impl DictationShortcutInput {
         }
 
         let requested_press_count = self.press_count.unwrap_or(1);
-
-        if windows && requested_press_count != 1 {
+        // On Windows a double tap exists only for a lone Ctrl, Alt or Shift,
+        // the Mac Fn toggle gesture; the helper's hook counts the taps.
+        let double_tap_allowed = is_windows_lone_modifier(&self.code, &self.modifiers);
+        if windows
+            && requested_press_count != 1
+            && !(requested_press_count == 2 && double_tap_allowed)
+        {
             return Err(AppError::new(
                 "dictation_shortcut_unsupported",
                 "Double-press shortcuts are not supported on Windows.",
             ));
         }
-        let press_count = 1;
+        let press_count = if windows && double_tap_allowed && requested_press_count == 2 {
+            2
+        } else {
+            1
+        };
 
         if windows && is_windows_lone_key(&self.code, &self.modifiers) {
             return Ok(DictationShortcutSetting {
@@ -1460,10 +1474,10 @@ impl DictationShortcutInput {
                 press_count,
             });
         }
-        if windows && !self.modifiers.has_any() && is_left_modifier_code(&self.code) {
+        if windows && !self.modifiers.has_any() && is_windows_key_code(&self.code) {
             return Err(AppError::new(
                 "dictation_shortcut_unsupported",
-                "Use Ctrl, Alt, or Shift on the right side of the keyboard, or add a key.",
+                "The Windows key alone opens Start. Use Ctrl, Alt, or Shift alone, or add a key.",
             ));
         }
 
@@ -1588,13 +1602,25 @@ fn default_shortcut_for(kind: DictationShortcutKind, windows: bool) -> Dictation
     }
 }
 
-/// Keys that work alone as a Windows shortcut: the right-hand modifiers
-/// (watched by the helper's keyboard hook, firing only when nothing else is
-/// pressed in between) and keys no app uses on their own. Mirrors the
-/// helper's `solo_key::SOLO_KEYS`.
-const WINDOWS_LONE_KEYS: [&str; 20] = [
+/// Ctrl, Alt and Shift of either side: watched by the helper's hooks with the
+/// Mac Fn gesture (hold alone to dictate, double tap to toggle).
+const WINDOWS_LONE_MODIFIERS: [&str; 6] = [
+    "ControlLeft",
     "ControlRight",
+    "AltLeft",
     "AltRight",
+    "ShiftLeft",
+    "ShiftRight",
+];
+
+/// Keys that work alone as a Windows shortcut: the modifiers above and keys
+/// no app uses on their own. Mirrors the helper's `solo_key::SOLO_KEYS`.
+const WINDOWS_LONE_KEYS: [&str; 23] = [
+    "ControlLeft",
+    "ControlRight",
+    "AltLeft",
+    "AltRight",
+    "ShiftLeft",
     "ShiftRight",
     "F13",
     "F14",
@@ -1619,23 +1645,22 @@ fn is_windows_lone_key(code: &str, modifiers: &DictationShortcutModifiers) -> bo
     !modifiers.has_any() && WINDOWS_LONE_KEYS.contains(&code)
 }
 
+fn is_windows_lone_modifier(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
+    !modifiers.has_any() && WINDOWS_LONE_MODIFIERS.contains(&code)
+}
+
 /// The Mac key code of `code`, or on Windows `0` for a lone key that is not
 /// a modifier (F13 to F24, Pause, Insert...): the helper also takes it in a
 /// chord (Ctrl+F13), and it maps keys by `code`, not by Mac key code.
 fn key_code_for_platform(code: &str, windows: bool) -> Option<u32> {
     key_code_for_code(code).or_else(|| {
-        (windows
-            && WINDOWS_LONE_KEYS.contains(&code)
-            && !matches!(code, "ControlRight" | "AltRight" | "ShiftRight"))
-        .then_some(0)
+        (windows && WINDOWS_LONE_KEYS.contains(&code) && !WINDOWS_LONE_MODIFIERS.contains(&code))
+            .then_some(0)
     })
 }
 
-fn is_left_modifier_code(code: &str) -> bool {
-    matches!(
-        code,
-        "ControlLeft" | "AltLeft" | "ShiftLeft" | "MetaLeft" | "MetaRight"
-    )
+fn is_windows_key_code(code: &str) -> bool {
+    matches!(code, "MetaLeft" | "MetaRight")
 }
 
 pub fn setup(app: &mut tauri::App) {
@@ -3238,7 +3263,15 @@ fn handle_shortcut_key_event(
         app.try_state::<ShortcutActivationState>()
             .and_then(|state| {
                 state.controller.lock().ok().and_then(|mut state| {
-                    let command = state.handle_edge(edge, kind, Instant::now())?;
+                    let now = Instant::now();
+                    let held = state.push_started_at.map(|at| now.duration_since(at));
+                    let command = state.handle_edge(edge, kind, now);
+                    append_dictation_event_log(
+                        app,
+                        Some("shortcut_edge"),
+                        &shortcut_edge_log_event(kind, edge, command, held),
+                    );
+                    let command = command?;
                     let starts_recording = state.command_starts_recording(command);
                     let command_take_id = if starts_recording {
                         Some(uuid::Uuid::new_v4().to_string())
@@ -5057,6 +5090,19 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let event_type = event_type.as_deref();
+    #[cfg(target_os = "windows")]
+    if let Some(event) = event.as_mut() {
+        complete_windows_target(event, |hwnd, pid| {
+            crate::activity::windows::window::app_of_window(hwnd as isize, pid)
+        });
+    }
+    if event_type == Some("shortcut_trigger_diagnostic") {
+        // What the Windows hook saw: the event log only, never the HUD.
+        if let Some(event) = event.as_ref() {
+            append_dictation_event_log(app, event_type, event);
+        }
+        return;
+    }
     let take_state = app.try_state::<DictationTakeState>();
     // A helper outcome and a replacement command must have one total order.
     // If the outcome wins, its whole lifecycle transition and frontend emit
@@ -7460,7 +7506,133 @@ fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> ser
             .and_then(serde_json::Value::as_str),
         "textChars": text_chars,
         "promptChars": prompt_chars,
+        "kind": payload
+            .and_then(|payload| payload.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        "trigger": trigger_log_fields(payload),
     })
+}
+
+/// The Windows helper names the pinned window only by handle and process;
+/// the dictation indicator needs `target` (app name and identity, for the
+/// icon), as the Mac helper sends it. Fills it for the start and paste
+/// events when `describe` can identify the app.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn complete_windows_target(
+    event: &mut serde_json::Value,
+    describe: impl Fn(i64, u32) -> Option<(String, String)>,
+) {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    // The stop pins the window the text is pasted into (it may not be the
+    // one dictation started in), and the indicator pins what this names.
+    if !matches!(
+        event_type,
+        Some("listening_started" | "finalizing_transcript" | "paste_target")
+    ) {
+        return;
+    }
+    let Some(payload) = event
+        .get_mut("payload")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if payload
+        .get("target")
+        .is_some_and(|target| !target.is_null())
+    {
+        return;
+    }
+    let hwnd = payload
+        .get("targetWindowHandle")
+        .and_then(serde_json::Value::as_i64);
+    let pid = payload
+        .get("targetProcessId")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let (Some(hwnd), Some(pid)) = (hwnd, pid) else {
+        return;
+    };
+    let Some((app, bundle_identifier)) = describe(hwnd, pid) else {
+        return;
+    };
+    payload.insert(
+        "target".to_string(),
+        serde_json::json!({
+            "app": app,
+            "bundleIdentifier": bundle_identifier,
+            "processIdentifier": pid,
+        }),
+    );
+}
+
+/// A log line for what the app did with a shortcut edge.
+fn shortcut_edge_log_event(
+    kind: DictationShortcutKind,
+    edge: ShortcutKeyEdge,
+    command: Option<DictationCommand>,
+    held: Option<Duration>,
+) -> serde_json::Value {
+    let action = match command {
+        None => "none",
+        Some(DictationCommand::StartListening) => "start",
+        Some(DictationCommand::StopAndPaste) => "stop_and_paste",
+        Some(DictationCommand::DiscardListening) => "discard",
+        Some(DictationCommand::ToggleListening) => "toggle",
+    };
+    let reason = match (edge, command) {
+        (ShortcutKeyEdge::Up, Some(DictationCommand::DiscardListening)) => "short_hold",
+        (ShortcutKeyEdge::Cancel, Some(DictationCommand::DiscardListening)) => "chord",
+        (_, None) => "busy_or_not_held",
+        _ => "shortcut",
+    };
+    serde_json::json!({
+        "type": "shortcut_edge",
+        "payload": {
+            "kind": match kind {
+                DictationShortcutKind::PushToTalk => "push_to_talk",
+                DictationShortcutKind::Toggle => "toggle",
+            },
+            "trigger": {
+                "edge": match edge {
+                    ShortcutKeyEdge::Down => "down",
+                    ShortcutKeyEdge::Up => "up",
+                    ShortcutKeyEdge::Cancel => "cancel",
+                },
+                "heldMs": held.map(|held| held.as_millis() as u64),
+                "action": action,
+                "reason": reason,
+            },
+        },
+    })
+}
+
+/// The trigger diagnostic fields worth keeping: the helper's own bounded
+/// vocabulary (key codes of modifiers only, decisions, reasons), never more.
+fn trigger_log_fields(payload: Option<&serde_json::Value>) -> serde_json::Value {
+    let Some(trigger) = payload
+        .and_then(|payload| payload.get("trigger"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return serde_json::Value::Null;
+    };
+    let mut fields = serde_json::Map::new();
+    for name in [
+        "key", "edge", "injected", "alone", "heldMs", "decision", "action", "reason",
+    ] {
+        let Some(value) = trigger.get(name) else {
+            continue;
+        };
+        let kept = match value {
+            serde_json::Value::String(text) => {
+                serde_json::Value::String(text.chars().take(40).collect())
+            }
+            serde_json::Value::Bool(_) | serde_json::Value::Number(_) => value.clone(),
+            _ => continue,
+        };
+        fields.insert(name.to_string(), kept);
+    }
+    serde_json::Value::Object(fields)
 }
 
 /// Tag error events with `payload.silent: bool` so the HUD doesn't have to
@@ -9954,8 +10126,45 @@ mod tests {
     }
 
     #[test]
-    fn windows_shortcut_input_rejects_a_lone_left_modifier() {
-        for code in ["ControlLeft", "AltLeft", "ShiftLeft"] {
+    fn windows_shortcut_input_accepts_ctrl_alt_and_shift_of_either_side() {
+        for (code, label) in [
+            ("ControlLeft", "Left Ctrl"),
+            ("AltLeft", "Left Alt"),
+            ("ShiftLeft", "Left Shift"),
+            ("ControlRight", "Right Ctrl"),
+            ("AltRight", "Right Alt"),
+            ("ShiftRight", "Right Shift"),
+        ] {
+            let shortcut = lone(code, label)
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+            assert_eq!(shortcut.code, code);
+            assert_eq!(shortcut.press_count, 1);
+        }
+    }
+
+    /// The Mac Fn toggle gesture: a double tap of the same lone modifier.
+    #[test]
+    fn windows_lone_modifiers_take_a_double_tap_and_nothing_else_does() {
+        let double = |code: &str, label: &str| DictationShortcutInput {
+            press_count: Some(2),
+            ..lone(code, label)
+        };
+        let shortcut = double("ControlLeft", "Left Ctrl+Left Ctrl")
+            .into_setting_for_platform(true)
+            .expect("a double-tapped lone modifier");
+        assert_eq!(shortcut.press_count, 2);
+        for (code, label) in [("F13", "F13+F13"), ("Pause", "Pause+Pause")] {
+            let error = double(code, label)
+                .into_setting_for_platform(true)
+                .expect_err(code);
+            assert_eq!(error.code, "dictation_shortcut_unsupported", "{code}");
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_refuses_the_windows_key_alone() {
+        for code in ["MetaLeft", "MetaRight"] {
             let error = lone(code, code)
                 .into_setting_for_platform(true)
                 .expect_err(code);
@@ -10044,13 +10253,25 @@ mod tests {
 
     #[test]
     fn windows_saved_lone_shortcuts_survive_loading() {
-        for code in ["ControlRight", "F13", "Pause"] {
+        for code in ["ControlRight", "ControlLeft", "AltLeft", "F13", "Pause"] {
             let saved = lone(code, code).into_setting_for_platform(true).unwrap();
             let loaded = saved
                 .clone()
                 .normalized_for_platform(DictationShortcutKind::PushToTalk, true);
             assert_eq!(loaded, saved, "{code}");
         }
+        let double_tap = DictationShortcutInput {
+            press_count: Some(2),
+            ..lone("ShiftLeft", "Left Shift+Left Shift")
+        }
+        .into_setting_for_platform(true)
+        .unwrap();
+        assert_eq!(
+            double_tap
+                .clone()
+                .normalized_for_platform(DictationShortcutKind::Toggle, true),
+            double_tap
+        );
         // A saved chord stays a saved chord: an existing install keeps it.
         let chord = DictationShortcutSetting::control_option_d();
         assert_eq!(
@@ -12065,6 +12286,136 @@ mod tests {
         assert_eq!(entry["textChars"], 28);
         assert!(entry.to_string().contains("textChars"));
         assert!(!entry.to_string().contains("Sensitive dictated sentence"));
+    }
+
+    fn notepad(hwnd: i64, pid: u32) -> Option<(String, String)> {
+        (hwnd == 5678 && pid == 1234)
+            .then(|| ("Bloco de Notas".to_string(), "notepad.exe".to_string()))
+    }
+
+    #[test]
+    fn windows_start_and_paste_events_name_the_target_app() {
+        for event_type in ["listening_started", "paste_target"] {
+            let mut event = serde_json::json!({
+                "type": event_type,
+                "payload": {
+                    "takeId": "take-1",
+                    "targetProcessId": 1234,
+                    "targetWindowHandle": 5678,
+                    "targetWindowTitle": "notas.txt - Bloco de Notas",
+                }
+            });
+            complete_windows_target(&mut event, notepad);
+            assert_eq!(
+                event["payload"]["target"],
+                serde_json::json!({
+                    "app": "Bloco de Notas",
+                    "bundleIdentifier": "notepad.exe",
+                    "processIdentifier": 1234,
+                }),
+                "{event_type}"
+            );
+        }
+    }
+
+    /// Started in app A, stopped in app B: the helper pins B at the stop and
+    /// says so in `finalizing_transcript`, which pins the indicator.
+    #[test]
+    fn the_windows_stop_names_the_app_the_text_goes_to() {
+        let mut event = serde_json::json!({
+            "type": "finalizing_transcript",
+            "payload": {
+                "takeId": "take-1",
+                "targetProcessId": 1234,
+                "targetWindowHandle": 5678,
+            }
+        });
+        complete_windows_target(&mut event, notepad);
+        assert_eq!(event["payload"]["target"]["app"], "Bloco de Notas");
+        assert_eq!(
+            event["payload"]["target"]["bundleIdentifier"],
+            "notepad.exe"
+        );
+    }
+
+    #[test]
+    fn a_windows_target_is_left_alone_when_unknown_or_already_named() {
+        let mut unknown = serde_json::json!({
+            "type": "listening_started",
+            "payload": { "targetProcessId": 1, "targetWindowHandle": 2 }
+        });
+        complete_windows_target(&mut unknown, notepad);
+        assert!(unknown["payload"].get("target").is_none());
+
+        let named = serde_json::json!({"app": "Terminal", "bundleIdentifier": "wt.exe"});
+        let mut already = serde_json::json!({
+            "type": "paste_target",
+            "payload": { "targetProcessId": 1234, "targetWindowHandle": 5678, "target": named }
+        });
+        complete_windows_target(&mut already, notepad);
+        assert_eq!(already["payload"]["target"]["app"], "Terminal");
+
+        let mut other = serde_json::json!({
+            "type": "recording_ready",
+            "payload": { "targetProcessId": 1234, "targetWindowHandle": 5678 }
+        });
+        complete_windows_target(&mut other, notepad);
+        assert!(other["payload"].get("target").is_none());
+    }
+
+    #[test]
+    fn dictation_event_log_keeps_trigger_diagnostics_without_typed_content() {
+        let event = serde_json::json!({
+            "type": "shortcut_trigger_diagnostic",
+            "payload": {
+                "kind": "push_to_talk",
+                "trigger": {
+                    "key": "ControlLeft",
+                    "edge": "up",
+                    "injected": false,
+                    "alone": true,
+                    "heldMs": 240,
+                    "decision": "up",
+                    "action": "push_end",
+                    "reason": "clean",
+                    "typed": "secret"
+                }
+            }
+        });
+
+        let entry = dictation_event_log_entry("shortcut_trigger_diagnostic", &event);
+
+        assert_eq!(entry["kind"], "push_to_talk");
+        assert_eq!(entry["trigger"]["key"], "ControlLeft");
+        assert_eq!(entry["trigger"]["heldMs"], 240);
+        assert_eq!(entry["trigger"]["action"], "push_end");
+        assert_eq!(entry["trigger"]["injected"], false);
+        assert!(!entry.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn a_shortcut_edge_logs_what_the_app_decided_and_why() {
+        let short = shortcut_edge_log_event(
+            DictationShortcutKind::PushToTalk,
+            ShortcutKeyEdge::Up,
+            Some(DictationCommand::DiscardListening),
+            Some(Duration::from_millis(90)),
+        );
+        let entry = dictation_event_log_entry("shortcut_edge", &short);
+        assert_eq!(entry["kind"], "push_to_talk");
+        assert_eq!(entry["trigger"]["edge"], "up");
+        assert_eq!(entry["trigger"]["action"], "discard");
+        assert_eq!(entry["trigger"]["reason"], "short_hold");
+        assert_eq!(entry["trigger"]["heldMs"], 90);
+
+        let ignored = shortcut_edge_log_event(
+            DictationShortcutKind::PushToTalk,
+            ShortcutKeyEdge::Down,
+            None,
+            None,
+        );
+        let entry = dictation_event_log_entry("shortcut_edge", &ignored);
+        assert_eq!(entry["trigger"]["action"], "none");
     }
 
     #[test]

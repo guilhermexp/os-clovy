@@ -452,6 +452,8 @@ pub fn run() {
             // Before any CLI turn can ask: cancels requests a previous
             // process left pending.
             approval_broker::setup(app);
+            // Before the menus and the activity loops: both read it.
+            restore_interface_locale(app);
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
             // After the tray exists: the capture thread publishes its state
@@ -591,10 +593,26 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
 /// Mirrors the webview's interface language into the native menus. The
 /// frontend emits the tag on startup and whenever the user changes it; menus
 /// are rebuilt on the main thread only when the language actually changed.
+/// The language saved by the last run, before the background loops that
+/// write activity text start.
+fn restore_interface_locale(app: &tauri::App) {
+    if let Ok(dir) = app_paths::app_config_dir(app.handle()) {
+        interface_locale::restore(&dir);
+    }
+}
+
 fn setup_interface_locale_listener(app: &tauri::App) {
     let handle = app.handle().clone();
     app.listen_any(interface_locale::INTERFACE_LOCALE_EVENT, move |event| {
         let locale = interface_locale::UiLocale::from_payload(event.payload());
+        let unsaved = app_paths::app_config_dir(&handle)
+            .ok()
+            .filter(|dir| interface_locale::read_saved(dir) != Some(locale));
+        if let Some(dir) = unsaved {
+            if let Err(error) = interface_locale::write_saved(&dir, locale) {
+                tracing::warn!(%error, "could not save the interface language");
+            }
+        }
         if !interface_locale::set_current(locale) {
             return;
         }
@@ -603,6 +621,19 @@ fn setup_interface_locale_listener(app: &tauri::App) {
             let _ = install_app_menu(&main_thread_handle);
             menu_bar::relocalize(&main_thread_handle);
         });
+    });
+    // The main window may have broadcast before this listener existed, and a
+    // single request can be lost the same way: ask until the language is
+    // known (at once when the saved file already said it).
+    let asker = app.handle().clone();
+    std::thread::spawn(move || {
+        interface_locale::ask_until_known(
+            || {
+                let _ = asker.emit(interface_locale::INTERFACE_LOCALE_REQUEST_EVENT, ());
+            },
+            || interface_locale::known().is_some(),
+            std::thread::sleep,
+        );
     });
 }
 

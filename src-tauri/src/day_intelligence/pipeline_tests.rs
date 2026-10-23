@@ -921,3 +921,211 @@ async fn session_documents_are_read_for_every_session_at_once() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn todays_reports_and_summary_in_another_language_are_generated_again() {
+    use super::pipeline::SummaryRun;
+
+    let (_dir, store) = day_store().await;
+    let settings = settings();
+    let zone = zone();
+    let sources = sources();
+    let provider = FakeProvider::new(|request| {
+        Ok(match kind(request) {
+            "hour" => hour_answer(),
+            "fold" => json!({"placements": [{
+                "workstream_id": 0, "title": "Login fix", "summary": "Fixing the login redirect.",
+                "activities": [1, 2]
+            }]}),
+            _ => summary_answer(),
+        })
+    });
+    let english = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::En,
+        local(16, 5),
+    );
+    let english_run = pipeline::summarize_on_demand(&english, day())
+        .await
+        .unwrap();
+    assert!(matches!(english_run, SummaryRun::Generated(_)));
+    let key = day_key(day());
+    assert_eq!(
+        db::summary_of_day(&store, &key)
+            .await
+            .unwrap()
+            .unwrap()
+            .locale,
+        "en"
+    );
+
+    let portuguese = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::PtBr,
+        local(16, 10),
+    );
+    assert!(pipeline::relocalize_day(&portuguese, day()).await.unwrap());
+    assert!(db::hour_reports_of_day(&store, &key)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(db::workstreams_of_day(&store, &key)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(db::summary_of_day(&store, &key).await.unwrap().is_none());
+
+    let again = pipeline::catch_up_day(&portuguese, day(), false)
+        .await
+        .unwrap();
+    assert_eq!((again.reported, again.folded, again.failed), (2, 2, 0));
+    let locales: Vec<String> = sqlx::query_scalar::query_scalar(
+        "SELECT locale FROM day_hour_reports WHERE day = ? ORDER BY hour",
+    )
+    .bind(&key)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(locales, ["pt-BR", "pt-BR"]);
+    let last_hour = provider.calls_of(prompts::HOUR_REPORT).pop().unwrap();
+    assert!(last_hour.system.as_deref().unwrap().ends_with(
+        prompts::system_prompt("", UiLocale::PtBr)
+            .rsplit("Language: ")
+            .next()
+            .unwrap()
+    ));
+    assert_eq!(db::workstreams_of_day(&store, &key).await.unwrap().len(), 2);
+
+    let portuguese_run = pipeline::summarize_on_demand(&portuguese, day())
+        .await
+        .unwrap();
+    assert!(matches!(portuguese_run, SummaryRun::Generated(_)));
+    assert_eq!(
+        db::summary_of_day(&store, &key)
+            .await
+            .unwrap()
+            .unwrap()
+            .locale,
+        "pt-BR"
+    );
+
+    // Everything is in the current language now: nothing more goes.
+    assert!(!pipeline::relocalize_day(&portuguese, day()).await.unwrap());
+}
+
+/// A summary written by hand before the scheduled time and removed by a
+/// language change is written again as soon as the reports are, once.
+#[tokio::test]
+async fn a_summary_removed_by_a_language_change_is_written_again_once() {
+    use super::pipeline::SummaryRun;
+    use super::summary::SummaryTrigger;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let (_dir, store) = day_store().await;
+    let settings = settings();
+    let zone = zone();
+    let sources = sources();
+    let summary_fails = Arc::new(AtomicBool::new(false));
+    let fails = Arc::clone(&summary_fails);
+    let provider = FakeProvider::new(move |request| {
+        Ok(match kind(request) {
+            "hour" => hour_answer(),
+            "fold" => json!({"placements": [{
+                "workstream_id": 0, "title": "Login fix", "summary": "s", "activities": [1, 2]
+            }]}),
+            _ if fails.load(Ordering::SeqCst) => return Err(LlmError::TimedOut),
+            _ => summary_answer(),
+        })
+    });
+    let key = day_key(day());
+    let english = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::En,
+        local(16, 5),
+    );
+    pipeline::summarize_on_demand(&english, day())
+        .await
+        .unwrap();
+    assert_eq!(
+        db::summary_of_day(&store, &key)
+            .await
+            .unwrap()
+            .unwrap()
+            .trigger,
+        SummaryTrigger::Manual
+    );
+
+    let portuguese = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::PtBr,
+        local(16, 10),
+    );
+    assert!(pipeline::relocalize_day(&portuguese, day()).await.unwrap());
+    // Reports not written again yet: the summary waits.
+    assert!(matches!(
+        pipeline::finish_pending_resummary(&portuguese, day())
+            .await
+            .unwrap(),
+        Some(SummaryRun::Incomplete(_))
+    ));
+    pipeline::catch_up_day(&portuguese, day(), false)
+        .await
+        .unwrap();
+    assert!(matches!(
+        pipeline::finish_pending_resummary(&portuguese, day())
+            .await
+            .unwrap(),
+        Some(SummaryRun::Generated(_))
+    ));
+    let summary = db::summary_of_day(&store, &key).await.unwrap().unwrap();
+    assert_eq!(
+        (summary.locale.as_str(), summary.trigger),
+        ("pt-BR", SummaryTrigger::Manual)
+    );
+    assert!(pipeline::finish_pending_resummary(&portuguese, day())
+        .await
+        .unwrap()
+        .is_none());
+
+    // A failure clears the mark too: no retry loop.
+    let english_again = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::En,
+        local(16, 20),
+    );
+    assert!(pipeline::relocalize_day(&english_again, day())
+        .await
+        .unwrap());
+    pipeline::catch_up_day(&english_again, day(), false)
+        .await
+        .unwrap();
+    summary_fails.store(true, Ordering::SeqCst);
+    assert!(pipeline::finish_pending_resummary(&english_again, day())
+        .await
+        .is_err());
+    assert!(pipeline::finish_pending_resummary(&english_again, day())
+        .await
+        .unwrap()
+        .is_none());
+}

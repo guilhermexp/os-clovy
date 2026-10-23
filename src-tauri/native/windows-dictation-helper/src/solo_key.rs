@@ -2,51 +2,137 @@
 //! keyboard hook's key events (no Win32 here, so the rules are testable
 //! anywhere with `rustc --test`).
 //!
-//! A lone modifier (Right Ctrl, Right Alt/AltGr, Right Shift) is not a
-//! hotkey Windows can register, and it must not get in the way of normal
-//! use: Right Ctrl + C still copies. It counts only when pressed and
-//! released with no other key in between.
+//! A lone modifier (Ctrl, Alt or Shift of either side) is not a hotkey
+//! Windows can register, and it must not get in the way of normal use:
+//! Ctrl + C still copies, Ctrl + click still selects. It works like Fn on the
+//! Mac helper: held alone past `HOLD_MS` it dictates until released; a double
+//! tap toggles. Any other key, mouse button or wheel before that keeps it an
+//! ordinary modifier, and input injected by software never counts.
 
 use std::collections::HashSet;
 
 /// Virtual-key codes the rules need.
+pub const VK_LSHIFT: u32 = 0xA0;
 pub const VK_RSHIFT: u32 = 0xA1;
+pub const VK_LCONTROL: u32 = 0xA2;
 pub const VK_RCONTROL: u32 = 0xA3;
+pub const VK_LMENU: u32 = 0xA4;
 pub const VK_RMENU: u32 = 0xA5;
 
-/// What a lone-modifier shortcut saw.
+/// One decision of the hook about a lone-modifier shortcut, for the
+/// dictation event log. Never names a key other than a modifier: anything
+/// else is `"other"`, so the log holds no typed content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoloEvent {
-    /// The key went down with nothing else held.
-    Down,
-    /// Another key went down while it was held: not a lone press.
-    Chord,
-    /// It went up; `clean` when no other key joined since it went down.
-    Up { clean: bool },
+pub struct Diagnostic {
+    /// The modifier's DOM `code`, `"other"` or `"mouse"`.
+    pub key: &'static str,
+    /// `"down"`, `"up"` or `"click"`.
+    pub edge: &'static str,
+    pub injected: bool,
+    /// The press went down with nothing else held.
+    pub alone: bool,
+    /// How long the shortcut key was held, on its release.
+    pub held_ms: Option<u64>,
+    pub decision: &'static str,
+    pub reason: &'static str,
 }
 
-/// Tracks one lone-modifier shortcut.
+/// The DOM `code` of a modifier virtual key, `"other"` for any other key.
+pub fn key_name(vk: u32) -> &'static str {
+    match vk {
+        VK_LSHIFT => "ShiftLeft",
+        VK_RSHIFT => "ShiftRight",
+        VK_LCONTROL => "ControlLeft",
+        VK_RCONTROL => "ControlRight",
+        VK_LMENU => "AltLeft",
+        VK_RMENU => "AltRight",
+        0x5B => "MetaLeft",
+        0x5C => "MetaRight",
+        _ => "other",
+    }
+}
+
+/// How long a lone modifier must be held alone before push-to-talk opens the
+/// microphone (the Mac helper's `holdThreshold`).
+pub const HOLD_MS: u64 = 160;
+/// Most time between a tap's release and the next press for a double tap
+/// (the Mac helper's `doublePressWindow`).
+pub const DOUBLE_TAP_MS: u64 = 340;
+
+/// One input the hooks saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Input {
+    /// A key edge; `repeat` is a down whose key was already down before it.
+    Key {
+        vk: u32,
+        down: bool,
+        injected: bool,
+        repeat: bool,
+    },
+    /// A mouse button press or a wheel turn.
+    Mouse { injected: bool },
+}
+
+/// What a lone-modifier gesture asks of dictation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GestureEvent {
+    PushDown,
+    PushUp,
+    /// The press became a chord after push-to-talk started: drop the take.
+    PushCancel,
+    Toggle,
+}
+
+/// What one input meant for a gesture, and why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GestureStep {
+    pub event: Option<GestureEvent>,
+    pub diagnostic: Option<Diagnostic>,
+}
+
+/// Where the current press of the gesture's key stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// The key is up.
+    Idle,
+    /// Down alone since `down_at`, not yet held long enough to dictate.
+    Pending,
+    /// Push-to-talk started and runs until the key goes up.
+    Holding,
+    /// The second press of a double tap: it toggles when released clean;
+    /// a key, a click or the wheel before that keeps it ordinary.
+    SecondTap,
+    /// The press is spent (a chord, a key already held): nothing more
+    /// happens until the key goes up.
+    Spent,
+}
+
+/// The Mac Fn gesture on one Windows modifier.
 #[derive(Clone, Debug)]
-pub struct SoloModifier {
+pub struct Gesture {
     target: u32,
-    /// Other keys currently down.
+    push: bool,
+    toggle_presses: Option<u32>,
+    phase: Phase,
+    down_at: u64,
+    /// Other keys the user holds down.
     others: HashSet<u32>,
-    /// The target is down.
-    held: bool,
-    /// The current press went down with nothing else held.
-    alone: bool,
-    /// Another key joined the current lone press.
-    chorded: bool,
+    /// The release of the last clean tap, for a double tap.
+    last_tap_at: Option<u64>,
 }
 
-impl SoloModifier {
-    pub fn new(target: u32) -> Self {
+impl Gesture {
+    /// `toggle_presses` is the toggle shortcut's press count when it uses the
+    /// same key (1: a tap, 2: a double tap).
+    pub fn new(target: u32, push: bool, toggle_presses: Option<u32>) -> Self {
         Self {
             target,
+            push,
+            toggle_presses,
+            phase: Phase::Idle,
+            down_at: 0,
             others: HashSet::new(),
-            held: false,
-            alone: false,
-            chorded: false,
+            last_tap_at: None,
         }
     }
 
@@ -54,49 +140,253 @@ impl SoloModifier {
         self.target
     }
 
-    /// Feeds one key edge (auto-repeat included); returns what it means for
-    /// this shortcut.
-    pub fn on_key(&mut self, vk: u32, is_down: bool) -> Option<SoloEvent> {
-        if vk == self.target {
-            if is_down {
-                if self.held {
-                    return None; // auto-repeat
+    /// Whether holding the key is push-to-talk.
+    pub fn pushes(&self) -> bool {
+        self.push
+    }
+
+    /// Whether the key's next release belongs to the toggle gesture (a tap
+    /// it counts), so a lone Alt must not reach the app as a menu key.
+    pub fn consumes_release(&self) -> bool {
+        match self.phase {
+            Phase::Pending => self.toggle_presses.is_some(),
+            Phase::SecondTap => true,
+            Phase::Idle | Phase::Holding | Phase::Spent => false,
+        }
+    }
+
+    /// Feeds one input. `still_down` asks Windows whether a key is down now:
+    /// a key whose release never reached the hook must not make every later
+    /// press look like a chord.
+    pub fn on_input(
+        &mut self,
+        input: Input,
+        now_ms: u64,
+        still_down: &dyn Fn(u32) -> bool,
+    ) -> GestureStep {
+        match input {
+            Input::Key {
+                vk,
+                down,
+                injected,
+                repeat,
+            } if vk == self.target => {
+                if injected {
+                    let edge = if down { "down" } else { "up" };
+                    return self.step(None, vk, edge, true, None, "ignored", "injected");
                 }
-                self.held = true;
-                self.alone = self.others.is_empty();
-                self.chorded = false;
-                return self.alone.then_some(SoloEvent::Down);
+                if down {
+                    self.target_down(repeat, now_ms, still_down)
+                } else {
+                    self.target_up(now_ms)
+                }
             }
-            if !self.held {
-                return None;
+            Input::Key { injected: true, .. } | Input::Mouse { injected: true } => {
+                GestureStep::default()
             }
-            self.held = false;
-            let alone = std::mem::replace(&mut self.alone, false);
-            return alone.then_some(SoloEvent::Up {
-                clean: !self.chorded,
-            });
+            Input::Key {
+                vk, down, repeat, ..
+            } => {
+                if !down {
+                    self.others.remove(&vk);
+                    return GestureStep::default();
+                }
+                self.others.insert(vk);
+                if repeat {
+                    return GestureStep::default();
+                }
+                self.chord(vk, "down", "other_key", now_ms)
+            }
+            Input::Mouse { .. } => self.chord(0, "click", "mouse", now_ms),
         }
-        if is_down {
-            let first = self.others.insert(vk);
-            if first && self.held && self.alone && !self.chorded {
-                self.chorded = true;
-                return Some(SoloEvent::Chord);
+    }
+
+    /// Starts push-to-talk once the key has been held alone long enough.
+    pub fn on_tick(&mut self, now_ms: u64) -> GestureStep {
+        match self.deadline() {
+            Some(deadline) if now_ms >= deadline => {
+                self.phase = Phase::Holding;
+                self.last_tap_at = None;
+                let held = Some(now_ms.saturating_sub(self.down_at));
+                self.step(
+                    Some(GestureEvent::PushDown),
+                    self.target,
+                    "down",
+                    false,
+                    held,
+                    "push_start",
+                    "held",
+                )
             }
+            _ => GestureStep::default(),
+        }
+    }
+
+    /// When `on_tick` has something to decide.
+    pub fn deadline(&self) -> Option<u64> {
+        (self.push && self.phase == Phase::Pending).then_some(self.down_at + HOLD_MS)
+    }
+
+    fn target_down(
+        &mut self,
+        repeat: bool,
+        now_ms: u64,
+        still_down: &dyn Fn(u32) -> bool,
+    ) -> GestureStep {
+        if repeat && self.phase != Phase::Idle {
+            return GestureStep::default();
+        }
+        // A fresh press while the last one never saw its release: the
+        // release was missed (a secure desktop, a lock screen). Start over.
+        let missed_release = self.phase == Phase::Holding;
+        self.others.retain(|vk| still_down(*vk));
+        self.down_at = now_ms;
+        if missed_release {
+            self.phase = Phase::Pending;
+            return self.step(
+                Some(GestureEvent::PushCancel),
+                self.target,
+                "down",
+                true,
+                None,
+                "push_cancel",
+                "missed_release",
+            );
+        }
+        if !self.others.is_empty() {
+            self.phase = Phase::Spent;
+            self.last_tap_at = None;
+            return self.step(
+                None,
+                self.target,
+                "down",
+                false,
+                None,
+                "ignored",
+                "other_key_held",
+            );
+        }
+        let double_tap = self.toggle_presses == Some(2)
+            && self
+                .last_tap_at
+                .is_some_and(|at| now_ms.saturating_sub(at) <= DOUBLE_TAP_MS);
+        if double_tap {
+            self.phase = Phase::SecondTap;
+            self.last_tap_at = None;
+            return self.step(
+                None,
+                self.target,
+                "down",
+                true,
+                None,
+                "second_tap",
+                "double_tap",
+            );
+        }
+        self.phase = Phase::Pending;
+        self.step(None, self.target, "down", true, None, "pending", "alone")
+    }
+
+    fn target_up(&mut self, now_ms: u64) -> GestureStep {
+        let phase = std::mem::replace(&mut self.phase, Phase::Idle);
+        let held = Some(now_ms.saturating_sub(self.down_at));
+        let line = |this: &Self, event, decision, reason| {
+            this.step(event, this.target, "up", true, held, decision, reason)
+        };
+        match phase {
+            Phase::Idle => self.step(
+                None,
+                self.target,
+                "up",
+                false,
+                None,
+                "ignored",
+                "up_without_down",
+            ),
+            Phase::Holding => line(self, Some(GestureEvent::PushUp), "push_end", "released"),
+            Phase::Spent => line(self, None, "released", "spent"),
+            Phase::SecondTap => line(self, Some(GestureEvent::Toggle), "toggle", "double_tap"),
+            Phase::Pending => match self.toggle_presses {
+                Some(1) => line(self, Some(GestureEvent::Toggle), "toggle", "tap"),
+                Some(2) => {
+                    self.last_tap_at = Some(now_ms);
+                    line(self, None, "tap", "first_of_double_tap")
+                }
+                _ => line(self, None, "tap", "short_hold"),
+            },
+        }
+    }
+
+    /// Another key, a mouse button or the wheel while the key is down.
+    fn chord(
+        &mut self,
+        vk: u32,
+        edge: &'static str,
+        reason: &'static str,
+        now_ms: u64,
+    ) -> GestureStep {
+        self.last_tap_at = None;
+        let held = Some(now_ms.saturating_sub(self.down_at));
+        let key = if reason == "mouse" {
+            "mouse"
         } else {
-            self.others.remove(&vk);
+            key_name(vk)
+        };
+        let (event, decision) = match self.phase {
+            // Before the hold threshold: nothing was shown, nothing to undo.
+            Phase::Pending | Phase::SecondTap => (None, "chord"),
+            Phase::Holding => (Some(GestureEvent::PushCancel), "push_cancel"),
+            Phase::Idle | Phase::Spent => return GestureStep::default(),
+        };
+        self.phase = Phase::Spent;
+        GestureStep {
+            event,
+            diagnostic: Some(Diagnostic {
+                key,
+                edge,
+                injected: false,
+                alone: true,
+                held_ms: held,
+                decision,
+                reason,
+            }),
         }
-        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step(
+        &self,
+        event: Option<GestureEvent>,
+        vk: u32,
+        edge: &'static str,
+        alone: bool,
+        held_ms: Option<u64>,
+        decision: &'static str,
+        reason: &'static str,
+    ) -> GestureStep {
+        let injected = reason == "injected";
+        GestureStep {
+            event,
+            diagnostic: Some(Diagnostic {
+                key: key_name(vk),
+                edge,
+                injected,
+                alone: alone && !injected,
+                held_ms,
+                decision,
+                reason,
+            }),
+        }
     }
 }
 
 /// What a finished capture that never formed a chord recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoloCapture {
-    /// A right-hand modifier pressed and released alone.
+    /// Ctrl, Alt or Shift (either side) pressed and released alone.
     Modifier(u32),
-    /// A left-hand modifier pressed and released alone: refused, since the
-    /// left keys are in constant use.
-    LeftModifier(u32),
+    /// The Windows key pressed and released alone: refused, it opens Start.
+    Unsupported(u32),
 }
 
 /// Watches a shortcut capture for a lone modifier and for whether any key
@@ -132,10 +422,10 @@ impl CaptureTracker {
             return None;
         }
         self.candidate = None;
-        Some(if is_right_modifier(vk) {
+        Some(if is_lone_modifier(vk) {
             SoloCapture::Modifier(vk)
         } else {
-            SoloCapture::LeftModifier(vk)
+            SoloCapture::Unsupported(vk)
         })
     }
 
@@ -145,14 +435,20 @@ impl CaptureTracker {
     }
 }
 
-fn is_right_modifier(vk: u32) -> bool {
-    matches!(vk, VK_RCONTROL | VK_RMENU | VK_RSHIFT)
+fn is_lone_modifier(vk: u32) -> bool {
+    matches!(
+        vk,
+        VK_LCONTROL | VK_RCONTROL | VK_LMENU | VK_RMENU | VK_LSHIFT | VK_RSHIFT
+    )
 }
 
 /// Lone keys: virtual key, DOM `code`, label.
-const SOLO_KEYS: [(u32, &str, &str); 20] = [
+const SOLO_KEYS: [(u32, &str, &str); 23] = [
+    (VK_LCONTROL, "ControlLeft", "Left Ctrl"),
     (VK_RCONTROL, "ControlRight", "Right Ctrl"),
+    (VK_LMENU, "AltLeft", "Left Alt"),
     (VK_RMENU, "AltRight", "Right Alt"),
+    (VK_LSHIFT, "ShiftLeft", "Left Shift"),
     (VK_RSHIFT, "ShiftRight", "Right Shift"),
     (0x7C, "F13", "F13"),
     (0x7D, "F14", "F14"),
@@ -192,7 +488,7 @@ pub fn solo_vk(code: &str) -> Option<u32> {
 /// Whether `code` names a lone modifier (handled by the hook, not
 /// `RegisterHotKey`).
 pub fn is_solo_modifier_code(code: &str) -> bool {
-    solo_vk(code).is_some_and(is_right_modifier)
+    solo_vk(code).is_some_and(is_lone_modifier)
 }
 
 #[cfg(test)]
@@ -200,89 +496,50 @@ mod tests {
     use super::*;
 
     const KEY_C: u32 = 0x43;
-    const VK_LSHIFT: u32 = 0xA0;
-    const VK_LCONTROL: u32 = 0xA2;
-
-    fn feed(machine: &mut SoloModifier, events: &[(u32, bool)]) -> Vec<SoloEvent> {
-        events
-            .iter()
-            .filter_map(|(vk, down)| machine.on_key(*vk, *down))
-            .collect()
-    }
 
     #[test]
-    fn right_ctrl_alone_goes_down_and_up_clean() {
-        let mut machine = SoloModifier::new(VK_RCONTROL);
-        assert_eq!(
-            feed(&mut machine, &[(VK_RCONTROL, true), (VK_RCONTROL, false)]),
-            [SoloEvent::Down, SoloEvent::Up { clean: true }]
+    fn a_key_already_held_keeps_the_press_ordinary() {
+        let mut gesture = Gesture::new(VK_RCONTROL, true, None);
+        let shift_held = |vk: u32| vk == VK_LSHIFT;
+        let mut events = play_with(
+            &mut gesture,
+            &[
+                (0, Some(key(VK_LSHIFT, true))),
+                (10, Some(key(VK_RCONTROL, true))),
+            ],
+            &shift_held,
         );
-    }
-
-    #[test]
-    fn right_ctrl_with_c_is_a_chord_not_a_shortcut() {
-        let mut machine = SoloModifier::new(VK_RCONTROL);
-        assert_eq!(
-            feed(
-                &mut machine,
-                &[
-                    (VK_RCONTROL, true),
-                    (KEY_C, true),
-                    (KEY_C, false),
-                    (VK_RCONTROL, false)
-                ]
-            ),
-            [
-                SoloEvent::Down,
-                SoloEvent::Chord,
-                SoloEvent::Up { clean: false }
-            ]
-        );
-    }
-
-    #[test]
-    fn auto_repeat_of_the_held_key_is_ignored() {
-        let mut machine = SoloModifier::new(VK_RCONTROL);
-        assert_eq!(
-            feed(
-                &mut machine,
-                &[
-                    (VK_RCONTROL, true),
-                    (VK_RCONTROL, true),
-                    (VK_RCONTROL, true),
-                    (VK_RCONTROL, false)
-                ]
-            ),
-            [SoloEvent::Down, SoloEvent::Up { clean: true }]
-        );
-    }
-
-    #[test]
-    fn a_key_already_held_makes_it_a_chord() {
-        let mut machine = SoloModifier::new(VK_RCONTROL);
-        assert_eq!(
-            feed(
-                &mut machine,
-                &[
-                    (VK_LSHIFT, true),
-                    (VK_RCONTROL, true),
-                    (VK_RCONTROL, false),
-                    (VK_LSHIFT, false)
-                ]
-            ),
-            Vec::<SoloEvent>::new()
-        );
+        events.extend(play(
+            &mut gesture,
+            &[
+                (10 + HOLD_MS, None),
+                (400, Some(key(VK_RCONTROL, false))),
+                (410, Some(key(VK_LSHIFT, false))),
+            ],
+        ));
+        assert_eq!(events, []);
         // Released everything: a later lone press counts again.
         assert_eq!(
-            feed(&mut machine, &[(VK_RCONTROL, true), (VK_RCONTROL, false)]),
-            [SoloEvent::Down, SoloEvent::Up { clean: true }]
+            play(
+                &mut gesture,
+                &[
+                    (1_000, Some(key(VK_RCONTROL, true))),
+                    (1_000 + HOLD_MS, None)
+                ]
+            ),
+            [GestureEvent::PushDown]
         );
     }
 
     #[test]
     fn other_keys_alone_mean_nothing() {
-        let mut machine = SoloModifier::new(VK_RMENU);
-        assert!(feed(&mut machine, &[(KEY_C, true), (KEY_C, false)]).is_empty());
+        let mut gesture = Gesture::new(VK_RMENU, true, Some(2));
+        let steps = [
+            gesture.on_input(key(KEY_C, true), 0, &NOTHING_HELD),
+            gesture.on_input(key(KEY_C, false), 10, &NOTHING_HELD),
+            gesture.on_input(Input::Mouse { injected: false }, 20, &NOTHING_HELD),
+        ];
+        assert!(steps.iter().all(|step| *step == GestureStep::default()));
     }
 
     #[test]
@@ -298,13 +555,386 @@ mod tests {
     }
 
     #[test]
-    fn capture_refuses_a_lone_left_modifier() {
+    fn capture_records_ctrl_alt_and_shift_of_either_side() {
+        for vk in [
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_LMENU,
+            VK_RMENU,
+            VK_LSHIFT,
+            VK_RSHIFT,
+        ] {
+            let mut capture = CaptureTracker::default();
+            capture.on_key(vk, true, true);
+            assert_eq!(
+                capture.on_key(vk, false, true),
+                Some(SoloCapture::Modifier(vk)),
+                "{vk:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_does_not_take_the_windows_key_alone() {
         let mut capture = CaptureTracker::default();
-        capture.on_key(VK_LCONTROL, true, true);
-        assert_eq!(
-            capture.on_key(VK_LCONTROL, false, true),
-            Some(SoloCapture::LeftModifier(VK_LCONTROL))
+        capture.on_key(VK_LWIN, true, true);
+        assert_ne!(
+            capture.on_key(VK_LWIN, false, true),
+            Some(SoloCapture::Modifier(VK_LWIN))
         );
+    }
+
+    const VK_LWIN: u32 = 0x5B;
+    const NOTHING_HELD: fn(u32) -> bool = |_| false;
+
+    fn key(vk: u32, down: bool) -> Input {
+        Input::Key {
+            vk,
+            down,
+            injected: false,
+            repeat: false,
+        }
+    }
+
+    fn injected(vk: u32, down: bool) -> Input {
+        Input::Key {
+            vk,
+            down,
+            injected: true,
+            repeat: false,
+        }
+    }
+
+    /// Feeds timed inputs (`None` is a timer tick) and collects the events.
+    fn play(gesture: &mut Gesture, script: &[(u64, Option<Input>)]) -> Vec<GestureEvent> {
+        play_with(gesture, script, &NOTHING_HELD)
+    }
+
+    fn play_with(
+        gesture: &mut Gesture,
+        script: &[(u64, Option<Input>)],
+        still_down: &dyn Fn(u32) -> bool,
+    ) -> Vec<GestureEvent> {
+        script
+            .iter()
+            .filter_map(|(at, input)| match input {
+                Some(input) => gesture.on_input(*input, *at, still_down).event,
+                None => gesture.on_tick(*at).event,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn holding_ctrl_alone_dictates_while_held() {
+        for target in [VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RSHIFT] {
+            let mut gesture = Gesture::new(target, true, None);
+            assert_eq!(play(&mut gesture, &[(0, Some(key(target, true)))]), []);
+            assert_eq!(gesture.deadline(), Some(HOLD_MS));
+            assert_eq!(play(&mut gesture, &[(HOLD_MS - 1, None)]), []);
+            assert_eq!(
+                play(
+                    &mut gesture,
+                    &[(HOLD_MS, None), (2_000, Some(key(target, false)))]
+                ),
+                [GestureEvent::PushDown, GestureEvent::PushUp],
+                "{target:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_click_and_wheel_never_open_the_microphone() {
+        let chords: [&[(u64, Option<Input>)]; 3] = [
+            &[(40, Some(key(KEY_C, true))), (60, Some(key(KEY_C, false)))],
+            &[(40, Some(Input::Mouse { injected: false }))],
+            &[(90, Some(Input::Mouse { injected: false }))],
+        ];
+        for chord in chords {
+            let mut gesture = Gesture::new(VK_LCONTROL, true, Some(2));
+            play(&mut gesture, &[(0, Some(key(VK_LCONTROL, true)))]);
+            let mut events = play(&mut gesture, chord);
+            events.extend(play(
+                &mut gesture,
+                &[
+                    (HOLD_MS, None),
+                    (400, None),
+                    (500, Some(key(VK_LCONTROL, false))),
+                ],
+            ));
+            assert_eq!(events, [], "{chord:?}");
+            assert_eq!(gesture.deadline(), None);
+        }
+    }
+
+    #[test]
+    fn a_chord_after_the_start_drops_the_take() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, None);
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (0, Some(key(VK_LCONTROL, true))),
+                    (HOLD_MS, None),
+                    (300, Some(key(KEY_C, true))),
+                    (320, Some(key(KEY_C, false))),
+                    (400, Some(key(VK_LCONTROL, false))),
+                ]
+            ),
+            [GestureEvent::PushDown, GestureEvent::PushCancel]
+        );
+    }
+
+    #[test]
+    fn injected_input_is_not_the_users_gesture() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, Some(2));
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (0, Some(injected(VK_LCONTROL, true))),
+                    (HOLD_MS, None),
+                    (300, Some(injected(VK_LCONTROL, false))),
+                ]
+            ),
+            []
+        );
+        let line = gesture
+            .on_input(injected(VK_LCONTROL, true), 400, &NOTHING_HELD)
+            .diagnostic
+            .expect("an injected press is logged");
+        assert!(line.injected);
+        assert_eq!(line.reason, "injected");
+        gesture.on_input(injected(VK_LCONTROL, false), 410, &NOTHING_HELD);
+
+        // An injected key (a paste) while the user holds Ctrl is no chord.
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (1_000, Some(key(VK_LCONTROL, true))),
+                    (1_000 + HOLD_MS, None),
+                    (1_300, Some(injected(0x56, true))),
+                    (1_310, Some(injected(0x56, false))),
+                    (1_320, Some(Input::Mouse { injected: true })),
+                    (2_000, Some(key(VK_LCONTROL, false))),
+                ]
+            ),
+            [GestureEvent::PushDown, GestureEvent::PushUp]
+        );
+    }
+
+    #[test]
+    fn a_key_whose_release_was_missed_does_not_block_the_next_press() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, None);
+        // C went down and its release never reached the hook.
+        play(&mut gesture, &[(0, Some(key(KEY_C, true)))]);
+        assert_eq!(
+            play_with(
+                &mut gesture,
+                &[
+                    (1_000, Some(key(VK_LCONTROL, true))),
+                    (1_000 + HOLD_MS, None),
+                    (2_000, Some(key(VK_LCONTROL, false))),
+                ],
+                &NOTHING_HELD,
+            ),
+            [GestureEvent::PushDown, GestureEvent::PushUp]
+        );
+
+        // Ctrl's own release was missed: a fresh press starts over.
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (3_000, Some(key(VK_LCONTROL, true))),
+                    (3_000 + HOLD_MS, None)
+                ]
+            ),
+            [GestureEvent::PushDown]
+        );
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (9_000, Some(key(VK_LCONTROL, true))),
+                    (9_000 + HOLD_MS, None)
+                ]
+            ),
+            [GestureEvent::PushCancel, GestureEvent::PushDown]
+        );
+    }
+
+    #[test]
+    fn auto_repeat_is_not_a_new_press() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, None);
+        let repeat = Input::Key {
+            vk: VK_LCONTROL,
+            down: true,
+            injected: false,
+            repeat: true,
+        };
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (0, Some(key(VK_LCONTROL, true))),
+                    (HOLD_MS, None),
+                    (500, Some(repeat)),
+                    (530, Some(repeat)),
+                    (900, Some(key(VK_LCONTROL, false))),
+                ]
+            ),
+            [GestureEvent::PushDown, GestureEvent::PushUp]
+        );
+    }
+
+    #[test]
+    fn a_double_tap_toggles_like_fn_on_the_mac() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, Some(2));
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (0, Some(key(VK_LCONTROL, true))),
+                    (90, Some(key(VK_LCONTROL, false))),
+                    (300, Some(key(VK_LCONTROL, true))),
+                    (300 + HOLD_MS, None),
+                    (600, Some(key(VK_LCONTROL, false))),
+                ]
+            ),
+            [GestureEvent::Toggle]
+        );
+        // Too slow: the second press is a fresh hold.
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (5_000, Some(key(VK_LCONTROL, true))),
+                    (5_090, Some(key(VK_LCONTROL, false))),
+                    (5_090 + DOUBLE_TAP_MS + 1, Some(key(VK_LCONTROL, true))),
+                    (5_090 + DOUBLE_TAP_MS + 1 + HOLD_MS, None),
+                ]
+            ),
+            [GestureEvent::PushDown]
+        );
+    }
+
+    /// The toggle fires when the second tap is released clean, never on its
+    /// press: a quick Ctrl tap followed by Ctrl+C is copying, not dictating.
+    #[test]
+    fn a_double_tap_toggles_only_on_a_clean_second_release() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, Some(2));
+        let steps: Vec<Option<GestureEvent>> = [
+            (0, key(VK_LCONTROL, true)),
+            (90, key(VK_LCONTROL, false)),
+            (300, key(VK_LCONTROL, true)),
+            (390, key(VK_LCONTROL, false)),
+        ]
+        .into_iter()
+        .map(|(at, input)| gesture.on_input(input, at, &NOTHING_HELD).event)
+        .collect();
+        assert_eq!(steps, [None, None, None, Some(GestureEvent::Toggle)]);
+
+        let chords: [Input; 3] = [
+            key(KEY_C, true),
+            Input::Mouse { injected: false },
+            Input::Mouse { injected: false },
+        ];
+        for (offset, chord) in chords.into_iter().enumerate() {
+            let start = 10_000 * (offset as u64 + 1);
+            let mut events = play(
+                &mut gesture,
+                &[
+                    (start, Some(key(VK_LCONTROL, true))),
+                    (start + 80, Some(key(VK_LCONTROL, false))),
+                    (start + 200, Some(key(VK_LCONTROL, true))),
+                    (start + 230, Some(chord)),
+                    (start + 200 + HOLD_MS, None),
+                    (start + 400, Some(key(VK_LCONTROL, false))),
+                ],
+            );
+            if chord == key(KEY_C, true) {
+                events.extend(play(
+                    &mut gesture,
+                    &[(start + 410, Some(key(KEY_C, false)))],
+                ));
+            }
+            assert_eq!(events, [], "{chord:?}");
+        }
+    }
+
+    /// Both taps of an Alt double tap are the gesture's, not the menu's; a
+    /// chord (Alt+Tab) or a push-only tap stays the app's.
+    #[test]
+    fn the_toggle_taps_consume_their_release_and_chords_do_not() {
+        let mut gesture = Gesture::new(VK_LMENU, true, Some(2));
+        assert!(!gesture.consumes_release());
+        gesture.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
+        assert!(gesture.consumes_release(), "first tap");
+        gesture.on_input(key(VK_LMENU, false), 80, &NOTHING_HELD);
+        assert!(!gesture.consumes_release());
+        gesture.on_input(key(VK_LMENU, true), 200, &NOTHING_HELD);
+        assert!(gesture.consumes_release(), "second tap");
+        gesture.on_input(key(VK_LMENU, false), 280, &NOTHING_HELD);
+
+        gesture.on_input(key(VK_LMENU, true), 5_000, &NOTHING_HELD);
+        gesture.on_input(key(0x09, true), 5_030, &NOTHING_HELD); // Tab
+        assert!(!gesture.consumes_release(), "Alt+Tab is the app's");
+        gesture.on_input(key(0x09, false), 5_060, &NOTHING_HELD);
+        gesture.on_input(key(VK_LMENU, false), 5_100, &NOTHING_HELD);
+
+        let mut push_only = Gesture::new(VK_LMENU, true, None);
+        push_only.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
+        assert!(
+            !push_only.consumes_release(),
+            "a plain Alt tap opens the menu as usual"
+        );
+        let mut single = Gesture::new(VK_RMENU, false, Some(1));
+        single.on_input(key(VK_RMENU, true), 0, &NOTHING_HELD);
+        assert!(single.consumes_release());
+    }
+
+    #[test]
+    fn a_single_tap_toggle_fires_on_a_clean_release() {
+        let mut gesture = Gesture::new(VK_RSHIFT, false, Some(1));
+        assert_eq!(
+            play(
+                &mut gesture,
+                &[
+                    (0, Some(key(VK_RSHIFT, true))),
+                    (80, Some(key(VK_RSHIFT, false))),
+                    (500, Some(key(VK_RSHIFT, true))),
+                    (520, Some(key(KEY_C, true))),
+                    (600, Some(key(VK_RSHIFT, false))),
+                ]
+            ),
+            [GestureEvent::Toggle]
+        );
+    }
+
+    #[test]
+    fn every_gesture_decision_is_logged_without_typed_keys() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, None);
+        let mut lines = Vec::new();
+        for (at, input) in [
+            (0, Some(key(VK_LCONTROL, true))),
+            (HOLD_MS, None),
+            (300, Some(key(KEY_C, true))),
+            (400, Some(key(VK_LCONTROL, false))),
+        ] {
+            let step = match input {
+                Some(input) => gesture.on_input(input, at, &NOTHING_HELD),
+                None => gesture.on_tick(at),
+            };
+            lines.extend(step.diagnostic);
+        }
+        let decisions: Vec<_> = lines.iter().map(|line| line.decision).collect();
+        assert_eq!(
+            decisions,
+            ["pending", "push_start", "push_cancel", "released"]
+        );
+        assert_eq!(lines[2].key, "other");
+        assert_eq!(lines[3].held_ms, Some(400));
     }
 
     #[test]
@@ -314,6 +944,35 @@ mod tests {
         capture.on_key(KEY_C, true, false);
         capture.on_key(KEY_C, false, false);
         assert_eq!(capture.on_key(VK_RCONTROL, false, true), None);
+    }
+
+    #[test]
+    fn a_press_with_a_key_held_and_a_short_tap_say_why() {
+        let mut gesture = Gesture::new(VK_RCONTROL, true, None);
+        gesture.on_input(key(VK_LSHIFT, true), 0, &NOTHING_HELD);
+        let held = gesture
+            .on_input(key(VK_RCONTROL, true), 10, &|vk| vk == VK_LSHIFT)
+            .diagnostic
+            .expect("logged");
+        assert!(!held.alone);
+        assert_eq!(held.reason, "other_key_held");
+        gesture.on_input(key(VK_RCONTROL, false), 20, &NOTHING_HELD);
+        gesture.on_input(key(VK_LSHIFT, false), 30, &NOTHING_HELD);
+
+        gesture.on_input(key(VK_RCONTROL, true), 1_000, &NOTHING_HELD);
+        let tap = gesture
+            .on_input(key(VK_RCONTROL, false), 1_090, &NOTHING_HELD)
+            .diagnostic
+            .expect("logged");
+        assert_eq!((tap.decision, tap.reason), ("tap", "short_hold"));
+        assert_eq!(tap.held_ms, Some(90));
+    }
+
+    #[test]
+    fn modifier_names_are_codes_and_other_keys_are_anonymous() {
+        assert_eq!(key_name(VK_LCONTROL), "ControlLeft");
+        assert_eq!(key_name(VK_RMENU), "AltRight");
+        assert_eq!(key_name(KEY_C), "other");
     }
 
     #[test]
@@ -336,8 +995,12 @@ mod tests {
             Some("Right Ctrl")
         );
         assert_eq!(solo_code(0x44), None, "D needs a modifier");
-        assert_eq!(solo_code(VK_LCONTROL), None);
+        assert_eq!(solo_code(VK_LCONTROL), Some(("ControlLeft", "Left Ctrl")));
+        assert_eq!(solo_code(VK_LMENU), Some(("AltLeft", "Left Alt")));
+        assert_eq!(solo_code(VK_LSHIFT), Some(("ShiftLeft", "Left Shift")));
+        assert_eq!(solo_code(VK_LWIN), None);
         assert!(is_solo_modifier_code("AltRight"));
+        assert!(is_solo_modifier_code("ControlLeft"));
         assert!(!is_solo_modifier_code("F13"));
     }
 }

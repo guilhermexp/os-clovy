@@ -261,10 +261,27 @@ mod windows_icon {
     }
 
     fn icon_png_from_file(path: &Path) -> Option<Vec<u8>> {
-        let _apartment = ComApartment::enter()?;
+        icon_png_from_file_traced(path).ok()
+    }
+
+    /// The calling thread's COM apartment, for failure reports in tests.
+    #[cfg(test)]
+    pub(super) fn current_apartment() -> String {
+        use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+        let mut kind = APTTYPE::default();
+        let mut qualifier = APTTYPEQUALIFIER::default();
+        match unsafe { CoGetApartmentType(&mut kind, &mut qualifier) } {
+            Ok(()) => format!("type {} qualifier {}", kind.0, qualifier.0),
+            Err(error) => format!("none ({:?})", error.code()),
+        }
+    }
+
+    /// [`icon_png_from_file`], saying which step failed.
+    pub(super) fn icon_png_from_file_traced(path: &Path) -> Result<Vec<u8>, String> {
+        let _apartment = ComApartment::enter().ok_or("CoInitializeEx failed")?;
         let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut info = SHFILEINFOW::default();
-        if unsafe {
+        let found = unsafe {
             SHGetFileInfoW(
                 PCWSTR(path_wide.as_ptr()),
                 FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -272,17 +289,21 @@ mod windows_icon {
                 std::mem::size_of::<SHFILEINFOW>() as u32,
                 SHGFI_ICON | SHGFI_LARGEICON,
             )
-        } == 0
-            || info.hIcon.0.is_null()
-        {
-            return None;
+        };
+        if found == 0 || info.hIcon.0.is_null() {
+            return Err(format!(
+                "SHGetFileInfoW returned {found} (icon null: {}, last error {:?})",
+                info.hIcon.0.is_null(),
+                windows::core::Error::from_win32().code()
+            ));
         }
         let icon = OwnedIcon(info.hIcon);
         let factory: IWICImagingFactory =
             unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
-                .ok()?;
-        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }.ok()?;
-        encode_bitmap_source_to_png(&factory, &bitmap)
+                .map_err(|error| format!("CoCreateInstance(WIC) {:?}", error.code()))?;
+        let bitmap = unsafe { factory.CreateBitmapFromHICON(icon.0) }
+            .map_err(|error| format!("CreateBitmapFromHICON {:?}", error.code()))?;
+        encode_bitmap_source_to_png(&factory, &bitmap).ok_or_else(|| "PNG encoding".to_string())
     }
 
     fn icon_png_from_apps_folder(identity: &str) -> Option<Vec<u8>> {
@@ -311,7 +332,17 @@ mod windows_icon {
         encode_bitmap_source_to_png(&factory, &bitmap)
     }
 
+    /// One Shell icon extraction at a time. A process's first extractions
+    /// made from several threads at once all fail (and each draws on a
+    /// second try): the UI asks for several apps' icons together, and two
+    /// tests used to race on it. Icons are cached, so this costs nothing
+    /// after the first draw.
+    static SHELL_ICONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     pub(super) fn icon_png(identity: &str) -> Option<Vec<u8>> {
+        let _one_at_a_time = SHELL_ICONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if identity.contains('!') {
             icon_png_from_apps_folder(identity)
         } else {
@@ -366,7 +397,23 @@ mod windows_tests {
         let icons: Vec<Vec<u8>> = ["cmd.exe", "explorer.exe"]
             .into_iter()
             .map(|executable| {
-                let url = app_icon_data_url(executable).expect("installed Windows app icon");
+                let url = app_icon_data_url(executable).unwrap_or_else(|| {
+                    // Say where it failed, and whether trying again helps.
+                    let path = crate::activity::windows::window::executable_path(executable);
+                    let first = path
+                        .as_deref()
+                        .map(super::windows_icon::icon_png_from_file_traced);
+                    let later = (1..=20).find_map(|attempt| {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        app_icon_data_url(executable).map(|_| attempt)
+                    });
+                    panic!(
+                        "installed Windows app icon: {executable} resolved to {path:?}; \
+                         extraction: {:?}; recovered on retry: {later:?}; thread apartment: {:?}",
+                        first.map(|result| result.map(|png| png.len())),
+                        super::windows_icon::current_apartment()
+                    )
+                });
                 let payload = url.strip_prefix("data:image/png;base64,").expect("PNG URL");
                 let png = base64::engine::general_purpose::STANDARD
                     .decode(payload)
@@ -380,6 +427,76 @@ mod windows_tests {
         assert_ne!(icons[0], icons[1], "each executable must show its own icon");
         assert_eq!(app_icon_data_url("../../Windows/explorer.exe"), None);
         assert_eq!(app_icon_data_url("clovy-never-installed.exe"), None);
+    }
+
+    /// The first icon extractions of a process, from several threads at once
+    /// (the UI asks for several apps' icons together), must all draw. Runs in
+    /// fresh child processes: the parent suite has already used the Shell.
+    #[test]
+    fn first_icon_extractions_of_a_process_from_parallel_threads_all_draw() {
+        if std::env::var("CLOVY_TEST_ISOLATED_ICONS").is_err() {
+            for round in 0..3 {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg("activity::app_icon::windows_tests::first_icon_extractions_of_a_process_from_parallel_threads_all_draw")
+                    .arg("--nocapture")
+                    .env("CLOVY_TEST_ISOLATED_ICONS", "1")
+                    .output()
+                    .expect("spawn the isolated icon test");
+                assert!(
+                    output.status.success(),
+                    "round {round}: isolated icon child failed with {:?}:\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+
+        let paths: Vec<std::path::PathBuf> = [
+            "cmd.exe",
+            "explorer.exe",
+            "notepad.exe",
+            "regedit.exe",
+            "taskmgr.exe",
+            "mmc.exe",
+            "charmap.exe",
+            "calc.exe",
+        ]
+        .into_iter()
+        .filter_map(crate::activity::windows::window::executable_path)
+        .collect();
+        assert!(paths.len() >= 4, "system executables found: {paths:?}");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(paths.len()));
+        let results: Vec<(std::path::PathBuf, Result<usize, String>)> = paths
+            .into_iter()
+            .map(|path| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let result = super::icon_png(&path.file_name().unwrap().to_string_lossy())
+                        .map(|png| png.len())
+                        .ok_or_else(|| {
+                            super::windows_icon::icon_png_from_file_traced(&path)
+                                .err()
+                                .unwrap_or_else(|| "drew on a second try".to_string())
+                        });
+                    (path, result)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        let failed: Vec<_> = results
+            .iter()
+            .filter(|(_, result)| result.is_err())
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "first extractions that failed: {failed:?}"
+        );
     }
 
     #[test]

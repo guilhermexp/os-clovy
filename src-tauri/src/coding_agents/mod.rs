@@ -295,23 +295,29 @@ async fn run(
                             lock(&status).last_error = Some(error.to_string());
                         }
                     }
-                    match summarize::drain(
-                        &store,
-                        &summarize::LlmBackend,
-                        &settings.coding_agents,
-                        crate::interface_locale::current(),
-                        window,
-                        Utc::now,
-                    )
-                    .await
-                    {
-                        Ok(report) => {
-                            changed |= report.summarized + report.failed > 0;
-                            if report.more {
-                                wait = DRAIN_AGAIN;
+                    // Summaries are written in the interface language: none
+                    // before it is known (saved file or webview).
+                    if let Some(locale) = crate::interface_locale::known() {
+                        match summarize::drain(
+                            &store,
+                            &summarize::LlmBackend,
+                            &settings.coding_agents,
+                            locale,
+                            window,
+                            Utc::now,
+                        )
+                        .await
+                        {
+                            Ok(report) => {
+                                changed |= report.summarized + report.failed > 0;
+                                if report.more {
+                                    wait = DRAIN_AGAIN;
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "coding agents: summaries failed")
                             }
                         }
-                        Err(error) => tracing::warn!(%error, "coding agents: summaries failed"),
                     }
                     if changed {
                         let _ = app.emit(CODING_AGENTS_UPDATED_EVENT, ());

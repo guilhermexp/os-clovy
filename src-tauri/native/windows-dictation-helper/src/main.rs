@@ -211,6 +211,26 @@ impl HelperApp {
                     "shortcut_captured",
                     serde_json::json!({ "kind": kind, "shortcut": shortcut }),
                 ),
+                HotkeyEvent::Diagnostic {
+                    kind,
+                    diagnostic,
+                    action,
+                } => event(
+                    "shortcut_trigger_diagnostic",
+                    serde_json::json!({
+                        "kind": kind,
+                        "trigger": {
+                            "key": diagnostic.key,
+                            "edge": diagnostic.edge,
+                            "injected": diagnostic.injected,
+                            "alone": diagnostic.alone,
+                            "heldMs": diagnostic.held_ms,
+                            "decision": diagnostic.decision,
+                            "action": action,
+                            "reason": diagnostic.reason,
+                        },
+                    }),
+                ),
             };
             if let Ok(tx) = event_tx.lock() {
                 let _ = tx.send(event);
@@ -430,6 +450,8 @@ impl HelperApp {
                         start_target: verified_start_target,
                     }
                 });
+                // The window in front when dictation starts: Clovy names its
+                // app for the indicator (`target`), as on the Mac.
                 self.writer.emit(event(
                     "listening_started",
                     serde_json::json!({
@@ -439,6 +461,8 @@ impl HelperApp {
                             .as_ref()
                             .map(|request| request.id.as_str()),
                         "takeId": take_id,
+                        "targetProcessId": start_target.map(|target| target.pid()),
+                        "targetWindowHandle": start_target.map(|target| target.hwnd_value()),
                     }),
                 ));
                 self.spawn_level_thread();
@@ -487,9 +511,16 @@ impl HelperApp {
         self.awaiting_transcript = true;
         self.pinned_target = focus::pin_foreground_window();
         let active_take_id = self.active_take_id.clone();
+        // The window pinned here receives the paste; Clovy names its app so
+        // the indicator pins it, not the one dictation started in.
+        let stop_target = self.pinned_target;
         self.writer.emit(event(
             "finalizing_transcript",
-            serde_json::json!({ "takeId": active_take_id.as_deref() }),
+            serde_json::json!({
+                "takeId": active_take_id.as_deref(),
+                "targetProcessId": stop_target.map(|target| target.pid()),
+                "targetWindowHandle": stop_target.map(|target| target.hwnd_value()),
+            }),
         ));
         match recorder.stop() {
             Ok(summary) => {

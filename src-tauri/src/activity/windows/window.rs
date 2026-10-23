@@ -287,6 +287,17 @@ pub(crate) fn focused_window() -> Option<WindowDescriptor> {
     describe_window_handle(hwnd, pid)
 }
 
+/// App name and identity (executable or AUMID) of the window the dictation
+/// helper pinned, by its handle and process. Records the executable so the
+/// app icon resolver can draw the same app's icon.
+pub(crate) fn app_of_window(hwnd: isize, pid: u32) -> Option<(String, String)> {
+    if hwnd == 0 || pid == 0 {
+        return None;
+    }
+    let descriptor = describe_window_handle(HWND(hwnd as *mut std::ffi::c_void), pid)?;
+    Some((descriptor.app_name, descriptor.bundle_id?))
+}
+
 /// Inspects a window handle and process ID to produce a `WindowDescriptor`.
 fn describe_window_handle(hwnd: HWND, pid: u32) -> Option<WindowDescriptor> {
     use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};

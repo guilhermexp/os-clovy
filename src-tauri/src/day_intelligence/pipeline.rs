@@ -402,6 +402,48 @@ impl std::fmt::Display for Incomplete {
     }
 }
 
+/// Sends `day`'s hour reports and summary written in another language than
+/// `deps.locale` back for generation: those reports, every workstream of
+/// the day (their titles are in that language too, so the remaining reports
+/// fold again) and the summary go, with their run records. True when
+/// anything went.
+pub async fn relocalize_day(deps: &Deps<'_>, day: NaiveDate) -> Result<bool, StoreError> {
+    db::relocalize_day(deps.store, &day_key(day), prompts::locale_tag(deps.locale)).await
+}
+
+/// Writes again, in `deps.locale`, the summary of `day` that
+/// [`relocalize_day`] removed, as soon as its inputs are settled, with the
+/// trigger it had. Runs once: a summary written, an empty day or a failure
+/// all clear the pending mark; only unsettled inputs keep it. `None` when
+/// nothing was pending.
+pub async fn finish_pending_resummary(
+    deps: &Deps<'_>,
+    day: NaiveDate,
+) -> Result<Option<SummaryRun>, PipelineError> {
+    let key = day_key(day);
+    let Some(trigger) = db::pending_resummary(deps.store, &key).await? else {
+        return Ok(None);
+    };
+    // Written meanwhile in this language ("Generate summary"): done.
+    if db::summary_of_day(deps.store, &key)
+        .await?
+        .is_some_and(|summary| summary.locale == prompts::locale_tag(deps.locale))
+    {
+        db::clear_resummary(deps.store, &key).await?;
+        return Ok(None);
+    }
+    if let Some(reason) = incomplete(deps, day).await? {
+        return Ok(Some(SummaryRun::Incomplete(reason)));
+    }
+    let generated = generate_summary(deps, day, trigger).await;
+    // Once, whatever happened: a failure is not retried in a loop.
+    db::clear_resummary(deps.store, &key).await?;
+    Ok(Some(match generated? {
+        Some(summary) => SummaryRun::Generated(Box::new(summary)),
+        None => SummaryRun::Empty,
+    }))
+}
+
 /// Whether every input of `day`'s summary is settled: the timeline built
 /// through the last hour that ended, each ended hour reported (or empty, or
 /// given up after its last attempt), every report folded, and coding-agent
