@@ -211,6 +211,26 @@ impl HelperApp {
                     "shortcut_captured",
                     serde_json::json!({ "kind": kind, "shortcut": shortcut }),
                 ),
+                HotkeyEvent::Diagnostic {
+                    kind,
+                    diagnostic,
+                    action,
+                } => event(
+                    "shortcut_trigger_diagnostic",
+                    serde_json::json!({
+                        "kind": kind,
+                        "trigger": {
+                            "key": diagnostic.key,
+                            "edge": diagnostic.edge,
+                            "injected": diagnostic.injected,
+                            "alone": diagnostic.alone,
+                            "heldMs": diagnostic.held_ms,
+                            "decision": diagnostic.decision,
+                            "action": action,
+                            "reason": diagnostic.reason,
+                        },
+                    }),
+                ),
             };
             if let Ok(tx) = event_tx.lock() {
                 let _ = tx.send(event);

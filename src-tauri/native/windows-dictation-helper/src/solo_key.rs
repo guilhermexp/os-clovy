@@ -98,11 +98,58 @@ impl SoloModifier {
     }
 
     /// Feeds one key edge with its origin and time, and says why it decided.
-    pub fn on_key_at(&mut self, vk: u32, is_down: bool, _injected: bool, _now_ms: u64) -> Step {
-        Step {
-            event: self.on_key(vk, is_down),
-            diagnostic: None,
+    pub fn on_key_at(&mut self, vk: u32, is_down: bool, injected: bool, now_ms: u64) -> Step {
+        let line = |edge, alone, held_ms, decision, reason| Diagnostic {
+            key: key_name(vk),
+            edge,
+            injected,
+            alone,
+            held_ms,
+            decision,
+            reason,
+        };
+        if vk == self.target {
+            if is_down {
+                if self.held {
+                    return Step::default(); // auto-repeat
+                }
+                let event = self.on_key(vk, true);
+                self.down_at = Some(now_ms);
+                let (decision, reason) = if self.alone {
+                    ("down", "alone")
+                } else {
+                    ("ignored", "other_key_held")
+                };
+                return Step {
+                    event,
+                    diagnostic: Some(line("down", self.alone, None, decision, reason)),
+                };
+            }
+            if !self.held {
+                return Step {
+                    event: None,
+                    diagnostic: Some(line("up", false, None, "ignored", "up_without_down")),
+                };
+            }
+            let (alone, chorded) = (self.alone, self.chorded);
+            let held_ms = self.down_at.take().map(|at| now_ms.saturating_sub(at));
+            let event = self.on_key(vk, false);
+            let (decision, reason) = match (alone, chorded) {
+                (false, _) => ("ignored", "not_alone"),
+                (true, true) => ("up", "chorded"),
+                (true, false) => ("up", "clean"),
+            };
+            return Step {
+                event,
+                diagnostic: Some(line("up", alone, held_ms, decision, reason)),
+            };
         }
+        let event = self.on_key(vk, is_down);
+        let diagnostic = (event == Some(SoloEvent::Chord)).then(|| {
+            let held_ms = self.down_at.map(|at| now_ms.saturating_sub(at));
+            line("down", true, held_ms, "chord", "other_key")
+        });
+        Step { event, diagnostic }
     }
 
     /// Feeds one key edge (auto-repeat included); returns what it means for
@@ -418,8 +465,11 @@ mod tests {
     #[test]
     fn typing_without_the_shortcut_key_logs_nothing() {
         let mut machine = SoloModifier::new(VK_RCONTROL);
-        assert!(diagnose(&mut machine, &[(KEY_C, true, false, 0), (KEY_C, false, false, 10)])
-            .is_empty());
+        assert!(diagnose(
+            &mut machine,
+            &[(KEY_C, true, false, 0), (KEY_C, false, false, 10)]
+        )
+        .is_empty());
     }
 
     #[test]

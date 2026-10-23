@@ -1,9 +1,10 @@
 use crate::protocol::{ShortcutCommand, ShortcutKind, ShortcutModifiers};
-use crate::solo_key::{self, CaptureTracker, SoloCapture, SoloEvent, SoloModifier};
+use crate::solo_key::{self, CaptureTracker, Diagnostic, SoloCapture, SoloEvent, SoloModifier};
 use std::{
     collections::{HashMap, HashSet},
     sync::{mpsc, Arc},
     thread,
+    time::Instant,
 };
 use windows_sys::Win32::{
     Foundation::GetLastError,
@@ -19,8 +20,8 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetMessageW, KillTimer, PeekMessageW,
             PostThreadMessageW, SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-            KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN,
-            WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+            KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_HOTKEY,
+            WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
         },
     },
 };
@@ -76,7 +77,19 @@ pub enum HotkeyEvent {
         kind: ShortcutKind,
         shortcut: ShortcutCommand,
     },
+    /// What the hook saw for a lone-modifier shortcut and what it did, for
+    /// the dictation event log.
+    Diagnostic {
+        kind: ShortcutKind,
+        diagnostic: Diagnostic,
+        action: &'static str,
+    },
 }
+
+/// The hook's view of one key edge, packed into the posted message's lParam.
+const KEY_DOWN_BIT: isize = 1;
+const KEY_INJECTED_BIT: isize = 2;
+const KEY_ALTGR_BIT: isize = 4;
 
 #[derive(Clone, Debug)]
 pub struct HotkeyManager {
@@ -167,6 +180,7 @@ fn hotkey_thread(
     };
     let _ = ready_tx.send(thread_id);
 
+    let started = Instant::now();
     let mut state = HotkeyThreadState::default();
     if hook.is_null() {
         event_sink(HotkeyEvent::RegistrationFailed {
@@ -188,9 +202,13 @@ fn hotkey_thread(
         }
         match msg.message {
             HOTKEY_RECONFIGURE => {}
-            HOTKEY_KEYBOARD_EVENT => {
-                handle_keyboard_event(&mut state, msg.wParam as u32, msg.lParam != 0, &event_sink)
-            }
+            HOTKEY_KEYBOARD_EVENT => handle_hook_message(
+                &mut state,
+                msg.wParam as u32,
+                msg.lParam,
+                started.elapsed().as_millis() as u64,
+                &event_sink,
+            ),
             WM_TIMER => {
                 if state.capture_timer_id == Some(msg.wParam) {
                     end_capture_on_timeout(&mut state, &event_sink);
@@ -280,10 +298,49 @@ fn drain_messages(
     false
 }
 
+fn handle_hook_message(
+    state: &mut HotkeyThreadState,
+    vk: u32,
+    flags: isize,
+    now_ms: u64,
+    event_sink: &EventSink,
+) {
+    let is_down = flags & KEY_DOWN_BIT != 0;
+    let injected = flags & KEY_INJECTED_BIT != 0;
+    if flags & KEY_ALTGR_BIT != 0 {
+        // AltGr layouts send a synthetic Left Ctrl with Right Alt; it is not a
+        // key the user pressed, but a Left Ctrl shortcut should say why it
+        // did not count.
+        if state.capture.is_none() {
+            for (kind, machine) in &state.solo {
+                if machine.target() == vk {
+                    event_sink(HotkeyEvent::Diagnostic {
+                        kind: *kind,
+                        diagnostic: Diagnostic {
+                            key: solo_key::key_name(vk),
+                            edge: if is_down { "down" } else { "up" },
+                            injected,
+                            alone: false,
+                            held_ms: None,
+                            decision: "ignored",
+                            reason: "altgr",
+                        },
+                        action: "none",
+                    });
+                }
+            }
+        }
+        return;
+    }
+    handle_keyboard_event(state, vk, is_down, injected, now_ms, event_sink);
+}
+
 fn handle_keyboard_event(
     state: &mut HotkeyThreadState,
     vk: u32,
     is_down: bool,
+    injected: bool,
+    now_ms: u64,
     event_sink: &EventSink,
 ) {
     let repeated = if is_down {
@@ -300,7 +357,7 @@ fn handle_keyboard_event(
         return;
     }
 
-    handle_solo_modifiers(state, vk, is_down, event_sink);
+    handle_solo_modifiers(state, vk, is_down, injected, now_ms, event_sink);
 
     if !is_down && state.active_push_to_talk {
         let should_release =
@@ -324,38 +381,45 @@ fn handle_solo_modifiers(
     state: &mut HotkeyThreadState,
     vk: u32,
     is_down: bool,
+    injected: bool,
+    now_ms: u64,
     event_sink: &EventSink,
 ) {
-    let mut fired = Vec::new();
+    let mut steps = Vec::new();
     for (kind, machine) in state.solo.iter_mut() {
-        if let Some(event) = machine.on_key(vk, is_down) {
-            fired.push((*kind, event));
+        let step = machine.on_key_at(vk, is_down, injected, now_ms);
+        if step.event.is_some() || step.diagnostic.is_some() {
+            steps.push((*kind, step));
         }
     }
-    for (kind, event) in fired {
-        let Some(label) = state
+    for (kind, step) in steps {
+        let label = state
             .shortcuts
             .get(&kind)
-            .map(|shortcut| shortcut.label.clone())
-        else {
-            continue;
-        };
-        match (kind, event) {
-            (ShortcutKind::PushToTalk, SoloEvent::Down) if !state.active_push_to_talk => {
+            .map(|shortcut| shortcut.label.clone());
+        let action = match (label, kind, step.event) {
+            (None, _, Some(_)) => "no_shortcut",
+            (Some(label), ShortcutKind::PushToTalk, Some(SoloEvent::Down))
+                if !state.active_push_to_talk =>
+            {
                 state.active_push_to_talk = true;
                 event_sink(HotkeyEvent::KeyDown {
                     kind,
                     shortcut: label,
                 });
+                "push_start"
             }
-            (ShortcutKind::PushToTalk, SoloEvent::Chord) if state.active_push_to_talk => {
+            (Some(label), ShortcutKind::PushToTalk, Some(SoloEvent::Chord))
+                if state.active_push_to_talk =>
+            {
                 state.active_push_to_talk = false;
                 event_sink(HotkeyEvent::KeyCancel {
                     kind,
                     shortcut: label,
                 });
+                "push_cancel"
             }
-            (ShortcutKind::PushToTalk, SoloEvent::Up { clean: true })
+            (Some(label), ShortcutKind::PushToTalk, Some(SoloEvent::Up { clean: true }))
                 if state.active_push_to_talk =>
             {
                 state.active_push_to_talk = false;
@@ -363,14 +427,23 @@ fn handle_solo_modifiers(
                     kind,
                     shortcut: label,
                 });
+                "push_end"
             }
-            (ShortcutKind::Toggle, SoloEvent::Up { clean: true }) => {
+            (Some(label), ShortcutKind::Toggle, Some(SoloEvent::Up { clean: true })) => {
                 event_sink(HotkeyEvent::KeyDown {
                     kind,
                     shortcut: label,
                 });
+                "toggle"
             }
-            _ => {}
+            _ => "none",
+        };
+        if let Some(diagnostic) = step.diagnostic {
+            event_sink(HotkeyEvent::Diagnostic {
+                kind,
+                diagnostic,
+                action,
+            });
         }
     }
 }
@@ -930,10 +1003,17 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let is_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
         if is_down || is_up {
             let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            let mut flags = 0;
+            if is_down {
+                flags |= KEY_DOWN_BIT;
+            }
+            if event.flags & LLKHF_INJECTED != 0 {
+                flags |= KEY_INJECTED_BIT;
+            }
             // AltGr layouts send a synthetic Left Ctrl (scan code 0x21D)
             // with Right Alt; it is not a key the user pressed.
             if event.vkCode == VK_LCONTROL as u32 && event.scanCode == ALTGR_FAKE_CTRL_SCAN_CODE {
-                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+                flags |= KEY_ALTGR_BIT;
             }
             let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
             unsafe {
@@ -941,7 +1021,7 @@ unsafe extern "system" fn low_level_keyboard_proc(
                     thread_id,
                     HOTKEY_KEYBOARD_EVENT,
                     event.vkCode as usize,
-                    is_down as isize,
+                    flags,
                 )
             };
         }
@@ -1175,12 +1255,13 @@ mod tests {
         );
         let (events, event_sink) = recorder();
         let ctrl = VK_RCONTROL as u32;
-        handle_keyboard_event(&mut state, ctrl, true, &event_sink);
-        handle_keyboard_event(&mut state, ctrl, false, &event_sink);
-        handle_keyboard_event(&mut state, ctrl, true, &event_sink);
-        handle_keyboard_event(&mut state, 0x43, true, &event_sink); // C
-        handle_keyboard_event(&mut state, 0x43, false, &event_sink);
-        handle_keyboard_event(&mut state, ctrl, false, &event_sink);
+        let down = KEY_DOWN_BIT;
+        handle_hook_message(&mut state, ctrl, down, 0, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 200, &event_sink);
+        handle_hook_message(&mut state, ctrl, down, 400, &event_sink);
+        handle_hook_message(&mut state, 0x43, down, 450, &event_sink); // C
+        handle_hook_message(&mut state, 0x43, 0, 460, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 500, &event_sink);
         let names: Vec<&str> = events
             .lock()
             .expect("event lock")
@@ -1194,6 +1275,41 @@ mod tests {
             .filter(|name| *name != "other")
             .collect();
         assert_eq!(names, ["down", "up", "down", "cancel"]);
+    }
+
+    #[test]
+    fn each_hook_decision_is_reported_with_what_it_did() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            lone(ShortcutKind::PushToTalk, "ControlRight", "Right Ctrl"),
+        );
+        let (events, event_sink) = recorder();
+        let ctrl = VK_RCONTROL as u32;
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 300, &event_sink);
+        handle_hook_message(
+            &mut state,
+            VK_LCONTROL as u32,
+            KEY_DOWN_BIT | KEY_ALTGR_BIT,
+            310,
+            &event_sink,
+        );
+        let lines: Vec<(&'static str, &'static str, Option<u64>)> = events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .filter_map(|event| match event {
+                HotkeyEvent::Diagnostic {
+                    diagnostic, action, ..
+                } => Some((diagnostic.decision, *action, diagnostic.held_ms)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [("down", "push_start", None), ("up", "push_end", Some(300))]
+        );
     }
 
     fn drain_set(state: &mut HotkeyThreadState, shortcut: ShortcutCommand) {

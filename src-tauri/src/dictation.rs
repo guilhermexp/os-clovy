@@ -3238,7 +3238,15 @@ fn handle_shortcut_key_event(
         app.try_state::<ShortcutActivationState>()
             .and_then(|state| {
                 state.controller.lock().ok().and_then(|mut state| {
-                    let command = state.handle_edge(edge, kind, Instant::now())?;
+                    let now = Instant::now();
+                    let held = state.push_started_at.map(|at| now.duration_since(at));
+                    let command = state.handle_edge(edge, kind, now);
+                    append_dictation_event_log(
+                        app,
+                        Some("shortcut_edge"),
+                        &shortcut_edge_log_event(kind, edge, command, held),
+                    );
+                    let command = command?;
                     let starts_recording = state.command_starts_recording(command);
                     let command_take_id = if starts_recording {
                         Some(uuid::Uuid::new_v4().to_string())
@@ -5057,6 +5065,13 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let event_type = event_type.as_deref();
+    if event_type == Some("shortcut_trigger_diagnostic") {
+        // What the Windows hook saw: the event log only, never the HUD.
+        if let Some(event) = event.as_ref() {
+            append_dictation_event_log(app, event_type, event);
+        }
+        return;
+    }
     let take_state = app.try_state::<DictationTakeState>();
     // A helper outcome and a replacement command must have one total order.
     // If the outcome wins, its whole lifecycle transition and frontend emit
@@ -7460,17 +7475,80 @@ fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> ser
             .and_then(serde_json::Value::as_str),
         "textChars": text_chars,
         "promptChars": prompt_chars,
+        "kind": payload
+            .and_then(|payload| payload.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        "trigger": trigger_log_fields(payload),
     })
 }
 
 /// A log line for what the app did with a shortcut edge.
 fn shortcut_edge_log_event(
-    _kind: DictationShortcutKind,
-    _edge: ShortcutKeyEdge,
-    _command: Option<DictationCommand>,
-    _held: Option<Duration>,
+    kind: DictationShortcutKind,
+    edge: ShortcutKeyEdge,
+    command: Option<DictationCommand>,
+    held: Option<Duration>,
 ) -> serde_json::Value {
-    serde_json::json!({ "type": "shortcut_edge", "payload": {} })
+    let action = match command {
+        None => "none",
+        Some(DictationCommand::StartListening) => "start",
+        Some(DictationCommand::StopAndPaste) => "stop_and_paste",
+        Some(DictationCommand::DiscardListening) => "discard",
+        Some(DictationCommand::ToggleListening) => "toggle",
+    };
+    let reason = match (edge, command) {
+        (ShortcutKeyEdge::Up, Some(DictationCommand::DiscardListening)) => "short_hold",
+        (ShortcutKeyEdge::Cancel, Some(DictationCommand::DiscardListening)) => "chord",
+        (_, None) => "busy_or_not_held",
+        _ => "shortcut",
+    };
+    serde_json::json!({
+        "type": "shortcut_edge",
+        "payload": {
+            "kind": match kind {
+                DictationShortcutKind::PushToTalk => "push_to_talk",
+                DictationShortcutKind::Toggle => "toggle",
+            },
+            "trigger": {
+                "edge": match edge {
+                    ShortcutKeyEdge::Down => "down",
+                    ShortcutKeyEdge::Up => "up",
+                    ShortcutKeyEdge::Cancel => "cancel",
+                },
+                "heldMs": held.map(|held| held.as_millis() as u64),
+                "action": action,
+                "reason": reason,
+            },
+        },
+    })
+}
+
+/// The trigger diagnostic fields worth keeping: the helper's own bounded
+/// vocabulary (key codes of modifiers only, decisions, reasons), never more.
+fn trigger_log_fields(payload: Option<&serde_json::Value>) -> serde_json::Value {
+    let Some(trigger) = payload
+        .and_then(|payload| payload.get("trigger"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return serde_json::Value::Null;
+    };
+    let mut fields = serde_json::Map::new();
+    for name in [
+        "key", "edge", "injected", "alone", "heldMs", "decision", "action", "reason",
+    ] {
+        let Some(value) = trigger.get(name) else {
+            continue;
+        };
+        let kept = match value {
+            serde_json::Value::String(text) => {
+                serde_json::Value::String(text.chars().take(40).collect())
+            }
+            serde_json::Value::Bool(_) | serde_json::Value::Number(_) => value.clone(),
+            _ => continue,
+        };
+        fields.insert(name.to_string(), kept);
+    }
+    serde_json::Value::Object(fields)
 }
 
 /// Tag error events with `payload.silent: bool` so the HUD doesn't have to

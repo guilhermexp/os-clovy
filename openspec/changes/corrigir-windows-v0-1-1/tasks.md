@@ -80,7 +80,7 @@
 
 O dono testou a v0.1.1: no Windows só grava Ctrl sozinho e ele não dispara o ditado; Alt e Fn não gravam; os textos de atividade saem em inglês com a interface em português; o indicador do ditado no Windows mostra ícone genérico. Revisão 2 deixou X1 (agy recusado com plugin desativado) e X2 (dica de sandbox casando erros comuns).
 
-- [ ] 10.1 Diagnóstico do gatilho: RED de que cada decisão do gancho (tecla vista, injetada ou não, "sozinha" ou não, tempo segurado, disparo ou descarte e motivo) vira uma linha no registro de eventos do ditado, sem conteúdo digitado; GREEN; commit de cada.
+- [x] 10.1 Diagnóstico do gatilho: RED de que cada decisão do gancho (tecla vista, injetada ou não, "sozinha" ou não, tempo segurado, disparo ou descarte e motivo) vira uma linha no registro de eventos do ditado, sem conteúdo digitado; GREEN; commit de cada.
 - [ ] 10.2 RED: captura e validação aceitam Ctrl, Alt e Shift de qualquer lado sozinhos (Rust, helper, interface); gesto igual ao Fn do Mac (segurar = grava enquanto segura; alternância = o gesto de alternância do Fn no Mac); Ctrl+tecla, Ctrl+clique e Ctrl+roda não iniciam gravação nem mostram indicador; entradas injetadas não contam; tecla sem soltura vista não trava o próximo disparo; commit RED.
 - [ ] 10.3 GREEN de 10.2: gancho de teclado e de mouse de baixo nível no helper, máquina de estados com espera curta antes de iniciar a gravação de modificadora sozinha (sem abrir o microfone em Ctrl+C), mensagens de captura atualizadas; adendo datado na ADR-0020; testes de 10.2 passam no job Windows.
 - [ ] 10.4 RED: o indicador do ditado no Windows recebe `target` (nome e identificador do app da janela fixada) no início e na colagem; commit RED.
