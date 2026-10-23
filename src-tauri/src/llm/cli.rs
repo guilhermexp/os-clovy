@@ -359,13 +359,21 @@ pub fn agy_extensions_on(home: &std::path::Path) -> Option<String> {
             );
         }
     }
-    if let Ok(entries) = std::fs::read_dir(config.join("plugins")) {
-        // agy records whether a plugin is on in its `config.json`
-        // (`plugins.<dir>.enabled`, keyed by directory); a plugin with no
-        // entry follows its own `plugin.json` (`"disabled": true` ships off).
-        let choices = json_file(&config.join("config.json"))
+    // agy records whether a plugin is on in its `config.json`
+    // (`plugins.<dir>.enabled`, keyed by directory); a plugin with no entry
+    // follows its own `plugin.json` (`"disabled": true` ships off). A file
+    // that exists but cannot be read or parsed may hide those choices.
+    let choices = match json_file_if_present(&config.join("config.json")) {
+        Ok(config) => config
             .and_then(|config| config.get("plugins").cloned())
-            .unwrap_or(Value::Null);
+            .unwrap_or(Value::Null),
+        Err(error) => {
+            return Some(format!(
+                "its configuration (~/.gemini/config/config.json) could not be read ({error}), so Clovy cannot tell which plugins are on. Fix or remove the file, or choose another provider."
+            ))
+        }
+    };
+    if let Ok(entries) = std::fs::read_dir(config.join("plugins")) {
         on.extend(
             entries
                 .flatten()
@@ -395,8 +403,20 @@ pub fn agy_extensions_on(home: &std::path::Path) -> Option<String> {
 /// A JSON file agy reads, tolerating the byte order mark Windows editors
 /// write (agy itself accepts it).
 fn json_file(path: &std::path::Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
+    json_file_if_present(path).ok().flatten()
+}
+
+/// Like [`json_file`], telling a missing file (`Ok(None)`) from one that
+/// cannot be read or parsed (`Err`).
+fn json_file_if_present(path: &std::path::Path) -> Result<Option<Value>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.kind().to_string()),
+    };
+    serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map(Some)
+        .map_err(|_| "not valid JSON".to_string())
 }
 
 /// Whether a plugin's own manifest declares it off by default. agy reads the

@@ -96,9 +96,9 @@ O dono testou a v0.1.1: no Windows só grava Ctrl sozinho e ele não dispara o d
 
 A revisão de código da v0.1.2 bloqueou com cinco achados. Cada um tem um commit RED antes do GREEN.
 
-- [ ] 11.1 Y1: a alternância por dois toques só dispara na soltura limpa do segundo toque; tecla, clique ou roda entre o segundo aperto e a soltura invalidam o gesto (Ctrl, Ctrl+C não liga o microfone).
-- [ ] 11.2 Y2: a máscara do Alt também cobre as solturas de Alt consumidas pelo gesto de alternância (a barra de menu do app não abre); acordes reais (Alt+Tab) seguem sem máscara.
-- [ ] 11.3 Y3: o `finalizing_transcript` do Windows leva o destino fixado na parada, completado no Rust, para o indicador fixar o app que recebe a colagem.
-- [ ] 11.4 Y4: um resumo do dia apagado pela troca de idioma fica pendente e é refeito assim que os relatórios forem refeitos, uma vez, sem esperar o horário automático.
-- [ ] 11.5 Y5: `config.json` do `agy` ilegível ou malformado bloqueia a chamada com diagnóstico; só arquivo ausente vale como sem configuração.
+- [x] 11.1 Y1: a alternância por dois toques só dispara na soltura limpa do segundo toque; tecla, clique ou roda entre o segundo aperto e a soltura invalidam o gesto (Ctrl, Ctrl+C não liga o microfone).
+- [x] 11.2 Y2: a máscara do Alt também cobre as solturas de Alt consumidas pelo gesto de alternância (a barra de menu do app não abre); acordes reais (Alt+Tab) seguem sem máscara.
+- [x] 11.3 Y3: o `finalizing_transcript` do Windows leva o destino fixado na parada, completado no Rust, para o indicador fixar o app que recebe a colagem.
+- [x] 11.4 Y4: um resumo do dia apagado pela troca de idioma fica pendente e é refeito assim que os relatórios forem refeitos, uma vez, sem esperar o horário automático.
+- [x] 11.5 Y5: `config.json` do `agy` ilegível ou malformado bloqueia a chamada com diagnóstico; só arquivo ausente vale como sem configuração.
 - [ ] 11.6 `make verify` numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`; push e evidências.
