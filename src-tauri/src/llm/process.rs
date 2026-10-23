@@ -114,6 +114,29 @@ pub async fn run(spec: ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     })
 }
 
+/// Reads a file a CLI wrote instead of stdout, under the same cap as the
+/// pipes. A missing file reads as empty; a larger one is refused rather than
+/// cut, since a truncated answer would parse as a different one.
+pub fn read_output_file(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_CAPTURE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_CAPTURE_BYTES {
+        return Err(format!(
+            "the answer is too large (over {} MiB)",
+            MAX_CAPTURE_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn spawn_reader(pipe: impl AsyncRead + Unpin + Send + 'static) -> Reader {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let task = tokio::spawn(read_capped(pipe, captured.clone()));

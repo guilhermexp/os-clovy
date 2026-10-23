@@ -316,7 +316,8 @@ pub async fn run_cli(
         }
     })?;
     if let Some(name) = invocation.output_file {
-        output.stdout = std::fs::read_to_string(scratch.path().join(name)).unwrap_or_default();
+        output.stdout = process::read_output_file(&scratch.path().join(name))
+            .map_err(|detail| LlmError::CliFailed { cli: kind, detail })?;
     }
     cli::parse_output(kind, &output, request.schema.is_some())
 }
