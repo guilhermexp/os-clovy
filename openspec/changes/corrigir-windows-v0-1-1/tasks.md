@@ -57,7 +57,7 @@
 
 - [x] 9.1 W5 RED: `last_message.txt` maior que 8 MiB é lido inteiro; commit RED.
 - [x] 9.2 W5 GREEN: o arquivo é lido com o limite de `MAX_CAPTURE_BYTES` e a saída maior é recusada.
-- [ ] 9.3 W2 RED: o `codex exec` pontual sobe os MCPs e os plugins do usuário; o `agy --print` também; commit RED.
+- [x] 9.3 W2 RED: o `codex exec` pontual sobe os MCPs e os plugins do usuário; o `agy --print` também; commit RED.
 - [ ] 9.4 W2 GREEN: o Codex pontual desliga plugins, apps e cada servidor MCP resolvido pelo próprio `codex mcp list --json`, mantendo a config (sandbox do Windows) e a autenticação; o `agy` pontual é recusado com mensagem clara enquanto houver MCP ou plugin ativo; prova com o codex real.
 - [ ] 9.5 W3 RED: o prompt inteiro do `agy` no argv passa do limite de linha de comando do Windows sem aviso; commit RED.
 - [ ] 9.6 W3 GREEN: tamanho da linha de comando do Windows contado em UTF-16 com o escape; acima do limite, erro claro antes de criar o processo.

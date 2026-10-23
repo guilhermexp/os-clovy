@@ -835,7 +835,7 @@ mod tests {
             dir.path(),
             "codex",
             &format!(
-                "printf '%s\\n' \"$@\" > '{log}/args'\npwd > '{log}/cwd'\ncat > '{log}/stdin'\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then shift; printf 'Resumo pronto' > \"$1\"; fi; shift; done\necho '{{\"type\":\"turn.completed\"}}'",
+                "{FAKE_CODEX_NO_MCP}printf '%s\\n' \"$@\" > '{log}/args'\npwd > '{log}/cwd'\ncat > '{log}/stdin'\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then shift; printf 'Resumo pronto' > \"$1\"; fi; shift; done\necho '{{\"type\":\"turn.completed\"}}'",
                 log = log.display()
             ),
         );
@@ -871,7 +871,7 @@ mod tests {
             dir.path(),
             "codex",
             &format!(
-                "cat > /dev/null\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then shift; head -c {} /dev/zero | tr '\\0' 'x' > \"$1\"; fi; shift; done\necho '{{\"type\":\"turn.completed\"}}'",
+                "{FAKE_CODEX_NO_MCP}cat > /dev/null\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then shift; head -c {} /dev/zero | tr '\\0' 'x' > \"$1\"; fi; shift; done\necho '{{\"type\":\"turn.completed\"}}'",
                 process::MAX_CAPTURE_BYTES + 1
             ),
         );
@@ -892,6 +892,151 @@ mod tests {
             Ok(text) => panic!("read all {} bytes", text.len()),
             Err(other) => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    /// A fake codex answers `mcp list --json` with no servers.
+    #[cfg(unix)]
+    const FAKE_CODEX_NO_MCP: &str = "case \" $* \" in *\" mcp list \"*) echo '[]'; exit 0;; esac\n";
+
+    /// A fake codex whose `mcp list --json` prints `servers`; the call itself
+    /// records its argv in `<dir>/exec.args` and answers "ok".
+    #[cfg(unix)]
+    fn fake_codex_with_servers(dir: &Path, servers: &str) -> std::path::PathBuf {
+        let args = dir.join("exec.args");
+        fake_cli(
+            dir,
+            "codex",
+            &format!(
+                "case \" $* \" in *\" mcp list \"*) printf '%s' '{servers}'; exit 0;; esac\nprintf '%s\\n' \"$@\" > '{args}'\ncat > /dev/null\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then shift; printf ok > \"$1\"; fi; shift; done",
+                args = args.display()
+            ),
+        );
+        args
+    }
+
+    #[cfg(unix)]
+    async fn run_codex(dir: &Path) -> Result<String, LlmError> {
+        run_cli(
+            CliKind::Codex,
+            &GenerateRequest {
+                prompt: "Resuma".to_string(),
+                ..GenerateRequest::default()
+            },
+            &env_with(dir),
+        )
+        .await
+    }
+
+    /// The user's MCP servers and plugins run outside codex's sandbox, so a
+    /// one-shot call turns every one of them off: plugins and apps by
+    /// feature, each server codex itself resolves by name. The user's config
+    /// (Windows sandbox, model) and login stay as they are.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn llm_codex_one_shot_turns_off_every_mcp_server_and_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = fake_codex_with_servers(
+            dir.path(),
+            r#"[{"name":"evil","enabled":true},{"name":"node_repl","enabled":true}]"#,
+        );
+        assert_eq!(run_codex(dir.path()).await.unwrap(), "ok");
+        let args = std::fs::read_to_string(args).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        for config in [
+            "features.plugins=false",
+            "features.apps=false",
+            "mcp_servers.evil.enabled=false",
+            "mcp_servers.node_repl.enabled=false",
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == config),
+                "codex lacks -c {config}: {args:?}"
+            );
+        }
+        assert_eq!(args.last(), Some(&"-"), "prompt still on stdin");
+        assert!(!args.contains(&"--ignore-user-config"));
+    }
+
+    /// When the servers cannot be listed, or a name cannot be turned off
+    /// safely, nothing is sent to codex.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn llm_codex_one_shot_fails_closed_when_servers_are_unknown() {
+        for servers in [r#"[{"name":"a.b","enabled":true}]"#, "not json"] {
+            let dir = tempfile::tempdir().unwrap();
+            let args = fake_codex_with_servers(dir.path(), servers);
+            let error = run_codex(dir.path()).await.unwrap_err();
+            assert!(
+                matches!(&error, LlmError::CliFailed { cli: CliKind::Codex, detail } if detail.contains("MCP")),
+                "{servers}: {error:?}"
+            );
+            assert!(!args.exists(), "{servers}: codex ran anyway");
+        }
+    }
+
+    #[cfg(unix)]
+    fn fake_agy(dir: &Path) -> std::path::PathBuf {
+        let ran = dir.join("agy.ran");
+        fake_cli(
+            dir,
+            "agy",
+            &format!(
+                "touch '{}'\necho '{{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'",
+                ran.display()
+            ),
+        );
+        ran
+    }
+
+    #[cfg(unix)]
+    async fn run_agy(dir: &Path) -> Result<String, LlmError> {
+        run_cli(
+            CliKind::Agy,
+            &GenerateRequest {
+                prompt: "Resuma".to_string(),
+                ..GenerateRequest::default()
+            },
+            &env_with(dir),
+        )
+        .await
+    }
+
+    /// agy starts the user's MCP servers and plugins in print mode, outside
+    /// `--sandbox`, and has no per-call switch to turn them off: while any is
+    /// on, a one-shot call is refused before agy starts.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn llm_agy_one_shot_is_refused_while_an_mcp_server_or_plugin_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = fake_agy(dir.path());
+        let config = dir.path().join(".gemini/config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("mcp_config.json"),
+            r#"{"mcpServers":{"evil":{"command":"evil","args":[]},"off":{"command":"x","disabled":true}}}"#,
+        )
+        .unwrap();
+        let error = run_agy(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(&error, LlmError::CliFailed { cli: CliKind::Agy, detail } if detail.contains("evil")),
+            "{error:?}"
+        );
+        assert!(!ran.exists(), "agy ran with an MCP server on");
+
+        std::fs::write(
+            config.join("mcp_config.json"),
+            r#"{"mcpServers":{"off":{"command":"x","disabled":true}}}"#,
+        )
+        .unwrap();
+        assert_eq!(run_agy(dir.path()).await.unwrap(), "ok");
+
+        std::fs::create_dir_all(config.join("plugins/some-plugin")).unwrap();
+        let error = run_agy(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(&error, LlmError::CliFailed { cli: CliKind::Agy, detail } if detail.contains("plugin")),
+            "{error:?}"
+        );
     }
 
     fn registry_with_activity(
