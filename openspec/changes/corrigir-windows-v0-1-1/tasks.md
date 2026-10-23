@@ -12,7 +12,7 @@
 ## 3. Árvore de processos no Windows (D4)
 
 - [x] 3.1 RED: teste Windows com CLI falso `.cmd` que inicia filho longo; cancelar e tempo limite deixam o filho vivo; commit RED.
-- [ ] 3.2 GREEN: Job Object com encerramento ao fechar, usado pelo chat e pela geração pontual; teste de 3.1 passa no job Windows do CI.
+- [x] 3.2 GREEN: Job Object com encerramento ao fechar, usado pelo chat e pela geração pontual; teste de 3.1 passa no job Windows do CI.
 
 ## 4. Codex no chat no Windows (D1)
 
@@ -39,10 +39,14 @@
 
 ## 8. Prova
 
-- [ ] 8.1 `make verify` com exit 0 numa worktree limpa; saída em `.tmp/verify/corrigir-windows-v0-1-1/`.
+- [x] 8.1 `make verify` com exit 0 numa worktree limpa; saída em `.tmp/verify/corrigir-windows-v0-1-1/`.
 - [ ] 8.2 Ensaio do `release.yml` com `dry_run=true` no HEAD final; os quatro jobs verdes.
 - [ ] 8.3 Windows de prova com o instalador do ensaio: nenhuma janela de console na abertura nem ao usar chat e notas; Codex responde no chat e gera resumo de nota; Antigravity aceito em atividade (se instalado no `cert`; senão registrar); atalho Ctrl+Shift+D e Ctrl direito salvos e iniciando o ditado; Fn mostra a mensagem; fechar e reabrir pela bandeja e pelo menu Iniciar; cancelar chat não deixa `node`/`codex.exe`. Capturas e registro em `.tmp/verify/corrigir-windows-v0-1-1/windows.md`; desinstalar e limpar no fim.
+
+> 8.3 feita em parte (2026-10-23, `.tmp/verify/corrigir-windows-v0-1-1/windows.md`): provados sem console na abertura, no chat e na chamada pontual; Codex do npm respondendo no chat; cancelar sem `node`/`codex.exe` órfãos; Codex liberado e testado para notas e atividade; Ctrl direito e Ctrl+Shift+D salvos e registrados; mensagem de tecla que não chega ao Windows; fechar esconde e a segunda abertura traz a janela. Sem prova, por a sessão do `cert` estar bloqueada ou faltar dependência: ditado iniciado pelo teclado físico, clique no ícone da bandeja e "Abrir Clovy", resumo de nota com Codex (precisa de áudio e da Clovy API local), Antigravity (não instalado no `cert`).
 - [ ] 8.4 macOS: smoke do caminho de janela (fechar e reabrir pela barra de menus e pelo Dock) e de uma geração de nota com `codex`, em app de prova com identificador próprio, sem Keychain.
+
+> 8.4 não feita: um app de prova com identificador próprio cria na abertura a chave do `activity.sqlite3` no Keychain (`activity/key.rs`), e esta execução não pode criar itens no Keychain. Cobertura no macOS: testes de `main_window` e `menu_bar`, e `make verify`.
 
 ## Workflow follow-up
 
