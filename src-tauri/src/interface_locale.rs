@@ -87,10 +87,16 @@ pub fn restore(dir: &std::path::Path) -> Option<UiLocale> {
 /// Windows the WebView loads alongside a long `setup`, and neither the
 /// window's broadcast nor Rust's first request has a guaranteed order.
 pub fn ask_until_known(
-    _ask: impl Fn(),
-    _known: impl Fn() -> bool,
-    _wait: impl Fn(std::time::Duration),
+    ask: impl Fn(),
+    known: impl Fn() -> bool,
+    wait: impl Fn(std::time::Duration),
 ) {
+    let mut delay = std::time::Duration::from_millis(500);
+    while !known() {
+        ask();
+        wait(delay);
+        delay = (delay * 2).min(std::time::Duration::from_secs(30));
+    }
 }
 
 /// File in the app config dir holding the last interface language, so text

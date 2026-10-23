@@ -622,8 +622,19 @@ fn setup_interface_locale_listener(app: &tauri::App) {
             menu_bar::relocalize(&main_thread_handle);
         });
     });
-    // The main window may have broadcast before this listener existed: ask.
-    let _ = app.emit(interface_locale::INTERFACE_LOCALE_REQUEST_EVENT, ());
+    // The main window may have broadcast before this listener existed, and a
+    // single request can be lost the same way: ask until the language is
+    // known (at once when the saved file already said it).
+    let asker = app.handle().clone();
+    std::thread::spawn(move || {
+        interface_locale::ask_until_known(
+            || {
+                let _ = asker.emit(interface_locale::INTERFACE_LOCALE_REQUEST_EVENT, ());
+            },
+            || interface_locale::known().is_some(),
+            std::thread::sleep,
+        );
+    });
 }
 
 fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
