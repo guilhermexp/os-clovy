@@ -860,6 +860,39 @@ mod tests {
         );
     }
 
+    /// The last-message file is read under the same cap as stdout: a codex
+    /// that writes more is refused instead of being read whole.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn llm_codex_last_message_over_the_capture_cap_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_cli(
+            dir.path(),
+            "codex",
+            &format!(
+                "cat > /dev/null\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then shift; head -c {} /dev/zero | tr '\\0' 'x' > \"$1\"; fi; shift; done\necho '{{\"type\":\"turn.completed\"}}'",
+                process::MAX_CAPTURE_BYTES + 1
+            ),
+        );
+        let result = run_cli(
+            CliKind::Codex,
+            &GenerateRequest {
+                prompt: "Resuma".to_string(),
+                ..GenerateRequest::default()
+            },
+            &env_with(dir.path()),
+        )
+        .await;
+        match result {
+            Err(LlmError::CliFailed { cli, detail }) => {
+                assert_eq!(cli, CliKind::Codex);
+                assert!(detail.contains("too large"), "{detail}");
+            }
+            Ok(text) => panic!("read all {} bytes", text.len()),
+            Err(other) => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
     fn registry_with_activity(
         provider: ProviderRef,
         level: Option<StructuredOutputLevel>,

@@ -52,3 +52,20 @@
 
 - Revisão de código, merge, `pnpm version:bump 0.1.1`, tag `v0.1.1`, release; conferir a atualização automática da `0.1.0` no Windows do dono.
 - Arquivar, `/sync`, `/cleanup`.
+
+## 9. Revisão 1 (W1–W5)
+
+- [ ] 9.1 W5 RED: `last_message.txt` maior que 8 MiB é lido inteiro; commit RED.
+- [ ] 9.2 W5 GREEN: o arquivo é lido com o limite de `MAX_CAPTURE_BYTES` e a saída maior é recusada.
+- [ ] 9.3 W2 RED: o `codex exec` pontual sobe os MCPs e os plugins do usuário; o `agy --print` também; commit RED.
+- [ ] 9.4 W2 GREEN: o Codex pontual desliga plugins, apps e cada servidor MCP resolvido pelo próprio `codex mcp list --json`, mantendo a config (sandbox do Windows) e a autenticação; o `agy` pontual é recusado com mensagem clara enquanto houver MCP ou plugin ativo; prova com o codex real.
+- [ ] 9.5 W3 RED: o prompt inteiro do `agy` no argv passa do limite de linha de comando do Windows sem aviso; commit RED.
+- [ ] 9.6 W3 GREEN: tamanho da linha de comando do Windows contado em UTF-16 com o escape; acima do limite, erro claro antes de criar o processo.
+- [ ] 9.7 W4 RED: Ctrl+F13, Shift+Insert e Ctrl+Pause são recusados na validação e na normalização do Windows; commit RED.
+- [ ] 9.8 W4 GREEN: essas combinações valem no Windows, sem mudar o macOS.
+- [ ] 9.9 W1 RED: um filho criado entre o `spawn()` e a adoção escapa do Job Object; commit RED.
+- [ ] 9.10 W1 GREEN: o processo nasce suspenso, entra no job e só então é retomado; falha de atribuição vira erro visível (chat, geração pontual, ferramenta de shell).
+- [ ] 9.11 Grupo 4 RED: falha de sandbox do Codex no Windows aparece como erro genérico no chat; commit RED.
+- [ ] 9.12 Grupo 4 GREEN: o chat mostra o que configurar.
+- [ ] 9.13 `make verify` com exit 0 numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`, os quatro jobs verdes.
+- [ ] 9.14 `cert` com o instalador do ensaio: chat com Codex e cancelamento sem órfãos; Codex pontual sem MCP subir; limpeza no fim.
