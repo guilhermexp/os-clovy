@@ -170,7 +170,9 @@ wakes every minute, on a capture failure, and when a notice is due:
    the config dir and restored at startup); the background loop writes
    nothing while it is unknown, and today's reports and summary in another
    language go back for generation with the day's workstreams
-   (`pipeline::relocalize_day`). JSON keys stay English. A day with
+   (`pipeline::relocalize_day`); a summary removed that way stays pending
+   (`resummary:<day>:<trigger>`) and is written again, once, as soon as the
+   reports are (`pipeline::finish_pending_resummary`). JSON keys stay English. A day with
    no reports, meetings, or blocks has no summary and no call.
 
 Failures are recorded per unit (`hour:<hour>`, `fold:<hour>`, `auto:<day>`)

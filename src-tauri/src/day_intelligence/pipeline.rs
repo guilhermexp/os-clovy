@@ -417,10 +417,31 @@ pub async fn relocalize_day(deps: &Deps<'_>, day: NaiveDate) -> Result<bool, Sto
 /// all clear the pending mark; only unsettled inputs keep it. `None` when
 /// nothing was pending.
 pub async fn finish_pending_resummary(
-    _deps: &Deps<'_>,
-    _day: NaiveDate,
+    deps: &Deps<'_>,
+    day: NaiveDate,
 ) -> Result<Option<SummaryRun>, PipelineError> {
-    Ok(None)
+    let key = day_key(day);
+    let Some(trigger) = db::pending_resummary(deps.store, &key).await? else {
+        return Ok(None);
+    };
+    // Written meanwhile in this language ("Generate summary"): done.
+    if db::summary_of_day(deps.store, &key)
+        .await?
+        .is_some_and(|summary| summary.locale == prompts::locale_tag(deps.locale))
+    {
+        db::clear_resummary(deps.store, &key).await?;
+        return Ok(None);
+    }
+    if let Some(reason) = incomplete(deps, day).await? {
+        return Ok(Some(SummaryRun::Incomplete(reason)));
+    }
+    let generated = generate_summary(deps, day, trigger).await;
+    // Once, whatever happened: a failure is not retried in a loop.
+    db::clear_resummary(deps.store, &key).await?;
+    Ok(Some(match generated? {
+        Some(summary) => SummaryRun::Generated(Box::new(summary)),
+        None => SummaryRun::Empty,
+    }))
 }
 
 /// Whether every input of `day`'s summary is settled: the timeline built

@@ -508,17 +508,56 @@ pub async fn relocalize_day(
         .await?;
     }
     // A summary in another language, or one written from the reports that
-    // just went, is written again.
-    query("DELETE FROM day_summaries WHERE day = ?")
+    // just went, is written again as soon as the reports are, with the
+    // trigger it had (`pipeline::finish_pending_resummary`). The scheduled
+    // run keeps its record, so it does not write a second one.
+    let trigger: Option<String> = query_scalar("SELECT trigger FROM day_summaries WHERE day = ?")
         .bind(day)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some(trigger) = trigger {
+        query("DELETE FROM day_summaries WHERE day = ?")
+            .bind(day)
+            .execute(&mut *tx)
+            .await?;
+        query("DELETE FROM day_intelligence_runs WHERE key LIKE 'resummary:' || ? || ':%'")
+            .bind(day)
+            .execute(&mut *tx)
+            .await?;
+        query(
+            "INSERT INTO day_intelligence_runs (key, attempts, outcome, last_error, next_attempt_at, updated_at)
+             VALUES (?, 0, 'ok', NULL, NULL, ?)",
+        )
+        .bind(format!("resummary:{day}:{}", SummaryTrigger::parse(&trigger).as_str()))
+        .bind(timestamp(Utc::now()))
         .execute(&mut *tx)
         .await?;
-    query("DELETE FROM day_intelligence_runs WHERE key = 'auto:' || ?")
-        .bind(day)
-        .execute(&mut *tx)
-        .await?;
+    }
     tx.commit().await?;
     Ok(true)
+}
+
+/// The summary of `day` waiting to be written again after a language
+/// change, by the trigger it had.
+pub async fn pending_resummary(
+    store: &ActivityStore,
+    day: &str,
+) -> Result<Option<SummaryTrigger>, StoreError> {
+    let key: Option<String> = query_scalar(
+        "SELECT key FROM day_intelligence_runs WHERE key LIKE 'resummary:' || ? || ':%'",
+    )
+    .bind(day)
+    .fetch_optional(store.pool())
+    .await?;
+    Ok(key.and_then(|key| key.rsplit(':').next().map(SummaryTrigger::parse)))
+}
+
+pub async fn clear_resummary(store: &ActivityStore, day: &str) -> Result<(), StoreError> {
+    query("DELETE FROM day_intelligence_runs WHERE key LIKE 'resummary:' || ? || ':%'")
+        .bind(day)
+        .execute(store.pool())
+        .await?;
+    Ok(())
 }
 
 /// Retention: removes everything of days before `cutoff_day`.
