@@ -20,7 +20,7 @@
 
 use serde::Deserialize;
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 #[cfg(target_os = "macos")]
@@ -203,7 +203,7 @@ fn handle_today_activation(day: String, kind: String, snooze: bool) {
         crate::day_intelligence::snooze_notice(app, &kind, &day);
         return;
     }
-    show_main_window(app);
+    crate::main_window::show(app);
     if let Some(day) = lock_today_queue().on_activation(Some(day)) {
         use tauri::Emitter;
         let _ = app.emit_to(
@@ -221,7 +221,7 @@ fn handle_notification_activation(session_id: Option<String>) {
     let Some(app) = NOTIFICATION_APP.get() else {
         return;
     };
-    show_main_window(app);
+    crate::main_window::show(app);
     if let Some(session_id) = lock_queue().on_activation(session_id) {
         #[cfg(target_os = "macos")]
         {
@@ -234,14 +234,6 @@ fn handle_notification_activation(session_id: Option<String>) {
         }
         #[cfg(not(target_os = "macos"))]
         let _ = session_id;
-    }
-}
-
-fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
     }
 }
 

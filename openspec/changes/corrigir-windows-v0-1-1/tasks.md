@@ -32,8 +32,8 @@
 
 ## 7. Janela principal (D7)
 
-- [ ] 7.1 RED: testes do caminho único de mostrar janela (recria quando não existe) e do fechar que esconde em todos os sistemas; commit RED.
-- [ ] 7.2 GREEN: `show_main_window` único usado por bandeja (clique esquerdo e "Abrir Clovy"), instância única, notificações, HUDs e menus; `CloseRequested` esconde em todos os sistemas; testes passam.
+- [x] 7.1 RED: testes do caminho único de mostrar janela (recria quando não existe) e do fechar que esconde em todos os sistemas; commit RED.
+- [x] 7.2 GREEN: `show_main_window` único usado por bandeja (clique esquerdo e "Abrir Clovy"), instância única, notificações, HUDs e menus; `CloseRequested` esconde em todos os sistemas; testes passam.
 
 ## 8. Prova
 

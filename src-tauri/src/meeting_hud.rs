@@ -139,10 +139,7 @@ pub fn meeting_hud_latest_status(state: State<'_, MeetingHudState>) -> Option<Re
 #[tauri::command]
 pub fn meeting_hud_reopen(app: AppHandle) {
     let note_id = capture::current_status().and_then(|status| status.note_id);
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.unminimize();
-        let _ = main.set_focus();
+    if crate::main_window::show(&app) {
         let _ = app.emit_to(
             "main",
             "meeting-hud-action",

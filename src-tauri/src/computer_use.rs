@@ -2988,11 +2988,7 @@ async fn join_target_to_clovy_stage(
     task_generation: u64,
 ) -> Result<WindowTarget, AppError> {
     ensure_task_generation_current(state, task_generation)?;
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.unminimize();
-        let _ = main.set_focus();
-    }
+    crate::main_window::show(app);
     set_clovy_stage_companion(app, true).await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
     ensure_task_generation_current(state, task_generation)?;

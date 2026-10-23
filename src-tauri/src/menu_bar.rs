@@ -6,7 +6,7 @@ use std::sync::{
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, Listener, Manager, Runtime,
 };
 
@@ -141,11 +141,19 @@ struct AgentMenuBarLastStatus {
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let initial_state = AgentMenuBarState::default();
     let initial_menu = build_menu(app, &initial_state)?;
+    // macOS: the menu bar item opens its menu on click. Windows: a left click
+    // on the tray icon brings the window back, and the menu is on the right
+    // click, as Windows users expect.
     let mut tray_builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&initial_menu)
         .tooltip(tray_tooltip(&initial_state, false, false))
-        .show_menu_on_left_click(true)
-        .on_menu_event(handle_menu_event);
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
+        .on_menu_event(handle_menu_event)
+        .on_tray_icon_event(|tray, event| {
+            if opens_window_on(&event) {
+                crate::main_window::show(tray.app_handle());
+            }
+        });
 
     match tauri::image::Image::from_bytes(TRAY_ICON_TEMPLATE_PNG) {
         Ok(icon) => {
@@ -268,16 +276,16 @@ pub fn set_activity_state(
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref();
     if id == MENU_SHOW_ID {
-        show_main_window(app);
+        crate::main_window::show(app);
         return;
     }
     if id == MENU_SETTINGS_ID {
-        show_main_window(app);
+        crate::main_window::show(app);
         let _ = app.emit(AGENT_MENU_BAR_OPEN_SETTINGS_EVENT, ());
         return;
     }
     if id == MENU_NEW_SESSION_ID {
-        show_main_window(app);
+        crate::main_window::show(app);
         let _ = app.emit(AGENT_MENU_BAR_NEW_SESSION_EVENT, ());
         return;
     }
@@ -303,7 +311,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         return;
     }
     if let Some(session_id) = id.strip_prefix(MENU_SESSION_ID_PREFIX) {
-        show_main_window(app);
+        crate::main_window::show(app);
         let _ = app.emit(AGENT_MENU_BAR_OPEN_SESSION_EVENT, session_id.to_string());
     }
 }
@@ -491,12 +499,18 @@ fn menu_bar_is_dark<R: Runtime>(app: &AppHandle<R>) -> bool {
         .unwrap_or(true)
 }
 
-fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+/// Whether a tray icon event brings the main window back: a left click
+/// (released) on Windows; never on macOS, where the click opens the menu.
+fn opens_window_on(event: &TrayIconEvent) -> bool {
+    !cfg!(target_os = "macos")
+        && matches!(
+            event,
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+        )
 }
 
 fn tray_tooltip(
@@ -578,6 +592,33 @@ fn escape_menu_text(value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn click(button: MouseButton, button_state: MouseButtonState) -> TrayIconEvent {
+        TrayIconEvent::Click {
+            id: tauri::tray::TrayIconId::new("test"),
+            position: tauri::PhysicalPosition::new(0.0, 0.0),
+            rect: tauri::Rect::default(),
+            button,
+            button_state,
+        }
+    }
+
+    #[test]
+    fn a_left_click_on_the_windows_tray_icon_opens_the_window() {
+        let windows = !cfg!(target_os = "macos");
+        assert_eq!(
+            opens_window_on(&click(MouseButton::Left, MouseButtonState::Up)),
+            windows
+        );
+        assert!(!opens_window_on(&click(
+            MouseButton::Left,
+            MouseButtonState::Down
+        )));
+        assert!(!opens_window_on(&click(
+            MouseButton::Right,
+            MouseButtonState::Up
+        )));
+    }
 
     #[test]
     fn tooltip_reflects_recording_and_dictation() {

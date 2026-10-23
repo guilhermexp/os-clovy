@@ -1,4 +1,14 @@
 //! The one path that shows Clovy's main window, and what closing it does.
+//!
+//! Closing the main window hides it on every system; the app keeps running
+//! in the tray (Windows) or menu bar (macOS). Everything that brings the
+//! window back (tray icon and "Open Clovy", a second launch, the Dock,
+//! notifications, HUDs, menus) calls [`show`], which rebuilds the window
+//! from the app configuration if it no longer exists.
+
+use tauri::{AppHandle, Manager, WebviewWindow};
+
+pub const MAIN_WINDOW_LABEL: &str = "main";
 
 /// What closing the main window does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,13 +19,9 @@ pub enum CloseAction {
     Close,
 }
 
-/// What a close request on the main window does on this system.
+/// What a close request on the main window does: hide, on every system.
 pub fn close_action() -> CloseAction {
-    if cfg!(target_os = "macos") {
-        CloseAction::Hide
-    } else {
-        CloseAction::Close
-    }
+    CloseAction::Hide
 }
 
 /// Where the main window lives; tests substitute it.
@@ -28,14 +34,85 @@ pub trait MainWindowSlot {
     fn reveal(&self, window: &Self::Window);
 }
 
-/// Shows the main window. Returns whether a window was revealed.
+/// Shows the main window, rebuilding it when it no longer exists. Returns
+/// whether a window was revealed.
 pub fn show_with<S: MainWindowSlot>(slot: &S) -> bool {
-    match slot.existing() {
+    match slot.existing().or_else(|| slot.create()) {
         Some(window) => {
             slot.reveal(&window);
             true
         }
         None => false,
+    }
+}
+
+/// Shows, restores, and focuses the main window, rebuilding it if needed.
+pub fn show(app: &AppHandle) -> bool {
+    show_with(&AppSlot(app))
+}
+
+/// Registers the lifecycle of the main window built from the configuration
+/// at startup.
+pub fn setup(app: &tauri::App) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        register_lifecycle(app.handle(), &window);
+    }
+}
+
+/// Close hides (every system); on macOS also the first-click bridge and the
+/// Computer use driver prewarm on focus.
+pub fn register_lifecycle(app: &AppHandle, window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    crate::install_main_window_first_mouse_bridge(app, window);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+    #[cfg(target_os = "macos")]
+    let lifecycle_app = app.clone();
+    let close_window = window.clone();
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::CloseRequested { api, .. } => {
+            if close_action() == CloseAction::Hide {
+                api.prevent_close();
+                let _ = close_window.hide();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        tauri::WindowEvent::Focused(true) => {
+            crate::computer_use::schedule_driver_prewarm(&lifecycle_app);
+        }
+        _ => {}
+    });
+}
+
+struct AppSlot<'a>(&'a AppHandle);
+
+impl MainWindowSlot for AppSlot<'_> {
+    type Window = WebviewWindow;
+
+    fn existing(&self) -> Option<WebviewWindow> {
+        self.0.get_webview_window(MAIN_WINDOW_LABEL)
+    }
+
+    fn create(&self) -> Option<WebviewWindow> {
+        let config = self
+            .0
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == MAIN_WINDOW_LABEL)?;
+        let window = tauri::WebviewWindowBuilder::from_config(self.0, config)
+            .and_then(|builder| builder.build())
+            .map_err(|error| tracing::warn!(%error, "could not rebuild the main window"))
+            .ok()?;
+        register_lifecycle(self.0, &window);
+        Some(window)
+    }
+
+    fn reveal(&self, window: &WebviewWindow) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
 }
 

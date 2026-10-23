@@ -142,12 +142,7 @@ pub fn run() {
     {
         if should_register_single_instance_plugin() {
             builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-                use tauri::Manager;
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
+                main_window::show(app);
             }));
         }
     }
@@ -183,8 +178,7 @@ pub fn run() {
                 return;
             }
             if event.id().as_ref() == OPEN_SETTINGS_MENU_ID {
-                #[cfg(target_os = "macos")]
-                show_main_window(app);
+                main_window::show(app);
                 let _ = app.emit(OPEN_SETTINGS_EVENT, ());
             }
         })
@@ -487,8 +481,7 @@ pub fn run() {
             // GitHub account yet (ADR-0066); off the startup path.
             connectors::start_github_cli_detection(app.handle());
             meeting_hud::setup(app);
-            #[cfg(target_os = "macos")]
-            setup_main_window_lifecycle(app);
+            main_window::setup(app);
             Ok(())
         })
         .build(context)
@@ -503,7 +496,9 @@ pub fn run() {
             // had a chance to latch the coordinator.
             tauri::RunEvent::Exit => shutdown::handle_exit(app),
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            tauri::RunEvent::Reopen { .. } => {
+                main_window::show(app);
+            }
             _ => {}
         });
 }
@@ -732,10 +727,7 @@ fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
 
 fn close_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        #[cfg(target_os = "macos")]
         let _ = window.hide();
-        #[cfg(not(target_os = "macos"))]
-        let _ = window.close();
     }
 }
 
@@ -780,31 +772,10 @@ fn set_recording_presence_bounds(
 }
 
 #[cfg(target_os = "macos")]
-fn setup_main_window_lifecycle(app: &mut tauri::App) {
-    if let Some(main_window) = app.get_webview_window("main") {
-        register_main_window_lifecycle(app.handle(), &main_window);
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn register_main_window_lifecycle(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
-    install_main_window_first_mouse_bridge(app, window);
-    let close_window = window.clone();
-    let lifecycle_app = app.clone();
-    window.on_window_event(move |event| match event {
-        tauri::WindowEvent::CloseRequested { api, .. } => {
-            api.prevent_close();
-            let _ = close_window.hide();
-        }
-        tauri::WindowEvent::Focused(true) => {
-            computer_use::schedule_driver_prewarm(&lifecycle_app);
-        }
-        _ => {}
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn install_main_window_first_mouse_bridge(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+pub(crate) fn install_main_window_first_mouse_bridge(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+) {
     use objc2::runtime::AnyObject;
     use objc2::sel;
 
@@ -941,32 +912,4 @@ fn emit_recording_presence_reopen() {
         "meeting-hud-action",
         serde_json::json!({ "action": "reopen", "noteId": note_id }),
     );
-}
-
-#[cfg(target_os = "macos")]
-fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        return;
-    }
-
-    let Some(config) = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|window| window.label == "main")
-    else {
-        return;
-    };
-
-    if let Ok(window) =
-        tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build())
-    {
-        register_main_window_lifecycle(app, &window);
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
 }
