@@ -1176,6 +1176,55 @@ mod tests {
         );
     }
 
+    /// agy keeps whether a plugin is on in its own `config.json`
+    /// (`plugins.<dir>.enabled`), falling back to the plugin's `plugin.json`
+    /// (`"disabled": true` ships it off). Only plugins that are on count.
+    #[test]
+    fn llm_agy_counts_only_plugins_agy_itself_has_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".gemini/config");
+        let plugins = config.join("plugins");
+        for name in ["on", "turned-off", "ships-off", "turned-on", "nested-off"] {
+            std::fs::create_dir_all(plugins.join(name)).unwrap();
+        }
+        std::fs::write(
+            plugins.join("ships-off/plugin.json"),
+            r#"{"disabled": true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugins.join("turned-on/plugin.json"),
+            r#"{"disabled": true}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugins.join("nested-off/.antigravity-plugin")).unwrap();
+        std::fs::write(
+            plugins.join("nested-off/.antigravity-plugin/plugin.json"),
+            r#"{"name": "nested-off", "disabled": true}"#,
+        )
+        .unwrap();
+        // Saved by Notepad: a byte order mark first.
+        std::fs::write(
+            config.join("config.json"),
+            "\u{feff}{\"plugins\":{\"turned-off\":{\"enabled\":false},\"turned-on\":{\"enabled\":true}}}",
+        )
+        .unwrap();
+
+        let detail = cli::agy_extensions_on(dir.path()).expect("two plugins are on");
+        assert!(detail.contains("plugin on"), "{detail}");
+        assert!(detail.contains("plugin turned-on"), "{detail}");
+        for off in ["turned-off", "ships-off", "nested-off"] {
+            assert!(!detail.contains(off), "{off}: {detail}");
+        }
+
+        std::fs::write(
+            config.join("config.json"),
+            r#"{"plugins":{"on":{"enabled":false},"turned-on":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(cli::agy_extensions_on(dir.path()), None);
+    }
+
     fn registry_with_activity(
         provider: ProviderRef,
         level: Option<StructuredOutputLevel>,
