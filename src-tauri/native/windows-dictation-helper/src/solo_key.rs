@@ -145,6 +145,12 @@ impl Gesture {
         self.push
     }
 
+    /// Whether the key's next release belongs to the toggle gesture (a tap
+    /// it counts), so a lone Alt must not reach the app as a menu key.
+    pub fn consumes_release(&self) -> bool {
+        false
+    }
+
     /// Feeds one input. `still_down` asks Windows whether a key is down now:
     /// a key whose release never reached the hook must not make every later
     /// press look like a chord.
@@ -851,6 +857,37 @@ mod tests {
             }
             assert_eq!(events, [], "{chord:?}");
         }
+    }
+
+    /// Both taps of an Alt double tap are the gesture's, not the menu's; a
+    /// chord (Alt+Tab) or a push-only tap stays the app's.
+    #[test]
+    fn the_toggle_taps_consume_their_release_and_chords_do_not() {
+        let mut gesture = Gesture::new(VK_LMENU, true, Some(2));
+        assert!(!gesture.consumes_release());
+        gesture.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
+        assert!(gesture.consumes_release(), "first tap");
+        gesture.on_input(key(VK_LMENU, false), 80, &NOTHING_HELD);
+        assert!(!gesture.consumes_release());
+        gesture.on_input(key(VK_LMENU, true), 200, &NOTHING_HELD);
+        assert!(gesture.consumes_release(), "second tap");
+        gesture.on_input(key(VK_LMENU, false), 280, &NOTHING_HELD);
+
+        gesture.on_input(key(VK_LMENU, true), 5_000, &NOTHING_HELD);
+        gesture.on_input(key(0x09, true), 5_030, &NOTHING_HELD); // Tab
+        assert!(!gesture.consumes_release(), "Alt+Tab is the app's");
+        gesture.on_input(key(0x09, false), 5_060, &NOTHING_HELD);
+        gesture.on_input(key(VK_LMENU, false), 5_100, &NOTHING_HELD);
+
+        let mut push_only = Gesture::new(VK_LMENU, true, None);
+        push_only.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
+        assert!(
+            !push_only.consumes_release(),
+            "a plain Alt tap opens the menu as usual"
+        );
+        let mut single = Gesture::new(VK_RMENU, false, Some(1));
+        single.on_input(key(VK_RMENU, true), 0, &NOTHING_HELD);
+        assert!(single.consumes_release());
     }
 
     #[test]
