@@ -402,6 +402,15 @@ impl std::fmt::Display for Incomplete {
     }
 }
 
+/// Sends `day`'s hour reports and summary written in another language than
+/// `deps.locale` back for generation: those reports, every workstream of
+/// the day (their titles are in that language too, so the remaining reports
+/// fold again) and the summary go, with their run records. True when
+/// anything went.
+pub async fn relocalize_day(_deps: &Deps<'_>, _day: NaiveDate) -> Result<bool, StoreError> {
+    Ok(false)
+}
+
 /// Whether every input of `day`'s summary is settled: the timeline built
 /// through the last hour that ended, each ended hour reported (or empty, or
 /// given up after its last attempt), every report folded, and coding-agent

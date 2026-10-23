@@ -54,6 +54,42 @@ pub fn current() -> UiLocale {
     UiLocale::from_u8(CURRENT.load(Ordering::SeqCst))
 }
 
+/// File in the app config dir holding the last interface language, so text
+/// generated before the webview loads already uses it.
+pub const SAVED_LOCALE_FILE: &str = "interface-locale.json";
+
+/// The interface language once known (event or saved file), else nothing.
+#[derive(Debug, Default)]
+pub struct LocaleState(AtomicU8);
+
+impl LocaleState {
+    pub const fn new() -> Self {
+        Self(AtomicU8::new(0))
+    }
+
+    pub fn known(&self) -> Option<UiLocale> {
+        None
+    }
+
+    pub fn current(&self) -> UiLocale {
+        UiLocale::En
+    }
+
+    pub fn set(&self, _locale: UiLocale) -> bool {
+        false
+    }
+}
+
+/// The saved interface language in `dir`, if any is readable.
+pub fn read_saved(_dir: &std::path::Path) -> Option<UiLocale> {
+    None
+}
+
+/// Saves the interface language in `dir`.
+pub fn write_saved(_dir: &std::path::Path, _locale: UiLocale) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Store the locale; returns true when it changed.
 pub fn set_current(locale: UiLocale) -> bool {
     CURRENT.swap(locale.as_u8(), Ordering::SeqCst) != locale.as_u8()
@@ -286,6 +322,31 @@ mod tests {
         assert_eq!(UiLocale::from_payload("\"fr\""), UiLocale::En);
         assert_eq!(UiLocale::from_payload("not json"), UiLocale::En);
         assert_eq!(UiLocale::from_payload(""), UiLocale::En);
+    }
+
+    #[test]
+    fn the_language_is_unknown_until_set() {
+        let state = LocaleState::new();
+        assert_eq!(state.known(), None);
+        assert_eq!(state.current(), UiLocale::En);
+        assert!(state.set(UiLocale::PtBr));
+        assert_eq!(state.known(), Some(UiLocale::PtBr));
+        assert_eq!(state.current(), UiLocale::PtBr);
+        assert!(!state.set(UiLocale::PtBr));
+        assert!(state.set(UiLocale::En));
+        assert_eq!(state.known(), Some(UiLocale::En));
+    }
+
+    #[test]
+    fn the_saved_language_survives_a_restart_and_garbage_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_saved(dir.path()), None);
+        write_saved(dir.path(), UiLocale::PtBr).unwrap();
+        assert_eq!(read_saved(dir.path()), Some(UiLocale::PtBr));
+        write_saved(dir.path(), UiLocale::En).unwrap();
+        assert_eq!(read_saved(dir.path()), Some(UiLocale::En));
+        std::fs::write(dir.path().join(SAVED_LOCALE_FILE), "not json").unwrap();
+        assert_eq!(read_saved(dir.path()), None);
     }
 
     #[test]
