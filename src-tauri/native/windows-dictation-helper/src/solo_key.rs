@@ -99,8 +99,11 @@ enum Phase {
     Pending,
     /// Push-to-talk started and runs until the key goes up.
     Holding,
-    /// The press is spent (a chord, a key already held, a toggle fired):
-    /// nothing more happens until the key goes up.
+    /// The second press of a double tap: it toggles when released clean;
+    /// a key, a click or the wheel before that keeps it ordinary.
+    SecondTap,
+    /// The press is spent (a chord, a key already held): nothing more
+    /// happens until the key goes up.
     Spent,
 }
 
@@ -258,15 +261,15 @@ impl Gesture {
                 .last_tap_at
                 .is_some_and(|at| now_ms.saturating_sub(at) <= DOUBLE_TAP_MS);
         if double_tap {
-            self.phase = Phase::Spent;
+            self.phase = Phase::SecondTap;
             self.last_tap_at = None;
             return self.step(
-                Some(GestureEvent::Toggle),
+                None,
                 self.target,
                 "down",
                 true,
                 None,
-                "toggle",
+                "second_tap",
                 "double_tap",
             );
         }
@@ -292,6 +295,7 @@ impl Gesture {
             ),
             Phase::Holding => line(self, Some(GestureEvent::PushUp), "push_end", "released"),
             Phase::Spent => line(self, None, "released", "spent"),
+            Phase::SecondTap => line(self, Some(GestureEvent::Toggle), "toggle", "double_tap"),
             Phase::Pending => match self.toggle_presses {
                 Some(1) => line(self, Some(GestureEvent::Toggle), "toggle", "tap"),
                 Some(2) => {
@@ -320,7 +324,7 @@ impl Gesture {
         };
         let (event, decision) = match self.phase {
             // Before the hold threshold: nothing was shown, nothing to undo.
-            Phase::Pending => (None, "chord"),
+            Phase::Pending | Phase::SecondTap => (None, "chord"),
             Phase::Holding => (Some(GestureEvent::PushCancel), "push_cancel"),
             Phase::Idle | Phase::Spent => return GestureStep::default(),
         };

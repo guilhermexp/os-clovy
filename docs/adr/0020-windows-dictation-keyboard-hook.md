@@ -123,7 +123,10 @@ look like a chord).
 - **The gesture is Fn's on the Mac helper** (`solo_key::Gesture`): held alone
   for 160 ms (`HOLD_MS`, the Mac `holdThreshold`) push-to-talk starts and runs
   until release; a double tap within 340 ms (`DOUBLE_TAP_MS`, the Mac
-  `doublePressWindow`) toggles. Push-to-talk no longer starts on the down
+  `doublePressWindow`) toggles when the second tap is released clean (the
+  Mac fires on the press; on Windows a key, click or wheel turn during the
+  second press, as in a quick Ctrl tap and then Ctrl + C, must leave it
+  ordinary). Push-to-talk no longer starts on the down
   edge: the short wait is what keeps Ctrl + C, Ctrl + click and Ctrl + wheel
   from opening the microphone or showing the indicator. A chord after the
   start sends `shortcut_key_cancel` and the take is discarded.
