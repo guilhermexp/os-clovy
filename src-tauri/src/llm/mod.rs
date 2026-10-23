@@ -1225,6 +1225,26 @@ mod tests {
         assert_eq!(cli::agy_extensions_on(dir.path()), None);
     }
 
+    /// A missing `config.json` is no configuration; one agy cannot read or
+    /// parse may hold `enabled: false` entries Clovy cannot see, so it
+    /// blocks the call with a diagnostic instead of letting plugins start.
+    #[test]
+    fn llm_agy_refuses_a_config_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".gemini/config");
+        std::fs::create_dir_all(&config).unwrap();
+        assert_eq!(cli::agy_extensions_on(dir.path()), None, "no config at all");
+
+        std::fs::write(config.join("config.json"), "{\"plugins\": {").unwrap();
+        let detail = cli::agy_extensions_on(dir.path()).expect("malformed config blocks");
+        assert!(detail.contains("config.json"), "{detail}");
+
+        std::fs::remove_file(config.join("config.json")).unwrap();
+        std::fs::create_dir(config.join("config.json")).unwrap();
+        let detail = cli::agy_extensions_on(dir.path()).expect("unreadable config blocks");
+        assert!(detail.contains("config.json"), "{detail}");
+    }
+
     fn registry_with_activity(
         provider: ProviderRef,
         level: Option<StructuredOutputLevel>,
