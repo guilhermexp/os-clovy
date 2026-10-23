@@ -48,6 +48,29 @@ impl ProcessTree {
         }
     }
 
+    /// Spawns `command` and adopts its whole tree.
+    pub fn spawn(
+        command: &mut tokio::process::Command,
+    ) -> std::io::Result<(tokio::process::Child, Self)> {
+        Self::spawn_with(command, |_| {})
+    }
+
+    /// [`Self::spawn`], running `between` once the child exists and before
+    /// its tree is adopted; tests widen that window with it.
+    fn spawn_with(
+        command: &mut tokio::process::Command,
+        between: impl FnOnce(u32),
+    ) -> std::io::Result<(tokio::process::Child, Self)> {
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.spawn()?;
+        if let Some(pid) = child.id() {
+            between(pid);
+        }
+        let tree = Self::adopt(child.id());
+        Ok((child, tree))
+    }
+
     /// Sends `signal` to the whole tree. Windows has no graceful signal for
     /// another process, so `Terminate` does nothing there and only `Kill`
     /// ends the tree.
@@ -163,5 +186,47 @@ mod windows_job {
                 let _ = CloseHandle(self.handle());
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::llm::cmd_shim_tests::{
+        kill_pid, npm_cmd_cli_with_child, process_alive, wait_for_pid,
+    };
+    use std::{process::Stdio, time::Duration};
+
+    /// `cmd.exe` → `node` → child, where the child starts while Clovy is
+    /// still between `spawn()` and placing the CLI in its job: killing the
+    /// tree must still end it.
+    #[tokio::test]
+    async fn a_child_started_before_the_tree_is_adopted_dies_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("child.pid");
+        let program = npm_cmd_cli_with_child(dir.path(), "codex", &pid_file, "started");
+        let mut command = crate::hide_console::tokio_command(&program);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let window_pid = pid_file.clone();
+        let (mut child, tree) = ProcessTree::spawn_with(&mut command, move |_| {
+            // A wide window: a running CLI starts its child in it.
+            let _ = wait_for_pid(&window_pid, Duration::from_secs(15));
+        })
+        .expect("spawn");
+        let pid_path = pid_file.clone();
+        let grandchild =
+            tokio::task::spawn_blocking(move || wait_for_pid(&pid_path, Duration::from_secs(30)))
+                .await
+                .unwrap()
+                .expect("child never started");
+        tree.kill();
+        let _ = child.wait().await;
+        let alive = process_alive(grandchild);
+        kill_pid(grandchild);
+        assert!(!alive, "child {grandchild} escaped the job");
     }
 }

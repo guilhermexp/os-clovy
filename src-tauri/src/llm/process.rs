@@ -66,13 +66,9 @@ pub async fn run(spec: ProcessSpec) -> Result<ProcessOutput, ProcessError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| ProcessError::Spawn(error.to_string()))?;
-    let tree = ProcessTree::adopt(child.id());
+    let (mut child, tree) =
+        ProcessTree::spawn(&mut command).map_err(|error| ProcessError::Spawn(error.to_string()))?;
 
     if let (Some(input), Some(mut stdin)) = (spec.stdin, child.stdin.take()) {
         tokio::spawn(async move {

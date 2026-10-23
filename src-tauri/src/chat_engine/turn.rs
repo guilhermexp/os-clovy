@@ -388,13 +388,10 @@ async fn run_process<S: FrameSink>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let (mut child, tree) = match ProcessTree::spawn(&mut command) {
+        Ok(spawned) => spawned,
         Err(error) => return TurnEnd::SpawnFailed(error.to_string()),
     };
-    let tree = ProcessTree::adopt(child.id());
     if let (Some(input), Some(mut stdin)) = (invocation.stdin.clone(), child.stdin.take()) {
         tokio::spawn(async move {
             let _ = stdin.write_all(input.as_bytes()).await;

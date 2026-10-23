@@ -340,6 +340,10 @@ jobs:
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine
 
+      - name: Test Windows process trees
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked process_group
+
       - name: Test Windows dictation helper
         shell: pwsh
         run: cargo test --manifest-path src-tauri/native/windows-dictation-helper/Cargo.toml --locked

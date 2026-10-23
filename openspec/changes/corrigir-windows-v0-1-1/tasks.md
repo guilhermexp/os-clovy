@@ -65,7 +65,7 @@
 - [x] 9.6 W3 GREEN: tamanho da linha de comando do Windows contado em UTF-16 com o escape; acima do limite, erro claro antes de criar o processo, na geração pontual e no chat. O `agy` 1.3 não lê o prompt pela entrada padrão no modo texto ("empty prompt", testado no Mac), por isso ele segue no argv.
 - [x] 9.7 W4 RED: Ctrl+F13, Shift+Insert e Ctrl+Pause são recusados na validação e na normalização do Windows; commit RED.
 - [x] 9.8 W4 GREEN: essas combinações valem no Windows, na validação e na normalização, sem mudar o macOS; teste do helper confirma o registro com os modificadores (roda no job Windows).
-- [ ] 9.9 W1 RED: um filho criado entre o `spawn()` e a adoção escapa do Job Object; commit RED.
+- [x] 9.9 W1 RED: um filho criado entre o `spawn()` e a adoção escapa do Job Object; commit RED.
 - [ ] 9.10 W1 GREEN: o processo nasce suspenso, entra no job e só então é retomado; falha de atribuição vira erro visível (chat, geração pontual, ferramenta de shell).
 - [x] 9.11 Grupo 4 RED: falha de sandbox do Codex no Windows aparece como erro genérico no chat; commit RED.
 - [x] 9.12 Grupo 4 GREEN: o chat mostra o que configurar (ver 4.2).

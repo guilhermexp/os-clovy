@@ -1097,10 +1097,8 @@ async fn run_shell_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command.spawn().map_err(io_error)?;
-    let tree = crate::process_group::ProcessTree::adopt(child.id());
+    let (mut child, tree) =
+        crate::process_group::ProcessTree::spawn(&mut command).map_err(io_error)?;
     let stdout = child
         .stdout
         .take()
