@@ -5,7 +5,7 @@
 //! that forks helpers (node workers, MCP servers) never leaves an orphan.
 //! Output is capped so a runaway CLI cannot exhaust memory.
 
-use crate::process_group::kill_group;
+use crate::process_group::ProcessTree;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -72,7 +72,7 @@ pub async fn run(spec: ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     let mut child = command
         .spawn()
         .map_err(|error| ProcessError::Spawn(error.to_string()))?;
-    let group = child.id();
+    let tree = ProcessTree::adopt(child.id());
 
     if let (Some(input), Some(mut stdin)) = (spec.stdin, child.stdin.take()) {
         tokio::spawn(async move {
@@ -88,11 +88,11 @@ pub async fn run(spec: ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     let status = match tokio::time::timeout(spec.timeout, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(error)) => {
-            kill_group(group);
+            tree.kill();
             return Err(ProcessError::Io(error.to_string()));
         }
         Err(_) => {
-            kill_group(group);
+            tree.kill();
             let _ = child.kill().await;
             let _ = child.wait().await;
             for (task, _) in [stdout_task, stderr_task].into_iter().flatten() {
@@ -103,7 +103,7 @@ pub async fn run(spec: ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     };
     // Sweep helpers the CLI left behind first: a helper that inherited stdout
     // would otherwise keep the pipe open and the answer would never reach EOF.
-    kill_group(group);
+    tree.kill();
     let stdout = collect(stdout_task).await;
     let stderr = collect(stderr_task).await;
     Ok(ProcessOutput {

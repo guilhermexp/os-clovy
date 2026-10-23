@@ -11,7 +11,7 @@
 
 ## 3. Árvore de processos no Windows (D4)
 
-- [ ] 3.1 RED: teste Windows com CLI falso `.cmd` que inicia filho longo; cancelar e tempo limite deixam o filho vivo; commit RED.
+- [x] 3.1 RED: teste Windows com CLI falso `.cmd` que inicia filho longo; cancelar e tempo limite deixam o filho vivo; commit RED.
 - [ ] 3.2 GREEN: Job Object com encerramento ao fechar, usado pelo chat e pela geração pontual; teste de 3.1 passa no job Windows do CI.
 
 ## 4. Codex no chat no Windows (D1)

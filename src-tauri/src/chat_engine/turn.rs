@@ -11,7 +11,7 @@ use crate::agent_runtime::{AgentItemPayload, AgentRepository};
 use crate::llm::cli::CliKind;
 use crate::mcp_server::turns::{TurnBinding, TurnRegistry};
 use crate::mcp_server::McpLaunch;
-use crate::process_group::{signal_group, GroupSignal};
+use crate::process_group::{GroupSignal, ProcessTree};
 use serde_json::{json, Value};
 use sqlx::row::Row;
 use std::collections::BTreeMap;
@@ -372,7 +372,7 @@ async fn run_process<S: FrameSink>(
         Ok(child) => child,
         Err(error) => return TurnEnd::SpawnFailed(error.to_string()),
     };
-    let group = child.id();
+    let tree = ProcessTree::adopt(child.id());
     if let (Some(input), Some(mut stdin)) = (invocation.stdin.clone(), child.stdin.take()) {
         tokio::spawn(async move {
             let _ = stdin.write_all(input.as_bytes()).await;
@@ -399,7 +399,7 @@ async fn run_process<S: FrameSink>(
         })
     });
     let Some(stdout) = child.stdout.take() else {
-        stop_group(&mut child, group).await;
+        stop_group(&mut child, &tree).await;
         return TurnEnd::SpawnFailed("stdout was unavailable".into());
     };
     let mut reader = BufReader::new(stdout);
@@ -412,7 +412,7 @@ async fn run_process<S: FrameSink>(
         tokio::select! {
             biased;
             () = cancelled(cancel) => {
-                stop_group(&mut child, group).await;
+                stop_group(&mut child, &tree).await;
                 return TurnEnd::Cancelled;
             }
             status = child.wait() => {
@@ -441,7 +441,7 @@ async fn run_process<S: FrameSink>(
         None => tokio::select! {
             biased;
             () = cancelled(cancel) => {
-                stop_group(&mut child, group).await;
+                stop_group(&mut child, &tree).await;
                 return TurnEnd::Cancelled;
             }
             status = child.wait() => status,
@@ -449,7 +449,7 @@ async fn run_process<S: FrameSink>(
     };
     // Sweep helpers the CLI left in its group (MCP servers it spawned), then
     // read what is still buffered in the pipe, for a bounded time.
-    signal_group(group, GroupSignal::Kill);
+    tree.signal(GroupSignal::Kill);
     let drain_until = tokio::time::Instant::now() + OUTPUT_DRAIN_GRACE;
     while let Ok(Ok(true)) = tokio::time::timeout_at(
         drain_until,
@@ -627,15 +627,15 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 
 /// SIGTERM to the whole group (the CLI may save its session), then SIGKILL
 /// after a short grace period; the child is reaped.
-async fn stop_group(child: &mut tokio::process::Child, group: Option<u32>) {
-    signal_group(group, GroupSignal::Terminate);
+async fn stop_group(child: &mut tokio::process::Child, tree: &ProcessTree) {
+    tree.signal(GroupSignal::Terminate);
     if tokio::time::timeout(CANCEL_GRACE, child.wait())
         .await
         .is_err()
     {
         let _ = child.start_kill();
     }
-    signal_group(group, GroupSignal::Kill);
+    tree.signal(GroupSignal::Kill);
     let _ = child.wait().await;
 }
 

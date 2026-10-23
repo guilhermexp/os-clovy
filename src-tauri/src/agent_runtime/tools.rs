@@ -1100,7 +1100,7 @@ async fn run_shell_command(
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn().map_err(io_error)?;
-    let group = child.id();
+    let tree = crate::process_group::ProcessTree::adopt(child.id());
     let stdout = child
         .stdout
         .take()
@@ -1112,7 +1112,7 @@ async fn run_shell_command(
     let (stdout, stderr) = match (stdout, stderr) {
         (Ok(stdout), Ok(stderr)) => (stdout, stderr),
         (Err(error), _) | (_, Err(error)) => {
-            crate::process_group::kill_group(group);
+            tree.kill();
             return Err(error);
         }
     };
@@ -1121,14 +1121,14 @@ async fn run_shell_command(
     let status = tokio::select! {
         status = child.wait() => status.map_err(io_error),
         () = cancelled => {
-            crate::process_group::kill_group(group);
+            tree.kill();
             let _ = child.kill().await;
             return Err(AppError::new("agent_tool_cancelled", "Shell command was cancelled."));
         }
     };
     // Sweep helpers the script left behind first: one that inherited stdout
     // would otherwise keep the pipe open and the output would never reach EOF.
-    crate::process_group::kill_group(group);
+    tree.kill();
     let status = status?;
     let stdout_text = collect_bounded(stdout).await;
     let stderr_text = collect_bounded(stderr).await;
