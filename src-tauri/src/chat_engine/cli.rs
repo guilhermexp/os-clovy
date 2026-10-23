@@ -967,35 +967,75 @@ impl StreamTranslator {
     }
 }
 
+/// How codex-rs words a Windows sandbox failure: around a failed command
+/// (`core/src/exec.rs`) and in the TUI's setup messages.
+const CODEX_WINDOWS_SANDBOX_PHRASES: [&str; 4] = [
+    "windows sandbox: ",
+    "windows sandbox join error:",
+    "invalid windows sandbox workspace roots:",
+    "windows sandbox setup failed",
+];
+
+/// The setup codes of codex-rs `windows-sandbox-rs/src/setup_error.rs`.
+const CODEX_WINDOWS_SANDBOX_SETUP_CODES: [&str; 28] = [
+    "orchestrator_sandbox_dir_create_failed",
+    "orchestrator_elevation_check_failed",
+    "orchestrator_elevation_required",
+    "orchestrator_payload_serialize_failed",
+    "orchestrator_helper_launch_failed",
+    "orchestrator_helper_launch_canceled",
+    "orchestrator_helper_exit_nonzero",
+    "orchestrator_helper_report_read_failed",
+    "orchestrator_helper_incomplete",
+    "helper_request_args_failed",
+    "helper_sandbox_dir_create_failed",
+    "helper_log_failed",
+    "helper_user_provision_failed",
+    "helper_users_group_create_failed",
+    "helper_user_create_or_update_failed",
+    "helper_dpapi_protect_failed",
+    "helper_users_file_write_failed",
+    "helper_setup_marker_write_failed",
+    "helper_sid_resolve_failed",
+    "helper_capability_sid_failed",
+    "helper_firewall_com_init_failed",
+    "helper_firewall_policy_access_failed",
+    "helper_firewall_policy_ineffective",
+    "helper_firewall_rule_create_or_add_failed",
+    "helper_firewall_rule_verify_failed",
+    "helper_read_acl_helper_spawn_failed",
+    "helper_sandbox_lock_failed",
+    "helper_unknown_error",
+];
+
 /// What Codex reports when its Windows sandbox is not set up or its setup
-/// failed: `windows sandbox: <error>` around a failed command
-/// (codex-rs `core/src/exec.rs`), `Windows sandbox setup failed: ...`, and
-/// the setup codes of `windows-sandbox-rs/src/setup_error.rs`
-/// (`orchestrator_*`, `helper_*`).
-pub(crate) fn is_codex_windows_sandbox_failure(text: &str) -> bool {
+/// failed, on Windows only: one of codex-rs's own phrases, or a complete
+/// setup code (not a word that merely starts like one).
+pub(crate) fn codex_windows_sandbox_failure(text: &str, windows: bool) -> bool {
+    if !windows {
+        return false;
+    }
     let lower = text.to_ascii_lowercase();
-    lower.contains("windows sandbox")
-        || lower.contains("sandbox setup")
-        || lower.contains("orchestrator_")
-        || lower.contains("setup_error.json")
+    CODEX_WINDOWS_SANDBOX_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+        || lower
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|word| CODEX_WINDOWS_SANDBOX_SETUP_CODES.contains(&word))
 }
 
-/// Whether `text` is a Codex Windows sandbox failure on this platform
-/// (`windows` is `cfg!(windows)` outside tests).
-pub(crate) fn codex_windows_sandbox_failure(text: &str, _windows: bool) -> bool {
-    is_codex_windows_sandbox_failure(text)
+pub(crate) fn is_codex_windows_sandbox_failure(text: &str) -> bool {
+    codex_windows_sandbox_failure(text, cfg!(windows))
 }
 
 /// Codex's own text, preceded by what to set up when it is a Windows
 /// sandbox failure on Windows.
-pub(crate) fn codex_sandbox_hint(text: &str, _windows: bool) -> String {
-    with_codex_sandbox_hint(text)
+pub(crate) fn with_codex_sandbox_hint(text: &str) -> String {
+    codex_sandbox_hint(text, cfg!(windows))
 }
 
-/// Codex's own text, preceded by what to set up when it is a Windows
-/// sandbox failure.
-pub(crate) fn with_codex_sandbox_hint(text: &str) -> String {
-    if !is_codex_windows_sandbox_failure(text) {
+pub(crate) fn codex_sandbox_hint(text: &str, windows: bool) -> String {
+    if !codex_windows_sandbox_failure(text, windows) {
         return text.to_string();
     }
     format!(
