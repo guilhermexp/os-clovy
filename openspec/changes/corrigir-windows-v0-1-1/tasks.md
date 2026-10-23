@@ -101,5 +101,5 @@ A revisão de código da v0.1.2 bloqueou com cinco achados. Cada um tem um commi
 - [x] 11.3 Y3: o `finalizing_transcript` do Windows leva o destino fixado na parada, completado no Rust, para o indicador fixar o app que recebe a colagem.
 - [x] 11.4 Y4: um resumo do dia apagado pela troca de idioma fica pendente e é refeito assim que os relatórios forem refeitos, uma vez, sem esperar o horário automático.
 - [x] 11.5 Y5: `config.json` do `agy` ilegível ou malformado bloqueia a chamada com diagnóstico; só arquivo ausente vale como sem configuração.
-- [ ] 11.7 Ícone do Windows: as primeiras extrações de ícone de um processo, em paralelo, falham todas (provado em processo filho no CI); a extração pelo Shell passa a ser serializada, e `windows_executables_have_distinct_bounded_png_icons` fica verde no job Windows.
-- [ ] 11.6 `make verify` numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`; push e evidências.
+- [x] 11.7 Ícone do Windows: as primeiras extrações de ícone de um processo, em paralelo, falham todas (provado em processo filho no CI); a extração pelo Shell passa a ser serializada, e `windows_executables_have_distinct_bounded_png_icons` fica verde no job Windows.
+- [x] 11.6 `make verify` numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`; push e evidências.
