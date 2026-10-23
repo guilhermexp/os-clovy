@@ -301,11 +301,14 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
         }
     }
     // A summary a language change removed is written again as soon as its
-    // reports are, not at the scheduled time.
-    match pipeline::finish_pending_resummary(&deps, today).await {
-        Ok(Some(pipeline::SummaryRun::Generated(_))) => emit(app, &day_key(today), false),
-        Ok(_) => {}
-        Err(error) => tracing::warn!(%error, "day summary in the new language failed"),
+    // reports are, not at the scheduled time; yesterday's too, which past
+    // midnight its scheduled run would never write again.
+    for (day, result) in pipeline::finish_pending_resummaries(&deps, today).await {
+        match result {
+            Ok(Some(pipeline::SummaryRun::Generated(_))) => emit(app, &day_key(day), false),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "day summary in the new language failed"),
+        }
     }
     let mut records = Vec::with_capacity(2);
     for day in [yesterday, today] {

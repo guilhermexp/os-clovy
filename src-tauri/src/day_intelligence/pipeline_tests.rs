@@ -1129,3 +1129,81 @@ async fn a_summary_removed_by_a_language_change_is_written_again_once() {
         .unwrap()
         .is_none());
 }
+
+/// A summary pending since a language change yesterday is written once the
+/// day has turned, by the same pass that serves today.
+#[tokio::test]
+async fn yesterdays_pending_summary_is_written_after_midnight() {
+    use super::pipeline::SummaryRun;
+
+    let (_dir, store) = day_store().await;
+    let settings = settings();
+    let zone = zone();
+    let sources = sources();
+    let provider = FakeProvider::new(|request| {
+        Ok(match kind(request) {
+            "hour" => hour_answer(),
+            "fold" => json!({"placements": [{
+                "workstream_id": 0, "title": "Login fix", "summary": "s", "activities": [1, 2]
+            }]}),
+            _ => summary_answer(),
+        })
+    });
+    let key = day_key(day());
+    let english = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::En,
+        local(16, 5),
+    );
+    pipeline::summarize_on_demand(&english, day())
+        .await
+        .unwrap();
+    let portuguese = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::PtBr,
+        local(16, 10),
+    );
+    assert!(pipeline::relocalize_day(&portuguese, day()).await.unwrap());
+
+    // Past midnight: today is the next day, yesterday holds the mark.
+    let next_morning = local(16, 10) + chrono::Duration::hours(14);
+    let tomorrow = day() + chrono::Duration::days(1);
+    let after_midnight = deps(
+        &store,
+        &settings,
+        &provider,
+        &sources,
+        &zone,
+        UiLocale::PtBr,
+        next_morning,
+    );
+    pipeline::catch_up_day(&after_midnight, day(), false)
+        .await
+        .unwrap();
+    let results = pipeline::finish_pending_resummaries(&after_midnight, tomorrow).await;
+    let yesterday = results
+        .iter()
+        .find(|(when, _)| *when == day())
+        .map(|(_, result)| result.as_ref().ok().cloned().flatten());
+    assert!(
+        matches!(yesterday, Some(Some(SummaryRun::Generated(_)))),
+        "yesterday: {yesterday:?}"
+    );
+    assert_eq!(
+        db::summary_of_day(&store, &key)
+            .await
+            .unwrap()
+            .unwrap()
+            .locale,
+        "pt-BR"
+    );
+    assert!(db::pending_resummary(&store, &key).await.unwrap().is_none());
+}

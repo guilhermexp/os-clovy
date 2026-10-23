@@ -156,3 +156,25 @@ look like a chord).
   (key as a modifier code or `other`, edge, injected, alone, held time,
   decision, reason) and the app logs what it did with each edge
   (`shortcut_edge`), both in `dictation-events.log` only, never the HUD.
+
+## Addendum 2026-10-23 (v0.1.3): the hook decides the Alt mask itself
+
+Supersedes how the v0.1.2 addendum above masks toggle-Alt releases. The
+hotkey thread published `MENU_MASK_ON_RELEASE` only after handling the
+posted message of the key-down; Windows calls a low-level hook before the
+thread's posted messages, so a quick tap could run the hook's down and up
+first and reach the app unmasked. The hook procedures now keep their own
+view (`solo_key::AltReleaseMask`, thread-local on the hotkey thread), fed by
+every keyboard and mouse hook event as it happens: a release of the toggle's
+Alt is masked when that press went down alone (keys held before it are
+checked with `GetAsyncKeyState`) and no key, button or wheel turn joined it.
+Injected input is ignored; a press long enough to start push-to-talk is
+masked as well, which changes nothing since push-to-talk already masked it.
+
+Update the same day: the gestures read "alone" from that hook view too. The
+keyboard hook keeps the keys held (`solo_key::KeySnapshot`, keys whose
+release never came dropped with `GetAsyncKeyState` at the edge), decides
+whether each down went down alone, masks with that answer and sends it in
+the posted message (`KEY_NOT_ALONE_BIT`). `Gesture` no longer looks at live
+key state, so the mask and the gesture cannot disagree when a key is
+released between the hook call and the handling of its message.

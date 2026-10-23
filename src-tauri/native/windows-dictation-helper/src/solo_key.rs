@@ -63,11 +63,14 @@ pub const DOUBLE_TAP_MS: u64 = 340;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
     /// A key edge; `repeat` is a down whose key was already down before it.
+    /// `alone`: on a down, no other key was held at that moment, as the hook
+    /// saw it (the one snapshot the gesture and the Alt mask both use).
     Key {
         vk: u32,
         down: bool,
         injected: bool,
         repeat: bool,
+        alone: bool,
     },
     /// A mouse button press or a wheel turn.
     Mouse { injected: bool },
@@ -115,8 +118,6 @@ pub struct Gesture {
     toggle_presses: Option<u32>,
     phase: Phase,
     down_at: u64,
-    /// Other keys the user holds down.
-    others: HashSet<u32>,
     /// The release of the last clean tap, for a double tap.
     last_tap_at: Option<u64>,
 }
@@ -131,7 +132,6 @@ impl Gesture {
             toggle_presses,
             phase: Phase::Idle,
             down_at: 0,
-            others: HashSet::new(),
             last_tap_at: None,
         }
     }
@@ -145,38 +145,29 @@ impl Gesture {
         self.push
     }
 
-    /// Whether the key's next release belongs to the toggle gesture (a tap
-    /// it counts), so a lone Alt must not reach the app as a menu key.
-    pub fn consumes_release(&self) -> bool {
-        match self.phase {
-            Phase::Pending => self.toggle_presses.is_some(),
-            Phase::SecondTap => true,
-            Phase::Idle | Phase::Holding | Phase::Spent => false,
-        }
+    /// Whether taps of the key toggle dictation.
+    pub fn toggles(&self) -> bool {
+        self.toggle_presses.is_some()
     }
 
-    /// Feeds one input. `still_down` asks Windows whether a key is down now:
-    /// a key whose release never reached the hook must not make every later
-    /// press look like a chord.
-    pub fn on_input(
-        &mut self,
-        input: Input,
-        now_ms: u64,
-        still_down: &dyn Fn(u32) -> bool,
-    ) -> GestureStep {
+    /// Feeds one input. Whether a press went down alone is the hook's
+    /// snapshot (`Input::Key::alone`), never read again here: the Alt mask
+    /// decided from that same snapshot at the moment of the edge.
+    pub fn on_input(&mut self, input: Input, now_ms: u64) -> GestureStep {
         match input {
             Input::Key {
                 vk,
                 down,
                 injected,
                 repeat,
+                alone,
             } if vk == self.target => {
                 if injected {
                     let edge = if down { "down" } else { "up" };
                     return self.step(None, vk, edge, true, None, "ignored", "injected");
                 }
                 if down {
-                    self.target_down(repeat, now_ms, still_down)
+                    self.target_down(repeat, alone, now_ms)
                 } else {
                     self.target_up(now_ms)
                 }
@@ -187,12 +178,7 @@ impl Gesture {
             Input::Key {
                 vk, down, repeat, ..
             } => {
-                if !down {
-                    self.others.remove(&vk);
-                    return GestureStep::default();
-                }
-                self.others.insert(vk);
-                if repeat {
+                if !down || repeat {
                     return GestureStep::default();
                 }
                 self.chord(vk, "down", "other_key", now_ms)
@@ -227,22 +213,16 @@ impl Gesture {
         (self.push && self.phase == Phase::Pending).then_some(self.down_at + HOLD_MS)
     }
 
-    fn target_down(
-        &mut self,
-        repeat: bool,
-        now_ms: u64,
-        still_down: &dyn Fn(u32) -> bool,
-    ) -> GestureStep {
+    fn target_down(&mut self, repeat: bool, alone: bool, now_ms: u64) -> GestureStep {
         if repeat && self.phase != Phase::Idle {
             return GestureStep::default();
         }
         // A fresh press while the last one never saw its release: the
         // release was missed (a secure desktop, a lock screen). Start over.
         let missed_release = self.phase == Phase::Holding;
-        self.others.retain(|vk| still_down(*vk));
         self.down_at = now_ms;
         if missed_release {
-            self.phase = Phase::Pending;
+            self.phase = if alone { Phase::Pending } else { Phase::Spent };
             return self.step(
                 Some(GestureEvent::PushCancel),
                 self.target,
@@ -253,7 +233,7 @@ impl Gesture {
                 "missed_release",
             );
         }
-        if !self.others.is_empty() {
+        if !alone {
             self.phase = Phase::Spent;
             self.last_tap_at = None;
             return self.step(
@@ -380,6 +360,98 @@ impl Gesture {
     }
 }
 
+/// The keys the user holds, kept by the keyboard hook edge by edge: the one
+/// place that decides whether a press went down alone. The hook sends the
+/// answer with each posted message, so the gestures (which hear of the edge
+/// later) and the Alt mask (decided at once) agree.
+#[derive(Clone, Debug, Default)]
+pub struct KeySnapshot {
+    down: HashSet<u32>,
+}
+
+impl KeySnapshot {
+    /// Feeds one key edge the user made (not injected, not AltGr's synthetic
+    /// Left Ctrl). On a down, whether no other key is held at this moment;
+    /// keys whose release never reached the hook are dropped first, by
+    /// asking Windows (`still_down`), so they cannot block every later press.
+    pub fn on_key(&mut self, vk: u32, down: bool, still_down: &dyn Fn(u32) -> bool) -> bool {
+        if !down {
+            self.down.remove(&vk);
+            return false;
+        }
+        self.down.retain(|key| *key == vk || still_down(*key));
+        let alone = self.down.iter().all(|key| *key == vk);
+        self.down.insert(vk);
+        alone
+    }
+}
+
+/// Decides, inside the keyboard hook, whether a release of the toggle's lone
+/// Alt must be masked from the app's menu bar: the press went down alone (the
+/// hook's [`KeySnapshot`]) and nothing (key, button, wheel) joined it. The
+/// hotkey thread learns of the same events later, from posted messages, so
+/// the hook cannot wait for it.
+#[derive(Clone, Debug, Default)]
+pub struct AltReleaseMask {
+    target: Option<u32>,
+    held: bool,
+    /// The current press went down with nothing else held.
+    alone: bool,
+    /// A key, button or wheel turn joined the current press.
+    chorded: bool,
+}
+
+impl AltReleaseMask {
+    /// The Alt key the toggle gesture uses alone, if any.
+    pub fn set_target(&mut self, target: Option<u32>) {
+        *self = Self {
+            target,
+            ..Self::default()
+        };
+    }
+
+    /// Feeds one key edge with the snapshot's `alone` for it; true when it
+    /// is a release to mask.
+    pub fn on_key(
+        &mut self,
+        vk: u32,
+        down: bool,
+        injected: bool,
+        repeat: bool,
+        alone: bool,
+    ) -> bool {
+        let Some(target) = self.target else {
+            return false;
+        };
+        if injected {
+            return false;
+        }
+        if vk == target {
+            if down {
+                if !(repeat && self.held) {
+                    self.held = true;
+                    self.alone = alone;
+                    self.chorded = false;
+                }
+                return false;
+            }
+            let was_held = std::mem::replace(&mut self.held, false);
+            return was_held && self.alone && !self.chorded;
+        }
+        if down && self.held && !repeat {
+            self.chorded = true;
+        }
+        false
+    }
+
+    /// A mouse button press or wheel turn.
+    pub fn on_mouse(&mut self, injected: bool) {
+        if !injected && self.held {
+            self.chorded = true;
+        }
+    }
+}
+
 /// What a finished capture that never formed a chord recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoloCapture {
@@ -500,14 +572,12 @@ mod tests {
     #[test]
     fn a_key_already_held_keeps_the_press_ordinary() {
         let mut gesture = Gesture::new(VK_RCONTROL, true, None);
-        let shift_held = |vk: u32| vk == VK_LSHIFT;
-        let mut events = play_with(
+        let mut events = play(
             &mut gesture,
             &[
                 (0, Some(key(VK_LSHIFT, true))),
-                (10, Some(key(VK_RCONTROL, true))),
+                (10, Some(key_not_alone(VK_RCONTROL))),
             ],
-            &shift_held,
         );
         events.extend(play(
             &mut gesture,
@@ -535,9 +605,9 @@ mod tests {
     fn other_keys_alone_mean_nothing() {
         let mut gesture = Gesture::new(VK_RMENU, true, Some(2));
         let steps = [
-            gesture.on_input(key(KEY_C, true), 0, &NOTHING_HELD),
-            gesture.on_input(key(KEY_C, false), 10, &NOTHING_HELD),
-            gesture.on_input(Input::Mouse { injected: false }, 20, &NOTHING_HELD),
+            gesture.on_input(key(KEY_C, true), 0),
+            gesture.on_input(key(KEY_C, false), 10),
+            gesture.on_input(Input::Mouse { injected: false }, 20),
         ];
         assert!(steps.iter().all(|step| *step == GestureStep::default()));
     }
@@ -593,6 +663,18 @@ mod tests {
             down,
             injected: false,
             repeat: false,
+            alone: true,
+        }
+    }
+
+    /// A down the hook saw while another key was held.
+    fn key_not_alone(vk: u32) -> Input {
+        Input::Key {
+            vk,
+            down: true,
+            injected: false,
+            repeat: false,
+            alone: false,
         }
     }
 
@@ -602,23 +684,44 @@ mod tests {
             down,
             injected: true,
             repeat: false,
+            alone: true,
         }
+    }
+
+    /// The hook's snapshot decides "alone", not a later look at which keys
+    /// are down: C held at the Alt-down, released before the gesture hears
+    /// of that down, still leaves the press ordinary.
+    #[test]
+    fn the_press_is_alone_only_if_the_hook_saw_it_alone() {
+        let mut gesture = Gesture::new(VK_LMENU, true, Some(2));
+        gesture.on_input(key(KEY_C, true), 0);
+        let down = gesture
+            .on_input(key_not_alone(VK_LMENU), 10)
+            .diagnostic
+            .expect("logged");
+        assert_eq!(down.reason, "other_key_held");
+        gesture.on_input(key(KEY_C, false), 20);
+        let mut events = play(
+            &mut gesture,
+            &[(10 + HOLD_MS, None), (100, Some(key(VK_LMENU, false)))],
+        );
+        // And the next quick tap is a first tap, not a second.
+        events.extend(play(
+            &mut gesture,
+            &[
+                (200, Some(key(VK_LMENU, true))),
+                (260, Some(key(VK_LMENU, false))),
+            ],
+        ));
+        assert_eq!(events, []);
     }
 
     /// Feeds timed inputs (`None` is a timer tick) and collects the events.
     fn play(gesture: &mut Gesture, script: &[(u64, Option<Input>)]) -> Vec<GestureEvent> {
-        play_with(gesture, script, &NOTHING_HELD)
-    }
-
-    fn play_with(
-        gesture: &mut Gesture,
-        script: &[(u64, Option<Input>)],
-        still_down: &dyn Fn(u32) -> bool,
-    ) -> Vec<GestureEvent> {
         script
             .iter()
             .filter_map(|(at, input)| match input {
-                Some(input) => gesture.on_input(*input, *at, still_down).event,
+                Some(input) => gesture.on_input(*input, *at).event,
                 None => gesture.on_tick(*at).event,
             })
             .collect()
@@ -699,12 +802,12 @@ mod tests {
             []
         );
         let line = gesture
-            .on_input(injected(VK_LCONTROL, true), 400, &NOTHING_HELD)
+            .on_input(injected(VK_LCONTROL, true), 400)
             .diagnostic
             .expect("an injected press is logged");
         assert!(line.injected);
         assert_eq!(line.reason, "injected");
-        gesture.on_input(injected(VK_LCONTROL, false), 410, &NOTHING_HELD);
+        gesture.on_input(injected(VK_LCONTROL, false), 410);
 
         // An injected key (a paste) while the user holds Ctrl is no chord.
         assert_eq!(
@@ -726,17 +829,17 @@ mod tests {
     #[test]
     fn a_key_whose_release_was_missed_does_not_block_the_next_press() {
         let mut gesture = Gesture::new(VK_LCONTROL, true, None);
-        // C went down and its release never reached the hook.
+        // C went down and its release never reached the hook; the hook's
+        // snapshot dropped it (see `the_snapshot_forgets_keys_windows_no_longer_holds`).
         play(&mut gesture, &[(0, Some(key(KEY_C, true)))]);
         assert_eq!(
-            play_with(
+            play(
                 &mut gesture,
                 &[
                     (1_000, Some(key(VK_LCONTROL, true))),
                     (1_000 + HOLD_MS, None),
                     (2_000, Some(key(VK_LCONTROL, false))),
                 ],
-                &NOTHING_HELD,
             ),
             [GestureEvent::PushDown, GestureEvent::PushUp]
         );
@@ -772,6 +875,7 @@ mod tests {
             down: true,
             injected: false,
             repeat: true,
+            alone: true,
         };
         assert_eq!(
             play(
@@ -831,7 +935,7 @@ mod tests {
             (390, key(VK_LCONTROL, false)),
         ]
         .into_iter()
-        .map(|(at, input)| gesture.on_input(input, at, &NOTHING_HELD).event)
+        .map(|(at, input)| gesture.on_input(input, at).event)
         .collect();
         assert_eq!(steps, [None, None, None, Some(GestureEvent::Toggle)]);
 
@@ -863,35 +967,99 @@ mod tests {
         }
     }
 
-    /// Both taps of an Alt double tap are the gesture's, not the menu's; a
-    /// chord (Alt+Tab) or a push-only tap stays the app's.
+    fn alt_edges(mask: &mut AltReleaseMask, edges: &[(u32, bool)]) -> Vec<bool> {
+        edges
+            .iter()
+            .map(|(vk, down)| mask.on_key(*vk, *down, false, false, true))
+            .collect()
+    }
+
     #[test]
-    fn the_toggle_taps_consume_their_release_and_chords_do_not() {
-        let mut gesture = Gesture::new(VK_LMENU, true, Some(2));
-        assert!(!gesture.consumes_release());
-        gesture.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
-        assert!(gesture.consumes_release(), "first tap");
-        gesture.on_input(key(VK_LMENU, false), 80, &NOTHING_HELD);
-        assert!(!gesture.consumes_release());
-        gesture.on_input(key(VK_LMENU, true), 200, &NOTHING_HELD);
-        assert!(gesture.consumes_release(), "second tap");
-        gesture.on_input(key(VK_LMENU, false), 280, &NOTHING_HELD);
+    fn the_snapshot_says_whether_a_press_went_down_alone() {
+        let mut keys = KeySnapshot::default();
+        let held = |vk: u32| vk == KEY_C;
+        assert!(keys.on_key(VK_LMENU, true, &held));
+        keys.on_key(VK_LMENU, false, &held);
+        assert!(keys.on_key(KEY_C, true, &held));
+        assert!(!keys.on_key(VK_LMENU, true, &held), "C is held");
+        keys.on_key(KEY_C, false, &held);
+        keys.on_key(VK_LMENU, false, &held);
+        assert!(keys.on_key(VK_LMENU, true, &held), "C was released");
+        // Auto-repeat of the same key is not another key.
+        assert!(keys.on_key(VK_LMENU, true, &held));
+    }
 
-        gesture.on_input(key(VK_LMENU, true), 5_000, &NOTHING_HELD);
-        gesture.on_input(key(0x09, true), 5_030, &NOTHING_HELD); // Tab
-        assert!(!gesture.consumes_release(), "Alt+Tab is the app's");
-        gesture.on_input(key(0x09, false), 5_060, &NOTHING_HELD);
-        gesture.on_input(key(VK_LMENU, false), 5_100, &NOTHING_HELD);
+    #[test]
+    fn the_snapshot_forgets_keys_windows_no_longer_holds() {
+        let mut keys = KeySnapshot::default();
+        keys.on_key(KEY_C, true, &NOTHING_HELD); // its release never came
+        assert!(keys.on_key(VK_LCONTROL, true, &NOTHING_HELD));
+    }
 
-        let mut push_only = Gesture::new(VK_LMENU, true, None);
-        push_only.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
-        assert!(
-            !push_only.consumes_release(),
-            "a plain Alt tap opens the menu as usual"
+    #[test]
+    fn the_hook_masks_a_lone_alt_tap_by_itself() {
+        let mut mask = AltReleaseMask::default();
+        mask.set_target(Some(VK_LMENU));
+        assert_eq!(
+            alt_edges(&mut mask, &[(VK_LMENU, true), (VK_LMENU, false)]),
+            [false, true]
         );
-        let mut single = Gesture::new(VK_RMENU, false, Some(1));
-        single.on_input(key(VK_RMENU, true), 0, &NOTHING_HELD);
-        assert!(single.consumes_release());
+        // Again, for the second tap of a double tap.
+        assert_eq!(
+            alt_edges(&mut mask, &[(VK_LMENU, true), (VK_LMENU, false)]),
+            [false, true]
+        );
+        // Auto-repeat while held changes nothing.
+        assert!(!mask.on_key(VK_LMENU, true, false, false, true));
+        assert!(!mask.on_key(VK_LMENU, true, false, true, false));
+        assert!(mask.on_key(VK_LMENU, false, false, false, false));
+    }
+
+    #[test]
+    fn alt_chords_reach_the_app_unmasked() {
+        let mut mask = AltReleaseMask::default();
+        mask.set_target(Some(VK_LMENU));
+        // Alt+Tab.
+        assert_eq!(
+            alt_edges(
+                &mut mask,
+                &[
+                    (VK_LMENU, true),
+                    (0x09, true),
+                    (0x09, false),
+                    (VK_LMENU, false)
+                ]
+            ),
+            [false, false, false, false]
+        );
+        // Alt + click.
+        mask.on_key(VK_LMENU, true, false, false, true);
+        mask.on_mouse(false);
+        assert!(!mask.on_key(VK_LMENU, false, false, false, false));
+        // A key already held when Alt went down (the snapshot said so).
+        mask.on_key(VK_LMENU, true, false, false, false);
+        assert!(!mask.on_key(VK_LMENU, false, false, false, false));
+    }
+
+    #[test]
+    fn injected_input_and_stale_keys_do_not_decide_the_mask() {
+        let mut mask = AltReleaseMask::default();
+        mask.set_target(Some(VK_RMENU));
+        // An injected Alt (or the mask key itself) is never masked.
+        assert!(!mask.on_key(VK_RMENU, true, true, false, true));
+        assert!(!mask.on_key(VK_RMENU, false, true, false, false));
+        // Injected keys and clicks during a real press are no chord.
+        mask.on_key(VK_RMENU, true, false, false, true);
+        mask.on_key(0xE8, true, true, false, true);
+        mask.on_key(0xE8, false, true, false, false);
+        mask.on_mouse(true);
+        assert!(mask.on_key(VK_RMENU, false, false, false, false));
+        // No target: nothing is masked.
+        mask.set_target(None);
+        assert_eq!(
+            alt_edges(&mut mask, &[(VK_RMENU, true), (VK_RMENU, false)]),
+            [false, false]
+        );
     }
 
     #[test]
@@ -923,7 +1091,7 @@ mod tests {
             (400, Some(key(VK_LCONTROL, false))),
         ] {
             let step = match input {
-                Some(input) => gesture.on_input(input, at, &NOTHING_HELD),
+                Some(input) => gesture.on_input(input, at),
                 None => gesture.on_tick(at),
             };
             lines.extend(step.diagnostic);
@@ -949,19 +1117,19 @@ mod tests {
     #[test]
     fn a_press_with_a_key_held_and_a_short_tap_say_why() {
         let mut gesture = Gesture::new(VK_RCONTROL, true, None);
-        gesture.on_input(key(VK_LSHIFT, true), 0, &NOTHING_HELD);
+        gesture.on_input(key(VK_LSHIFT, true), 0);
         let held = gesture
-            .on_input(key(VK_RCONTROL, true), 10, &|vk| vk == VK_LSHIFT)
+            .on_input(key_not_alone(VK_RCONTROL), 10)
             .diagnostic
             .expect("logged");
         assert!(!held.alone);
         assert_eq!(held.reason, "other_key_held");
-        gesture.on_input(key(VK_RCONTROL, false), 20, &NOTHING_HELD);
-        gesture.on_input(key(VK_LSHIFT, false), 30, &NOTHING_HELD);
+        gesture.on_input(key(VK_RCONTROL, false), 20);
+        gesture.on_input(key(VK_LSHIFT, false), 30);
 
-        gesture.on_input(key(VK_RCONTROL, true), 1_000, &NOTHING_HELD);
+        gesture.on_input(key(VK_RCONTROL, true), 1_000);
         let tap = gesture
-            .on_input(key(VK_RCONTROL, false), 1_090, &NOTHING_HELD)
+            .on_input(key(VK_RCONTROL, false), 1_090)
             .diagnostic
             .expect("logged");
         assert_eq!((tap.decision, tap.reason), ("tap", "short_hold"));

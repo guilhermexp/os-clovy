@@ -444,6 +444,20 @@ pub async fn finish_pending_resummary(
     }))
 }
 
+/// [`finish_pending_resummary`] for the days the background loop catches
+/// up (yesterday and `today`): a mark left yesterday must not outlive
+/// midnight, when the scheduled run of that day is already recorded.
+pub async fn finish_pending_resummaries(
+    deps: &Deps<'_>,
+    today: NaiveDate,
+) -> Vec<(NaiveDate, Result<Option<SummaryRun>, PipelineError>)> {
+    let mut results = Vec::with_capacity(2);
+    for day in [today - Duration::days(1), today] {
+        results.push((day, finish_pending_resummary(deps, day).await));
+    }
+    results
+}
+
 /// Whether every input of `day`'s summary is settled: the timeline built
 /// through the last hour that ended, each ended hour reported (or empty, or
 /// given up after its last attempt), every report folded, and coding-agent
