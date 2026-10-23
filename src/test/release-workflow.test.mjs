@@ -22,6 +22,8 @@ describe("release workflow", () => {
     expect(job("macos")).toContain("needs: version");
     expect(job("windows")).toContain("needs: version");
     expect(job("version")).toContain("scripts/check-release-version.mjs");
+    // Only a dry run may rehearse an already published version.
+    expect(job("version")).toMatch(/DRY_RUN.*--dry-run/s);
   });
 
   it("publishes only after both builds, and only outside a dry run", () => {

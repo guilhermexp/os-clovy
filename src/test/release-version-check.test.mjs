@@ -52,4 +52,17 @@ describe("checkReleaseVersion", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("already exists");
   });
+
+  // A dry run publishes nothing, so a patch branch can rehearse the release
+  // of the version already out before the bump.
+  it("lets a dry run rehearse a version whose release already exists", () => {
+    expect(
+      checkReleaseVersion({
+        tag: "v0.1.0",
+        files: files("0.1.0"),
+        releaseExists: true,
+        dryRun: true,
+      }),
+    ).toEqual({ ok: true, version: "0.1.0" });
+  });
 });
