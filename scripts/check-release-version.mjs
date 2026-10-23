@@ -1,6 +1,7 @@
 // Fails a release before any build when the tag does not match the version in
-// the four version files, or when a release for the tag already exists.
-//   node scripts/check-release-version.mjs v0.1.0 [--repo owner/name]
+// the four version files, or when a release for the tag already exists. A dry
+// run publishes nothing, so it may rehearse a version already released.
+//   node scripts/check-release-version.mjs v0.1.0 [--repo owner/name] [--dry-run]
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -10,7 +11,7 @@ import { readCurrentVersion } from "./bump-version.mjs";
 
 const TAG_RE = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
-export function checkReleaseVersion({ tag, files, releaseExists }) {
+export function checkReleaseVersion({ tag, files, releaseExists, dryRun = false }) {
   if (!TAG_RE.test(tag)) {
     return { ok: false, reason: `Tag "${tag}" is not vX.Y.Z.` };
   }
@@ -22,7 +23,7 @@ export function checkReleaseVersion({ tag, files, releaseExists }) {
       reason: `Tag ${tag} does not match version ${current.version} in package.json, Cargo.toml, Cargo.lock and tauri.conf.json; run pnpm version:bump first.`,
     };
   }
-  if (releaseExists) {
+  if (releaseExists && !dryRun) {
     return { ok: false, reason: `A release for ${tag} already exists.` };
   }
   return { ok: true, version: current.version };
@@ -43,6 +44,7 @@ async function main() {
     throw new Error("Usage: node scripts/check-release-version.mjs <vX.Y.Z> [--repo owner/name]");
   const repoIndex = rest.indexOf("--repo");
   const repository = repoIndex === -1 ? process.env.GITHUB_REPOSITORY : rest[repoIndex + 1];
+  const dryRun = rest.includes("--dry-run");
   const root = process.cwd();
   const read = (path) => readFile(resolve(root, path), "utf8");
   const files = {
@@ -55,9 +57,14 @@ async function main() {
     tag,
     files,
     releaseExists: releaseExistsOnGitHub(tag, repository),
+    dryRun,
   });
   if (!result.ok) throw new Error(result.reason);
-  console.log(`Release ${tag} matches version ${result.version} and is not published yet.`);
+  console.log(
+    dryRun
+      ? `Dry run: ${tag} matches version ${result.version}; nothing is published.`
+      : `Release ${tag} matches version ${result.version} and is not published yet.`,
+  );
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

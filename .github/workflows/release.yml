@@ -45,7 +45,11 @@ jobs:
       - name: Check the tag against the four version files
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/check-release-version.mjs "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+        # A dry run publishes nothing and may rehearse a released version.
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY")
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          node scripts/check-release-version.mjs "$RELEASE_TAG" "${args[@]}"
 
   macos:
     name: macOS universal build
