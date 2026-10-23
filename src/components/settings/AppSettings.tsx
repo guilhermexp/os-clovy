@@ -1631,6 +1631,7 @@ export function AppSettings({
                       }
                       onCancel={() => void cancelShortcutCapture()}
                       platform={capabilities.platform}
+                      captureHintWindows={t("settings.shortcuts.captureHintWindows")}
                     />
 
                     <ShortcutRow
@@ -1645,6 +1646,7 @@ export function AppSettings({
                       onReset={() => void saveShortcut("toggle", defaultShortcuts.toggle)}
                       onCancel={() => void cancelShortcutCapture()}
                       platform={capabilities.platform}
+                      captureHintWindows={t("settings.shortcuts.captureHintWindowsToggle")}
                     />
                   </>
                 ) : (
@@ -2929,11 +2931,13 @@ function ShortcutRow({
   onReset,
   onCancel,
   platform,
+  captureHintWindows,
 }: {
   title: string;
   description: string;
   shortcut: DictationShortcutSetting;
   defaultShortcut: DictationShortcutSetting;
+  captureHintWindows: string;
   capturing: boolean;
   disabled: boolean;
   error?: string;
@@ -2950,9 +2954,7 @@ function ShortcutRow({
       <div className="settings-row-info">
         <h3 className="settings-row-title">{title}</h3>
         <p className="settings-row-description" aria-live="polite">
-          {capturing && platform === "windows"
-            ? t("settings.shortcuts.captureHintWindows")
-            : description}
+          {capturing && platform === "windows" ? captureHintWindows : description}
         </p>
         {error ? (
           <p className="settings-row-error" role="alert">
@@ -2991,8 +2993,6 @@ function windowsShortcutMessage(code: string | undefined, fallback: string, shor
   switch (code) {
     case "no_key_detected":
       return translate("settings.shortcuts.noKeyWindows");
-    case "left_modifier":
-      return translate("settings.shortcuts.leftModifierWindows");
     case "modifier_required":
       return translate("settings.shortcuts.modifierRequiredWindows");
     case "unsupported_key":

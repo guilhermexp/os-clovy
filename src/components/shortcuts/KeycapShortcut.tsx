@@ -38,6 +38,9 @@ const WINDOWS_LONE_KEY_NAMES = {
   "right ctrl": "shell.shortcut.rightCtrl",
   "right alt": "shell.shortcut.rightAlt",
   "right shift": "shell.shortcut.rightShift",
+  "left ctrl": "shell.shortcut.leftCtrl",
+  "left alt": "shell.shortcut.leftAlt",
+  "left shift": "shell.shortcut.leftShift",
 } as const;
 
 export function KeycapShortcut({

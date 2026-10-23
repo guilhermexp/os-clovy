@@ -870,7 +870,12 @@ impl DictationShortcutSetting {
     }
 
     fn normalized_for_platform(mut self, kind: DictationShortcutKind, windows: bool) -> Self {
-        if windows && self.press_count == 1 && is_windows_lone_key(&self.code, &self.modifiers) {
+        let double_tap =
+            self.press_count == 2 && is_windows_lone_modifier(&self.code, &self.modifiers);
+        if windows
+            && (self.press_count == 1 || double_tap)
+            && is_windows_lone_key(&self.code, &self.modifiers)
+        {
             self.key_code = key_code_for_code(&self.code).unwrap_or(0);
             return self;
         }
@@ -1442,14 +1447,23 @@ impl DictationShortcutInput {
         }
 
         let requested_press_count = self.press_count.unwrap_or(1);
-
-        if windows && requested_press_count != 1 {
+        // On Windows a double tap exists only for a lone Ctrl, Alt or Shift,
+        // the Mac Fn toggle gesture; the helper's hook counts the taps.
+        let double_tap_allowed = is_windows_lone_modifier(&self.code, &self.modifiers);
+        if windows
+            && requested_press_count != 1
+            && !(requested_press_count == 2 && double_tap_allowed)
+        {
             return Err(AppError::new(
                 "dictation_shortcut_unsupported",
                 "Double-press shortcuts are not supported on Windows.",
             ));
         }
-        let press_count = 1;
+        let press_count = if windows && double_tap_allowed && requested_press_count == 2 {
+            2
+        } else {
+            1
+        };
 
         if windows && is_windows_lone_key(&self.code, &self.modifiers) {
             return Ok(DictationShortcutSetting {
@@ -1460,10 +1474,10 @@ impl DictationShortcutInput {
                 press_count,
             });
         }
-        if windows && !self.modifiers.has_any() && is_left_modifier_code(&self.code) {
+        if windows && !self.modifiers.has_any() && is_windows_key_code(&self.code) {
             return Err(AppError::new(
                 "dictation_shortcut_unsupported",
-                "Use Ctrl, Alt, or Shift on the right side of the keyboard, or add a key.",
+                "The Windows key alone opens Start. Use Ctrl, Alt, or Shift alone, or add a key.",
             ));
         }
 
@@ -1588,13 +1602,25 @@ fn default_shortcut_for(kind: DictationShortcutKind, windows: bool) -> Dictation
     }
 }
 
-/// Keys that work alone as a Windows shortcut: the right-hand modifiers
-/// (watched by the helper's keyboard hook, firing only when nothing else is
-/// pressed in between) and keys no app uses on their own. Mirrors the
-/// helper's `solo_key::SOLO_KEYS`.
-const WINDOWS_LONE_KEYS: [&str; 20] = [
+/// Ctrl, Alt and Shift of either side: watched by the helper's hooks with the
+/// Mac Fn gesture (hold alone to dictate, double tap to toggle).
+const WINDOWS_LONE_MODIFIERS: [&str; 6] = [
+    "ControlLeft",
     "ControlRight",
+    "AltLeft",
     "AltRight",
+    "ShiftLeft",
+    "ShiftRight",
+];
+
+/// Keys that work alone as a Windows shortcut: the modifiers above and keys
+/// no app uses on their own. Mirrors the helper's `solo_key::SOLO_KEYS`.
+const WINDOWS_LONE_KEYS: [&str; 23] = [
+    "ControlLeft",
+    "ControlRight",
+    "AltLeft",
+    "AltRight",
+    "ShiftLeft",
     "ShiftRight",
     "F13",
     "F14",
@@ -1619,23 +1645,22 @@ fn is_windows_lone_key(code: &str, modifiers: &DictationShortcutModifiers) -> bo
     !modifiers.has_any() && WINDOWS_LONE_KEYS.contains(&code)
 }
 
+fn is_windows_lone_modifier(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
+    !modifiers.has_any() && WINDOWS_LONE_MODIFIERS.contains(&code)
+}
+
 /// The Mac key code of `code`, or on Windows `0` for a lone key that is not
 /// a modifier (F13 to F24, Pause, Insert...): the helper also takes it in a
 /// chord (Ctrl+F13), and it maps keys by `code`, not by Mac key code.
 fn key_code_for_platform(code: &str, windows: bool) -> Option<u32> {
     key_code_for_code(code).or_else(|| {
-        (windows
-            && WINDOWS_LONE_KEYS.contains(&code)
-            && !matches!(code, "ControlRight" | "AltRight" | "ShiftRight"))
-        .then_some(0)
+        (windows && WINDOWS_LONE_KEYS.contains(&code) && !WINDOWS_LONE_MODIFIERS.contains(&code))
+            .then_some(0)
     })
 }
 
-fn is_left_modifier_code(code: &str) -> bool {
-    matches!(
-        code,
-        "ControlLeft" | "AltLeft" | "ShiftLeft" | "MetaLeft" | "MetaRight"
-    )
+fn is_windows_key_code(code: &str) -> bool {
+    matches!(code, "MetaLeft" | "MetaRight")
 }
 
 pub fn setup(app: &mut tauri::App) {

@@ -108,3 +108,43 @@ key Windows does see). `Fn` stays refused.
   `no_key_detected`, shown as "that key doesn't reach Windows" with Right Ctrl
   suggested. Capture and registration errors stay on the row until the user's
   next action.
+
+## Addendum 2026-10-23 (v0.1.2): either side, the Mac Fn gesture, a mouse hook
+
+Supersedes the lone-modifier rules of the addendum above, by the owner's
+decision after v0.1.1: only Right Ctrl could be recorded, and even it did not
+start dictation reliably (a tap shorter than the app's 160 ms graze filter
+was discarded, and a key whose release the hook missed made every later press
+look like a chord).
+
+- **Ctrl, Alt and Shift of either side** work alone (`ControlLeft`,
+  `AltLeft`, `ShiftLeft` join the right-hand keys). The Windows key alone
+  stays refused: it opens Start.
+- **The gesture is Fn's on the Mac helper** (`solo_key::Gesture`): held alone
+  for 160 ms (`HOLD_MS`, the Mac `holdThreshold`) push-to-talk starts and runs
+  until release; a double tap within 340 ms (`DOUBLE_TAP_MS`, the Mac
+  `doublePressWindow`) toggles. Push-to-talk no longer starts on the down
+  edge: the short wait is what keeps Ctrl + C, Ctrl + click and Ctrl + wheel
+  from opening the microphone or showing the indicator. A chord after the
+  start sends `shortcut_key_cancel` and the take is discarded.
+- **A lone modifier on the toggle is a double tap** (`pressCount: 2`,
+  labelled `Left Ctrl+Left Ctrl`), so push-to-talk and the toggle can share
+  one key as Fn and Fn+Fn do on the Mac. Double taps exist on Windows only for
+  these keys; every other shortcut keeps `pressCount: 1`.
+- **A low-level mouse hook** (`WH_MOUSE_LL`) reports button presses and wheel
+  turns, nothing else (no position), so a click or a wheel turn spends the
+  press like a key. Its procedure only posts a message, as the keyboard hook
+  does, so it adds no work to pointer moves.
+- **Injected input never counts** (`LLKHF_INJECTED`, `LLMHF_INJECTED`): not
+  as a press, and not as a chord (Clovy's own paste is injected).
+- **Missed releases do not wedge the key**: auto-repeat is read in the hook,
+  where the async key state still holds the previous state, instead of
+  inferred from a set of pressed keys; other keys are checked against
+  `GetAsyncKeyState` on each new press; a fresh press while push-to-talk was
+  still running cancels that take and starts over.
+- **A lone Alt that dictated** gets an unassigned key (VK 0xE8) tapped while
+  held, so its release does not open the focused app's menu bar.
+- **Every decision is logged**: the hook sends `shortcut_trigger_diagnostic`
+  (key as a modifier code or `other`, edge, injected, alone, held time,
+  decision, reason) and the app logs what it did with each edge
+  (`shortcut_edge`), both in `dictation-events.log` only, never the HUD.
