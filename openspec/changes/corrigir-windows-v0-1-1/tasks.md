@@ -2,12 +2,12 @@
 
 ## 1. Reprodução no Windows de prova (D1)
 
-- [ ] 1.1 Instalar a `v0.1.0` publicada no `cert` (perfil `cert-`), com `codex` instalado pelo npm além do nativo; registrar com capturas: janelas de console na abertura, erro real do Codex no chat (stderr ou mensagem da execução), erro real ao salvar um atalho personalizado (mensagem e `dictation-settings.json`), janela que não volta pela bandeja e pela segunda abertura. Registro em `.tmp/verify/corrigir-windows-v0-1-1/reproducao.md`.
+- [x] 1.1 Instalar a `v0.1.0` publicada no `cert` (perfil `cert-`), com `codex` instalado pelo npm além do nativo; registrar com capturas: janelas de console na abertura, erro real do Codex no chat (stderr ou mensagem da execução), erro real ao salvar um atalho personalizado (mensagem e `dictation-settings.json`), janela que não volta pela bandeja e pela segunda abertura. Registro em `.tmp/verify/corrigir-windows-v0-1-1/reproducao.md`.
 
 ## 2. Processos sem console e sondagem compartilhada (D2, D3)
 
-- [ ] 2.1 RED: teste que falha com `Command::new` fora de `hide_console`, e teste de sondagem concorrente contando uma sondagem por CLI; commit RED.
-- [ ] 2.2 GREEN: `hide_console` em todos os pontos de criação de processo (incluindo sidecar) e `detect_all` compartilhado; testes de 2.1 passam.
+- [x] 2.1 RED: teste que falha com `Command::new` fora de `hide_console`, e teste de sondagem concorrente contando uma sondagem por CLI; commit RED.
+- [x] 2.2 GREEN: `hide_console` em todos os pontos de criação de processo (incluindo sidecar) e `detect_all` compartilhado; testes de 2.1 passam.
 
 ## 3. Árvore de processos no Windows (D4)
 

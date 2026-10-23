@@ -72,3 +72,47 @@ async fn chat_engine_cmd_cli_gets_a_prompt_longer_than_the_cmd_line_limit() {
         assert!(prompt_seen(&record).contains(&input), "{}", kind.id());
     }
 }
+
+/// Cancelling a CLI resolved as an npm `.cmd` shim ends `cmd.exe`, `node`,
+/// and what `node` started (`codex.exe` in a real install).
+#[tokio::test]
+async fn chat_engine_cancel_ends_the_whole_cmd_cli_process_tree() {
+    use crate::llm::cmd_shim_tests::{
+        kill_pid, npm_cmd_cli_with_child, process_alive, wait_for_pid,
+    };
+    let kind = CliKind::Codex;
+    let harness = Harness::new(kind).await;
+    let pid_file = harness.log.path().join("child.pid");
+    let program = npm_cmd_cli_with_child(
+        harness.bin.path(),
+        kind.id(),
+        &pid_file,
+        r#"{"type":"thread.started","thread_id":"codex-thread-1"}"#,
+    );
+    let run_id = harness.new_run(kind, "Long task").await;
+    let sink = TestSink {
+        repository: harness.repository.clone(),
+        emitted: StdMutex::new(Vec::new()),
+    };
+    let mut context = harness.context(kind, &program, &run_id, "Long task", None);
+    context.env = std::env::vars().collect();
+    let (cancel, receiver) = watch::channel(false);
+    let pid_path = pid_file.clone();
+    let canceller = async move {
+        let child = tokio::task::spawn_blocking(move || {
+            wait_for_pid(&pid_path, std::time::Duration::from_secs(20))
+        })
+        .await
+        .unwrap();
+        cancel.send(true).unwrap();
+        child
+    };
+    let (_, child) = tokio::join!(
+        execute_turn(&harness.repository, &sink, context, receiver),
+        canceller
+    );
+    let child = child.expect("the fake CLI never started its child");
+    let alive = process_alive(child);
+    kill_pid(child);
+    assert!(!alive, "child {child} outlived the cancelled turn");
+}

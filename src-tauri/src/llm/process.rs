@@ -204,7 +204,32 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
-    use crate::llm::cmd_shim_tests::{npm_cmd_cli, read_record};
+    use crate::llm::cmd_shim_tests::{
+        kill_pid, npm_cmd_cli, npm_cmd_cli_with_child, process_alive, read_record, wait_for_pid,
+    };
+
+    /// `cmd.exe` → `node` → child: on timeout the whole tree ends, not only
+    /// the `cmd.exe` Clovy started.
+    #[tokio::test]
+    async fn llm_cmd_cli_timeout_ends_the_whole_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("child.pid");
+        let program = npm_cmd_cli_with_child(dir.path(), "codex", &pid_file, "started");
+        let result = run(ProcessSpec {
+            program,
+            args: vec!["exec".to_string()],
+            env: std::env::vars().collect(),
+            cwd: dir.path().to_path_buf(),
+            stdin: None,
+            timeout: Duration::from_secs(3),
+        })
+        .await;
+        assert_eq!(result, Err(ProcessError::TimedOut));
+        let child = wait_for_pid(&pid_file, Duration::from_secs(1)).expect("child never started");
+        let alive = process_alive(child);
+        kill_pid(child);
+        assert!(!alive, "child {child} outlived the timed-out CLI");
+    }
 
     /// One-shot calls give the prompt on stdin; through an npm `.cmd` shim
     /// it reaches the CLI byte for byte, however long and whatever it holds.
