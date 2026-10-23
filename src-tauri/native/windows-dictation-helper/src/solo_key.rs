@@ -380,6 +380,38 @@ impl Gesture {
     }
 }
 
+/// Decides, inside the keyboard hook and from the hook's own events, whether
+/// a release of the toggle's lone Alt must be masked from the app's menu
+/// bar: the press went down alone and nothing (key, button, wheel) joined it.
+/// The hotkey thread learns of the same events later, from posted messages,
+/// so the hook cannot wait for it.
+#[derive(Clone, Debug, Default)]
+pub struct AltReleaseMask {
+    target: Option<u32>,
+}
+
+impl AltReleaseMask {
+    /// The Alt key the toggle gesture uses alone, if any.
+    pub fn set_target(&mut self, target: Option<u32>) {
+        self.target = target;
+    }
+
+    /// Feeds one key edge; true when it is a release to mask.
+    pub fn on_key(
+        &mut self,
+        _vk: u32,
+        _down: bool,
+        _injected: bool,
+        _repeat: bool,
+        _still_down: &dyn Fn(u32) -> bool,
+    ) -> bool {
+        false
+    }
+
+    /// A mouse button press or wheel turn.
+    pub fn on_mouse(&mut self, _injected: bool) {}
+}
+
 /// What a finished capture that never formed a chord recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoloCapture {
@@ -892,6 +924,86 @@ mod tests {
         let mut single = Gesture::new(VK_RMENU, false, Some(1));
         single.on_input(key(VK_RMENU, true), 0, &NOTHING_HELD);
         assert!(single.consumes_release());
+    }
+
+    fn alt_edges(mask: &mut AltReleaseMask, edges: &[(u32, bool)]) -> Vec<bool> {
+        edges
+            .iter()
+            .map(|(vk, down)| mask.on_key(*vk, *down, false, false, &NOTHING_HELD))
+            .collect()
+    }
+
+    #[test]
+    fn the_hook_masks_a_lone_alt_tap_by_itself() {
+        let mut mask = AltReleaseMask::default();
+        mask.set_target(Some(VK_LMENU));
+        assert_eq!(
+            alt_edges(&mut mask, &[(VK_LMENU, true), (VK_LMENU, false)]),
+            [false, true]
+        );
+        // Again, for the second tap of a double tap.
+        assert_eq!(
+            alt_edges(&mut mask, &[(VK_LMENU, true), (VK_LMENU, false)]),
+            [false, true]
+        );
+        // Auto-repeat while held changes nothing.
+        let repeat = mask.on_key(VK_LMENU, true, false, false, &NOTHING_HELD);
+        assert!(!repeat);
+        assert!(!mask.on_key(VK_LMENU, true, false, true, &NOTHING_HELD));
+        assert!(mask.on_key(VK_LMENU, false, false, false, &NOTHING_HELD));
+    }
+
+    #[test]
+    fn alt_chords_reach_the_app_unmasked() {
+        let mut mask = AltReleaseMask::default();
+        mask.set_target(Some(VK_LMENU));
+        // Alt+Tab.
+        assert_eq!(
+            alt_edges(
+                &mut mask,
+                &[
+                    (VK_LMENU, true),
+                    (0x09, true),
+                    (0x09, false),
+                    (VK_LMENU, false)
+                ]
+            ),
+            [false, false, false, false]
+        );
+        // Alt + click.
+        mask.on_key(VK_LMENU, true, false, false, &NOTHING_HELD);
+        mask.on_mouse(false);
+        assert!(!mask.on_key(VK_LMENU, false, false, false, &NOTHING_HELD));
+        // A key already held when Alt went down.
+        mask.on_key(VK_LSHIFT, true, false, false, &NOTHING_HELD);
+        mask.on_key(VK_LMENU, true, false, false, &|vk| vk == VK_LSHIFT);
+        assert!(!mask.on_key(VK_LMENU, false, false, false, &NOTHING_HELD));
+        mask.on_key(VK_LSHIFT, false, false, false, &NOTHING_HELD);
+    }
+
+    #[test]
+    fn injected_input_and_stale_keys_do_not_decide_the_mask() {
+        let mut mask = AltReleaseMask::default();
+        mask.set_target(Some(VK_RMENU));
+        // An injected Alt (or the mask key itself) is never masked.
+        assert!(!mask.on_key(VK_RMENU, true, true, false, &NOTHING_HELD));
+        assert!(!mask.on_key(VK_RMENU, false, true, false, &NOTHING_HELD));
+        // Injected keys and clicks during a real press are no chord.
+        mask.on_key(VK_RMENU, true, false, false, &NOTHING_HELD);
+        mask.on_key(0xE8, true, true, false, &NOTHING_HELD);
+        mask.on_key(0xE8, false, true, false, &NOTHING_HELD);
+        mask.on_mouse(true);
+        assert!(mask.on_key(VK_RMENU, false, false, false, &NOTHING_HELD));
+        // A key whose release was missed does not block the mask.
+        mask.on_key(KEY_C, true, false, false, &NOTHING_HELD);
+        mask.on_key(VK_RMENU, true, false, false, &NOTHING_HELD);
+        assert!(mask.on_key(VK_RMENU, false, false, false, &NOTHING_HELD));
+        // No target: nothing is masked.
+        mask.set_target(None);
+        assert_eq!(
+            alt_edges(&mut mask, &[(VK_RMENU, true), (VK_RMENU, false)]),
+            [false, false]
+        );
     }
 
     #[test]

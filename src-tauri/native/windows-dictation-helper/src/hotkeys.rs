@@ -494,6 +494,12 @@ fn apply_gesture_step(
     }
 }
 
+/// What the keyboard hook procedure decides by itself, at the moment of a
+/// key edge: whether this is a lone toggle-Alt release to mask.
+fn decide_alt_mask(_vk: u32, _is_down: bool, _injected: bool, _repeat: bool) -> bool {
+    false
+}
+
 /// The Alt key whose next release the toggle gesture consumes, or 0. Read
 /// by the keyboard hook, which must mask that release before Windows hands
 /// it to the app as a menu key.
@@ -1682,6 +1688,29 @@ mod tests {
         handle_hook_message(&mut state, alt, KEY_DOWN_BIT, 5_000, &event_sink);
         handle_hook_message(&mut state, VK_TAB as u32, KEY_DOWN_BIT, 5_030, &event_sink);
         assert_eq!(menu_mask_target(&state), 0, "Alt+Tab");
+    }
+
+    /// The hook's down and up of a quick Alt tap can both run before the
+    /// thread consumes the first posted message: the hook decides alone.
+    #[test]
+    fn the_hook_masks_an_alt_tap_before_any_posted_message_is_handled() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            ShortcutCommand {
+                press_count: 2,
+                ..lone(ShortcutKind::Toggle, "AltLeft", "Left Alt+Left Alt")
+            },
+        );
+        let alt = VK_LMENU as u32;
+        assert!(!decide_alt_mask(alt, true, false, false));
+        assert!(decide_alt_mask(alt, false, false, false), "first tap");
+        assert!(!decide_alt_mask(alt, true, false, false));
+        assert!(decide_alt_mask(alt, false, false, false), "second tap");
+        assert!(!decide_alt_mask(alt, true, false, false));
+        assert!(!decide_alt_mask(VK_TAB as u32, true, false, false));
+        assert!(!decide_alt_mask(VK_TAB as u32, false, false, false));
+        assert!(!decide_alt_mask(alt, false, false, false), "Alt+Tab");
     }
 
     /// A quick Ctrl tap, then Ctrl+C: copying, so no toggle and no indicator.
