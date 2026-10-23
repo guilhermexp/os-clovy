@@ -511,9 +511,16 @@ impl HelperApp {
         self.awaiting_transcript = true;
         self.pinned_target = focus::pin_foreground_window();
         let active_take_id = self.active_take_id.clone();
+        // The window pinned here receives the paste; Clovy names its app so
+        // the indicator pins it, not the one dictation started in.
+        let stop_target = self.pinned_target;
         self.writer.emit(event(
             "finalizing_transcript",
-            serde_json::json!({ "takeId": active_take_id.as_deref() }),
+            serde_json::json!({
+                "takeId": active_take_id.as_deref(),
+                "targetProcessId": stop_target.map(|target| target.pid()),
+                "targetWindowHandle": stop_target.map(|target| target.hwnd_value()),
+            }),
         ));
         match recorder.stop() {
             Ok(summary) => {

@@ -7523,7 +7523,12 @@ fn complete_windows_target(
     describe: impl Fn(i64, u32) -> Option<(String, String)>,
 ) {
     let event_type = event.get("type").and_then(serde_json::Value::as_str);
-    if !matches!(event_type, Some("listening_started" | "paste_target")) {
+    // The stop pins the window the text is pasted into (it may not be the
+    // one dictation started in), and the indicator pins what this names.
+    if !matches!(
+        event_type,
+        Some("listening_started" | "finalizing_transcript" | "paste_target")
+    ) {
         return;
     }
     let Some(payload) = event
