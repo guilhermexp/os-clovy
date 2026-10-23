@@ -77,6 +77,8 @@ export default defineMessages({
       "Pick a letter, number, punctuation, arrow, or function key.",
     "settings.shortcuts.registerFailedWindows":
       "Windows could not register {shortcut}. Another app may already use it.",
+    "settings.shortcuts.captureHintWindows":
+      "Press a combination, or a key that works alone, such as Right Ctrl. Esc cancels.",
     "settings.shortcuts.modifierRequiredMac": "Shortcut must include Cmd, Ctrl, Opt, Shift, or Fn.",
     "settings.shortcuts.monitorUnavailable": "Global shortcut monitoring is unavailable.",
     "settings.shortcuts.unavailable": "Dictation shortcut is unavailable.",
@@ -414,6 +416,8 @@ export default defineMessages({
       "Escolha uma letra, número, pontuação, seta ou tecla de função.",
     "settings.shortcuts.registerFailedWindows":
       "O Windows não conseguiu registrar {shortcut}. Outro app pode já estar usando.",
+    "settings.shortcuts.captureHintWindows":
+      "Pressione uma combinação ou uma tecla que funciona sozinha, como o Ctrl direito. Esc cancela.",
     "settings.shortcuts.modifierRequiredMac":
       "O atalho precisa incluir Cmd, Ctrl, Opt, Shift ou Fn.",
     "settings.shortcuts.monitorUnavailable":

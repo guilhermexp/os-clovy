@@ -63,7 +63,7 @@ function helperEvent(type: string, payload: Record<string, unknown>) {
   act(() => mocks.helperListener?.({ payload: JSON.stringify({ type, payload }) }));
 }
 
-async function renderShortcuts() {
+async function renderShortcuts(changeLabel = "Change") {
   render(
     <AppSettings
       sourceMode="microphoneOnly"
@@ -75,7 +75,7 @@ async function renderShortcuts() {
     />,
   );
   await waitFor(() => expect(mocks.helperListener).toBeDefined());
-  await screen.findAllByRole("button", { name: "Change" });
+  await screen.findAllByRole("button", { name: changeLabel });
 }
 
 async function startPushToTalkCapture() {
@@ -138,6 +138,27 @@ describe("shortcut capture on Windows", () => {
     });
     const error = await screen.findByText(/doesn't reach Windows/);
     expect(error.textContent).toMatch(/Right Ctrl/);
+  });
+
+  it("hints at lone keys while capturing, and names them in Portuguese", async () => {
+    applyInterfaceLocale("pt-BR");
+    await renderShortcuts("Alterar");
+    const [change] = screen.getAllByRole("button", { name: "Alterar" });
+    await userEvent.setup().click(change);
+    expect(
+      await screen.findByText(/uma tecla que funciona sozinha, como o Ctrl direito/),
+    ).toBeInTheDocument();
+
+    helperEvent("shortcut_captured", {
+      kind: "push_to_talk",
+      shortcut: {
+        code: "ControlRight",
+        label: "Right Ctrl",
+        modifiers: { command: false, control: false, option: false, shift: false, function: false },
+        pressCount: 1,
+      },
+    });
+    expect(await screen.findByText("Ctrl direito")).toBeInTheDocument();
   });
 
   it("keeps a registration error on the row after the capture ends", async () => {

@@ -28,7 +28,7 @@
 
 - [x] 6.1 RED: testes da validação Rust (tecla sozinha e modificadora sozinha aceitas no Windows, Fn recusado), da máquina de estados do gancho (Ctrl direito sozinho dispara; Ctrl direito+C não), da captura de fonte única, da mensagem de tecla não vista e do erro que não some; commit RED.
 - [x] 6.2 GREEN: `hotkeys.rs`, `dictation.rs`, `use-shortcut-capture.ts`, `AppSettings.tsx`, padrão Ctrl direito no Windows para quem não tem atalho salvo, e a causa de "não salva nenhum atalho" encontrada em 1.1; testes passam.
-- [ ] 6.3 Interface da linha de atalho revisada com `/impeccable` (pt-BR e inglês); adendo datado na ADR-0020.
+- [x] 6.3 Interface da linha de atalho revisada com `/impeccable` (pt-BR e inglês); adendo datado na ADR-0020.
 
 ## 7. Janela principal (D7)
 

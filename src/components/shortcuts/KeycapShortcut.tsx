@@ -32,6 +32,14 @@ const WINDOWS_KEY_GLYPHS: Record<string, { glyph: string; name: string }> = {
   shift: { glyph: "Shift", name: "Shift" },
 };
 
+/** Lone keys a Windows shortcut can be (labels as the helper writes them),
+ * named in the interface language. */
+const WINDOWS_LONE_KEY_NAMES = {
+  "right ctrl": "shell.shortcut.rightCtrl",
+  "right alt": "shell.shortcut.rightAlt",
+  "right shift": "shell.shortcut.rightShift",
+} as const;
+
 export function KeycapShortcut({
   label,
   capturing = false,
@@ -55,7 +63,10 @@ export function KeycapShortcut({
   return (
     <span className="keycap-frame" aria-label={t("shell.shortcut.ariaLabel", { label })}>
       {keys.map((key, idx) => {
-        const mapped = keyGlyphs[key.toLowerCase()];
+        const lone = windows
+          ? WINDOWS_LONE_KEY_NAMES[key.toLowerCase() as keyof typeof WINDOWS_LONE_KEY_NAMES]
+          : undefined;
+        const mapped = lone ? { glyph: t(lone), name: t(lone) } : keyGlyphs[key.toLowerCase()];
         return (
           <kbd
             key={`${key}-${idx}`}

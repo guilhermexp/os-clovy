@@ -76,3 +76,35 @@ capture validation, registration, and activation share one Windows allowlist.
 - A shortcut is not ready merely because it was saved. The helper emits
   readiness only after registration succeeds and emits a recoverable
   registration failure when Windows refuses the chord.
+
+## Addendum 2026-10-23: lone keys, Right Ctrl default, helper-only capture
+
+Supersedes the v1 rejection of bare keys and modifier-only shortcuts for a
+narrow set, by the owner's decision after v0.1.0 on Windows (Fn does not reach
+Windows on most keyboards, so the Mac habit of a lone dictation key needs a
+key Windows does see). `Fn` stays refused.
+
+- **Lone right-hand modifiers** (`ControlRight`, `AltRight`, `ShiftRight`) are
+  watched by the existing hook, not `RegisterHotKey`, which cannot reserve a
+  modifier alone. They count only when pressed and released with no other key
+  in between (`solo_key::SoloModifier`): Right Ctrl + C keeps copying.
+  Push-to-talk starts on the lone press, stops on its release, and a key that
+  joins while it is held sends `shortcut_key_cancel`, which discards the take
+  instead of pasting it. Toggle fires on the clean release. AltGr's synthetic
+  Left Ctrl (scan code 0x21D) is ignored. Left-hand modifiers alone stay
+  refused: they are in constant use. These shortcuts get no system conflict
+  detection, the trade-off this ADR named; the chord rule keeps them out of the
+  way of normal typing.
+- **Lone keys no app uses on their own** (`F13` to `F24`, `Pause`,
+  `ScrollLock`, `Insert`, `PrintScreen`, `ContextMenu`) keep the reservation
+  path: `RegisterHotKey` with no modifier, so conflicts are still reported.
+- **Default:** Windows push-to-talk is Right Ctrl. A shortcut already saved
+  is kept; only installs without one get the new default.
+- **Capture has one source, the helper's hook.** Settings no longer reads the
+  same keys from the DOM on Windows: the DOM cannot tell the right modifier
+  from the left or see AltGr reliably, and the two sources raced (the DOM
+  path cancelled the helper's capture, and the cancel cleared the row's
+  error). A capture that times out with no key event at all reports
+  `no_key_detected`, shown as "that key doesn't reach Windows" with Right Ctrl
+  suggested. Capture and registration errors stay on the row until the user's
+  next action.

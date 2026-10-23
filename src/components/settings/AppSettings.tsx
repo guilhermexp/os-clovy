@@ -2949,8 +2949,16 @@ function ShortcutRow({
     <div className="settings-row">
       <div className="settings-row-info">
         <h3 className="settings-row-title">{title}</h3>
-        <p className="settings-row-description">{description}</p>
-        {error ? <p className="settings-row-error">{error}</p> : null}
+        <p className="settings-row-description" aria-live="polite">
+          {capturing && platform === "windows"
+            ? t("settings.shortcuts.captureHintWindows")
+            : description}
+        </p>
+        {error ? (
+          <p className="settings-row-error" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
       <div className="settings-row-control">
         <KeycapShortcut label={shortcut.label} capturing={capturing} platform={platform} />
