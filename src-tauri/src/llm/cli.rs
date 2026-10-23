@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const ERROR_DETAIL_CHARS: usize = 300;
+/// Codex writes its final answer to this file in the scratch directory.
+pub const CODEX_LAST_MESSAGE_FILE: &str = "last_message.txt";
+/// The strict output schema codex validates against, in the scratch directory.
+pub const CODEX_SCHEMA_FILE: &str = "schema.json";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CliKind {
@@ -110,6 +114,8 @@ pub struct CliInvocation {
     pub stdin: Option<String>,
     pub set_env: Vec<(String, String)>,
     pub remove_env: Vec<&'static str>,
+    /// Files written into the scratch directory before the call (name, text).
+    pub files: Vec<(String, String)>,
 }
 
 /// The single prompt text a CLI receives: the marker alone on the first
@@ -206,6 +212,7 @@ pub fn build_invocation(
         stdin: Some(compose_prompt(kind, request)),
         set_env,
         remove_env,
+        files: Vec::new(),
     })
 }
 
@@ -444,12 +451,7 @@ mod tests {
         ] {
             assert!(pi.contains(&flag.to_string()), "pi lacks {flag}");
         }
-        for kind in [
-            CliKind::Codex,
-            CliKind::Agy,
-            CliKind::CursorAgent,
-            CliKind::Copilot,
-        ] {
+        for kind in [CliKind::CursorAgent, CliKind::Copilot] {
             assert!(!kind.tools_disabled());
             assert_eq!(
                 build_invocation(kind, &request(None)),
@@ -458,6 +460,125 @@ mod tests {
                 kind.id()
             );
         }
+    }
+
+    /// Codex keeps tools it cannot turn off, so a one-shot call runs it in its
+    /// least-privileged mode: read-only sandbox (no writes, no network for
+    /// commands), never asking for approval, no web search, no saved
+    /// session, in the empty scratch directory, prompt on stdin.
+    #[test]
+    fn llm_codex_one_shot_runs_read_only_ephemeral_and_offline() {
+        let codex = build_invocation(CliKind::Codex, &request(None)).unwrap();
+        let args = &codex.args;
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        for flag in ["--ephemeral", "--skip-git-repo-check"] {
+            assert!(args.contains(&flag.to_string()), "codex lacks {flag}");
+        }
+        for config in [
+            "approval_policy=\"never\"",
+            "web_search=\"disabled\"",
+            "sandbox_workspace_write.network_access=false",
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == config),
+                "codex lacks -c {config}"
+            );
+        }
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--output-last-message", CODEX_LAST_MESSAGE_FILE]),
+            "the answer is read from a file in the scratch directory"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("-"),
+            "prompt on stdin"
+        );
+        assert!(!args.iter().any(|arg| arg.contains("danger")));
+        let prompt = codex.stdin.unwrap();
+        assert_eq!(prompt.lines().next(), Some(CLOVY_AUTHORSHIP_MARKER));
+    }
+
+    #[test]
+    fn llm_codex_schema_goes_to_a_strict_output_schema_file() {
+        let schema = json!({"type": "object", "properties": {"ok": {"type": "boolean"}}});
+        let codex = build_invocation(CliKind::Codex, &request(Some(schema.clone()))).unwrap();
+        assert!(codex
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--output-schema", CODEX_SCHEMA_FILE]));
+        assert_eq!(
+            codex.files,
+            vec![(
+                CODEX_SCHEMA_FILE.to_string(),
+                strictify(&schema).to_string()
+            )]
+        );
+    }
+
+    /// agy has no flag that turns its tools off; print mode denies every
+    /// permission request (nobody can approve), `--sandbox` restricts its
+    /// terminal, and nothing auto-approves.
+    #[test]
+    fn llm_agy_one_shot_uses_its_most_restricted_mode() {
+        let schema = json!({"type": "object", "properties": {"ok": {"type": "boolean"}}});
+        let agy = build_invocation(CliKind::Agy, &request(Some(schema.clone()))).unwrap();
+        let args = &agy.args;
+        let prompt = args.iter().position(|arg| arg == "--print").unwrap();
+        assert!(args[prompt + 1].starts_with(CLOVY_AUTHORSHIP_MARKER));
+        for flag in ["--sandbox", "--disable-slash-commands"] {
+            assert!(args.contains(&flag.to_string()), "agy lacks {flag}");
+        }
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "json"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--json-schema" && pair[1] == schema.to_string()));
+        assert!(!args.iter().any(|arg| arg.contains("dangerously")));
+        assert!(agy.stdin.is_none());
+    }
+
+    #[test]
+    fn llm_codex_and_agy_answers_are_parsed() {
+        // run_cli puts codex's last-message file in place of stdout.
+        assert_eq!(
+            parse_output(CliKind::Codex, &finished("Resumo\n", true), false).unwrap(),
+            "Resumo"
+        );
+        let failed = ProcessOutput {
+            stderr: "ERROR: {\"error\":{\"message\":\"Not signed in\"}}".to_string(),
+            ..finished("", false)
+        };
+        assert!(matches!(
+            parse_output(CliKind::Codex, &failed, false),
+            Err(LlmError::CliFailed { detail, .. }) if detail == "Not signed in"
+        ));
+        assert_eq!(
+            parse_output(
+                CliKind::Agy,
+                &finished(r#"{"status":"SUCCESS","response":"Olá"}"#, true),
+                false
+            )
+            .unwrap(),
+            "Olá"
+        );
+        assert_eq!(
+            parse_output(
+                CliKind::Agy,
+                &finished(
+                    r#"{"status":"SUCCESS","structured_output":{"ok":true}}"#,
+                    true
+                ),
+                true
+            )
+            .unwrap(),
+            r#"{"ok":true}"#
+        );
     }
 
     #[test]

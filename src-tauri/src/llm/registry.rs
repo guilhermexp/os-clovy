@@ -984,18 +984,30 @@ mod tests {
     #[test]
     fn llm_cli_that_keeps_tools_cannot_take_content_uses() {
         let mut settings = crate::providers::default_settings_for_tests();
-        for usage in [LlmUsage::Notes, LlmUsage::Activity] {
-            let error = set_usage(
-                &mut settings,
-                usage,
-                ProviderRef::Cli { id: CliKind::Codex },
-                |_| true,
-            )
-            .unwrap_err();
-            assert_eq!(error.code, "llm_cli_tools_not_disabled", "{usage:?}");
+        for id in [CliKind::CursorAgent, CliKind::Copilot] {
+            for usage in [LlmUsage::Notes, LlmUsage::Activity] {
+                let error =
+                    set_usage(&mut settings, usage, ProviderRef::Cli { id }, |_| true).unwrap_err();
+                assert_eq!(error.code, "llm_cli_tools_not_disabled", "{id:?} {usage:?}");
+            }
         }
         assert_eq!(settings.llm_usage.notes, ProviderRef::Clovy);
         assert_eq!(settings.llm_usage.activity, ProviderRef::None);
+    }
+
+    /// The owner's decision: codex and agy run notes and activity in their
+    /// least-privileged one-shot mode.
+    #[test]
+    fn llm_codex_and_agy_take_notes_and_activity() {
+        for id in [CliKind::Codex, CliKind::Agy] {
+            let mut settings = crate::providers::default_settings_for_tests();
+            for usage in [LlmUsage::Notes, LlmUsage::Activity] {
+                set_usage(&mut settings, usage, ProviderRef::Cli { id }, |_| true)
+                    .unwrap_or_else(|error| panic!("{id:?} {usage:?}: {error:?}"));
+            }
+            assert_eq!(settings.llm_usage.notes, ProviderRef::Cli { id });
+            assert_eq!(settings.llm_usage.activity, ProviderRef::Cli { id });
+        }
     }
 
     #[test]

@@ -749,19 +749,14 @@ mod tests {
     async fn llm_cli_that_keeps_tools_is_never_started() {
         let dir = tempfile::tempdir().unwrap();
         let started = dir.path().join("started");
-        for name in ["codex", "agy", "cursor-agent", "copilot"] {
+        for name in ["cursor-agent", "copilot"] {
             fake_cli(
                 dir.path(),
                 name,
                 &format!("touch '{}'\necho ok", started.display()),
             );
         }
-        for kind in [
-            CliKind::Codex,
-            CliKind::Agy,
-            CliKind::CursorAgent,
-            CliKind::Copilot,
-        ] {
+        for kind in [CliKind::CursorAgent, CliKind::Copilot] {
             let error = run_cli(
                 kind,
                 &GenerateRequest {
@@ -779,17 +774,81 @@ mod tests {
 
     #[tokio::test]
     async fn llm_activity_refuses_a_cli_that_keeps_tools() {
-        let mut registry = registry_with_activity(ProviderRef::Cli { id: CliKind::Codex }, None);
+        let mut registry = registry_with_activity(
+            ProviderRef::Cli {
+                id: CliKind::CursorAgent,
+            },
+            None,
+        );
         registry
             .cli_levels
-            .insert(CliKind::Codex, StructuredOutputLevel::Strict);
+            .insert(CliKind::CursorAgent, StructuredOutputLevel::JsonSchema);
         // Were the call made, the error would be `TimedOut`.
         let error = run_activity(&registry, GenerateRequest::default(), |_, _| async {
             Err(LlmError::TimedOut)
         })
         .await
         .unwrap_err();
-        assert_eq!(error, LlmError::CliToolsNotDisabled(CliKind::Codex));
+        assert_eq!(error, LlmError::CliToolsNotDisabled(CliKind::CursorAgent));
+    }
+
+    /// The app runs on Windows too: the error speaks of the computer.
+    #[test]
+    fn llm_missing_cli_error_does_not_say_mac() {
+        let error = AppError::from(LlmError::CliNotInstalled(CliKind::Codex));
+        assert_eq!(error.message, "Codex is not installed on this computer.");
+    }
+
+    #[tokio::test]
+    async fn llm_activity_runs_on_codex() {
+        let mut registry = registry_with_activity(ProviderRef::Cli { id: CliKind::Codex }, None);
+        registry
+            .cli_levels
+            .insert(CliKind::Codex, StructuredOutputLevel::Strict);
+        let error = run_activity(&registry, GenerateRequest::default(), |_, _| async {
+            Err(LlmError::TimedOut)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, LlmError::TimedOut, "the call was made");
+    }
+
+    /// A fake codex that records its argv and stdin, then writes its answer
+    /// to the `--output-last-message` file, as codex does.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn llm_codex_one_shot_reads_the_answer_from_its_last_message_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        std::fs::create_dir(&log).unwrap();
+        fake_cli(
+            dir.path(),
+            "codex",
+            &format!(
+                "printf '%s\\n' \"$@\" > '{log}/args'\npwd > '{log}/cwd'\ncat > '{log}/stdin'\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then shift; printf 'Resumo pronto' > \"$1\"; fi; shift; done\necho '{{\"type\":\"turn.completed\"}}'",
+                log = log.display()
+            ),
+        );
+        let answer = run_cli(
+            CliKind::Codex,
+            &GenerateRequest {
+                prompt: "Resuma a reunião".to_string(),
+                ..GenerateRequest::default()
+            },
+            &env_with(dir.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer, "Resumo pronto");
+        let args = std::fs::read_to_string(log.join("args")).unwrap();
+        assert!(args.contains("read-only"), "{args}");
+        let stdin = std::fs::read_to_string(log.join("stdin")).unwrap();
+        assert!(stdin.starts_with(CLOVY_AUTHORSHIP_MARKER));
+        let cwd = std::fs::read_to_string(log.join("cwd")).unwrap();
+        assert!(
+            cwd.contains("clovy-llm-"),
+            "runs in the scratch directory: {cwd}"
+        );
     }
 
     fn registry_with_activity(

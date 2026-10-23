@@ -163,28 +163,55 @@ describe("LlmProvidersSection", () => {
     expect(notInstalledOption.textContent).toContain("(not installed)");
   });
 
-  it("offers a CLI whose tools stay on for chat only, never for content uses, and does not test it", async () => {
+  it("offers codex and agy for content uses in their least-privileged mode", async () => {
     mocks.llmDetectClis.mockResolvedValue(
       sampleClis.map((cli) =>
-        cli.id === "codex" ? { ...cli, installed: true, path: "/usr/local/bin/codex" } : cli,
+        cli.id === "codex" || cli.id === "agy"
+          ? { ...cli, installed: true, path: `/usr/local/bin/${cli.id}`, oneShot: true }
+          : cli,
       ),
     );
     render(<LlmProvidersSection />);
 
     expect(await screen.findByText(/\/usr\/local\/bin\/codex/)).toBeInTheDocument();
+    const option = (name: string, id: string) =>
+      screen
+        .getByRole("combobox", { name })
+        .querySelector(`option[value="cli:${id}"]`) as HTMLOptionElement;
+    for (const id of ["codex", "agy"]) {
+      for (const name of ["Chat", "Notes", "Activity"]) {
+        expect(option(name, id).disabled, `${id} ${name}`).toBe(false);
+      }
+    }
+    expect(option("Notes", "codex").textContent).toBe("Codex");
+    // Claude Code, Codex, and Antigravity are installed and can be tested.
+    expect(screen.getAllByRole("button", { name: "Test" })).toHaveLength(3);
+  });
+
+  it("offers a CLI whose tools stay on for chat only, never for content uses, and does not test it", async () => {
+    mocks.llmDetectClis.mockResolvedValue(
+      sampleClis.map((cli) =>
+        cli.id === "cursor-agent"
+          ? { ...cli, installed: true, path: "/usr/local/bin/cursor-agent" }
+          : cli,
+      ),
+    );
+    render(<LlmProvidersSection />);
+
+    expect(await screen.findByText(/\/usr\/local\/bin\/cursor-agent/)).toBeInTheDocument();
     const option = (name: string) =>
       screen
         .getByRole("combobox", { name })
-        .querySelector('option[value="cli:codex"]') as HTMLOptionElement;
+        .querySelector('option[value="cli:cursor-agent"]') as HTMLOptionElement;
     expect(option("Chat").disabled).toBe(false);
     // Dictation cleanup never runs on a CLI or endpoint, so it has no row.
     expect(screen.queryByRole("combobox", { name: "Dictation cleanup" })).toBeNull();
     for (const name of ["Notes", "Activity"]) {
       expect(option(name).disabled, name).toBe(true);
-      expect(option(name).textContent).toBe("Codex (tools can't be turned off)");
+      expect(option(name).textContent).toBe("Cursor Agent (tools can't be turned off)");
     }
-    expect(screen.getAllByText(/Its tools can't be turned off/).length).toBe(4);
-    // Only Claude Code (installed, tools off) has a test button.
+    expect(screen.getAllByText(/Its tools can't be turned off/).length).toBe(2);
+    // Only Claude Code (installed, one-shot capable) has a test button.
     expect(screen.getAllByRole("button", { name: "Test" })).toHaveLength(1);
   });
 
