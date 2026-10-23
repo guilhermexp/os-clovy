@@ -407,8 +407,8 @@ impl std::fmt::Display for Incomplete {
 /// the day (their titles are in that language too, so the remaining reports
 /// fold again) and the summary go, with their run records. True when
 /// anything went.
-pub async fn relocalize_day(_deps: &Deps<'_>, _day: NaiveDate) -> Result<bool, StoreError> {
-    Ok(false)
+pub async fn relocalize_day(deps: &Deps<'_>, day: NaiveDate) -> Result<bool, StoreError> {
+    db::relocalize_day(deps.store, &day_key(day), prompts::locale_tag(deps.locale)).await
 }
 
 /// Whether every input of `day`'s summary is settled: the timeline built

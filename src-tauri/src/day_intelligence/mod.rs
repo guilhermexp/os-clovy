@@ -262,6 +262,11 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
     if provider_state() != ProviderState::Ready {
         return;
     }
+    // Text is written in the interface language: before the saved file or
+    // the webview says which, nothing is generated (the next tick retries).
+    let Some(locale) = crate::interface_locale::known() else {
+        return;
+    };
     if state.embedder.status() == EmbedderStatus::Absent {
         let embedder = Arc::clone(&state.embedder);
         tauri::async_runtime::spawn(async move { embedder.ensure_ready().await });
@@ -278,9 +283,15 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
         embedder: state.embedder.as_ref(),
         sources: &sources,
         zone: &zone,
-        locale: crate::interface_locale::current(),
+        locale,
         now,
     };
+    // Today's reports and summary in another language are written again.
+    match pipeline::relocalize_day(&deps, today).await {
+        Ok(true) => emit(app, &day_key(today), false),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "day intelligence relocalization failed"),
+    }
     let yesterday = today - Duration::days(1);
     for day in [yesterday, today] {
         match pipeline::catch_up_day(&deps, day, false).await {

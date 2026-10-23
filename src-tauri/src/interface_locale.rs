@@ -2,9 +2,11 @@
 //!
 //! The webview owns the preference (`src/i18n/locale.ts`, localStorage) and
 //! emits `clovy://interface-locale` with the chosen BCP 47 tag on startup and
-//! on every change. Rust only mirrors it so the menus it builds read in the
-//! same language; unknown tags fall back to English, matching the frontend.
-//! This is independent of the dictation/transcription language.
+//! on every change. Rust mirrors it so the menus it builds read in the same
+//! language (unknown tags fall back to English, matching the frontend), and
+//! saves it in the config dir (`SAVED_LOCALE_FILE`): activity text generated
+//! at startup, before the webview loads, needs it, and waits while it is
+//! unknown. This is independent of the dictation/transcription language.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -16,7 +18,7 @@ pub enum UiLocale {
     PtBr,
 }
 
-static CURRENT: AtomicU8 = AtomicU8::new(0);
+static CURRENT: LocaleState = LocaleState::new();
 
 impl UiLocale {
     /// Parse an event payload: a JSON string ("\"pt-BR\"") or a bare tag.
@@ -34,24 +36,47 @@ impl UiLocale {
         }
     }
 
-    fn as_u8(self) -> u8 {
+    /// The BCP 47 tag the webview uses.
+    pub fn tag(self) -> &'static str {
         match self {
-            UiLocale::En => 0,
-            UiLocale::PtBr => 1,
+            UiLocale::En => "en",
+            UiLocale::PtBr => "pt-BR",
         }
     }
 
-    fn from_u8(value: u8) -> Self {
-        if value == 1 {
-            UiLocale::PtBr
-        } else {
-            UiLocale::En
+    fn as_u8(self) -> u8 {
+        match self {
+            UiLocale::En => 1,
+            UiLocale::PtBr => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(UiLocale::En),
+            2 => Some(UiLocale::PtBr),
+            _ => None,
         }
     }
 }
 
+/// The interface language for the native chrome: English until known.
 pub fn current() -> UiLocale {
-    UiLocale::from_u8(CURRENT.load(Ordering::SeqCst))
+    CURRENT.current()
+}
+
+/// The interface language, once the webview said it or the saved file did.
+/// Generated activity text waits for it.
+pub fn known() -> Option<UiLocale> {
+    CURRENT.known()
+}
+
+/// Restores the language saved in `dir` at startup, before anything is
+/// generated. Returns it when there was one.
+pub fn restore(dir: &std::path::Path) -> Option<UiLocale> {
+    let locale = read_saved(dir)?;
+    CURRENT.set(locale);
+    Some(locale)
 }
 
 /// File in the app config dir holding the last interface language, so text
@@ -68,31 +93,46 @@ impl LocaleState {
     }
 
     pub fn known(&self) -> Option<UiLocale> {
-        None
+        UiLocale::from_u8(self.0.load(Ordering::SeqCst))
     }
 
     pub fn current(&self) -> UiLocale {
-        UiLocale::En
+        self.known().unwrap_or(UiLocale::En)
     }
 
-    pub fn set(&self, _locale: UiLocale) -> bool {
-        false
+    /// Stores the locale; returns true when it changed.
+    pub fn set(&self, locale: UiLocale) -> bool {
+        self.0.swap(locale.as_u8(), Ordering::SeqCst) != locale.as_u8()
     }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SavedLocale {
+    locale: String,
 }
 
 /// The saved interface language in `dir`, if any is readable.
-pub fn read_saved(_dir: &std::path::Path) -> Option<UiLocale> {
-    None
+pub fn read_saved(dir: &std::path::Path) -> Option<UiLocale> {
+    let text = std::fs::read_to_string(dir.join(SAVED_LOCALE_FILE)).ok()?;
+    let saved: SavedLocale = serde_json::from_str(&text).ok()?;
+    Some(UiLocale::from_tag(&saved.locale))
 }
 
 /// Saves the interface language in `dir`.
-pub fn write_saved(_dir: &std::path::Path, _locale: UiLocale) -> std::io::Result<()> {
-    Ok(())
+pub fn write_saved(dir: &std::path::Path, locale: UiLocale) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let saved = SavedLocale {
+        locale: locale.tag().to_string(),
+    };
+    std::fs::write(
+        dir.join(SAVED_LOCALE_FILE),
+        serde_json::to_vec(&saved).map_err(std::io::Error::other)?,
+    )
 }
 
 /// Store the locale; returns true when it changed.
 pub fn set_current(locale: UiLocale) -> bool {
-    CURRENT.swap(locale.as_u8(), Ordering::SeqCst) != locale.as_u8()
+    CURRENT.set(locale)
 }
 
 /// Native menu copy. English strings are byte-identical to the pre-i18n

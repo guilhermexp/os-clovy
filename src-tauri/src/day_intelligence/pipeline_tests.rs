@@ -1002,7 +1002,7 @@ async fn todays_reports_and_summary_in_another_language_are_generated_again() {
             .next()
             .unwrap()
     ));
-    assert_eq!(db::workstreams_of_day(&store, &key).await.unwrap().len(), 1);
+    assert_eq!(db::workstreams_of_day(&store, &key).await.unwrap().len(), 2);
 
     let portuguese_run = pipeline::summarize_on_demand(&portuguese, day())
         .await
