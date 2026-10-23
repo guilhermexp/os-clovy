@@ -1,13 +1,11 @@
 use crate::protocol::{ShortcutCommand, ShortcutKind, ShortcutModifiers};
 use crate::solo_key::{
-    self, CaptureTracker, Diagnostic, Gesture, GestureEvent, GestureStep, Input, SoloCapture,
+    self, AltReleaseMask, CaptureTracker, Diagnostic, Gesture, GestureEvent, GestureStep, Input,
+    SoloCapture,
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        mpsc, Arc,
-    },
+    sync::{mpsc, Arc},
     thread,
     time::Instant,
 };
@@ -361,9 +359,17 @@ fn rebuild_gestures(state: &mut HotkeyThreadState) {
     if let Some((vk, presses)) = toggle.filter(|(key, _)| Some(*key) != push) {
         gestures.push(Gesture::new(vk, false, Some(presses)));
     }
+    // The hook masks releases of the toggle's lone Alt by itself.
+    let toggle_alt = gestures
+        .iter()
+        .find(|gesture| {
+            gesture.toggles()
+                && (gesture.target() == VK_LMENU as u32 || gesture.target() == VK_RMENU as u32)
+        })
+        .map(Gesture::target);
+    ALT_RELEASE_MASK.with(|mask| mask.borrow_mut().set_target(toggle_alt));
     state.gestures = gestures;
     kill_timer(&mut state.gesture_timer_id);
-    publish_menu_mask(state);
 }
 
 /// Which shortcut a gesture event or diagnostic belongs to.
@@ -416,7 +422,6 @@ fn tick_gestures(state: &mut HotkeyThreadState, now_ms: u64, event_sink: &EventS
 
 /// A timer runs only while a press waits for its hold threshold.
 fn sync_gesture_timer(state: &mut HotkeyThreadState) {
-    publish_menu_mask(state);
     let waiting = state
         .gestures
         .iter()
@@ -496,30 +501,19 @@ fn apply_gesture_step(
 
 /// What the keyboard hook procedure decides by itself, at the moment of a
 /// key edge: whether this is a lone toggle-Alt release to mask.
-fn decide_alt_mask(_vk: u32, _is_down: bool, _injected: bool, _repeat: bool) -> bool {
-    false
+fn decide_alt_mask(vk: u32, is_down: bool, injected: bool, repeat: bool) -> bool {
+    ALT_RELEASE_MASK.with(|mask| {
+        mask.borrow_mut()
+            .on_key(vk, is_down, injected, repeat, &|vk| key_is_down(vk))
+    })
 }
 
-/// The Alt key whose next release the toggle gesture consumes, or 0. Read
-/// by the keyboard hook, which must mask that release before Windows hands
-/// it to the app as a menu key.
-fn menu_mask_target(state: &HotkeyThreadState) -> u32 {
-    state
-        .gestures
-        .iter()
-        .find(|gesture| {
-            (gesture.target() == VK_LMENU as u32 || gesture.target() == VK_RMENU as u32)
-                && gesture.consumes_release()
-        })
-        .map_or(0, Gesture::target)
-}
-
-/// What [`menu_mask_target`] said last, for the keyboard hook procedure (it
-/// runs on the hotkey thread but has no access to its state).
-static MENU_MASK_ON_RELEASE: AtomicU32 = AtomicU32::new(0);
-
-fn publish_menu_mask(state: &HotkeyThreadState) {
-    MENU_MASK_ON_RELEASE.store(menu_mask_target(state), Ordering::SeqCst);
+thread_local! {
+    /// The hooks run on the hotkey thread, called by Windows in its message
+    /// loop before posted messages are handled: this is their own view of
+    /// the toggle's lone Alt, fed by every hook event as it happens.
+    static ALT_RELEASE_MASK: std::cell::RefCell<AltReleaseMask> =
+        std::cell::RefCell::new(AltReleaseMask::default());
 }
 
 /// Taps an unassigned key while Alt is held, so releasing a lone Alt that
@@ -1231,16 +1225,18 @@ unsafe extern "system" fn low_level_keyboard_proc(
             if event.vkCode == VK_LCONTROL as u32 && event.scanCode == ALTGR_FAKE_CTRL_SCAN_CODE {
                 flags |= KEY_ALTGR_BIT;
             }
-            // A lone Alt tap the toggle gesture counts: tap the mask key now,
-            // while Alt is still down for the app, so its release does not
-            // open the menu bar. Chords (Alt+Tab) never get here: they spend
-            // the gesture, which clears the target.
-            if is_up
-                && flags & KEY_INJECTED_BIT == 0
-                && event.vkCode != 0
-                && MENU_MASK_ON_RELEASE
-                    .compare_exchange(event.vkCode, 0, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
+            // A lone tap of the toggle's Alt: tap the mask key now, while Alt
+            // is still down for the app, so its release does not open the
+            // menu bar. Decided here, from the hook's own events: the posted
+            // messages may not have been handled yet. Chords (Alt+Tab) are
+            // left alone.
+            if flags & KEY_ALTGR_BIT == 0
+                && decide_alt_mask(
+                    event.vkCode,
+                    is_down,
+                    flags & KEY_INJECTED_BIT != 0,
+                    flags & KEY_REPEAT_BIT != 0,
+                )
             {
                 mask_alt_menu();
             }
@@ -1275,6 +1271,7 @@ unsafe extern "system" fn low_level_mouse_proc(code: i32, wparam: usize, lparam:
         ) {
             let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
             let injected = (event.flags & LLMHF_INJECTED != 0) as isize;
+            ALT_RELEASE_MASK.with(|mask| mask.borrow_mut().on_mouse(injected != 0));
             let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
             unsafe { PostThreadMessageW(thread_id, HOTKEY_MOUSE_EVENT, 0, injected) };
         }
@@ -1660,34 +1657,6 @@ mod tests {
                     | HotkeyEvent::KeyUp { .. }
                     | HotkeyEvent::KeyCancel { .. }
             )));
-    }
-
-    /// Both taps of a lone-Alt double tap are masked from the app's menu
-    /// bar; Alt+Tab is not.
-    #[test]
-    fn the_hook_masks_the_alt_releases_the_toggle_consumes() {
-        let mut state = HotkeyThreadState::default();
-        drain_set(
-            &mut state,
-            ShortcutCommand {
-                press_count: 2,
-                ..lone(ShortcutKind::Toggle, "AltLeft", "Left Alt+Left Alt")
-            },
-        );
-        let (_, event_sink) = recorder();
-        let alt = VK_LMENU as u32;
-        assert_eq!(menu_mask_target(&state), 0);
-        handle_hook_message(&mut state, alt, KEY_DOWN_BIT, 0, &event_sink);
-        assert_eq!(menu_mask_target(&state), alt, "first tap");
-        handle_hook_message(&mut state, alt, 0, 80, &event_sink);
-        handle_hook_message(&mut state, alt, KEY_DOWN_BIT, 200, &event_sink);
-        assert_eq!(menu_mask_target(&state), alt, "second tap");
-        handle_hook_message(&mut state, alt, 0, 280, &event_sink);
-        assert_eq!(menu_mask_target(&state), 0);
-
-        handle_hook_message(&mut state, alt, KEY_DOWN_BIT, 5_000, &event_sink);
-        handle_hook_message(&mut state, VK_TAB as u32, KEY_DOWN_BIT, 5_030, &event_sink);
-        assert_eq!(menu_mask_target(&state), 0, "Alt+Tab");
     }
 
     /// The hook's down and up of a quick Alt tap can both run before the

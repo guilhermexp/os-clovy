@@ -108,6 +108,6 @@ A revisão de código da v0.1.2 bloqueou com cinco achados. Cada um tem um commi
 
 A revisão confirmou Y1, Y3, Y5 e a trava do ícone e deixou dois P2 para a v0.1.3. Cada um tem um commit RED antes do GREEN.
 
-- [ ] 12.1 Z1: a pendência `resummary:<dia>:<gatilho>` de ontem também é processada junto do catch-up, e não fica presa depois da meia-noite.
-- [ ] 12.2 Z2: a máscara da soltura do Alt é decidida de forma síncrona dentro do gancho, sem depender de a mensagem postada já ter sido consumida.
+- [x] 12.1 Z1: a pendência `resummary:<dia>:<gatilho>` de ontem também é processada junto do catch-up, e não fica presa depois da meia-noite.
+- [x] 12.2 Z2: a máscara da soltura do Alt é decidida de forma síncrona dentro do gancho, sem depender de a mensagem postada já ter sido consumida.
 - [ ] 12.3 `make verify` numa worktree limpa; CI Windows sem falhas novas; push.

@@ -145,14 +145,9 @@ impl Gesture {
         self.push
     }
 
-    /// Whether the key's next release belongs to the toggle gesture (a tap
-    /// it counts), so a lone Alt must not reach the app as a menu key.
-    pub fn consumes_release(&self) -> bool {
-        match self.phase {
-            Phase::Pending => self.toggle_presses.is_some(),
-            Phase::SecondTap => true,
-            Phase::Idle | Phase::Holding | Phase::Spent => false,
-        }
+    /// Whether taps of the key toggle dictation.
+    pub fn toggles(&self) -> bool {
+        self.toggle_presses.is_some()
     }
 
     /// Feeds one input. `still_down` asks Windows whether a key is down now:
@@ -388,28 +383,69 @@ impl Gesture {
 #[derive(Clone, Debug, Default)]
 pub struct AltReleaseMask {
     target: Option<u32>,
+    /// Other keys the user holds down.
+    others: HashSet<u32>,
+    held: bool,
+    /// The current press went down with nothing else held.
+    alone: bool,
+    /// A key, button or wheel turn joined the current press.
+    chorded: bool,
 }
 
 impl AltReleaseMask {
     /// The Alt key the toggle gesture uses alone, if any.
     pub fn set_target(&mut self, target: Option<u32>) {
-        self.target = target;
+        *self = Self {
+            target,
+            ..Self::default()
+        };
     }
 
     /// Feeds one key edge; true when it is a release to mask.
     pub fn on_key(
         &mut self,
-        _vk: u32,
-        _down: bool,
-        _injected: bool,
-        _repeat: bool,
-        _still_down: &dyn Fn(u32) -> bool,
+        vk: u32,
+        down: bool,
+        injected: bool,
+        repeat: bool,
+        still_down: &dyn Fn(u32) -> bool,
     ) -> bool {
+        let Some(target) = self.target else {
+            return false;
+        };
+        if injected {
+            return false;
+        }
+        if vk == target {
+            if down {
+                if !(repeat && self.held) {
+                    self.others.retain(|vk| still_down(*vk));
+                    self.held = true;
+                    self.alone = self.others.is_empty();
+                    self.chorded = false;
+                }
+                return false;
+            }
+            let was_held = std::mem::replace(&mut self.held, false);
+            return was_held && self.alone && !self.chorded;
+        }
+        if down {
+            self.others.insert(vk);
+            if self.held && !repeat {
+                self.chorded = true;
+            }
+        } else {
+            self.others.remove(&vk);
+        }
         false
     }
 
     /// A mouse button press or wheel turn.
-    pub fn on_mouse(&mut self, _injected: bool) {}
+    pub fn on_mouse(&mut self, injected: bool) {
+        if !injected && self.held {
+            self.chorded = true;
+        }
+    }
 }
 
 /// What a finished capture that never formed a chord recorded.
@@ -893,37 +929,6 @@ mod tests {
             }
             assert_eq!(events, [], "{chord:?}");
         }
-    }
-
-    /// Both taps of an Alt double tap are the gesture's, not the menu's; a
-    /// chord (Alt+Tab) or a push-only tap stays the app's.
-    #[test]
-    fn the_toggle_taps_consume_their_release_and_chords_do_not() {
-        let mut gesture = Gesture::new(VK_LMENU, true, Some(2));
-        assert!(!gesture.consumes_release());
-        gesture.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
-        assert!(gesture.consumes_release(), "first tap");
-        gesture.on_input(key(VK_LMENU, false), 80, &NOTHING_HELD);
-        assert!(!gesture.consumes_release());
-        gesture.on_input(key(VK_LMENU, true), 200, &NOTHING_HELD);
-        assert!(gesture.consumes_release(), "second tap");
-        gesture.on_input(key(VK_LMENU, false), 280, &NOTHING_HELD);
-
-        gesture.on_input(key(VK_LMENU, true), 5_000, &NOTHING_HELD);
-        gesture.on_input(key(0x09, true), 5_030, &NOTHING_HELD); // Tab
-        assert!(!gesture.consumes_release(), "Alt+Tab is the app's");
-        gesture.on_input(key(0x09, false), 5_060, &NOTHING_HELD);
-        gesture.on_input(key(VK_LMENU, false), 5_100, &NOTHING_HELD);
-
-        let mut push_only = Gesture::new(VK_LMENU, true, None);
-        push_only.on_input(key(VK_LMENU, true), 0, &NOTHING_HELD);
-        assert!(
-            !push_only.consumes_release(),
-            "a plain Alt tap opens the menu as usual"
-        );
-        let mut single = Gesture::new(VK_RMENU, false, Some(1));
-        single.on_input(key(VK_RMENU, true), 0, &NOTHING_HELD);
-        assert!(single.consumes_release());
     }
 
     fn alt_edges(mask: &mut AltReleaseMask, edges: &[(u32, bool)]) -> Vec<bool> {
