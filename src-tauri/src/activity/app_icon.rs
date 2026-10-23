@@ -332,7 +332,17 @@ mod windows_icon {
         encode_bitmap_source_to_png(&factory, &bitmap)
     }
 
+    /// One Shell icon extraction at a time. A process's first extractions
+    /// made from several threads at once all fail (and each draws on a
+    /// second try): the UI asks for several apps' icons together, and two
+    /// tests used to race on it. Icons are cached, so this costs nothing
+    /// after the first draw.
+    static SHELL_ICONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     pub(super) fn icon_png(identity: &str) -> Option<Vec<u8>> {
+        let _one_at_a_time = SHELL_ICONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if identity.contains('!') {
             icon_png_from_apps_folder(identity)
         } else {
