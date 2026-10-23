@@ -1616,6 +1616,41 @@ mod tests {
             )));
     }
 
+    /// A quick Ctrl tap, then Ctrl+C: copying, so no toggle and no indicator.
+    #[test]
+    fn a_tap_then_ctrl_c_never_toggles_dictation() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            lone(ShortcutKind::PushToTalk, "ControlLeft", "Left Ctrl"),
+        );
+        drain_set(
+            &mut state,
+            ShortcutCommand {
+                press_count: 2,
+                ..lone(ShortcutKind::Toggle, "ControlLeft", "Left Ctrl+Left Ctrl")
+            },
+        );
+        let (events, event_sink) = recorder();
+        let ctrl = VK_LCONTROL as u32;
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 0, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 80, &event_sink);
+        handle_hook_message(&mut state, ctrl, KEY_DOWN_BIT, 200, &event_sink);
+        handle_hook_message(&mut state, 0x43, KEY_DOWN_BIT, 230, &event_sink);
+        handle_hook_message(&mut state, 0x43, 0, 260, &event_sink);
+        handle_hook_message(&mut state, ctrl, 0, 300, &event_sink);
+        assert!(!events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(
+                event,
+                HotkeyEvent::KeyDown { .. }
+                    | HotkeyEvent::KeyUp { .. }
+                    | HotkeyEvent::KeyCancel { .. }
+            )));
+    }
+
     fn drain_set(state: &mut HotkeyThreadState, shortcut: ShortcutCommand) {
         let (tx, rx) = mpsc::channel();
         tx.send(HotkeyMessage::Set(shortcut)).unwrap();

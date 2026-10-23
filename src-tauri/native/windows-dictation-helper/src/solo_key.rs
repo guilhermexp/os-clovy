@@ -805,6 +805,50 @@ mod tests {
         );
     }
 
+    /// The toggle fires when the second tap is released clean, never on its
+    /// press: a quick Ctrl tap followed by Ctrl+C is copying, not dictating.
+    #[test]
+    fn a_double_tap_toggles_only_on_a_clean_second_release() {
+        let mut gesture = Gesture::new(VK_LCONTROL, true, Some(2));
+        let steps: Vec<Option<GestureEvent>> = [
+            (0, key(VK_LCONTROL, true)),
+            (90, key(VK_LCONTROL, false)),
+            (300, key(VK_LCONTROL, true)),
+            (390, key(VK_LCONTROL, false)),
+        ]
+        .into_iter()
+        .map(|(at, input)| gesture.on_input(input, at, &NOTHING_HELD).event)
+        .collect();
+        assert_eq!(steps, [None, None, None, Some(GestureEvent::Toggle)]);
+
+        let chords: [Input; 3] = [
+            key(KEY_C, true),
+            Input::Mouse { injected: false },
+            Input::Mouse { injected: false },
+        ];
+        for (offset, chord) in chords.into_iter().enumerate() {
+            let start = 10_000 * (offset as u64 + 1);
+            let mut events = play(
+                &mut gesture,
+                &[
+                    (start, Some(key(VK_LCONTROL, true))),
+                    (start + 80, Some(key(VK_LCONTROL, false))),
+                    (start + 200, Some(key(VK_LCONTROL, true))),
+                    (start + 230, Some(chord)),
+                    (start + 200 + HOLD_MS, None),
+                    (start + 400, Some(key(VK_LCONTROL, false))),
+                ],
+            );
+            if chord == key(KEY_C, true) {
+                events.extend(play(
+                    &mut gesture,
+                    &[(start + 410, Some(key(KEY_C, false)))],
+                ));
+            }
+            assert_eq!(events, [], "{chord:?}");
+        }
+    }
+
     #[test]
     fn a_single_tap_toggle_fires_on_a_clean_release() {
         let mut gesture = Gesture::new(VK_RSHIFT, false, Some(1));
