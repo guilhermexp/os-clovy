@@ -91,3 +91,14 @@ O dono testou a v0.1.1: no Windows só grava Ctrl sozinho e ele não dispara o d
 - [x] 10.9 X2: RED e GREEN — a dica de sandbox do Codex só aparece para erros de sandbox reconhecidos do Codex no Windows (prefixos e códigos completos), nunca em erro comum de comando nem fora do Windows.
 - [ ] 10.10 `make verify` com exit 0 numa worktree limpa; CI Windows (`desktop.yml`) sem falhas novas; ensaio do `release.yml` com `dry_run=true`, quatro jobs verdes.
 - [ ] 10.11 `cert` com o instalador do ensaio: captura de Alt esquerdo e Ctrl esquerdo gravada (pelo diagnóstico, já que a tela fica bloqueada: eventos injetados aparecem como injetados e não disparam); indicador com nome e ícone do app de destino; registro em `.tmp/verify/corrigir-windows-v0-1-1/v0-1-2.md`; desinstalar e limpar.
+
+## 11. Revisão da v0.1.2 (Y1–Y5)
+
+A revisão de código da v0.1.2 bloqueou com cinco achados. Cada um tem um commit RED antes do GREEN.
+
+- [ ] 11.1 Y1: a alternância por dois toques só dispara na soltura limpa do segundo toque; tecla, clique ou roda entre o segundo aperto e a soltura invalidam o gesto (Ctrl, Ctrl+C não liga o microfone).
+- [ ] 11.2 Y2: a máscara do Alt também cobre as solturas de Alt consumidas pelo gesto de alternância (a barra de menu do app não abre); acordes reais (Alt+Tab) seguem sem máscara.
+- [ ] 11.3 Y3: o `finalizing_transcript` do Windows leva o destino fixado na parada, completado no Rust, para o indicador fixar o app que recebe a colagem.
+- [ ] 11.4 Y4: um resumo do dia apagado pela troca de idioma fica pendente e é refeito assim que os relatórios forem refeitos, uma vez, sem esperar o horário automático.
+- [ ] 11.5 Y5: `config.json` do `agy` ilegível ou malformado bloqueia a chamada com diagnóstico; só arquivo ausente vale como sem configuração.
+- [ ] 11.6 `make verify` numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`; push e evidências.
