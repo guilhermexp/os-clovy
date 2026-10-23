@@ -5090,6 +5090,12 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let event_type = event_type.as_deref();
+    #[cfg(target_os = "windows")]
+    if let Some(event) = event.as_mut() {
+        complete_windows_target(event, |hwnd, pid| {
+            crate::activity::windows::window::app_of_window(hwnd as isize, pid)
+        });
+    }
     if event_type == Some("shortcut_trigger_diagnostic") {
         // What the Windows hook saw: the event log only, never the HUD.
         if let Some(event) = event.as_ref() {
@@ -7511,10 +7517,48 @@ fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> ser
 /// the dictation indicator needs `target` (app name and identity, for the
 /// icon), as the Mac helper sends it. Fills it for the start and paste
 /// events when `describe` can identify the app.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn complete_windows_target(
-    _event: &mut serde_json::Value,
-    _describe: impl Fn(i64, u32) -> Option<(String, String)>,
+    event: &mut serde_json::Value,
+    describe: impl Fn(i64, u32) -> Option<(String, String)>,
 ) {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    if !matches!(event_type, Some("listening_started" | "paste_target")) {
+        return;
+    }
+    let Some(payload) = event
+        .get_mut("payload")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if payload
+        .get("target")
+        .is_some_and(|target| !target.is_null())
+    {
+        return;
+    }
+    let hwnd = payload
+        .get("targetWindowHandle")
+        .and_then(serde_json::Value::as_i64);
+    let pid = payload
+        .get("targetProcessId")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let (Some(hwnd), Some(pid)) = (hwnd, pid) else {
+        return;
+    };
+    let Some((app, bundle_identifier)) = describe(hwnd, pid) else {
+        return;
+    };
+    payload.insert(
+        "target".to_string(),
+        serde_json::json!({
+            "app": app,
+            "bundleIdentifier": bundle_identifier,
+            "processIdentifier": pid,
+        }),
+    );
 }
 
 /// A log line for what the app did with a shortcut edge.

@@ -450,6 +450,8 @@ impl HelperApp {
                         start_target: verified_start_target,
                     }
                 });
+                // The window in front when dictation starts: Clovy names its
+                // app for the indicator (`target`), as on the Mac.
                 self.writer.emit(event(
                     "listening_started",
                     serde_json::json!({
@@ -459,6 +461,8 @@ impl HelperApp {
                             .as_ref()
                             .map(|request| request.id.as_str()),
                         "takeId": take_id,
+                        "targetProcessId": start_target.map(|target| target.pid()),
+                        "targetWindowHandle": start_target.map(|target| target.hwnd_value()),
                     }),
                 ));
                 self.spawn_level_thread();
