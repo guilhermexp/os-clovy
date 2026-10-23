@@ -166,7 +166,11 @@ wakes every minute, on a capture failure, and when a notice is due:
    now (retrying failed ones); if one still fails or an input is behind, the
    command fails with `day_summary_incomplete` instead of writing a partial
    summary. Text follows the interface
-   language (`interface_locale::current()`); JSON keys stay English. A day with
+   language (`interface_locale::known()`, saved in `interface-locale.json` in
+   the config dir and restored at startup); the background loop writes
+   nothing while it is unknown, and today's reports and summary in another
+   language go back for generation with the day's workstreams
+   (`pipeline::relocalize_day`). JSON keys stay English. A day with
    no reports, meetings, or blocks has no summary and no call.
 
 Failures are recorded per unit (`hour:<hour>`, `fold:<hour>`, `auto:<day>`)
