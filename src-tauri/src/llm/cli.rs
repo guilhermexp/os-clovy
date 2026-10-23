@@ -374,6 +374,50 @@ pub fn agy_extensions_on(home: &std::path::Path) -> Option<String> {
     })
 }
 
+/// Longest command line `CreateProcessW` accepts, in UTF-16 units, without
+/// its terminating NUL.
+pub const WINDOWS_COMMAND_LINE_MAX: usize = 32_766;
+
+/// UTF-16 length of the command line the standard library builds on
+/// Windows for `program` and `args`: the program always quoted; an argument
+/// quoted when empty or holding a space or tab; `"` escaped as `\"` with the
+/// backslashes before it doubled, and so are backslashes before a closing
+/// quote.
+pub fn windows_command_line_units(program: &std::path::Path, args: &[String]) -> usize {
+    let mut units = program.as_os_str().to_string_lossy().encode_utf16().count() + 2;
+    for arg in args {
+        let quoted = arg.is_empty() || arg.contains([' ', '\t']);
+        let mut backslashes = 0;
+        units += 1;
+        for unit in arg.encode_utf16() {
+            if unit == u16::from(b'\\') {
+                backslashes += 1;
+            } else {
+                if unit == u16::from(b'"') {
+                    units += backslashes + 1;
+                }
+                backslashes = 0;
+            }
+            units += 1;
+        }
+        if quoted {
+            units += 2 + backslashes;
+        }
+    }
+    units
+}
+
+/// Refuses, before anything is spawned, a call whose command line Windows
+/// would not accept (`windows` is `cfg!(windows)` outside tests).
+pub fn check_command_line(
+    _kind: CliKind,
+    _program: &std::path::Path,
+    _args: &[String],
+    _windows: bool,
+) -> Result<(), LlmError> {
+    Ok(())
+}
+
 /// Extracts the model's answer from a finished CLI call.
 pub fn parse_output(
     kind: CliKind,
@@ -628,6 +672,75 @@ mod tests {
             schema,
             timeout: None,
         }
+    }
+
+    fn agy_args(prompt: &str) -> Vec<String> {
+        let request = GenerateRequest {
+            prompt: prompt.to_string(),
+            ..request(None)
+        };
+        build_invocation(CliKind::Agy, &request).unwrap().args
+    }
+
+    /// agy takes its prompt in argv (text print mode reads no stdin). On
+    /// Windows the whole command line, counted in UTF-16 units after the
+    /// quoting `CreateProcessW` needs, must fit in 32,766 units; a prompt
+    /// short in characters can still overflow it.
+    #[test]
+    fn llm_agy_prompt_over_the_windows_command_line_fails_clearly() {
+        let program = std::path::Path::new(r"C:\Users\u\AppData\Local\agy\bin\agy.exe");
+        for prompt in [
+            "😀".repeat(17_000),  // 2 UTF-16 units each
+            "\"".repeat(17_000),  // escaped as \"
+            "a\\".repeat(11_000), // backslashes doubled only before a quote
+        ] {
+            let args = agy_args(&prompt);
+            let fits = windows_command_line_units(program, &args) <= WINDOWS_COMMAND_LINE_MAX;
+            let result = check_command_line(CliKind::Agy, program, &args, true);
+            assert_eq!(result.is_ok(), fits, "{}", &prompt[..8]);
+        }
+        let error =
+            check_command_line(CliKind::Agy, program, &agy_args(&"😀".repeat(17_000)), true)
+                .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::CliFailed { cli: CliKind::Agy, detail } if detail.contains("too long") && detail.contains("Windows")),
+            "{error:?}"
+        );
+        // A long but fitting prompt still runs, and macOS keeps its own cap.
+        assert!(
+            check_command_line(CliKind::Agy, program, &agy_args(&"a".repeat(30_000)), true).is_ok()
+        );
+        assert!(check_command_line(
+            CliKind::Agy,
+            program,
+            &agy_args(&"😀".repeat(17_000)),
+            false
+        )
+        .is_ok());
+    }
+
+    /// Counted the way the standard library builds the line: the program
+    /// always quoted, an argument quoted when empty or holding a space or
+    /// tab, `"` escaped with the backslashes before it doubled.
+    #[test]
+    fn llm_windows_command_line_counts_utf16_and_quoting() {
+        let program = std::path::Path::new(r"C:\a b\agy.exe");
+        let units = |args: &[&str]| {
+            windows_command_line_units(
+                program,
+                &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        let base = r#""C:\a b\agy.exe""#.len();
+        assert_eq!(units(&[]), base);
+        assert_eq!(units(&["abc"]), base + 1 + 3);
+        assert_eq!(units(&[""]), base + 1 + 2);
+        assert_eq!(units(&["a b"]), base + 1 + 5);
+        assert_eq!(units(&["😀"]), base + 1 + 2);
+        assert_eq!(units(&[r#"a"b"#]), base + 1 + 4);
+        assert_eq!(units(&[r#"a\"b"#]), base + 1 + 6);
+        assert_eq!(units(&[r"a b\"]), base + 1 + 7);
+        assert_eq!(units(&[r"a\b"]), base + 1 + 3);
     }
 
     #[test]
