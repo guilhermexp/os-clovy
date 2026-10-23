@@ -752,7 +752,6 @@ echo '{"type":"turn.completed"}'"#,
 /// What to configure when Codex reports that its Windows sandbox is not set
 /// up or its setup failed (texts from codex-rs `core/src/exec.rs`,
 /// `windows-sandbox-rs/src/setup_error.rs` and the TUI).
-#[cfg(unix)]
 fn assert_sandbox_hint(text: &str, detail: &str) {
     assert!(
         text.contains("codex sandbox setup --elevated --current-user"),
@@ -762,9 +761,45 @@ fn assert_sandbox_hint(text: &str, detail: &str) {
     assert!(text.contains(detail), "keeps what Codex said: {text}");
 }
 
+/// Codex's Windows sandbox failures, as codex-rs writes them: the exec
+/// prefixes and the setup codes of `windows-sandbox-rs/src/setup_error.rs`.
+#[test]
+fn chat_engine_recognizes_only_codex_windows_sandbox_failures() {
+    use super::cli::{codex_sandbox_hint, codex_windows_sandbox_failure};
+    for text in [
+        "windows sandbox: failed to resolve codex_home: not found",
+        "windows sandbox join error: task panicked",
+        "invalid Windows sandbox workspace roots: C:\\x",
+        "Windows sandbox setup failed: orchestrator_elevation_required: run elevated",
+        "Windows sandbox setup failed.",
+        "orchestrator_helper_launch_canceled: the UAC prompt was canceled",
+        "helper_firewall_rule_create_or_add_failed: access denied",
+        "error: helper_unknown_error",
+    ] {
+        assert!(codex_windows_sandbox_failure(text, true), "{text}");
+        assert_sandbox_hint(&codex_sandbox_hint(text, true), text);
+        // Never outside Windows.
+        assert!(!codex_windows_sandbox_failure(text, false), "{text}");
+        assert_eq!(codex_sandbox_hint(text, false), text);
+    }
+    for text in [
+        "error: orchestrator_config.yaml not found",
+        "make: *** [sandbox setup] Error 2",
+        "test my_orchestrator_test ... FAILED",
+        "helper_scripts/run.sh: permission denied",
+        "Sandbox setup complete",
+        "You have hit your usage limit.",
+    ] {
+        assert!(!codex_windows_sandbox_failure(text, true), "{text}");
+        assert_eq!(codex_sandbox_hint(text, true), text);
+    }
+}
+
+/// Outside Windows a Codex sandbox text keeps Codex's own words: no hint to
+/// set up a Windows sandbox.
 #[tokio::test]
 #[cfg(unix)]
-async fn chat_engine_codex_windows_sandbox_failure_says_what_to_configure() {
+async fn chat_engine_codex_windows_sandbox_failure_gets_no_hint_outside_windows() {
     let kind = CliKind::Codex;
     let harness = Harness::new(kind).await;
     let detail =
@@ -782,7 +817,8 @@ exit 1
     let (_, emitted) = harness.turn(kind, &program, "Hi", None).await;
     let (method, data) = emitted.last().unwrap();
     assert_eq!(method, "run.failed");
-    assert_sandbox_hint(data["message"].as_str().unwrap(), detail);
+    assert_no_sandbox_hint(data["message"].as_str().unwrap());
+    assert!(data["message"].as_str().unwrap().contains(detail));
 
     // Only on stderr, the way an older codex exits.
     let stderr =
@@ -800,14 +836,20 @@ exit 1
     let (_, emitted) = harness.turn(kind, &program, "Hi", None).await;
     let (method, data) = emitted.last().unwrap();
     assert_eq!(method, "run.failed");
-    assert_sandbox_hint(data["message"].as_str().unwrap(), stderr);
+    assert_no_sandbox_hint(data["message"].as_str().unwrap());
 }
 
-/// A command that could not start in the sandbox fails the tool step; the
-/// step says what to configure, and the turn still ends normally.
+#[cfg(unix)]
+fn assert_no_sandbox_hint(text: &str) {
+    assert!(!text.contains("codex sandbox setup"), "{text}");
+}
+
+/// A command that could not start in the sandbox fails the tool step with
+/// Codex's words (no Windows hint outside Windows), and the turn still ends
+/// normally.
 #[tokio::test]
 #[cfg(unix)]
-async fn chat_engine_codex_command_blocked_by_the_windows_sandbox_says_what_to_configure() {
+async fn chat_engine_codex_command_blocked_by_the_sandbox_fails_the_step_only() {
     let kind = CliKind::Codex;
     let harness = Harness::new(kind).await;
     let detail = "windows sandbox: helper_sandbox_lock_failed: SetFileAttributesW failed";
@@ -829,7 +871,7 @@ echo '{{"type":"turn.completed"}}'
         .find(|(method, _)| method == "tool.failed")
         .map(|(_, data)| data.clone())
         .expect("the blocked command is shown as failed");
-    assert_sandbox_hint(failed["error"].as_str().unwrap(), detail);
+    assert_eq!(failed["error"], json!(detail));
     assert_eq!(emitted.last().unwrap().0, "run.completed");
 }
 

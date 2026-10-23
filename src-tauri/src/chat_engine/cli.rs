@@ -980,6 +980,18 @@ pub(crate) fn is_codex_windows_sandbox_failure(text: &str) -> bool {
         || lower.contains("setup_error.json")
 }
 
+/// Whether `text` is a Codex Windows sandbox failure on this platform
+/// (`windows` is `cfg!(windows)` outside tests).
+pub(crate) fn codex_windows_sandbox_failure(text: &str, _windows: bool) -> bool {
+    is_codex_windows_sandbox_failure(text)
+}
+
+/// Codex's own text, preceded by what to set up when it is a Windows
+/// sandbox failure on Windows.
+pub(crate) fn codex_sandbox_hint(text: &str, _windows: bool) -> String {
+    with_codex_sandbox_hint(text)
+}
+
 /// Codex's own text, preceded by what to set up when it is a Windows
 /// sandbox failure.
 pub(crate) fn with_codex_sandbox_hint(text: &str) -> String {
