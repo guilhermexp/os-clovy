@@ -25,6 +25,46 @@ pub enum SoloEvent {
     Up { clean: bool },
 }
 
+/// One decision of the hook about a lone-modifier shortcut, for the
+/// dictation event log. Never names a key other than a modifier: anything
+/// else is `"other"`, so the log holds no typed content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    /// The modifier's DOM `code`, `"other"` or `"mouse"`.
+    pub key: &'static str,
+    /// `"down"`, `"up"` or `"click"`.
+    pub edge: &'static str,
+    pub injected: bool,
+    /// The press went down with nothing else held.
+    pub alone: bool,
+    /// How long the shortcut key was held, on its release.
+    pub held_ms: Option<u64>,
+    pub decision: &'static str,
+    pub reason: &'static str,
+}
+
+/// What one input meant for a shortcut, and why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Step {
+    pub event: Option<SoloEvent>,
+    pub diagnostic: Option<Diagnostic>,
+}
+
+/// The DOM `code` of a modifier virtual key, `"other"` for any other key.
+pub fn key_name(vk: u32) -> &'static str {
+    match vk {
+        0xA0 => "ShiftLeft",
+        VK_RSHIFT => "ShiftRight",
+        0xA2 => "ControlLeft",
+        VK_RCONTROL => "ControlRight",
+        0xA4 => "AltLeft",
+        VK_RMENU => "AltRight",
+        0x5B => "MetaLeft",
+        0x5C => "MetaRight",
+        _ => "other",
+    }
+}
+
 /// Tracks one lone-modifier shortcut.
 #[derive(Clone, Debug)]
 pub struct SoloModifier {
@@ -37,6 +77,8 @@ pub struct SoloModifier {
     alone: bool,
     /// Another key joined the current lone press.
     chorded: bool,
+    /// When the current press went down, in milliseconds.
+    down_at: Option<u64>,
 }
 
 impl SoloModifier {
@@ -47,11 +89,20 @@ impl SoloModifier {
             held: false,
             alone: false,
             chorded: false,
+            down_at: None,
         }
     }
 
     pub fn target(&self) -> u32 {
         self.target
+    }
+
+    /// Feeds one key edge with its origin and time, and says why it decided.
+    pub fn on_key_at(&mut self, vk: u32, is_down: bool, _injected: bool, _now_ms: u64) -> Step {
+        Step {
+            event: self.on_key(vk, is_down),
+            diagnostic: None,
+        }
     }
 
     /// Feeds one key edge (auto-repeat included); returns what it means for
@@ -314,6 +365,85 @@ mod tests {
         capture.on_key(KEY_C, true, false);
         capture.on_key(KEY_C, false, false);
         assert_eq!(capture.on_key(VK_RCONTROL, false, true), None);
+    }
+
+    fn diagnose(machine: &mut SoloModifier, events: &[(u32, bool, bool, u64)]) -> Vec<Diagnostic> {
+        events
+            .iter()
+            .filter_map(|(vk, down, injected, at)| {
+                machine.on_key_at(*vk, *down, *injected, *at).diagnostic
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_decision_about_the_shortcut_key_is_a_diagnostic_line() {
+        let mut machine = SoloModifier::new(VK_RCONTROL);
+        let lines = diagnose(
+            &mut machine,
+            &[
+                (VK_RCONTROL, true, false, 1_000),
+                (VK_RCONTROL, false, false, 1_240),
+            ],
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].key, "ControlRight");
+        assert_eq!(lines[0].edge, "down");
+        assert!(lines[0].alone);
+        assert!(!lines[0].injected);
+        assert_eq!(lines[1].edge, "up");
+        assert_eq!(lines[1].held_ms, Some(240));
+        assert!(!lines[1].decision.is_empty() && !lines[1].reason.is_empty());
+    }
+
+    #[test]
+    fn a_chord_is_logged_without_naming_the_other_key() {
+        let mut machine = SoloModifier::new(VK_RCONTROL);
+        let lines = diagnose(
+            &mut machine,
+            &[
+                (VK_RCONTROL, true, false, 0),
+                (KEY_C, true, false, 50),
+                (KEY_C, false, false, 80),
+                (VK_RCONTROL, false, false, 120),
+            ],
+        );
+        assert_eq!(lines.len(), 3, "down, chord, up: {lines:?}");
+        assert_eq!(lines[1].key, "other");
+        assert_eq!(lines[1].decision, "chord");
+        assert_eq!(lines[2].reason, "chorded");
+        assert!(lines.iter().all(|line| line.key != "KeyC"));
+    }
+
+    #[test]
+    fn typing_without_the_shortcut_key_logs_nothing() {
+        let mut machine = SoloModifier::new(VK_RCONTROL);
+        assert!(diagnose(&mut machine, &[(KEY_C, true, false, 0), (KEY_C, false, false, 10)])
+            .is_empty());
+    }
+
+    #[test]
+    fn injected_and_not_alone_presses_say_so() {
+        let mut machine = SoloModifier::new(VK_RCONTROL);
+        let injected = diagnose(&mut machine, &[(VK_RCONTROL, true, true, 0)]);
+        assert_eq!(injected.len(), 1);
+        assert!(injected[0].injected);
+        machine.on_key_at(VK_RCONTROL, false, true, 10);
+
+        let held = diagnose(
+            &mut machine,
+            &[(VK_LSHIFT, true, false, 20), (VK_RCONTROL, true, false, 30)],
+        );
+        assert_eq!(held.len(), 1);
+        assert!(!held[0].alone);
+        assert_eq!(held[0].reason, "other_key_held");
+    }
+
+    #[test]
+    fn modifier_names_are_codes_and_other_keys_are_anonymous() {
+        assert_eq!(key_name(VK_LCONTROL), "ControlLeft");
+        assert_eq!(key_name(VK_RMENU), "AltRight");
+        assert_eq!(key_name(KEY_C), "other");
     }
 
     #[test]

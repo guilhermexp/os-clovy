@@ -7463,6 +7463,16 @@ fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> ser
     })
 }
 
+/// A log line for what the app did with a shortcut edge.
+fn shortcut_edge_log_event(
+    _kind: DictationShortcutKind,
+    _edge: ShortcutKeyEdge,
+    _command: Option<DictationCommand>,
+    _held: Option<Duration>,
+) -> serde_json::Value {
+    serde_json::json!({ "type": "shortcut_edge", "payload": {} })
+}
+
 /// Tag error events with `payload.silent: bool` so the HUD doesn't have to
 /// re-derive the classification — Rust is the single source of truth.
 fn annotate_silent_error(event: &mut serde_json::Value) {
@@ -12065,6 +12075,61 @@ mod tests {
         assert_eq!(entry["textChars"], 28);
         assert!(entry.to_string().contains("textChars"));
         assert!(!entry.to_string().contains("Sensitive dictated sentence"));
+    }
+
+    #[test]
+    fn dictation_event_log_keeps_trigger_diagnostics_without_typed_content() {
+        let event = serde_json::json!({
+            "type": "shortcut_trigger_diagnostic",
+            "payload": {
+                "kind": "push_to_talk",
+                "trigger": {
+                    "key": "ControlLeft",
+                    "edge": "up",
+                    "injected": false,
+                    "alone": true,
+                    "heldMs": 240,
+                    "decision": "up",
+                    "action": "push_end",
+                    "reason": "clean",
+                    "typed": "secret"
+                }
+            }
+        });
+
+        let entry = dictation_event_log_entry("shortcut_trigger_diagnostic", &event);
+
+        assert_eq!(entry["kind"], "push_to_talk");
+        assert_eq!(entry["trigger"]["key"], "ControlLeft");
+        assert_eq!(entry["trigger"]["heldMs"], 240);
+        assert_eq!(entry["trigger"]["action"], "push_end");
+        assert_eq!(entry["trigger"]["injected"], false);
+        assert!(!entry.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn a_shortcut_edge_logs_what_the_app_decided_and_why() {
+        let short = shortcut_edge_log_event(
+            DictationShortcutKind::PushToTalk,
+            ShortcutKeyEdge::Up,
+            Some(DictationCommand::DiscardListening),
+            Some(Duration::from_millis(90)),
+        );
+        let entry = dictation_event_log_entry("shortcut_edge", &short);
+        assert_eq!(entry["kind"], "push_to_talk");
+        assert_eq!(entry["trigger"]["edge"], "up");
+        assert_eq!(entry["trigger"]["action"], "discard");
+        assert_eq!(entry["trigger"]["reason"], "short_hold");
+        assert_eq!(entry["trigger"]["heldMs"], 90);
+
+        let ignored = shortcut_edge_log_event(
+            DictationShortcutKind::PushToTalk,
+            ShortcutKeyEdge::Down,
+            None,
+            None,
+        );
+        let entry = dictation_event_log_entry("shortcut_edge", &ignored);
+        assert_eq!(entry["trigger"]["action"], "none");
     }
 
     #[test]
