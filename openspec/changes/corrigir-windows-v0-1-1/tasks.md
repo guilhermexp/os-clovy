@@ -66,7 +66,7 @@
 - [x] 9.7 W4 RED: Ctrl+F13, Shift+Insert e Ctrl+Pause são recusados na validação e na normalização do Windows; commit RED.
 - [x] 9.8 W4 GREEN: essas combinações valem no Windows, na validação e na normalização, sem mudar o macOS; teste do helper confirma o registro com os modificadores (roda no job Windows).
 - [x] 9.9 W1 RED: um filho criado entre o `spawn()` e a adoção escapa do Job Object; commit RED.
-- [ ] 9.10 W1 GREEN: o processo nasce suspenso, entra no job e só então é retomado; falha de atribuição vira erro visível (chat, geração pontual, ferramenta de shell).
+- [x] 9.10 W1 GREEN: o processo nasce suspenso (`CREATE_SUSPENDED` junto com `CREATE_NO_WINDOW`), entra no job e só então a thread inicial é retomada; falha de criação do job, de atribuição ou de retomada encerra o processo antes de rodar e vira erro visível (chat: "Could not start ...", geração pontual: `llm_cli_failed`, ferramenta de shell: erro da ferramenta). `PROC_THREAD_ATTRIBUTE_JOB_LIST` descartado: `tokio::process::Command` não expõe a lista de atributos.
 - [x] 9.11 Grupo 4 RED: falha de sandbox do Codex no Windows aparece como erro genérico no chat; commit RED.
 - [x] 9.12 Grupo 4 GREEN: o chat mostra o que configurar (ver 4.2).
 - [ ] 9.13 `make verify` com exit 0 numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`, os quatro jobs verdes.

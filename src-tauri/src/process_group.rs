@@ -6,11 +6,14 @@
 //!
 //! - Unix: the child is spawned with `process_group(0)`; signalling the group
 //!   reaches every helper.
-//! - Windows: there are no process groups. The child is placed in a Job
-//!   Object right after it starts, its descendants join the job when they
-//!   are created, and killing the tree terminates the job. The job is also
+//! - Windows: there are no process groups. The child is created suspended,
+//!   placed in a Job Object, and only then resumed, so it cannot start a
+//!   process outside the job; its descendants join the job when they are
+//!   created, and killing the tree terminates the job. The job is also
 //!   closed with `KILL_ON_JOB_CLOSE`, so dropping the tree sweeps whatever is
-//!   left (an npm `codex.cmd` runs `cmd.exe` -> `node` -> `codex.exe`).
+//!   left (an npm `codex.cmd` runs `cmd.exe` -> `node` -> `codex.exe`). A
+//!   child that cannot be placed in the job is killed before it runs and the
+//!   spawn fails.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupSignal {
@@ -18,37 +21,18 @@ pub enum GroupSignal {
     Kill,
 }
 
-/// The tree of the child with this pid, adopted right after spawn.
+/// The whole tree of a child started by [`ProcessTree::spawn`].
 #[derive(Debug)]
 pub struct ProcessTree {
     #[cfg(unix)]
     group: Option<u32>,
     #[cfg(windows)]
-    job: Option<windows_job::Job>,
+    job: windows_job::Job,
 }
 
 impl ProcessTree {
-    /// Adopts the tree of a freshly spawned child (`child.id()`). On Unix the
-    /// child must have been spawned with `process_group(0)`.
-    pub fn adopt(pid: Option<u32>) -> Self {
-        #[cfg(unix)]
-        {
-            Self { group: pid }
-        }
-        #[cfg(windows)]
-        {
-            Self {
-                job: pid.and_then(windows_job::Job::for_process),
-            }
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = pid;
-            Self {}
-        }
-    }
-
-    /// Spawns `command` and adopts its whole tree.
+    /// Spawns `command` with its whole tree adopted from the child's first
+    /// instruction.
     pub fn spawn(
         command: &mut tokio::process::Command,
     ) -> std::io::Result<(tokio::process::Child, Self)> {
@@ -62,13 +46,50 @@ impl ProcessTree {
         between: impl FnOnce(u32),
     ) -> std::io::Result<(tokio::process::Child, Self)> {
         #[cfg(unix)]
-        command.process_group(0);
-        let child = command.spawn()?;
-        if let Some(pid) = child.id() {
-            between(pid);
+        {
+            command.process_group(0);
+            let child = command.spawn()?;
+            let group = child.id();
+            if let Some(pid) = group {
+                between(pid);
+            }
+            Ok((child, Self { group }))
         }
-        let tree = Self::adopt(child.id());
-        Ok((child, tree))
+        #[cfg(windows)]
+        {
+            let job = windows_job::Job::new()?;
+            command.creation_flags(
+                crate::hide_console::CREATE_NO_WINDOW | windows_job::CREATE_SUSPENDED,
+            );
+            let mut child = command.spawn()?;
+            if let Some(pid) = child.id() {
+                between(pid);
+            }
+            let placed = child
+                .raw_handle()
+                .zip(child.id())
+                .ok_or_else(|| std::io::Error::other("the process has no handle"))
+                .and_then(|(handle, pid)| {
+                    job.assign(handle)?;
+                    windows_job::resume_first_thread(pid)
+                });
+            if let Err(error) = placed {
+                // Still suspended: it never ran.
+                let _ = child.start_kill();
+                return Err(std::io::Error::other(format!(
+                    "could not place the process in a job object: {error}"
+                )));
+            }
+            Ok((child, Self { job }))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let child = command.spawn()?;
+            if let Some(pid) = child.id() {
+                between(pid);
+            }
+            Ok((child, Self {}))
+        }
     }
 
     /// Sends `signal` to the whole tree. Windows has no graceful signal for
@@ -79,9 +100,7 @@ impl ProcessTree {
         signal_group(self.group, signal);
         #[cfg(windows)]
         if signal == GroupSignal::Kill {
-            if let Some(job) = &self.job {
-                job.terminate();
-            }
+            self.job.terminate();
         }
         #[cfg(not(any(unix, windows)))]
         let _ = signal;
@@ -116,18 +135,27 @@ fn signal_group(group: Option<u32>, signal: GroupSignal) {
 
 #[cfg(windows)]
 mod windows_job {
+    use std::io;
     use windows::core::PCWSTR;
     use windows::Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
+            },
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
                 SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
-            Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
         },
     };
+
+    /// `CREATE_SUSPENDED`: the child's first thread waits for
+    /// [`resume_first_thread`].
+    pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
 
     /// A Job Object handle that kills its processes when closed.
     #[derive(Debug)]
@@ -138,32 +166,30 @@ mod windows_job {
     unsafe impl Sync for Job {}
 
     impl Job {
-        /// A new kill-on-close job holding the process `pid`, or `None` when
-        /// Windows refuses (the tree then ends with the child only).
-        pub fn for_process(pid: u32) -> Option<Self> {
-            // SAFETY: every handle opened here is closed here or by `Drop`.
+        /// A new, empty kill-on-close job.
+        pub fn new() -> io::Result<Self> {
+            // SAFETY: the job handle is closed by `Drop`, also on the error
+            // path below.
             unsafe {
-                let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
-                let job = Job(job.0 as isize);
+                let job = Job(CreateJobObjectW(None, PCWSTR::null())?.0 as isize);
                 let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 SetInformationJobObject(
                     job.handle(),
                     JobObjectExtendedLimitInformation,
                     std::ptr::from_ref(&limits).cast(),
-                    u32::try_from(std::mem::size_of_val(&limits)).ok()?,
-                )
-                .ok()?;
-                let process =
-                    OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid).ok()?;
-                let assigned = AssignProcessToJobObject(job.handle(), process);
-                let _ = CloseHandle(process);
-                if let Err(error) = assigned {
-                    tracing::warn!(%error, pid, "could not place the CLI in a job object");
-                    return None;
-                }
-                Some(job)
+                    std::mem::size_of_val(&limits) as u32,
+                )?;
+                Ok(job)
             }
+        }
+
+        /// Places the process behind `process` (its own handle, still open)
+        /// in the job.
+        pub fn assign(&self, process: std::os::windows::io::RawHandle) -> io::Result<()> {
+            // SAFETY: both handles are open; the process handle is borrowed.
+            unsafe { AssignProcessToJobObject(self.handle(), HANDLE(process)) }?;
+            Ok(())
         }
 
         fn handle(&self) -> HANDLE {
@@ -185,6 +211,42 @@ mod windows_job {
             unsafe {
                 let _ = CloseHandle(self.handle());
             }
+        }
+    }
+
+    /// Resumes the first thread of the suspended process `pid`. A process
+    /// created suspended has exactly that one thread.
+    pub fn resume_first_thread(pid: u32) -> io::Result<()> {
+        // SAFETY: the snapshot and thread handles are closed before return;
+        // the entry is sized as the API requires.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?;
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut found = Thread32First(snapshot, &mut entry);
+            let mut resumed = Err(io::Error::other("its first thread was not found"));
+            while found.is_ok() {
+                if entry.th32OwnerProcessID == pid {
+                    resumed = match OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) {
+                        Ok(thread) => {
+                            let count = ResumeThread(thread);
+                            let _ = CloseHandle(thread);
+                            if count == u32::MAX {
+                                Err(io::Error::last_os_error())
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Err(error) => Err(error.into()),
+                    };
+                    break;
+                }
+                found = Thread32Next(snapshot, &mut entry);
+            }
+            let _ = CloseHandle(snapshot);
+            resumed
         }
     }
 }

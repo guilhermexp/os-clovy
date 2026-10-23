@@ -59,7 +59,12 @@ No Windows, todo processo filho de linha de comando que o Clovy inicia (sondagem
 - Test: unit — contador de sondagens com chamadas concorrentes
 
 ### Requirement: Encerramento da árvore de processos no Windows
-No Windows, cancelar uma execução de chat por CLI ou estourar o tempo limite MUST encerrar o processo iniciado e todos os seus descendentes (por exemplo `cmd.exe` → `node` → `codex.exe`).
+No Windows, cancelar uma execução de chat por CLI ou estourar o tempo limite MUST encerrar o processo iniciado e todos os seus descendentes (por exemplo `cmd.exe` → `node` → `codex.exe`). O processo MUST entrar no Job Object antes de executar a primeira instrução (criado suspenso, atribuído ao job e só então retomado); se não puder ser atribuído, ele é encerrado sem rodar e a execução falha com erro visível.
+
+#### Scenario: Filho criado logo depois do spawn
+- **WHEN** o CLI cria um filho no instante seguinte ao `spawn()`
+- **THEN** o filho já está no job e morre com a árvore
+- Test: integration (Windows) — janela alargada entre `spawn()` e a adoção, com CLI falso `.cmd` que inicia um filho
 
 #### Scenario: Sandbox do Codex não configurado no Windows
 - **WHEN** o `codex` do chat relata falha do sandbox do Windows (`windows sandbox: ...`, `Windows sandbox setup failed: ...`, códigos de setup)

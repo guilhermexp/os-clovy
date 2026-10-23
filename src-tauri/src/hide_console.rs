@@ -12,7 +12,7 @@ use std::ffi::OsStr;
 
 /// `CREATE_NO_WINDOW`: the console child runs without a console window.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// A process command that can be told not to open a console.
 pub trait HideConsole {
