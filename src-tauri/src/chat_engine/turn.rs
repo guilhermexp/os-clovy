@@ -322,6 +322,20 @@ pub async fn execute_turn<S: FrameSink>(
                         )
                     })
                 });
+            // A Windows sandbox failure may reach only stderr; it says more
+            // than the stream's own "ended without completing".
+            let sandbox_line = last_line(&stderr_tail)
+                .filter(|line| cli::is_codex_windows_sandbox_failure(line))
+                .map(str::to_string);
+            let failed = failed.map(|message| match context.kind {
+                CliKind::Codex => match &sandbox_line {
+                    Some(line) if !cli::is_codex_windows_sandbox_failure(&message) => {
+                        cli::with_codex_sandbox_hint(line)
+                    }
+                    _ => cli::with_codex_sandbox_hint(&message),
+                },
+                _ => message,
+            });
             match failed {
                 Some(message) => frames.emit("run.failed", failure(&message)).await,
                 None => frames.emit("run.completed", json!({})).await,

@@ -16,8 +16,10 @@
 
 ## 4. Codex no chat no Windows (D1)
 
-- [ ] 4.1 RED com a causa encontrada em 1.1 (teste que reproduz a argv/ambiente/saída que falha); commit RED.
-- [ ] 4.2 GREEN: correção da causa; teste passa; mensagem clara se o problema for configuração do Codex no Windows.
+- [x] 4.1 RED com a falha de sandbox do Codex no Windows emitida por um CLI falso (turno que falha, stderr e comando bloqueado), com os textos do código do Codex (`core/src/exec.rs`: `windows sandbox: {err}`; `windows-sandbox-rs/src/setup_error.rs`: códigos `orchestrator_*`/`helper_*`; TUI: `Windows sandbox setup failed: ...`; remédio do `codex doctor`: `codex sandbox setup --elevated`); commit RED (`64bf3cde`).
+- [x] 4.2 GREEN: nesses casos o chat mostra "Codex could not use its Windows sandbox", o comando `codex sandbox setup --elevated --current-user` num terminal de administrador (grava `[windows] sandbox = "elevated"`) e o texto original do Codex; as demais falhas seguem com o texto do Codex.
+
+> Causa no Windows do dono não reproduzida (2026-10-23): no `cert` (`[windows] sandbox = "elevated"`) o chat respondeu com o Codex nativo e com o do npm. O dono mandou seguir sem o erro; o grupo fecha com a mensagem clara para a falha de sandbox, que é a causa mais provável segundo as issues openai/codex#26737 e #37940, e não com uma correção de causa confirmada.
 
 > Em aberto (2026-10-23): no `cert`, a v0.1.0 respondeu no chat com o Codex nativo e com o `codex.cmd` do npm (`.tmp/verify/corrigir-windows-v0-1-1/reproducao.md`, 2b). Não há causa reproduzida para um RED, e D1 proíbe corrigir por hipótese. O que se reproduziu no chat (consoles e processos órfãos ao cancelar) foi corrigido nos grupos 2 e 3. Falta o erro real do Windows do dono (mensagem na tela e o `[windows] sandbox` do `~/.codex/config.toml` dele).
 
@@ -66,6 +68,6 @@
 - [ ] 9.9 W1 RED: um filho criado entre o `spawn()` e a adoção escapa do Job Object; commit RED.
 - [ ] 9.10 W1 GREEN: o processo nasce suspenso, entra no job e só então é retomado; falha de atribuição vira erro visível (chat, geração pontual, ferramenta de shell).
 - [x] 9.11 Grupo 4 RED: falha de sandbox do Codex no Windows aparece como erro genérico no chat; commit RED.
-- [ ] 9.12 Grupo 4 GREEN: o chat mostra o que configurar.
+- [x] 9.12 Grupo 4 GREEN: o chat mostra o que configurar (ver 4.2).
 - [ ] 9.13 `make verify` com exit 0 numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`, os quatro jobs verdes.
 - [ ] 9.14 `cert` com o instalador do ensaio: chat com Codex e cancelamento sem órfãos; Codex pontual sem MCP subir; limpeza no fim.

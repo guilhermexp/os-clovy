@@ -13,6 +13,21 @@ Chamadas de geração pontual a CLIs SHALL rodar sem persistir sessão no CLI, s
 - **THEN** a escolha é aceita e a invocação usa o modo mais restrito do `agy`
 - Test: unit — seleção por uso e montagem da invocação do `agy`
 
+#### Scenario: MCPs e plugins do usuário na chamada pontual
+- **WHEN** o usuário tem servidores MCP, plugins, hooks ou `notify` configurados no `codex` e gera uma nota ou atividade com ele
+- **THEN** nenhum deles sobe durante a chamada; a config do usuário (sandbox do Windows, modelo) e a autenticação continuam valendo; se a lista de servidores falha ou um nome não pode ser desligado, a chamada falha antes de o `codex` receber conteúdo
+- Test: unit — CLI falso cuja lista de servidores vira `-c mcp_servers.<nome>.enabled=false`, e falha fechada; live (ignorado) — `codex` real com MCPs e plugins, nenhum processo de MCP sob a chamada
+
+#### Scenario: Antigravity com MCP ativo
+- **WHEN** o `agy` tem um servidor MCP ou plugin ativo e é escolhido para uma chamada pontual
+- **THEN** a chamada é recusada antes de o `agy` iniciar, nomeando o que está ativo e como desligar
+- Test: unit — HOME falso com `mcp_config.json` e `plugins/`
+
+#### Scenario: Prompt longo do Antigravity no Windows
+- **WHEN** a linha de comando do `agy` no Windows passaria de 32.766 unidades UTF-16 depois do escape
+- **THEN** a chamada (pontual ou de chat) falha com mensagem clara antes de criar o processo
+- Test: unit — contagem UTF-16 com o escape e prompts com emoji e aspas
+
 #### Scenario: CLI que mantém ferramentas
 - **WHEN** o usuário tenta escolher `cursor-agent` para notas
 - **THEN** a escolha é recusada com a explicação de que as ferramentas desse CLI não podem ser desligadas, e nenhum processo é iniciado
@@ -45,6 +60,11 @@ No Windows, todo processo filho de linha de comando que o Clovy inicia (sondagem
 
 ### Requirement: Encerramento da árvore de processos no Windows
 No Windows, cancelar uma execução de chat por CLI ou estourar o tempo limite MUST encerrar o processo iniciado e todos os seus descendentes (por exemplo `cmd.exe` → `node` → `codex.exe`).
+
+#### Scenario: Sandbox do Codex não configurado no Windows
+- **WHEN** o `codex` do chat relata falha do sandbox do Windows (`windows sandbox: ...`, `Windows sandbox setup failed: ...`, códigos de setup)
+- **THEN** o chat mostra o que configurar (`codex sandbox setup --elevated --current-user` num terminal de administrador) junto com o texto do Codex, em vez da falha genérica
+- Test: unit — CLI falso que emite o erro de sandbox no turno, no stderr e num comando bloqueado
 
 #### Scenario: Cancelar Codex instalado pelo npm
 - **WHEN** o usuário cancela uma execução com motor `codex` resolvido como `codex.cmd`

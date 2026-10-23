@@ -550,7 +550,7 @@ impl StreamTranslator {
                                             |code| format!("Exit code {code}."),
                                         )
                                     } else {
-                                        output.to_string()
+                                        with_codex_sandbox_hint(output)
                                     };
                                     (Value::Null, Some(detail), declined)
                                 } else {
@@ -965,6 +965,31 @@ impl StreamTranslator {
             _ => {}
         }
     }
+}
+
+/// What Codex reports when its Windows sandbox is not set up or its setup
+/// failed: `windows sandbox: <error>` around a failed command
+/// (codex-rs `core/src/exec.rs`), `Windows sandbox setup failed: ...`, and
+/// the setup codes of `windows-sandbox-rs/src/setup_error.rs`
+/// (`orchestrator_*`, `helper_*`).
+pub(crate) fn is_codex_windows_sandbox_failure(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("windows sandbox")
+        || lower.contains("sandbox setup")
+        || lower.contains("orchestrator_")
+        || lower.contains("setup_error.json")
+}
+
+/// Codex's own text, preceded by what to set up when it is a Windows
+/// sandbox failure.
+pub(crate) fn with_codex_sandbox_hint(text: &str) -> String {
+    if !is_codex_windows_sandbox_failure(text) {
+        return text.to_string();
+    }
+    format!(
+        "Codex could not use its Windows sandbox. In a terminal opened as administrator, run `codex sandbox setup --elevated --current-user` (it saves `sandbox = \"elevated\"` under `[windows]` in the Codex config), then try again. Codex said: {}",
+        text.trim()
+    )
 }
 
 fn str_at<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
