@@ -451,7 +451,11 @@ pub async fn finish_pending_resummaries(
     deps: &Deps<'_>,
     today: NaiveDate,
 ) -> Vec<(NaiveDate, Result<Option<SummaryRun>, PipelineError>)> {
-    vec![(today, finish_pending_resummary(deps, today).await)]
+    let mut results = Vec::with_capacity(2);
+    for day in [today - Duration::days(1), today] {
+        results.push((day, finish_pending_resummary(deps, day).await));
+    }
+    results
 }
 
 /// Whether every input of `day`'s summary is settled: the timeline built
