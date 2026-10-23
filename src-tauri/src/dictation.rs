@@ -887,7 +887,7 @@ impl DictationShortcutSetting {
         if is_modifier_only_input(&self.code, &self.modifiers) {
             return DictationShortcutSetting::modifier_only(self.modifiers);
         }
-        let Some(key_code) = key_code_for_code(&self.code) else {
+        let Some(key_code) = key_code_for_platform(&self.code, windows) else {
             return default_shortcut_for(kind, windows);
         };
         if !self.modifiers.has_any() {
@@ -1510,7 +1510,7 @@ impl DictationShortcutInput {
             ));
         }
 
-        let key_code = key_code_for_code(&self.code).ok_or_else(|| {
+        let key_code = key_code_for_platform(&self.code, windows).ok_or_else(|| {
             AppError::new(
                 "dictation_shortcut_unsupported",
                 "Shortcut must include a supported non-modifier key.",
@@ -1617,6 +1617,18 @@ const WINDOWS_LONE_KEYS: [&str; 20] = [
 
 fn is_windows_lone_key(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
     !modifiers.has_any() && WINDOWS_LONE_KEYS.contains(&code)
+}
+
+/// The Mac key code of `code`, or on Windows `0` for a lone key that is not
+/// a modifier (F13 to F24, Pause, Insert...): the helper also takes it in a
+/// chord (Ctrl+F13), and it maps keys by `code`, not by Mac key code.
+fn key_code_for_platform(code: &str, windows: bool) -> Option<u32> {
+    key_code_for_code(code).or_else(|| {
+        (windows
+            && WINDOWS_LONE_KEYS.contains(&code)
+            && !matches!(code, "ControlRight" | "AltRight" | "ShiftRight"))
+        .then_some(0)
+    })
 }
 
 fn is_left_modifier_code(code: &str) -> bool {

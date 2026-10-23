@@ -1137,6 +1137,35 @@ mod tests {
             .any(|event| matches!(event, HotkeyEvent::Ready { .. })));
     }
 
+    /// A chord on an extended key (Ctrl+Alt+F13, Ctrl+Alt+Pause) is a hotkey
+    /// with its modifiers, like any other chord.
+    #[test]
+    fn chords_on_extended_keys_register_with_their_modifiers() {
+        let mut state = HotkeyThreadState::default();
+        state.shortcuts.insert(
+            ShortcutKind::PushToTalk,
+            shortcut(ShortcutKind::PushToTalk, "Pause", "Ctrl+Alt+Pause"),
+        );
+        state.shortcuts.insert(
+            ShortcutKind::Toggle,
+            shortcut(ShortcutKind::Toggle, "F13", "Ctrl+Alt+F13"),
+        );
+        let (_, event_sink) = recorder();
+        let mut calls = Vec::new();
+        register_shortcuts_with(&mut state, &event_sink, |id, modifiers, vk| {
+            calls.push((id, modifiers, vk));
+            Ok(())
+        });
+        let modifiers = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
+        assert_eq!(
+            calls,
+            [
+                (HOTKEY_PUSH_TO_TALK, modifiers, 0x13),
+                (HOTKEY_TOGGLE, modifiers, 0x7C)
+            ]
+        );
+    }
+
     #[test]
     fn lone_right_ctrl_push_to_talk_starts_stops_and_cancels() {
         let mut state = HotkeyThreadState::default();
