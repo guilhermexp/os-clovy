@@ -1,4 +1,5 @@
 use crate::protocol::{ShortcutCommand, ShortcutKind, ShortcutModifiers};
+use crate::solo_key::{self, CaptureTracker, SoloCapture, SoloEvent, SoloModifier};
 use std::{
     collections::{HashMap, HashSet},
     sync::{mpsc, Arc},
@@ -30,6 +31,7 @@ const HOTKEY_RECONFIGURE: u32 = WM_APP + 1;
 const HOTKEY_KEYBOARD_EVENT: u32 = WM_APP + 2;
 const CAPTURE_TIMEOUT_MS: u32 = 12_000;
 const PUSH_RELEASE_POLL_MS: u32 = 50;
+const ALTGR_FAKE_CTRL_SCAN_CODE: u32 = 0x21D;
 
 type EventSink = Arc<dyn Fn(HotkeyEvent) + Send + Sync + 'static>;
 
@@ -40,6 +42,12 @@ pub enum HotkeyEvent {
         shortcut: String,
     },
     KeyUp {
+        kind: ShortcutKind,
+        shortcut: String,
+    },
+    /// Another key joined a held lone-key push-to-talk (Right Ctrl + C):
+    /// drop the take instead of pasting it.
+    KeyCancel {
         kind: ShortcutKind,
         shortcut: String,
     },
@@ -127,6 +135,10 @@ struct CaptureState {
 #[derive(Default)]
 struct HotkeyThreadState {
     shortcuts: HashMap<ShortcutKind, ShortcutCommand>,
+    /// Lone-modifier shortcuts, watched through the keyboard hook because
+    /// `RegisterHotKey` cannot take a modifier alone.
+    solo: HashMap<ShortcutKind, SoloModifier>,
+    capture_keys: CaptureTracker,
     registered: HashSet<i32>,
     pressed_keys: HashSet<u32>,
     active_push_to_talk: bool,
@@ -181,7 +193,7 @@ fn hotkey_thread(
             }
             WM_TIMER => {
                 if state.capture_timer_id == Some(msg.wParam) {
-                    cancel_capture(&mut state, &event_sink);
+                    end_capture_on_timeout(&mut state, &event_sink);
                 } else if state.push_release_timer_id == Some(msg.wParam) {
                     poll_active_push_to_talk(&mut state, &event_sink);
                 }
@@ -233,6 +245,16 @@ fn drain_messages(
         match message {
             HotkeyMessage::Set(shortcut) => {
                 release_active_push_to_talk(state, event_sink);
+                match solo_key::solo_vk(&shortcut.code)
+                    .filter(|_| solo_key::is_solo_modifier_code(&shortcut.code))
+                {
+                    Some(vk) => {
+                        state.solo.insert(shortcut.kind, SoloModifier::new(vk));
+                    }
+                    None => {
+                        state.solo.remove(&shortcut.kind);
+                    }
+                }
                 state.shortcuts.insert(shortcut.kind, shortcut);
                 shortcuts_changed = true;
             }
@@ -240,6 +262,7 @@ fn drain_messages(
                 release_active_push_to_talk(state, event_sink);
                 unregister_all(state);
                 state.capture = Some(CaptureState { kind });
+                state.capture_keys = CaptureTracker::default();
                 state.pressed_keys.clear();
                 kill_timer(&mut state.capture_timer_id);
                 state.capture_timer_id = nonzero_timer_id(unsafe {
@@ -277,6 +300,8 @@ fn handle_keyboard_event(
         return;
     }
 
+    handle_solo_modifiers(state, vk, is_down, event_sink);
+
     if !is_down && state.active_push_to_talk {
         let should_release =
             state
@@ -292,6 +317,64 @@ fn handle_keyboard_event(
     }
 }
 
+/// Lone-modifier shortcuts: push-to-talk starts on the lone press, stops on
+/// its release, and is dropped when another key joins (Right Ctrl + C keeps
+/// copying); toggle fires on a clean release.
+fn handle_solo_modifiers(
+    state: &mut HotkeyThreadState,
+    vk: u32,
+    is_down: bool,
+    event_sink: &EventSink,
+) {
+    let mut fired = Vec::new();
+    for (kind, machine) in state.solo.iter_mut() {
+        if let Some(event) = machine.on_key(vk, is_down) {
+            fired.push((*kind, event));
+        }
+    }
+    for (kind, event) in fired {
+        let Some(label) = state
+            .shortcuts
+            .get(&kind)
+            .map(|shortcut| shortcut.label.clone())
+        else {
+            continue;
+        };
+        match (kind, event) {
+            (ShortcutKind::PushToTalk, SoloEvent::Down) if !state.active_push_to_talk => {
+                state.active_push_to_talk = true;
+                event_sink(HotkeyEvent::KeyDown {
+                    kind,
+                    shortcut: label,
+                });
+            }
+            (ShortcutKind::PushToTalk, SoloEvent::Chord) if state.active_push_to_talk => {
+                state.active_push_to_talk = false;
+                event_sink(HotkeyEvent::KeyCancel {
+                    kind,
+                    shortcut: label,
+                });
+            }
+            (ShortcutKind::PushToTalk, SoloEvent::Up { clean: true })
+                if state.active_push_to_talk =>
+            {
+                state.active_push_to_talk = false;
+                event_sink(HotkeyEvent::KeyUp {
+                    kind,
+                    shortcut: label,
+                });
+            }
+            (ShortcutKind::Toggle, SoloEvent::Up { clean: true }) => {
+                event_sink(HotkeyEvent::KeyDown {
+                    kind,
+                    shortcut: label,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 fn handle_capture_key(
     state: &mut HotkeyThreadState,
     capture: CaptureState,
@@ -303,12 +386,51 @@ fn handle_capture_key(
         cancel_capture(state, event_sink);
         return;
     }
+    match state.capture_keys.on_key(vk, is_down, is_modifier_vk(vk)) {
+        Some(SoloCapture::Modifier(vk)) => {
+            if let Some((code, label)) = solo_key::solo_code(vk) {
+                finish_capture(
+                    state,
+                    capture,
+                    vk,
+                    code,
+                    label.to_string(),
+                    ShortcutModifiers::default(),
+                    event_sink,
+                );
+            }
+            return;
+        }
+        Some(SoloCapture::LeftModifier(_)) => {
+            fail_capture(
+                state,
+                capture,
+                "left_modifier",
+                "Use Ctrl, Alt, or Shift on the right side of the keyboard, or add a key.",
+                event_sink,
+            );
+            return;
+        }
+        None => {}
+    }
     if !is_down || is_modifier_vk(vk) {
         return;
     }
 
     let modifiers = current_modifiers(&state.pressed_keys);
     if !has_standard_modifier(modifiers) {
+        if let Some((code, label)) = solo_key::solo_code(vk) {
+            finish_capture(
+                state,
+                capture,
+                vk,
+                code,
+                label.to_string(),
+                modifiers,
+                event_sink,
+            );
+            return;
+        }
         fail_capture(
             state,
             capture,
@@ -328,11 +450,23 @@ fn handle_capture_key(
         );
         return;
     };
+    let label = shortcut_label(modifiers, code);
+    finish_capture(state, capture, vk, code, label, modifiers, event_sink);
+}
 
+fn finish_capture(
+    state: &mut HotkeyThreadState,
+    capture: CaptureState,
+    vk: u32,
+    code: &str,
+    label: String,
+    modifiers: ShortcutModifiers,
+    event_sink: &EventSink,
+) {
     let shortcut = ShortcutCommand {
         key_code: vk,
         code: code.to_string(),
-        label: shortcut_label(modifiers, code),
+        label,
         kind: capture.kind,
         press_count: 1,
         modifiers,
@@ -355,6 +489,25 @@ fn cancel_capture(state: &mut HotkeyThreadState, event_sink: &EventSink) {
     state.pressed_keys.clear();
     event_sink(HotkeyEvent::CaptureCancelled { kind: capture.kind });
     register_shortcuts(state, event_sink);
+}
+
+/// The capture timed out: nothing pressed at all means the key never reached
+/// Windows (Fn on most keyboards); otherwise it simply ended.
+fn end_capture_on_timeout(state: &mut HotkeyThreadState, event_sink: &EventSink) {
+    let Some(capture) = state.capture else {
+        return;
+    };
+    if state.capture_keys.saw_any_key() {
+        cancel_capture(state, event_sink);
+    } else {
+        fail_capture(
+            state,
+            capture,
+            "no_key_detected",
+            "No key reached Windows. Keys such as Fn are handled by the keyboard itself.",
+            event_sink,
+        );
+    }
 }
 
 fn fail_capture(
@@ -394,6 +547,10 @@ fn fail_capture_with(
 }
 
 fn register_shortcuts(state: &mut HotkeyThreadState, event_sink: &EventSink) {
+    // The hook was not fed during a capture; start the lone-key rules over.
+    for machine in state.solo.values_mut() {
+        *machine = SoloModifier::new(machine.target());
+    }
     register_shortcuts_with(state, event_sink, |id, modifiers, vk| {
         if unsafe { RegisterHotKey(std::ptr::null_mut(), id, modifiers, vk) } != 0 {
             Ok(())
@@ -428,9 +585,10 @@ fn register_shortcuts_with(
             });
             continue;
         };
+        let solo = solo_key::solo_vk(&shortcut.code).is_some();
         if shortcut.press_count != 1
             || shortcut.modifiers.function
-            || !has_standard_modifier(shortcut.modifiers)
+            || (!solo && !has_standard_modifier(shortcut.modifiers))
         {
             all_registered = false;
             event_sink(HotkeyEvent::RegistrationFailed {
@@ -442,6 +600,10 @@ fn register_shortcuts_with(
                     shortcut.label
                 ),
             });
+            continue;
+        }
+        if solo_key::is_solo_modifier_code(&shortcut.code) {
+            // Watched by the keyboard hook (`handle_solo_modifiers`).
             continue;
         }
         let id = hotkey_id(kind);
@@ -705,7 +867,7 @@ pub(crate) fn virtual_key_for_code(code: &str) -> Option<u32> {
         "Backslash" => VK_OEM_5 as u32,
         "BracketRight" => VK_OEM_6 as u32,
         "Quote" => VK_OEM_7 as u32,
-        _ => return None,
+        other => return solo_key::solo_vk(other),
     })
 }
 
@@ -752,6 +914,7 @@ fn code_for_virtual_key(vk: u32) -> Option<&'static str> {
         value if value == VK_OEM_5 as u32 => Some("Backslash"),
         value if value == VK_OEM_6 as u32 => Some("BracketRight"),
         value if value == VK_OEM_7 as u32 => Some("Quote"),
+        other if !is_modifier_vk(other) => solo_key::solo_code(other).map(|(code, _)| code),
         _ => None,
     }
 }
@@ -767,6 +930,11 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let is_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
         if is_down || is_up {
             let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            // AltGr layouts send a synthetic Left Ctrl (scan code 0x21D)
+            // with Right Alt; it is not a key the user pressed.
+            if event.vkCode == VK_LCONTROL as u32 && event.scanCode == ALTGR_FAKE_CTRL_SCAN_CODE {
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+            }
             let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
             unsafe {
                 PostThreadMessageW(
@@ -820,7 +988,12 @@ mod tests {
                 "missing mapping for {code}"
             );
         }
-        assert_eq!(virtual_key_for_code("F13"), None);
+        // F13-F24, Pause, and the right-hand modifiers work as lone keys.
+        assert_eq!(virtual_key_for_code("F13"), Some(0x7C));
+        assert_eq!(
+            virtual_key_for_code("ControlRight"),
+            Some(VK_RCONTROL as u32)
+        );
         assert_eq!(virtual_key_for_code("NumpadEnter"), None);
         assert_eq!(virtual_key_for_code("KeyAA"), None);
     }
@@ -919,6 +1092,88 @@ mod tests {
                     ..
                 } if code == "modifier_required"
             )));
+    }
+
+    fn recorder() -> (Arc<std::sync::Mutex<Vec<HotkeyEvent>>>, EventSink) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_events = Arc::clone(&events);
+        let event_sink: EventSink = Arc::new(move |event| {
+            captured_events.lock().expect("event lock").push(event);
+        });
+        (events, event_sink)
+    }
+
+    fn lone(kind: ShortcutKind, code: &str, label: &str) -> ShortcutCommand {
+        ShortcutCommand {
+            modifiers: ShortcutModifiers::default(),
+            ..shortcut(kind, code, label)
+        }
+    }
+
+    /// Right Ctrl goes through the hook, F13 is a hotkey with no modifier;
+    /// both count as registered.
+    #[test]
+    fn lone_keys_register_without_modifiers() {
+        let mut state = HotkeyThreadState::default();
+        state.shortcuts.insert(
+            ShortcutKind::PushToTalk,
+            lone(ShortcutKind::PushToTalk, "ControlRight", "Right Ctrl"),
+        );
+        state.shortcuts.insert(
+            ShortcutKind::Toggle,
+            lone(ShortcutKind::Toggle, "F13", "F13"),
+        );
+        let (events, event_sink) = recorder();
+        let mut calls = Vec::new();
+        register_shortcuts_with(&mut state, &event_sink, |id, modifiers, vk| {
+            calls.push((id, modifiers, vk));
+            Ok(())
+        });
+        assert_eq!(calls, [(HOTKEY_TOGGLE, MOD_NOREPEAT, 0x7C)]);
+        assert!(events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .any(|event| matches!(event, HotkeyEvent::Ready { .. })));
+    }
+
+    #[test]
+    fn lone_right_ctrl_push_to_talk_starts_stops_and_cancels() {
+        let mut state = HotkeyThreadState::default();
+        drain_set(
+            &mut state,
+            lone(ShortcutKind::PushToTalk, "ControlRight", "Right Ctrl"),
+        );
+        let (events, event_sink) = recorder();
+        let ctrl = VK_RCONTROL as u32;
+        handle_keyboard_event(&mut state, ctrl, true, &event_sink);
+        handle_keyboard_event(&mut state, ctrl, false, &event_sink);
+        handle_keyboard_event(&mut state, ctrl, true, &event_sink);
+        handle_keyboard_event(&mut state, 0x43, true, &event_sink); // C
+        handle_keyboard_event(&mut state, 0x43, false, &event_sink);
+        handle_keyboard_event(&mut state, ctrl, false, &event_sink);
+        let names: Vec<&str> = events
+            .lock()
+            .expect("event lock")
+            .iter()
+            .map(|event| match event {
+                HotkeyEvent::KeyDown { .. } => "down",
+                HotkeyEvent::KeyUp { .. } => "up",
+                HotkeyEvent::KeyCancel { .. } => "cancel",
+                _ => "other",
+            })
+            .filter(|name| *name != "other")
+            .collect();
+        assert_eq!(names, ["down", "up", "down", "cancel"]);
+    }
+
+    fn drain_set(state: &mut HotkeyThreadState, shortcut: ShortcutCommand) {
+        let (tx, rx) = mpsc::channel();
+        tx.send(HotkeyMessage::Set(shortcut)).unwrap();
+        let (_, event_sink) = recorder();
+        // Registration itself would call RegisterHotKey; a lone modifier
+        // never does.
+        drain_messages(&rx, state, &event_sink);
     }
 
     fn shortcut(kind: ShortcutKind, code: &str, label: &str) -> ShortcutCommand {

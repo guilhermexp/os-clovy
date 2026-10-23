@@ -159,6 +159,10 @@ impl HelperApp {
                     "shortcut_key_up",
                     serde_json::json!({ "kind": kind, "shortcut": shortcut }),
                 ),
+                HotkeyEvent::KeyCancel { kind, shortcut } => event(
+                    "shortcut_key_cancel",
+                    serde_json::json!({ "kind": kind, "shortcut": shortcut }),
+                ),
                 HotkeyEvent::Ready {
                     push_to_talk_shortcut,
                     toggle_shortcut,

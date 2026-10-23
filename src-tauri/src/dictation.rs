@@ -592,9 +592,11 @@ impl Default for DictationSettings {
 }
 
 impl DictationSettings {
-    fn default_for_platform(_windows: bool) -> Self {
+    /// Windows dictates with Right Ctrl alone by default (there is no Fn
+    /// there); a saved shortcut is kept as it is.
+    fn default_for_platform(windows: bool) -> Self {
         Self {
-            push_to_talk_shortcut: DictationShortcutSetting::control_option_d(),
+            push_to_talk_shortcut: default_shortcut_for(DictationShortcutKind::PushToTalk, windows),
             toggle_shortcut: DictationShortcutSetting::control_option_t(),
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
@@ -685,7 +687,12 @@ impl<'de> Deserialize<'de> for DictationSettings {
             push_to_talk_shortcut: settings
                 .push_to_talk_shortcut
                 .map(|shortcut| shortcut.normalized_or_default(DictationShortcutKind::PushToTalk))
-                .unwrap_or_else(DictationShortcutSetting::control_option_d),
+                .unwrap_or_else(|| {
+                    default_shortcut_for(
+                        DictationShortcutKind::PushToTalk,
+                        cfg!(target_os = "windows"),
+                    )
+                }),
             toggle_shortcut: settings
                 .toggle_shortcut
                 .map(|shortcut| shortcut.normalized_or_default(DictationShortcutKind::Toggle))
@@ -812,6 +819,17 @@ impl DictationShortcutSetting {
         }
     }
 
+    /// Right Ctrl alone: the Windows push-to-talk default.
+    fn right_ctrl() -> Self {
+        Self {
+            key_code: 0,
+            code: "ControlRight".to_string(),
+            modifiers: DictationShortcutModifiers::default(),
+            label: "Right Ctrl".to_string(),
+            press_count: 1,
+        }
+    }
+
     fn control_option_d() -> Self {
         Self {
             key_code: 0x02,
@@ -852,12 +870,16 @@ impl DictationShortcutSetting {
     }
 
     fn normalized_for_platform(mut self, kind: DictationShortcutKind, windows: bool) -> Self {
+        if windows && self.press_count == 1 && is_windows_lone_key(&self.code, &self.modifiers) {
+            self.key_code = key_code_for_code(&self.code).unwrap_or(0);
+            return self;
+        }
         if windows
             && (self.press_count != 1
                 || self.modifiers.function
                 || is_modifier_only_input(&self.code, &self.modifiers))
         {
-            return default_shortcut_for_kind(kind);
+            return default_shortcut_for(kind, windows);
         }
         if self.is_bare_fn() {
             return DictationShortcutSetting::bare_fn();
@@ -866,10 +888,10 @@ impl DictationShortcutSetting {
             return DictationShortcutSetting::modifier_only(self.modifiers);
         }
         let Some(key_code) = key_code_for_code(&self.code) else {
-            return default_shortcut_for_kind(kind);
+            return default_shortcut_for(kind, windows);
         };
         if !self.modifiers.has_any() {
-            return default_shortcut_for_kind(kind);
+            return default_shortcut_for(kind, windows);
         }
         self.key_code = key_code;
         self.press_count = if self.press_count == 2 { 2 } else { 1 };
@@ -1010,6 +1032,7 @@ fn shortcut_key_edge(event_type: &str) -> Option<ShortcutKeyEdge> {
     match event_type {
         "fn_key_down" | "shortcut_key_down" => Some(ShortcutKeyEdge::Down),
         "fn_key_up" | "shortcut_key_up" => Some(ShortcutKeyEdge::Up),
+        "shortcut_key_cancel" => Some(ShortcutKeyEdge::Cancel),
         _ => None,
     }
 }
@@ -1090,7 +1113,19 @@ impl ShortcutActivationController {
                 None => None,
             },
             (DictationShortcutKind::Toggle, ShortcutKeyEdge::Up) => None,
-            (_, ShortcutKeyEdge::Cancel) => None,
+            (DictationShortcutKind::PushToTalk, ShortcutKeyEdge::Cancel) => {
+                self.push_started_at = None;
+                let active = self.active_mode == Some(DictationShortcutKind::PushToTalk)
+                    && self.push_to_talk_is_down;
+                self.push_to_talk_is_down = false;
+                if active {
+                    self.active_mode = None;
+                    Some(DictationCommand::DiscardListening)
+                } else {
+                    None
+                }
+            }
+            (DictationShortcutKind::Toggle, ShortcutKeyEdge::Cancel) => None,
         }
     }
 
@@ -1416,6 +1451,22 @@ impl DictationShortcutInput {
         }
         let press_count = 1;
 
+        if windows && is_windows_lone_key(&self.code, &self.modifiers) {
+            return Ok(DictationShortcutSetting {
+                key_code: key_code_for_code(&self.code).unwrap_or(0),
+                code: self.code,
+                modifiers: self.modifiers,
+                label: self.label,
+                press_count,
+            });
+        }
+        if windows && !self.modifiers.has_any() && is_left_modifier_code(&self.code) {
+            return Err(AppError::new(
+                "dictation_shortcut_unsupported",
+                "Use Ctrl, Alt, or Shift on the right side of the keyboard, or add a key.",
+            ));
+        }
+
         if is_bare_fn_input(&self.code, &self.modifiers) {
             if windows {
                 return Err(AppError::new(
@@ -1529,11 +1580,50 @@ fn no_standard_modifiers(modifiers: &DictationShortcutModifiers) -> bool {
     !modifiers.command && !modifiers.control && !modifiers.option && !modifiers.shift
 }
 
-fn default_shortcut_for_kind(kind: DictationShortcutKind) -> DictationShortcutSetting {
+fn default_shortcut_for(kind: DictationShortcutKind, windows: bool) -> DictationShortcutSetting {
     match kind {
+        DictationShortcutKind::PushToTalk if windows => DictationShortcutSetting::right_ctrl(),
         DictationShortcutKind::PushToTalk => DictationShortcutSetting::control_option_d(),
         DictationShortcutKind::Toggle => DictationShortcutSetting::control_option_t(),
     }
+}
+
+/// Keys that work alone as a Windows shortcut: the right-hand modifiers
+/// (watched by the helper's keyboard hook, firing only when nothing else is
+/// pressed in between) and keys no app uses on their own. Mirrors the
+/// helper's `solo_key::SOLO_KEYS`.
+const WINDOWS_LONE_KEYS: [&str; 20] = [
+    "ControlRight",
+    "AltRight",
+    "ShiftRight",
+    "F13",
+    "F14",
+    "F15",
+    "F16",
+    "F17",
+    "F18",
+    "F19",
+    "F20",
+    "F21",
+    "F22",
+    "F23",
+    "F24",
+    "Pause",
+    "ScrollLock",
+    "Insert",
+    "PrintScreen",
+    "ContextMenu",
+];
+
+fn is_windows_lone_key(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
+    !modifiers.has_any() && WINDOWS_LONE_KEYS.contains(&code)
+}
+
+fn is_left_modifier_code(code: &str) -> bool {
+    matches!(
+        code,
+        "ControlLeft" | "AltLeft" | "ShiftLeft" | "MetaLeft" | "MetaRight"
+    )
 }
 
 pub fn setup(app: &mut tauri::App) {

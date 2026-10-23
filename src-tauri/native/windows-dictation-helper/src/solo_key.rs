@@ -7,6 +7,8 @@
 //! use: Right Ctrl + C still copies. It counts only when pressed and
 //! released with no other key in between.
 
+use std::collections::HashSet;
+
 /// Virtual-key codes the rules need.
 pub const VK_LSHIFT: u32 = 0xA0;
 pub const VK_RSHIFT: u32 = 0xA1;
@@ -30,11 +32,25 @@ pub enum SoloEvent {
 #[derive(Clone, Debug)]
 pub struct SoloModifier {
     target: u32,
+    /// Other keys currently down.
+    others: HashSet<u32>,
+    /// The target is down.
+    held: bool,
+    /// The current press went down with nothing else held.
+    alone: bool,
+    /// Another key joined the current lone press.
+    chorded: bool,
 }
 
 impl SoloModifier {
     pub fn new(target: u32) -> Self {
-        Self { target }
+        Self {
+            target,
+            others: HashSet::new(),
+            held: false,
+            alone: false,
+            chorded: false,
+        }
     }
 
     pub fn target(&self) -> u32 {
@@ -43,7 +59,35 @@ impl SoloModifier {
 
     /// Feeds one key edge (auto-repeat included); returns what it means for
     /// this shortcut.
-    pub fn on_key(&mut self, _vk: u32, _is_down: bool) -> Option<SoloEvent> {
+    pub fn on_key(&mut self, vk: u32, is_down: bool) -> Option<SoloEvent> {
+        if vk == self.target {
+            if is_down {
+                if self.held {
+                    return None; // auto-repeat
+                }
+                self.held = true;
+                self.alone = self.others.is_empty();
+                self.chorded = false;
+                return self.alone.then_some(SoloEvent::Down);
+            }
+            if !self.held {
+                return None;
+            }
+            self.held = false;
+            let alone = std::mem::replace(&mut self.alone, false);
+            return alone.then_some(SoloEvent::Up {
+                clean: !self.chorded,
+            });
+        }
+        if is_down {
+            let first = self.others.insert(vk);
+            if first && self.held && self.alone && !self.chorded {
+                self.chorded = true;
+                return Some(SoloEvent::Chord);
+            }
+        } else {
+            self.others.remove(&vk);
+        }
         None
     }
 }
@@ -61,36 +105,97 @@ pub enum SoloCapture {
 /// Watches a shortcut capture for a lone modifier and for whether any key
 /// reached Windows at all.
 #[derive(Clone, Debug, Default)]
-pub struct CaptureTracker;
+pub struct CaptureTracker {
+    /// The modifier pressed first while nothing else was down.
+    candidate: Option<u32>,
+    /// Keys currently down.
+    down: HashSet<u32>,
+    saw_key: bool,
+}
 
 impl CaptureTracker {
-    pub fn on_key(&mut self, _vk: u32, _is_down: bool, _is_modifier: bool) -> Option<SoloCapture> {
-        None
+    /// Feeds one key edge. Returns a lone-modifier capture when the first
+    /// modifier pressed alone is released with no other key in between.
+    pub fn on_key(&mut self, vk: u32, is_down: bool, is_modifier: bool) -> Option<SoloCapture> {
+        self.saw_key = true;
+        if is_down {
+            let first = self.down.insert(vk);
+            if !first {
+                return None; // auto-repeat
+            }
+            if is_modifier && self.down.len() == 1 {
+                self.candidate = Some(vk);
+            } else {
+                self.candidate = None;
+            }
+            return None;
+        }
+        self.down.remove(&vk);
+        if self.candidate != Some(vk) {
+            return None;
+        }
+        self.candidate = None;
+        Some(if is_right_modifier(vk) {
+            SoloCapture::Modifier(vk)
+        } else {
+            SoloCapture::LeftModifier(vk)
+        })
     }
 
     /// Whether any key event reached the hook during the capture.
     pub fn saw_any_key(&self) -> bool {
-        false
+        self.saw_key
     }
 }
 
+fn is_right_modifier(vk: u32) -> bool {
+    matches!(vk, VK_RCONTROL | VK_RMENU | VK_RSHIFT)
+}
+
+/// Lone keys: virtual key, DOM `code`, label.
+const SOLO_KEYS: [(u32, &str, &str); 20] = [
+    (VK_RCONTROL, "ControlRight", "Right Ctrl"),
+    (VK_RMENU, "AltRight", "Right Alt"),
+    (VK_RSHIFT, "ShiftRight", "Right Shift"),
+    (0x7C, "F13", "F13"),
+    (0x7D, "F14", "F14"),
+    (0x7E, "F15", "F15"),
+    (0x7F, "F16", "F16"),
+    (0x80, "F17", "F17"),
+    (0x81, "F18", "F18"),
+    (0x82, "F19", "F19"),
+    (0x83, "F20", "F20"),
+    (0x84, "F21", "F21"),
+    (0x85, "F22", "F22"),
+    (0x86, "F23", "F23"),
+    (0x87, "F24", "F24"),
+    (0x13, "Pause", "Pause"),
+    (0x91, "ScrollLock", "Scroll Lock"),
+    (0x2D, "Insert", "Insert"),
+    (0x2C, "PrintScreen", "Print Screen"),
+    (0x5D, "ContextMenu", "Menu"),
+];
+
 /// The DOM `code` of a key that works as a shortcut on its own, and a label.
 pub fn solo_code(vk: u32) -> Option<(&'static str, &'static str)> {
-    let _ = vk;
-    None
+    SOLO_KEYS
+        .iter()
+        .find(|(key, _, _)| *key == vk)
+        .map(|(_, code, label)| (*code, *label))
 }
 
 /// The virtual key of a lone-key `code`.
 pub fn solo_vk(code: &str) -> Option<u32> {
-    let _ = code;
-    None
+    SOLO_KEYS
+        .iter()
+        .find(|(_, known, _)| *known == code)
+        .map(|(vk, _, _)| *vk)
 }
 
 /// Whether `code` names a lone modifier (handled by the hook, not
 /// `RegisterHotKey`).
 pub fn is_solo_modifier_code(code: &str) -> bool {
-    let _ = code;
-    false
+    solo_vk(code).is_some_and(is_right_modifier)
 }
 
 #[cfg(test)]
@@ -227,7 +332,10 @@ mod tests {
             assert_eq!(solo_code(vk).map(|(code, _)| code), Some(code));
             assert_eq!(solo_vk(code), Some(vk), "{code}");
         }
-        assert_eq!(solo_code(VK_RCONTROL).map(|(_, label)| label), Some("Right Ctrl"));
+        assert_eq!(
+            solo_code(VK_RCONTROL).map(|(_, label)| label),
+            Some("Right Ctrl")
+        );
         assert_eq!(solo_code(0x44), None, "D needs a modifier");
         assert_eq!(solo_code(VK_LCONTROL), None);
         assert!(is_solo_modifier_code("AltRight"));

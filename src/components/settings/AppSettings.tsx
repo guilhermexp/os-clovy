@@ -255,10 +255,15 @@ const DEFAULT_SETTINGS: DictationSettingsDto = {
   hudPlacement: "bottom",
 };
 
+// Windows has no Fn: dictation defaults to Right Ctrl alone (mirrors
+// `DictationSettings::default_for_platform` in Rust).
 const WINDOWS_DEFAULT_SHORTCUTS: Record<DictationShortcutKind, DictationShortcutSetting> = {
   push_to_talk: {
-    ...DEFAULT_SETTINGS.pushToTalkShortcut,
-    label: "Ctrl+Alt+D",
+    keyCode: 0,
+    code: "ControlRight",
+    modifiers: { command: false, control: false, option: false, shift: false, function: false },
+    label: "Right Ctrl",
+    pressCount: 1,
   },
   toggle: {
     ...DEFAULT_SETTINGS.toggleShortcut,
@@ -716,10 +721,20 @@ export function AppSettings({
   useEffect(() => {
     if (!capturingShortcut) return;
     const kind = capturingShortcut;
+    const windows = capabilities.platform === "windows";
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
         void cancelShortcutCapture();
+        return;
+      }
+      // On Windows the helper's keyboard hook is the only source: it sees
+      // which side a modifier is on and AltGr, which the DOM does not, and
+      // two sources racing each other is how a capture used to end with
+      // the other source's cancel wiping its result.
+      if (windows) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
       // Key chords are read here in the DOM (the window is focused during a
@@ -742,7 +757,7 @@ export function AppSettings({
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [capturingShortcut]);
+  }, [capturingShortcut, capabilities.platform]);
 
   async function requestMicrophones() {
     try {
@@ -842,7 +857,11 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "hotkey_trigger_unavailable") {
-      const message = helperEvent.payload?.message ?? translate("settings.shortcuts.unavailable");
+      const message = windowsShortcutMessage(
+        stringPayload(helperEvent.payload?.code),
+        helperEvent.payload?.message ?? translate("settings.shortcuts.unavailable"),
+        stringPayload(helperEvent.payload?.shortcut),
+      );
       const kind = shortcutKindPayload(helperEvent.payload?.kind);
       setHelperUnavailable(undefined);
       setShortcutError(message);
@@ -855,7 +874,10 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "shortcut_capture_error") {
-      const message = helperEvent.payload?.message ?? translate("settings.shortcuts.captureFailed");
+      const message = windowsShortcutMessage(
+        stringPayload(helperEvent.payload?.code),
+        helperEvent.payload?.message ?? translate("settings.shortcuts.captureFailed"),
+      );
       const kind = shortcutKindPayload(helperEvent.payload?.kind) ?? capturingShortcutRef.current;
       setCapturingShortcut(undefined);
       setShortcutError(message);
@@ -864,9 +886,9 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "shortcut_capture_cancelled") {
+      // The capture ending is not the user's next action: an error already
+      // on the row (a registration the system refused) stays visible.
       setCapturingShortcut(undefined);
-      setShortcutError(undefined);
-      setShortcutErrorKind(undefined);
       setStatus(translate("settings.shortcuts.captureEnded"));
       return;
     }
@@ -2953,6 +2975,25 @@ function ShortcutRow({
       </div>
     </div>
   );
+}
+
+/** The helper's Windows capture and registration codes, in the interface
+ * language; anything else keeps the helper's own message. */
+function windowsShortcutMessage(code: string | undefined, fallback: string, shortcut?: string) {
+  switch (code) {
+    case "no_key_detected":
+      return translate("settings.shortcuts.noKeyWindows");
+    case "left_modifier":
+      return translate("settings.shortcuts.leftModifierWindows");
+    case "modifier_required":
+      return translate("settings.shortcuts.modifierRequiredWindows");
+    case "unsupported_key":
+      return translate("settings.shortcuts.unsupportedKeyWindows");
+  }
+  if (code?.startsWith("register_hotkey_") && shortcut) {
+    return translate("settings.shortcuts.registerFailedWindows", { shortcut });
+  }
+  return fallback;
 }
 
 function shortcutKindPayload(value: unknown): DictationShortcutKind | undefined {

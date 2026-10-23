@@ -67,7 +67,16 @@ export default defineMessages({
 
     "settings.shortcuts.blurb":
       "Set the keyboard shortcuts that start dictation and control Clovy.",
-    "settings.shortcuts.modifierRequiredWindows": "Shortcut must include Ctrl, Alt, Shift, or Win.",
+    "settings.shortcuts.modifierRequiredWindows":
+      "Add Ctrl, Alt, Shift, or Win, or pick a key that works alone: Right Ctrl, Right Alt, Right Shift, F13 to F24, Pause, Scroll Lock, or Insert.",
+    "settings.shortcuts.noKeyWindows":
+      "That key doesn't reach Windows: the keyboard handles it itself, as most keyboards do with Fn. Try Right Ctrl.",
+    "settings.shortcuts.leftModifierWindows":
+      "Use Ctrl, Alt, or Shift on the right side of the keyboard, or add a key.",
+    "settings.shortcuts.unsupportedKeyWindows":
+      "Pick a letter, number, punctuation, arrow, or function key.",
+    "settings.shortcuts.registerFailedWindows":
+      "Windows could not register {shortcut}. Another app may already use it.",
     "settings.shortcuts.modifierRequiredMac": "Shortcut must include Cmd, Ctrl, Opt, Shift, or Fn.",
     "settings.shortcuts.monitorUnavailable": "Global shortcut monitoring is unavailable.",
     "settings.shortcuts.unavailable": "Dictation shortcut is unavailable.",
@@ -396,7 +405,15 @@ export default defineMessages({
     "settings.shortcuts.blurb":
       "Defina os atalhos de teclado que iniciam o ditado e controlam o Clovy.",
     "settings.shortcuts.modifierRequiredWindows":
-      "O atalho precisa incluir Ctrl, Alt, Shift ou Win.",
+      "Inclua Ctrl, Alt, Shift ou Win, ou escolha uma tecla que funciona sozinha: Ctrl direito, Alt direito, Shift direito, F13 a F24, Pause, Scroll Lock ou Insert.",
+    "settings.shortcuts.noKeyWindows":
+      "Essa tecla não chega ao Windows: o próprio teclado a trata, como a maioria faz com o Fn. Tente o Ctrl direito.",
+    "settings.shortcuts.leftModifierWindows":
+      "Use o Ctrl, Alt ou Shift do lado direito do teclado, ou inclua outra tecla.",
+    "settings.shortcuts.unsupportedKeyWindows":
+      "Escolha uma letra, número, pontuação, seta ou tecla de função.",
+    "settings.shortcuts.registerFailedWindows":
+      "O Windows não conseguiu registrar {shortcut}. Outro app pode já estar usando.",
     "settings.shortcuts.modifierRequiredMac":
       "O atalho precisa incluir Cmd, Ctrl, Opt, Shift ou Fn.",
     "settings.shortcuts.monitorUnavailable":
