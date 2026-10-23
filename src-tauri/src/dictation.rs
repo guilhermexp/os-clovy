@@ -9951,6 +9951,68 @@ mod tests {
         }
     }
 
+    fn chord(
+        code: &str,
+        label: &str,
+        modifiers: DictationShortcutModifiers,
+    ) -> DictationShortcutInput {
+        DictationShortcutInput {
+            code: code.to_string(),
+            modifiers,
+            label: label.to_string(),
+            press_count: Some(1),
+        }
+    }
+
+    /// The helper captures chords on the keys Windows has beyond the Mac
+    /// table (F13 to F24, Pause, Insert...); they save and survive loading
+    /// on Windows only.
+    #[test]
+    fn windows_shortcut_input_accepts_chords_on_extended_keys() {
+        let control = DictationShortcutModifiers {
+            control: true,
+            ..DictationShortcutModifiers::default()
+        };
+        let shift = DictationShortcutModifiers {
+            shift: true,
+            ..DictationShortcutModifiers::default()
+        };
+        for (code, label, modifiers) in [
+            ("F13", "Ctrl+F13", &control),
+            ("Insert", "Shift+Insert", &shift),
+            ("Pause", "Ctrl+Pause", &control),
+            ("F24", "Ctrl+F24", &control),
+            ("ScrollLock", "Shift+Scroll Lock", &shift),
+        ] {
+            let saved = chord(code, label, modifiers.clone())
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert_eq!(saved.code, code);
+            assert_eq!(&saved.modifiers, modifiers);
+            assert_eq!(saved.label, label);
+            for kind in [
+                DictationShortcutKind::PushToTalk,
+                DictationShortcutKind::Toggle,
+            ] {
+                assert_eq!(
+                    saved.clone().normalized_for_platform(kind, true),
+                    saved,
+                    "{label} survives loading"
+                );
+            }
+            assert!(
+                chord(code, label, modifiers.clone())
+                    .into_setting_for_platform(false)
+                    .is_err(),
+                "{label} stays unsupported on macOS"
+            );
+        }
+        // A right-hand modifier is only a shortcut on its own.
+        assert!(chord("ControlRight", "Shift+Right Ctrl", shift)
+            .into_setting_for_platform(true)
+            .is_err());
+    }
+
     #[test]
     fn mac_shortcut_input_keeps_its_own_lone_key_rules() {
         assert!(lone("ControlRight", "Right Ctrl")
