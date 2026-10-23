@@ -108,7 +108,7 @@ pub(super) fn is_alive(pid: u32) -> bool {
 pub(super) fn running_executables(names: &[String]) -> Result<Vec<String>, MigrationError> {
     let mut running = Vec::new();
     for name in names {
-        let status = std::process::Command::new("/usr/bin/pgrep")
+        let status = crate::hide_console::command("/usr/bin/pgrep")
             .args(["-x", name])
             .stdout(std::process::Stdio::null())
             .status()

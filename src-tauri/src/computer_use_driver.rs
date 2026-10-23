@@ -523,14 +523,14 @@ fn signature_details(
     path: &std::path::Path,
     expected_identifier: &str,
 ) -> Option<VerifiedSignature> {
-    let mut verification = Command::new("/usr/bin/codesign");
+    let mut verification = crate::hide_console::command("/usr/bin/codesign");
     verification.args(["--verify", "--strict"]).arg(path);
     let verification = bounded_child_output(verification, SIGNATURE_DETAILS_TIMEOUT).ok()??;
     if !verification.status.success() {
         return None;
     }
 
-    let mut command = Command::new("/usr/bin/codesign");
+    let mut command = crate::hide_console::command("/usr/bin/codesign");
     command.args(["-dv", "--verbose=4"]).arg(path);
     let details = bounded_child_output(command, SIGNATURE_DETAILS_TIMEOUT).ok()??;
     if !details.status.success() {

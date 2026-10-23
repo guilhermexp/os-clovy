@@ -8,8 +8,12 @@ use super::{
     shell_env::LoginEnv,
     StructuredOutputLevel,
 };
+use futures_util::future::{BoxFuture, FutureExt, Shared};
 use serde::Serialize;
-use std::time::Duration;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_VERSION_CHARS: usize = 80;
@@ -33,8 +37,51 @@ pub struct CliStatus {
 }
 
 /// Detects every CLI concurrently, in catalog order.
+///
+/// Several screens ask at once (on startup the chat picker, the workspace,
+/// and the note chat); they share one probe in flight and its result for
+/// [`SHARED_PROBE_TTL`], so each CLI is started once instead of once per
+/// screen.
 pub async fn detect_all(env: &LoginEnv) -> Vec<CliStatus> {
-    futures_util::future::join_all(CliKind::ALL.into_iter().map(|kind| detect(kind, env))).await
+    shared_probe(env).await
+}
+
+type ProbeFuture = Shared<BoxFuture<'static, Vec<CliStatus>>>;
+
+/// How long a finished probe answers later callers with the same environment.
+const SHARED_PROBE_TTL: Duration = Duration::from_secs(5);
+
+struct SharedProbe {
+    env: LoginEnv,
+    started: Instant,
+    probe: ProbeFuture,
+}
+
+static SHARED_PROBE: Mutex<Option<SharedProbe>> = Mutex::new(None);
+
+fn shared_probe(env: &LoginEnv) -> ProbeFuture {
+    let mut shared = SHARED_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(current) = shared.as_ref() {
+        let pending = current.probe.peek().is_none();
+        if current.env == *env && (pending || current.started.elapsed() < SHARED_PROBE_TTL) {
+            return current.probe.clone();
+        }
+    }
+    let owned = env.clone();
+    let probe = async move {
+        futures_util::future::join_all(CliKind::ALL.into_iter().map(|kind| detect(kind, &owned)))
+            .await
+    }
+    .boxed()
+    .shared();
+    *shared = Some(SharedProbe {
+        env: env.clone(),
+        started: Instant::now(),
+        probe: probe.clone(),
+    });
+    probe
 }
 
 pub async fn detect(kind: CliKind, env: &LoginEnv) -> CliStatus {

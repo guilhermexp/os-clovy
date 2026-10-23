@@ -118,7 +118,7 @@ fn legacy_gateway_command_matches(command: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 async fn live_gateway_matches(pid: u32) -> bool {
-    tokio::process::Command::new("/bin/ps")
+    crate::hide_console::tokio_command("/bin/ps")
         .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
         .output()
         .await
@@ -131,7 +131,7 @@ async fn live_gateway_matches(pid: u32) -> bool {
 #[cfg(target_os = "windows")]
 async fn live_gateway_matches(pid: u32) -> bool {
     let script = format!("(Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}').CommandLine");
-    tokio::process::Command::new("powershell.exe")
+    crate::hide_console::tokio_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .await
@@ -173,7 +173,7 @@ async fn stop_legacy_gateway_process(pid: u32) {
 async fn stop_legacy_gateway_process(pid: u32) {
     let _ = tokio::time::timeout(
         LEGACY_GATEWAY_STOP_TIMEOUT,
-        tokio::process::Command::new("taskkill.exe")
+        crate::hide_console::tokio_command("taskkill.exe")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status(),
     )
@@ -205,7 +205,7 @@ async fn stop_legacy_launch_agent(hermes_home: &Path, user_home: &Path) {
     ] {
         let _ = tokio::time::timeout(
             LEGACY_GATEWAY_STOP_TIMEOUT,
-            tokio::process::Command::new("/bin/launchctl")
+            crate::hide_console::tokio_command("/bin/launchctl")
                 .args(["bootout", &target])
                 .status(),
         )

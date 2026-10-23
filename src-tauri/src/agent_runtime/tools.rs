@@ -1030,12 +1030,12 @@ async fn run_shell(context: &ToolContext, arguments: &Value) -> Result<Value, Ap
     }
     let script = required_string(arguments, "command")?;
     let mut command = if cfg!(target_os = "windows") {
-        let mut command = Command::new("cmd");
+        let mut command = crate::hide_console::tokio_command("cmd");
         command.arg("/C").arg(script);
         command
     } else if cfg!(target_os = "macos") && context.safety_mode == AgentSafetyMode::Sandboxed {
         let profile = sandbox_profile(&context.workspace);
-        let mut command = Command::new("/usr/bin/sandbox-exec");
+        let mut command = crate::hide_console::tokio_command("/usr/bin/sandbox-exec");
         command
             .arg("-p")
             .arg(profile)
@@ -1044,7 +1044,7 @@ async fn run_shell(context: &ToolContext, arguments: &Value) -> Result<Value, Ap
             .arg(script);
         command
     } else {
-        let mut command = Command::new("/bin/sh");
+        let mut command = crate::hide_console::tokio_command("/bin/sh");
         command.arg("-lc").arg(script);
         command
     };

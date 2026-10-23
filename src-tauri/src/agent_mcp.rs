@@ -25,7 +25,7 @@ use tauri::AppHandle;
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStdin, ChildStdout},
     sync::Mutex as AsyncMutex,
     time::timeout,
 };
@@ -2499,7 +2499,7 @@ async fn start_stdio_session(
     let mut command = if let Some(workspace) = sandbox_workspace {
         #[cfg(target_os = "macos")]
         {
-            let mut command = Command::new("/usr/bin/sandbox-exec");
+            let mut command = crate::hide_console::tokio_command("/usr/bin/sandbox-exec");
             command
                 .arg("-p")
                 .arg(crate::agent_runtime::tools::sandbox_profile(workspace))
@@ -2513,7 +2513,7 @@ async fn start_stdio_session(
             return Err(AgentMcpError::ToolUnavailable);
         }
     } else {
-        let mut command = Command::new(executable);
+        let mut command = crate::hide_console::tokio_command(executable);
         command.args(&server.args);
         command
     };

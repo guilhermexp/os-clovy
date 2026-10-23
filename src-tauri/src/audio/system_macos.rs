@@ -4,7 +4,6 @@ use crate::{
 };
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -64,7 +63,7 @@ impl SystemAudioCapture {
             pid_path.display(),
             log_path.display()
         ));
-        let open_status = Command::new("/usr/bin/open")
+        let open_status = crate::hide_console::command("/usr/bin/open")
             .arg("-n")
             .arg(&helper_app)
             .arg("--args")
@@ -297,7 +296,7 @@ pub fn helper_permission_check() -> Result<(), AppError> {
         pid_path.display(),
         log_path.display()
     ));
-    let open_status = Command::new("/usr/bin/open")
+    let open_status = crate::hide_console::command("/usr/bin/open")
         .arg("-n")
         .arg(&helper_app)
         .arg("--args")
@@ -375,7 +374,7 @@ fn helper_error_is_permission_denied(message: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn macos_version_supports_system_audio() -> bool {
-    let output = std::process::Command::new("sw_vers")
+    let output = crate::hide_console::command("sw_vers")
         .arg("-productVersion")
         .output();
     let Ok(output) = output else {
@@ -456,7 +455,7 @@ fn abort_failed_helper_start(partial_path: &Path, status_path: &Path, pid_path: 
 }
 
 fn send_signal(pid: u32, signal: &str) {
-    let _ = Command::new("kill")
+    let _ = crate::hide_console::command("kill")
         .arg(signal)
         .arg(pid.to_string())
         .status();
@@ -466,7 +465,11 @@ fn terminate_existing_helpers() {
     let helper_names = ["clovy-system-audio-recorder"];
     let mut pids: Vec<u32> = Vec::new();
     for helper_name in helper_names {
-        let Ok(output) = Command::new("pgrep").arg("-f").arg(helper_name).output() else {
+        let Ok(output) = crate::hide_console::command("pgrep")
+            .arg("-f")
+            .arg(helper_name)
+            .output()
+        else {
             continue;
         };
         pids.extend(
@@ -494,7 +497,7 @@ fn terminate_existing_helpers() {
 }
 
 fn process_is_running(pid: u32) -> bool {
-    Command::new("kill")
+    crate::hide_console::command("kill")
         .arg("-0")
         .arg(pid.to_string())
         .status()

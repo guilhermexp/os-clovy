@@ -1078,7 +1078,7 @@ pub async fn open_privacy_settings(request: OpenPrivacySettingsRequest) -> Resul
             }
             _ => "x-apple.systempreferences:com.apple.preference.security",
         };
-        let status = std::process::Command::new("/usr/bin/open")
+        let status = crate::hide_console::command("/usr/bin/open")
             .arg(url)
             .status()
             .map_err(|error| AppError::new("settings_open_failed", error.to_string()))?;
@@ -1135,7 +1135,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        let mut command = std::process::Command::new("/usr/bin/open");
+        let mut command = crate::hide_console::command("/usr/bin/open");
         command.arg("-R").arg(target);
         spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to reveal path in Finder: {error}"))
@@ -1150,7 +1150,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
         // not escape the inner quotes as `\"`, which makes Explorer fall
         // back to the default folder instead of selecting the file. Keep the
         // path as an OsString so non-UTF-8 Windows paths are not lossy-formatted.
-        let mut command = std::process::Command::new("explorer.exe");
+        let mut command = crate::hide_console::command("explorer.exe");
         let mut arg = OsString::new();
         if target.is_dir() {
             arg.push("\"");
@@ -1168,7 +1168,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let dir = target.parent().unwrap_or(target);
-        let mut command = std::process::Command::new("xdg-open");
+        let mut command = crate::hide_console::command("xdg-open");
         command.arg(dir);
         spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to open containing directory: {error}"))

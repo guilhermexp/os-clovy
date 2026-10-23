@@ -3903,7 +3903,7 @@ fn helper_ownership_path(app: &AppHandle) -> Option<PathBuf> {
 /// pid (definitive `Gone`); a failure to run `ps` at all is `Unknown`.
 #[cfg(target_os = "macos")]
 fn probe_start_time(pid: u32) -> StartTimeProbe {
-    let output = Command::new("/bin/ps")
+    let output = crate::hide_console::command("/bin/ps")
         .arg("-p")
         .arg(pid.to_string())
         .arg("-o")
@@ -3949,7 +3949,7 @@ fn comm_line_is_dictation_helper(comm_line: &str) -> bool {
 /// could not run; `NotHelper` when the pid is gone or is a different program.
 #[cfg(target_os = "macos")]
 fn inspect_helper_identity(pid: u32) -> HelperIdentity {
-    let output = Command::new("/bin/ps")
+    let output = crate::hide_console::command("/bin/ps")
         .arg("-p")
         .arg(pid.to_string())
         .arg("-o")
@@ -4324,7 +4324,7 @@ fn live_owner_claimed_helper_pids(app: &AppHandle) -> Result<Vec<u32>, AppError>
 /// exits non-zero with no matches, and any failure yields an empty list.
 #[cfg(target_os = "macos")]
 fn enumerate_running_helper_pids() -> Vec<u32> {
-    let output = Command::new("/usr/bin/pgrep")
+    let output = crate::hide_console::command("/usr/bin/pgrep")
         .arg("-f")
         .arg(DICTATION_HELPER_NAME)
         .stdin(Stdio::null())
@@ -4404,7 +4404,7 @@ fn reap_unrecorded_helpers(_app: &AppHandle) -> Result<(), AppError> {
 /// Submits SIGKILL to a single pid (best-effort; the caller confirms exit).
 #[cfg(target_os = "macos")]
 fn kill_pid(pid: u32) {
-    let _ = Command::new("/bin/kill")
+    let _ = crate::hide_console::command("/bin/kill")
         .arg("-KILL")
         .arg(pid.to_string())
         .stdin(Stdio::null())
@@ -4443,7 +4443,7 @@ fn process_state_is_terminal(state: &str) -> bool {
 /// signalable indefinitely even though it is inert.
 #[cfg(target_os = "macos")]
 fn process_alive(pid: u32) -> bool {
-    if let Ok(output) = Command::new("/bin/ps")
+    if let Ok(output) = crate::hide_console::command("/bin/ps")
         .arg("-p")
         .arg(pid.to_string())
         .args(["-o", "state="])
@@ -4462,7 +4462,7 @@ fn process_alive(pid: u32) -> bool {
         }
     }
 
-    Command::new("/bin/kill")
+    crate::hide_console::command("/bin/kill")
         .arg("-0")
         .arg(pid.to_string())
         .stdin(Stdio::null())
@@ -4491,7 +4491,7 @@ fn spawn_helper(app: &AppHandle) -> Result<HelperProcess, AppError> {
             )
         })?;
 
-    let mut command = Command::new(&helper_path);
+    let mut command = crate::hide_console::command(&helper_path);
     #[cfg(target_os = "macos")]
     command.env("CLOVY_OWNER_PID", std::process::id().to_string());
     let mut child = command

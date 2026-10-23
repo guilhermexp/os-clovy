@@ -1082,7 +1082,7 @@ fn next_permission_prompt(probe: &PermissionProbe) -> Option<DriverPermissionPro
 }
 
 fn driver_command(path: &Path) -> Command {
-    let mut command = Command::new(path);
+    let mut command = crate::hide_console::tokio_command(path);
     for (name, _) in std::env::vars_os() {
         if should_scrub_driver_env(&name) {
             command.env_remove(name);
@@ -1415,9 +1415,9 @@ async fn verify_bundle_signature(_path: PathBuf) -> Result<(), AppError> {
 #[cfg(target_os = "macos")]
 fn verify_bundle_signature_sync(path: &Path) -> Result<(), AppError> {
     use std::os::unix::process::CommandExt;
-    use std::process::{Command as StdCommand, Stdio};
+    use std::process::Stdio;
 
-    let mut command = StdCommand::new("/usr/bin/codesign");
+    let mut command = crate::hide_console::command("/usr/bin/codesign");
     command
         .args(["--verify", "--strict"])
         .arg(path)

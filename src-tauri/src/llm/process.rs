@@ -52,7 +52,7 @@ pub enum ProcessError {
 }
 
 pub async fn run(spec: ProcessSpec) -> Result<ProcessOutput, ProcessError> {
-    let mut command = tokio::process::Command::new(&spec.program);
+    let mut command = crate::hide_console::tokio_command(&spec.program);
     command
         .args(&spec.args)
         .env_clear()

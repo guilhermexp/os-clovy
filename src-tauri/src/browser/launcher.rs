@@ -299,7 +299,7 @@ pub fn launch(binary: &Path, profile_dir: &Path, proxy_port: u16) -> io::Result<
         }
     }
 
-    let mut command = Command::new(binary);
+    let mut command = crate::hide_console::command(binary);
 
     // Command-line flags, in order. Grouped by intent; every flag is load-bearing
     // for a headless, isolated, policy-proxied browsing session.

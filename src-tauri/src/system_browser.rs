@@ -80,14 +80,14 @@ fn open_with_windows_shell(
 
 #[cfg(target_os = "macos")]
 fn browser_open_command(url: &str) -> std::process::Command {
-    let mut command = std::process::Command::new("open");
+    let mut command = crate::hide_console::command("open");
     command.arg(url);
     command
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn browser_open_command(url: &str) -> std::process::Command {
-    let mut command = std::process::Command::new("xdg-open");
+    let mut command = crate::hide_console::command("xdg-open");
     command.arg(url);
     command
 }

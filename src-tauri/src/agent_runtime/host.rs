@@ -139,7 +139,7 @@ impl AgentRuntimeHost {
         }
 
         let (program, args) = resolve_runtime_command(app)?;
-        let mut child = Command::new(program)
+        let mut child = crate::hide_console::tokio_command(program)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use tokio::process::Command;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Each `gh` invocation is a short local process; detection must never hold
@@ -64,7 +63,7 @@ impl Gh {
     /// Stdout of one `gh` call when it exits successfully. Stderr is
     /// discarded so no `gh` diagnostic can carry a credential into an error.
     async fn run(&self, args: &[&str]) -> Option<Zeroizing<Vec<u8>>> {
-        let mut command = Command::new(&self.path);
+        let mut command = crate::hide_console::tokio_command(&self.path);
         command
             .args(args)
             .env_clear()

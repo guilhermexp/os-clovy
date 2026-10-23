@@ -352,7 +352,7 @@ async fn run_process<S: FrameSink>(
     state: &mut TurnState<'_, S>,
 ) -> TurnEnd {
     let context = state.context;
-    let mut command = tokio::process::Command::new(&context.program);
+    let mut command = crate::hide_console::tokio_command(&context.program);
     command
         .args(&invocation.args)
         .env_clear()
