@@ -200,8 +200,8 @@ describe("Clovy API, provider, and own-engine errors", () => {
     expect(
       messageFromError({
         code: "llm_cli_not_installed",
-        message: "Pi is not installed on this Mac.",
+        message: "Pi is not installed on this computer.",
       }),
-    ).toBe("Pi is not installed on this Mac.");
+    ).toBe("Pi is not installed on this computer.");
   });
 });

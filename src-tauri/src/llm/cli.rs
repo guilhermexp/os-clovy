@@ -2,9 +2,11 @@
 //!
 //! A one-shot prompt carries untrusted text (meeting transcripts, notes,
 //! coding-agent transcripts), so a one-shot call only runs on a CLI that can
-//! be started with **every tool turned off** ([`CliKind::tools_disabled`]):
-//! text in the prompt can then never make the CLI read files, run commands,
-//! or reach the network. The other CLIs are refused with
+//! be started with **every tool turned off** ([`CliKind::tools_disabled`]),
+//! or, by the owner's decision, on codex and agy in their least-privileged
+//! mode ([`CliKind::one_shot_allowed`]): codex in a read-only, offline
+//! sandbox that never asks for approval, agy in print mode with its terminal
+//! sandbox and no auto-approval. The other CLIs are refused with
 //! [`LlmError::CliToolsNotDisabled`] before anything is spawned.
 //!
 //! Each call is also isolated as far as the CLI allows: no session persisted,
@@ -22,6 +24,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const ERROR_DETAIL_CHARS: usize = 300;
+/// agy reads the prompt from argv only; longer prompts are elided in the
+/// middle.
+const ARGV_PROMPT_CAP_CHARS: usize = 180_000;
 /// Codex writes its final answer to this file in the scratch directory.
 pub const CODEX_LAST_MESSAGE_FILE: &str = "last_message.txt";
 /// The strict output schema codex validates against, in the scratch directory.
@@ -102,6 +107,16 @@ impl CliKind {
         matches!(self, CliKind::Claude | CliKind::Pi)
     }
 
+    /// Whether a one-shot call (notes, activity) may run on this CLI: the
+    /// tool-free ones, plus codex and agy in their least-privileged mode
+    /// (owner decision): codex `exec --sandbox read-only` with approval
+    /// `never`, no web search, no network, no saved session; agy `--print`
+    /// with `--sandbox`, where nobody can approve a permission request.
+    /// cursor-agent and copilot stay refused.
+    pub fn one_shot_allowed(self) -> bool {
+        self.tools_disabled() || matches!(self, CliKind::Codex | CliKind::Agy)
+    }
+
     pub fn parse(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.id() == id)
     }
@@ -116,6 +131,8 @@ pub struct CliInvocation {
     pub remove_env: Vec<&'static str>,
     /// Files written into the scratch directory before the call (name, text).
     pub files: Vec<(String, String)>,
+    /// The answer is in this file of the scratch directory, not on stdout.
+    pub output_file: Option<&'static str>,
 }
 
 /// The single prompt text a CLI receives: the marker alone on the first
@@ -149,9 +166,11 @@ pub fn schema_instruction(schema: &Value) -> String {
     )
 }
 
-/// Builds the argv/stdin/env for one isolated call with every tool off.
-/// CLIs that cannot guarantee that are refused
-/// ([`LlmError::CliToolsNotDisabled`]); nothing is spawned for them.
+/// Builds the argv/stdin/env for one isolated call: every tool off, or the
+/// CLI's least-privileged mode (codex, agy). The call runs in an empty
+/// scratch directory; relative file names below live there. CLIs that allow
+/// neither are refused ([`LlmError::CliToolsNotDisabled`]); nothing is
+/// spawned for them.
 pub fn build_invocation(
     kind: CliKind,
     request: &GenerateRequest,
@@ -161,6 +180,9 @@ pub fn build_invocation(
         ("DO_NOT_TRACK".to_string(), "1".to_string()),
     ];
     let mut remove_env = Vec::new();
+    let mut files = Vec::new();
+    let mut output_file = None;
+    let mut stdin = Some(compose_prompt(kind, request));
     let args = match kind {
         CliKind::Claude => {
             let mut args = strings(&[
@@ -203,16 +225,62 @@ pub fn build_invocation(
                 "--no-prompt-templates",
             ])
         }
-        CliKind::Codex | CliKind::Agy | CliKind::CursorAgent | CliKind::Copilot => {
+        CliKind::Codex => {
+            let mut args = strings(&[
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--color",
+                "never",
+                "-c",
+                "approval_policy=\"never\"",
+                "-c",
+                "web_search=\"disabled\"",
+                "-c",
+                "sandbox_workspace_write.network_access=false",
+                "-c",
+                "analytics.enabled=false",
+                "--output-last-message",
+                CODEX_LAST_MESSAGE_FILE,
+            ]);
+            if let Some(schema) = &request.schema {
+                files.push((CODEX_SCHEMA_FILE.to_string(), strictify(schema).to_string()));
+                args.push("--output-schema".to_string());
+                args.push(CODEX_SCHEMA_FILE.to_string());
+            }
+            args.push("-".to_string());
+            output_file = Some(CODEX_LAST_MESSAGE_FILE);
+            args
+        }
+        CliKind::Agy => {
+            let prompt = stdin.take().unwrap_or_default();
+            let mut args = vec![
+                "--print".to_string(),
+                cap_middle(&prompt, ARGV_PROMPT_CAP_CHARS),
+                "--output-format".to_string(),
+                "json".to_string(),
+                "--sandbox".to_string(),
+                "--disable-slash-commands".to_string(),
+            ];
+            if let Some(schema) = &request.schema {
+                args.push("--json-schema".to_string());
+                args.push(schema.to_string());
+            }
+            args
+        }
+        CliKind::CursorAgent | CliKind::Copilot => {
             return Err(LlmError::CliToolsNotDisabled(kind));
         }
     };
     Ok(CliInvocation {
         args,
-        stdin: Some(compose_prompt(kind, request)),
+        stdin,
         set_env,
         remove_env,
-        files: Vec::new(),
+        files,
+        output_file,
     })
 }
 
@@ -258,7 +326,41 @@ pub fn parse_output(
             }
         }
         CliKind::Pi => parse_pi_stream(&output.stdout).map_err(failed)?,
-        CliKind::Codex | CliKind::Agy | CliKind::CursorAgent | CliKind::Copilot => {
+        // `run_cli` puts the last-message file in place of stdout.
+        CliKind::Codex => {
+            if !output.success {
+                return Err(failed(codex_error(&output.stderr)));
+            }
+            output.stdout.clone()
+        }
+        CliKind::Agy => {
+            let envelope = parse_envelope(&output.stdout)
+                .ok_or_else(|| failed(first_line_or(&output.stderr, &output.stdout)))?;
+            let status = envelope.get("status").and_then(Value::as_str);
+            if status.is_some_and(|status| status != "SUCCESS") {
+                return Err(failed(
+                    envelope
+                        .get("error")
+                        .or_else(|| envelope.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("error")
+                        .to_string(),
+                ));
+            }
+            match envelope
+                .get("structured_output")
+                .filter(|value| !value.is_null())
+            {
+                Some(Value::String(text)) => text.clone(),
+                Some(structured) => structured.to_string(),
+                None => envelope
+                    .get("response")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            }
+        }
+        CliKind::CursorAgent | CliKind::Copilot => {
             return Err(LlmError::CliToolsNotDisabled(kind));
         }
     };
@@ -377,6 +479,37 @@ pub fn strictify(schema: &Value) -> Value {
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
+}
+
+/// The message of codex's `ERROR: {json}` line, else its first stderr line.
+fn codex_error(stderr: &str) -> String {
+    if let Some((_, after)) = stderr.split_once("ERROR:") {
+        let after = after.trim();
+        if let Ok(value) = serde_json::from_str::<Value>(after) {
+            if let Some(message) = value
+                .pointer("/error/message")
+                .or_else(|| value.pointer("/message"))
+                .and_then(Value::as_str)
+            {
+                return message.to_string();
+            }
+        }
+        return after.lines().next().unwrap_or(after).to_string();
+    }
+    first_line_or(stderr, "")
+}
+
+/// Keeps the head (70%) and tail (30%) of an oversized prompt.
+fn cap_middle(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    let head = max_chars * 7 / 10;
+    let tail = max_chars - head;
+    let head_text: String = value.chars().take(head).collect();
+    let tail_text: String = value.chars().skip(count - tail).collect();
+    format!("{head_text}\n[...]\n{tail_text}")
 }
 
 fn first_line_or(primary: &str, secondary: &str) -> String {

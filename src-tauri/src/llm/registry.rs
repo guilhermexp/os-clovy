@@ -467,7 +467,7 @@ pub fn set_usage(
         }
         // One-shot uses send content (transcripts, notes) to the CLI; chat
         // goes through the CLI chat engine, which has its own contract.
-        ProviderRef::Cli { id } if usage != LlmUsage::Chat && !id.tools_disabled() => {
+        ProviderRef::Cli { id } if usage != LlmUsage::Chat && !id.one_shot_allowed() => {
             return Err(LlmError::CliToolsNotDisabled(*id).into());
         }
         _ => {}
@@ -1001,6 +1001,8 @@ mod tests {
     fn llm_codex_and_agy_take_notes_and_activity() {
         for id in [CliKind::Codex, CliKind::Agy] {
             let mut settings = crate::providers::default_settings_for_tests();
+            // Activity also needs the level the connection test measured.
+            settings.llm_cli_levels.insert(id, id.structured_output());
             for usage in [LlmUsage::Notes, LlmUsage::Activity] {
                 set_usage(&mut settings, usage, ProviderRef::Cli { id }, |_| true)
                     .unwrap_or_else(|error| panic!("{id:?} {usage:?}: {error:?}"));

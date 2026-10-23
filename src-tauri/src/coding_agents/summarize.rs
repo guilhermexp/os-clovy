@@ -4,7 +4,7 @@
 //! when that CLI is installed **and** runs with every tool off
 //! (`CliKind::tools_disabled`: today `claude` for Claude Code sessions);
 //! otherwise the activity provider chosen in Settings, Models (which `llm`
-//! also refuses when it is a CLI that keeps its tools). With neither, nothing
+//! refuses when it is a CLI that allows no one-shot call). With neither, nothing
 //! is called and the block stays sealed without a summary until one becomes
 //! available. The prompt fences the transcript and tells the model to treat
 //! it as quoted data. Calls go through `crate::llm`, which stamps Clovy's
@@ -84,7 +84,7 @@ impl SummaryBackend for LlmBackend {
         let provider = registry.usage.get(LlmUsage::Activity);
         let tools_off = match provider {
             ProviderRef::None | ProviderRef::Clovy => false,
-            ProviderRef::Cli { id } => id.tools_disabled(),
+            ProviderRef::Cli { id } => id.one_shot_allowed(),
             ProviderRef::Endpoint { .. } => true,
         };
         tools_off

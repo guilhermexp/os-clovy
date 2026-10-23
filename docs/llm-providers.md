@@ -83,18 +83,19 @@ A one-shot prompt carries untrusted text (meeting transcripts, notes,
 dictation, coding-agent transcripts). Text in a prompt must never be able to
 make the CLI read files, run commands, or reach the network, so **a one-shot
 call only runs on a CLI that can be started with every tool off**
-(`CliKind::tools_disabled`):
+(`CliKind::tools_disabled`), **or, by the owner's decision (2026-10-23), on
+codex and agy in their least-privileged mode** (`CliKind::one_shot_allowed`):
 
 | CLI | One-shot calls | Why |
 |---|---|---|
 | claude | Yes | `--tools ""` turns off every built-in tool; `--strict-mcp-config` without `--mcp-config` and `--setting-sources ""` load no MCP server, plugin, or hook |
 | pi | Yes | `--no-tools` (built-in and extension tools) and `--no-extensions` |
-| codex | Refused | `exec` always offers shell, patch, MCP, and app tools (new versions keep adding more); `-s read-only` still lets it run commands and read files |
-| agy | Refused | no flag turns its tools off |
+| codex | Yes, least privilege | `exec --sandbox read-only --ephemeral --skip-git-repo-check -c approval_policy="never" -c web_search="disabled" -c sandbox_workspace_write.network_access=false --output-last-message last_message.txt [--output-schema schema.json] -`, prompt on stdin: no writes, no network for commands, no approval prompt, no saved session; the answer is read from the last-message file in the scratch directory. Its tools stay on (it can still read files and the user's own MCP servers load), which the owner accepted |
+| agy | Yes, least privilege | `--print <prompt> --output-format json --sandbox --disable-slash-commands [--json-schema <schema>]`: no flag turns its tools off; in print mode nobody can approve a permission request, so tool steps fail ("user denied permission"), and `--sandbox` restricts its terminal. agy has no flag to skip saving its conversation |
 | cursor-agent | Refused | print mode "has access to all tools"; `--mode ask` still reads |
 | copilot | Refused | MCP servers from the user's configuration and plugins cannot all be excluded |
 
-A refused CLI fails with `LlmError::CliToolsNotDisabled` (`llm_cli_tools_not_disabled`)
+cursor-agent and copilot stay refused. A refused CLI fails with `LlmError::CliToolsNotDisabled` (`llm_cli_tools_not_disabled`)
 before anything is spawned, in `generate`, `generate_for_activity`,
 `generate_on_cli_for_activity`, and the connection test. `llm_set_usage`
 refuses it for notes and activity (chat goes through the
@@ -123,10 +124,13 @@ Every allowed one-shot call also:
   --no-prompt-templates --no-approve`);
 - strips `ANTHROPIC_API_KEY` for claude so a stray key never switches the user
   to metered billing;
-- is killed with its whole process group on timeout (`LlmError::TimedOut`), and
-  the group is swept right after the CLI exits, before output is collected, so
-  a lingering helper cannot hold stdout open; stdout and stderr are each
-  capped at 8 MiB.
+- is killed with its whole process tree on timeout (`LlmError::TimedOut`), and
+  the tree is swept right after the CLI exits, before output is collected, so
+  a lingering helper cannot hold stdout open (Unix: the process group;
+  Windows: a kill-on-close Job Object, `process_group::ProcessTree`); stdout
+  and stderr are each capped at 8 MiB;
+- on Windows starts without a console window (`hide_console`), like every
+  process Clovy starts.
 
 ## Settings and routing
 

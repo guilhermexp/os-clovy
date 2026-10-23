@@ -21,8 +21,8 @@
 
 ## 5. Codex e Antigravity em notas, texto e atividade (D5)
 
-- [ ] 5.1 RED: testes da invocação pontual do `codex` e do `agy` (flags, pasta temporária, sem sessão) e da seleção por uso aceita; `cursor-agent` continua recusado; commit RED.
-- [ ] 5.2 GREEN: invocações, regras de uso e UI de provedores sem acinzentar os dois; mensagem "neste Mac" corrigida para o Windows; docs de provedores atualizadas.
+- [x] 5.1 RED: testes da invocação pontual do `codex` e do `agy` (flags, pasta temporária, sem sessão) e da seleção por uso aceita; `cursor-agent` continua recusado; commit RED.
+- [x] 5.2 GREEN: invocações, regras de uso e UI de provedores sem acinzentar os dois; mensagem "neste Mac" corrigida para o Windows; docs de provedores atualizadas.
 
 ## 6. Atalhos no Windows (D6)
 

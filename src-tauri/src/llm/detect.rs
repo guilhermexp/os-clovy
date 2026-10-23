@@ -31,9 +31,9 @@ pub struct CliStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub structured_output: StructuredOutputLevel,
-    /// The CLI can run one-shot calls with every tool off; only those may be
-    /// chosen for notes, dictation cleanup, and activity.
-    pub tools_disabled: bool,
+    /// The CLI can run one-shot calls (every tool off, or its least-privileged
+    /// mode); only those may be chosen for notes and activity.
+    pub one_shot: bool,
 }
 
 /// Detects every CLI concurrently, in catalog order.
@@ -94,7 +94,7 @@ pub async fn detect(kind: CliKind, env: &LoginEnv) -> CliStatus {
             version: None,
             reason: Some(format!("`{}` was not found on your PATH.", kind.id())),
             structured_output: kind.structured_output(),
-            tools_disabled: kind.tools_disabled(),
+            one_shot: kind.one_shot_allowed(),
         };
     };
     let version = read_version(&path, env).await;
@@ -106,7 +106,7 @@ pub async fn detect(kind: CliKind, env: &LoginEnv) -> CliStatus {
         version,
         reason: None,
         structured_output: kind.structured_output(),
-        tools_disabled: kind.tools_disabled(),
+        one_shot: kind.one_shot_allowed(),
     }
 }
 

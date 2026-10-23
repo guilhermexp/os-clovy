@@ -104,9 +104,9 @@ export default defineMessages({
       "The model selected for this session is invalid. Choose the model again.",
     "lib.errors.autoModelInvalid": "The model selected by Auto is invalid. Retry the agent run.",
     "lib.errors.llm.notLocal": "This provider is not one of your own providers.",
-    "lib.errors.llm.cliNotInstalled": "{cli} is not installed on this Mac.",
+    "lib.errors.llm.cliNotInstalled": "{cli} is not installed on this computer.",
     "lib.errors.llm.cliToolsNotDisabled":
-      "{cli} cannot run with its tools turned off, so Clovy does not send it content. Choose Claude Code, Pi, or an endpoint.",
+      "{cli} cannot run with its tools turned off, so Clovy does not send it content. Choose Claude Code, Codex, Pi, Antigravity, or an endpoint.",
     "lib.errors.llm.cliFailed": "{cli} failed: {detail}",
     "lib.errors.llm.endpointNotFound": "This endpoint is no longer configured.",
     "lib.errors.llm.endpointUnreachable":
@@ -525,9 +525,9 @@ export default defineMessages({
     "lib.errors.autoModelInvalid":
       "O modelo escolhido pelo Auto é inválido. Rode o agente de novo.",
     "lib.errors.llm.notLocal": "Este provedor não é um dos seus provedores próprios.",
-    "lib.errors.llm.cliNotInstalled": "{cli} não está instalado neste Mac.",
+    "lib.errors.llm.cliNotInstalled": "{cli} não está instalado neste computador.",
     "lib.errors.llm.cliToolsNotDisabled":
-      "{cli} não roda com as ferramentas desligadas, então o Clovy não envia conteúdo para ele. Escolha Claude Code, Pi ou um endpoint.",
+      "{cli} não roda com as ferramentas desligadas, então o Clovy não envia conteúdo para ele. Escolha Claude Code, Codex, Pi, Antigravity ou um endpoint.",
     "lib.errors.llm.cliFailed": "{cli} falhou: {detail}",
     "lib.errors.llm.endpointNotFound": "Este endpoint não está mais configurado.",
     "lib.errors.llm.endpointUnreachable":

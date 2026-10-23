@@ -177,7 +177,7 @@ pub fn account_from_record(record: ConnectorAccountRecord) -> ConnectorAccount {
 fn cli_missing_error() -> AppError {
     AppError::new(
         "connector_github_cli_missing",
-        "GitHub CLI (gh) was not found on this Mac. Install it, run gh auth login, then try again.",
+        "GitHub CLI (gh) was not found on this computer. Install it, run gh auth login, then try again.",
     )
 }
 

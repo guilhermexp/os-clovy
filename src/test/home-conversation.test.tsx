@@ -251,14 +251,14 @@ describe("Home conversation on the default CLI engine", () => {
       start_agent_run: () =>
         Promise.reject({
           code: "llm_cli_not_installed",
-          message: "Claude Code is not installed on this Mac.",
+          message: "Claude Code is not installed on this computer.",
         }),
     });
     render(<AgentWorkspace homeMode initialSession={homeSession} />);
     await send("eae");
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Claude Code is not installed on this Mac.",
+      "Claude Code is not installed on this computer.",
     );
     expect(calls("start_agent_run")[0][1]).toEqual({
       request: expect.objectContaining({ model: CLAUDE }),

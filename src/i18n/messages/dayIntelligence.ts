@@ -25,7 +25,7 @@ export default defineMessages({
 
     "dayIntelligence.provider.missingTitle": "Day summaries need an activity provider",
     "dayIntelligence.provider.missingDescription":
-      "Choose an activity provider in Settings, Models. Until then nothing is generated and no activity text leaves this Mac.",
+      "Choose an activity provider in Settings, Models. Until then nothing is generated and no activity text leaves this computer.",
     "dayIntelligence.provider.insufficientTitle": "The activity provider needs JSON schema support",
     "dayIntelligence.provider.insufficientDescription":
       "Test the provider in Settings, Models, or choose one that supports JSON schema.",
@@ -96,7 +96,7 @@ export default defineMessages({
 
     "dayIntelligence.provider.missingTitle": "O resumo do dia precisa de um provedor de atividade",
     "dayIntelligence.provider.missingDescription":
-      "Escolha um provedor de atividade em Configurações, Modelos. Até lá nada é gerado e nenhum texto de atividade sai deste Mac.",
+      "Escolha um provedor de atividade em Configurações, Modelos. Até lá nada é gerado e nenhum texto de atividade sai deste computador.",
     "dayIntelligence.provider.insufficientTitle":
       "O provedor de atividade precisa de suporte a JSON schema",
     "dayIntelligence.provider.insufficientDescription":

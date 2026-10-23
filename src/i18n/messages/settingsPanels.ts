@@ -203,7 +203,7 @@ export default defineMessages({
     "settingsPanels.connectors.revokeWith": "Also revoke Clovy's access with {provider}",
     "settingsPanels.connectors.viaGh": "via gh",
     "settingsPanels.connectors.viaGhTip":
-      "Uses your GitHub CLI login on this Mac. Clovy reads the token from gh for each call and never stores it.",
+      "Uses your GitHub CLI login on this computer. Clovy reads the token from gh for each call and never stores it.",
     "settingsPanels.connectors.connectWithGh": "Connect with GitHub CLI",
     "settingsPanels.connectors.connectWithGhName": "Connect {name} with GitHub CLI",
     "settingsPanels.connectors.ghConnected": "GitHub connected through GitHub CLI",
@@ -217,7 +217,7 @@ export default defineMessages({
     "settingsPanels.memory.addMemory": "Add memory",
     "settingsPanels.memory.title": "Memory",
     "settingsPanels.memory.blurb":
-      "Everything Clovy remembers, across every project. Memories stay on this Mac.",
+      "Everything Clovy remembers, across every project. Memories stay on this computer.",
     "settingsPanels.memory.enableTitle": "Let Clovy remember things",
     "settingsPanels.memory.enableDescription":
       "Clovy can save useful details across sessions and use them when they are relevant.",
@@ -394,7 +394,7 @@ export default defineMessages({
     "settingsPanels.llm.notInstalledSuffix": " (not installed)",
     "settingsPanels.llm.toolsOnSuffix": " (tools can't be turned off)",
     "settingsPanels.llm.toolsOnReason":
-      "Its tools can't be turned off, so it is used for chat only, never for notes, dictation cleanup, or activity.",
+      "Its tools can't be turned off, so it is used for chat only, never for notes or activity.",
     "settingsPanels.llm.clisHeading": "Agent CLIs",
     "settingsPanels.llm.clisDescription": "Installed CLI agents detected on your machine.",
     "settingsPanels.llm.refreshClis": "Check again",
@@ -648,7 +648,7 @@ export default defineMessages({
     "settingsPanels.connectors.revokeWith": "Também revogar o acesso do Clovy no {provider}",
     "settingsPanels.connectors.viaGh": "via gh",
     "settingsPanels.connectors.viaGhTip":
-      "Usa o login do GitHub CLI neste Mac. O Clovy lê o token do gh a cada chamada e nunca o guarda.",
+      "Usa o login do GitHub CLI neste computador. O Clovy lê o token do gh a cada chamada e nunca o guarda.",
     "settingsPanels.connectors.connectWithGh": "Conectar pelo GitHub CLI",
     "settingsPanels.connectors.connectWithGhName": "Conectar {name} pelo GitHub CLI",
     "settingsPanels.connectors.ghConnected": "GitHub conectado pelo GitHub CLI",
@@ -662,7 +662,7 @@ export default defineMessages({
     "settingsPanels.memory.addMemory": "Adicionar memória",
     "settingsPanels.memory.title": "Memória",
     "settingsPanels.memory.blurb":
-      "Tudo o que o Clovy lembra, em todos os projetos. As memórias ficam neste Mac.",
+      "Tudo o que o Clovy lembra, em todos os projetos. As memórias ficam neste computador.",
     "settingsPanels.memory.enableTitle": "Deixar o Clovy lembrar das coisas",
     "settingsPanels.memory.enableDescription":
       "O Clovy pode salvar detalhes úteis entre sessões e usá-los quando forem relevantes.",
@@ -843,7 +843,7 @@ export default defineMessages({
     "settingsPanels.llm.notInstalledSuffix": " (não instalado)",
     "settingsPanels.llm.toolsOnSuffix": " (ferramentas não podem ser desligadas)",
     "settingsPanels.llm.toolsOnReason":
-      "As ferramentas dele não podem ser desligadas, então ele só é usado no chat, nunca em notas, limpeza de ditado ou atividade.",
+      "As ferramentas dele não podem ser desligadas, então ele só é usado no chat, nunca em notas ou atividade.",
     "settingsPanels.llm.clisHeading": "CLIs de agentes",
     "settingsPanels.llm.clisDescription": "Agentes CLI instalados detectados em sua máquina.",
     "settingsPanels.llm.refreshClis": "Verificar novamente",

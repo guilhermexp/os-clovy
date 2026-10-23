@@ -18,8 +18,9 @@ export type LlmCliStatusDto = {
   version?: string;
   reason?: string;
   structuredOutput: StructuredOutputLevel;
-  /** Runs one-shot calls with every tool off; only these take notes, dictation cleanup, and activity. */
-  toolsDisabled: boolean;
+  /** Can run one-shot calls (notes, activity): every tool off, or the
+   * CLI's least-privileged mode (codex, agy). */
+  oneShot: boolean;
 };
 
 export type LlmEndpointDto = {

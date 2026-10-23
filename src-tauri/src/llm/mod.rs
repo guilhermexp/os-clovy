@@ -95,7 +95,7 @@ pub enum LlmError {
     NotLocal,
     CliNotInstalled(CliKind),
     /// The CLI cannot run a one-shot call with every tool turned off, so it is
-    /// never given content (see [`cli::CliKind::tools_disabled`]).
+    /// never given content (see [`cli::CliKind::one_shot_allowed`]).
     CliToolsNotDisabled(CliKind),
     CliFailed {
         cli: CliKind,
@@ -118,12 +118,12 @@ impl From<LlmError> for AppError {
             ),
             LlmError::CliNotInstalled(cli) => AppError::new(
                 "llm_cli_not_installed",
-                format!("{} is not installed on this Mac.", cli.display_name()),
+                format!("{} is not installed on this computer.", cli.display_name()),
             ),
             LlmError::CliToolsNotDisabled(cli) => AppError::new(
                 "llm_cli_tools_not_disabled",
                 format!(
-                    "{} cannot run with its tools turned off, so Clovy does not send it content. Choose Claude Code, Pi, or an endpoint.",
+                    "{} cannot run with its tools turned off, so Clovy does not send it content. Choose Claude Code, Codex, Pi, Antigravity, or an endpoint.",
                     cli.display_name()
                 ),
             ),
@@ -252,7 +252,7 @@ where
         return Err(LlmError::ActivityProviderMissing);
     }
     if let ProviderRef::Cli { id } = &provider {
-        if !id.tools_disabled() {
+        if !id.one_shot_allowed() {
             return Err(LlmError::CliToolsNotDisabled(*id));
         }
     }
@@ -289,12 +289,18 @@ pub async fn run_cli(
             cli: kind,
             detail: format!("could not create a scratch directory: {error}"),
         })?;
+    for (name, text) in &invocation.files {
+        std::fs::write(scratch.path().join(name), text).map_err(|error| LlmError::CliFailed {
+            cli: kind,
+            detail: format!("could not write {name}: {error}"),
+        })?;
+    }
     let mut child_env = shell_env::cli_environment(env.vars());
     for name in &invocation.remove_env {
         child_env.remove(*name);
     }
     child_env.extend(invocation.set_env.iter().cloned());
-    let output = process::run(process::ProcessSpec {
+    let mut output = process::run(process::ProcessSpec {
         program,
         args: invocation.args.clone(),
         env: child_env,
@@ -309,6 +315,9 @@ pub async fn run_cli(
             LlmError::CliFailed { cli: kind, detail }
         }
     })?;
+    if let Some(name) = invocation.output_file {
+        output.stdout = std::fs::read_to_string(scratch.path().join(name)).unwrap_or_default();
+    }
     cli::parse_output(kind, &output, request.schema.is_some())
 }
 

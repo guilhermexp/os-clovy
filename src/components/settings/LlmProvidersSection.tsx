@@ -342,9 +342,10 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
     }
 
     for (const cli of clis) {
-      // Notes, dictation cleanup, and activity send content to the CLI, so
-      // only CLIs that run with every tool off can take them.
-      const toolsOn = forUsage !== "chat" && !cli.toolsDisabled;
+      // Notes and activity send content to the CLI, so only CLIs that run
+      // one-shot calls with every tool off or in their least-privileged mode
+      // (codex, agy) can take them.
+      const toolsOn = forUsage !== "chat" && !cli.oneShot;
       const disabled = !cli.installed || toolsOn;
       const suffix = !cli.installed
         ? t("settingsPanels.llm.notInstalledSuffix")
@@ -532,14 +533,14 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
                     {details}
                     {testResult ? ` · ${testResult}` : ""}
                   </p>
-                  {cli.toolsDisabled ? null : (
+                  {cli.oneShot ? null : (
                     <p className="settings-row-description">
                       {t("settingsPanels.llm.toolsOnReason")}
                     </p>
                   )}
                 </div>
                 <div className="settings-row-control">
-                  {isInstalled && cli.toolsDisabled ? (
+                  {isInstalled && cli.oneShot ? (
                     <button
                       type="button"
                       className="btn btn-secondary"
