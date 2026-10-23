@@ -182,6 +182,39 @@ mod tests {
         assert!(!detect(CliKind::Codex, &env).await.installed);
     }
 
+    /// Several screens ask for the catalog at once on startup; each CLI is
+    /// probed once for all of them.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn llm_concurrent_detection_probes_each_cli_once() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("probes.log");
+        for name in ["claude", "codex"] {
+            write_script(
+                &root.path().join(name),
+                &format!(
+                    "echo {name} >> '{}'\nsleep 0.2\necho '1.0 ({name})'",
+                    log.display()
+                ),
+            );
+        }
+        let env = LoginEnv::from_vars(BTreeMap::from([(
+            "PATH".to_string(),
+            root.path().to_string_lossy().into_owned(),
+        )]));
+        let (first, second, third) =
+            tokio::join!(detect_all(&env), detect_all(&env), detect_all(&env));
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        assert!(first
+            .iter()
+            .any(|cli| cli.installed && cli.id == CliKind::Codex));
+        let probes = std::fs::read_to_string(&log).unwrap();
+        let mut probes: Vec<&str> = probes.lines().collect();
+        probes.sort_unstable();
+        assert_eq!(probes, ["claude", "codex"]);
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn llm_broken_login_shell_falls_back_to_the_app_environment() {

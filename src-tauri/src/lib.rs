@@ -30,6 +30,7 @@ pub mod experimental_settings;
 pub mod extension_host;
 pub mod feature_flags;
 mod filesystem;
+pub(crate) mod hide_console;
 mod http_client;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub mod identity_migration;
