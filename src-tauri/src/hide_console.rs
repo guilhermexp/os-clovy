@@ -101,7 +101,12 @@ mod tests {
         rust_files(&root, &mut files);
         let mut offenders = Vec::new();
         for file in files {
-            if is_test_file(&file) || file.ends_with("hide_console.rs") {
+            // computer_use_driver.rs is the root of the macOS-only signed
+            // driver binary, which does not link this module.
+            if is_test_file(&file)
+                || file.ends_with("hide_console.rs")
+                || file.ends_with("computer_use_driver.rs")
+            {
                 continue;
             }
             let source = std::fs::read_to_string(&file).unwrap();

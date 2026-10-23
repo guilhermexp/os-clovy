@@ -17,7 +17,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, Command},
+    process::{Child, ChildStdin},
     sync::{oneshot, Mutex},
 };
 use uuid::Uuid;
@@ -1815,7 +1815,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn exited_runtime_children_are_not_treated_as_running() {
-        let mut child = Command::new("/bin/sh")
+        let mut child = tokio::process::Command::new("/bin/sh")
             .args(["-c", "exit 0"])
             .spawn()
             .expect("short-lived child should start");

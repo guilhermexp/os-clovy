@@ -215,17 +215,22 @@ mod windows_tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("child.pid");
         let program = npm_cmd_cli_with_child(dir.path(), "codex", &pid_file, "started");
-        let result = run(ProcessSpec {
+        // Generous: a cold `node` on a hosted runner can take seconds.
+        let call = tokio::spawn(run(ProcessSpec {
             program,
             args: vec!["exec".to_string()],
             env: std::env::vars().collect(),
             cwd: dir.path().to_path_buf(),
             stdin: None,
-            timeout: Duration::from_secs(3),
-        })
-        .await;
-        assert_eq!(result, Err(ProcessError::TimedOut));
-        let child = wait_for_pid(&pid_file, Duration::from_secs(1)).expect("child never started");
+            timeout: Duration::from_secs(20),
+        }));
+        let pid_path = pid_file.clone();
+        let child =
+            tokio::task::spawn_blocking(move || wait_for_pid(&pid_path, Duration::from_secs(20)))
+                .await
+                .unwrap()
+                .expect("child never started");
+        assert_eq!(call.await.unwrap(), Err(ProcessError::TimedOut));
         let alive = process_alive(child);
         kill_pid(child);
         assert!(!alive, "child {child} outlived the timed-out CLI");

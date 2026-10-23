@@ -17,7 +17,7 @@ use std::{
     future::Future,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
         Arc, Mutex, OnceLock,
@@ -8666,7 +8666,7 @@ mod tests {
     #[test]
     fn wait_for_pid_exit_confirms_a_kill_and_bounds_a_survivor() {
         // A dead pid is observed as exited.
-        let mut victim = Command::new("/bin/sleep")
+        let mut victim = std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -8680,7 +8680,7 @@ mod tests {
 
         // ...and a live process is NOT declared exited, so the reap aborts the
         // replacement spawn rather than racing a helper that still holds the tap.
-        let mut survivor = Command::new("/bin/sleep")
+        let mut survivor = std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

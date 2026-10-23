@@ -14,7 +14,7 @@
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 /// A supported Chromium-family browser. The variant order is the detection
@@ -542,7 +542,7 @@ mod tests {
         let dir = profile.path().to_path_buf();
         assert!(dir.exists());
 
-        let child = Command::new("/bin/sleep")
+        let child = std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -669,9 +669,10 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--output-format", "json"]));
+        let schema_text = schema.to_string();
         assert!(args
             .windows(2)
-            .any(|pair| pair[0] == "--json-schema" && pair[1] == schema.to_string()));
+            .any(|pair| pair[0] == "--json-schema" && pair[1] == schema_text));
         assert!(!args.iter().any(|arg| arg.contains("dangerously")));
         assert!(agy.stdin.is_none());
     }
