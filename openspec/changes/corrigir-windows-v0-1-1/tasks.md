@@ -103,3 +103,11 @@ A revisão de código da v0.1.2 bloqueou com cinco achados. Cada um tem um commi
 - [x] 11.5 Y5: `config.json` do `agy` ilegível ou malformado bloqueia a chamada com diagnóstico; só arquivo ausente vale como sem configuração.
 - [x] 11.7 Ícone do Windows: as primeiras extrações de ícone de um processo, em paralelo, falham todas (provado em processo filho no CI); a extração pelo Shell passa a ser serializada, e `windows_executables_have_distinct_bounded_png_icons` fica verde no job Windows.
 - [x] 11.6 `make verify` numa worktree limpa; CI Windows sem falhas novas; ensaio do `release.yml` com `dry_run=true`; push e evidências.
+
+## 12. Revisão 2 da v0.1.2 (Z1–Z2)
+
+A revisão confirmou Y1, Y3, Y5 e a trava do ícone e deixou dois P2 para a v0.1.3. Cada um tem um commit RED antes do GREEN.
+
+- [ ] 12.1 Z1: a pendência `resummary:<dia>:<gatilho>` de ontem também é processada junto do catch-up, e não fica presa depois da meia-noite.
+- [ ] 12.2 Z2: a máscara da soltura do Alt é decidida de forma síncrona dentro do gancho, sem depender de a mensagem postada já ter sido consumida.
+- [ ] 12.3 `make verify` numa worktree limpa; CI Windows sem falhas novas; push.
