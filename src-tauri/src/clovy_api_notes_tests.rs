@@ -529,3 +529,88 @@ async fn note_transcript_cleanup_without_a_key_goes_through_clovy_api() {
     assert_eq!(body["style"], NOTE_TRANSCRIPT_CLEANUP_STYLE);
     assert!(heads(&hosts.openrouter).is_empty());
 }
+
+/// OpenRouter answering 503 once, then the cleaned note transcript.
+async fn openrouter_overloaded_once() -> FakeServer {
+    let calls = Arc::new(AtomicUsize::new(0));
+    test_server::start(Arc::new(move |_: &serde_json::Value| {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            (503, serde_json::json!({ "error": "overloaded" }))
+        } else {
+            (200, test_server::chat_reply("Send it to Samir."))
+        }
+    }))
+    .await
+}
+
+#[tokio::test]
+async fn a_transient_openrouter_failure_in_note_cleanup_is_retried_once() {
+    let openrouter = openrouter_overloaded_once().await;
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        openrouter_base: openrouter.base_url.clone(),
+        ..hosts.transport()
+    };
+
+    let cleaned = dictate_cleanup_via(
+        &transport,
+        Some("sk-or-user"),
+        note_cleanup_params(),
+        DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(cleaned, "Send it to Samir.");
+    assert_eq!(heads(&openrouter).len(), 2);
+}
+
+#[tokio::test]
+async fn a_permanent_openrouter_refusal_in_note_cleanup_is_not_retried() {
+    let openrouter = answering(400, serde_json::json!({ "error": "bad request" })).await;
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        openrouter_base: openrouter.base_url.clone(),
+        ..hosts.transport()
+    };
+
+    let error = dictate_cleanup_via(
+        &transport,
+        Some("sk-or-user"),
+        note_cleanup_params(),
+        DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, REQUEST_FAILED_CODE);
+    assert_eq!(heads(&openrouter).len(), 1);
+}
+
+/// Dictation cleanup keeps one attempt: it is optional and latency-bound, and
+/// a failure pastes the raw transcript at once (ADR-0065, design D4).
+#[tokio::test]
+async fn dictation_cleanup_keeps_a_single_attempt() {
+    let openrouter = openrouter_overloaded_once().await;
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        openrouter_base: openrouter.base_url.clone(),
+        ..hosts.transport()
+    };
+    let params = DictateCleanupRequestParams {
+        style: "Writing style: standard.".to_string(),
+        ..note_cleanup_params()
+    };
+
+    let error = dictate_cleanup_via(
+        &transport,
+        Some("sk-or-user"),
+        params,
+        DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, REQUEST_FAILED_CODE);
+    assert_eq!(heads(&openrouter).len(), 1);
+}
