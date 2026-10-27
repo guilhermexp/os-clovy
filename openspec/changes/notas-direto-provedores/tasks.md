@@ -24,4 +24,6 @@
 ## 5. Documentação e verificação
 
 - [x] 5.1 `docs/llm-providers.md`, `docs/configuration.md`, `AGENTS.md` e README/PRIVACY se citarem o fluxo.
-- [ ] 5.2 `make verify` numa worktree limpa, CI `desktop.yml` na branch, evidência em `.tmp/verify/notas-direto-provedores/report.md`.
+- [x] 5.2 `make verify` numa worktree limpa, CI `desktop.yml` na branch, evidência em `.tmp/verify/notas-direto-provedores/report.md`.
+
+> 5.2: `make verify` EXIT=0; CI run 40567062149 só com os vermelhos conhecidos (vitest `mcp-server-dev-runner`, clippy `dictation.rs:211`/`notion.rs`, OCR `activity::windows`); por eles o instalador Windows não foi construído e os testes Rust do macOS não rodaram no CI. Sem chamada real aos provedores.
