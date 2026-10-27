@@ -80,3 +80,10 @@ is 0.6 or more, because Whisper invents text over near-silence and the
 helper's speech classifier no longer runs before upload. Takes under 0.5 s
 are not uploaded at all. The Clovy API route keeps `json` (v1 contract). See
 the `ditado-rapido` design, D5.
+
+## Addendum (2026-10-27): notes take the direct route too
+
+§5 is narrowed by [ADR-0070](0070-notes-call-the-users-own-provider-directly.md):
+note transcription, note generation (not Auto) and note transcript cleanup
+also go straight to the user's own Groq or OpenRouter key. Chat, media and
+web keep their Clovy API routes.

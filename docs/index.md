@@ -80,6 +80,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0067](adr/0067-computer-use-depends-only-on-local-gates.md) - Computer use is ready from the grant, the pinned driver and macOS permissions alone: no Pro/Max plan, Clovy vision model or remote rollout; the tool is offered only to CLI turns through `clovy-mcp` (amends ADR-0028)
 - [adr/0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md) - supersedes ADR-0055: the app becomes `dev.guilhermexp.clovy` (`Clovy.app`, `clovy`), the extension gets the owner's key pair, and the first launch on macOS copies the June-era profile and credentials once (Windows starts clean); the compatibility bridges are removed
 - [adr/0069](adr/0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md) - amends ADR-0001: releases on `guilhermexp/os-clovy` with one stable channel and the owner's minisign key; only release builds check, every install waits for the owner and for recordings to end; Mac signing optional
+- [adr/0070](adr/0070-notes-call-the-users-own-provider-directly.md) - amends ADR-0065 §5: with the notes engine on Clovy and the user's own key, note transcription goes straight to Groq and note generation (not Auto) and note transcript cleanup to OpenRouter, with Clovy API's own contract; without a key and without Clovy API, the note names the missing key
 
 ## Enforceable rules (spec/)
 
