@@ -13,6 +13,7 @@ const TRANSCRIPTION_CHANNELS: u16 = 1;
 /// Raw interleaved input held per normalization pass: 32 KiB of PCM16.
 const NORMALIZATION_CHUNK_SAMPLE_BUDGET: usize = 16 * 1024;
 pub const MAX_TRANSCRIPTION_CHUNK_MS: i64 = 30 * 1000;
+pub const FINAL_TRANSCRIPTION_SPAN_MS: i64 = MAX_TRANSCRIPTION_CHUNK_MS;
 /// Pre-roll backfilled ahead of a detected turn onset when extracting its WAV,
 /// so the first phonemes that fall below the VAD activity threshold (or before
 /// the sustained-activity run) are still transcribed. See JUN-110.
@@ -2597,6 +2598,82 @@ mod tests {
             sample_format: SampleFormat::Int,
         };
         write_wav_samples(path, spec, samples);
+    }
+
+    /// Groq's upload cap on the free tier.
+    const GROQ_MAX_UPLOAD_BYTES: i64 = 26_214_400;
+
+    #[test]
+    fn a_final_transcription_span_stays_well_under_groqs_upload_cap() {
+        assert_eq!(FINAL_TRANSCRIPTION_SPAN_MS, 120_000);
+        // A normalized span is PCM16 mono at 16 kHz plus a 44-byte header.
+        let span_bytes = FINAL_TRANSCRIPTION_SPAN_MS * i64::from(TRANSCRIPTION_SAMPLE_RATE) / 1000
+            * 2
+            + 44;
+        assert_eq!(span_bytes, 3_840_044);
+        assert!(span_bytes < GROQ_MAX_UPLOAD_BYTES / 4);
+    }
+
+    #[test]
+    fn a_long_source_splits_into_final_spans_under_the_upload_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.wav");
+        let spec = WavSpec {
+            channels: TRANSCRIPTION_CHANNELS,
+            sample_rate: TRANSCRIPTION_SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        // Five minutes of normalized audio.
+        write_wav_samples(&input, spec, &vec![1_000_i16; 16_000 * 300]);
+
+        let chunks =
+            split_wav_for_transcription(&input, &dir.path().join("chunks"), "source").unwrap();
+
+        let durations = chunks
+            .iter()
+            .map(|chunk| {
+                let reader = WavReader::open(chunk).unwrap();
+                i64::from(reader.duration()) * 1000 / i64::from(TRANSCRIPTION_SAMPLE_RATE)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(durations, vec![120_000, 120_000, 60_000]);
+        for chunk in &chunks {
+            let bytes = std::fs::metadata(chunk).unwrap().len() as i64;
+            assert!(bytes < GROQ_MAX_UPLOAD_BYTES, "{bytes}");
+        }
+    }
+
+    #[test]
+    fn same_source_turns_group_up_to_the_final_span_without_crossing_the_other_source() {
+        let turn = |source: &str, start_ms: i64, end_ms: i64| AudioTurn {
+            artifact_id: format!("artifact-{source}"),
+            source: source.to_string(),
+            source_path: PathBuf::from(source),
+            extraction_start_ms: start_ms,
+            start_ms,
+            end_ms,
+            turn_index: 0,
+        };
+        let mut turns = (0..12)
+            .map(|index| turn("microphone", index * 10_000, index * 10_000 + 9_000))
+            .collect::<Vec<_>>();
+        turns.push(turn("system", 125_000, 130_000));
+        turns.push(turn("microphone", 131_000, 140_000));
+
+        let grouped = coalesce_turns_for_transcription(turns);
+
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|turn| (turn.source.as_str(), turn.start_ms, turn.end_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                ("microphone", 0, 119_000),
+                ("system", 125_000, 130_000),
+                ("microphone", 131_000, 140_000),
+            ]
+        );
     }
 
     fn write_wav_samples(path: &Path, spec: WavSpec, samples: &[i16]) {

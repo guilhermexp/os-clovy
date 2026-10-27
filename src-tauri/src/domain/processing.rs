@@ -1592,7 +1592,7 @@ async fn process_saved_source_audio_pipeline(
         replaced_sources: HashSet::new(),
     };
     let transcriber = retain_cleanup_during_note_transcription(
-        instrument_turn_transcriber(default_turn_transcriber(), timeline.clone()),
+        instrument_turn_transcriber(note_turn_transcriber(), timeline.clone()),
         Arc::clone(&turn_wav_dir_cleanup),
     );
     let pipeline_result = prepare_and_transcribe_turn_jobs_bounded(
@@ -2344,6 +2344,51 @@ fn retain_cleanup_during_note_transcription(
 
 fn default_turn_transcriber() -> TurnTranscriber {
     Arc::new(|request| Box::pin(transcribe_saved_audio(request)))
+}
+
+pub(crate) const TRANSCRIPTION_RATE_LIMITED_CODE: &str = "transcription_rate_limited";
+
+pub(crate) struct RequestPacer;
+
+impl RequestPacer {
+    pub(crate) fn new(_max_requests: usize, _window: Duration) -> Self {
+        Self
+    }
+
+    pub(crate) async fn acquire(&self) {}
+
+    pub(crate) fn pause_for(&self, _wait: Duration) {}
+}
+
+fn paced_turn_transcriber(inner: TurnTranscriber, _pacer: Arc<RequestPacer>) -> TurnTranscriber {
+    inner
+}
+
+/// The final-turn transcriber of a note run: Groq (or Clovy API) behind the
+/// process-wide pacer.
+fn note_turn_transcriber() -> TurnTranscriber {
+    #[cfg(test)]
+    if let Ok((transcriber, pacer)) =
+        TEST_NOTE_TRANSCRIPTION.try_with(|(transcriber, pacer)| (transcriber.clone(), pacer.clone()))
+    {
+        return paced_turn_transcriber(transcriber, pacer);
+    }
+    default_turn_transcriber()
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// The transcriber and pacer a pipeline test runs instead of Groq.
+    static TEST_NOTE_TRANSCRIPTION: (TurnTranscriber, Arc<RequestPacer>);
+}
+
+fn coalesce_turns_reusing_layout(
+    turns: Vec<AudioTurn>,
+    microphone_echo_spans: &[(i64, i64)],
+    _session_id: &str,
+    _done_span_ids: &HashSet<String>,
+) -> Vec<AudioTurn> {
+    coalesce_turns_for_transcription_avoiding_echo(turns, microphone_echo_spans)
 }
 
 fn instrument_turn_transcriber(
@@ -9086,5 +9131,399 @@ mod tests {
         let first = requests[0].to_string();
         assert!(first.contains("Term0") && first.contains("Term79"));
         assert!(first.contains("ship it with clovee and jane do"));
+    }
+
+    fn groq_rate_limit(retry_after_ms: Option<u64>) -> AppError {
+        let mut error = AppError::new(
+            "groq_usage_limit_exceeded",
+            "Groq reports that its usage limit was reached. Try again later, or check the plan behind your saved Groq key.",
+        );
+        error.details = retry_after_ms.map(|ms| serde_json::json!({ "retryAfterMs": ms }));
+        error
+    }
+
+    /// Answers each request in order from `answers`, then succeeds with the
+    /// audio path, recording every audio path it was asked for.
+    fn scripted_transcriber(
+        answers: Vec<Result<&'static str, AppError>>,
+    ) -> (TurnTranscriber, Arc<Mutex<Vec<String>>>) {
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let answers = Arc::new(Mutex::new(VecDeque::from(answers)));
+        let transcriber = {
+            let requested = Arc::clone(&requested);
+            Arc::new(move |request: TranscriptionRequest| {
+                let path = request.audio_path.to_string_lossy().to_string();
+                requested.lock().unwrap().push(path.clone());
+                let answer = answers.lock().unwrap().pop_front();
+                Box::pin(async move {
+                    match answer {
+                        Some(Ok(text)) => Ok(test_provider_result(text)),
+                        Some(Err(error)) => Err(error),
+                        None => Ok(test_provider_result(&path)),
+                    }
+                }) as TranscriptionFuture
+            }) as TurnTranscriber
+        };
+        (transcriber, requested)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_request_pacer_never_starts_more_than_its_budget_per_window() {
+        let pacer = RequestPacer::new(18, Duration::from_secs(60));
+        let started = tokio::time::Instant::now();
+        let mut starts = Vec::new();
+        for _ in 0..40 {
+            pacer.acquire().await;
+            starts.push(tokio::time::Instant::now() - started);
+        }
+        // The first window's budget goes out at once: short notes stay fast.
+        assert!(starts[17] < Duration::from_secs(1), "{starts:?}");
+        for window in starts.windows(19) {
+            assert!(
+                window[18] - window[0] >= Duration::from_secs(60),
+                "19 starts inside one minute: {window:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_pacer_pause_holds_every_caller() {
+        let pacer = Arc::new(RequestPacer::new(18, Duration::from_secs(60)));
+        pacer.pause_for(Duration::from_secs(30));
+        let started = tokio::time::Instant::now();
+        let other = {
+            let pacer = Arc::clone(&pacer);
+            tokio::spawn(async move {
+                pacer.acquire().await;
+                tokio::time::Instant::now()
+            })
+        };
+        pacer.acquire().await;
+        assert!(started.elapsed() >= Duration::from_secs(30));
+        assert!(other.await.unwrap() - started >= Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_short_groq_rate_limit_waits_and_retries_the_same_request() {
+        let (inner, requested) =
+            scripted_transcriber(vec![Err(groq_rate_limit(Some(20_000))), Ok("after the wait")]);
+        let pacer = Arc::new(RequestPacer::new(18, Duration::from_secs(60)));
+        let transcriber = paced_turn_transcriber(inner, Arc::clone(&pacer));
+        let started = tokio::time::Instant::now();
+
+        let result = transcriber(TranscriptionRequest {
+            provider: "groq".to_string(),
+            audio_path: PathBuf::from("m0"),
+            title: "Meeting".to_string(),
+            context: None,
+            language: None,
+            operation_id: Some("turn-0".to_string()),
+            preview: false,
+        })
+        .await
+        .expect("a short limit is waited out");
+
+        assert_eq!(result.text, "after the wait");
+        assert_eq!(*requested.lock().unwrap(), vec!["m0", "m0"]);
+        assert!(started.elapsed() >= Duration::from_secs(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_without_a_wait_header_waits_a_minute() {
+        let (inner, requested) =
+            scripted_transcriber(vec![Err(groq_rate_limit(None)), Ok("after a minute")]);
+        let transcriber = paced_turn_transcriber(
+            inner,
+            Arc::new(RequestPacer::new(18, Duration::from_secs(60))),
+        );
+        let started = tokio::time::Instant::now();
+
+        let result = transcriber(test_transcription_request("m0")).await.unwrap();
+
+        assert_eq!(result.text, "after a minute");
+        assert_eq!(requested.lock().unwrap().len(), 2);
+        assert!(started.elapsed() >= Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_groq_rate_limit_pauses_with_the_resume_time() {
+        let (inner, requested) =
+            scripted_transcriber(vec![Err(groq_rate_limit(Some(3_600_000)))]);
+        let transcriber = paced_turn_transcriber(
+            inner,
+            Arc::new(RequestPacer::new(18, Duration::from_secs(60))),
+        );
+        let before_ms = chrono::Utc::now().timestamp_millis();
+
+        let error = transcriber(test_transcription_request("m0"))
+            .await
+            .expect_err("an hour-long limit pauses the note");
+
+        assert_eq!(error.code, TRANSCRIPTION_RATE_LIMITED_CODE);
+        assert_eq!(requested.lock().unwrap().len(), 1);
+        let resume_at_ms = error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("resumeAtMs"))
+            .and_then(serde_json::Value::as_i64)
+            .expect("the pause names when it resumes");
+        assert!(resume_at_ms >= before_ms + 3_600_000);
+        let resume_at = chrono::DateTime::from_timestamp_millis(resume_at_ms)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(
+            error.message,
+            format!(
+                "Groq usage limit reached. Clovy continues transcribing at {}. Parts already transcribed are kept.",
+                resume_at.format("%H:%M")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_paused_turn_stops_the_stream_and_skips_the_source_fallback() {
+        let mut pause = AppError::new(TRANSCRIPTION_RATE_LIMITED_CODE, "paused");
+        pause.details = Some(serde_json::json!({ "resumeAtMs": 1 }));
+        let (transcriber, requested) = scripted_transcriber(vec![Ok("m0 text"), Err(pause)]);
+        let sunk = Arc::new(Mutex::new(Vec::new()));
+        let result_sink = {
+            let sunk = Arc::clone(&sunk);
+            Arc::new(move |event: CompletedTurnTranscription| {
+                let failed = matches!(event.result, TurnTranscriptionResult::Failure(_));
+                sunk.lock().unwrap().push(failed);
+                Box::pin(async { Ok(()) }) as TurnResultFuture
+            }) as TurnResultSink
+        };
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_preparer = {
+            let fallback_calls = Arc::clone(&fallback_calls);
+            Arc::new(move |plan: SourceFallbackPlan| {
+                fallback_calls.fetch_add(1, Ordering::SeqCst);
+                prepare_source_fallback(plan)
+            }) as SourceFallbackPreparer
+        };
+        let fallback = SourceFallbackPlan {
+            artifact_id: "artifact-m0".to_string(),
+            source: "microphone".to_string(),
+            source_path: PathBuf::from("m-full"),
+            normalized_path: PathBuf::from("m-full-normalized"),
+            temp_dir: std::env::temp_dir(),
+            recorded_silence: false,
+            all_turns_cover_full_source: false,
+            echo_trimmed: false,
+            end_ms: 10_000,
+            turn_index: 9,
+            detected_ms: 10_000,
+            durable_job: None,
+        };
+
+        let error = transcribe_turn_jobs_bounded(
+            vec![
+                test_job("m0", "microphone", 0),
+                test_job("s1", "system", 1),
+                test_job("m2", "microphone", 2),
+                test_job("s3", "system", 3),
+            ],
+            vec![fallback],
+            &[],
+            TEST_TRANSCRIPTION_PROVIDER.to_string(),
+            "Meeting".to_string(),
+            None,
+            fallback_preparer,
+            transcriber,
+            Some(result_sink),
+            1,
+        )
+        .await
+        .expect_err("a pause ends the run");
+
+        assert_eq!(error.code, TRANSCRIPTION_RATE_LIMITED_CODE);
+        // Nothing after the paused turn is sent, and the whole source is not
+        // re-sent into the same limit.
+        assert_eq!(*requested.lock().unwrap(), vec!["m0", "s1"]);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        // The paused turn is recorded as failed, so the next run resets it to
+        // pending; the finished turn is kept.
+        assert_eq!(*sunk.lock().unwrap(), vec![false, true]);
+    }
+
+    fn test_transcription_request(path: &str) -> TranscriptionRequest {
+        TranscriptionRequest {
+            provider: "groq".to_string(),
+            audio_path: PathBuf::from(path),
+            title: "Meeting".to_string(),
+            context: None,
+            language: None,
+            operation_id: Some(format!("{path}-op")),
+            preview: false,
+        }
+    }
+
+    /// Three microphone turns, 8 s of silence apart.
+    fn write_three_turn_microphone(path: &std::path::Path) {
+        let tone = (32_000, 20_000);
+        let gap = (128_000, 0);
+        write_segmented_wav(path, 16_000, &[tone, gap, tone, gap, tone]);
+    }
+
+    async fn rate_limited_run(
+        repos: &Repositories,
+        note_id: &str,
+        session_id: &str,
+        sources: Vec<SourceAudioForProcessing>,
+        transcriber: TurnTranscriber,
+    ) -> Result<NoteDto, AppError> {
+        TEST_NOTE_TRANSCRIPTION
+            .scope(
+                (
+                    transcriber,
+                    Arc::new(RequestPacer::new(18, Duration::from_secs(60))),
+                ),
+                process_saved_source_audio(
+                    repos,
+                    note_id,
+                    session_id,
+                    RecordingSourceMode::MicrophonePlusSystem,
+                    sources,
+                    "Rate limited".to_string(),
+                    None,
+                    None,
+                    ProcessingTiming::untracked(),
+                ),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_paused_note_resumes_with_only_the_turns_still_missing() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _server = install_fake_correction_engine(Arc::new(echo_correction)).await;
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let note_id: String =
+            sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
+                .bind(&session_id)
+                .fetch_one(&repos.pool)
+                .await
+                .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let microphone = directory.path().join("microphone.wav");
+        write_three_turn_microphone(&microphone);
+        let artifact = repos
+            .create_audio_artifact(
+                &note_id,
+                &session_id,
+                &microphone.to_string_lossy(),
+                10_000,
+                0,
+                "checksum",
+            )
+            .await
+            .unwrap();
+        let sources = vec![(
+            artifact.id.clone(),
+            "microphone".to_string(),
+            microphone.clone(),
+            false,
+        )];
+        let paused = |text: &str| {
+            let mut error = AppError::new(TRANSCRIPTION_RATE_LIMITED_CODE, text);
+            error.details = Some(serde_json::json!({ "resumeAtMs": 1 }));
+            error
+        };
+
+        // First run: turn 0 is transcribed, turn 1 hits a long limit.
+        let (first, first_requests) =
+            scripted_transcriber(vec![Ok("first turn"), Err(paused("paused at 1"))]);
+        let error = rate_limited_run(&repos, &note_id, &session_id, sources.clone(), first)
+            .await
+            .expect_err("the first run pauses");
+        assert_eq!(error.code, TRANSCRIPTION_RATE_LIMITED_CODE);
+        assert_eq!(first_requests.lock().unwrap().len(), 2);
+        let note = repos.get_note(&note_id).await.unwrap();
+        assert_eq!(note.processing_status, ProcessingStatus::Failed);
+        assert_eq!(note.last_error.as_deref(), Some("paused at 1"));
+
+        // Second run: turn 0 is reused; only turns 1 and 2 go to Groq.
+        let (second, second_requests) =
+            scripted_transcriber(vec![Ok("second turn"), Err(paused("paused at 2"))]);
+        let error = rate_limited_run(&repos, &note_id, &session_id, sources, second)
+            .await
+            .expect_err("the second run pauses again");
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
+        assert_eq!(error.code, TRANSCRIPTION_RATE_LIMITED_CODE);
+        let second_requests = second_requests.lock().unwrap().clone();
+        assert_eq!(second_requests.len(), 2, "{second_requests:?}");
+        assert!(
+            first_requests.lock().unwrap()[0] != second_requests[0],
+            "the finished turn was sent again"
+        );
+        let texts = repos
+            .certified_source_turn_transcripts_for_session(&session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|transcript| transcript.text)
+            .collect::<Vec<_>>();
+        assert_eq!(texts, vec!["first turn", "second turn"]);
+    }
+
+    fn microphone_turn(start_ms: i64, end_ms: i64) -> AudioTurn {
+        test_audio_turn(
+            "artifact-m",
+            "microphone",
+            PathBuf::from("m"),
+            0,
+            start_ms,
+            end_ms,
+        )
+    }
+
+    #[test]
+    fn a_new_session_groups_turns_up_to_the_final_span() {
+        let turns = vec![
+            microphone_turn(0, 10_000),
+            microphone_turn(11_000, 20_000),
+            microphone_turn(21_000, 29_000),
+            microphone_turn(30_000, 40_000),
+        ];
+
+        let grouped = coalesce_turns_reusing_layout(turns, &[], "session", &HashSet::new());
+
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|turn| (turn.start_ms, turn.end_ms))
+                .collect::<Vec<_>>(),
+            vec![(0, 40_000)]
+        );
+    }
+
+    #[test]
+    fn a_session_with_turns_from_the_30_second_layout_keeps_that_layout() {
+        let turns = vec![
+            microphone_turn(0, 10_000),
+            microphone_turn(11_000, 20_000),
+            microphone_turn(21_000, 29_000),
+            microphone_turn(30_000, 40_000),
+        ];
+        let done = HashSet::from([note_transcription_span_id(
+            "session",
+            "microphone",
+            NoteTranscriptionJobKind::Turn,
+            0,
+            29_000,
+        )]);
+
+        let grouped = coalesce_turns_reusing_layout(turns, &[], "session", &done);
+
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|turn| (turn.start_ms, turn.end_ms))
+                .collect::<Vec<_>>(),
+            vec![(0, 29_000), (30_000, 40_000)]
+        );
     }
 }

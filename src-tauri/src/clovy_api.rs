@@ -553,6 +553,10 @@ where
     }
 }
 
+fn parse_groq_reset_ms(_value: &str) -> Option<u64> {
+    None
+}
+
 fn direct_status_is_transient(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::REQUEST_TIMEOUT
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS
