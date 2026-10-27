@@ -6,9 +6,9 @@ use super::*;
 use crate::llm::endpoint::test_server::{self, FakeServer};
 use std::sync::Arc;
 
-const CLOVY_TOKEN: &str = "clovy-access-token";
+pub(super) const CLOVY_TOKEN: &str = "clovy-access-token";
 
-struct FixedTokens;
+pub(super) struct FixedTokens;
 
 impl DictationTokens for FixedTokens {
     async fn access(&self) -> Result<String, AppError> {
@@ -20,15 +20,15 @@ impl DictationTokens for FixedTokens {
     }
 }
 
-struct Hosts {
-    groq: FakeServer,
-    openrouter: FakeServer,
-    clovy: FakeServer,
-    client: reqwest::Client,
+pub(super) struct Hosts {
+    pub(super) groq: FakeServer,
+    pub(super) openrouter: FakeServer,
+    pub(super) clovy: FakeServer,
+    pub(super) client: reqwest::Client,
 }
 
 impl Hosts {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
         let groq = test_server::start(Arc::new(|_: &serde_json::Value| {
             (
                 200,
@@ -61,7 +61,7 @@ impl Hosts {
         }
     }
 
-    fn transport(&self) -> DictationTransport<'_, FixedTokens> {
+    pub(super) fn transport(&self) -> DictationTransport<'_, FixedTokens> {
         DictationTransport {
             clovy_client: &self.client,
             direct_client: &self.client,
@@ -74,11 +74,11 @@ impl Hosts {
     }
 }
 
-fn heads(server: &FakeServer) -> Vec<String> {
+pub(super) fn heads(server: &FakeServer) -> Vec<String> {
     server.heads.lock().unwrap().clone()
 }
 
-fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+pub(super) fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     head.lines().skip(1).find_map(|line| {
         let (key, value) = line.split_once(':')?;
         key.trim()
@@ -88,7 +88,7 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// The provider-key headers Clovy API reads; a direct request carries none.
-fn assert_no_forwarded_keys(head: &str) {
+pub(super) fn assert_no_forwarded_keys(head: &str) {
     for name in [
         GROQ_API_KEY_HEADER,
         OPENROUTER_API_KEY_HEADER,

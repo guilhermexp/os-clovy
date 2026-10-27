@@ -387,6 +387,30 @@ pub async fn transcribe_saved_audio(
     })
 }
 
+/// The note's failure when neither the user's Groq key nor Clovy API is
+/// there. Kept byte-identical to `notes.failure.groqKeyMissing`.
+pub(crate) const GROQ_API_KEY_MISSING_MESSAGE: &str =
+    "Add your Groq API key in Settings > Models > Provider API keys to transcribe recordings.";
+
+pub(crate) async fn transcribe_saved_audio_via<K: DictationTokens>(
+    _transport: &DictationTransport<'_, K>,
+    _groq_key: Option<&str>,
+    _model: String,
+    _request: TranscriptionRequest,
+) -> Result<TranscriptionProviderResult, AppError> {
+    Err(AppError::new("not_implemented", "not implemented"))
+}
+
+pub(crate) async fn generate_note_via<K: DictationTokens>(
+    _transport: &DictationTransport<'_, K>,
+    _openrouter_key: Option<&str>,
+    _model: String,
+    _cost_quality: Option<f64>,
+    _request: GenerationRequest,
+) -> Result<GenerationProviderResult, AppError> {
+    Err(AppError::new("not_implemented", "not implemented"))
+}
+
 pub async fn generate_note_from_transcript(
     request: GenerationRequest,
 ) -> Result<GenerationProviderResult, AppError> {
@@ -5173,3 +5197,7 @@ mod llm_note_tests;
 #[cfg(test)]
 #[path = "clovy_api_dictation_tests.rs"]
 mod dictation_route_tests;
+
+#[cfg(test)]
+#[path = "clovy_api_notes_tests.rs"]
+mod note_route_tests;
