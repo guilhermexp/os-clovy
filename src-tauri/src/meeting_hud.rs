@@ -230,9 +230,28 @@ fn app_inactive() -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows has no app-level activation: Clovy counts as active only while one
+/// of its own windows is the foreground window. The HUD is non-focusable
+/// (`WS_EX_NOACTIVATE`), so clicking it never makes Clovy active and hides it.
+#[cfg(target_os = "windows")]
+fn app_inactive() -> bool {
+    clovy_inactive_for_foreground(
+        crate::activity::windows::window::foreground_window_pid(),
+        std::process::id(),
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn app_inactive() -> bool {
     false
+}
+
+/// Clovy is inactive on Windows unless the foreground window belongs to this
+/// process (the main window or the HUD). No foreground window (lock screen,
+/// focus in transition) also counts as inactive, so the countdown shows.
+#[cfg(any(target_os = "windows", test))]
+fn clovy_inactive_for_foreground(foreground_pid: Option<u32>, own_pid: u32) -> bool {
+    foreground_pid != Some(own_pid)
 }
 
 /// Per-thread drag-settle tracker for the orientation flip.
@@ -957,7 +976,8 @@ fn make_nonactivating(hud: &WebviewWindow) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_TICK, END_PROMPT_WINDOW_SIZE, PILL_SIZE, VERTICAL_PILL_LENGTH, WINDOW_SIZE,
+        clovy_inactive_for_foreground, ACTIVE_TICK, END_PROMPT_WINDOW_SIZE, PILL_SIZE,
+        VERTICAL_PILL_LENGTH, WINDOW_SIZE,
     };
     use crate::domain::types::{
         AudioLevelDto, RecordingSource, RecordingSourceMode, RecordingState, RecordingStatusDto,
@@ -972,6 +992,24 @@ mod tests {
             Duration::from_millis(50),
             "the waveform peak window and ballistics are tuned for 20 Hz level targets"
         );
+    }
+
+    /// Windows has no app-level activation, so the HUD (and the end-of-meeting
+    /// countdown it carries) must take over whenever another process owns the
+    /// foreground window, even with Clovy's main window visible behind it.
+    #[test]
+    fn windows_clovy_is_inactive_when_another_process_owns_the_foreground() {
+        assert!(clovy_inactive_for_foreground(Some(4242), 1000));
+    }
+
+    #[test]
+    fn windows_clovy_is_inactive_without_a_foreground_window() {
+        assert!(clovy_inactive_for_foreground(None, 1000));
+    }
+
+    #[test]
+    fn windows_clovy_is_active_when_it_owns_the_foreground() {
+        assert!(!clovy_inactive_for_foreground(Some(1000), 1000));
     }
 
     /// First `prop: <n>px` declaration inside the rule whose selector line

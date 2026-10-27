@@ -62,6 +62,31 @@ flushes the WAV before the recovery row advances. A dead writer releases the
 flush wait so recovery state and diagnostics continue advancing instead of
 waiting for the full timeout.
 
+## Meeting detection
+
+A one-second native poll asks which processes own the microphone, drops
+Clovy's own process and the dictation helper (`owned_pids`), and keeps the
+ones on the meeting-app allowlist. When one appears and Clovy is not
+recording, the HUD receives `meeting-detection-event` with the app labels
+("Zoom", "Chrome") and asks whether to record. The signal is microphone
+ownership only: no window titles or URLs, so Google Meet reads as "Chrome
+holds the microphone".
+
+- **macOS:** CoreAudio process objects with `IsRunningInput` and an input
+  device; apps are matched by bundle-id prefix.
+- **Windows:** WASAPI capture sessions in `AudioSessionStateActive` on every
+  active capture endpoint, each session pid lifted through a Toolhelp process
+  snapshot to the app that owns it (out of `msedgewebview2.exe` into its host,
+  and from a Chromium or Firefox child to the browser process, so a WebView2
+  owned by Clovy is still Clovy). Apps are matched by lowercase executable
+  name or, for packaged apps, by package name. The microphone consent store
+  (`HKCU\...\CapabilityAccessManager\ConsentStore\microphone` and its
+  `NonPackaged` subkey, in use while `LastUsedTimeStop` is 0) only adds an
+  allowlisted app that no session showed and that has a running process; it
+  never adds unlisted apps, so it cannot make meeting-end evidence ambiguous.
+  The parser (`meeting_detection/windows_probe.rs`) is pure and tested on any
+  host; only the reader is Windows-only.
+
 ## Automatic meeting completion
 
 Only a recording started from the native meeting prompt is eligible for
@@ -70,7 +95,8 @@ families that own the microphone and persists the recording origin, app-family
 set, and eligibility on `recording_sessions`. Manual, agent-started, and
 recovered recordings remain ineligible.
 
-The CoreAudio meeting detector keeps polling during capture. Meeting completion
+The meeting detector (CoreAudio on macOS, WASAPI on Windows) keeps polling
+during capture. Meeting completion
 does not inspect audio levels or speech activity: silence during a meeting is
 not end evidence. Instead, every originating app family must be absent from 15
 consecutive successful one-second microphone-ownership probes. That transition
@@ -112,6 +138,8 @@ for navigation and compatibility, but is no longer polled during processing.
 - `src-tauri/src/meeting_detection.rs` — external microphone ownership,
   meeting-start app-family snapshots, end debounce, grace period, and the
   retained finish mailbox.
+- `src-tauri/src/meeting_detection/windows_probe.rs` — the Windows meeting-app
+  list and the WASAPI, process-snapshot and consent-store probe.
 
 Tauri commands: `start_recording`, `pause_recording`, `resume_recording`,
 `get_recording_status`, `finish_recording`, `check_recording_source_readiness`,

@@ -9,6 +9,10 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod windows_probe;
+
+use windows_probe::find_windows_mic_app;
+
 const CLEAR_AFTER_INACTIVE_POLLS: u8 = 2;
 const HEARTBEAT_EVERY_ACTIVE_POLLS: u8 = 5;
 const MEETING_END_ABSENT_POLLS: u8 = 15;
@@ -834,10 +838,10 @@ const ALLOWED_MIC_APPS: &[AllowedMicApp] = &[
 pub fn setup(app: &mut tauri::App) {
     app.manage(MeetingStartRequestState::default());
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     spawn_monitor(app.handle().clone());
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = app;
 }
 
@@ -947,7 +951,7 @@ pub(crate) fn active_allowed_external_processes(
 }
 
 fn is_allowed_microphone_app(bundle_id: &str) -> bool {
-    allowed_mic_app(bundle_id).is_some()
+    allowed_mic_app(bundle_id).is_some() || find_windows_mic_app(bundle_id).is_some()
 }
 
 fn bundle_id_matches_prefix(bundle_id: &str, prefix: &str) -> bool {
@@ -963,6 +967,18 @@ fn app_label_from_bundle_id(bundle_id: &str) -> String {
     if let Some(app) = allowed_mic_app(bundle_id) {
         return app.label.to_string();
     }
+    if let Some(app) = find_windows_mic_app(bundle_id) {
+        return app.label.to_string();
+    }
+    // ASCII lowercasing keeps byte offsets, so the stem length slices the
+    // original spelling ("OBS64.exe" -> "OBS64").
+    if let Some(stem) = bundle_id
+        .to_ascii_lowercase()
+        .strip_suffix(".exe")
+        .filter(|stem| !stem.is_empty())
+    {
+        return bundle_id[..stem.len()].to_string();
+    }
     bundle_id
         .rsplit('.')
         .find(|part| !part.trim().is_empty())
@@ -977,7 +993,9 @@ fn allowed_mic_app(bundle_id: &str) -> Option<&'static AllowedMicApp> {
 }
 
 fn bundle_family_from_bundle_id(bundle_id: &str) -> Option<String> {
-    allowed_mic_app(bundle_id).map(|app| app.bundle_prefix.to_ascii_lowercase())
+    allowed_mic_app(bundle_id)
+        .map(|app| app.bundle_prefix.to_ascii_lowercase())
+        .or_else(|| find_windows_mic_app(bundle_id).map(|app| app.family.to_string()))
 }
 
 fn meeting_end_bundle_families(
@@ -1002,7 +1020,7 @@ fn meeting_end_bundle_families(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn spawn_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let mut state = MeetingDetectionState::default();
@@ -1069,7 +1087,7 @@ fn spawn_monitor(app: AppHandle) {
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn observe_meeting_end(app: &AppHandle, active_bundle_families: Option<&BTreeSet<String>>) {
     let Some(state) = app.try_state::<MeetingStartRequestState>() else {
         return;
@@ -1175,7 +1193,10 @@ fn emit_meeting_end_finish_request(app: &AppHandle, request: &PendingMeetingEndF
 #[cfg(target_os = "macos")]
 pub(crate) use macos::active_input_processes;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub(crate) use windows_probe::active_input_processes;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn active_input_processes() -> Result<Vec<MicrophoneInputProcess>, ProbeError> {
     Ok(Vec::new())
 }
@@ -1194,11 +1215,19 @@ impl ProbeError {
 
 impl std::fmt::Display for ProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{} failed with OSStatus {}",
-            self.operation, self.status
-        )
+        if cfg!(target_os = "windows") {
+            write!(
+                formatter,
+                "{} failed with HRESULT {:#010x}",
+                self.operation, self.status
+            )
+        } else {
+            write!(
+                formatter,
+                "{} failed with OSStatus {}",
+                self.operation, self.status
+            )
+        }
     }
 }
 
@@ -2203,6 +2232,172 @@ mod tests {
             input_process(64, "com.gather.GatherV20"),
         ])
         .is_empty());
+    }
+
+    #[test]
+    fn windows_meeting_apps_have_readable_labels() {
+        let cases = [
+            ("Zoom.exe", "Zoom"),
+            ("teams.exe", "Teams"),
+            ("ms-teams.exe", "Teams"),
+            ("msteams.exe", "Teams"),
+            ("MSTeams_8wekyb3d8bbwe", "Teams"),
+            ("slack.exe", "Slack"),
+            ("Discord.exe", "Discord"),
+            ("whatsapp.exe", "WhatsApp"),
+            ("WhatsApp.Root.exe", "WhatsApp"),
+            ("5319275A.WhatsAppDesktop_cv1g1gvanyjgm", "WhatsApp"),
+            ("Telegram.exe", "Telegram"),
+            ("Signal.exe", "Signal"),
+            ("webex.exe", "Webex"),
+            ("CiscoCollabHost.exe", "Webex"),
+            ("chrome.exe", "Chrome"),
+            ("msedge.exe", "Edge"),
+            ("firefox.exe", "Firefox"),
+            ("brave.exe", "Brave"),
+            ("opera.exe", "Opera"),
+            ("vivaldi.exe", "Vivaldi"),
+            ("Arc.exe", "Arc"),
+            ("comet.exe", "Comet"),
+        ];
+
+        for (index, (identity, label)) in cases.into_iter().enumerate() {
+            let pid = 900 + index as u32;
+            let process = input_process(pid, identity);
+            assert_eq!(process.app_label, label, "{identity}");
+            assert_eq!(allowed_pids(&[process]), vec![pid], "{identity}");
+        }
+    }
+
+    #[test]
+    fn every_activity_browser_executable_is_a_windows_meeting_app() {
+        for executable in crate::activity::filter::BROWSER_EXECUTABLES {
+            let process = input_process(1, executable);
+            assert!(is_allowed_microphone_app(executable), "{executable}");
+            assert_ne!(process.app_label, "exe", "{executable}");
+        }
+    }
+
+    #[test]
+    fn windows_teams_identities_share_one_family() {
+        let family = Some("windows:teams".to_string());
+        assert_eq!(bundle_family_from_bundle_id("Teams.exe"), family);
+        assert_eq!(bundle_family_from_bundle_id("ms-teams.exe"), family);
+        assert_eq!(
+            bundle_family_from_bundle_id("MSTeams_8wekyb3d8bbwe"),
+            family
+        );
+        assert_eq!(
+            bundle_family_from_bundle_id("chrome.exe"),
+            Some("windows:chrome".to_string())
+        );
+    }
+
+    #[test]
+    fn unlisted_windows_identities_keep_a_readable_label_and_stay_out() {
+        assert_eq!(input_process(1, "obs64.exe").app_label, "obs64");
+        assert!(allowed_pids(&[
+            input_process(2, "obs64.exe"),
+            input_process(3, "notchrome.exe"),
+            input_process(4, "chrome.exe.bak"),
+            input_process(5, "MSTeamsX_8wekyb3d8bbwe"),
+            input_process(6, "msedgewebview2.exe"),
+            input_process(7, "clovy.exe"),
+        ])
+        .is_empty());
+    }
+
+    #[test]
+    fn windows_probe_drives_detection_and_meeting_end() {
+        use windows_probe::{windows_input_processes, ProbeSnapshot, ProcessEntry};
+
+        let processes = vec![
+            ProcessEntry {
+                pid: 200,
+                parent_pid: 100,
+                exe_name: "chrome.exe".to_string(),
+            },
+            ProcessEntry {
+                pid: 210,
+                parent_pid: 200,
+                exe_name: "chrome.exe".to_string(),
+            },
+            ProcessEntry {
+                pid: 400,
+                parent_pid: 100,
+                exe_name: "clovy.exe".to_string(),
+            },
+        ];
+        let owned = BTreeSet::from([400]);
+        let in_call = windows_input_processes(&ProbeSnapshot {
+            active_capture_pids: vec![210, 400],
+            processes: processes.clone(),
+            consent: Vec::new(),
+        });
+        let after_call = windows_input_processes(&ProbeSnapshot {
+            active_capture_pids: vec![400],
+            processes,
+            consent: Vec::new(),
+        });
+
+        let mut detection = MeetingDetectionState::default();
+        let allowed = active_allowed_external_processes(&in_call, &owned);
+        assert_eq!(deduped_app_labels(&allowed), vec!["Chrome"]);
+        assert_eq!(
+            detection.update(true, !allowed.is_empty(), false),
+            Some(MeetingDetectionEvent::Detected)
+        );
+
+        let started_families =
+            meeting_end_bundle_families(&in_call, &owned).expect("unambiguous probe");
+        assert_eq!(started_families, families(&["windows:chrome"]));
+        let mut tracker = MeetingEndTracker::new("meeting-session".to_string(), started_families);
+        let ended_families =
+            meeting_end_bundle_families(&after_call, &owned).expect("unambiguous probe");
+        assert!(ended_families.is_empty());
+
+        let mut now_ms = 0;
+        assert_eq!(
+            tracker.observe(Some(&families(&["windows:chrome"])), now_ms),
+            None
+        );
+        let mut countdown = None;
+        for _ in 0..MEETING_END_ABSENT_POLLS {
+            now_ms += 1_000;
+            countdown = tracker.observe(Some(&ended_families), now_ms).or(countdown);
+        }
+        assert!(matches!(
+            countdown,
+            Some(MeetingEndTransition::StateChanged(MeetingEndStatus {
+                phase: MeetingEndPhase::Countdown,
+                ..
+            }))
+        ));
+        let mut finish = None;
+        for _ in 0..MEETING_END_COUNTDOWN_POLLS {
+            now_ms += 1_000;
+            finish = tracker.observe(Some(&ended_families), now_ms).or(finish);
+        }
+        assert!(matches!(
+            finish,
+            Some(MeetingEndTransition::FinishQueued(
+                MeetingEndStatus {
+                    phase: MeetingEndPhase::FinishQueued,
+                    ..
+                },
+                _
+            ))
+        ));
+
+        let allowed_after = active_allowed_external_processes(&after_call, &owned);
+        assert_eq!(
+            detection.update(true, !allowed_after.is_empty(), false),
+            None
+        );
+        assert_eq!(
+            detection.update(true, !allowed_after.is_empty(), false),
+            Some(MeetingDetectionEvent::Cleared)
+        );
     }
 
     #[test]
