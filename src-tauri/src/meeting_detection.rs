@@ -11,6 +11,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod windows_probe;
 
+use windows_probe::find_windows_mic_app;
+
 const CLEAR_AFTER_INACTIVE_POLLS: u8 = 2;
 const HEARTBEAT_EVERY_ACTIVE_POLLS: u8 = 5;
 const MEETING_END_ABSENT_POLLS: u8 = 15;
@@ -836,10 +838,10 @@ const ALLOWED_MIC_APPS: &[AllowedMicApp] = &[
 pub fn setup(app: &mut tauri::App) {
     app.manage(MeetingStartRequestState::default());
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     spawn_monitor(app.handle().clone());
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = app;
 }
 
@@ -949,7 +951,7 @@ pub(crate) fn active_allowed_external_processes(
 }
 
 fn is_allowed_microphone_app(bundle_id: &str) -> bool {
-    allowed_mic_app(bundle_id).is_some()
+    allowed_mic_app(bundle_id).is_some() || find_windows_mic_app(bundle_id).is_some()
 }
 
 fn bundle_id_matches_prefix(bundle_id: &str, prefix: &str) -> bool {
@@ -965,6 +967,18 @@ fn app_label_from_bundle_id(bundle_id: &str) -> String {
     if let Some(app) = allowed_mic_app(bundle_id) {
         return app.label.to_string();
     }
+    if let Some(app) = find_windows_mic_app(bundle_id) {
+        return app.label.to_string();
+    }
+    // ASCII lowercasing keeps byte offsets, so the stem length slices the
+    // original spelling ("OBS64.exe" -> "OBS64").
+    if let Some(stem) = bundle_id
+        .to_ascii_lowercase()
+        .strip_suffix(".exe")
+        .filter(|stem| !stem.is_empty())
+    {
+        return bundle_id[..stem.len()].to_string();
+    }
     bundle_id
         .rsplit('.')
         .find(|part| !part.trim().is_empty())
@@ -979,7 +993,9 @@ fn allowed_mic_app(bundle_id: &str) -> Option<&'static AllowedMicApp> {
 }
 
 fn bundle_family_from_bundle_id(bundle_id: &str) -> Option<String> {
-    allowed_mic_app(bundle_id).map(|app| app.bundle_prefix.to_ascii_lowercase())
+    allowed_mic_app(bundle_id)
+        .map(|app| app.bundle_prefix.to_ascii_lowercase())
+        .or_else(|| find_windows_mic_app(bundle_id).map(|app| app.family.to_string()))
 }
 
 fn meeting_end_bundle_families(
@@ -1004,7 +1020,7 @@ fn meeting_end_bundle_families(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn spawn_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let mut state = MeetingDetectionState::default();
@@ -1071,7 +1087,7 @@ fn spawn_monitor(app: AppHandle) {
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn observe_meeting_end(app: &AppHandle, active_bundle_families: Option<&BTreeSet<String>>) {
     let Some(state) = app.try_state::<MeetingStartRequestState>() else {
         return;
@@ -1177,7 +1193,10 @@ fn emit_meeting_end_finish_request(app: &AppHandle, request: &PendingMeetingEndF
 #[cfg(target_os = "macos")]
 pub(crate) use macos::active_input_processes;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub(crate) use windows_probe::active_input_processes;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn active_input_processes() -> Result<Vec<MicrophoneInputProcess>, ProbeError> {
     Ok(Vec::new())
 }
@@ -1196,11 +1215,19 @@ impl ProbeError {
 
 impl std::fmt::Display for ProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{} failed with OSStatus {}",
-            self.operation, self.status
-        )
+        if cfg!(target_os = "windows") {
+            write!(
+                formatter,
+                "{} failed with HRESULT {:#010x}",
+                self.operation, self.status
+            )
+        } else {
+            write!(
+                formatter,
+                "{} failed with OSStatus {}",
+                self.operation, self.status
+            )
+        }
     }
 }
 
