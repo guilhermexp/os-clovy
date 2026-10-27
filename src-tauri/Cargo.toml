@@ -1,6 +1,6 @@
 [package]
 name = "clovy"
-version = "0.1.2"
+version = "0.1.3"
 description = "Clovy"
 authors = ["guilhermexp"]
 license = "MIT"
