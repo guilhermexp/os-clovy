@@ -287,6 +287,20 @@ pub(crate) fn focused_window() -> Option<WindowDescriptor> {
     describe_window_handle(hwnd, pid)
 }
 
+/// Process that owns the foreground window, including Clovy itself; `None`
+/// when there is no foreground window.
+pub(crate) fn foreground_window_pid() -> Option<u32> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    (pid != 0).then_some(pid)
+}
+
 /// App name and identity (executable or AUMID) of the window the dictation
 /// helper pinned, by its handle and process. Records the executable so the
 /// app icon resolver can draw the same app's icon.

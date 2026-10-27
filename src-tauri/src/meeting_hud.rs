@@ -230,16 +230,28 @@ fn app_inactive() -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows has no app-level activation: Clovy counts as active only while one
+/// of its own windows is the foreground window. The HUD is non-focusable
+/// (`WS_EX_NOACTIVATE`), so clicking it never makes Clovy active and hides it.
+#[cfg(target_os = "windows")]
+fn app_inactive() -> bool {
+    clovy_inactive_for_foreground(
+        crate::activity::windows::window::foreground_window_pid(),
+        std::process::id(),
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn app_inactive() -> bool {
     false
 }
 
 /// Clovy is inactive on Windows unless the foreground window belongs to this
-/// process (the main window or the HUD).
+/// process (the main window or the HUD). No foreground window (lock screen,
+/// focus in transition) also counts as inactive, so the countdown shows.
 #[cfg(any(target_os = "windows", test))]
-fn clovy_inactive_for_foreground(_foreground_pid: Option<u32>, _own_pid: u32) -> bool {
-    false
+fn clovy_inactive_for_foreground(foreground_pid: Option<u32>, own_pid: u32) -> bool {
+    foreground_pid != Some(own_pid)
 }
 
 /// Per-thread drag-settle tracker for the orientation flip.
