@@ -27,3 +27,8 @@
 - [x] 5.2 `make verify` numa worktree limpa, CI `desktop.yml` na branch, evidência em `.tmp/verify/notas-direto-provedores/report.md`.
 
 > 5.2: `make verify` EXIT=0; CI run 40567062149 só com os vermelhos conhecidos (vitest `mcp-server-dev-runner`, clippy `dictation.rs:211`/`notion.rs`, OCR `activity::windows`); por eles o instalador Windows não foi construído e os testes Rust do macOS não rodaram no CI. Sem chamada real aos provedores.
+
+## 6. Revisão N1: nova tentativa na limpeza de nota (D4)
+
+- [x] 6.1 RED: 503 seguido de 200 na limpeza `note_transcript_cleanup` direta dá o texto limpo em duas requisições; 400 não é repetido; a limpeza do ditado continua com uma tentativa; commit RED (`616ee8fd`).
+- [x] 6.2 GREEN: o caminho direto da limpeza de nota usa `send_direct`; o ditado fica com uma tentativa, por latência (D4).

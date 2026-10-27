@@ -1008,22 +1008,38 @@ pub(crate) async fn dictate_cleanup_via<K: DictationTokens>(
         ],
         "temperature": 0.0,
     });
-    let response = transport
-        .direct_client
-        .post(format!("{}/chat/completions", transport.openrouter_base))
-        .bearer_auth(openrouter_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(network_error)?;
-    let status = response.status();
-    if !status.is_success() {
-        tracing::warn!(
-            status = status.as_u16(),
-            "openrouter dictation cleanup failed"
-        );
-        return Err(direct_provider_error(BuiltinProvider::OpenRouter, status));
-    }
+    let url = format!("{}/chat/completions", transport.openrouter_base);
+    let request = || {
+        transport
+            .direct_client
+            .post(&url)
+            .bearer_auth(openrouter_key)
+            .json(&body)
+    };
+    let response = if params.style == NOTE_TRANSCRIPT_CLEANUP_STYLE {
+        // The note pipeline waits for the whole recording anyway, so it gets
+        // Clovy API's one retry of a transient failure (ADR-0070).
+        send_direct(
+            BuiltinProvider::OpenRouter,
+            "this cleanup",
+            || Ok(request()),
+        )
+        .await?
+    } else {
+        // Dictation keeps one attempt: cleanup is optional and its failure
+        // pastes the raw transcript at once, while a retry would hold the
+        // paste for another round trip (ADR-0065).
+        let response = request().send().await.map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            tracing::warn!(
+                status = status.as_u16(),
+                "openrouter dictation cleanup failed"
+            );
+            return Err(direct_provider_error(BuiltinProvider::OpenRouter, status));
+        }
+        response
+    };
     let value: serde_json::Value = response
         .json()
         .await

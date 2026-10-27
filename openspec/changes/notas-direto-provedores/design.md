@@ -44,7 +44,7 @@ Com motor de Notas = Clovy, modelo diferente de Auto e chave OpenRouter: `POST {
 
 ### D4. Limpeza direta da transcrição da nota
 
-`cleanup_text` com motor Clovy passa a usar `dictate_cleanup_via` com a chave OpenRouter e o modelo padrão de limpeza. Quando o estilo é `note_transcript_cleanup`, o corpo direto usa o prompt `note_transcript_cleanup.md` do Clovy API e a mensagem do servidor para esse estilo (`<dictionary_context>`, `<asr_transcript>`, `<output_contract>`); os outros estilos seguem com o contrato do ditado. A limpeza continua opcional no pipeline: falha ou texto vazio mantém a transcrição bruta.
+`cleanup_text` com motor Clovy passa a usar `dictate_cleanup_via` com a chave OpenRouter e o modelo padrão de limpeza. Quando o estilo é `note_transcript_cleanup`, o corpo direto usa o prompt `note_transcript_cleanup.md` do Clovy API e a mensagem do servidor para esse estilo (`<dictionary_context>`, `<asr_transcript>`, `<output_contract>`); os outros estilos seguem com o contrato do ditado. A limpeza continua opcional no pipeline: falha ou texto vazio mantém a transcrição bruta. A limpeza da nota tem a mesma nova tentativa de D2 (408, 429, 5xx e erro de transporte que não seja prazo; nunca um 4xx permanente), como o `OpenRouterChat::complete` do servidor. A limpeza do ditado continua com uma tentativa só: é opcional, sua falha cola o transcrito bruto na hora, e repetir seguraria a colagem por mais uma ida e volta, contra a meta de latência da ADR-0065.
 
 ### D5. Falha sem chave e sem servidor
 
