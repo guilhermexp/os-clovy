@@ -31,7 +31,7 @@ const BROWSER_BUNDLE_PREFIXES: &[&str] = &[
 ];
 
 // Executable identities are exact, unlike macOS bundle-id families.
-const BROWSER_EXECUTABLES: &[&str] = &[
+pub(crate) const BROWSER_EXECUTABLES: &[&str] = &[
     "msedge.exe",
     "chrome.exe",
     "chromium.exe",
