@@ -19,7 +19,8 @@ export function userFacingFailureMessage(message?: string) {
 
 /** Failure sentences the desktop backend writes into a note
  * (`domain/processing.rs`: `user_facing_transcription_failure_message`,
- * `note_generation_failure_for_user`). Notes persist only that English
+ * `note_generation_failure_for_user`, and `clovy_api` for a missing provider
+ * key or oversized audio). Notes persist only that English
  * sentence, not its error code, so the sentence is the stable identifier:
  * each key's English text is byte-identical to what Rust stores, and the
  * banner shows it in the interface language. */
@@ -32,6 +33,9 @@ const STORED_FAILURE_KEYS: MessageKey[] = [
   "notes.failure.serviceBusy",
   "notes.failure.generationBusy",
   "notes.failure.generationFailed",
+  "notes.failure.groqKeyMissing",
+  "notes.failure.audioTooLarge",
+  "notes.failure.generationKeyMissing",
 ];
 
 function storedFailureKey(body: string): MessageKey | undefined {

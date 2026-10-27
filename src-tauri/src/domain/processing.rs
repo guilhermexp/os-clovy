@@ -3956,7 +3956,10 @@ fn note_generation_failure_for_user(mut error: AppError) -> AppError {
     {
         return error;
     }
-    error.message = if normalized_message.contains("authorization_denied") {
+    error.message = if normalized_code == "openrouter_api_key_missing" {
+        "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved."
+            .to_string()
+    } else if normalized_message.contains("authorization_denied") {
         "Your recording was transcribed, but note generation is busy right now. Your transcript is saved."
             .to_string()
     } else {
@@ -5592,6 +5595,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_generation_without_an_openrouter_key_or_clovy_api_names_the_missing_key() {
+        let failure = note_generation_failure_for_user(AppError::new(
+            "openrouter_api_key_missing",
+            "Add your OpenRouter API key.",
+        ));
+        assert_eq!(failure.code, "openrouter_api_key_missing");
+        assert_eq!(
+            failure.message,
+            "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved."
+        );
+    }
+
+    #[test]
+    fn a_missing_groq_key_reaches_the_note_unchanged() {
+        assert_eq!(
+            user_facing_transcription_failure_message(
+                "groq_api_key_missing",
+                crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE,
+                false,
+                "microphone",
+            ),
+            crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE
+        );
+    }
+
     /// Notes persist only these English sentences (no error code column), so
     /// the desktop translates them by exact text. Every sentence must exist
     /// verbatim in the English `notes.failure.*` catalog, or that failure
@@ -5608,6 +5637,20 @@ mod tests {
             user_facing_transcription_failure_message("x", "authorization_denied", false, "m"),
             note_generation_failure_for_user(AppError::new("x", "authorization_denied")).message,
             note_generation_failure_for_user(AppError::new("x", "anything else")).message,
+            user_facing_transcription_failure_message(
+                "groq_api_key_missing",
+                crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE,
+                false,
+                "m",
+            ),
+            user_facing_transcription_failure_message(
+                "audio_too_large",
+                crate::clovy_api::AUDIO_TOO_LARGE_MESSAGE,
+                false,
+                "m",
+            ),
+            note_generation_failure_for_user(AppError::new("openrouter_api_key_missing", "no key"))
+                .message,
         ];
         for sentence in sentences {
             assert!(

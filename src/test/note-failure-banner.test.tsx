@@ -1,10 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   NoteFailureBanner,
   userFacingFailureMessage,
 } from "../components/note-editor/NoteFailureBanner";
+import { applyInterfaceLocale } from "../i18n/locale";
 
 describe("userFacingFailureMessage", () => {
   it("turns no-speech provider codes into useful guidance", () => {
@@ -29,6 +30,38 @@ describe("userFacingFailureMessage", () => {
     expect(userFacingFailureMessage("Microphone: authorization_denied")).toBe(
       "Microphone: The service is busy right now. Wait a minute, then retry.",
     );
+  });
+});
+
+describe("missing provider keys", () => {
+  afterEach(() => applyInterfaceLocale("en"));
+
+  const groqMissing =
+    "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings.";
+  const openRouterMissing =
+    "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved.";
+
+  it("names the missing key per source instead of the raw request error", () => {
+    expect(userFacingFailureMessage(`System: ${groqMissing} | Microphone: ${groqMissing}`)).toBe(
+      `System: ${groqMissing} | Microphone: ${groqMissing}`,
+    );
+  });
+
+  it("shows the missing keys in Portuguese", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(userFacingFailureMessage(`Microphone: ${groqMissing}`)).toBe(
+      "Microfone: Adicione sua chave de API da Groq em Configurações > Modelos > Mais opções > Chaves de API de provedores para transcrever gravações.",
+    );
+    expect(userFacingFailureMessage(openRouterMissing)).toBe(
+      "Sua gravação foi transcrita, mas o Clovy precisa da sua chave de API da OpenRouter para escrever a nota. Adicione-a em Configurações > Modelos > Mais opções > Chaves de API de provedores. Sua transcrição está salva.",
+    );
+  });
+
+  it("keeps Retry for a missing key", () => {
+    render(
+      <NoteFailureBanner errorMessage={groqMissing} audioPreserved onRetry={() => undefined} />,
+    );
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeEnabled();
   });
 });
 
