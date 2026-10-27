@@ -313,7 +313,7 @@ async fn without_a_groq_key_or_clovy_api_the_error_names_the_missing_key() {
     assert!(
         error
             .message
-            .contains("Settings > Models > Provider API keys"),
+            .contains("Settings > Models > More options > Provider API keys"),
         "{}",
         error.message
     );

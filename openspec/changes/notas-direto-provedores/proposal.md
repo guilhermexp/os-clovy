@@ -11,7 +11,7 @@ O dono decidiu: chamada direta, igual ao ditado. Não embutir o servidor no app.
 - Transcrição de nota (final por turno, fallback por fonte e prévia ao vivo): com a chave Groq salva, o desktop chama `api.groq.com` direto, com os mesmos parâmetros que o Clovy API usa (modelo, padrão `whisper-large-v3-turbo`, idioma, prompt do dicionário, `response_format=json`, nome de arquivo canônico), uma nova tentativa para falhas transitórias, texto vazio como `no_speech`, 401/403 como chave rejeitada e limite de 25 MB do áudio antes do envio.
 - Geração de nota com o motor de Notas = Clovy e um modelo explícito: com a chave OpenRouter salva, o desktop chama `openrouter.ai` direto com o mesmo prompt de sistema, a mesma mensagem do usuário e o mesmo pós-processamento do servidor.
 - Limpeza da transcrição da nota (`note_transcript_cleanup`): com a chave OpenRouter salva, vai direto à OpenRouter com o prompt e a mensagem que o Clovy API usa para esse estilo, em `temperature: 0`.
-- Sem a chave, cada chamada segue pelo Clovy API como antes. Se o servidor também não responde, a nota mostra, em pt-BR e en, que falta a chave Groq ou OpenRouter em Configurações > Modelos > Chaves de API de provedores, e o "Tentar de novo" continua.
+- Sem a chave, cada chamada segue pelo Clovy API como antes. Se o servidor também não responde, a nota mostra, em pt-BR e en, que falta a chave Groq ou OpenRouter em Configurações > Modelos > Mais opções > Chaves de API de provedores, e o "Tentar de novo" continua.
 - Motores Endpoint e CLI não mudam.
 
 ## Capabilities

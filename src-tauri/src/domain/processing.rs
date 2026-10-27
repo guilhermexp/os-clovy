@@ -3957,7 +3957,7 @@ fn note_generation_failure_for_user(mut error: AppError) -> AppError {
         return error;
     }
     error.message = if normalized_code == "openrouter_api_key_missing" {
-        "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > Provider API keys. Your transcript is saved."
+        "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved."
             .to_string()
     } else if normalized_message.contains("authorization_denied") {
         "Your recording was transcribed, but note generation is busy right now. Your transcript is saved."
@@ -5604,7 +5604,7 @@ mod tests {
         assert_eq!(failure.code, "openrouter_api_key_missing");
         assert_eq!(
             failure.message,
-            "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > Provider API keys. Your transcript is saved."
+            "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved."
         );
     }
 

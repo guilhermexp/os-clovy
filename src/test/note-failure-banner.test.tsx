@@ -37,9 +37,9 @@ describe("missing provider keys", () => {
   afterEach(() => applyInterfaceLocale("en"));
 
   const groqMissing =
-    "Add your Groq API key in Settings > Models > Provider API keys to transcribe recordings.";
+    "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings.";
   const openRouterMissing =
-    "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > Provider API keys. Your transcript is saved.";
+    "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved.";
 
   it("names the missing key per source instead of the raw request error", () => {
     expect(userFacingFailureMessage(`System: ${groqMissing} | Microphone: ${groqMissing}`)).toBe(
@@ -50,10 +50,10 @@ describe("missing provider keys", () => {
   it("shows the missing keys in Portuguese", () => {
     applyInterfaceLocale("pt-BR");
     expect(userFacingFailureMessage(`Microphone: ${groqMissing}`)).toBe(
-      "Microfone: Adicione sua chave de API da Groq em Configurações > Modelos > Chaves de API de provedores para transcrever gravações.",
+      "Microfone: Adicione sua chave de API da Groq em Configurações > Modelos > Mais opções > Chaves de API de provedores para transcrever gravações.",
     );
     expect(userFacingFailureMessage(openRouterMissing)).toBe(
-      "Sua gravação foi transcrita, mas o Clovy precisa da sua chave de API da OpenRouter para escrever a nota. Adicione-a em Configurações > Modelos > Chaves de API de provedores. Sua transcrição está salva.",
+      "Sua gravação foi transcrita, mas o Clovy precisa da sua chave de API da OpenRouter para escrever a nota. Adicione-a em Configurações > Modelos > Mais opções > Chaves de API de provedores. Sua transcrição está salva.",
     );
   });
 

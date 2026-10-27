@@ -176,9 +176,22 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   running it without tools; the run then fails (the exact status OpenRouter
   returns in that case has not been observed yet).
 - **Notes.** `clovy_api::generate_note_from_transcript` uses the notes
-  selection: Clovy API (with the saved remote model), the endpoint, or the CLI
+  selection: Clovy (with the saved remote model), the endpoint, or the CLI
   (same system prompt and source layout as the endpoint route; stored provider
-  `cli:<id>`).
+  `cli:<id>`). On Clovy with the user's own OpenRouter key and an explicit
+  model, the note is one chat completion straight to OpenRouter with Clovy
+  API's `note_generate.md` prompt, source layout, and source-label cleanup
+  (stored provider `openrouter`); Auto or no key goes through
+  `/v1/notes/generate` (ADR-0070).
+- **Note transcription.** `clovy_api::transcribe_saved_audio` (final turns, the
+  per-source fallback, live preview) posts straight to Groq with the user's
+  own Groq key, with the parameters Clovy API sends (`response_format=json`,
+  canonical `audio.wav`/`audio.m4a` name, dictionary prompt, language, 25 MB
+  cap, one retry of a 408/429/5xx or transport failure; an empty transcript is
+  `no_speech`), and through `/v1/notes/transcribe` without one (ADR-0070).
+  Without the key and without a reachable Clovy API, the note names the
+  missing key (`groq_api_key_missing`, `openrouter_api_key_missing`) instead of
+  the HTTP error.
 - **Dictation cleanup.** Never an own provider: `llm_set_usage` refuses a CLI,
   an endpoint, or none for `dictationCleanup` (`llm_provider_not_allowed`), and
   `normalize` moves a stored CLI or endpoint choice back to Clovy API, so the
@@ -189,7 +202,9 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   `/v1/dictate/cleanup` without it ([dictation.md](dictation.md), ADR-0065).
 - **Note transcript cleanup.** `clovy_api::cleanup_text` sends style
   `note_transcript_cleanup` on the notes selection (the engine that writes the
-  note: Clovy API, the endpoint, or the CLI); it selects the note correction prompt with the full
+  note: Clovy, the endpoint, or the CLI; on Clovy it goes straight to
+  OpenRouter with the user's key, with Clovy API's `note_transcript_cleanup.md`
+  prompt at temperature 0, else through `/v1/dictate/cleanup`); it selects the note correction prompt with the full
   dictionary and earlier same-source turns as context; the Whisper prompt
   itself only carries the short dictionary hint (see
   [configuration.md](configuration.md#transcription-context)).

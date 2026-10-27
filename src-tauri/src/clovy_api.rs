@@ -375,12 +375,12 @@ pub async fn transcribe_saved_audio(
 /// The note's failure when neither the user's Groq key nor Clovy API is
 /// there. Kept byte-identical to `notes.failure.groqKeyMissing`.
 pub(crate) const GROQ_API_KEY_MISSING_MESSAGE: &str =
-    "Add your Groq API key in Settings > Models > Provider API keys to transcribe recordings.";
+    "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings.";
 /// Kept byte-identical to `notes.failure.audioTooLarge`.
 pub(crate) const AUDIO_TOO_LARGE_MESSAGE: &str =
     "This recording part is larger than the 25 MB Groq accepts in one request.";
 const OPENROUTER_API_KEY_MISSING_MESSAGE: &str =
-    "Add your OpenRouter API key in Settings > Models > Provider API keys to write notes.";
+    "Add your OpenRouter API key in Settings > Models > More options > Provider API keys to write notes.";
 /// Groq's upload cap, equal to Clovy API's `max_audio_bytes`.
 const GROQ_MAX_AUDIO_BYTES: usize = 26_214_400;
 /// The original request plus one retry, as Clovy API's upstream calls.

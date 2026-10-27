@@ -28,7 +28,7 @@ curated). `clovy-api/.env.example` and `config.toml` are authoritative.
 
 | Var | Purpose | Default |
 |-----|---------|---------|
-| `CLOVY_API_URL` | Clovy API base URL the app calls; share links use its origin | `http://127.0.0.1:8080` |
+| `CLOVY_API_URL` | Clovy API base URL the app calls; share links use its origin. Dictation and notes skip it for each provider whose own key is saved (ADR-0065, ADR-0070) | `http://127.0.0.1:8080` |
 | `OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` | The fixed local identity (there is no sign-in): bearer token sent to Clovy API | `local-dev-token` |
 | `OS_CLOVY_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store connector tokens in a file, not the Keychain (avoids prompts) | `0` |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Google Desktop OAuth credential for Gmail/Calendar connectors. Google requires both at token exchange; the second value is not confidential in an installed app and grants no user-data access by itself | unset |
@@ -93,7 +93,11 @@ the desktop checks the key against the provider's free, documented endpoint
 `GET /v1/models/pricing`, Tavily `GET /usage`) and stores it only if accepted,
 in the Keychain store the endpoints use (`crate::llm::secrets`), under the
 account `builtin:<provider>`. `provider-settings.json` and the settings DTO
-carry only `providerApiKeysConfigured` flags, never a key. A saved key is sent
+carry only `providerApiKeysConfigured` flags, never a key. Dictation and notes
+do not go through Clovy API for a provider whose key is saved: the desktop
+calls Groq or OpenRouter itself with only that key (ADR-0065, ADR-0070; notes
+on Auto stay on Clovy API), so a packaged app without Clovy API writes notes
+with the Groq and OpenRouter keys alone. Otherwise a saved key is sent
 only as that provider's private header (`x-groq-api-key`,
 `x-openrouter-api-key`, `x-fal-api-key`, `x-tavily-api-key`) on the routes of
 its capability. Video status polls carry the fal key too: Clovy API never

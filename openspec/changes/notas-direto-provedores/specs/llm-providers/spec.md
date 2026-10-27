@@ -54,11 +54,11 @@ Com o motor de Notas = Clovy e a chave do provedor salva, o desktop SHALL mandar
 - Test: integration — `clovy_api_notes_tests.rs`
 
 ### Requirement: Falha clara sem chave nem servidor
-Quando não há a chave do provedor e o Clovy API não responde, a nota SHALL dizer, na língua da interface (pt-BR ou en), qual chave falta e onde salvá-la (Configurações > Modelos > Chaves de API de provedores), e MUST NOT mostrar o erro cru da biblioteca HTTP. O áudio fica salvo e "Tentar de novo" continua disponível.
+Quando não há a chave do provedor e o Clovy API não responde, a nota SHALL dizer, na língua da interface (pt-BR ou en), qual chave falta e onde salvá-la (Configurações > Modelos > Mais opções > Chaves de API de provedores), e MUST NOT mostrar o erro cru da biblioteca HTTP. O áudio fica salvo e "Tentar de novo" continua disponível.
 
 #### Scenario: Transcrição sem chave Groq e sem servidor
 - **WHEN** não há chave Groq e a conexão com o Clovy API é recusada
-- **THEN** a transcrição falha com `groq_api_key_missing` e a frase "Add your Groq API key in Settings > Models > Provider API keys to transcribe recordings.", que a nota mostra traduzida
+- **THEN** a transcrição falha com `groq_api_key_missing` e a frase "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings.", que a nota mostra traduzida
 - Test: integration — `clovy_api_notes_tests.rs` com porta fechada; unit — `note-failure-banner.test.tsx` traduz a frase em pt-BR
 
 #### Scenario: Geração sem chave OpenRouter e sem servidor

@@ -81,11 +81,11 @@ export default defineMessages({
     "notes.failure.generationFailed":
       "Your recording was transcribed, but Clovy couldn't generate the note. Your transcript is saved.",
     "notes.failure.groqKeyMissing":
-      "Add your Groq API key in Settings > Models > Provider API keys to transcribe recordings.",
+      "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings.",
     "notes.failure.audioTooLarge":
       "This recording part is larger than the 25 MB Groq accepts in one request.",
     "notes.failure.generationKeyMissing":
-      "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > Provider API keys. Your transcript is saved.",
+      "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
     "notes.failure.generic": "Clovy couldn't finish processing this note.",
     "notes.failure.savedCanRetry": "Your recording is saved locally, so you can retry.",
@@ -420,11 +420,11 @@ export default defineMessages({
     "notes.failure.generationFailed":
       "Sua gravação foi transcrita, mas o Clovy não conseguiu gerar a nota. Sua transcrição está salva.",
     "notes.failure.groqKeyMissing":
-      "Adicione sua chave de API da Groq em Configurações > Modelos > Chaves de API de provedores para transcrever gravações.",
+      "Adicione sua chave de API da Groq em Configurações > Modelos > Mais opções > Chaves de API de provedores para transcrever gravações.",
     "notes.failure.audioTooLarge":
       "Esta parte da gravação passa dos 25 MB que a Groq aceita por requisição.",
     "notes.failure.generationKeyMissing":
-      "Sua gravação foi transcrita, mas o Clovy precisa da sua chave de API da OpenRouter para escrever a nota. Adicione-a em Configurações > Modelos > Chaves de API de provedores. Sua transcrição está salva.",
+      "Sua gravação foi transcrita, mas o Clovy precisa da sua chave de API da OpenRouter para escrever a nota. Adicione-a em Configurações > Modelos > Mais opções > Chaves de API de provedores. Sua transcrição está salva.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
     "notes.failure.generic": "O Clovy não conseguiu terminar de processar esta nota.",
     "notes.failure.savedCanRetry":

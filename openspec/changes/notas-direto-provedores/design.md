@@ -48,9 +48,9 @@ Com motor de Notas = Clovy, modelo diferente de Auto e chave OpenRouter: `POST {
 
 ### D5. Falha sem chave e sem servidor
 
-Quando não há chave e a conexão com o Clovy API falha (`reqwest::Error::is_connect`), a transcrição devolve `groq_api_key_missing` com a frase "Add your Groq API key in Settings > Models > Provider API keys to transcribe recordings." e a geração devolve `openrouter_api_key_missing`, que `note_generation_failure_for_user` troca por "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > Provider API keys. Your transcript is saved." As frases são as chaves `notes.failure.*` em inglês, traduzidas por texto exato no `NoteFailureBanner`, como as outras. O "Tentar de novo" não muda: o áudio fica salvo.
+Quando não há chave e a conexão com o Clovy API falha (`reqwest::Error::is_connect`), a transcrição devolve `groq_api_key_missing` com a frase "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings." e a geração devolve `openrouter_api_key_missing`, que `note_generation_failure_for_user` troca por "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved." As frases são as chaves `notes.failure.*` em inglês, traduzidas por texto exato no `NoteFailureBanner`, como as outras. O "Tentar de novo" não muda: o áudio fica salvo.
 
-O caminho no app é Configurações > Modelos > Chaves de API de provedores (`settings.providerKeys.title` na aba Modelos); o pedido falava em "Provedores", mas a frase aponta para o rótulo que existe.
+O caminho no app é Configurações > Modelos > Mais opções > Chaves de API de provedores (`settings.providerKeys.title` na aba Modelos); o pedido falava em "Provedores", mas a frase aponta para o rótulo que existe.
 
 ## Risks / Trade-offs
 

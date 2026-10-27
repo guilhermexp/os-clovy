@@ -152,7 +152,9 @@ Service keys belong only in `clovy-api/.env`, never in the root desktop
 `.env`: Groq for transcription and dictation, OpenRouter for text (chat,
 notes, dictation cleanup), fal for images and video, and Tavily for web search
 and fetch. A provider without a service key still works with your own key
-for it, saved in Settings.
+for it, saved in Settings. With your own Groq and OpenRouter keys, dictation
+and notes call those providers directly, so a packaged app needs no Clovy API
+for them.
 
 See [docs/development.md](docs/development.md) for the day-to-day development
 guide (ports, onboarding replay, local data, permissions, agent skills, and

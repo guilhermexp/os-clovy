@@ -241,9 +241,11 @@ build scripts in `pnpm-workspace.yaml` — live in
   Keys for Groq, OpenRouter, fal and Tavily, and the OS Accounts App API key,
   belong to Clovy API. Explicit user BYOK credentials stay in the local
   credential store and go only to their own provider: forwarded through Clovy
-  API on that provider's eligible route, or, for dictation transcription and
-  dictation cleanup, sent from the desktop straight to that provider
-  ([ADR-0065](docs/adr/0065-dictation-calls-the-users-own-provider-directly.md)).
+  API on that provider's eligible route, or, for dictation and notes
+  (transcription, cleanup, and note generation except Auto), sent from the
+  desktop straight to that provider
+  ([ADR-0065](docs/adr/0065-dictation-calls-the-users-own-provider-directly.md),
+  [ADR-0070](docs/adr/0070-notes-call-the-users-own-provider-directly.md)).
   They are never credentials for another vendor.
 - **Clovy API must stay backward-compatible — no breaking changes.** Clovy ships
   and auto-updates in production, so installs in the wild keep calling older
