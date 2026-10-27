@@ -32,3 +32,4 @@
 
 - [x] 6.1 RED: 503 seguido de 200 na limpeza `note_transcript_cleanup` direta dá o texto limpo em duas requisições; 400 não é repetido; a limpeza do ditado continua com uma tentativa; commit RED (`616ee8fd`).
 - [x] 6.2 GREEN: o caminho direto da limpeza de nota usa `send_direct`; o ditado fica com uma tentativa, por latência (D4).
+- [x] 6.3 `make verify` numa worktree limpa no `c12e285f`: EXIT=0.
