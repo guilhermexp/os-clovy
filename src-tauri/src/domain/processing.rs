@@ -3956,7 +3956,10 @@ fn note_generation_failure_for_user(mut error: AppError) -> AppError {
     {
         return error;
     }
-    error.message = if normalized_message.contains("authorization_denied") {
+    error.message = if normalized_code == "openrouter_api_key_missing" {
+        "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > Provider API keys. Your transcript is saved."
+            .to_string()
+    } else if normalized_message.contains("authorization_denied") {
         "Your recording was transcribed, but note generation is busy right now. Your transcript is saved."
             .to_string()
     } else {
@@ -5637,6 +5640,12 @@ mod tests {
             user_facing_transcription_failure_message(
                 "groq_api_key_missing",
                 crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE,
+                false,
+                "m",
+            ),
+            user_facing_transcription_failure_message(
+                "audio_too_large",
+                crate::clovy_api::AUDIO_TOO_LARGE_MESSAGE,
                 false,
                 "m",
             ),
