@@ -203,7 +203,10 @@ async fn a_groq_rate_limit_reports_the_wait_and_is_not_retried_early() {
 
     assert_eq!(error.code, "groq_usage_limit_exceeded");
     assert_eq!(
-        error.details.as_ref().and_then(|details| details.get("retryAfterMs")),
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("retryAfterMs")),
         Some(&serde_json::json!(30_000))
     );
     // Retrying before `retry-after` only spends another request.
@@ -249,10 +252,75 @@ async fn the_requests_reset_header_sets_the_wait_without_retry_after() {
 
     assert_eq!(error.code, "groq_usage_limit_exceeded");
     assert_eq!(
-        error.details.as_ref().and_then(|details| details.get("retryAfterMs")),
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("retryAfterMs")),
         Some(&serde_json::json!(179_560))
     );
     assert_eq!(heads(&groq).len(), 1);
+}
+
+#[tokio::test]
+async fn a_packed_turn_request_asks_groq_for_segment_times() {
+    let groq = answering(
+        200,
+        serde_json::json!({
+            "text": "first turn second turn",
+            "language": "portuguese",
+            "segments": [
+                { "start": 0.0, "end": 1.9, "text": " first turn", "no_speech_prob": 0.01 },
+                { "start": 2.0, "end": 2.4, "text": " hmm", "no_speech_prob": 0.9 },
+                { "start": 2.5, "end": 4.25, "text": " second turn", "no_speech_prob": 0.02 }
+            ]
+        }),
+    )
+    .await;
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        groq_base: groq.base_url.clone(),
+        ..hosts.transport()
+    };
+    let directory = tempfile::tempdir().unwrap();
+
+    let timed = transcribe_saved_audio_timed_via(
+        &transport,
+        "gsk-user",
+        MODEL.to_string(),
+        turn_request(&directory, false),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        timed.segments,
+        vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1_900,
+                text: "first turn".to_string(),
+            },
+            TranscriptSegment {
+                start_ms: 2_500,
+                end_ms: 4_250,
+                text: "second turn".to_string(),
+            },
+        ]
+    );
+    let body = groq.raw_bodies.lock().unwrap()[0].clone();
+    for expected in [
+        "name=\"response_format\"\r\n\r\nverbose_json\r\n",
+        "name=\"timestamp_granularities[]\"\r\n\r\nsegment\r\n",
+        "name=\"prompt\"\r\n\r\nSamir",
+        "filename=\"audio.wav\"",
+    ] {
+        assert!(body.contains(expected), "{expected} missing in {body}");
+    }
+    assert_eq!(
+        header(&heads(&groq)[0], "authorization"),
+        Some("Bearer gsk-user")
+    );
+    assert!(heads(&hosts.clovy).is_empty());
 }
 
 #[test]

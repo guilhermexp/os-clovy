@@ -84,6 +84,10 @@ export default defineMessages({
       "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings.",
     "notes.failure.audioTooLarge":
       "This recording part is larger than the 25 MB Groq accepts in one request.",
+    "notes.failure.groqUsageLimit":
+      "Groq reports that its usage limit was reached. Try again later, or check the plan behind your saved Groq key.",
+    "notes.failure.rateLimitPaused":
+      "Groq usage limit reached. Clovy continues transcribing at {time}. Parts already transcribed are kept.",
     "notes.failure.generationKeyMissing":
       "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
@@ -423,6 +427,10 @@ export default defineMessages({
       "Adicione sua chave de API da Groq em Configurações > Modelos > Mais opções > Chaves de API de provedores para transcrever gravações.",
     "notes.failure.audioTooLarge":
       "Esta parte da gravação passa dos 25 MB que a Groq aceita por requisição.",
+    "notes.failure.groqUsageLimit":
+      "A Groq informa que o limite de uso foi atingido. Tente de novo mais tarde ou confira o plano da sua chave Groq salva.",
+    "notes.failure.rateLimitPaused":
+      "Limite de uso da Groq atingido. O Clovy continua a transcrição às {time}. As partes já transcritas ficam salvas.",
     "notes.failure.generationKeyMissing":
       "Sua gravação foi transcrita, mas o Clovy precisa da sua chave de API da OpenRouter para escrever a nota. Adicione-a em Configurações > Modelos > Mais opções > Chaves de API de provedores. Sua transcrição está salva.",
     "notes.failure.sourcePrefixed": "{source}: {message}",
