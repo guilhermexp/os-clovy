@@ -30,14 +30,6 @@ Sessões criadas pelo motor nativo SHALL continuar listáveis com itens e artefa
 - **THEN** o histórico aparece completo e a resposta vem do CLI padrão com as mensagens anteriores no prompt
 - Test: integration — banco com sessão nativa de fixture e CLI falso que grava o prompt
 
-### Requirement: Contrato do clovy-api preservado
-A remoção MUST NOT remover nem alterar rotas `/v1/*` do clovy-api. O desktop pode deixar de chamar rotas usadas só pelo nativo.
-
-#### Scenario: Fixtures de contrato
-- **WHEN** a suíte do clovy-api roda após o corte
-- **THEN** as fixtures de contrato dos clientes antigos continuam passando sem alteração
-- Test: integration — `pnpm test:clovy-api`
-
 ### Requirement: Configurações sem motor nativo
 `llm_usage.chat` MUST aceitar apenas CLIs depois do corte; valores `clovy` e `endpoint` salvos MUST migrar uma vez para o CLI padrão. Endpoints registrados MUST continuar disponíveis para notas, limpeza e atividade.
 
