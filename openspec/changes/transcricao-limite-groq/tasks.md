@@ -71,7 +71,9 @@ A revisão 3 (`e19b446e`) aprovou H1 e a rota no caminho normal e deixou dois P2
 - [x] 10.0 RED dos dois (`9d08e9d8`): a chave salva ilegível caía na rota do Clovy API, e o retry manual marcava `transcribing` por cima de uma nota `ready`.
 - [x] 10.1 I1 GREEN (`7dd6d5fb`): a resolução de rota propaga `provider_api_key_unavailable`; só `Ok(None)` vai ao Clovy API; a prévia não envia nada; frase traduzida no banner.
 - [x] 10.2 I2 GREEN (`3b8f160f`): compare-and-set de `failed` para `transcribing`; um retry que marcou a nota sempre roda.
-- [ ] 10.3 `make verify` numa worktree limpa, CI, report.
+- [x] 10.3 `make verify` numa worktree limpa, CI, report.
+
+> 10.3: `make verify` no `e70caa8f`: EXIT=0 na primeira rodada (vitest 1868/1868, Rust 2031 + integração). CI run 40628982214 só com os vermelhos conhecidos (vitest `mcp-server-dev-runner`, clippy `dictation.rs:211`/`notion.rs`); o job do Windows passou inteiro.
 
 ## 7. Documentação e verificação
 
