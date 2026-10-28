@@ -35,8 +35,15 @@ const STORED_FAILURE_KEYS: MessageKey[] = [
   "notes.failure.generationFailed",
   "notes.failure.groqKeyMissing",
   "notes.failure.audioTooLarge",
+  "notes.failure.groqUsageLimit",
+  "notes.failure.groqKeyUnavailable",
   "notes.failure.generationKeyMissing",
 ];
+
+/** `notes.failure.rateLimitPaused` as Rust stores it
+ * (`processing.rs`: `rate_limit_paused_message`), with the HH:MM it resumes. */
+const RATE_LIMIT_PAUSED =
+  /^Groq usage limit reached\. Clovy continues transcribing at (\d{1,2}:\d{2})\. Parts already transcribed are kept\.$/;
 
 function storedFailureKey(body: string): MessageKey | undefined {
   const trimmed = body.trim();
@@ -49,8 +56,11 @@ function friendlyFailureSegment(message: string) {
   const normalized = body.toLowerCase();
   let friendly = body;
   const storedKey = storedFailureKey(body);
+  const pausedUntil = body.trim().match(RATE_LIMIT_PAUSED)?.[1];
   if (storedKey) {
     friendly = translate(storedKey);
+  } else if (pausedUntil) {
+    friendly = translate("notes.failure.rateLimitPaused", { time: pausedUntil });
   } else if (normalized.includes("no_speech") || normalized.includes("no speech")) {
     friendly = translate("notes.failure.noSpeech");
   } else if (isInvalidClovyResponseMessage(body)) {

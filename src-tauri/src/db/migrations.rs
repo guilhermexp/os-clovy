@@ -1343,6 +1343,17 @@ const MIGRATIONS: &[Migration] = &[
             )),
         ],
     },
+    Migration {
+        version: 51,
+        name: "note_transcription_chunks",
+        requirements: &[
+            SchemaRequirement::Table("note_transcription_chunks"),
+            SchemaRequirement::Index("idx_note_transcription_chunks_session"),
+        ],
+        steps: &[MigrationStep::Sql(include_str!(
+            "../../migrations/035_note_transcription_chunks.sql"
+        ))],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2287,6 +2298,7 @@ mod tests {
                 (48, "linear_managed_mcp".to_string()),
                 (49, "linear_managed_mcp_repair".to_string()),
                 (50, "agent_artifact_display_names".to_string()),
+                (51, "note_transcription_chunks".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
@@ -2607,6 +2619,7 @@ mod tests {
                 (48, "linear_managed_mcp".to_string()),
                 (49, "linear_managed_mcp_repair".to_string()),
                 (50, "agent_artifact_display_names".to_string()),
+                (51, "note_transcription_chunks".to_string()),
             ]
         );
 

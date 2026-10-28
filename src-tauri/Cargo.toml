@@ -102,6 +102,10 @@ zeroize = { version = "1", features = ["derive"] }
 zip = { version = "=4.2.0", default-features = false }
 tauri-plugin-autostart = "2.5.1"
 
+[dev-dependencies]
+# Paused-clock tests for transcription pacing; the same tokio as above.
+tokio = { version = "1.42", features = ["test-util"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

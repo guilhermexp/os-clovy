@@ -282,6 +282,9 @@ pub(crate) mod test_server {
     };
 
     pub type Handler = Arc<dyn Fn(&Value) -> (u16, Value) + Send + Sync>;
+    /// A handler that also names the response headers, for rate-limit replies.
+    pub type HeaderHandler =
+        Arc<dyn Fn(&Value) -> (u16, Value, Vec<(String, String)>) + Send + Sync>;
 
     pub struct FakeServer {
         pub base_url: String,
@@ -294,6 +297,14 @@ pub(crate) mod test_server {
     }
 
     pub async fn start(handler: Handler) -> FakeServer {
+        start_with_headers(Arc::new(move |request: &Value| {
+            let (status, body) = handler(request);
+            (status, body, Vec::new())
+        }))
+        .await
+    }
+
+    pub async fn start_with_headers(handler: HeaderHandler) -> FakeServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -353,11 +364,15 @@ pub(crate) mod test_server {
                         .unwrap()
                         .push(String::from_utf8_lossy(&body).to_string());
                     let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                    let (status, response) = handler(&request);
+                    let (status, response, headers) = handler(&request);
                     recorded.lock().unwrap().push(request);
                     let payload = response.to_string();
+                    let extra = headers
+                        .iter()
+                        .map(|(name, value)| format!("{name}: {value}\r\n"))
+                        .collect::<String>();
                     let reply = format!(
-                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{payload}",
                         payload.len()
                     );
                     let _ = socket.write_all(reply.as_bytes()).await;

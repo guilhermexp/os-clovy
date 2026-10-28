@@ -60,3 +60,85 @@ or to extend the direct route. The owner chose the direct route on
   an explicit model is the remedy.
 - Chat, media, and web keep their Clovy API routes; extending the direct
   route to them needs its own decision.
+
+## Addendum (2026-10-27): Groq rate limits on the direct route
+
+The direct route made the user's Groq plan the limit of note transcription.
+On the base plan `whisper-large-v3-turbo` allows 20 requests a minute, 2,000
+a day, 7,200 s of audio an hour and 28,800 s a day, and bills every request
+as at least 10 s. v0.1.3 failed long meetings: a 429 got one retry after a
+fixed 300 ms, became a failed turn, and the run kept sending the remaining
+turns into the same limit, while the default-on live preview had already
+spent most of the hour's audio. This addendum changes §2's "one retry of a
+transient failure" for 429 and the shape of the final-transcription request.
+
+1. **A 429 is a wait, not a failure.** The direct call reads `retry-after`
+   (else `x-ratelimit-reset-requests` when no requests remain) and returns
+   it as `details.retryAfterMs`, waiting it out itself only up to 2 s.
+2. **One pacer per process** for Groq transcription: at most 18 requests a
+   minute and 7,200 s of billed audio an hour, across both Sources, every
+   note, and the live preview. A 429 holds every caller for the named wait
+   (60 s when none) and repeats the same request.
+3. **A long wait pauses the note.** Over 90 s, the run stops with
+   `transcription_rate_limited` and `details.resumeAtMs`; the note says when
+   it continues and the desktop resumes it at that time while it stays open.
+   Finished turns are kept, the rest stay pending, and the full-source
+   fallback does not run into the same limit.
+4. **With the user's key, speech turns go in packs.** Consecutive turns of
+   one Source are concatenated (0.5 s apart) into one request of up to
+   600 s, the chunk of Groq's own long-audio example (19.2 MB of 16 kHz mono
+   PCM16, under the 25 MB cap), sent as `verbose_json` with segment times
+   and split back per turn. Silence between turns is never sent, the
+   10-second minimum is paid once per pack, and each turn keeps its own
+   durable job and Source attribution. Clovy API's route has no segment
+   times, so without the key a turn is still one request. Fixed splits (a
+   full-Source job, an over-long turn) use 600 s chunks with a 10 s overlap
+   whose repeated words are dropped. FLAC was not adopted: Groq bills
+   seconds, not bytes, and the project has no encoder.
+5. **The live preview gives way.** It never waits for the pacer and spends at
+   most 3,600 s of the hour's audio; past that, preview chunks are dropped
+   (ADR-0002 allows it) so the final transcription keeps its budget. The
+   preview's text is not reused for the note: its fixed 8 s cuts and
+   missing dictionary prompt are worse than the turn-based pass.
+
+The limits are the base plan's; a paid plan is paced the same until Clovy
+can read the plan. Clovy API does not change.
+
+Review of the same addendum (2026-10-27, before release):
+
+6. **Split jobs keep their chunks.** A full-Source job (microphone only,
+   the full-Source fallback) or an over-long turn keeps each finished 600 s
+   chunk in `note_transcription_chunks`, so a resume sends only the chunks
+   still missing; without it, two audible hours paused before the last chunk
+   on every run and never finished.
+2. (amended) **One pacer per Groq account, on the wall clock.** The pacer is
+   picked per request: the saved key's account, by a SHA-256 fingerprint
+   that never keeps the key, or Clovy API's route without a key, which has
+   its own. Its pause and its hour of audio are wall-clock times, guarded
+   against a clock set back, so a pause ends on time across sleep.
+3. (amended) **A resume claims its pause once.** The automatic resume sets
+   the note from that very pause to transcribing in one update; a Retry
+   that got there first leaves nothing to claim, and a retry that waited
+   behind another run skips a note that no longer needs it.
+
+Second review of the same addendum (2026-10-28, before release):
+
+- **The model is part of what a resume reuses.** A job's durable identity
+  and each kept chunk's key include the transcription model a run reads
+  once (and the chunk's language); the default model adds nothing to the
+  identity, so sessions transcribed before keep theirs.
+- **One route per request.** A request reads the saved key once and its
+  kept chunks, pacer and transport use that same key and model.
+- **Every retry revalidates under the lock.** The note's queue counts
+  finished runs; a retry that sees a run finish after it was queued, or a
+  ready note, does not process the note again, whatever its queue depth.
+
+Third review of the same addendum (2026-10-28, before release):
+
+- **An unreadable saved key is an error, not Clovy API's route.** Only no
+  saved key takes Clovy API's route; a saved key the credential store
+  cannot return fails the request with `provider_api_key_unavailable`,
+  and the live preview sends nothing.
+- **A manual retry marks only a still-failed note.** Its early
+  transcribing status is a compare-and-set from failed; a retry that made
+  it always runs, so a skipped run never leaves the note in between.

@@ -65,6 +65,47 @@ describe("missing provider keys", () => {
   });
 });
 
+describe("Groq rate limits", () => {
+  afterEach(() => applyInterfaceLocale("en"));
+
+  const usageLimit =
+    "Groq reports that its usage limit was reached. Try again later, or check the plan behind your saved Groq key.";
+  const paused =
+    "Groq usage limit reached. Clovy continues transcribing at 14:35. Parts already transcribed are kept.";
+
+  it("keeps the English sentences as stored", () => {
+    expect(userFacingFailureMessage(`System: ${usageLimit} | Microphone: ${usageLimit}`)).toBe(
+      `System: ${usageLimit} | Microphone: ${usageLimit}`,
+    );
+    expect(userFacingFailureMessage(paused)).toBe(paused);
+  });
+
+  it("shows the usage limit in Portuguese", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(userFacingFailureMessage(`System: ${usageLimit} | Microphone: ${usageLimit}`)).toBe(
+      "Sistema: A Groq informa que o limite de uso foi atingido. Tente de novo mais tarde ou confira o plano da sua chave Groq salva. | Microfone: A Groq informa que o limite de uso foi atingido. Tente de novo mais tarde ou confira o plano da sua chave Groq salva.",
+    );
+  });
+
+  it("says in Portuguese that the saved Groq key could not be read", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(
+      userFacingFailureMessage(
+        "Microphone: Clovy could not read your saved Groq key. Open Settings and save it again.",
+      ),
+    ).toBe(
+      "Microfone: O Clovy não conseguiu ler sua chave Groq salva. Abra as Configurações e salve-a de novo.",
+    );
+  });
+
+  it("shows when a paused note continues, in Portuguese", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(userFacingFailureMessage(paused)).toBe(
+      "Limite de uso da Groq atingido. O Clovy continua a transcrição às 14:35. As partes já transcritas ficam salvas.",
+    );
+  });
+});
+
 describe("NoteFailureBanner", () => {
   it("shows only Retry for generic failures and reassures audio is saved", () => {
     render(

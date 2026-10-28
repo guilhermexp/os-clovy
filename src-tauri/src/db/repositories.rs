@@ -35,6 +35,14 @@ pub struct Repositories {
     pub pool: SqlitePool,
 }
 
+#[derive(Debug, Clone)]
+pub struct NoteTranscriptionChunk {
+    pub text: String,
+    pub language: Option<String>,
+    /// The provider found no speech in this chunk.
+    pub no_speech: bool,
+}
+
 pub struct PendingDictationHistoryItem {
     transaction: sqlx::transaction::Transaction<'static, Sqlite>,
     item: DictationHistoryItemDto,
@@ -2871,6 +2879,94 @@ impl Repositories {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get("updated_at"))
+    }
+
+    /// A finished chunk of a split saved-audio job, by its chunk key.
+    pub async fn note_transcription_chunk(
+        &self,
+        chunk_key: &str,
+    ) -> Result<Option<NoteTranscriptionChunk>, sqlx::error::Error> {
+        let row = query(
+            "SELECT text, language, no_speech FROM note_transcription_chunks WHERE chunk_key = ?",
+        )
+        .bind(chunk_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| NoteTranscriptionChunk {
+            text: row.get("text"),
+            language: row.get("language"),
+            no_speech: row.get::<i64, _>("no_speech") != 0,
+        }))
+    }
+
+    pub async fn save_note_transcription_chunk(
+        &self,
+        chunk_key: &str,
+        recording_session_id: &str,
+        chunk: &NoteTranscriptionChunk,
+    ) -> Result<(), sqlx::error::Error> {
+        query(
+            "INSERT INTO note_transcription_chunks
+             (chunk_key, recording_session_id, text, language, no_speech, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(chunk_key) DO UPDATE SET
+               text = excluded.text,
+               language = excluded.language,
+               no_speech = excluded.no_speech",
+        )
+        .bind(chunk_key)
+        .bind(recording_session_id)
+        .bind(&chunk.text)
+        .bind(&chunk.language)
+        .bind(i64::from(chunk.no_speech))
+        .bind(timestamp())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Shows a manual retry at once, in one statement: only a note still
+    /// failed becomes transcribing, so a retry never writes over a note
+    /// another run made ready or is processing.
+    pub async fn mark_failed_note_transcribing(
+        &self,
+        note_id: &str,
+    ) -> Result<bool, sqlx::error::Error> {
+        let result = query(
+            "UPDATE notes
+             SET processing_status = ?, last_error = NULL, updated_at = ?
+             WHERE id = ? AND processing_status = ?",
+        )
+        .bind(ProcessingStatus::Transcribing.as_db())
+        .bind(timestamp())
+        .bind(note_id)
+        .bind(ProcessingStatus::Failed.as_db())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Takes a note paused by a provider rate limit for its automatic resume,
+    /// in one statement: only while the note still shows that very pause, so
+    /// a Retry that got there first, or a second resume, claims nothing.
+    pub async fn claim_paused_note(
+        &self,
+        note_id: &str,
+        paused_message: &str,
+    ) -> Result<bool, sqlx::error::Error> {
+        let result = query(
+            "UPDATE notes
+             SET processing_status = ?, updated_at = ?
+             WHERE id = ? AND processing_status = ? AND last_error = ?",
+        )
+        .bind(ProcessingStatus::Transcribing.as_db())
+        .bind(timestamp())
+        .bind(note_id)
+        .bind(ProcessingStatus::Failed.as_db())
+        .bind(paused_message)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn set_note_transcription_warning(

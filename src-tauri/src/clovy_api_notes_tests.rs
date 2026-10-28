@@ -165,6 +165,173 @@ async fn a_transient_groq_failure_is_retried_once() {
     assert_eq!(heads(&groq).len(), 2);
 }
 
+fn rate_limited(headers: &[(&str, &str)]) -> (u16, serde_json::Value, Vec<(String, String)>) {
+    (
+        429,
+        serde_json::json!({ "error": { "message": "Rate limit reached", "code": "rate_limit_exceeded" } }),
+        headers
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+    )
+}
+
+async fn transcribe_against(groq: &FakeServer) -> Result<TranscriptionProviderResult, AppError> {
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        groq_base: groq.base_url.clone(),
+        ..hosts.transport()
+    };
+    let directory = tempfile::tempdir().unwrap();
+    transcribe_saved_audio_via(
+        &transport,
+        Some("gsk-user"),
+        MODEL.to_string(),
+        turn_request(&directory, false),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_groq_rate_limit_reports_the_wait_and_is_not_retried_early() {
+    let groq = test_server::start_with_headers(Arc::new(|_: &serde_json::Value| {
+        rate_limited(&[("retry-after", "30")])
+    }))
+    .await;
+
+    let error = transcribe_against(&groq).await.unwrap_err();
+
+    assert_eq!(error.code, "groq_usage_limit_exceeded");
+    assert_eq!(
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("retryAfterMs")),
+        Some(&serde_json::json!(30_000))
+    );
+    // Retrying before `retry-after` only spends another request.
+    assert_eq!(heads(&groq).len(), 1);
+}
+
+#[tokio::test]
+async fn a_short_groq_retry_after_is_waited_then_retried() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let groq = test_server::start_with_headers(Arc::new(move |_: &serde_json::Value| {
+        if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+            rate_limited(&[("retry-after", "1")])
+        } else {
+            (
+                200,
+                serde_json::json!({ "text": "after the wait", "language": "en" }),
+                Vec::new(),
+            )
+        }
+    }))
+    .await;
+    let started = std::time::Instant::now();
+
+    let result = transcribe_against(&groq).await.unwrap();
+
+    assert_eq!(result.text, "after the wait");
+    assert_eq!(heads(&groq).len(), 2);
+    assert!(started.elapsed() >= Duration::from_millis(1_000));
+}
+
+#[tokio::test]
+async fn the_requests_reset_header_sets_the_wait_without_retry_after() {
+    let groq = test_server::start_with_headers(Arc::new(|_: &serde_json::Value| {
+        rate_limited(&[
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-reset-requests", "2m59.56s"),
+        ])
+    }))
+    .await;
+
+    let error = transcribe_against(&groq).await.unwrap_err();
+
+    assert_eq!(error.code, "groq_usage_limit_exceeded");
+    assert_eq!(
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("retryAfterMs")),
+        Some(&serde_json::json!(179_560))
+    );
+    assert_eq!(heads(&groq).len(), 1);
+}
+
+#[tokio::test]
+async fn a_packed_turn_request_asks_groq_for_segment_times() {
+    let groq = answering(
+        200,
+        serde_json::json!({
+            "text": "first turn second turn",
+            "language": "portuguese",
+            "segments": [
+                { "start": 0.0, "end": 1.9, "text": " first turn", "no_speech_prob": 0.01 },
+                { "start": 2.0, "end": 2.4, "text": " hmm", "no_speech_prob": 0.9 },
+                { "start": 2.5, "end": 4.25, "text": " second turn", "no_speech_prob": 0.02 }
+            ]
+        }),
+    )
+    .await;
+    let hosts = Hosts::start().await;
+    let transport = DictationTransport {
+        groq_base: groq.base_url.clone(),
+        ..hosts.transport()
+    };
+    let directory = tempfile::tempdir().unwrap();
+
+    let timed = transcribe_saved_audio_timed_via(
+        &transport,
+        "gsk-user",
+        MODEL.to_string(),
+        turn_request(&directory, false),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        timed.segments,
+        vec![
+            TranscriptSegment {
+                start_ms: 0,
+                end_ms: 1_900,
+                text: "first turn".to_string(),
+            },
+            TranscriptSegment {
+                start_ms: 2_500,
+                end_ms: 4_250,
+                text: "second turn".to_string(),
+            },
+        ]
+    );
+    let body = groq.raw_bodies.lock().unwrap()[0].clone();
+    for expected in [
+        "name=\"response_format\"\r\n\r\nverbose_json\r\n",
+        "name=\"timestamp_granularities[]\"\r\n\r\nsegment\r\n",
+        "name=\"prompt\"\r\n\r\nSamir",
+        "filename=\"audio.wav\"",
+    ] {
+        assert!(body.contains(expected), "{expected} missing in {body}");
+    }
+    assert_eq!(
+        header(&heads(&groq)[0], "authorization"),
+        Some("Bearer gsk-user")
+    );
+    assert!(heads(&hosts.clovy).is_empty());
+}
+
+#[test]
+fn groq_reset_durations_parse() {
+    assert_eq!(parse_groq_reset_ms("7.66s"), Some(7_660));
+    assert_eq!(parse_groq_reset_ms("2m59.56s"), Some(179_560));
+    assert_eq!(parse_groq_reset_ms("1h2m3s"), Some(3_723_000));
+    assert_eq!(parse_groq_reset_ms("12ms"), Some(12));
+    assert_eq!(parse_groq_reset_ms("soon"), None);
+}
+
 #[tokio::test]
 async fn a_rejected_request_is_not_retried() {
     let groq = answering(400, serde_json::json!({ "error": "bad audio" })).await;

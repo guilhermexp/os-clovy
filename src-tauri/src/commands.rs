@@ -20,9 +20,9 @@ use crate::{
         processing::{
             add_latency_checkpoint, manual_notes_for_generation,
             process_saved_source_audio_with_progress, NoteProcessingProgressReporter,
-            ProcessingTiming, NOTE_PROCESSING_PROGRESS_EVENT,
+            ProcessingTiming, NOTE_PROCESSING_PROGRESS_EVENT, TRANSCRIPTION_RATE_LIMITED_CODE,
         },
-        processing_queue,
+        processing_queue::{self, RetryOrigin},
         types::{
             AppError, AssignNoteToFolderRequest, AssignSessionToFolderRequest,
             AssignSessionToProfileRequest, BootstrapResponse, CheckRecordingSourceReadinessRequest,
@@ -1950,7 +1950,87 @@ async fn persist_recording_recovery_state(
     Ok(())
 }
 
+/// The app a rate-limited note resumes in; every processing run builds its
+/// progress reporter from it first.
+static RATE_LIMIT_RESUME_APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+/// After the pause's own time, so Groq's window has surely reset.
+const RATE_LIMIT_RESUME_MARGIN_MS: i64 = 5_000;
+/// Wall-clock checks while waiting: a monotonic sleep stops while the Mac
+/// sleeps, and the resume time is a clock time.
+const RATE_LIMIT_RESUME_POLL: Duration = Duration::from_secs(60);
+
+/// A note paused by a provider rate limit
+/// (`TRANSCRIPTION_RATE_LIMITED_CODE`) runs again at the time its message
+/// names, while Clovy stays open and the note still shows that pause. The run
+/// is the Retry run: finished turns are reused, only the missing ones are sent.
+fn schedule_rate_limited_resume(note_id: &str, recording_session_id: &str, error: &AppError) {
+    if error.code != TRANSCRIPTION_RATE_LIMITED_CODE {
+        return;
+    }
+    let Some(resume_at_ms) = error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("resumeAtMs"))
+        .and_then(serde_json::Value::as_i64)
+    else {
+        return;
+    };
+    let Some(app) = RATE_LIMIT_RESUME_APP.get().cloned() else {
+        return;
+    };
+    let note_id = note_id.to_string();
+    let recording_session_id = recording_session_id.to_string();
+    let paused_message = error.message.clone();
+    tracing::info!(%note_id, resume_at_ms, "note transcription paused by a rate limit");
+    tauri::async_runtime::spawn(async move {
+        let resume_at_ms = resume_at_ms.saturating_add(RATE_LIMIT_RESUME_MARGIN_MS);
+        loop {
+            let remaining_ms = resume_at_ms - Utc::now().timestamp_millis();
+            if remaining_ms <= 0 {
+                break;
+            }
+            tokio::time::sleep(
+                RATE_LIMIT_RESUME_POLL.min(Duration::from_millis(remaining_ms as u64)),
+            )
+            .await;
+        }
+        let Ok(repos) = repositories(&app).await else {
+            return;
+        };
+        // One claim per pause: a Retry that got there first, or another
+        // resume, leaves nothing to claim.
+        if !repos
+            .claim_paused_note(&note_id, &paused_message)
+            .await
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // Boxed: the resumed run can pause and schedule another resume.
+        let resumed: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<NoteDto, AppError>> + Send>,
+        > = Box::pin(retry_processing_from(
+            app,
+            RetryProcessingRequest {
+                note_id: note_id.clone(),
+                step: None,
+                recording_session_id: Some(recording_session_id),
+            },
+            RetryOrigin::Resume,
+        ));
+        if let Err(error) = resumed.await {
+            tracing::warn!(%note_id, code = %error.code, "rate-limited note did not resume");
+            // The claim set the note to transcribing; give the pause back so
+            // the note keeps its message and its Retry.
+            let _ = repos
+                .set_note_status(&note_id, ProcessingStatus::Failed, Some(paused_message))
+                .await;
+        }
+    });
+}
+
 fn note_processing_progress_reporter(app: &AppHandle) -> NoteProcessingProgressReporter {
+    let _ = RATE_LIMIT_RESUME_APP.set(app.clone());
     let app = app.clone();
     NoteProcessingProgressReporter::new(move |progress| {
         if let Err(error) = app.emit(NOTE_PROCESSING_PROGRESS_EVENT, progress) {
@@ -2393,7 +2473,7 @@ async fn finish_recording_session_with_timing(
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
-        let _ = process_saved_source_audio_with_progress(
+        let result = process_saved_source_audio_with_progress(
             &task_repos,
             &task_note_id,
             &task_session_id,
@@ -2407,6 +2487,9 @@ async fn finish_recording_session_with_timing(
         )
         .await;
         ticket.finish();
+        if let Err(error) = &result {
+            schedule_rate_limited_resume(&task_note_id, &task_session_id, error);
+        }
     });
     Ok(FinishRecordingResponse {
         note,
@@ -2564,6 +2647,14 @@ pub async fn retry_processing(
     app: AppHandle,
     request: RetryProcessingRequest,
 ) -> Result<NoteDto, AppError> {
+    retry_processing_from(app, request, RetryOrigin::Manual).await
+}
+
+async fn retry_processing_from(
+    app: AppHandle,
+    request: RetryProcessingRequest,
+    origin: RetryOrigin,
+) -> Result<NoteDto, AppError> {
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
     let sources = retry_audio_sources(
@@ -2573,12 +2664,13 @@ pub async fn retry_processing(
         request.recording_session_id.as_deref(),
     )
     .await?;
-    let (ticket, depth) = processing_queue::enqueue(&request.note_id);
-    if depth <= 1 {
-        repos
-            .set_note_status(&request.note_id, ProcessingStatus::Transcribing, None)
+    let (ticket, _depth) = processing_queue::enqueue(&request.note_id);
+    // Show the retry at once, but only on a note that is still failed: never
+    // over a ready note, and a resume's claim already did it for the resume.
+    let marked_by_this_run = origin == RetryOrigin::Manual
+        && repos
+            .mark_failed_note_transcribing(&request.note_id)
             .await?;
-    }
 
     let mut note = repos.get_note(&request.note_id).await?;
     note.queued_recordings = processing_queue::queued_behind(&request.note_id);
@@ -2616,10 +2708,28 @@ pub async fn retry_processing(
                 return;
             }
         };
+        // Whatever ran after this run was queued may have finished the note:
+        // a second run would generate it again, billed, and replace the
+        // result. Checked under the lock for every run, whatever its depth.
+        if !processing_queue::queued_retry_should_run(
+            origin,
+            note.processing_status,
+            ticket.runs_completed_since_enqueue(),
+            marked_by_this_run,
+        ) {
+            tracing::info!(
+                note_id = %task_note_id,
+                ?origin,
+                status = ?note.processing_status,
+                "retry skipped: the note no longer needs it"
+            );
+            ticket.finish();
+            return;
+        }
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
-        let _ = process_saved_source_audio_with_progress(
+        let result = process_saved_source_audio_with_progress(
             &task_repos,
             &task_note_id,
             &task_recording_session_id,
@@ -2638,6 +2748,9 @@ pub async fn retry_processing(
         )
         .await;
         ticket.finish();
+        if let Err(error) = &result {
+            schedule_rate_limited_resume(&task_note_id, &task_recording_session_id, error);
+        }
     });
     Ok(note)
 }
@@ -2895,6 +3008,9 @@ async fn process_recovered_source_audio(
     )
     .await;
     ticket.finish();
+    if let Err(error) = &result {
+        schedule_rate_limited_resume(note_id, session_id, error);
+    }
     result
 }
 

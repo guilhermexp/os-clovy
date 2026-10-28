@@ -1,6 +1,6 @@
 use crate::{
     audio::turns::normalize_wav_for_transcription,
-    clovy_api::{transcribe_saved_audio, TranscriptionRequest},
+    clovy_api::TranscriptionRequest,
     domain::types::{RecordingSource, RecordingSourceMode},
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -592,6 +592,12 @@ async fn transcribe_preview_chunk(
         channels,
         samples,
     } = request;
+    // The preview shares the provider account with the final transcription:
+    // it takes a request only when one is free now and within its part of
+    // the hour's audio, and otherwise drops the chunk (ADR-0002 lets preview
+    // audio be dropped). The chunk then goes with the same key whose pacer
+    // gave it the request.
+    let route = crate::domain::processing::live_preview_route(end_ms - start_ms)?;
     let temp_path = preview_chunk_path(session_id, segment_id);
     if let Err(error) = write_preview_wav(&temp_path, sample_rate, channels, samples) {
         let _ = std::fs::remove_file(&temp_path);
@@ -616,7 +622,7 @@ async fn transcribe_preview_chunk(
     };
 
     let request = preview_transcription_request(audio_path.clone(), session_id, segment_id);
-    let result = transcribe_saved_audio(request).await;
+    let result = crate::domain::processing::transcribe_on_route(route, request).await;
     let _ = std::fs::remove_file(&temp_path);
     if audio_path != temp_path {
         let _ = std::fs::remove_file(&audio_path);

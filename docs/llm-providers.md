@@ -187,8 +187,42 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   per-source fallback, live preview) posts straight to Groq with the user's
   own Groq key, with the parameters Clovy API sends (`response_format=json`,
   canonical `audio.wav`/`audio.m4a` name, dictionary prompt, language, 25 MB
-  cap, one retry of a 408/429/5xx or transport failure; an empty transcript is
+  cap, one retry of a 408/5xx or transport failure; an empty transcript is
   `no_speech`), and through `/v1/notes/transcribe` without one (ADR-0070).
+  A Groq 429 carries its `retry-after` (else `x-ratelimit-reset-requests`) as
+  `details.retryAfterMs`; `send_direct` waits it out only up to 2 s. Final
+  transcription reads one route per request (the saved key, the run's
+  model, that key's pacer) and its kept chunks, pacer and transport all use
+  it; the key is never read again for that request. Only no saved key
+  takes Clovy API's route: a saved key the credential store cannot return
+  fails the request with `provider_api_key_unavailable` (the note says to
+  save it again) and the live preview sends nothing. It runs behind the
+  pacer of that route (`domain/processing.rs` `RequestPacer`): one per Groq account, keyed by the
+  first 8 bytes of the key's SHA-256 (never the key), with 18 requests a
+  minute and 7,200 s of billed audio an hour (each request billed at least
+  10 s) across both Sources, every note and the live preview; Clovy API's
+  route without a key has its own pacer, held only by a 429 it relays. Pacer
+  times are wall-clock milliseconds, so a pause ends on time across sleep,
+  and a clock set back never stretches it. A 429 holds every caller of that
+  pacer and repeats the same request; a wait over 90 s pauses the note with
+  `transcription_rate_limited` and `details.resumeAtMs`, the note says when
+  it continues, and `commands.rs` resumes it then while Clovy is open: the
+  resume claims the pause in one update, so a Retry that got there first
+  leaves it nothing, and every retry checks under the note's lock how many
+  runs finished since it was queued: a ready note is never processed again.
+  A manual retry shows itself at once only by turning a still-failed note
+  into transcribing (a compare-and-set), and a retry that did so always
+  runs, so no skipped run leaves the note transcribing.
+  Every finished chunk of a split job (a full-Source job, an over-long turn)
+  is kept in `note_transcription_chunks`, keyed with its model and language,
+  so a resume sends only the chunks still missing. A job's durable identity
+  includes the transcription model (the default adds nothing), so a model
+  switched between pause and resume transcribes the note again. With the key, consecutive speech
+  turns of one Source go as turn packs of up to 600 s through
+  `transcribe_saved_audio_timed` (`verbose_json`, segment times) and come
+  back per turn. The live preview takes a request only when one is free and
+  within 3,600 s of the hour's audio, otherwise it drops the chunk (ADR-0070
+  addendum).
   Without the key and without a reachable Clovy API, the note names the
   missing key (`groq_api_key_missing`, `openrouter_api_key_missing`) instead of
   the HTTP error.

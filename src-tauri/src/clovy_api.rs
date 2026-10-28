@@ -372,6 +372,26 @@ pub async fn transcribe_saved_audio(
     .await
 }
 
+/// Note transcription with a Groq key and model the caller already resolved
+/// for this request, so the request goes with the same key its pacer chose.
+pub(crate) async fn transcribe_saved_audio_with(
+    groq_key: Option<&str>,
+    model: String,
+    request: TranscriptionRequest,
+) -> Result<TranscriptionProviderResult, AppError> {
+    transcribe_saved_audio_via(&production_notes_transport(), groq_key, model, request).await
+}
+
+/// The timed (turn pack) request with an already resolved Groq key and model.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) async fn transcribe_saved_audio_timed_with(
+    groq_key: &str,
+    model: String,
+    request: TranscriptionRequest,
+) -> Result<TimedTranscription, AppError> {
+    transcribe_saved_audio_timed_via(&production_notes_transport(), groq_key, model, request).await
+}
+
 /// The note's failure when neither the user's Groq key nor Clovy API is
 /// there. Kept byte-identical to `notes.failure.groqKeyMissing`.
 pub(crate) const GROQ_API_KEY_MISSING_MESSAGE: &str =
@@ -440,21 +460,60 @@ pub(crate) async fn transcribe_saved_audio_via<K: DictationTokens>(
             provider: response.provider,
         });
     };
+    // The request Clovy API makes to Groq for /v1/notes/transcribe: a JSON
+    // answer and a canonical file name, so the local name never leaves.
+    let body = send_groq_transcription(
+        transport,
+        groq_key,
+        &model,
+        &request.audio_path,
+        audio,
+        context,
+        language,
+        false,
+    )
+    .await?;
+    let text = body.text.trim().to_string();
+    if text.is_empty() {
+        // The no-speech error Clovy API answers for an empty transcript.
+        return Err(AppError::new("no_speech", "no_speech"));
+    }
+    Ok(TranscriptionProviderResult {
+        text,
+        language: body.language,
+        provider: BuiltinProvider::Groq.id().to_string(),
+    })
+}
+
+/// One `/audio/transcriptions` request to Groq with the user's key. `timed`
+/// asks for `verbose_json` with segment timestamps instead of plain `json`.
+#[allow(clippy::too_many_arguments)]
+async fn send_groq_transcription<K: DictationTokens>(
+    transport: &DictationTransport<'_, K>,
+    groq_key: &str,
+    model: &str,
+    audio_path: &Path,
+    audio: Vec<u8>,
+    context: Option<String>,
+    language: Option<String>,
+    timed: bool,
+) -> Result<GroqTranscription, AppError> {
     if audio.len() > GROQ_MAX_AUDIO_BYTES {
         return Err(AppError::new("audio_too_large", AUDIO_TOO_LARGE_MESSAGE));
     }
-    // The request Clovy API makes to Groq for /v1/notes/transcribe: a JSON
-    // answer and a canonical file name, so the local name never leaves.
-    let filename = canonical_audio_filename(&request.audio_path);
+    let filename = canonical_audio_filename(audio_path);
     let url = format!("{}/audio/transcriptions", transport.groq_base);
     let response = send_direct(BuiltinProvider::Groq, "this transcription", || {
         let mut form = Form::new()
-            .text("model", model.clone())
-            .text("response_format", "json")
-            .part(
-                "file",
-                audio_part(audio.clone(), filename, &request.audio_path)?,
-            );
+            .text("model", model.to_string())
+            .text(
+                "response_format",
+                if timed { "verbose_json" } else { "json" },
+            )
+            .part("file", audio_part(audio.clone(), filename, audio_path)?);
+        if timed {
+            form = form.text("timestamp_granularities[]", "segment");
+        }
         if let Some(context) = context.clone() {
             form = form.text("prompt", context);
         }
@@ -468,20 +527,102 @@ pub(crate) async fn transcribe_saved_audio_via<K: DictationTokens>(
             .multipart(form))
     })
     .await?;
-    let body: GroqTranscription = response
+    response
         .json()
         .await
-        .map_err(|_| AppError::new("provider_response_invalid", INVALID_DIRECT_RESPONSE))?;
-    let text = body.text.trim().to_string();
-    if text.is_empty() {
-        // The no-speech error Clovy API answers for an empty transcript.
-        return Err(AppError::new("no_speech", "no_speech"));
-    }
-    Ok(TranscriptionProviderResult {
-        text,
+        .map_err(|_| AppError::new("provider_response_invalid", INVALID_DIRECT_RESPONSE))
+}
+
+/// A stretch of a timed transcription, in milliseconds from the audio's start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptSegment {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+}
+
+/// A transcription with its segment times: a pack of several speech turns
+/// sent as one request is split back into its turns by these times.
+#[derive(Debug, Clone)]
+pub struct TimedTranscription {
+    pub language: Option<String>,
+    pub segments: Vec<TranscriptSegment>,
+}
+
+/// Note transcription with segment times, straight to Groq with the user's
+/// key. Without the key there is no timed route: the caller sends one turn
+/// per request instead.
+pub async fn transcribe_saved_audio_timed(
+    request: TranscriptionRequest,
+) -> Result<TimedTranscription, AppError> {
+    let Some(groq_key) = crate::providers::provider_api_key(BuiltinProvider::Groq)? else {
+        return Err(AppError::new(
+            "groq_api_key_missing",
+            GROQ_API_KEY_MISSING_MESSAGE,
+        ));
+    };
+    transcribe_saved_audio_timed_via(
+        &production_notes_transport(),
+        &groq_key,
+        crate::providers::transcription_model(),
+        request,
+    )
+    .await
+}
+
+pub(crate) async fn transcribe_saved_audio_timed_via<K: DictationTokens>(
+    transport: &DictationTransport<'_, K>,
+    groq_key: &str,
+    model: String,
+    request: TranscriptionRequest,
+) -> Result<TimedTranscription, AppError> {
+    let audio = read_audio(&request.audio_path).await?;
+    let context = request
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let language = normalized_language(request.language.as_deref()).map(str::to_string);
+    let body = send_groq_transcription(
+        transport,
+        groq_key,
+        &model,
+        &request.audio_path,
+        audio,
+        context,
+        language,
+        true,
+    )
+    .await?;
+    let segments = body
+        .segments
+        .ok_or_else(|| AppError::new("provider_response_invalid", INVALID_DIRECT_RESPONSE))?
+        .into_iter()
+        .filter(|segment| {
+            !segment
+                .no_speech_prob
+                .is_some_and(|probability| probability >= GROQ_NO_SPEECH_PROB_LIMIT)
+        })
+        .filter_map(|segment| {
+            let text = segment.text.trim().to_string();
+            (!text.is_empty()).then(|| TranscriptSegment {
+                start_ms: seconds_to_ms(segment.start),
+                end_ms: seconds_to_ms(segment.end),
+                text,
+            })
+        })
+        .collect();
+    Ok(TimedTranscription {
         language: body.language,
-        provider: BuiltinProvider::Groq.id().to_string(),
+        segments,
     })
+}
+
+fn seconds_to_ms(seconds: Option<f64>) -> i64 {
+    seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map_or(0, |seconds| (seconds * 1_000.0).round() as i64)
 }
 
 /// Clovy API's canonical upload names (`AudioFormat::upstream_filename`).
@@ -510,9 +651,16 @@ fn clovy_api_unreachable(error: reqwest::Error, provider: BuiltinProvider) -> Ap
     }
 }
 
+/// The longest `retry-after` a direct call waits out itself. A longer wait
+/// goes back to the caller as `details.retryAfterMs`: retrying earlier only
+/// spends another request (the note pacer waits instead).
+const DIRECT_PROVIDER_MAX_INLINE_RATE_LIMIT_WAIT_MS: u64 = 2_000;
+
 /// Sends one request to the user's own provider, retrying a transient
 /// failure once like Clovy API does (`clovy-providers::retry`): 408, 429,
-/// 5xx, and a transport error that is not a timeout.
+/// 5xx, and a transport error that is not a timeout. A 429 waits for the
+/// provider's `retry-after` before that retry, and is returned at once with
+/// the wait when it is longer than two seconds.
 async fn send_direct<F>(
     provider: BuiltinProvider,
     task: &str,
@@ -524,17 +672,31 @@ where
     let mut attempt = 1;
     loop {
         let retry = attempt < DIRECT_PROVIDER_ATTEMPTS;
+        let mut delay = DIRECT_PROVIDER_RETRY_BACKOFF;
         match build()?.send().await {
             Ok(response) if response.status().is_success() => return Ok(response),
             Ok(response) => {
                 let status = response.status();
-                if !(retry && direct_status_is_transient(status)) {
+                let rate_limit_wait_ms = (status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                    .then(|| rate_limit_wait_ms(response.headers()))
+                    .flatten();
+                let wait_too_long = rate_limit_wait_ms
+                    .is_some_and(|wait_ms| wait_ms > DIRECT_PROVIDER_MAX_INLINE_RATE_LIMIT_WAIT_MS);
+                if !(retry && direct_status_is_transient(status)) || wait_too_long {
                     tracing::warn!(
                         provider = provider.id(),
                         status = status.as_u16(),
+                        retry_after_ms = rate_limit_wait_ms,
                         "direct provider call failed"
                     );
-                    return Err(direct_note_provider_error(provider, status, task));
+                    let mut error = direct_note_provider_error(provider, status, task);
+                    if let Some(wait_ms) = rate_limit_wait_ms {
+                        error.details = Some(serde_json::json!({ "retryAfterMs": wait_ms }));
+                    }
+                    return Err(error);
+                }
+                if let Some(wait_ms) = rate_limit_wait_ms {
+                    delay = Duration::from_millis(wait_ms);
                 }
             }
             Err(error) => {
@@ -546,11 +708,62 @@ where
         tracing::warn!(
             provider = provider.id(),
             attempt,
+            delay_ms = delay.as_millis() as u64,
             "direct provider call failed transiently, retrying"
         );
-        tokio::time::sleep(DIRECT_PROVIDER_RETRY_BACKOFF).await;
+        tokio::time::sleep(delay).await;
         attempt += 1;
     }
+}
+
+/// The wait a 429 asks for: `retry-after` in seconds, else the request
+/// window's reset when no requests remain (Groq's `2m59.56s` format).
+fn rate_limit_wait_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+    };
+    if let Some(seconds) = header("retry-after")
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+    {
+        return Some((seconds * 1_000.0).ceil() as u64);
+    }
+    (header("x-ratelimit-remaining-requests") == Some("0"))
+        .then(|| header("x-ratelimit-reset-requests").and_then(parse_groq_reset_ms))
+        .flatten()
+}
+
+/// Parses a reset duration such as `7.66s`, `2m59.56s`, `1h2m3s` or `12ms`.
+fn parse_groq_reset_ms(value: &str) -> Option<u64> {
+    let mut rest = value.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total_ms = 0.0_f64;
+    while !rest.is_empty() {
+        let number_end = rest
+            .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+            .unwrap_or(rest.len());
+        let number = rest[..number_end].parse::<f64>().ok()?;
+        rest = &rest[number_end..];
+        let (unit_ms, unit_len) = if rest.starts_with("ms") {
+            (1.0, 2)
+        } else if rest.starts_with('h') {
+            (3_600_000.0, 1)
+        } else if rest.starts_with('m') {
+            (60_000.0, 1)
+        } else if rest.starts_with('s') {
+            (1_000.0, 1)
+        } else {
+            return None;
+        };
+        total_ms += number * unit_ms;
+        rest = &rest[unit_len..];
+    }
+    Some(total_ms.round() as u64)
 }
 
 fn direct_status_is_transient(status: reqwest::StatusCode) -> bool {
@@ -876,6 +1089,11 @@ struct GroqSegment {
     text: String,
     #[serde(default)]
     no_speech_prob: Option<f64>,
+    /// Seconds from the audio's start (`verbose_json`).
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
 }
 
 /// The transcript without no-speech segments; the plain text when Groq sent
