@@ -1646,7 +1646,17 @@ export function AgentWorkspace({
       setError(messageFromError(cause));
     }
   };
-  const sessionDisplayModel = projection.run?.model ?? selectedSession?.model ?? model;
+  const sessionModel = projection.run?.model ?? selectedSession?.model ?? model;
+  const sessionCli = sessionModel.startsWith(CLI_ENGINE_MODEL_PREFIX)
+    ? sessionModel.slice(CLI_ENGINE_MODEL_PREFIX.length)
+    : undefined;
+  const sessionDisplayModel =
+    engineCatalog?.clis.find((cli) => cli.id === sessionCli)?.name ??
+    (sessionCli === "claude"
+      ? "Claude Code"
+      : sessionCli === "codex"
+        ? "Codex"
+        : (sessionCli ?? sessionModel));
   const toolUsage = [...projection.items]
     .filter(
       (item) =>

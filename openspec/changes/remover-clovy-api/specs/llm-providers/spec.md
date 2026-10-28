@@ -36,7 +36,7 @@ Com o motor de Notas = OpenRouter, o desktop SHALL mandar a transcrição de not
 #### Scenario: Sem chave Groq
 - **WHEN** não há chave Groq salva e uma gravação começa e termina
 - **THEN** a prévia ao vivo não inicia, a transcrição falha com `groq_api_key_missing` e nenhuma requisição de transcrição ou prévia é feita
-- Test: unit — portão da prévia com e sem chave; integration — servidor falso em `127.0.0.1:8080` com zero requisições
+- Test: unit — portão da prévia com e sem chave; integration — servidor sentinela em porta efêmera, injetada como a URL legada, com zero requisições
 
 #### Scenario: Falha transitória da Groq
 - **WHEN** a Groq responde 503 na primeira tentativa e 200 na segunda
@@ -79,7 +79,7 @@ Quando falta a chave do provedor de que a nota precisa, a nota SHALL dizer, na l
 #### Scenario: Transcrição sem chave Groq e sem servidor
 - **WHEN** não há chave Groq e uma gravação termina
 - **THEN** a transcrição falha com `groq_api_key_missing` sem nenhuma requisição de rede, e a nota mostra traduzida a frase "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings."
-- Test: integration — servidor falso em `127.0.0.1:8080` recebe zero requisições; unit — `note-failure-banner.test.tsx` traduz a frase em pt-BR
+- Test: integration — servidor sentinela em porta efêmera, injetada como a URL legada, recebe zero requisições; unit — `note-failure-banner.test.tsx` traduz a frase em pt-BR
 
 #### Scenario: Geração sem chave OpenRouter e sem servidor
 - **WHEN** o motor de Notas é OpenRouter e não há chave OpenRouter
@@ -91,3 +91,5 @@ Quando falta a chave do provedor de que a nota precisa, a nota SHALL dizer, na l
 ### Requirement: Endpoint OpenAI-compatível como modelo do agente
 **Reason**: O chat é só dos motores CLI, e o agente nativo sai com a fase 4 de `cli-substitui-agente-nativo`.
 **Migration**: `llm_usage.chat` com `endpoint` ou `clovy` migra uma vez para o CLI padrão. Endpoints cadastrados continuam valendo para notas e atividade.
+
+Nota de verificação (orquestrador, 2026-10-28): os testes automatizados usam porta efêmera para evitar conflitos locais. A prova nativa em `127.0.0.1:8080` é separada, executada somente com a porta livre e limitada aos fluxos autorizados, conforme a tarefa 7.2 e seu relatório. Isso não declara sucesso dos fluxos reais de provedores adiados para validação manual pós-merge pelo dono.

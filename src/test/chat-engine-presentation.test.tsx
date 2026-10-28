@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
@@ -137,6 +137,64 @@ describe("chat engine presentation", () => {
     await user.click(screen.getByRole("button", { name: /Chat engine/i }));
     expect(document.querySelector(".agent-composer-notice")).toBeNull();
     expect(screen.queryByText(/Clovy tools|Clovy's tools/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      name: "Claude session",
+      sessionModel: "__clovy_cli_engine__:claude",
+      expected: "Claude Code",
+    },
+    {
+      name: "Codex run after a Claude session",
+      sessionModel: "__clovy_cli_engine__:claude",
+      runModel: "__clovy_cli_engine__:codex",
+      expected: "Codex",
+    },
+    { name: "catalog engine name", sessionModel: "__clovy_cli_engine__:pi", expected: "Pi" },
+    {
+      name: "unavailable catalog",
+      sessionModel: "__clovy_cli_engine__:claude",
+      catalogUnavailable: true,
+      expected: "Claude Code",
+    },
+    {
+      name: "unavailable Codex catalog",
+      sessionModel: "__clovy_cli_engine__:codex",
+      catalogUnavailable: true,
+      expected: "Codex",
+    },
+    {
+      name: "historical model",
+      sessionModel: "anthropic/historical-model",
+      expected: "anthropic/historical-model",
+    },
+  ])("shows the engine name in Usage for $name", async ({
+    sessionModel,
+    runModel,
+    catalogUnavailable,
+    expected,
+  }) => {
+    const user = userEvent.setup();
+    const storedSession = { ...session, model: sessionModel };
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === "chat_engine_catalog" && catalogUnavailable)
+        return Promise.reject(new Error("Catalog unavailable"));
+      if (command === "get_latest_agent_run" && runModel)
+        return Promise.resolve({
+          id: "latest-run",
+          sessionId: session.id,
+          status: "completed",
+          model: runModel,
+        });
+      return answer(command, [storedSession]);
+    });
+    render(<AgentWorkspace initialSession={storedSession} />);
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Usage" }));
+    const usagePanel = screen.getByRole("dialog", { name: "Usage" });
+    expect(await within(usagePanel).findByText(expected, { exact: true })).toBeInTheDocument();
+    expect(usagePanel).not.toHaveTextContent("__clovy_cli_engine__:");
   });
 
   it("draws each engine row with its brand mark and keeps the row name first", async () => {

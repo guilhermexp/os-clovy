@@ -4,6 +4,8 @@
 
 Define como uma ferramenta chamada por um turno CLI pede aprovação ou resposta ao usuário através do app, e como a decisão volta como resultado da ferramenta.
 
+No fork, as decisões são locais ao app. O requisito anterior de aprovação pelo Companion foi superado pela retirada desse produto, já registrada na base desta change em `CONTEXT.md` e documentada em `docs/companion-protocol.md`; os testes históricos de protocolo não comprovam aprovação de um turno CLI pelo telefone.
+
 ## ADDED Requirements
 
 ### Requirement: Pedido de aprovação visível na sessão
@@ -18,7 +20,7 @@ Uma ferramenta que exige aprovação SHALL registrar no broker um pedido ligado 
 O broker SHALL aceitar uma única decisão por pedido pelo comando de resolução existente. Aprovar MUST liberar a ferramenta; negar MUST devolver `isError` com `user_denied`. Escolhas `session` e `always` MUST valer como aprovação única. Uma segunda decisão MUST ser recusada sem efeito.
 
 #### Scenario: Duas respostas simultâneas
-- **WHEN** desktop e companion respondem ao mesmo pedido ao mesmo tempo
+- **WHEN** duas resoluções locais respondem ao mesmo pedido ao mesmo tempo
 - **THEN** só a primeira decisão vale e a ferramenta executa no máximo uma vez
 - Test: integration — duas resoluções concorrentes contra o mesmo item e contagem de execuções
 
@@ -58,11 +60,3 @@ Quando o spike S1 confirmar o suporte, turnos Claude SHALL encaminhar os pedidos
 - **WHEN** o Claude pede permissão para rodar um comando e o usuário nega
 - **THEN** o CLI recebe a negação e o item da ferramenta aparece como recusado pelo usuário
 - Test: integration — CLI falso que chama `approve_action` como o Claude faria; smoke real com Claude na fase 3
-
-### Requirement: Companion no escopo da ADR-0053
-O companion SHALL receber o aviso de pedidos pendentes de sessões CLI. Somente pedidos de `computer_use` MUST ser respondíveis pelo telefone, uma única vez e com o prazo atual; os demais MUST indicar que aguardam resposta no Mac.
-
-#### Scenario: Aprovação de computer use pelo telefone
-- **WHEN** um turno CLI iniciado pelo companion chama `computer_use` e o telefone aprova
-- **THEN** a ação executa uma vez e uma segunda resposta com o mesmo id é recusada
-- Test: integration — protocolo do companion com par falso e registro de auditoria

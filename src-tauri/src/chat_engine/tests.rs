@@ -1258,6 +1258,69 @@ const UNATTENDED: policy::TurnPermissions = policy::TurnPermissions {
     }),
 };
 
+#[tokio::test]
+#[cfg(unix)]
+async fn policy_fake_codex_receives_an_existing_workspace_image() {
+    let kind = CliKind::Codex;
+    let harness = Harness::new(kind).await;
+    let attachments = harness.workspace.path().join("attachments");
+    std::fs::create_dir(&attachments).unwrap();
+    let image_path = attachments.join("synthetic.png");
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+        .save(&image_path)
+        .unwrap();
+    let program = harness.fake_cli(kind, r#"
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '--image' ]; then
+    test -f "$argument" || exit 8
+    printf '%s' "$argument" > "$LOG/image-read"
+  fi
+  previous="$argument"
+done
+test -s "$LOG/image-read" || exit 9
+echo '{"type":"thread.started","thread_id":"image-fixture"}'
+echo '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"Image file received."}}'
+echo '{"type":"turn.completed"}'
+"#);
+    let manifest = crate::agent_sessions::api::cli_message_with_attachments(
+        "Inspect the image.",
+        &[crate::agent_sessions::MessageAttachmentPayload {
+            id: "synthetic".into(),
+            name: "synthetic.png".into(),
+            path: image_path.to_string_lossy().into(),
+            mime_type: Some("image/png".into()),
+            size_bytes: i64::try_from(std::fs::metadata(&image_path).unwrap().len()).unwrap(),
+            available: true,
+            created_at: "2026-10-28T00:00:00Z".into(),
+        }],
+    );
+    let run_id = harness.new_run(kind, &manifest).await;
+    let mut context = harness.context(kind, &program, &run_id, &manifest, None);
+    context.images = vec![image_path.clone()];
+    let sink = TestSink {
+        repository: harness.repository.clone(),
+        emitted: StdMutex::new(Vec::new()),
+    };
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    execute_turn(&harness.repository, &sink, context, receiver).await;
+    assert_eq!(
+        harness.repository.get_run(&run_id).await.unwrap().status,
+        "completed"
+    );
+    let argv = harness.args(1);
+    let image_arg = argv.windows(2).find(|pair| pair[0] == "--image").unwrap();
+    assert_eq!(Path::new(&image_arg[1]), image_path);
+    assert!(Path::new(&image_arg[1]).is_file());
+    assert_eq!(
+        std::fs::read_to_string(harness.log.path().join("image-read")).unwrap(),
+        image_path.to_string_lossy()
+    );
+    assert!(harness
+        .stdin(1)
+        .contains(&image_path.to_string_lossy().to_string()));
+}
+
 #[test]
 fn chat_engine_unattended_claude_turn_has_only_read_tools_clovy_mcp_and_web() {
     let launch = McpLaunch {

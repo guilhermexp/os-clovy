@@ -2121,6 +2121,7 @@ mod tests {
 
     #[tokio::test]
     async fn claimed_run_snapshots_the_resolved_remote_model_and_safety_mode() {
+        let _guard = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let pool = pool().await;
         let mut request = create_request("every 1h");
         request.model = "auto".into();

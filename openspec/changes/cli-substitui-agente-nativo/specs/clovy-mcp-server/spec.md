@@ -50,7 +50,7 @@ Estas ferramentas SHALL executar sem aprovação do broker, como no motor nativo
 #### Scenario: Mídia exige vínculo
 - **WHEN** um turno vinculado chama `generate_image`
 - **THEN** o arquivo aparece em `artifacts/` do workspace da sessão e na lista de artefatos da sessão
-- Test: integration — clovy-api falso e `list_agent_artifacts` da sessão
+- Test: integration — `media_generate_image_reaches_fal_directly_over_http` usa fal falsa; `media_generate_image_lands_in_the_session_workspace_and_artifact_list` verifica o arquivo e a lista de artefatos da sessão
 
 ### Requirement: Leituras de vault, skills e rotinas
 `get_obsidian_vault`, `list_skills`, `load_skill` e `list_routines` SHALL executar sem aprovação do broker; skills MUST respeitar a habilitação global de `agent_skill_settings`.

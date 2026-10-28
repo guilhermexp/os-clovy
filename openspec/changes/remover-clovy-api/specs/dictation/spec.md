@@ -17,4 +17,6 @@ A transcrição do ditado SHALL ir sempre direto do desktop à Groq com a chave 
 - **WHEN** a limpeza está ligada, há chave Groq e não há chave OpenRouter
 - **THEN** o transcrito bruto é colado e o usuário vê o aviso de chave OpenRouter ausente
 
-Test: integration — servidores HTTP falsos no lugar de Groq e OpenRouter e um servidor falso em `127.0.0.1:8080` que MUST receber zero requisições; cabeçalhos levam só a chave do provedor chamado.
+Test: integration — servidores HTTP falsos no lugar de Groq e OpenRouter e um servidor sentinela em porta efêmera, injetada como a URL legada, que MUST receber zero requisições; cabeçalhos levam só a chave do provedor chamado.
+
+Nota de verificação (orquestrador, 2026-10-28): os testes automatizados usam porta efêmera para evitar conflitos locais. A prova nativa em `127.0.0.1:8080` é separada, executada somente com a porta livre e limitada aos fluxos autorizados, conforme a tarefa 7.2 e seu relatório. Isso não declara sucesso dos fluxos reais de provedores adiados para validação manual pós-merge pelo dono.

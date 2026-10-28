@@ -2483,9 +2483,15 @@ mod tests {
         assert!(!loaded.provider_api_keys_configured.openrouter);
     }
 
-    #[test]
-    fn text_model_selection_preserves_chat_and_note_engines() {
-        let state = test_state();
+    #[tokio::test]
+    async fn text_model_selection_preserves_chat_and_note_engines() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let previous = current_settings();
+        let directory = tempfile::tempdir().unwrap();
+        let state = ProviderSettingsState {
+            path: directory.path().join("provider-settings.json"),
+            settings: Mutex::new(default_settings()),
+        };
         {
             let mut settings = state.settings.lock().unwrap();
             settings.llm_usage.chat = ProviderRef::Cli {
@@ -2513,6 +2519,13 @@ mod tests {
             ProviderRef::Cli { id: CliKind::Codex }
         );
         assert_eq!(settings.remote_generation_model, "example/text-only");
+        let saved = fs::read_to_string(&state.path).unwrap();
+        let (reloaded, _) =
+            settings_from_json(&saved, &crate::llm::secrets::MemorySecretStore::default()).unwrap();
+        assert_eq!(reloaded.remote_generation_model, "example/text-only");
+        assert_eq!(reloaded.llm_usage.chat, settings.llm_usage.chat);
+        assert_eq!(reloaded.llm_usage.notes, settings.llm_usage.notes);
+        replace_current_settings(previous);
     }
 
     #[test]

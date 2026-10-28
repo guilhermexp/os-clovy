@@ -7,12 +7,18 @@ Define quando e como o agente nativo é apagado, o que sobrevive e como os usuá
 ## ADDED Requirements
 
 ### Requirement: Critério de corte
-A remoção SHALL começar só depois de: fases 0 e 2 concluídas; `make verify` sem falhas; testes de paridade do delta `clovy-mcp-server` verdes para Claude e Codex; smoke nativo isolado com turno real de Claude e de Codex usando ao menos uma ferramenta de cada grupo de escrita com aprovação e com negação; nenhum ponto de entrada do app iniciando `run.start`; e aceite explícito do dono.
+A entrega do corte SHALL exigir fases 0 e 2 concluídas, `make verify` sem falhas novas, contratos locais de Claude e Codex cobertos por testes, nenhum ponto de entrada iniciando `run.start`, smoke reduzido das tarefas 3.2 e 3.3 e aceite explícito do dono. As duas falhas de formatação preexistentes MUST ser registradas separadamente. A implementação pode anteceder o smoke, conforme decisão do orquestrador de 2026-10-28.
 
 #### Scenario: Corte bloqueado
 - **WHEN** algum ponto de entrada ainda inicia o runtime nativo
-- **THEN** a fase 4 não começa
-- Test: static — busca por `run.start` e `AgentRuntimeHost` fora dos arquivos a apagar retorna vazio antes do corte
+- **THEN** a entrega da fase 4 fica bloqueada até remover esse ponto de entrada
+- Test: static — busca por `run.start` e `AgentRuntimeHost` no código vigente retorna vazio; integration — evidência reduzida e aceite registrados nas tarefas 3.2 e 3.3
+
+#### Scenario: Smoke reduzido aceito após o corte
+- **WHEN** o dono aceita o corte e o orquestrador registra a redução em 2026-10-28
+- **THEN** a evidência Claude pós-corte com MCP, perfil sintético novo e identidade própria, junto ao relatório da tentativa pré-corte, satisfaz o smoke reduzido; paridade nativa pré-corte, perfil copiado e turno Codex real não são exigidos
+- **AND** Codex real permanece explicitamente não comprovado
+- Test: manual — evidência e decisão registradas nas tarefas 3.2 e 3.3, sem reclassificar testes com CLI falso como prova nativa
 
 ### Requirement: Nada do sidecar no produto
 Depois do corte, o bundle, os scripts de build, o CI e o processo do app MUST NOT conter nem iniciar o sidecar do agente nativo.
