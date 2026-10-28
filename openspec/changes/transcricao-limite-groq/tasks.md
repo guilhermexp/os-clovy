@@ -38,4 +38,6 @@
 ## 7. Documentação e verificação
 
 - [x] 7.1 `docs/llm-providers.md`, adendo datado da ADR-0070, `docs/audio-pipeline.md`, termo `Turn pack` no `CONTEXT.md`.
-- [ ] 7.2 `make verify` numa worktree limpa, CI `desktop.yml`, evidência em `.tmp/verify/transcricao-limite-groq/report.md`.
+- [x] 7.2 `make verify` numa worktree limpa, CI `desktop.yml`, evidência em `.tmp/verify/transcricao-limite-groq/report.md`.
+
+> 7.2: `make verify` no `e0fdeb0c`: a primeira rodada caiu por timeout de 5 s em `cargo-clovy-runner.test.mjs` com a máquina carregada (passa isolado, 2/2); a segunda deu EXIT=0 (vitest 1867/1867, Rust 2014 + integração). CI run 40606541165 só com os vermelhos conhecidos (vitest `mcp-server-dev-runner`, clippy `dictation.rs:211`/`notion.rs`, clipboard `activity::windows`); por eles os testes Rust do macOS não rodaram no CI. Sem chamada real à Groq e sem prova nativa no app.
