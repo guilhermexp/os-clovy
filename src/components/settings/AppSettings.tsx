@@ -27,7 +27,6 @@ import {
   listProviderModels,
   localAudioFileSrc,
   providerModelSettings,
-  clovyOpenVerifyPage,
   clearProviderApiKey,
   setDictationLanguage,
   setDictationMicrophone,
@@ -255,7 +254,6 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   // The factory default text model: DEFAULT_GENERATION_MODEL in the Rust
   // providers module, mirrored by the leading Suggested pick.
   generationModel: DEFAULT_GENERATION_SUGGESTION_ID,
-  costQuality: 100,
   remoteGenerationModel: DEFAULT_GENERATION_SUGGESTION_ID,
   imageModel: DEFAULT_IMAGE_MODEL,
   videoModel: DEFAULT_VIDEO_MODEL,
@@ -1006,8 +1004,7 @@ export function AppSettings({
     }
   }
 
-  // Returns whether the switch persisted, so confirmation flows (the OpenRouter
-  // key billing choice) can stay open instead of closing over a failed save.
+  // Persists the model without changing any engine selection.
   async function selectProviderModel(mode: ProviderModelMode, modelId: string): Promise<boolean> {
     if (showingPartitionModels) return false;
     try {
@@ -2154,24 +2151,6 @@ export function AppSettings({
                   </div>
                 </div>
 
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <h3 className="settings-row-title">{t("settings.about.verification")}</h3>
-                    <p className="settings-row-description">
-                      {t("settings.about.verificationDescription")}
-                    </p>
-                  </div>
-                  <div className="settings-row-control">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => void clovyOpenVerifyPage().catch(() => undefined)}
-                    >
-                      {t("settings.about.verify")}
-                    </button>
-                  </div>
-                </div>
-
                 {import.meta.env.DEV ? (
                   // Dev builds only: same helper the devtools console exposes
                   // as clovy.replayOnboarding() — clears completion and
@@ -2615,7 +2594,7 @@ function ModelRow({
   onToggle: () => void;
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
-  onSelect: (modelId: string, costQuality?: number, options?: { keepOpen?: boolean }) => void;
+  onSelect: (modelId: string) => void;
   readOnly?: boolean;
   summarySuppressed?: boolean;
   catalogError?: boolean;

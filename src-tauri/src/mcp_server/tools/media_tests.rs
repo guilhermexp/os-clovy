@@ -1,9 +1,8 @@
 //! The media group (parity slice 2.3): the artifact lands in the bound
 //! session's workspace and in its artifact list, a video is followed within
 //! the CLI's tool timeout and continued by job id, and unbound clients never
-//! reach it. Clovy API is a fake: in process for the job logic, and a fake
-//! HTTP server for the production client (in a child test process, since the
-//! client reads its address and token from the environment).
+//! reach it. Media replies are faked in process for job logic, and a fake
+//! HTTP queue exercises the direct fal client in an isolated child process.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -26,7 +25,7 @@ use crate::providers::{EditImageRequest, GenerateImageRequest, GenerateVideoRequ
 
 const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake image";
 
-/// A fake Clovy API: records each request, answers images with fixed bytes
+/// Fake media responses: records each request, answers images with fixed bytes
 /// and video polls from a script, then done (or still rendering, `stuck`).
 #[derive(Default)]
 struct FakeMediaApi {
@@ -388,11 +387,7 @@ async fn media_edit_image_reads_sources_in_the_workspace_and_only_there_when_san
         .await
         .unwrap_err();
     assert_eq!(invalid.code, "image_source_invalid");
-    assert_eq!(
-        api.calls().len(),
-        1,
-        "refused sources never reach Clovy API"
-    );
+    assert_eq!(api.calls().len(), 1, "refused sources never reach fal");
     assert_eq!(turn.artifacts().await.len(), 1);
 
     let unrestricted = Turn::new(AgentSafetyMode::Unrestricted).await;

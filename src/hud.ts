@@ -1651,9 +1651,9 @@ stopButton?.addEventListener("click", async (event) => {
 });
 
 // Cancel makes the current take terminal before asking the helper to discard
-// it. Work that has not started is suppressed; a metered request whose
-// settlement Clovy API already spawned cannot be revoked at the desktop
-// boundary. The helper answers with recording_discarded, which is the
+// it. Work that has not started is suppressed; a provider request already
+// in flight may still complete. The helper answers with recording_discarded,
+// which is the
 // authoritative confirmation that capture actually stopped. Keep the
 // listening HUD visible if the command write fails so an active recording is
 // never concealed behind a dismissed panel.

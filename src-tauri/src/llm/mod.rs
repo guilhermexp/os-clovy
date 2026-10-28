@@ -639,10 +639,13 @@ mod tests {
             ("OPENROUTER_API_KEY".to_string(), "user-own-key".to_string()),
         ]);
         for (name, value) in [
-            ("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "clovy-dev-token"),
-            ("OS_JUNE_LOCAL_DEV_BEARER_TOKEN", "june-dev-token"),
+            ("CLOVY_TEST_PRIVATE_TOKEN", "clovy-dev-token"),
+            ("CLOVY_TEST_LEGACY_TOKEN", "june-dev-token"),
             ("OS_ACCOUNTS_CLIENT_ID", "clovy-client"),
-            ("CLOVY_API_URL", "http://127.0.0.1:8787"),
+            (
+                "CLOVY_TEST_RETIRED_PROVIDER_ORIGIN",
+                "http://127.0.0.1:8787",
+            ),
             ("GOOGLE_OAUTH_CLIENT_SECRET", "clovy-oauth-secret"),
         ] {
             vars.insert(name.to_string(), value.to_string());

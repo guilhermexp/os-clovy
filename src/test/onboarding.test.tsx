@@ -26,7 +26,6 @@ const mocks = vi.hoisted(() => ({
   setDictationLanguage: vi.fn(),
   setDictationShortcut: vi.fn(),
   setClovyPersona: vi.fn(),
-  clovyOpenVerifyPage: vi.fn(),
   listen: vi.fn(),
 }));
 
@@ -49,7 +48,6 @@ vi.mock("../lib/tauri", () => ({
   setDictationLanguage: mocks.setDictationLanguage,
   setDictationShortcut: mocks.setDictationShortcut,
   setClovyPersona: mocks.setClovyPersona,
-  clovyOpenVerifyPage: mocks.clovyOpenVerifyPage,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

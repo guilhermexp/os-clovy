@@ -55,16 +55,6 @@ export default defineMessages({
     "settings.updates.check": "Check for updates",
     "settings.updates.checking": "Checking...",
 
-    "settings.autoPreference.cost": "Economy",
-    "settings.autoPreference.balanced": "Balanced",
-    "settings.autoPreference.quality": "Quality",
-    "settings.autoPreference.title": "Auto preference",
-    "settings.autoPreference.description":
-      "Choose how Clovy balances model quality and usage cost.",
-    "settings.autoPreference.openRouterNote":
-      "Auto does not use your OpenRouter key for notes or chat. Choose an OpenRouter model above to use your key for notes and new chats.",
-    "settings.autoPreference.updated": "Automatic model preference updated.",
-
     "settings.shortcuts.blurb":
       "Set the keyboard shortcuts that start dictation and control Clovy.",
     "settings.shortcuts.modifierRequiredWindows":
@@ -187,7 +177,7 @@ export default defineMessages({
 
     "settings.liveTranscription.title": "Live transcription",
     "settings.liveTranscription.description":
-      "Show a live transcript while you record. This transcribes audio twice, so it may use extra credits; turning it off shows the transcript only after the recording ends.",
+      "Show a live transcript while you record using your Groq key. This transcribes audio twice and may increase provider usage. Turning it off shows the transcript after recording ends.",
     "settings.liveTranscription.aria": "Show a live transcript while recording",
     "settings.liveTranscription.on":
       "Live transcription on: the transcript streams while you record.",
@@ -206,7 +196,7 @@ export default defineMessages({
 
     "settings.providerKeys.title": "Provider API keys",
     "settings.providerKeys.description":
-      "Use your own key for a provider so its requests do not use Clovy credits. Keys stay in your Keychain and travel only with that provider's requests through Clovy API, which does not store them. Clovy Auto never uses your keys.",
+      "Your keys stay in the local credential store and are sent only to their own provider.",
     "settings.providerKeys.apiKey": "API key",
     "settings.providerKeys.configured": "Configured",
     "settings.providerKeys.missing": "Not configured",
@@ -218,24 +208,16 @@ export default defineMessages({
     "settings.providerKeys.groq.description": "Transcription for dictation and notes",
     "settings.providerKeys.openrouter.name": "OpenRouter",
     "settings.providerKeys.openrouter.description":
-      "Text models for chat, notes, and cleanup. Never used by Auto.",
+      "Text models for notes and transcript cleanup. Chat uses a local CLI engine.",
     "settings.providerKeys.fal.name": "fal",
     "settings.providerKeys.fal.description": "Images and video",
     "settings.providerKeys.tavily.name": "Tavily",
     "settings.providerKeys.tavily.description": "Web search",
-    "settings.openRouter.autoDialogTitle": "Auto does not use your OpenRouter key",
-    "settings.openRouter.autoDialogDescription":
-      "Notes and chat are billed to Clovy credits while Auto is selected. Switch to {model} to use your key for notes and new chats.",
-    "settings.openRouter.anOpenRouterModel": "an OpenRouter model",
-    "settings.openRouter.useModel": "Use {model}",
-    "settings.openRouter.keepAuto": "Keep Auto",
+
     "settings.about.blurb": "Version, release channel, and other details about this copy of Clovy.",
     "settings.about.releaseVersion": "Release version",
     "settings.about.commit": "Commit",
-    "settings.about.verification": "Server verification",
-    "settings.about.verificationDescription":
-      "Clovy's server runs in a confidential VM. See exactly what code is running and how to verify it yourself.",
-    "settings.about.verify": "Verify server",
+
     "settings.about.replayOnboarding": "Replay onboarding",
     "settings.about.replayOnboardingDescription":
       "Dev only. Forget that onboarding finished and reload into the first-run wizard.",
@@ -399,16 +381,6 @@ export default defineMessages({
     "settings.updates.check": "Procurar atualizações",
     "settings.updates.checking": "Procurando...",
 
-    "settings.autoPreference.cost": "Economia",
-    "settings.autoPreference.balanced": "Equilibrado",
-    "settings.autoPreference.quality": "Qualidade",
-    "settings.autoPreference.title": "Preferência do Auto",
-    "settings.autoPreference.description":
-      "Escolha como o Clovy equilibra a qualidade do modelo e o custo de uso.",
-    "settings.autoPreference.openRouterNote":
-      "O Auto não usa sua chave da OpenRouter para notas ou conversas. Escolha um modelo da OpenRouter acima para usar sua chave em notas e novas conversas.",
-    "settings.autoPreference.updated": "Preferência do modelo automático atualizada.",
-
     "settings.shortcuts.blurb":
       "Defina os atalhos de teclado que iniciam o ditado e controlam o Clovy.",
     "settings.shortcuts.modifierRequiredWindows":
@@ -536,7 +508,7 @@ export default defineMessages({
 
     "settings.liveTranscription.title": "Transcrição ao vivo",
     "settings.liveTranscription.description":
-      "Mostra uma transcrição ao vivo enquanto você grava. Isso transcreve o áudio duas vezes, então pode usar créditos extras; se desativar, a transcrição aparece só depois que a gravação termina.",
+      "Mostra uma transcrição ao vivo com sua chave Groq. Isso transcreve o áudio duas vezes e pode aumentar o uso do provedor. Se desativar, a transcrição aparece depois que a gravação termina.",
     "settings.liveTranscription.aria": "Mostrar uma transcrição ao vivo durante a gravação",
     "settings.liveTranscription.on":
       "Transcrição ao vivo ativada: a transcrição aparece enquanto você grava.",
@@ -555,7 +527,7 @@ export default defineMessages({
 
     "settings.providerKeys.title": "Chaves de API de provedores",
     "settings.providerKeys.description":
-      "Use sua própria chave de um provedor para que as solicitações dele não usem créditos do Clovy. As chaves ficam nas Chaves do seu Mac e só seguem com as solicitações desse provedor pela API do Clovy, que não as armazena. O Auto do Clovy nunca usa suas chaves.",
+      "Suas chaves ficam no armazenamento local de credenciais e são enviadas apenas ao respectivo provedor.",
     "settings.providerKeys.apiKey": "Chave de API",
     "settings.providerKeys.configured": "Configurada",
     "settings.providerKeys.missing": "Não configurada",
@@ -567,24 +539,16 @@ export default defineMessages({
     "settings.providerKeys.groq.description": "Transcrição para ditado e notas",
     "settings.providerKeys.openrouter.name": "OpenRouter",
     "settings.providerKeys.openrouter.description":
-      "Modelos de texto para conversas, notas e limpeza. Nunca usado pelo Auto.",
+      "Modelos de texto para notas e limpeza de transcrições. O chat usa um motor CLI local.",
     "settings.providerKeys.fal.name": "fal",
     "settings.providerKeys.fal.description": "Imagens e vídeo",
     "settings.providerKeys.tavily.name": "Tavily",
     "settings.providerKeys.tavily.description": "Busca na web",
-    "settings.openRouter.autoDialogTitle": "O Auto não usa sua chave da OpenRouter",
-    "settings.openRouter.autoDialogDescription":
-      "Notas e conversas são cobradas em créditos do Clovy enquanto o Auto estiver selecionado. Mude para {model} para usar sua chave em notas e novas conversas.",
-    "settings.openRouter.anOpenRouterModel": "um modelo da OpenRouter",
-    "settings.openRouter.useModel": "Usar {model}",
-    "settings.openRouter.keepAuto": "Manter o Auto",
+
     "settings.about.blurb": "Versão, canal de lançamento e outros detalhes desta cópia do Clovy.",
     "settings.about.releaseVersion": "Versão",
     "settings.about.commit": "Commit",
-    "settings.about.verification": "Verificação do servidor",
-    "settings.about.verificationDescription":
-      "O servidor do Clovy roda em uma VM confidencial. Veja exatamente qual código está rodando e como verificar por conta própria.",
-    "settings.about.verify": "Verificar servidor",
+
     "settings.about.replayOnboarding": "Repetir a introdução",
     "settings.about.replayOnboardingDescription":
       "Só em desenvolvimento. Esquece que a introdução foi concluída e recarrega no assistente inicial.",

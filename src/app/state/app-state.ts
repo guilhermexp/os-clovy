@@ -16,7 +16,6 @@ export type NotesState = {
   selectedNote?: NoteDto;
   selectedFolderId?: string;
   recordingStatus?: RecordingStatusDto;
-  providerConfigured: boolean;
   activeRecoveries: RecoverableRecordingDto[];
 };
 
@@ -53,7 +52,6 @@ export function createInitialState(): NotesState {
     folders: [],
     notes: [],
     activeRecoveries: [],
-    providerConfigured: false,
   };
 }
 
@@ -67,7 +65,6 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
         notes: action.payload.notes,
         activeRecoveries: action.payload.activeRecoveries,
         selectedNoteId,
-        providerConfigured: action.payload.providerConfigured,
       };
     }
     case "noteLoaded":

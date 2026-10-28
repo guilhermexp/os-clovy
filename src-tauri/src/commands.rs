@@ -37,12 +37,8 @@ use crate::{
             RecordingSourceReadinessDto, RecordingStatusDto, RemoveNoteFromFolderRequest,
             RemoveSessionFromFolderRequest, RenameFolderRequest, RetryProcessingRequest,
             SessionFolderDto, SessionProfileDto, SessionRequest, SetSessionCompletedRequest,
-            ShareAddInvitesRequest, ShareCreateRequest, ShareCreatedDto, ShareDeleteRequest,
-            ShareDto, ShareGetRequest, ShareInviteKeyDto, ShareInviteKeySaveRequest,
-            ShareInviteKeysGetRequest, ShareInvitesAddedDto, ShareKeyDto, ShareKeyGetRequest,
-            ShareKeySaveRequest, ShareRevokeInviteRequest, ShareSummaryDto, SourceReadinessDto,
-            StartMeetingRecordingRequest, StartRecordingRequest, UpdateDictionaryEntryRequest,
-            UpdateNoteRequest, UpdateNoteResponse,
+            SourceReadinessDto, StartMeetingRecordingRequest, StartRecordingRequest,
+            UpdateDictionaryEntryRequest, UpdateNoteRequest, UpdateNoteResponse,
         },
     },
     meeting_detection::{MeetingStartRecordingOutcome, MeetingStartRequestState},
@@ -221,7 +217,6 @@ pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError
         notes,
         active_recoveries,
         active_recording,
-        provider_configured: crate::providers::provider_configured(),
     })
 }
 
@@ -320,61 +315,14 @@ pub async fn update_note(
     )))
 }
 
-/// Revoke the remote share for an item and drop its local keys, if the item is
-/// shared. Called before deleting a shared item so its server-side ciphertext
-/// and invite ACL don't outlive it: once the source note/session is gone the
-/// owner has no Share dialog left to revoke from, and existing recipient links
-/// would keep opening forever. Fail closed - if the revoke can't be confirmed
-/// the caller keeps the item rather than orphaning a live share.
-async fn revoke_item_share(
-    repos: &Repositories,
-    item_kind: &str,
-    item_id: &str,
-) -> Result<(), AppError> {
-    if let Some(record) = repos.share_key_for_item(item_kind, item_id).await? {
-        delete_remote_share_or_accept_missing(&record.share_id).await?;
-        repos.delete_share_keys(&record.share_id).await?;
-    }
-    Ok(())
-}
-
-async fn delete_remote_share_or_accept_missing(share_id: &str) -> Result<(), AppError> {
-    match crate::clovy_api::share_delete(share_id).await {
-        Ok(()) => Ok(()),
-        // `share_not_found` is deliberately ambiguous for non-enumeration. For
-        // deletion, either meaning is terminal for this local profile: the
-        // remote share is already absent or cannot be managed by this account,
-        // so retaining the stale key would permanently block item deletion.
-        Err(error) if is_share_not_found(&error) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn is_share_not_found(error: &AppError) -> bool {
-    matches!(
-        error.code.as_str(),
-        "clovy_request_failed" | "june_request_failed"
-    ) && error.message == "share_not_found"
-}
-
-async fn delete_profile_records_with_share_revoker<F, Fut>(
+/// Delete a profile's local records and return its recording files for removal.
+async fn delete_profile_records(
     repos: &Repositories,
     profile: &str,
-    mut revoke_share: F,
-) -> Result<Vec<String>, AppError>
-where
-    F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(), AppError>>,
-{
+) -> Result<Vec<String>, AppError> {
     if profile == "default" {
         return Ok(Vec::new());
     }
-
-    for record in repos.share_keys_for_profile_notes(profile).await? {
-        revoke_share(record.share_id.clone()).await?;
-        repos.delete_share_keys(&record.share_id).await?;
-    }
-
     let audio_paths = repos.audio_artifact_paths_for_profile(profile).await?;
     repos.delete_profile_data(profile).await?;
     Ok(audio_paths)
@@ -384,7 +332,6 @@ where
 pub async fn delete_note(app: AppHandle, request: DeleteNoteRequest) -> Result<(), AppError> {
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    revoke_item_share(&repos, "note", &request.note_id).await?;
     let audio_paths = repos
         .audio_artifact_paths_for_note(&request.note_id)
         .await?;
@@ -418,9 +365,6 @@ pub async fn delete_notes(app: AppHandle, request: DeleteNotesRequest) -> Result
 
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    for note_id in &note_ids {
-        revoke_item_share(&repos, "note", note_id).await?;
-    }
     let audio_paths = repos.audio_artifact_paths_for_notes(&note_ids).await?;
     repos.delete_notes(&note_ids).await?;
     for path in audio_paths {
@@ -644,16 +588,10 @@ pub async fn move_profile_data_to_default(
 
 #[tauri::command]
 pub async fn delete_profile_data(app: AppHandle, profile: String) -> Result<(), AppError> {
-    // "Delete permanently" is a privacy promise: remote note shares are
-    // revoked before their source rows disappear, and recordings on disk go
-    // with those rows, mirroring delete_note / delete_notes.
+    // Recording files go with the deleted local rows, as in delete_note.
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    let audio_paths =
-        delete_profile_records_with_share_revoker(&repos, &profile, |share_id| async move {
-            delete_remote_share_or_accept_missing(&share_id).await
-        })
-        .await?;
+    let audio_paths = delete_profile_records(&repos, &profile).await?;
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -1006,15 +944,6 @@ pub async fn check_recording_source_readiness(
         .map_err(|error| AppError::new("readiness_check_failed", error.to_string()))
 }
 
-/// Opens the clovy-api `/verify` page (enclave attestation, routing,
-/// retention) in the default browser. Must route through Rust: the webview
-/// installs no new-window handler, so `target="_blank"` anchors are silently
-/// dropped — same reason the accounts portal links go through a command.
-#[tauri::command]
-pub fn clovy_open_verify_page() -> Result<(), AppError> {
-    crate::system_browser::open_in_browser(&crate::clovy_api::verify_url())
-}
-
 /// Opens an arbitrary external link in the default browser. This is the
 /// generic sibling of the fixed-URL commands above: the frontend's global
 /// anchor interceptor (src/lib/external-links.ts) routes every external
@@ -1034,13 +963,6 @@ pub fn clovy_open_external_url(url: String) -> Result<(), AppError> {
         ));
     }
     crate::system_browser::open_in_browser(url.trim())
-}
-
-/// Compatibility IPC aliases for frontend bundles from before the technical
-/// identity migration.
-#[tauri::command]
-pub fn june_open_verify_page() -> Result<(), AppError> {
-    clovy_open_verify_page()
 }
 
 #[tauri::command]
@@ -3058,134 +2980,6 @@ fn wav_duration_ms(path: &Path) -> Option<i64> {
     (duration_ms > 0).then_some(duration_ms)
 }
 
-// ---- Private sharing (JUN-308) -----------------------------------------
-// Thin proxies to the clovy-api /v1/shares endpoints plus the local key
-// store. All crypto happens in the webview; these commands only move
-// ciphertext, envelopes, metadata, and locally persisted key bytes.
-
-#[tauri::command]
-pub async fn share_create(request: ShareCreateRequest) -> Result<ShareCreatedDto, AppError> {
-    crate::clovy_api::share_create(&request).await
-}
-
-#[tauri::command]
-pub async fn share_list() -> Result<Vec<ShareSummaryDto>, AppError> {
-    crate::clovy_api::share_list().await
-}
-
-#[tauri::command]
-pub async fn share_get(request: ShareGetRequest) -> Result<ShareDto, AppError> {
-    crate::clovy_api::share_get(&request.share_id).await
-}
-
-#[tauri::command]
-pub async fn share_add_invites(
-    request: ShareAddInvitesRequest,
-) -> Result<ShareInvitesAddedDto, AppError> {
-    crate::clovy_api::share_add_invites(&request.share_id, &request.invites).await
-}
-
-#[tauri::command]
-pub async fn share_revoke_invite(request: ShareRevokeInviteRequest) -> Result<(), AppError> {
-    crate::clovy_api::share_revoke_invite(&request.share_id, &request.invite_id).await
-}
-
-#[tauri::command]
-pub async fn share_delete(app: AppHandle, request: ShareDeleteRequest) -> Result<(), AppError> {
-    delete_remote_share_or_accept_missing(&request.share_id).await?;
-    // The share is gone server-side; its locally retained keys are useless
-    // and should not outlive it.
-    repositories(&app)
-        .await?
-        .delete_share_keys(&request.share_id)
-        .await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn share_key_save(app: AppHandle, request: ShareKeySaveRequest) -> Result<(), AppError> {
-    let content_key = decode_share_key_b64(&request.content_key_b64)?;
-    repositories(&app)
-        .await?
-        .save_share_key(&crate::db::repositories::ShareKeyRecord {
-            share_id: request.share_id,
-            item_kind: request.item_kind,
-            item_id: request.item_id,
-            content_key,
-        })
-        .await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn share_key_get(
-    app: AppHandle,
-    request: ShareKeyGetRequest,
-) -> Result<Option<ShareKeyDto>, AppError> {
-    let record = repositories(&app)
-        .await?
-        .share_key_for_item(&request.item_kind, &request.item_id)
-        .await?;
-    Ok(record.map(|record| ShareKeyDto {
-        share_id: record.share_id,
-        content_key_b64: encode_share_key_b64(&record.content_key),
-    }))
-}
-
-#[tauri::command]
-pub async fn share_invite_key_save(
-    app: AppHandle,
-    request: ShareInviteKeySaveRequest,
-) -> Result<(), AppError> {
-    let invite_key = decode_share_key_b64(&request.invite_key_b64)?;
-    repositories(&app)
-        .await?
-        .save_share_invite_key(&crate::db::repositories::ShareInviteKeyRecord {
-            invite_id: request.invite_id,
-            share_id: request.share_id,
-            invite_key,
-        })
-        .await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn share_invite_keys_get(
-    app: AppHandle,
-    request: ShareInviteKeysGetRequest,
-) -> Result<Vec<ShareInviteKeyDto>, AppError> {
-    let records = repositories(&app)
-        .await?
-        .share_invite_keys(&request.share_id)
-        .await?;
-    Ok(records
-        .into_iter()
-        .map(|record| ShareInviteKeyDto {
-            invite_id: record.invite_id,
-            invite_key_b64: encode_share_key_b64(&record.invite_key),
-        })
-        .collect())
-}
-
-/// Origin share links point at; the webview assembles the full link
-/// (including the key-carrying fragment, which must never reach Rust logs).
-#[tauri::command]
-pub fn get_share_base_url() -> Result<String, AppError> {
-    Ok(crate::clovy_api::share_base_url())
-}
-
-fn decode_share_key_b64(value: &str) -> Result<Vec<u8>, AppError> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(value.trim())
-        .map_err(|_| AppError::new("share_key_invalid", "Share key is not valid base64url."))
-}
-
-fn encode_share_key_b64(value: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value)
-}
-
 /// Cached app repositories pool. The database path is derived from the app
 /// data dir and never changes within a process, so the pool (and its
 /// migrations) are initialized once instead of on every Tauri command.
@@ -3412,36 +3206,17 @@ mod tests {
     use super::{
         apply_system_audio_permission_probe_result, assemble_recording_source_readiness,
         capture_start_timeout_error, copy_directory, copy_directory_contents,
-        create_memory_with_settings, delete_profile_records_with_share_revoker, is_share_not_found,
-        load_memory_settings, persist_memory_settings, recovery_validation_expected_duration_ms,
+        create_memory_with_settings, delete_profile_records, load_memory_settings,
+        persist_memory_settings, recovery_validation_expected_duration_ms,
         replace_directory_from_staging, should_probe_system_audio_permission,
         start_capture_with_timeout_and_cleanup, update_memory_with_settings,
         validated_folder_instructions, CaptureStartupGuard, MEMORY_SETTINGS_LOCK,
     };
 
-    #[test]
-    fn recognizes_only_the_ambiguous_share_not_found_error() {
-        assert!(is_share_not_found(&AppError::new(
-            "clovy_request_failed",
-            "share_not_found"
-        )));
-        assert!(is_share_not_found(&AppError::new(
-            "june_request_failed",
-            "share_not_found"
-        )));
-        assert!(!is_share_not_found(&AppError::new(
-            "june_request_failed",
-            "network error"
-        )));
-        assert!(!is_share_not_found(&AppError::new(
-            "storage_unavailable",
-            "share_not_found"
-        )));
-    }
     use crate::{
         app_paths::AppPaths,
         audio::capture::{is_capture_active, CaptureStartState, StartedRecording, StartedSource},
-        db::repositories::{Repositories, ShareKeyRecord},
+        db::repositories::Repositories,
         domain::types::{
             AppError, AudioLevelDto, MemorySettingsDto, RecordingSource, RecordingSourceMode,
             RecordingState, RecordingStatusDto, SourceReadinessDto,
@@ -3542,110 +3317,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_record_deletion_revokes_note_shares_before_removing_rows() {
+    async fn profile_record_deletion_is_local_and_preserves_default_profile() {
         let repos = test_repositories().await;
-        let profile_note = repos
-            .create_note("research", None)
+        let selected = repos.create_note("research", None).await.unwrap();
+        let default = repos.create_note("default", None).await.unwrap();
+        assert!(delete_profile_records(&repos, "research")
             .await
-            .expect("create profile note");
-        let default_note = repos
-            .create_note("default", None)
+            .unwrap()
+            .is_empty());
+        assert!(repos.get_note(&selected.id).await.is_err());
+        assert_eq!(repos.get_note(&default.id).await.unwrap().id, default.id);
+        assert!(delete_profile_records(&repos, "default")
             .await
-            .expect("create default note");
-        let profile_share = ShareKeyRecord {
-            share_id: "share-research".to_string(),
-            item_kind: "note".to_string(),
-            item_id: profile_note.id.clone(),
-            content_key: vec![1; 32],
-        };
-        let default_share = ShareKeyRecord {
-            share_id: "share-default".to_string(),
-            item_kind: "note".to_string(),
-            item_id: default_note.id.clone(),
-            content_key: vec![2; 32],
-        };
-        repos
-            .save_share_key(&profile_share)
-            .await
-            .expect("save profile share");
-        repos
-            .save_share_key(&default_share)
-            .await
-            .expect("save default share");
-        let revoked = Arc::new(Mutex::new(Vec::new()));
-        let revoked_for_call = Arc::clone(&revoked);
-
-        let audio_paths =
-            delete_profile_records_with_share_revoker(&repos, "research", move |share_id| {
-                let revoked = Arc::clone(&revoked_for_call);
-                async move {
-                    revoked.lock().expect("revoked lock").push(share_id);
-                    Ok(())
-                }
-            })
-            .await
-            .expect("delete profile records");
-
-        assert!(audio_paths.is_empty());
-        assert_eq!(
-            *revoked.lock().expect("revoked lock"),
-            vec!["share-research".to_string()]
-        );
-        assert!(repos.get_note(&profile_note.id).await.is_err());
-        assert!(repos
-            .share_key_for_item("note", &profile_note.id)
-            .await
-            .expect("profile share lookup")
-            .is_none());
-        assert_eq!(
-            repos
-                .share_key_for_item("note", &default_note.id)
-                .await
-                .expect("default share lookup"),
-            Some(default_share)
-        );
-        repos
-            .get_note(&default_note.id)
-            .await
-            .expect("default note remains");
-    }
-
-    #[tokio::test]
-    async fn profile_record_deletion_keeps_rows_and_keys_when_share_revocation_fails() {
-        let repos = test_repositories().await;
-        let note = repos
-            .create_note("research", None)
-            .await
-            .expect("create profile note");
-        let share = ShareKeyRecord {
-            share_id: "share-research".to_string(),
-            item_kind: "note".to_string(),
-            item_id: note.id.clone(),
-            content_key: vec![1; 32],
-        };
-        repos
-            .save_share_key(&share)
-            .await
-            .expect("save profile share");
-
-        let error = delete_profile_records_with_share_revoker(&repos, "research", |_| async {
-            Err(AppError::new("june_request_failed", "network error"))
-        })
-        .await
-        .expect_err("failed revocation must keep local data");
-
-        assert_eq!(error.code, "june_request_failed");
-        repos
-            .get_note(&note.id)
-            .await
-            .expect("profile note remains");
-        assert_eq!(
-            repos
-                .share_key_for_item("note", &note.id)
-                .await
-                .expect("profile share lookup"),
-            Some(share)
-        );
+            .unwrap()
+            .is_empty());
+        assert_eq!(repos.get_note(&default.id).await.unwrap().id, default.id);
     }
 
     #[test]

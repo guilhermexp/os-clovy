@@ -46,7 +46,7 @@ type ModelPrivacySignals = Pick<ProviderModelDto, "privacy" | "traits"> &
 
 /** The agent drives everything through tool calls, so a text model without
  * function calling bricks Clovy — prompts run but no file, shell, or memory
- * tool ever executes. The capability name comes from Clovy API's catalog
+ * tool ever executes. The capability name comes from the provider catalog
  * (`supportsFunctionCalling`, derived from the provider's supported
  * parameters); match defensively on the normalized name so a rename to
  * snake_case or "tool calling" keeps working. */
@@ -84,7 +84,7 @@ export const BUILTIN_PROVIDER_NAME_KEYS: Record<BuiltinProvider, MessageKey> = {
 
 /** Whether the model can read image input (vision). Mirrors
  * `modelSupportsTools`: key off the authoritative capability flag on
- * `capabilities` only, never `traits`. Clovy API lists a capability only when
+ * `capabilities` only, never `traits`. The catalog lists a capability only when
  * the provider catalog reports it (image input for `supportsVision`), so
  * `capabilities` reliably lists genuine vision support. `traits` is
  * descriptive text that conflates image OUTPUT with image INPUT — matching it

@@ -271,12 +271,7 @@ export default defineMessages({
     "settingsPanels.models.tokensMillions": "{value}M tokens",
     "settingsPanels.models.tokensThousands": "{value}K tokens",
     "settingsPanels.models.tokensCount": "{value} tokens",
-    "settingsPanels.picker.economy": "Economy",
-    "settingsPanels.picker.economyDescription": "Favors cheaper models to stretch your credits.",
-    "settingsPanels.picker.balanced": "Balanced",
-    "settingsPanels.picker.balancedDescription": "Weighs quality against cost on every request.",
-    "settingsPanels.picker.quality": "Quality",
-    "settingsPanels.picker.qualityDescription": "Routes to the strongest model for the job.",
+
     "settingsPanels.picker.chooseText": "Choose text model",
     "settingsPanels.picker.suggestedText": "Suggested text models",
     "settingsPanels.picker.allText": "All text models",
@@ -291,8 +286,7 @@ export default defineMessages({
     "settingsPanels.picker.allVideo": "All video models",
     "settingsPanels.picker.suggested": "Suggested",
     "settingsPanels.picker.suggestedForSurface": "Suggested for this surface.",
-    "settingsPanels.picker.automaticTerm": "automatic",
-    "settingsPanels.picker.preference": "Preference",
+
     "settingsPanels.picker.effort": "Effort",
     "settingsPanels.picker.matchingModels": {
       one: "{count} matching model. Use the arrow keys to review it.",
@@ -308,12 +302,7 @@ export default defineMessages({
     "settingsPanels.picker.noPrivate": "No private models available.",
     "settingsPanels.picker.noModelsMatch": "No models match your search.",
     "settingsPanels.picker.matchingModelsAria": "Matching models",
-    "settingsPanels.picker.autoAria": "Choose the model automatically",
-    "settingsPanels.picker.providerKeyNeeded":
-      "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
-    "settingsPanels.picker.providerAvailabilityUnknown":
-      "Clovy could not confirm media availability. Reopen this picker to retry, or add your fal API key in Settings, under More options.",
-    "settingsPanels.picker.autoPreference": "Auto preference",
+
     "settingsPanels.picker.thinkingLevel": "Thinking level",
     "settingsPanels.picker.loadingSuggested": "Loading suggested models.",
     "settingsPanels.picker.allModels": "All models",
@@ -387,9 +376,7 @@ export default defineMessages({
     "settingsPanels.llm.usageActivityDescription":
       "Activity stays off when set to None. Nothing is sent anywhere.",
     "settingsPanels.llm.providerOpenRouter": "OpenRouter",
-    "settingsPanels.llm.providerClovyLegacy": "Clovy (legacy agent)",
-    "settingsPanels.llm.chatLegacyFallback":
-      "Claude Code and Codex aren't installed, so chat uses the legacy Clovy agent. Install one and restart Clovy to make it the default.",
+
     "settingsPanels.llm.providerNone": "None",
     "settingsPanels.llm.notInstalledSuffix": " (not installed)",
     "settingsPanels.llm.toolsOnSuffix": " (tools can't be turned off)",
@@ -717,13 +704,7 @@ export default defineMessages({
     "settingsPanels.models.tokensMillions": "{value}M tokens",
     "settingsPanels.models.tokensThousands": "{value}K tokens",
     "settingsPanels.models.tokensCount": "{value} tokens",
-    "settingsPanels.picker.economy": "Economia",
-    "settingsPanels.picker.economyDescription":
-      "Prefere modelos mais baratos para render mais créditos.",
-    "settingsPanels.picker.balanced": "Equilibrado",
-    "settingsPanels.picker.balancedDescription": "Equilibra qualidade e custo em cada pedido.",
-    "settingsPanels.picker.quality": "Qualidade",
-    "settingsPanels.picker.qualityDescription": "Usa o modelo mais forte para a tarefa.",
+
     "settingsPanels.picker.chooseText": "Escolher modelo de texto",
     "settingsPanels.picker.suggestedText": "Modelos de texto sugeridos",
     "settingsPanels.picker.allText": "Todos os modelos de texto",
@@ -738,8 +719,7 @@ export default defineMessages({
     "settingsPanels.picker.allVideo": "Todos os modelos de vídeo",
     "settingsPanels.picker.suggested": "Sugeridos",
     "settingsPanels.picker.suggestedForSurface": "Sugerido para esta tela.",
-    "settingsPanels.picker.automaticTerm": "automático",
-    "settingsPanels.picker.preference": "Preferência",
+
     "settingsPanels.picker.effort": "Esforço",
     "settingsPanels.picker.matchingModels": {
       one: "{count} modelo encontrado. Use as setas para revisá-lo.",
@@ -756,12 +736,7 @@ export default defineMessages({
     "settingsPanels.picker.noPrivate": "Nenhum modelo privado disponível.",
     "settingsPanels.picker.noModelsMatch": "Nenhum modelo corresponde à sua busca.",
     "settingsPanels.picker.matchingModelsAria": "Modelos encontrados",
-    "settingsPanels.picker.autoAria": "Escolher o modelo automaticamente",
-    "settingsPanels.picker.providerKeyNeeded":
-      "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
-    "settingsPanels.picker.providerAvailabilityUnknown":
-      "O Clovy não conseguiu confirmar a disponibilidade de mídia. Reabra este seletor para tentar de novo ou adicione sua chave de API da fal em Configurações, em Mais opções.",
-    "settingsPanels.picker.autoPreference": "Preferência do Auto",
+
     "settingsPanels.picker.thinkingLevel": "Nível de raciocínio",
     "settingsPanels.picker.loadingSuggested": "Carregando modelos sugeridos.",
     "settingsPanels.picker.allModels": "Todos os modelos",
@@ -836,9 +811,7 @@ export default defineMessages({
     "settingsPanels.llm.usageActivityDescription":
       "Os recursos de atividade ficam desativados quando definido como Nenhum. Nada é enviado para lugar algum.",
     "settingsPanels.llm.providerOpenRouter": "OpenRouter",
-    "settingsPanels.llm.providerClovyLegacy": "Clovy (agente legado)",
-    "settingsPanels.llm.chatLegacyFallback":
-      "O Claude Code e o Codex não estão instalados, então o chat usa o agente legado do Clovy. Instale um deles e reinicie o Clovy para torná-lo o padrão.",
+
     "settingsPanels.llm.providerNone": "Nenhum",
     "settingsPanels.llm.notInstalledSuffix": " (não instalado)",
     "settingsPanels.llm.toolsOnSuffix": " (ferramentas não podem ser desligadas)",

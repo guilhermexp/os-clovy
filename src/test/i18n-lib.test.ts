@@ -3,7 +3,6 @@ import { applyInterfaceLocale } from "../i18n/locale";
 import { toolActivityLabel, toolActivitySentence } from "../lib/agent-tool-labels";
 import { autonomyUnlockHint } from "../lib/connectors";
 import { LANGUAGE_OPTIONS, languageLabel } from "../lib/dictation-languages";
-import { describeShareError } from "../lib/errors";
 import { FONT_SCALE_PRESETS } from "../lib/font-scale";
 import { compactScheduleLabel, humanizeSchedule } from "../lib/routine-schedule";
 import type { ConnectorPolicyCatalog } from "../lib/tauri";
@@ -48,9 +47,6 @@ describe("lib copy in English (default)", () => {
     expect(humanizeSchedule("*/15 * * * *")).toBe("Every 15 minutes");
     expect(autonomyUnlockHint(policy, 2)).toBe(
       "Runs 1 more time under approval to unlock autonomous.",
-    );
-    expect(describeShareError({ message: "share_not_found" })).toBe(
-      "This share no longer exists. It may have been stopped.",
     );
   });
 });
@@ -109,13 +105,5 @@ describe("lib copy in Brazilian Portuguese", () => {
     expect(compactScheduleLabel("every 30m")).toBe("A cada 30 minutos");
     // Free text is still returned verbatim.
     expect(humanizeSchedule("every day at 9:00")).toBe("every day at 9:00");
-  });
-
-  it("translates user-visible error messages", () => {
-    expect(describeShareError({ message: "share_not_found" })).toBe(
-      "Este compartilhamento não existe mais. Ele pode ter sido interrompido.",
-    );
-    // Messages that are not known codes pass through untouched.
-    expect(describeShareError({ message: "boom" })).toBe("boom");
   });
 });

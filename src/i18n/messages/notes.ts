@@ -66,16 +66,14 @@ export default defineMessages({
     "notes.failure.noSpeech":
       "No speech detected. Try speaking louder or moving closer to the microphone.",
     "notes.failure.invalidResponse": "The processing service returned an invalid response.",
-    "notes.failure.billingUnavailable":
-      "Billing is temporarily unavailable. Please try again in a moment.",
+
     "notes.failure.providerFailed": "The transcription provider could not process this audio.",
     "notes.failure.serviceBusy": "The service is busy right now. Wait a minute, then retry.",
     "notes.failure.silenceSystem":
       "The system audio recorded silence for the whole session. Check that audio was playing and that system audio capture is enabled.",
     "notes.failure.silenceMicrophone":
       "The microphone recorded silence for the whole session. Check that the right microphone is selected in Settings and that macOS input volume is up.",
-    "notes.failure.billingTemporarilyUnavailable":
-      "Billing is temporarily unavailable. Please try again in a moment.",
+
     "notes.failure.generationBusy":
       "Your recording was transcribed, but note generation is busy right now. Your transcript is saved.",
     "notes.failure.generationFailed":
@@ -97,8 +95,7 @@ export default defineMessages({
     "notes.failure.savedCanRetry": "Your recording is saved locally, so you can retry.",
     "notes.header.askWorking": "Clovy is working on your question",
     "notes.header.ask": "Ask Clovy",
-    "notes.header.shareNote": "Share note",
-    "notes.header.share": "Share",
+
     "notes.header.referenceCopied": "Reference for Clovy copied",
     "notes.header.actions": "Note actions",
     "notes.header.copyReference": "Copy reference for Clovy",
@@ -161,52 +158,7 @@ export default defineMessages({
     "notes.chat.startDictation": "Start dictation",
     "notes.chat.stop": "Stop Clovy",
     "notes.chat.send": "Send message",
-    "notes.share.copyLinkFailed": "Couldn't copy the link. Try again.",
-    "notes.share.passcodeTooShort": "Use at least {min} characters for the passcode.",
-    "notes.share.createdCopyFailed":
-      "Link created, but couldn't copy it. Select Copy to try again.",
-    "notes.share.copyPasscodeFailed": "Couldn't copy the passcode. Try again.",
-    "notes.share.untitledNote": "Untitled note",
-    "notes.share.untitledSession": "Untitled session",
-    "notes.share.linkFor": "Share link for {title}",
-    "notes.share.titleNote": "Share note",
-    "notes.share.titleSession": "Share session",
-    "notes.share.description": 'Anyone with the link can view an encrypted snapshot of "{title}".',
-    "notes.share.descriptionPasscode":
-      'Anyone with the link and passcode can view an encrypted snapshot of "{title}". Clovy never stores the passcode.',
-    "notes.share.stopSharing": "Stop sharing",
-    "notes.share.creatingLink": "Creating link...",
-    "notes.share.createLink": "Create link",
-    "notes.share.loading": "Loading share...",
-    "notes.share.legacyLabel": "Legacy share notice",
-    "notes.share.legacyBody":
-      "This item uses the previous invite-only sharing model. Stop sharing it to create a simpler link.",
-    "notes.share.requirePasscode": "Require a passcode",
-    "notes.share.requirePasscodeHint": "Clovy never stores the passcode. Send it separately.",
-    "notes.share.passcode": "Passcode",
-    "notes.share.passcodePlaceholder": "At least {min} characters",
-    "notes.share.hidePasscode": "Hide passcode",
-    "notes.share.showPasscode": "Show passcode",
-    "notes.share.link": "Link",
-    "notes.share.copyPasscode": "Copy passcode",
-    "notes.share.passcodeCopied": "Passcode copied",
-    "notes.share.oneTimeLabel": "One-time passcode notice",
-    "notes.share.oneTimeBody":
-      "This is the only time the passcode is shown. Copy it now and send it separately from the link.",
-    "notes.share.passcodeGone":
-      "The passcode can't be shown again. To set a new one, <reset>reset this link</reset>.",
-    "notes.share.errorLabel": "Share error",
-    "notes.share.resetLink": "Reset link",
-    "notes.share.resetDescription":
-      "The current link will stop opening for everyone. You can then create a new link with a new passcode.",
-    "notes.share.stopDescriptionNote":
-      "This shared note will stop opening for everyone. This cannot erase content people already viewed or copied.",
-    "notes.share.stopDescriptionSession":
-      "This shared session will stop opening for everyone. This cannot erase content people already viewed or copied.",
-    "notes.share.resetting": "Resetting...",
-    "notes.share.stopping": "Stopping...",
-    "notes.share.copyShareLink": "Copy share link",
-    "notes.share.shareLinkCopied": "Share link copied",
+
     "notes.folders.create.title": "Create project",
     "notes.folders.create.description":
       "Group meeting notes and agent sessions by project, client, or topic.",
@@ -411,16 +363,14 @@ export default defineMessages({
     "notes.failure.noSpeech":
       "Nenhuma fala detectada. Tente falar mais alto ou se aproximar do microfone.",
     "notes.failure.invalidResponse": "O serviço de processamento retornou uma resposta inválida.",
-    "notes.failure.billingUnavailable":
-      "A cobrança está temporariamente indisponível. Tente de novo em instantes.",
+
     "notes.failure.providerFailed": "O provedor de transcrição não conseguiu processar este áudio.",
     "notes.failure.serviceBusy": "O serviço está ocupado agora. Aguarde um minuto e tente de novo.",
     "notes.failure.silenceSystem":
       "O áudio do sistema gravou silêncio durante toda a sessão. Confira se havia áudio tocando e se a captura do áudio do sistema está ativada.",
     "notes.failure.silenceMicrophone":
       "O microfone gravou silêncio durante toda a sessão. Confira se o microfone certo está selecionado nos Ajustes e se o volume de entrada do macOS está alto.",
-    "notes.failure.billingTemporarilyUnavailable":
-      "A cobrança está temporariamente indisponível. Tente de novo em instantes.",
+
     "notes.failure.generationBusy":
       "Sua gravação foi transcrita, mas a geração de notas está ocupada agora. Sua transcrição está salva.",
     "notes.failure.generationFailed":
@@ -443,8 +393,7 @@ export default defineMessages({
       "Sua gravação está salva localmente, então você pode tentar de novo.",
     "notes.header.askWorking": "O Clovy está trabalhando na sua pergunta",
     "notes.header.ask": "Perguntar ao Clovy",
-    "notes.header.shareNote": "Compartilhar nota",
-    "notes.header.share": "Compartilhar",
+
     "notes.header.referenceCopied": "Referência para o Clovy copiada",
     "notes.header.actions": "Ações da nota",
     "notes.header.copyReference": "Copiar referência para o Clovy",
@@ -510,53 +459,7 @@ export default defineMessages({
     "notes.chat.startDictation": "Iniciar ditado",
     "notes.chat.stop": "Parar o Clovy",
     "notes.chat.send": "Enviar mensagem",
-    "notes.share.copyLinkFailed": "Não foi possível copiar o link. Tente de novo.",
-    "notes.share.passcodeTooShort": "Use pelo menos {min} caracteres na senha.",
-    "notes.share.createdCopyFailed":
-      "Link criado, mas não foi possível copiá-lo. Selecione Copiar para tentar de novo.",
-    "notes.share.copyPasscodeFailed": "Não foi possível copiar a senha. Tente de novo.",
-    "notes.share.untitledNote": "Nota sem título",
-    "notes.share.untitledSession": "Sessão sem título",
-    "notes.share.linkFor": "Link de compartilhamento de {title}",
-    "notes.share.titleNote": "Compartilhar nota",
-    "notes.share.titleSession": "Compartilhar sessão",
-    "notes.share.description":
-      'Qualquer pessoa com o link pode ver uma cópia criptografada de "{title}".',
-    "notes.share.descriptionPasscode":
-      'Qualquer pessoa com o link e a senha pode ver uma cópia criptografada de "{title}". O Clovy nunca armazena a senha.',
-    "notes.share.stopSharing": "Parar de compartilhar",
-    "notes.share.creatingLink": "Criando link...",
-    "notes.share.createLink": "Criar link",
-    "notes.share.loading": "Carregando compartilhamento...",
-    "notes.share.legacyLabel": "Aviso de compartilhamento antigo",
-    "notes.share.legacyBody":
-      "Este item usa o modelo anterior de compartilhamento apenas por convite. Pare de compartilhá-lo para criar um link mais simples.",
-    "notes.share.requirePasscode": "Exigir uma senha",
-    "notes.share.requirePasscodeHint": "O Clovy nunca armazena a senha. Envie-a separadamente.",
-    "notes.share.passcode": "Senha",
-    "notes.share.passcodePlaceholder": "Pelo menos {min} caracteres",
-    "notes.share.hidePasscode": "Ocultar senha",
-    "notes.share.showPasscode": "Mostrar senha",
-    "notes.share.link": "Link",
-    "notes.share.copyPasscode": "Copiar senha",
-    "notes.share.passcodeCopied": "Senha copiada",
-    "notes.share.oneTimeLabel": "Aviso de senha exibida uma única vez",
-    "notes.share.oneTimeBody":
-      "Esta é a única vez que a senha é exibida. Copie agora e envie separadamente do link.",
-    "notes.share.passcodeGone":
-      "A senha não pode ser exibida novamente. Para definir uma nova, <reset>redefina este link</reset>.",
-    "notes.share.errorLabel": "Erro de compartilhamento",
-    "notes.share.resetLink": "Redefinir link",
-    "notes.share.resetDescription":
-      "O link atual deixará de abrir para todos. Depois, você pode criar um novo link com uma nova senha.",
-    "notes.share.stopDescriptionNote":
-      "Esta nota compartilhada deixará de abrir para todos. Isso não apaga o conteúdo que as pessoas já viram ou copiaram.",
-    "notes.share.stopDescriptionSession":
-      "Esta sessão compartilhada deixará de abrir para todos. Isso não apaga o conteúdo que as pessoas já viram ou copiaram.",
-    "notes.share.resetting": "Redefinindo...",
-    "notes.share.stopping": "Parando...",
-    "notes.share.copyShareLink": "Copiar link de compartilhamento",
-    "notes.share.shareLinkCopied": "Link de compartilhamento copiado",
+
     "notes.folders.create.title": "Criar projeto",
     "notes.folders.create.description":
       "Agrupe notas de reunião e sessões do agente por projeto, cliente ou tema.",

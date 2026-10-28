@@ -98,7 +98,6 @@ export type RenderAppWorkspaceDependencies = {
   microphoneBlocked: boolean;
   microphoneStatus: string | undefined;
   noteDetailScrollRef: React.MutableRefObject<HTMLDivElement | null>;
-  noteShareUrl: string | null;
   noteToolbarActions: JSX.Element | null;
   notesListRef: React.MutableRefObject<NotesListHandle | null>;
   openMemorySettings: (folderId?: string) => void;

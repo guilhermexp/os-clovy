@@ -9,15 +9,18 @@ use crate::{
             LEGACY_TRANSCRIPTION_SPAN_MS, SPLIT_OVERLAP_MS,
         },
     },
-    clovy_api::{
-        generate_note_from_transcript, GenerationRequest, TimedTranscription, TranscriptSegment,
-        TranscriptionProviderResult, TranscriptionRequest,
-    },
     db::repositories::{NoteTranscriptionChunk, Repositories},
     domain::types::{
         AppError, DictionaryEntryDto, NoteDto, NoteProcessingProgressDto, NoteProcessingStage,
         NoteTranscriptionJobKind, NoteTranscriptionJobPlan, NoteTranscriptionJobRecord,
         NoteTranscriptionJobStatus, ProcessingStatus, RecordingSourceMode, TranscriptDto,
+    },
+    providers::{
+        groq::{
+            TimedTranscription, TranscriptSegment, TranscriptionProviderResult,
+            TranscriptionRequest,
+        },
+        notes::{generate_note_from_transcript, GenerationRequest},
     },
 };
 use sha2::{Digest, Sha256};
@@ -2373,7 +2376,7 @@ fn retain_cleanup_during_note_transcription(
 
 #[cfg(test)]
 fn default_turn_transcriber() -> TurnTranscriber {
-    Arc::new(|request| Box::pin(crate::clovy_api::transcribe_saved_audio(request)))
+    Arc::new(|request| Box::pin(crate::providers::groq::transcribe_saved_audio(request)))
 }
 
 /// A note run stopped by a provider rate limit too long to wait out; its
@@ -2635,7 +2638,7 @@ fn note_route_from(
     model: String,
 ) -> Result<TranscriptionRoute, AppError> {
     let key = saved_key?;
-    let groq_key = crate::clovy_api::require_groq_key(key.as_deref())?.to_string();
+    let groq_key = crate::providers::groq::require_groq_key(key.as_deref())?.to_string();
     let pacer = groq_direct_pacer(&key_fingerprint(&groq_key));
     Ok(TranscriptionRoute {
         groq_key: Some(groq_key),
@@ -2777,7 +2780,7 @@ fn note_chain(
 fn note_provider_call() -> RoutedCall<TranscriptionProviderResult> {
     Arc::new(|route, request| {
         Box::pin(async move {
-            crate::clovy_api::transcribe_saved_audio_with(
+            crate::providers::groq::transcribe_saved_audio_with(
                 route.groq_key.as_deref(),
                 route.model,
                 request,
@@ -2796,11 +2799,15 @@ fn note_timed_call() -> RoutedCall<TimedTranscription> {
             let Some(groq_key) = route.groq_key else {
                 return Err(AppError::new(
                     "groq_api_key_missing",
-                    crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE,
+                    crate::providers::groq::GROQ_API_KEY_MISSING_MESSAGE,
                 ));
             };
-            crate::clovy_api::transcribe_saved_audio_timed_with(&groq_key, route.model, request)
-                .await
+            crate::providers::groq::transcribe_saved_audio_timed_with(
+                &groq_key,
+                route.model,
+                request,
+            )
+            .await
         }) as ProviderFuture<TimedTranscription>
     })
 }
@@ -2945,9 +2952,8 @@ fn rate_limit_paused_message(resume_at: &chrono::DateTime<chrono::Local>) -> Str
     )
 }
 
-/// The final-turn transcriber of a note run: Groq with the user's key, or
-/// Clovy API without one, with the run's `model`; each request reads its
-/// route once and keeps it for its kept chunks, its pacer and its call.
+/// The final-turn transcriber uses Groq with the user's key and the run's
+/// model. Each request keeps one resolved route for its chunks, pacer and call.
 fn note_turn_transcriber(repos: Repositories, model: String) -> TurnTranscriber {
     #[cfg(test)]
     if let Ok((transcriber, pacer)) = TEST_NOTE_TRANSCRIPTION
@@ -2970,8 +2976,7 @@ tokio::task_local! {
     static TEST_NOTE_PACKS: (PackTranscriber, Arc<RequestPacer>);
 }
 
-/// Turns go in packs only straight to Groq with the user's key: Clovy API's
-/// note route answers without segment times.
+/// Timed packs go straight to Groq with the user's key.
 /// Each pack request reads its route once, like a turn, so its pacer and
 /// its call use the same key.
 fn note_pack_transcriber(model: String) -> Option<PackTranscriber> {
@@ -5110,20 +5115,23 @@ fn user_facing_transcription_failure_message(
         return "No speech detected. Try speaking louder or moving closer to the microphone."
             .to_string();
     }
+    // Historical failures can still be present in saved processing jobs.
+    // Render them as provider failures without retired account actions.
     if normalized_message.contains("metering_provider_failed")
         || normalized_code.contains("metering")
-    {
-        return "Billing is temporarily unavailable. Please try again in a moment.".to_string();
-    }
-    if normalized_message.contains("upstream_provider_failed")
+        || normalized_code.contains("insufficient_credits")
+        || normalized_message.contains("insufficient_credits")
+        || normalized_message.contains("balance is too low")
+        || normalized_message.starts_with("billing is temporarily unavailable")
+        || normalized_message.contains("upstream_provider_failed")
         || normalized_code.contains("upstream")
     {
         return "The transcription provider could not process this audio.".to_string();
     }
-    // A transient metering denial (concurrency cap, rate limit): the account
-    // is fine and a retry after a short wait usually clears it. Never show
-    // the raw reason string.
-    if normalized_message.contains("authorization_denied") {
+    // Preserve actionable retry guidance for a historical concurrency denial.
+    if normalized_message.contains("authorization_denied")
+        || normalized_code.contains("authorization_denied")
+    {
         return "The service is busy right now. Wait a minute, then retry.".to_string();
     }
     message.trim().to_string()
@@ -5134,19 +5142,12 @@ fn user_facing_transcription_failure_message(
 fn note_generation_failure_for_user(mut error: AppError) -> AppError {
     let normalized_code = error.code.trim().to_ascii_lowercase();
     let normalized_message = error.message.trim().to_ascii_lowercase();
-    // Keep billing errors intact so the shared failure banner can offer the
-    // correct account action instead of reducing them to a generic retry.
-    if normalized_code.contains("insufficient_credits")
-        || normalized_message.contains("insufficient_credits")
-        || normalized_message.contains("balance is too low")
-        || normalized_message.contains("metering_provider_failed")
-    {
-        return error;
-    }
     error.message = if normalized_code == "openrouter_api_key_missing" {
         "Your recording was transcribed, but Clovy needs your OpenRouter API key to write the note. Add it in Settings > Models > More options > Provider API keys. Your transcript is saved."
             .to_string()
-    } else if normalized_message.contains("authorization_denied") {
+    } else if normalized_message.contains("authorization_denied")
+        || normalized_code.contains("authorization_denied")
+    {
         "Your recording was transcribed, but note generation is busy right now. Your transcript is saved."
             .to_string()
     } else {
@@ -5234,14 +5235,16 @@ async fn cleanup_note_transcript_text(
     }
     match tokio::time::timeout(
         Duration::from_millis(NOTE_TRANSCRIPT_CLEANUP_TIMEOUT_MS),
-        crate::clovy_api::cleanup_text(crate::clovy_api::DictateCleanupRequestParams {
-            text: text.to_string(),
-            dictionary_context: context.map(str::to_string),
-            app_context: None,
-            style: crate::clovy_api::NOTE_TRANSCRIPT_CLEANUP_STYLE.to_string(),
-            session_id: "note_transcript".to_string(),
-            utterance_id: uuid::Uuid::new_v4().to_string(),
-        }),
+        crate::providers::notes::cleanup_text(
+            crate::providers::openrouter::DictateCleanupRequestParams {
+                text: text.to_string(),
+                dictionary_context: context.map(str::to_string),
+                app_context: None,
+                style: crate::providers::notes::NOTE_TRANSCRIPT_CLEANUP_STYLE.to_string(),
+                session_id: "note_transcript".to_string(),
+                utterance_id: uuid::Uuid::new_v4().to_string(),
+            },
+        ),
     )
     .await
     {
@@ -5265,7 +5268,7 @@ fn tail_chars(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::audio::turns::coalesce_turns_for_transcription_avoiding_echo;
-    use crate::clovy_api::TranscriptionProviderResult;
+    use crate::providers::groq::TranscriptionProviderResult;
     use sqlx::row::Row;
     use std::{
         collections::HashMap,
@@ -5278,7 +5281,7 @@ mod tests {
     };
 
     /// A transcription source the note cleanup engine does not run for, so
-    /// pipeline tests never reach Clovy API's cleanup route.
+    /// pipeline tests never reach a real cleanup provider.
     const TEST_TRANSCRIPTION_PROVIDER: &str = "test";
 
     struct DropNotifier(Option<tokio::sync::mpsc::UnboundedSender<()>>);
@@ -6532,9 +6535,8 @@ mod tests {
 
     #[tokio::test]
     async fn transient_invalid_turn_response_retries_before_failing() {
-        // Every transient class Clovy API can surface without a provider result
-        // must recover on retry rather than fail the whole note: an
-        // invalid/empty envelope and explicit transient request failures.
+        // Historical transient failures without a provider result recover on
+        // retry rather than failing the whole note.
         let transient_errors = [
             AppError::new(
                 "clovy_api_response_invalid",
@@ -6603,7 +6605,7 @@ mod tests {
             ),
             (
                 AppError::new("june_request_failed", "metering_provider_failed"),
-                "Billing is temporarily unavailable. Please try again in a moment.",
+                "The transcription provider could not process this audio.",
                 1,
             ),
         ];
@@ -6681,8 +6683,8 @@ mod tests {
             "operation timed out"
         )));
         // `upstream_provider_failed` is not precise enough for desktop retry:
-        // Clovy API uses the same envelope for transient 5xxs and deterministic
-        // provider 4xxs after taking a Hold.
+        // Historical server errors did not distinguish transient 5xx responses
+        // from deterministic provider 4xx failures.
         assert!(!is_retryable_transcription_error(&AppError::new(
             "june_request_failed",
             "upstream_provider_failed"
@@ -6747,7 +6749,7 @@ mod tests {
                 true,
                 "microphone",
             ),
-            "Billing is temporarily unavailable. Please try again in a moment."
+            "The transcription provider could not process this audio."
         );
         // Regression (2026-07-14): the raw deny reason leaked into the failure
         // banner as "authorization_denied".
@@ -6779,7 +6781,53 @@ mod tests {
         ));
         assert_eq!(
             balance_failure.message,
-            "Your balance is too low. Upgrade to continue."
+            "Your recording was transcribed, but Clovy couldn't generate the note. Your transcript is saved."
+        );
+    }
+
+    #[test]
+    fn retired_account_failures_use_provider_copy_without_losing_error_details() {
+        for (code, message) in [
+            ("metering_failed", "metering_provider_failed"),
+            (
+                "insufficient_credits",
+                "Your balance is too low. Upgrade to continue.",
+            ),
+            ("provider_failed", "insufficient_credits"),
+            (
+                "provider_failed",
+                "Billing is temporarily unavailable. Please try again in a moment.",
+            ),
+        ] {
+            assert_eq!(
+                user_facing_transcription_failure_message(code, message, false, "microphone"),
+                "The transcription provider could not process this audio."
+            );
+            let mut original = AppError::new(code, message);
+            original.details = Some(serde_json::json!({ "retryAfterMs": 1500 }));
+            let error = note_generation_failure_for_user(original);
+            assert_eq!(error.code, code);
+            assert_eq!(
+                error.details,
+                Some(serde_json::json!({ "retryAfterMs": 1500 }))
+            );
+            assert_eq!(
+                error.message,
+                "Your recording was transcribed, but Clovy couldn't generate the note. Your transcript is saved."
+            );
+        }
+        assert_eq!(
+            user_facing_transcription_failure_message(
+                "authorization_denied",
+                "",
+                false,
+                "microphone"
+            ),
+            "The service is busy right now. Wait a minute, then retry."
+        );
+        assert_eq!(
+            note_generation_failure_for_user(AppError::new("authorization_denied", "")).message,
+            "Your recording was transcribed, but note generation is busy right now. Your transcript is saved."
         );
     }
 
@@ -6801,11 +6849,11 @@ mod tests {
         assert_eq!(
             user_facing_transcription_failure_message(
                 "groq_api_key_missing",
-                crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE,
+                crate::providers::groq::GROQ_API_KEY_MISSING_MESSAGE,
                 false,
                 "microphone",
             ),
-            crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE
+            crate::providers::groq::GROQ_API_KEY_MISSING_MESSAGE
         );
     }
 
@@ -6827,13 +6875,13 @@ mod tests {
             note_generation_failure_for_user(AppError::new("x", "anything else")).message,
             user_facing_transcription_failure_message(
                 "groq_api_key_missing",
-                crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE,
+                crate::providers::groq::GROQ_API_KEY_MISSING_MESSAGE,
                 false,
                 "m",
             ),
             user_facing_transcription_failure_message(
                 "audio_too_large",
-                crate::clovy_api::AUDIO_TOO_LARGE_MESSAGE,
+                crate::providers::groq::AUDIO_TOO_LARGE_MESSAGE,
                 false,
                 "m",
             ),
@@ -10173,7 +10221,7 @@ mod tests {
     }
 
     /// Routes the correction engine (the notes usage) to an isolated fake
-    /// endpoint, never Clovy API. Callers hold `GLOBAL_SETTINGS_TEST_LOCK` and
+    /// endpoint. Callers hold `GLOBAL_SETTINGS_TEST_LOCK` and
     /// restore the default settings when done.
     async fn install_fake_correction_engine(
         handler: crate::llm::endpoint::test_server::Handler,

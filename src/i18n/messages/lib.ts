@@ -42,10 +42,7 @@ export default defineMessages({
     "lib.brand.plum": "Plum",
 
     // Errors.
-    "lib.errors.sharingUnavailable":
-      "Sharing isn't available on this Clovy server yet. Try again after the next update.",
-    "lib.errors.shareNotFound": "This share no longer exists. It may have been stopped.",
-    "lib.errors.insufficientCredits": "Your balance is too low. Upgrade to continue.",
+
     "lib.errors.emptyResponse": "Clovy returned no data.",
     "lib.errors.unreachable": "Couldn't reach Clovy.",
     "lib.errors.requestFailed": "Clovy couldn't complete this request. Try again.",
@@ -73,12 +70,11 @@ export default defineMessages({
       "This job was started with your {name} account. Save a valid key from that {name} account in Settings to continue it.",
     "lib.errors.provider.keyNotAccepted":
       "Clovy sent your {name} key with a request that does not use it. Update Clovy and try again.",
-    "lib.errors.provider.keyNoCredits":
-      "Your {name} key has no credits left. Add credits with {name} or remove the key in Settings.",
+
     "lib.errors.provider.keyModelUnavailable":
       "Your saved {name} key cannot be used with the selected model. Open Settings and choose another model.",
     "lib.errors.provider.notConfigured":
-      "{name} is not set up on this Clovy service. Add your own {name} API key in Settings to continue.",
+      "Add your {name} API key in Settings > Models > More options > Provider API keys to continue.",
     "lib.errors.provider.modelUnavailable":
       "{name} could not serve the selected model right now. Choose another model or try again later.",
     "lib.errors.provider.usageLimit":
@@ -102,7 +98,7 @@ export default defineMessages({
     "lib.errors.localModelStatus": "Local model returned status {status}.",
     "lib.errors.remoteModelInvalid":
       "The model selected for this session is invalid. Choose the model again.",
-    "lib.errors.autoModelInvalid": "The model selected by Auto is invalid. Retry the agent run.",
+
     "lib.errors.llm.notLocal": "This provider is not one of your own providers.",
     "lib.errors.llm.cliNotInstalled": "{cli} is not installed on this computer.",
     "lib.errors.llm.cliToolsNotDisabled":
@@ -125,8 +121,7 @@ export default defineMessages({
       "Activity features need a provider with JSON schema support. Test the provider first, or choose one that supports JSON schema.",
     "lib.errors.llm.activityProviderMissing":
       "Activity features need a provider. Choose one in Settings, Models.",
-    "lib.errors.llm.activityNeverClovyApi":
-      "Activity features never use Clovy API. Choose one of your own providers or none.",
+
     "lib.errors.llm.chooseProvider": "Choose a provider for this use.",
     "lib.errors.llm.keychainUnavailable": "Clovy could not reach the system keychain. Try again.",
     "lib.errors.llm.endpointKeyInvalid": "Enter a valid API key.",
@@ -368,9 +363,7 @@ export default defineMessages({
     "lib.thinking.high.blurb": "Deeper reasoning with higher usage.",
 
     // Suggested models.
-    "lib.suggested.autoEconomy": "Economy",
-    "lib.suggested.autoQuality": "Quality",
-    "lib.suggested.autoBalanced": "Balanced",
+
     "lib.suggested.glm52":
       "Default pick: GLM 5.2, a text model with reasoning, tool use, structured output, and a 1M-token context window.",
     "lib.suggested.kimiK3":
@@ -459,11 +452,6 @@ export default defineMessages({
     "lib.brand.ocean": "Oceano",
     "lib.brand.plum": "Ameixa",
 
-    "lib.errors.sharingUnavailable":
-      "O compartilhamento ainda não está disponível neste servidor do Clovy. Tente de novo após a próxima atualização.",
-    "lib.errors.shareNotFound":
-      "Este compartilhamento não existe mais. Ele pode ter sido interrompido.",
-    "lib.errors.insufficientCredits": "Seu saldo está muito baixo. Faça upgrade para continuar.",
     "lib.errors.emptyResponse": "O Clovy não retornou dados.",
     "lib.errors.unreachable": "Não foi possível falar com o Clovy.",
     "lib.errors.requestFailed": "O Clovy não conseguiu concluir este pedido. Tente de novo.",
@@ -491,12 +479,11 @@ export default defineMessages({
       "Este trabalho foi iniciado com sua conta do provedor {name}. Salve nos Ajustes uma chave válida dessa conta do provedor {name} para continuar.",
     "lib.errors.provider.keyNotAccepted":
       "O Clovy enviou sua chave do provedor {name} num pedido que não a usa. Atualize o Clovy e tente de novo.",
-    "lib.errors.provider.keyNoCredits":
-      "Sua chave do provedor {name} está sem créditos. Adicione créditos no provedor {name} ou remova a chave nos Ajustes.",
+
     "lib.errors.provider.keyModelUnavailable":
       "Sua chave salva do provedor {name} não pode ser usada com o modelo selecionado. Abra os Ajustes e escolha outro modelo.",
     "lib.errors.provider.notConfigured":
-      "{name} não está configurado neste serviço do Clovy. Adicione sua própria chave de API do provedor {name} nos Ajustes para continuar.",
+      "Adicione sua chave de API da {name} em Configurações > Modelos > Mais opções > Chaves de API de provedores para continuar.",
     "lib.errors.provider.modelUnavailable":
       "{name} não conseguiu atender o modelo selecionado agora. Escolha outro modelo ou tente de novo mais tarde.",
     "lib.errors.provider.usageLimit":
@@ -522,8 +509,7 @@ export default defineMessages({
     "lib.errors.localModelStatus": "O modelo local respondeu com o status {status}.",
     "lib.errors.remoteModelInvalid":
       "O modelo escolhido para esta sessão é inválido. Escolha o modelo de novo.",
-    "lib.errors.autoModelInvalid":
-      "O modelo escolhido pelo Auto é inválido. Rode o agente de novo.",
+
     "lib.errors.llm.notLocal": "Este provedor não é um dos seus provedores próprios.",
     "lib.errors.llm.cliNotInstalled": "{cli} não está instalado neste computador.",
     "lib.errors.llm.cliToolsNotDisabled":
@@ -546,8 +532,7 @@ export default defineMessages({
       "Os recursos de atividade precisam de um provedor com suporte a JSON schema. Teste o provedor primeiro ou escolha um que suporte JSON schema.",
     "lib.errors.llm.activityProviderMissing":
       "Os recursos de atividade precisam de um provedor. Escolha um em Ajustes, Modelos.",
-    "lib.errors.llm.activityNeverClovyApi":
-      "Os recursos de atividade nunca usam o Clovy API. Escolha um dos seus provedores ou nenhum.",
+
     "lib.errors.llm.chooseProvider": "Escolha um provedor para este uso.",
     "lib.errors.llm.keychainUnavailable":
       "O Clovy não conseguiu acessar as chaves do sistema. Tente de novo.",
@@ -780,9 +765,6 @@ export default defineMessages({
     "lib.thinking.high.label": "Alto",
     "lib.thinking.high.blurb": "Raciocínio mais profundo com maior uso.",
 
-    "lib.suggested.autoEconomy": "Economia",
-    "lib.suggested.autoQuality": "Qualidade",
-    "lib.suggested.autoBalanced": "Equilibrado",
     "lib.suggested.glm52":
       "Escolha padrão: GLM 5.2, um modelo de texto com raciocínio, uso de ferramentas, saída estruturada e janela de contexto de 1M de tokens.",
     "lib.suggested.kimiK3":

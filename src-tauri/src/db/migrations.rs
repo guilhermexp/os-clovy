@@ -1362,6 +1362,16 @@ const MIGRATIONS: &[Migration] = &[
             "../../migrations/036_retire_native_chat.sql"
         ))],
     },
+    Migration {
+        version: 53,
+        name: "retire_sharing_keys",
+        // A unique marker distinguishes this data cleanup from version 19
+        // when adopting an unversioned historical database.
+        requirements: &[SchemaRequirement::Table("sharing_retirement")],
+        steps: &[MigrationStep::Sql(include_str!(
+            "../../migrations/037_retire_sharing_keys.sql"
+        ))],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2308,8 +2318,50 @@ mod tests {
                 (50, "agent_artifact_display_names".to_string()),
                 (51, "note_transcription_chunks".to_string()),
                 (52, "retire_native_chat".to_string()),
+                (53, "retire_sharing_keys".to_string()),
             ]
         );
+        assert_latest_stamp(&pool).await;
+    }
+
+    #[tokio::test]
+    async fn retired_sharing_keys_are_purged_without_changing_notes_or_history() {
+        let pool = test_pool().await;
+        run_migration_catalog(&pool, &MIGRATIONS[..52])
+            .await
+            .expect("pre-cut schema");
+        let repos = crate::db::repositories::Repositories::new(pool.clone());
+        let note = repos
+            .create_note("default", None)
+            .await
+            .expect("synthetic note");
+        install_runtime_non_replay_guard(&pool).await;
+        query("INSERT INTO share_keys (share_id, item_kind, item_id, content_key, created_at) VALUES ('old-share', 'note', ?, X'010203', 'now')")
+            .bind(&note.id).execute(&pool).await.expect("synthetic content key");
+        query("INSERT INTO share_invite_keys (invite_id, share_id, invite_key, created_at) VALUES ('old-invite', 'old-share', X'040506', 'now')")
+            .execute(&pool).await.expect("synthetic invite key");
+        run_migrations(&pool).await.expect("retire sharing");
+        for table in ["share_keys", "share_invite_keys"] {
+            let count = query(&format!("SELECT COUNT(*) AS count FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .expect("remaining key count")
+                .get::<i64, _>("count");
+            assert_eq!(count, 0, "retired key material remains in {table}");
+        }
+        assert_eq!(
+            repos.get_note(&note.id).await.expect("note remains").id,
+            note.id
+        );
+        assert_eq!(
+            query("SELECT COUNT(*) AS count FROM agent_items")
+                .fetch_one(&pool)
+                .await
+                .expect("history count")
+                .get::<i64, _>("count"),
+            2
+        );
+        run_migrations(&pool).await.expect("idempotent restart");
         assert_latest_stamp(&pool).await;
     }
 
@@ -2630,6 +2682,7 @@ mod tests {
                 (50, "agent_artifact_display_names".to_string()),
                 (51, "note_transcription_chunks".to_string()),
                 (52, "retire_native_chat".to_string()),
+                (53, "retire_sharing_keys".to_string()),
             ]
         );
 

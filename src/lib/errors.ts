@@ -98,10 +98,7 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   dictation_composer_request_invalid: "hud.error.composerUnavailable",
   dictation_composer_window_unavailable: "hud.error.composerUnavailable",
   dictation_take_invalid: "hud.error.composerUnavailable",
-  // Clovy API client (src-tauri/src/clovy_api.rs)
-  insufficient_credits: "lib.errors.insufficientCredits",
   empty_response: "lib.errors.emptyResponse",
-  clovy_api_response_invalid: "lib.errors.streamInvalid",
   audio_artifact_missing: "lib.errors.audioArtifactMissing",
   transcription_empty: "lib.errors.transcriptionEmpty",
   local_model_not_configured: [
@@ -130,7 +127,6 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
     },
   ],
   remote_model_invalid: "lib.errors.remoteModelInvalid",
-  auto_resolved_model_invalid: "lib.errors.autoModelInvalid",
   // Note pipeline (src-tauri/src/domain/processing.rs)
   transcription_already_running: [
     {
@@ -202,57 +198,14 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   llm_timeout: "lib.errors.llm.timeout",
   llm_structured_output_insufficient: "lib.errors.llm.structuredOutput",
   llm_activity_provider_missing: "lib.errors.llm.activityProviderMissing",
-  llm_provider_not_allowed: [
-    {
-      key: "lib.errors.llm.activityNeverClovyApi",
-      match: "Activity features never use Clovy API. Choose one of your own providers or none.",
-    },
-    { key: "lib.errors.llm.chooseProvider" },
-  ],
+  llm_provider_not_allowed: "lib.errors.llm.chooseProvider",
   llm_keychain_unavailable: "lib.errors.llm.keychainUnavailable",
   llm_endpoint_key_invalid: "lib.errors.llm.endpointKeyInvalid",
   llm_endpoint_model_required: "lib.errors.llm.endpointModelRequired",
   llm_endpoint_name_invalid: "lib.errors.llm.endpointNameInvalid",
 };
 
-/** `clovy_request_failed` carries the Clovy API's reason as its message: a
- * snake_case machine code from the envelope, or a network error's text. */
-const REQUEST_FAILED_CODES = new Set(["clovy_request_failed", "june_request_failed"]);
-
-const REQUEST_FAILED_REASONS: Record<string, MessageKey> = {
-  upstream_provider_failed: "lib.errors.reason.upstreamProviderFailed",
-  metering_provider_failed: "notes.failure.billingTemporarilyUnavailable",
-  authorization_denied: "notes.failure.serviceBusy",
-  concurrency_cap_exceeded: "notes.failure.serviceBusy",
-  server_busy: "notes.failure.serviceBusy",
-  insufficient_credits: "lib.errors.insufficientCredits",
-  no_speech: "hud.error.noSpeech",
-  transcript_empty: "lib.errors.reason.transcriptEmpty",
-  dictation_text_empty: "lib.errors.reason.transcriptEmpty",
-  audio_too_large: "lib.errors.reason.audioTooLarge",
-  file_too_large: "lib.errors.reason.audioTooLarge",
-  payload_too_large: "lib.errors.reason.payloadTooLarge",
-  unsupported_audio_format: "lib.errors.reason.audioFormatUnsupported",
-  audio_required: "lib.errors.reason.audioRequired",
-  duration_required: "lib.errors.reason.requestUnreadable",
-  model_capability_unavailable: "lib.errors.reason.modelCapabilityUnavailable",
-  model_required: "lib.errors.reason.modelRequired",
-  string_too_long: "lib.errors.reason.textTooLong",
-  prompt_required: "lib.errors.reason.promptRequired",
-  invalid_chat_completion_body: "lib.errors.reason.requestUnreadable",
-  json_too_deep: "lib.errors.reason.requestUnreadable",
-  multipart_invalid: "lib.errors.reason.requestUnreadable",
-  generation_failed: "lib.errors.reason.generationFailed",
-  sharing_unavailable: "lib.errors.sharingUnavailable",
-  share_not_found: "lib.errors.shareNotFound",
-};
-
-/** reqwest's transport errors ("error sending request for url (...)"). */
-const NETWORK_ERROR =
-  /^(error sending request|error decoding response body|error following redirect|request or response body error|builder error|operation timed out|Couldn't reach Clovy\.$)/i;
-
-/** Clovy API provider reasons (`groq_api_key_rejected`), see
- * `provider_error` in clovy_api.rs. */
+/** Direct provider error codes share localized setup guidance. */
 const PROVIDER_NAMES: Record<string, string> = {
   groq: "Groq",
   openrouter: "OpenRouter",
@@ -265,7 +218,6 @@ const PROVIDER_REASONS: Record<string, MessageKey> = {
   api_key_rejected: "lib.errors.provider.keyRejected",
   api_key_required: "lib.errors.provider.keyRequired",
   api_key_not_accepted: "lib.errors.provider.keyNotAccepted",
-  api_key_insufficient_credits: "lib.errors.provider.keyNoCredits",
   api_key_model_unavailable: "lib.errors.provider.keyModelUnavailable",
   not_configured: "lib.errors.provider.notConfigured",
   model_unavailable: "lib.errors.provider.modelUnavailable",
@@ -277,18 +229,6 @@ function providerWording(code: string): string | undefined {
   const match = code.match(/^(groq|openrouter|fal|tavily)_(.+)$/);
   const key = match ? PROVIDER_REASONS[match[2]] : undefined;
   return match && key ? t(key, { name: PROVIDER_NAMES[match[1]] }) : undefined;
-}
-
-function requestFailedWording(message: string): string | undefined {
-  const reason = message.trim();
-  const reasonKey = REQUEST_FAILED_REASONS[reason];
-  if (reasonKey) return t(reasonKey);
-  const provider = providerWording(reason);
-  if (provider) return provider;
-  if (NETWORK_ERROR.test(reason)) return t("lib.errors.unreachable");
-  // Any other machine reason is never shown raw.
-  if (/^[a-z0-9_]+$/.test(reason)) return t("lib.errors.requestFailed");
-  return undefined;
 }
 
 function codeWording(
@@ -315,7 +255,6 @@ function codeWording(
     }
     return undefined;
   }
-  if (REQUEST_FAILED_CODES.has(code)) return requestFailedWording(message);
   return providerWording(code);
 }
 
@@ -331,8 +270,7 @@ export function messageForErrorCode(
   return codeWording(code, fallback, params) ?? fallback;
 }
 
-/** The native message of a thrown value, untranslated: for logic that
- * matches the wire text (a share's `share_not_found`, the Max plan gate). */
+/** The native message of a thrown value, before localization. */
 export function rawMessageFromError(err: unknown) {
   if (err && typeof err === "object" && "message" in err) {
     return String((err as { message: unknown }).message);
@@ -359,28 +297,4 @@ export function errorCode(err: unknown): string | undefined {
     return typeof code === "string" ? code : undefined;
   }
   return undefined;
-}
-
-/** Whether a share request failed because the share is unknown, revoked, or
- * not owned by the caller. The Clovy API collapses all of these to a 404 whose
- * message is `share_not_found` (non-enumeration); the structured code is the
- * generic `clovy_request_failed`, so we match the message. Lets the owner
- * dialog treat a definitively-gone share differently from a transient error. */
-export function isShareNotFoundError(err: unknown): boolean {
-  return rawMessageFromError(err) === "share_not_found";
-}
-
-/** Human-readable share command error. The Clovy API's share endpoints answer
- * with bare machine codes as messages (`sharing_unavailable` when the server
- * has no share database configured, `share_not_found` for unknown or revoked
- * shares); user-facing surfaces must not leak those raw codes. */
-export function describeShareError(err: unknown): string {
-  const message = rawMessageFromError(err);
-  if (message === "sharing_unavailable") {
-    return t("lib.errors.sharingUnavailable");
-  }
-  if (message === "share_not_found") {
-    return t("lib.errors.shareNotFound");
-  }
-  return messageFromError(err);
 }

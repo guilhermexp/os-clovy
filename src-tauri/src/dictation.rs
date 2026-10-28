@@ -1,14 +1,14 @@
 #[cfg(target_os = "windows")]
 use crate::audio::turns::normalize_wav_for_transcription;
-use crate::clovy_api::{
-    dictate_cleanup, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
-    TranscriptionProviderResult, DEFAULT_DICTATION_CLEANUP_MODEL,
-};
 use crate::domain::{
     processing::{build_transcription_dictionary, TranscriptionDictionary},
     types::{AppError, ListDictationHistoryResponse},
 };
 use crate::providers::{configured_transcription_provider, PROVIDER_GROQ};
+use crate::providers::{
+    groq::{dictate_transcribe, DictateTranscribeRequest, TranscriptionProviderResult},
+    openrouter::{dictate_cleanup, DictateCleanupRequestParams, DEFAULT_DICTATION_CLEANUP_MODEL},
+};
 use chrono::Utc;
 use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -39,11 +39,9 @@ const DICTATION_CLEANUP_BASE_TIMEOUT_MS: u64 = 15_000;
 /// conservative floor of ~50 tokens/s for the cleanup model.
 const DICTATION_CLEANUP_TIMEOUT_MS_PER_BYTE: u64 = 5;
 const DICTATION_CLEANUP_MAX_TIMEOUT_MS: u64 = 60_000;
-/// No single cleanup request may wait longer than Clovy API's cleanup billing
-/// hold (`cleanup_hold_ttl_seconds`, 30s): a response that arrives after its
-/// hold expired could paste text whose charge no longer settles. The overall
-/// budget above spans multiple sequential chunk requests; this cap bounds
-/// each one. Keep in sync with the clovy-api config default.
+/// Bound each optional cleanup request to 30 seconds. The overall budget
+/// above can span multiple sequential chunks; a failed chunk preserves its
+/// original transcript so cleanup cannot hold the paste indefinitely.
 const DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS: u64 = 30_000;
 /// Above this size, cleanup runs chunked. Measured against the production
 /// prompt (JUN-212): the cleanup model punctuates ~800-byte passages of
@@ -1685,7 +1683,7 @@ pub fn setup(app: &mut tauri::App) {
     manage_settings(app.handle());
     // Keys, token, and the transcription connection are ready before the
     // first press (ditado-rapido D4).
-    crate::clovy_api::warm_dictation_route_if_idle();
+    crate::providers::groq::warm_dictation_route_if_idle();
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
     });
@@ -3241,7 +3239,7 @@ fn handle_shortcut_key_event(
     if edge == ShortcutKeyEdge::Down {
         // A pooled connection idle for over a minute is reopened while the
         // user speaks, not after release.
-        crate::clovy_api::warm_dictation_route_if_idle();
+        crate::providers::groq::warm_dictation_route_if_idle();
     }
 
     let Some(kind) = shortcut_kind_from_event(event) else {
@@ -5924,7 +5922,7 @@ impl DictationTranscriber for ServiceDictationTranscriber {
     }
 }
 
-/// The production cleaner: the chosen OpenRouter model through Clovy API.
+/// The production cleaner calls the chosen OpenRouter model directly.
 struct ServiceDictationCleaner;
 
 impl DictationCleaner for ServiceDictationCleaner {
@@ -6697,8 +6695,7 @@ fn is_blank_transcript(text: &str) -> bool {
     !text.chars().any(char::is_alphanumeric)
 }
 
-/// Clovy API answers an empty Groq transcript with a `no_speech` (or
-/// `dictation_text_empty`) failure rather than empty text.
+/// Accept the no-speech error spellings found in historical dictation results.
 fn is_whisper_no_speech_error(error: &AppError) -> bool {
     let message = error.message.to_ascii_lowercase();
     error.code == "no_speech"
@@ -7361,7 +7358,7 @@ fn stop_take_during_update(app: &AppHandle, take_id: String) {
 fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), AppError> {
     let key = crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
         .inspect_err(|_| reset_shortcut_activation(app))?;
-    crate::clovy_api::require_groq_key(key.as_deref())
+    crate::providers::groq::require_groq_key(key.as_deref())
         .inspect_err(|_| reset_shortcut_activation(app))?;
     crate::update_gate::UPDATE_GATE
         .begin_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE))
@@ -7805,9 +7802,7 @@ fn is_silent_transcription_error(event: &serde_json::Value) -> bool {
         || normalized_message.contains("no recorded audio")
         || normalized_message.contains("audio file is too short")
         || normalized_message.contains("did not return any transcript")
-        // Clovy API collapses an empty dictation to a BadRequest whose message
-        // is the service reason (e.g. "no_speech", "dictation_text_empty").
-        // Treat those as "nothing captured", not a fault.
+        // Historical no-speech results mean nothing was captured.
         || normalized_message.contains("no_speech")
         || normalized_message.contains("dictation_text_empty")
 }

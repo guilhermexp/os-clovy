@@ -22,6 +22,7 @@ const EDIT_MODEL: &str = "fal-ai/flux-2/edit";
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
     pub image_bytes: u64,
+    pub image_cache_bytes: usize,
     pub video_bytes: u64,
     pub queue_json_bytes: u64,
     pub image_timeout: Duration,
@@ -32,6 +33,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             image_bytes: 50 * 1024 * 1024,
+            image_cache_bytes: MAX_IMAGE_CACHE_BYTES,
             video_bytes: 100 * 1024 * 1024,
             queue_json_bytes: 1024 * 1024,
             image_timeout: Duration::from_secs(120),
@@ -116,6 +118,17 @@ impl FalClient {
         }
     }
 
+    #[cfg(test)]
+    pub(super) async fn retained_image_bytes(&self) -> usize {
+        self.state
+            .lock()
+            .await
+            .images
+            .values()
+            .map(|entry| entry.bytes.load(Ordering::Relaxed))
+            .sum()
+    }
+
     async fn image_entry(&self, operation: String) -> Result<Arc<ImageEntry>, AppError> {
         let mut state = self.state.lock().await;
         state
@@ -132,7 +145,7 @@ impl FalClient {
                 .values()
                 .map(|entry| entry.bytes.load(Ordering::Relaxed))
                 .sum();
-            if state.images.len() < MAX_OPERATIONS && bytes < MAX_IMAGE_CACHE_BYTES {
+            if state.images.len() < MAX_OPERATIONS && bytes < self.limits.image_cache_bytes {
                 break;
             }
             let oldest = state
@@ -193,7 +206,7 @@ impl FalClient {
             .image_leg(&request.model, key, &input)
             .await
             .map(|asset| image_dto(asset, request.model));
-        finish_image_entry(&entry, &mut stored, &result);
+        finish_image_entry(self, &entry, &mut stored, &result).await;
         result
     }
 
@@ -251,7 +264,7 @@ impl FalClient {
         })
         .await
         .unwrap_or_else(|_| Err(invalid("image_generation_timeout")));
-        finish_image_entry(&entry, &mut stored, &result);
+        finish_image_entry(self, &entry, &mut stored, &result).await;
         result
     }
 
@@ -491,16 +504,32 @@ impl FalClient {
     }
 }
 
-fn finish_image_entry(
+async fn finish_image_entry(
+    client: &FalClient,
     entry: &ImageEntry,
     stored: &mut Option<Result<GeneratedImageDto, AppError>>,
     result: &Result<GeneratedImageDto, AppError>,
 ) {
-    entry.bytes.store(
-        result.as_ref().map_or(0, |image| image.image_base64.len()),
-        Ordering::Relaxed,
-    );
-    *stored = Some(result.clone());
+    // Serialize completion accounting as well as admission: several in-flight
+    // images can finish after each observed an empty cache. The first caller
+    // still receives its image even when its replay payload cannot be retained.
+    let state = client.state.lock().await;
+    let retained: usize = state
+        .images
+        .values()
+        .map(|item| item.bytes.load(Ordering::Relaxed))
+        .sum();
+    let bytes = result.as_ref().map_or(0, |image| image.image_base64.len());
+    if retained.saturating_add(bytes) <= client.limits.image_cache_bytes {
+        entry.bytes.store(bytes, Ordering::Relaxed);
+        *stored = Some(result.clone());
+    } else {
+        // Keep the outcome marker: a replay must not start another paid POST.
+        *stored = Some(Err(AppError::new(
+            "image_result_not_cached",
+            "The image was generated, but its result is no longer cached.",
+        )));
+    }
     entry.complete.store(true, Ordering::Release);
 }
 fn screened_safe_mode(prompt: &str, selected: Option<bool>) -> Option<bool> {

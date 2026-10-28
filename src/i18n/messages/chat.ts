@@ -75,7 +75,7 @@ export default defineMessages({
     "chat.approval.denied": "Denied",
     "chat.approval.resolved": "Resolved",
     "chat.notice.contextOverflow": "This conversation is too large for the selected model.",
-    "chat.notice.needCredits": "You need more credits to continue.",
+
     "chat.notice.toolFailed": "A tool Clovy used could not finish this request.",
     "chat.notice.runtimeStopped": "Clovy stopped unexpectedly.",
     "chat.notice.upstreamFailed": "The model service could not finish this request.",
@@ -136,7 +136,7 @@ export default defineMessages({
     "chat.session.viewFiles": "View files",
     "chat.session.viewFilesCount": "View files ({count})",
     "chat.session.actions": "Session actions",
-    "chat.session.share": "Share",
+
     "chat.session.usage": "Usage",
     "chat.session.compactContext": "Compact context",
     "chat.session.changeProject": "Change project",
@@ -147,19 +147,18 @@ export default defineMessages({
     "chat.engine.menuTitle": "Chat engine",
     "chat.engine.sectionEndpoints": "Endpoints",
     "chat.engine.sectionClis": "Agent CLIs",
-    "chat.engine.clovy": "Clovy",
+
     "chat.engine.notFoundOnPath": "Not found on your PATH.",
     "chat.engine.defaultEngine": "Default",
     "chat.engine.sectionLegacy": "Legacy",
-    "chat.engine.clovyLegacyDescription": "Built-in agent, kept while its tools move to the CLIs",
+
     "chat.model.preferenceSentence": "Preference: {detail}.",
     "chat.model.effortSentence": "Effort: {effort}.",
     "chat.model.modelSentence": "Model: {name}.",
     "chat.model.modelLabel": "Model: {name}",
     "chat.model.chooseTextModel": "Choose text model",
     "chat.model.suggested": "Suggested",
-    "chat.model.providerKeyNeeded":
-      "Clovy has no {provider} service key here, so its models need your own {provider} API key. Add it in Settings, under More options.",
+
     "chat.model.suggestedTextModels": "Suggested text models",
     "chat.model.loadingSuggested": "Loading suggested models.",
     "chat.model.allModels": "All models",
@@ -263,7 +262,7 @@ export default defineMessages({
     "chat.approval.denied": "Negado",
     "chat.approval.resolved": "Resolvido",
     "chat.notice.contextOverflow": "Esta conversa é grande demais para o modelo selecionado.",
-    "chat.notice.needCredits": "Você precisa de mais créditos para continuar.",
+
     "chat.notice.toolFailed":
       "Uma ferramenta usada pelo Clovy não conseguiu concluir esta solicitação.",
     "chat.notice.runtimeStopped": "O Clovy parou inesperadamente.",
@@ -325,7 +324,7 @@ export default defineMessages({
     "chat.session.viewFiles": "Ver arquivos",
     "chat.session.viewFilesCount": "Ver arquivos ({count})",
     "chat.session.actions": "Ações da sessão",
-    "chat.session.share": "Compartilhar",
+
     "chat.session.usage": "Uso",
     "chat.session.compactContext": "Compactar contexto",
     "chat.session.changeProject": "Mudar de projeto",
@@ -336,20 +335,18 @@ export default defineMessages({
     "chat.engine.menuTitle": "Mecanismo de chat",
     "chat.engine.sectionEndpoints": "Endpoints",
     "chat.engine.sectionClis": "CLIs de agentes",
-    "chat.engine.clovy": "Clovy",
+
     "chat.engine.notFoundOnPath": "Não encontrado no PATH da sua sessão.",
     "chat.engine.defaultEngine": "Padrão",
     "chat.engine.sectionLegacy": "Legado",
-    "chat.engine.clovyLegacyDescription":
-      "Agente embutido, mantido enquanto suas ferramentas passam para as CLIs",
+
     "chat.model.preferenceSentence": "Preferência: {detail}.",
     "chat.model.effortSentence": "Esforço: {effort}.",
     "chat.model.modelSentence": "Modelo: {name}.",
     "chat.model.modelLabel": "Modelo: {name}",
     "chat.model.chooseTextModel": "Escolher modelo de texto",
     "chat.model.suggested": "Sugeridos",
-    "chat.model.providerKeyNeeded":
-      "O Clovy não tem uma chave de serviço da {provider} aqui, então os modelos dela precisam da sua própria chave de API da {provider}. Adicione em Configurações, em Mais opções.",
+
     "chat.model.suggestedTextModels": "Modelos de texto sugeridos",
     "chat.model.loadingSuggested": "Carregando modelos sugeridos.",
     "chat.model.allModels": "Todos os modelos",

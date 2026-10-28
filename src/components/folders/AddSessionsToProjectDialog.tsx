@@ -146,7 +146,7 @@ export function AddSessionsToProjectDialog({
                     </span>
                     <span className="add-notes-body">
                       <span className="add-notes-title">
-                        {session.title.trim() || t("notes.share.untitledSession")}
+                        {session.title.trim() || t("chat.session.untitled")}
                       </span>
                       <span className="add-notes-preview">
                         {session.source === "legacy_routine"

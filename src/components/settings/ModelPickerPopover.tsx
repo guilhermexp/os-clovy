@@ -23,7 +23,7 @@ import { rectFromElement, type HoverBridgeRect } from "../ui/hoverBridge";
 import { useCatalogHoverBridge, useModelDetailHoverBridge } from "../ui/useModelHoverBridge";
 import { ModelPrivacyChip, ModelRowPrivacyBadge } from "../ui/ModelPrivacyChip";
 import { Switch } from "../ui/Switch";
-import { AUTO_MODEL_ID, modelSpecEntries } from "./ModelPickerDialog";
+import { modelSpecEntries } from "./ModelPickerDialog";
 import { ProviderLogo } from "./ProviderLogo";
 
 export type ModelPickerFlyout = { kind: "model"; id: string } | { kind: "all" } | null;
@@ -67,7 +67,6 @@ export function ModelPickerPopover({
   flyout,
   model,
   options,
-  costQuality,
   search,
   popoverRef,
   searchRef,
@@ -88,7 +87,6 @@ export function ModelPickerPopover({
   flyout: ModelPickerFlyout;
   model?: ProviderModelDto;
   options: ProviderModelDto[];
-  costQuality?: number;
   search: string;
   popoverRef: RefObject<HTMLDivElement>;
   searchRef: RefObject<HTMLInputElement>;
@@ -110,7 +108,7 @@ export function ModelPickerPopover({
   onRootSearchChange?: (value: string) => void;
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
-  onSelect: (modelId: string, costQuality?: number, options?: { keepOpen?: boolean }) => void;
+  onSelect: (modelId: string) => void;
 }) {
   const t = useT();
   const modeLabels = MODE_LABEL_KEYS[mode];
@@ -314,7 +312,6 @@ export function ModelPickerPopover({
           key: `${id}:host:${index}`,
           model: option,
           reason: option.description ?? t("settingsPanels.picker.suggestedForSurface"),
-          costQuality: undefined,
         },
       ];
     });
@@ -339,16 +336,15 @@ export function ModelPickerPopover({
   const rootSuggestedIds = new Set(rootMatchingSuggested.map(({ model: option }) => option.id));
   const rootResults = rootQueryActive
     ? [
-        ...rootMatchingSuggested.map(({ key, model: option, costQuality: presetCostQuality }) => ({
+        ...rootMatchingSuggested.map(({ key, model: option }) => ({
           key,
           model: option,
-          costQuality: presetCostQuality,
         })),
         ...selectable
           .filter(
             (option) => !rootSuggestedIds.has(option.id) && modelMatchesQuery(option, rootQuery),
           )
-          .map((option) => ({ key: option.id, model: option, costQuality: undefined })),
+          .map((option) => ({ key: option.id, model: option })),
       ]
     : [];
   const resolvedRootActive = Math.min(rootActive, Math.max(rootResults.length - 1, 0));
@@ -572,7 +568,7 @@ export function ModelPickerPopover({
         aria-label={t("settingsPanels.picker.matchingModelsAria")}
         onScroll={rootFade.update}
       >
-        {rootResults.map(({ key, model: option, costQuality: presetCostQuality }, index) => (
+        {rootResults.map(({ key, model: option }, index) => (
           <button
             key={key}
             id={`${rootListId}-option-${index}`}
@@ -580,17 +576,13 @@ export function ModelPickerPopover({
             className="agent-composer-model-row"
             role="option"
             tabIndex={-1}
-            aria-selected={
-              option.id === model.id &&
-              (presetCostQuality === undefined || presetCostQuality === costQuality)
-            }
+            aria-selected={option.id === model.id}
             data-active={index === resolvedRootActive || undefined}
             onPointerMove={() => setRootActive(index)}
-            onClick={() => onSelect(option.id, presetCostQuality)}
+            onClick={() => onSelect(option.id)}
           >
             <ModelPickerOptionText model={option} />
-            {option.id === model.id &&
-            (presetCostQuality === undefined || presetCostQuality === costQuality) ? (
+            {option.id === model.id ? (
               <IconCheckmark2Small
                 size={14}
                 aria-hidden
@@ -646,7 +638,7 @@ export function ModelPickerPopover({
                 event.stopPropagation();
                 if (rootQueryActive && rootResults.length) {
                   const active = rootResults[resolvedRootActive];
-                  onSelect(active.model.id, active.costQuality);
+                  onSelect(active.model.id);
                 }
                 return;
               }
@@ -700,16 +692,13 @@ export function ModelPickerPopover({
             onKeyDown={handleListboxNavigation}
           >
             {suggested.length ? (
-              suggested.map(({ key, model: option, costQuality: presetCostQuality }) => (
+              suggested.map(({ key, model: option }) => (
                 <button
                   key={key}
                   type="button"
                   className="agent-composer-model-row"
                   role="option"
-                  aria-selected={
-                    option.id === model.id &&
-                    (presetCostQuality === undefined || presetCostQuality === costQuality)
-                  }
+                  aria-selected={option.id === model.id}
                   data-model-id={key}
                   data-active={(flyout?.kind === "model" && flyout.id === key) || undefined}
                   onMouseEnter={() => {
@@ -728,11 +717,10 @@ export function ModelPickerPopover({
                     cancelHoverIntent();
                     onFlyoutChange({ kind: "model", id: key });
                   }}
-                  onClick={() => onSelect(option.id, presetCostQuality)}
+                  onClick={() => onSelect(option.id)}
                 >
                   <ModelPickerOptionText model={option} />
-                  {option.id === model.id &&
-                  (presetCostQuality === undefined || presetCostQuality === costQuality) ? (
+                  {option.id === model.id ? (
                     <IconCheckmark2Small
                       size={14}
                       aria-hidden
@@ -937,7 +925,7 @@ function ModelPickerOption({
   model: ProviderModelDto;
   selected: boolean;
   active?: boolean;
-  onSelect: (modelId: string, costQuality?: number) => void;
+  onSelect: (modelId: string) => void;
   onHover: (model: ProviderModelDto, row: HTMLElement, immediate: boolean) => void;
 }) {
   return (
@@ -964,11 +952,7 @@ function ModelPickerOption({
 function ModelPickerOptionText({ model }: { model: ProviderModelDto }) {
   return (
     <>
-      <span
-        className="agent-composer-model-row-logo"
-        data-brand={model.id === AUTO_MODEL_ID ? "clovy" : undefined}
-        aria-hidden
-      >
+      <span className="agent-composer-model-row-logo" aria-hidden>
         <ProviderLogo provider={model.provider} id={model.id} name={model.name} />
       </span>
       <span className="agent-composer-model-row-copy">

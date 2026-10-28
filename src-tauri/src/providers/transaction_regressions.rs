@@ -274,11 +274,10 @@ async fn f3_native_media_catalog_uses_curated_models_without_a_server() {
             .unwrap();
         assert_eq!(response.models.len(), expected.len());
         assert_eq!(response.model_type, mode.api_type());
-        assert!(response.models.iter().all(|model| {
-            model.provider == "fal"
-                && model.service_available.is_none()
-                && expected.contains(&model.id.as_str())
-        }));
+        assert!(response
+            .models
+            .iter()
+            .all(|model| { model.provider == "fal" && expected.contains(&model.id.as_str()) }));
         assert!(expected.contains(&response.selected_model.as_str()));
     }
 }

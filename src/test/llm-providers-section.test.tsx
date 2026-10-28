@@ -340,7 +340,8 @@ describe("LlmProvidersSection", () => {
   });
 
   it("does not offer the native fallback when no default CLI is installed", async () => {
-    mocks.llmProviders.mockResolvedValue({ ...sampleProviders, cliDefaultPending: true });
+    mocks.llmProviders.mockResolvedValue(sampleProviders);
+    mocks.llmDetectClis.mockResolvedValue(sampleClis.map((cli) => ({ ...cli, installed: false })));
     render(<LlmProvidersSection />);
     const chatSelect = await screen.findByRole("combobox", { name: "Chat" });
     expect(chatSelect).toHaveValue("cli:claude");
@@ -351,7 +352,6 @@ describe("LlmProvidersSection", () => {
     mocks.llmProviders.mockResolvedValue({
       ...sampleProviders,
       usage: { ...sampleProviders.usage, chat: { kind: "cli", id: "claude" } },
-      cliDefaultPending: false,
     });
     render(<LlmProvidersSection />);
     expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();

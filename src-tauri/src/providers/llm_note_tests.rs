@@ -1,6 +1,6 @@
 //! Note generation through the user's own CLI providers (`crate::llm`),
-//! exercised through `clovy_api::generate_note_from_transcript`. Kept in its
-//! own file so the routing code in `clovy_api.rs` can change without touching
+//! exercised through `providers::notes::generate_note_from_transcript`. Kept in its
+//! own file so the routing code in `providers/notes.rs` can change without touching
 //! the test source.
 
 use super::*;
@@ -161,7 +161,7 @@ async fn note_transcript_correction_runs_on_the_notes_cli_not_clovy_api() {
     };
     crate::providers::replace_current_settings_for_tests(settings);
 
-    // Clovy API is unreachable here (no sign-in), so an answer can only
+    // Only the synthetic CLI is configured here, so an answer can only
     // come from the CLI.
     let corrected = cleanup_text(DictateCleanupRequestParams {
         text: "ship the clovie updater fix".to_string(),

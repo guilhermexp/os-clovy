@@ -19,7 +19,6 @@ const models = ["vendor/one", "vendor/two", "vendor/three"].map((id, index) => (
   modelType: "text",
   capabilities: index === 1 ? [] : ["supportsFunctionCalling"],
   traits: [],
-  serviceAvailable: false,
   contextTokens: 128000,
 }));
 let settings: Record<string, unknown>;
@@ -53,7 +52,6 @@ beforeEach(() => {
     transcriptionModel: "whisper-large-v3-turbo",
     imageModel: "fal-ai/flux/dev",
     videoModel: "fal-ai/wan/v2.2-a14b/text-to-video",
-    costQuality: 100,
     remoteGenerationModel: "vendor/saved",
     localGeneration: { baseUrl: "", modelId: "" },
     generationModel: "vendor/saved",

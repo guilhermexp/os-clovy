@@ -10,7 +10,6 @@ import { toast } from "../components/ui/Toaster";
 import { t, useLocale } from "../i18n";
 import { exportNoteAsPdf } from "../lib/note-pdf";
 import { useNoteChat } from "../components/note-chat/useNoteChat";
-import { noteReadyToShare } from "../lib/share-payload";
 import { SETTINGS_TABS } from "../components/settings/AppSettings";
 import type { TabItem } from "../components/tabs/TabBar";
 import { reorderTabs } from "./tabs/tabs";
@@ -480,13 +479,10 @@ export function App() {
   const noteChatOpenRef = useRef(noteChatOpen);
   noteChatOpenRef.current = noteChatOpen;
   const [confirmDeleteNote, setConfirmDeleteNote] = useState(false);
-  const [shareNoteOpen, setShareNoteOpen] = useState(false);
-  const [noteShareUrl, setNoteShareUrl] = useState<string | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset note-scoped UI on selection change
   useEffect(() => {
     setNoteChatOpen(false);
     setConfirmDeleteNote(false);
-    setShareNoteOpen(false);
   }, [selectedNoteId]);
   // The note's Ask Clovy chat is owned here, not inside the panel, so its
   // session and working state survive the panel closing: a fired-off question
@@ -533,9 +529,6 @@ export function App() {
       askClovyOpen={noteChatOpen}
       askClovyWorking={noteChat.working}
       onAskClovy={() => setNoteChatOpen((open) => !open)}
-      onShare={
-        noteReadyToShare(selectedNote.processingStatus) ? () => setShareNoteOpen(true) : undefined
-      }
       onExportPdf={() => void handleExportNotePdf()}
       onDownloadAudio={
         noteHasDownloadableAudio(selectedNote) ? () => void handleDownloadNoteAudio() : undefined
@@ -1857,7 +1850,6 @@ export function App() {
     microphoneBlocked,
     microphoneStatus,
     noteDetailScrollRef,
-    noteShareUrl,
     noteToolbarActions,
     notesListRef,
     openMemorySettings,
@@ -1953,10 +1945,8 @@ export function App() {
     setMoveDialogNoteIds,
     setMoveDialogSessionIds,
     setNoteChatOpen,
-    setNoteShareUrl,
     setOriginAllNotes,
     setOriginFolderId,
-    setShareNoteOpen,
     setSidebarCollapsed,
     setSidebarResizing,
     setSidebarTransition,
@@ -1964,7 +1954,6 @@ export function App() {
     settingsDetailScrollerActive,
     settingsReturnView,
     settingsTab,
-    shareNoteOpen,
     sidebarCollapsed,
     sidebarRecorderStatus,
     sidebarResizing,

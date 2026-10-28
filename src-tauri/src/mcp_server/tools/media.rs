@@ -1,6 +1,6 @@
 //! The media group: `generate_image`, `edit_image`, and `generate_video` for
 //! a CLI turn, with the same arguments, limits, and results as the native
-//! agent's tools. Each call bills Clovy API (or the user's fal key) and
+//! agent's tools. Each call uses the user's fal key directly and
 //! writes its file into `artifacts/` of the bound session's workspace and a
 //! row of `agent_artifacts`, so the group needs a turn but no approval (parity
 //! with the native engine; names fixed in the `clovy-mcp-server` delta of the
@@ -514,10 +514,9 @@ pub(crate) fn video_cancelled() -> AppError {
     AppError::new("agent_tool_cancelled", "Video generation was cancelled.")
 }
 
-/// Poll failures that leave the job on the server and clear once the user saves
-/// a valid key from the fal account that started it (a rotated key from that
-/// account works): Clovy API's three key answers, and this desktop failing to
-/// read the saved key, which keeps the poll from reaching Clovy API at all.
+/// Poll failures that preserve the fal job until the user saves a valid key
+/// from the account that started it (including a rotated key). An unreadable
+/// local key also preserves the job without sending a request.
 fn video_poll_waits_for_provider_key(error: &AppError) -> bool {
     matches!(
         error.code.as_str(),

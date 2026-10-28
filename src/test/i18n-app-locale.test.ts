@@ -140,30 +140,11 @@ describe("native error codes", () => {
   });
 });
 
-describe("Clovy API, provider, and own-engine errors", () => {
+describe("Direct provider and own-engine errors", () => {
   afterEach(() => applyInterfaceLocale("en"));
 
-  it("words Clovy API reasons, provider reasons, and transport errors", () => {
+  it("localizes direct provider key rejection", () => {
     applyInterfaceLocale("pt-BR");
-    const failed = (message: string) => messageFromError({ code: "clovy_request_failed", message });
-    expect(failed("server_busy")).toBe(
-      "O serviço está ocupado agora. Aguarde um minuto e tente de novo.",
-    );
-    expect(failed("upstream_provider_failed")).toBe(
-      "O provedor do modelo não conseguiu concluir este pedido. Tente de novo.",
-    );
-    expect(failed("error sending request for url (https://api.example/v1/dictate)")).toBe(
-      "Não foi possível falar com o Clovy.",
-    );
-    expect(failed("brand_new_reason")).toBe(
-      "O Clovy não conseguiu concluir este pedido. Tente de novo.",
-    );
-    expect(
-      messageFromError({
-        code: "insufficient_credits",
-        message: "Your balance is too low. Upgrade to continue.",
-      }),
-    ).toBe("Seu saldo está muito baixo. Faça upgrade para continuar.");
     expect(
       messageFromError({
         code: "groq_api_key_rejected",

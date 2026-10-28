@@ -380,7 +380,7 @@ pub fn start_capture_with_cancel(
     // billed (JUN-375).
     let live_preview_available = crate::providers::live_transcription()
         && crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
-            .is_ok_and(|key| crate::clovy_api::require_groq_key(key.as_deref()).is_ok());
+            .is_ok_and(|key| crate::providers::groq::require_groq_key(key.as_deref()).is_ok());
     let live_preview = if live_preview_available {
         Some(start_live_transcript_preview(
             app.clone(),

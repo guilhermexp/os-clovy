@@ -81,15 +81,6 @@ async function resolveFrontendPort() {
   });
 }
 
-async function resolveApiPort() {
-  return chooseDevPort({
-    name: "Clovy API",
-    explicitValue: process.env.CLOVY_API_PORT,
-    base: 8080,
-    portIsFree,
-  });
-}
-
 const REPLAY_ONBOARDING_FLAG = "--replay-onboarding";
 const platformConfigs = {
   darwin: "src-tauri/tauri.macos.conf.json",
@@ -118,11 +109,6 @@ if (config && !hasConfigOverride) {
 }
 
 const frontendPort = await resolveFrontendPort();
-const startsLocalApi = process.env.CLOVY_DEV_SKIP_LOCAL_API !== "1";
-const apiPort = startsLocalApi ? await resolveApiPort() : undefined;
-if (apiPort !== undefined) {
-  console.error(`Using an isolated Clovy API on http://127.0.0.1:${apiPort}.`);
-}
 const developerDir =
   process.platform === "darwin" && existsSync("/Applications/Xcode.app/Contents/Developer")
     ? "/Applications/Xcode.app/Contents/Developer"
@@ -148,13 +134,6 @@ const child = spawn(tauri.command, [...tauri.args, "dev", ...tauriArgs], {
   env: {
     ...process.env,
     VITE_PORT: String(frontendPort),
-    ...(apiPort === undefined
-      ? {}
-      : {
-          CLOVY_API_PORT: String(apiPort),
-          CLOVY_API_URL: `http://127.0.0.1:${apiPort}`,
-          CLOVY__SERVER__PORT: String(apiPort),
-        }),
     ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
     OS_CLOVY_DEV_APP_NAME: devAppIdentity.productName,
     OS_CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,

@@ -44,10 +44,9 @@ describe("note chat model truthfulness", () => {
     });
     mocks.providerModelSettings.mockReset();
     mocks.providerModelSettings.mockResolvedValue({
-      settings: { generationModel: "concrete-default", costQuality: 100 },
+      settings: { generationModel: "concrete-default" },
       effectiveSettings: {
         generationModel: "concrete-default",
-        costQuality: 100,
         providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       },
     });

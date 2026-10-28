@@ -130,8 +130,6 @@ import { getCurrentDataPartitionName } from "../../lib/data-partition";
 import { Dialog } from "../ui/Dialog";
 import { Spinner } from "../ui/Spinner";
 import { ClovyAlive } from "../brand/ClovyAlive";
-import { ShareDialog } from "../share/ShareDialog";
-import { buildSessionPayload } from "../../lib/share-payload";
 import {
   type AgentNewSessionDetail,
   pendingNewSessionRequest,
@@ -203,22 +201,6 @@ export function composerInSteerStateFor(input: {
       (input.working ||
         (input.submitting && input.submittingSessionId === input.selectedSessionId) ||
         input.demo),
-  );
-}
-
-export function canShareAgentSession(input: {
-  selectedSessionId?: string;
-  newSessionMode: boolean;
-  provisional: boolean;
-  historyLoaded: boolean;
-  working: boolean;
-}): boolean {
-  return Boolean(
-    input.selectedSessionId &&
-      !input.newSessionMode &&
-      !input.provisional &&
-      input.historyLoaded &&
-      !input.working,
   );
 }
 
@@ -300,8 +282,6 @@ export function AgentWorkspace({
   const [hydratedSelectionId, setHydratedSelectionId] = useState<string>();
   const [artifacts, setArtifacts] = useState<AgentArtifactDto[]>([]);
   const [artifactPanel, setArtifactPanel] = useState<AgentArtifactPanelState | null>(null);
-  const [shareOpen, setShareOpen] = useState(false);
-  const [shareUrl, setShareUrl] = useState<string>();
   const [usageOpen, setUsageOpen] = useState(false);
   const usagePanelRef = useRef<HTMLElement>(null);
   const usageReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -533,8 +513,6 @@ export function AgentWorkspace({
       setNewSessionMode(true);
       setProjection(createAgentRuntimeProjection());
       setArtifacts([]);
-      setShareOpen(false);
-      setShareUrl(undefined);
       setComposerDraft(request?.prompt ?? "");
       setPendingInitialTurn(undefined);
       setSubmitting(false);
@@ -1825,18 +1803,6 @@ export function AgentWorkspace({
             }
             inProject={sessionInProject}
             projectContext={projectContext}
-            shareUrl={shareUrl}
-            onShare={
-              canShareAgentSession({
-                selectedSessionId: selectedId,
-                newSessionMode,
-                provisional: false,
-                historyLoaded: true,
-                working: running || waiting,
-              })
-                ? () => setShareOpen(true)
-                : undefined
-            }
             onUsage={sessionActionsAvailable ? () => setUsageOpen(true) : undefined}
             onRename={sessionActionsAvailable ? rename : undefined}
             onMoveToProject={
@@ -2226,34 +2192,6 @@ export function AgentWorkspace({
             document.querySelector(".app-shell") ?? document.body,
           )
         : null}
-      {selectedSession ? (
-        <ShareDialog
-          key={selectedSession.id}
-          open={shareOpen}
-          onClose={() => setShareOpen(false)}
-          onLinkChange={(url) => setShareUrl(url ?? undefined)}
-          item={{
-            kind: "session",
-            itemId: selectedSession.id,
-            title: selectedSession.title,
-            buildPayload: () =>
-              buildSessionPayload({
-                title: selectedSession.title,
-                messages: projection.items.flatMap((item) =>
-                  item.kind === "message" && (item.role === "user" || item.role === "assistant")
-                    ? [
-                        {
-                          role: item.role,
-                          content:
-                            item.role === "user" ? stripProjectContext(item.text) : item.text,
-                        },
-                      ]
-                    : [],
-                ),
-              }),
-          }}
-        />
-      ) : null}
     </>
   );
 }
@@ -2304,7 +2242,7 @@ function AgentComposer({
   onPendingDraftPersist: (text: string, draftOwnerId: string | null | undefined) => void;
   onDraftContentChange: (hasContent: boolean) => void;
   model: string;
-  setModel: (value: string, costQuality?: number) => void;
+  setModel: (value: string) => void;
   safetyMode: AgentSafetyMode;
   setSafetyMode: (value: AgentSafetyMode) => void;
   attachments: string[];

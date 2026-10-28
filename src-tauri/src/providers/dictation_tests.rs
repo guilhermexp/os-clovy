@@ -50,10 +50,13 @@ impl Hosts {
     pub(super) fn transport(&self) -> DictationTransport<'_> {
         DictationTransport {
             direct_client: &self.client,
-            // FakeServer bases end in `/v1`; Clovy API paths carry their own.
+            // The retired server sentinel keeps its old origin injection point.
             retired_api_base: self.clovy.base_url.trim_end_matches("/v1").to_string(),
-            groq_base: self.groq.base_url.clone(),
-            openrouter_base: self.openrouter.base_url.clone(),
+            groq_base: format!("{}/openai/v1", self.groq.base_url.trim_end_matches("/v1")),
+            openrouter_base: format!(
+                "{}/api/v1",
+                self.openrouter.base_url.trim_end_matches("/v1")
+            ),
         }
     }
 }
@@ -71,7 +74,7 @@ pub(super) fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-/// The provider-key headers Clovy API reads; a direct request carries none.
+/// Historical forwarding headers must never appear on a direct request.
 pub(super) fn assert_no_forwarded_keys(head: &str) {
     for name in [
         GROQ_API_KEY_HEADER,
@@ -190,7 +193,7 @@ async fn a_forbidden_groq_key_never_falls_back_to_the_retired_server() {
     .await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -228,13 +231,13 @@ async fn dictation_with_a_groq_key_goes_straight_to_groq_with_only_that_key() {
     let groq = heads(&hosts.groq);
     assert_eq!(groq.len(), 1);
     assert!(
-        groq[0].starts_with("POST /v1/audio/transcriptions "),
+        groq[0].starts_with("POST /openai/v1/audio/transcriptions "),
         "{}",
         groq[0]
     );
     assert_eq!(header(&groq[0], "authorization"), Some("Bearer gsk-user"));
     assert_no_forwarded_keys(&groq[0]);
-    assert_eq!(header(&groq[0], CLOVY_APP_VERSION_HEADER), None);
+    assert_eq!(header(&groq[0], "x-clovy-app-version"), None);
     assert!(heads(&hosts.clovy).is_empty());
     assert!(heads(&hosts.openrouter).is_empty());
 }
@@ -256,7 +259,7 @@ async fn cleanup_with_an_openrouter_key_goes_straight_to_openrouter_with_only_th
     let openrouter = heads(&hosts.openrouter);
     assert_eq!(openrouter.len(), 1);
     assert!(
-        openrouter[0].starts_with("POST /v1/chat/completions "),
+        openrouter[0].starts_with("POST /api/v1/chat/completions "),
         "{}",
         openrouter[0]
     );
@@ -297,7 +300,7 @@ async fn a_rejected_groq_key_is_reported_as_the_users_key() {
     .await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -324,7 +327,7 @@ async fn warming_opens_the_transcription_host_without_sending_audio() {
         .unwrap();
     let groq = heads(&hosts.groq);
     assert_eq!(groq.len(), 1);
-    assert!(groq[0].starts_with("GET /v1/models "), "{}", groq[0]);
+    assert!(groq[0].starts_with("GET /openai/v1/models "), "{}", groq[0]);
     assert_eq!(header(&groq[0], "authorization"), Some("Bearer gsk-user"));
     assert!(heads(&hosts.clovy).is_empty());
 
@@ -459,7 +462,7 @@ async fn direct_groq_drops_segments_whisper_marks_as_no_speech() {
     .await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -491,7 +494,7 @@ async fn direct_groq_with_only_no_speech_segments_is_empty() {
     .await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();

@@ -13,7 +13,6 @@ pub mod browser;
 mod browser_broker;
 pub mod chat_engine;
 pub mod claude_projects;
-pub mod clovy_api;
 pub mod coding_agents;
 pub mod commands;
 pub mod computer_use;
@@ -38,7 +37,6 @@ pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
 mod local_env;
-mod local_identity;
 pub mod macos_menu_icons;
 pub mod main_window;
 pub mod mcp_server;
@@ -272,25 +270,12 @@ pub fn run() {
             commands::set_folder_memory_disabled,
             commands::memory_settings,
             commands::set_memory_enabled,
-            commands::share_create,
-            commands::share_list,
-            commands::share_get,
-            commands::share_add_invites,
-            commands::share_revoke_invite,
-            commands::share_delete,
-            commands::share_key_save,
-            commands::share_key_get,
-            commands::share_invite_key_save,
-            commands::share_invite_keys_get,
-            commands::get_share_base_url,
             commands::get_microphone_permission_state,
             commands::check_recording_source_readiness,
             commands::open_privacy_settings,
             commands::reveal_path,
             commands::unpack_bundled_extension,
-            commands::clovy_open_verify_page,
             commands::clovy_open_external_url,
-            commands::june_open_verify_page,
             commands::june_open_external_url,
             commands::start_meeting_recording,
             commands::start_recording,
@@ -353,7 +338,6 @@ pub fn run() {
             providers::delete_profile_model_overrides,
             providers::list_provider_models,
             providers::set_provider_model,
-            providers::set_cost_quality,
             providers::set_provider_api_key,
             providers::clear_provider_api_key,
             providers::set_image_safe_mode,

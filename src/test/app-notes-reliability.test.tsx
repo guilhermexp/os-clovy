@@ -174,7 +174,6 @@ vi.mock("../lib/tauri", () => ({
   // these tests focused on the meetings surfaces.
   hermesBridgeStatus: vi.fn(async () => ({ running: false })),
   listAgentTasks: vi.fn(async () => ({ items: [] })),
-  clovyOpenVerifyPage: vi.fn(async () => ""),
   providerModelSettings: vi.fn(async () => ({
     settings: { generationModel: "" },
   })),
@@ -302,7 +301,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [],
-      providerConfigured: true,
     };
 
     mocks.getCurrentWindow.mockReturnValue({
@@ -664,7 +662,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [noteWithoutDownloadableAudio, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : noteWithoutDownloadableAudio,
@@ -697,7 +694,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [noteWithAudio, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : noteWithAudio,
@@ -744,7 +740,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [noteWithAudio, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : noteWithAudio,
@@ -784,7 +779,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.listNotes.mockResolvedValue({ items: [] });
 
@@ -1221,7 +1215,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [recovery()],
-      providerConfigured: true,
     });
     mocks.recoverRecording.mockResolvedValue({
       ...first,
@@ -1276,7 +1269,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [recovery()],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) => {
       if (noteId === "note-2") return second;
@@ -1334,7 +1326,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [recovery()],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) => {
       if (noteId === "note-2") return second;
@@ -1390,7 +1381,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [failedNote, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : failedNote,
@@ -1419,7 +1409,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [recoverableNote, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : recoverableNote,
@@ -1446,7 +1435,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [warningNote, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : warningNote,
@@ -1498,7 +1486,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     let processingDone = false;
     mocks.getNote.mockImplementation(async () => (processingDone ? completedNote : selectedNote));
@@ -1571,7 +1558,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockResolvedValue(selectedNote);
 
@@ -1653,7 +1639,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     let processingDone = false;
     mocks.getNote.mockImplementation(async () => (processingDone ? completedNote : selectedNote));
@@ -1718,7 +1703,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     let processingDone = false;
     mocks.getNote.mockImplementation(async () => (processingDone ? completedNote : selectedNote));

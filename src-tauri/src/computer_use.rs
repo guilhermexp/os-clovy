@@ -44,7 +44,6 @@ use tokio::{
 /// Compatibility identity for restored runs created before Computer use moved
 /// from a Clovy-owned MCP server to host tools in ADR-0040.
 pub const LEGACY_MCP_SERVER_NAME: &str = "june_computer_use";
-pub const PROXY_PATH: &str = "/v1/computer-use/action";
 pub const APPROVALS_CHANGED_EVENT: &str = "clovy://computer-use-approvals-changed";
 
 #[cfg(not(debug_assertions))]

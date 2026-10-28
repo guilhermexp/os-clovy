@@ -1,19 +1,14 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const apiDir = path.join(rootDir, "clovy-api");
 const frontendPort = Number.parseInt(process.env.VITE_PORT ?? "1421", 10);
-const apiPort = Number.parseInt(process.env.CLOVY_API_PORT ?? "8080", 10);
-const skipLocalApi = process.env.CLOVY_DEV_SKIP_LOCAL_API === "1";
 const shell = process.platform === "win32";
 
-let apiChild = null;
 let frontendChild = null;
 let shuttingDown = false;
 
@@ -51,7 +46,7 @@ function spawnManaged(name, command, args, cwd) {
 function cleanup() {
   if (shuttingDown) return;
   shuttingDown = true;
-  for (const child of [frontendChild, apiChild]) {
+  for (const child of [frontendChild]) {
     if (child && !child.killed) {
       child.kill();
     }
@@ -71,34 +66,6 @@ if (process.env.CLOVY_DEV_PREPARE_ONLY === "1") {
   process.exit(0);
 }
 
-if (skipLocalApi) {
-  console.error("Skipping local Clovy API because CLOVY_DEV_SKIP_LOCAL_API=1.");
-} else {
-  if (!fs.existsSync(path.join(apiDir, "Cargo.toml"))) {
-    console.error(`Could not find clovy-api/Cargo.toml under ${rootDir}`);
-    process.exit(1);
-  }
-
-  if (await portIsOpen(apiPort)) {
-    console.error(
-      `Clovy API port ${apiPort} became occupied before startup. Restart make dev to select another port.`,
-    );
-    process.exit(1);
-  } else {
-    apiChild = spawnManaged(
-      "clovy-api",
-      "cargo",
-      ["run", "-p", "clovy-api-server", "--", "serve"],
-      apiDir,
-    );
-    apiChild.on("exit", (code, signal) => {
-      if (shuttingDown) return;
-      console.error(`clovy-api exited with ${signal ?? code}`);
-      exitFromChild(code, signal);
-    });
-  }
-}
-
 if (await portIsOpen(frontendPort)) {
   console.error(
     `Vite port ${frontendPort} became occupied before startup. Restart make dev to select another port.`,
@@ -107,8 +74,4 @@ if (await portIsOpen(frontendPort)) {
 } else {
   frontendChild = spawnManaged("Vite", "pnpm", ["run", "dev"], rootDir);
   frontendChild.on("exit", exitFromChild);
-}
-
-if (!frontendChild) {
-  setInterval(() => {}, 60 * 60 * 1000);
 }

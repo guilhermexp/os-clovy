@@ -2,7 +2,6 @@ import { t } from "../i18n";
 import { markAgentNewSessionPending } from "../components/agent/session-persistence";
 import { AgentSessionsList } from "../components/agent/AgentSessionsList";
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
-import { ShareLinkCopyAction } from "../components/share/ShareLinkCopyAction";
 import { NotesList } from "../components/notes-list/NotesList";
 import { BreadcrumbBar } from "../components/ui/BreadcrumbBar";
 import { IconProjects } from "central-icons/IconProjects";
@@ -86,7 +85,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     microphoneBlocked,
     microphoneStatus,
     noteDetailScrollRef,
-    noteShareUrl,
     noteToolbarActions,
     notesListRef,
     openMemorySettings,
@@ -472,7 +470,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             },
             {
               label: selectedNote.title.trim() || t("app.newNote"),
-              action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
             },
           ]}
           actions={noteToolbarActions}
@@ -494,7 +491,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             },
             {
               label: selectedNote.title.trim() || t("app.newNote"),
-              action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
             },
           ]}
           actions={noteToolbarActions}
@@ -505,7 +501,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             { label: t("app.nav.notes"), onClick: () => setActiveView("all-notes") },
             {
               label: selectedNote.title.trim() || t("app.newNote"),
-              action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
             },
           ]}
           actions={noteToolbarActions}

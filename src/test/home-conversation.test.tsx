@@ -73,7 +73,7 @@ function mockInvoke(overrides: Record<string, Handler> = {}) {
         return { mode: "generation", selectedModel: "open-software/auto", models: [] };
       case "provider_model_settings":
         return {
-          settings: { costQuality: 100 },
+          settings: {},
           effectiveSettings: {
             providerApiKeysConfigured: {
               groq: false,

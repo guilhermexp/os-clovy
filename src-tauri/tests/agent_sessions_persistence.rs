@@ -1162,7 +1162,9 @@ async fn native_waiting_runs_are_cancelled_without_losing_history_or_cli_runs() 
         .await
         .unwrap();
     let items_before = repository.items(&native.id).await.unwrap();
-    query("DELETE FROM schema_migrations WHERE version = 52")
+    // Rewind the synthetic stamp to a contiguous pre-retirement prefix.
+    // Later migrations must be replayed too, rather than leaving a gap at 52.
+    query("DELETE FROM schema_migrations WHERE version >= 52")
         .execute(&pool)
         .await
         .unwrap();

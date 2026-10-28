@@ -867,3 +867,41 @@ fn completed_video_file_name_is_stable_and_rejects_path_components() {
     assert_eq!(first, format!("generated-video-{job}.mp4"));
     assert!(super::video_file_name("../outside", "mp4").is_err());
 }
+
+#[tokio::test]
+async fn concurrent_images_respect_completed_cache_budget() {
+    let queue = Server::start(image_reply).await;
+    let budget = BASE64.encode(PNG).len() + 1;
+    let client = FalClient::for_test(
+        &queue.url,
+        None,
+        Limits {
+            image_cache_bytes: budget,
+            ..Limits::default()
+        },
+    );
+    let first = image_request();
+    let mut second = image_request();
+    second.request_id = Some("image-operation-2".into());
+    let (one, two) = tokio::join!(
+        client.generate_image(Some(KEY), first.clone()),
+        client.generate_image(Some(KEY), second.clone())
+    );
+    assert_eq!(BASE64.decode(one.unwrap().image_base64).unwrap(), PNG);
+    assert_eq!(BASE64.decode(two.unwrap().image_base64).unwrap(), PNG);
+    assert!(
+        client.retained_image_bytes().await <= budget,
+        "concurrent completions must not retain images above the cache budget"
+    );
+    // Replay may return a lightweight expired-result marker, never a paid resubmit.
+    let _ = client.generate_image(Some(KEY), first).await;
+    let _ = client.generate_image(Some(KEY), second).await;
+    assert_eq!(
+        queue
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST")
+            .count(),
+        2
+    );
+}

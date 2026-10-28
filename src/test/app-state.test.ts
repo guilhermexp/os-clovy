@@ -26,7 +26,6 @@ describe("notesReducer", () => {
       ],
       notes: [note({ id: "note-2", title: "Second" }), note({ id: "note-1", title: "First" })],
       activeRecoveries: [],
-      providerConfigured: true,
     };
 
     const state = notesReducer(createInitialState(), {
@@ -37,7 +36,6 @@ describe("notesReducer", () => {
     expect(state.folders).toHaveLength(1);
     expect(state.notes.map((item) => item.id)).toEqual(["note-2", "note-1"]);
     expect(state.selectedNoteId).toBe("note-2");
-    expect(state.providerConfigured).toBe(true);
   });
 
   it("upserts a folder when a concurrent import returns an existing folder", () => {
@@ -362,7 +360,6 @@ describe("notesReducer", () => {
           },
         ],
         activeRecoveries: [],
-        providerConfigured: false,
       },
     });
 

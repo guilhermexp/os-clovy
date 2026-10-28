@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,26 +10,13 @@ async function read(relativePath) {
   return readFile(join(root, relativePath), "utf8");
 }
 
-function workflowTriggerPaths(source, trigger) {
-  const start = source.indexOf(`  ${trigger}:\n`);
-  expect(start).toBeGreaterThan(-1);
-  const remainder = source.slice(start + trigger.length + 4);
-  const nextTrigger = remainder.search(
-    /\n(?: {2}(?:pull_request|push|workflow_dispatch):|[A-Za-z][\w-]*:)(?:\n|$)/,
-  );
-  const block = nextTrigger === -1 ? remainder : remainder.slice(0, nextTrigger);
-  return [...block.matchAll(/^\s{6}- "([^"]+)"$/gm)].map((match) => match[1]);
-}
-
 describe("Clovy technical identity", () => {
-  it("uses Clovy for canonical package, service, and helper names", async () => {
+  it("uses Clovy for canonical package and helper names", async () => {
     const [
       packageJson,
       extensionPackage,
       desktopCargo,
       windowsHelperCargo,
-      apiCargo,
-      apiAppCargo,
       legacyCryptoCargo,
       legacyProtocolCargo,
     ] = await Promise.all([
@@ -36,8 +24,6 @@ describe("Clovy technical identity", () => {
       read("extension/package.json").then(JSON.parse),
       read("src-tauri/Cargo.toml"),
       read("src-tauri/native/windows-dictation-helper/Cargo.toml"),
-      read("clovy-api/Cargo.toml"),
-      read("clovy-api/crates/app/Cargo.toml"),
       read("crates/june-companion-crypto/Cargo.toml"),
       read("crates/june-companion-protocol/Cargo.toml"),
     ]);
@@ -49,10 +35,6 @@ describe("Clovy technical identity", () => {
     expect(desktopCargo).toMatch(/^name = "clovy-nm-shim"$/m);
     expect(windowsHelperCargo).toMatch(/^name = "clovy-windows-dictation-helper"$/m);
     expect(windowsHelperCargo).toMatch(/^name = "clovy-dictation-helper"$/m);
-    expect(apiCargo).toContain('members = ["crates/*"]');
-    expect(apiCargo).toContain('clovy-api = { path = "crates/api" }');
-    expect(apiAppCargo).toMatch(/^name = "clovy-api-server"$/m);
-    expect(apiAppCargo).toMatch(/^name = "clovy-api"$/m);
     expect(legacyCryptoCargo).toContain('name = "june-companion-crypto"');
     expect(legacyCryptoCargo).toContain(
       'clovy-companion-crypto = { path = "../clovy-companion-crypto" }',
@@ -163,17 +145,60 @@ describe("Clovy technical identity", () => {
     expect(releaseAge).not.toContain("os-june-pnpm-release-age-check");
   });
 
-  it("runs Clovy API checks when the canonical companion protocol changes", async () => {
-    const apiChecks = await read(".github/workflows/clovy-api.yml");
-    const apiCheckPaths = [
-      "clovy-api/**",
-      "crates/clovy-companion-protocol/**",
+  it("removes the backend workspace, workflow and build targets", async () => {
+    for (const relativePath of [
+      "clovy-api/Cargo.toml",
+      "clovy-api/Cargo.lock",
+      "clovy-api/config.toml",
+      "agent-runtime/package.json",
       ".github/workflows/clovy-api.yml",
-      ".github/actions/setup-rust/**",
-    ];
+    ]) {
+      expect(existsSync(join(root, relativePath)), relativePath).toBe(false);
+    }
+    const [packageJson, makefile] = await Promise.all([
+      read("package.json").then(JSON.parse),
+      read("Makefile"),
+    ]);
+    for (const [name, command] of Object.entries(packageJson.scripts)) {
+      expect(`${name} ${command}`).not.toMatch(/clovy-api|agent-runtime/);
+    }
+    const retiredTargets = [
+      ...makefile.matchAll(/^(dev-api|clovy-api-[\w-]+|agent-runtime[\w-]*):/gm),
+    ]
+      .map((match) => match[1])
+      .filter((target) => target !== "clovy-api-references-check");
+    expect(retiredTargets).toEqual([]);
+    expect(makefile).not.toMatch(/(?:cd\s+|--manifest-path\s+)clovy-api(?:\/|\s)/);
+    const setupRust = ".github/actions/setup-rust/action.yml";
+    if (existsSync(join(root, setupRust))) {
+      expect(await read(setupRust)).not.toContain("clovy-api");
+    }
+  });
 
-    expect(workflowTriggerPaths(apiChecks, "pull_request")).toEqual(apiCheckPaths);
-    expect(workflowTriggerPaths(apiChecks, "push")).toEqual(apiCheckPaths);
+  it("includes the retired API reference guard in the full verification gate", async () => {
+    const makefile = await read("Makefile");
+    const verify = makefile.match(/^verify:\s*([^\n]+)/m)?.[1] ?? "";
+    expect(verify.split(/\s+/)).toContain("clovy-api-references-check");
+    expect(makefile).toMatch(
+      /^clovy-api-references-check:[^\n]*\n\t[^\n]*node scripts\/check-clovy-api-references\.mjs/m,
+    );
+    expect(verify).not.toMatch(/clovy-api-(?:fmt|lint|test)/);
+  });
+
+  it("starts development without backend processes, URL injection or a local bearer", async () => {
+    const forbiddenNames = [
+      ["CLOVY", "API", "URL"].join("_"),
+      ["clovy", "api", "url"].join("_"),
+      ["OS", "CLOVY", "LOCAL", "DEV", "BEARER", "TOKEN"].join("_"),
+      ["local", "dev", "bearer", "token"].join("_"),
+    ];
+    for (const file of ["scripts/tauri-dev.mjs", "scripts/tauri-before-dev.mjs"]) {
+      const source = await read(file);
+      expect(source, file).not.toMatch(
+        /clovy-api|CLOVY_API_PORT|CLOVY__SERVER__PORT|CLOVY_DEV_SKIP_LOCAL_API/,
+      );
+      for (const name of forbiddenNames) expect(source, file).not.toContain(name);
+    }
   });
 
   it("preserves released C ABI contracts while publishing canonical aliases", async () => {
@@ -204,10 +229,7 @@ describe("Clovy technical identity", () => {
       computerUseDriver,
       meetingDetection,
       obsidian,
-      desktopApi,
       httpClient,
-      apiMain,
-      apiConfig,
       driverContract,
       noteDrag,
     ] = await Promise.all([
@@ -216,10 +238,7 @@ describe("Clovy technical identity", () => {
       read("src-tauri/src/computer_use_driver.rs"),
       read("src-tauri/src/meeting_detection.rs"),
       read("src-tauri/src/obsidian.rs"),
-      read("src-tauri/src/clovy_api.rs"),
       read("src-tauri/src/http_client.rs"),
-      read("clovy-api/crates/app/src/main.rs"),
-      read("clovy-api/crates/config/src/lib.rs"),
       read("src-tauri/cua-driver-contract.json").then(JSON.parse),
       read("src/lib/dnd.ts"),
     ]);
@@ -237,15 +256,9 @@ describe("Clovy technical identity", () => {
     expect(obsidian).toContain(".clovy-obsidian-write-probe-");
     expect(obsidian).not.toContain(".june-obsidian-write-probe-");
     // Provider requests take their user agent from the shared HTTP builder.
-    expect(desktopApi).toContain("crate::http_client::base_client_builder()");
     expect(httpClient).toContain('pub const USER_AGENT: &str = concat!("clovy/"');
     expect(httpClient).toContain(".user_agent(USER_AGENT)");
-    for (const source of [desktopApi, httpClient]) {
-      expect(source).not.toContain('concat!("os-june/"');
-    }
-    expect(apiMain).not.toContain('"june=info,clovy_api=info');
-    expect(apiConfig).toContain("viewer@localdev.clovy");
-    expect(apiConfig).not.toContain("viewer@localdev.june");
+    expect(httpClient).not.toContain('concat!("os-june/"');
     expect(driverContract.clovyActions).toBeInstanceOf(Array);
     expect(driverContract).not.toHaveProperty("juneActions");
     expect(noteDrag).toContain('NOTE_DND_MIME = "application/x-clovy-note-id"');

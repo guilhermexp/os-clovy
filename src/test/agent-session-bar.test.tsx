@@ -8,7 +8,6 @@ describe("AgentSessionBar", () => {
       <AgentSessionBar
         title="Plan the launch"
         onRename={vi.fn()}
-        onShare={vi.fn()}
         onMoveToProject={vi.fn()}
         onDelete={vi.fn()}
       />,
@@ -17,7 +16,7 @@ describe("AgentSessionBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Session actions" }));
 
     expect(screen.getByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Share" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Share" })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Add to project" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Delete session" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Usage" })).not.toBeInTheDocument();

@@ -185,15 +185,13 @@ describe("AgentWorkspace runtime wiring", () => {
               capabilities: ["tool-calling"],
               privacy: "private",
               contextTokens: 200_000,
-              inputCreditsPerMillionTokens: 2_000,
-              outputCreditsPerMillionTokens: 4_000,
             },
           ],
         });
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
-          settings: { costQuality: 100 },
+          settings: {},
           effectiveSettings: {
             providerApiKeysConfigured: {
               groq: false,
@@ -204,10 +202,7 @@ describe("AgentWorkspace runtime wiring", () => {
           },
         });
       }
-      if (command === "set_cost_quality") {
-        const value = (args as { request?: { value?: number } } | undefined)?.request?.value ?? 100;
-        return Promise.resolve({ costQuality: value });
-      }
+
       if (command === "create_agent_session") return Promise.resolve(newSession);
       if (command === "start_agent_run") {
         return Promise.resolve({
@@ -1733,7 +1728,7 @@ describe("AgentWorkspace runtime wiring", () => {
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
-          settings: { costQuality: 100 },
+          settings: {},
           effectiveSettings: {
             providerApiKeysConfigured: {
               groq: false,

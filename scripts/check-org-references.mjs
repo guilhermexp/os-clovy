@@ -15,7 +15,7 @@ const selfPath = path.relative(rootDir, scriptPath).split(path.sep).join("/");
 export const ORG_REFERENCE_SCOPES = [
   {
     name: "repository and CI",
-    pathspecs: [".github", "clovy-api", "scripts", "Makefile"],
+    pathspecs: [".github", "scripts", "Makefile"],
     pattern: /opensoftware\.co\b|june\.link|open-software-network|blacksmith/,
   },
   {

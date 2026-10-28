@@ -181,7 +181,6 @@ vi.mock("../lib/tauri", () => ({
   // these tests focused on the meetings surfaces.
   hermesBridgeStatus: vi.fn(async () => ({ running: false })),
   listAgentTasks: vi.fn(async () => ({ items: [] })),
-  clovyOpenVerifyPage: vi.fn(async () => ""),
   providerModelSettings: vi.fn(async () => ({
     settings: { generationModel: "" },
   })),
@@ -273,7 +272,6 @@ describe("meeting start transcription event", () => {
       folders: [],
       notes: [first],
       activeRecoveries: [],
-      providerConfigured: true,
     };
 
     mocks.getCurrentWindow.mockReturnValue({
@@ -472,7 +470,6 @@ describe("meeting start transcription event", () => {
         folders: [],
         notes: [first],
         activeRecoveries: [],
-        providerConfigured: true,
       });
       await bootstrap.promise;
     });
@@ -507,7 +504,6 @@ describe("meeting start transcription event", () => {
         folders: [],
         notes: [first],
         activeRecoveries: [],
-        providerConfigured: true,
       });
       await bootstrap.promise;
     });
@@ -885,7 +881,6 @@ describe("meeting start transcription event", () => {
       notes: [first, fresh],
       activeRecoveries: [],
       activeRecording,
-      providerConfigured: true,
     });
 
     render(<App />);
@@ -1148,7 +1143,6 @@ describe("agent recorder request event", () => {
       folders: [],
       notes: [first],
       activeRecoveries: [],
-      providerConfigured: true,
     };
 
     mocks.getCurrentWindow.mockReturnValue({

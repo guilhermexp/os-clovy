@@ -105,7 +105,7 @@ describe("CLI chat engine follow-up queuing", () => {
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
-          settings: { costQuality: 100 },
+          settings: {},
           effectiveSettings: {
             providerApiKeysConfigured: {
               groq: false,

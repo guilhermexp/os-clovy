@@ -1293,10 +1293,13 @@ echo '{"type":"agent_end","messages":[]}'"#,
         ("HOME", "/Users/someone"),
         ("PI_CODING_AGENT_DIR", "/Users/someone/.pi/agent"),
         ("OPENROUTER_API_KEY", "user-own-key"),
-        ("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "clovy-dev-token"),
-        ("OS_JUNE_LOCAL_DEV_BEARER_TOKEN", "june-dev-token"),
+        ("CLOVY_TEST_PRIVATE_TOKEN", "clovy-dev-token"),
+        ("CLOVY_TEST_LEGACY_TOKEN", "june-dev-token"),
         ("OS_ACCOUNTS_CLIENT_ID", "clovy-client"),
-        ("CLOVY_API_URL", "http://127.0.0.1:8787"),
+        (
+            "CLOVY_TEST_RETIRED_PROVIDER_ORIGIN",
+            "http://127.0.0.1:8787",
+        ),
         ("GOOGLE_OAUTH_CLIENT_SECRET", "clovy-oauth-secret"),
     ] {
         context.env.insert(name.to_string(), value.to_string());
@@ -1482,7 +1485,12 @@ async fn chat_engine_home_session_runs_two_turns_on_the_cli_without_clovy_api() 
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
-    std::env::set_var("CLOVY_API_URL", format!("http://{api_address}"));
+    // Inject the historical origin at its original environment boundary. A
+    // reintroduced server resolver would hit this listener; current CLI code
+    // never reads it. Assemble the retired name only inside this regression.
+    let retired_origin_env = ["CLOVY", "API", "URL"].join("_");
+    let previous_origin = std::env::var_os(&retired_origin_env);
+    std::env::set_var(&retired_origin_env, format!("http://{api_address}"));
 
     let kind = CliKind::Claude;
     let mut harness = Harness::new(kind).await;
@@ -1573,4 +1581,8 @@ async fn chat_engine_home_session_runs_two_turns_on_the_cli_without_clovy_api() 
     );
     assert_eq!(api_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     api_server.abort();
+    match previous_origin {
+        Some(value) => std::env::set_var(retired_origin_env, value),
+        None => std::env::remove_var(retired_origin_env),
+    }
 }

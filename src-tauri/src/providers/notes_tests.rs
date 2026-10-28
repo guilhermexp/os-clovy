@@ -116,7 +116,7 @@ async fn answering(status: u16, body: serde_json::Value) -> FakeServer {
     .await
 }
 
-/// A Clovy API base nothing listens on: the connection is refused.
+/// A retired-server origin with no listener: the connection is refused.
 fn closed_clovy_base() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -143,13 +143,13 @@ async fn a_final_turn_with_a_groq_key_goes_straight_to_groq_with_clovy_apis_para
     let groq = heads(&hosts.groq);
     assert_eq!(groq.len(), 1);
     assert!(
-        groq[0].starts_with("POST /v1/audio/transcriptions "),
+        groq[0].starts_with("POST /openai/v1/audio/transcriptions "),
         "{}",
         groq[0]
     );
     assert_eq!(header(&groq[0], "authorization"), Some("Bearer gsk-user"));
     assert_no_forwarded_keys(&groq[0]);
-    assert_eq!(header(&groq[0], CLOVY_APP_VERSION_HEADER), None);
+    assert_eq!(header(&groq[0], "x-clovy-app-version"), None);
     let body = hosts.groq.raw_bodies.lock().unwrap()[0].clone();
     for expected in [
         "name=\"model\"\r\n\r\nwhisper-large-v3-turbo",
@@ -206,7 +206,7 @@ async fn a_transient_groq_failure_is_retried_once() {
     .await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -238,7 +238,7 @@ fn rate_limited(headers: &[(&str, &str)]) -> (u16, serde_json::Value, Vec<(Strin
 async fn transcribe_against(groq: &FakeServer) -> Result<TranscriptionProviderResult, AppError> {
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -337,7 +337,7 @@ async fn a_packed_turn_request_asks_groq_for_segment_times() {
     .await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -396,7 +396,7 @@ async fn a_rejected_request_is_not_retried() {
     let groq = answering(400, serde_json::json!({ "error": "bad audio" })).await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -419,7 +419,7 @@ async fn an_empty_groq_transcript_is_no_speech() {
     let groq = answering(200, serde_json::json!({ "text": "  ", "language": "en" })).await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        groq_base: groq.base_url.clone(),
+        groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -443,7 +443,7 @@ async fn a_rejected_groq_key_is_reported_as_the_users_key() {
         let groq = answering(status, serde_json::json!({ "error": "invalid key" })).await;
         let hosts = Hosts::start().await;
         let transport = DictationTransport {
-            groq_base: groq.base_url.clone(),
+            groq_base: format!("{}/openai/v1", groq.base_url.trim_end_matches("/v1")),
             ..hosts.transport()
         };
         let directory = tempfile::tempdir().unwrap();
@@ -523,7 +523,7 @@ async fn note_generation_with_an_openrouter_key_goes_straight_to_openrouter() {
     .await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        openrouter_base: openrouter.base_url.clone(),
+        openrouter_base: format!("{}/api/v1", openrouter.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let request = generation_request();
@@ -544,13 +544,13 @@ async fn note_generation_with_an_openrouter_key_goes_straight_to_openrouter() {
     let sent = heads(&openrouter);
     assert_eq!(sent.len(), 1);
     assert!(
-        sent[0].starts_with("POST /v1/chat/completions "),
+        sent[0].starts_with("POST /api/v1/chat/completions "),
         "{}",
         sent[0]
     );
     assert_eq!(header(&sent[0], "authorization"), Some("Bearer sk-or-user"));
     assert_no_forwarded_keys(&sent[0]);
-    assert_eq!(header(&sent[0], CLOVY_APP_VERSION_HEADER), None);
+    assert_eq!(header(&sent[0], "x-clovy-app-version"), None);
     let body = openrouter.requests.lock().unwrap()[0].clone();
     assert_eq!(body["model"], "z-ai/glm-5.2");
     assert_eq!(body["messages"][0]["content"], LOCAL_SAFETY_CONTEXT);
@@ -590,7 +590,7 @@ async fn a_rejected_openrouter_key_fails_note_generation_as_the_users_key() {
     let openrouter = answering(401, serde_json::json!({ "error": "invalid key" })).await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        openrouter_base: openrouter.base_url.clone(),
+        openrouter_base: format!("{}/api/v1", openrouter.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
 
@@ -630,7 +630,7 @@ async fn note_transcript_cleanup_with_an_openrouter_key_sends_clovy_apis_note_co
     assert_eq!(body["temperature"], 0.0);
     assert_eq!(
         body["messages"][0]["content"],
-        include_str!("prompts/note_transcript_cleanup.md").trim()
+        include_str!("../prompts/note_transcript_cleanup.md").trim()
     );
     assert_eq!(
         body["messages"][1]["content"],
@@ -677,7 +677,7 @@ async fn a_transient_openrouter_failure_in_note_cleanup_is_retried_once() {
     let openrouter = openrouter_overloaded_once().await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        openrouter_base: openrouter.base_url.clone(),
+        openrouter_base: format!("{}/api/v1", openrouter.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
 
@@ -699,7 +699,7 @@ async fn a_permanent_openrouter_refusal_in_note_cleanup_is_not_retried() {
     let openrouter = answering(400, serde_json::json!({ "error": "bad request" })).await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        openrouter_base: openrouter.base_url.clone(),
+        openrouter_base: format!("{}/api/v1", openrouter.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
 
@@ -723,7 +723,7 @@ async fn dictation_cleanup_keeps_a_single_attempt() {
     let openrouter = openrouter_overloaded_once().await;
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        openrouter_base: openrouter.base_url.clone(),
+        openrouter_base: format!("{}/api/v1", openrouter.base_url.trim_end_matches("/v1")),
         ..hosts.transport()
     };
     let params = DictateCleanupRequestParams {

@@ -23,7 +23,6 @@ type ModelPickerEntry = {
   key: string;
   model: ProviderModelDto;
   reason?: string;
-  costQuality?: number;
 };
 
 // Model catalog UI shared between Settings (the Models tab rows) and the
@@ -87,7 +86,6 @@ export function ModelPickerDialog({
   mode,
   value,
   options,
-  costQuality,
   search,
   onSearchChange,
   onClose,
@@ -97,11 +95,10 @@ export function ModelPickerDialog({
   mode: ProviderModelMode;
   value: string;
   options: ProviderModelDto[];
-  costQuality?: number;
   search: string;
   onSearchChange: (value: string) => void;
   onClose: () => void;
-  onSelect: (modelId: string, costQuality?: number) => void;
+  onSelect: (modelId: string) => void;
 }) {
   const t = useT();
   // "Suggested" leads with the few models we actually recommend (benchmarks,
@@ -198,10 +195,7 @@ export function ModelPickerDialog({
       <div className="model-picker-list" role="listbox" aria-label={title}>
         {filteredOptions.map((item) => {
           const { model } = item;
-          const presetCostQuality = item.costQuality;
-          const selected =
-            model.id === value &&
-            (presetCostQuality === undefined || presetCostQuality === costQuality);
+          const selected = model.id === value;
           const reason = showReasons ? item.reason : undefined;
           // A local (bring-your-own) endpoint is selectable, but its tool
           // support can't be verified from here, so it carries a non-blocking
@@ -215,13 +209,9 @@ export function ModelPickerDialog({
               role="option"
               aria-selected={selected}
               data-selected={selected}
-              onClick={() => onSelect(model.id, presetCostQuality)}
+              onClick={() => onSelect(model.id)}
             >
-              <span
-                className="model-picker-logo"
-                data-brand={model.id === AUTO_MODEL_ID ? "clovy" : undefined}
-                aria-hidden
-              >
+              <span className="model-picker-logo" aria-hidden>
                 <ProviderLogo provider={model.provider} id={model.id} name={model.name} />
               </span>
               <span className="model-picker-name" title={model.description}>

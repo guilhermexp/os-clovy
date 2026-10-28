@@ -25,21 +25,6 @@ export function pricingLabel(model: ProviderModelDto) {
     }
   }
   if (model.priceDescription?.trim()) return model.priceDescription.trim();
-  if (model.priceUnit === "seconds" && typeof model.creditsPerMillionSeconds === "number") {
-    return t("lib.modelPricing.perSecondAudio", {
-      price: formatCreditsAsUsdPerUnit(model.creditsPerMillionSeconds, 1_000_000),
-    });
-  }
-  if (
-    model.priceUnit === "tokens" &&
-    typeof model.inputCreditsPerMillionTokens === "number" &&
-    typeof model.outputCreditsPerMillionTokens === "number"
-  ) {
-    return t("lib.modelPricing.perMillionTokens", {
-      input: formatCreditsAsUsd(model.inputCreditsPerMillionTokens),
-      output: formatCreditsAsUsd(model.outputCreditsPerMillionTokens),
-    });
-  }
   return undefined;
 }
 
@@ -84,11 +69,6 @@ function formatUsd(value: number) {
   return value >= 1 ? value.toFixed(2) : value.toFixed(4).replace(/0+$/, "0");
 }
 
-export function formatCreditsAsUsd(credits: number) {
-  const cents = Math.round(credits / 10);
-  return usd(`${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`);
-}
-
 /** A USD amount given as its English decimal text ("1.75", "0.000150").
  * English keeps the historical `$1.75` shape exactly; other languages format
  * the same amount and precision as US dollars in their own convention
@@ -102,14 +82,4 @@ function usd(amount: string): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
-}
-
-function formatCreditsAsUsdPerUnit(credits: number, units: number) {
-  if (units <= 0) return usd("0.00");
-  const microUsd = Math.round((credits * 1_000) / units);
-  if (microUsd >= 1_000_000) {
-    const cents = Math.round(microUsd / 10_000);
-    return usd(`${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`);
-  }
-  return usd(`0.${String(microUsd).padStart(6, "0").replace(/0+$/, "")}`);
 }

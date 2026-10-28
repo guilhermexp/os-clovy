@@ -89,8 +89,7 @@ export default defineMessages({
     "agent.usage.latestContext": "Latest request context",
     "agent.usage.contextValue": "{used} of {limit} ({percent}%)",
     "agent.usage.contextUsed": "Context used",
-    "agent.usage.estimatedCharge": "Estimated charge",
-    "agent.usage.chargeValue": "{credits} credits (about {usd})",
+
     "agent.usage.tools": "Tools",
     "agent.usage.toolCalls": { one: "{count} call", other: "{count} calls" },
     "agent.usage.toolCallsWithFailures": {
@@ -289,8 +288,7 @@ export default defineMessages({
     "agent.usage.latestContext": "Contexto da última solicitação",
     "agent.usage.contextValue": "{used} de {limit} ({percent}%)",
     "agent.usage.contextUsed": "Contexto usado",
-    "agent.usage.estimatedCharge": "Cobrança estimada",
-    "agent.usage.chargeValue": "{credits} créditos (cerca de {usd})",
+
     "agent.usage.tools": "Ferramentas",
     "agent.usage.toolCalls": { one: "{count} chamada", other: "{count} chamadas" },
     "agent.usage.toolCallsWithFailures": {

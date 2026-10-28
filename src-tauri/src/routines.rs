@@ -2712,7 +2712,7 @@ mod tests {
 
     #[test]
     fn automatic_routine_model_runs_on_the_default_cli_engine() {
-        for stored_model in ["", "auto", crate::providers::AUTO_GENERATION_MODEL] {
+        for stored_model in ["", "auto", crate::providers::LEGACY_AUTO_GENERATION_MODEL] {
             assert_eq!(
                 resolve_routine_model(
                     stored_model,

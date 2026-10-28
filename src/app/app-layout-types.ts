@@ -98,10 +98,8 @@ export type RenderAppLayoutDependencies = {
   setMoveDialogNoteIds: React.Dispatch<React.SetStateAction<string[] | null>>;
   setMoveDialogSessionIds: React.Dispatch<React.SetStateAction<string[] | null>>;
   setNoteChatOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  setNoteShareUrl: React.Dispatch<React.SetStateAction<string | null>>;
   setOriginAllNotes: React.Dispatch<React.SetStateAction<boolean>>;
   setOriginFolderId: React.Dispatch<React.SetStateAction<string | undefined>>;
-  setShareNoteOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSidebarCollapsed: React.Dispatch<React.SetStateAction<boolean>>;
   setSidebarResizing: React.Dispatch<React.SetStateAction<boolean>>;
   setSidebarTransition: React.Dispatch<React.SetStateAction<"none" | "smooth">>;
@@ -109,7 +107,6 @@ export type RenderAppLayoutDependencies = {
   settingsDetailScrollerActive: boolean;
   settingsReturnView: SidebarView;
   settingsTab: SettingsTab;
-  shareNoteOpen: boolean;
   sidebarCollapsed: boolean;
   sidebarRecorderStatus: RecordingStatusDto | null;
   sidebarResizing: boolean;

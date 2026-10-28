@@ -204,10 +204,6 @@ fn model_row(provider: &str, id: &str, name: &str, model_type: &str) -> Provider
         capabilities: vec![],
         price_unit: model_type.to_string(),
         price_description: String::new(),
-        credits_per_million_seconds: None,
-        input_credits_per_million_tokens: None,
-        output_credits_per_million_tokens: None,
-        service_available: None,
     }
 }
 
@@ -338,8 +334,6 @@ mod tests {
         assert!((pricing["input"]["usd"].as_f64().unwrap() - 0.3).abs() < 0.000001);
         assert_eq!(pricing["output"]["usd"], 2.5);
         assert_eq!(plain.privacy, None);
-        assert_eq!(plain.service_available, None);
-        assert_eq!(plain.input_credits_per_million_tokens, None);
         let vision = models
             .iter()
             .find(|model| model.id == "vendor/vision")
@@ -446,7 +440,11 @@ mod tests {
                     .collect::<Vec<_>>(),
                 expected
             );
-            assert!(models.iter().all(|model| model.service_available.is_none()));
+            assert!(models.iter().all(|model| {
+                let value = serde_json::to_value(model).unwrap();
+                value.get("serviceAvailable").is_none()
+                    && value.get("inputCreditsPerMillionTokens").is_none()
+            }));
         }
     }
 }

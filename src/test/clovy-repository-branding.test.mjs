@@ -13,8 +13,6 @@ describe("Clovy repository branding", () => {
       ".github/ISSUE_TEMPLATE/bug_report.yml",
       ".github/ISSUE_TEMPLATE/config.yml",
       ".github/ISSUE_TEMPLATE/feature_request.yml",
-      "clovy-api/config.toml",
-      "clovy-api/crates/config/src/lib.rs",
       "docs/private-connectors-implementation-plan.md",
       "docs/release-extension.md",
       "docs/telemetry-p3a-implementation-plan.md",
