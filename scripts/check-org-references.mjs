@@ -25,8 +25,9 @@ export const ORG_REFERENCE_SCOPES = [
     pattern: /opensoftware\.co\b|june\.link|open-software-network/,
   },
   {
-    // The June-era app identity (ADR-0068). Its one exception is the identity
-    // migration module: the list of migration sources and the tests pinning it.
+    // The June-era app identity (ADR-0068). Migration and native-secret
+    // retirement may name legacy Keychain services to read or remove them.
+    // Both modules remain covered by the service-domain scope above.
     name: "app identity",
     pathspecs: [
       "src",
@@ -43,6 +44,7 @@ export const ORG_REFERENCE_SCOPES = [
       "styleguide.html",
       ":!src/test",
       ":!src-tauri/src/identity_migration",
+      ":!src-tauri/src/agent_sessions/retirement.rs",
     ],
     pattern: /co\.opensoftware|os-june|June\.app/,
   },

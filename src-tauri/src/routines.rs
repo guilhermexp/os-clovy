@@ -1639,6 +1639,33 @@ mod tests {
     }
 
     #[test]
+    fn retired_routine_models_keep_the_local_codex_fallback() {
+        let model = resolve_routine_model(
+            "auto",
+            "remote-model",
+            Some(crate::llm::cli::CliKind::Codex),
+        );
+        assert_eq!(
+            crate::chat_engine::cli_for_model(&model),
+            Some(crate::llm::cli::CliKind::Codex)
+        );
+    }
+
+    #[test]
+    fn a_routine_without_a_cli_reports_the_missing_local_engine() {
+        let model = resolve_routine_model("auto", "remote-model", None);
+        let kind = crate::chat_engine::cli_for_model(&model).unwrap();
+        // start_cli_turn resolves the executable before spawning and returns
+        // this error when the selected CLI is absent from the login PATH.
+        let error = AppError::from(crate::llm::LlmError::CliNotInstalled(kind));
+        assert_eq!(error.code, "llm_cli_not_installed");
+        assert_eq!(
+            error.message,
+            "Claude Code is not installed on this computer."
+        );
+    }
+
+    #[test]
     fn historical_linear_toolsets_preserve_read_and_action_boundaries() {
         let managed_id = crate::agent_mcp::MANAGED_LINEAR_SERVER_ID;
         let managed_name = crate::agent_mcp::MANAGED_LINEAR_SERVER_NAME;
@@ -2724,7 +2751,7 @@ mod tests {
             ),
             // Clovy cannot confine pi's tools for unattended work.
             (ProviderRef::Cli { id: CliKind::Pi }, None),
-            (ProviderRef::Clovy, None),
+            (ProviderRef::OpenRouter, None),
         ] {
             settings.llm_usage.chat = chat;
             crate::providers::replace_current_settings_for_tests(settings.clone());

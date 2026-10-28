@@ -386,7 +386,7 @@ export default defineMessages({
     "settingsPanels.llm.usageActivity": "Activity",
     "settingsPanels.llm.usageActivityDescription":
       "Activity stays off when set to None. Nothing is sent anywhere.",
-    "settingsPanels.llm.providerClovy": "Clovy",
+    "settingsPanels.llm.providerOpenRouter": "OpenRouter",
     "settingsPanels.llm.providerClovyLegacy": "Clovy (legacy agent)",
     "settingsPanels.llm.chatLegacyFallback":
       "Claude Code and Codex aren't installed, so chat uses the legacy Clovy agent. Install one and restart Clovy to make it the default.",
@@ -433,7 +433,7 @@ export default defineMessages({
     "settingsPanels.llm.clearApiKey": "Remove saved key",
     "settingsPanels.llm.deleteTitle": "Delete {name}?",
     "settingsPanels.llm.deleteDescription":
-      "Usages pointing at this endpoint will switch back to Clovy (or None for activity).",
+      "Usages pointing at this endpoint will switch back to OpenRouter (or None for activity).",
     "settingsPanels.llm.deleteConfirm": "Delete endpoint",
     "settingsPanels.llm.saveChanges": "Save changes",
     "settingsPanels.llm.saveEndpoint": "Save endpoint",
@@ -835,7 +835,7 @@ export default defineMessages({
     "settingsPanels.llm.usageActivity": "Atividade",
     "settingsPanels.llm.usageActivityDescription":
       "Os recursos de atividade ficam desativados quando definido como Nenhum. Nada é enviado para lugar algum.",
-    "settingsPanels.llm.providerClovy": "Clovy",
+    "settingsPanels.llm.providerOpenRouter": "OpenRouter",
     "settingsPanels.llm.providerClovyLegacy": "Clovy (agente legado)",
     "settingsPanels.llm.chatLegacyFallback":
       "O Claude Code e o Codex não estão instalados, então o chat usa o agente legado do Clovy. Instale um deles e reinicie o Clovy para torná-lo o padrão.",
@@ -882,7 +882,7 @@ export default defineMessages({
     "settingsPanels.llm.clearApiKey": "Remover chave salva",
     "settingsPanels.llm.deleteTitle": "Excluir {name}?",
     "settingsPanels.llm.deleteDescription":
-      "Os usos que apontam para este endpoint voltarão para o Clovy (ou Nenhum para atividade).",
+      "Os usos que apontam para este endpoint voltarão para a OpenRouter (ou Nenhum para atividade).",
     "settingsPanels.llm.deleteConfirm": "Excluir endpoint",
     "settingsPanels.llm.saveChanges": "Salvar alterações",
     "settingsPanels.llm.saveEndpoint": "Salvar endpoint",

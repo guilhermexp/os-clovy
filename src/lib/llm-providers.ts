@@ -2,10 +2,10 @@ import { invoke } from "./tauri";
 
 export type StructuredOutputLevel = "none" | "prompt" | "json_object" | "json_schema" | "strict";
 export type LlmCliId = "claude" | "codex" | "pi" | "agy" | "cursor-agent" | "copilot";
-export type LlmUsage = "chat" | "notes" | "dictationCleanup" | "activity";
+export type LlmUsage = "chat" | "notes" | "activity";
 
 export type LlmProviderRef =
-  | { kind: "clovy" }
+  | { kind: "openrouter" }
   | { kind: "none" }
   | { kind: "endpoint"; id: string }
   | { kind: "cli"; id: LlmCliId };
@@ -35,7 +35,6 @@ export type LlmEndpointDto = {
 export type LlmUsageSelection = {
   chat: LlmProviderRef;
   notes: LlmProviderRef;
-  dictationCleanup: LlmProviderRef;
   activity: LlmProviderRef;
 };
 
@@ -92,8 +91,8 @@ export function isActivityEligible(level?: StructuredOutputLevel): boolean {
 
 export function providerRefKey(ref: LlmProviderRef): string {
   switch (ref.kind) {
-    case "clovy":
-      return "clovy";
+    case "openrouter":
+      return "openrouter";
     case "none":
       return "none";
     case "endpoint":
@@ -104,8 +103,8 @@ export function providerRefKey(ref: LlmProviderRef): string {
 }
 
 export function parseProviderRefKey(key: string): LlmProviderRef {
-  if (key === "clovy") {
-    return { kind: "clovy" };
+  if (key === "openrouter") {
+    return { kind: "openrouter" };
   }
   if (key === "none") {
     return { kind: "none" };

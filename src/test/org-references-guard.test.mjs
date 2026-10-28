@@ -27,7 +27,14 @@ describe("organization reference guard", () => {
     expect('"identifier": "dev.guilhermexp.clovy"').not.toMatch(scope.pattern);
     expect(scope.pathspecs.filter((spec) => spec.startsWith(":!src-tauri"))).toEqual([
       ":!src-tauri/src/identity_migration",
+      ":!src-tauri/src/agent_sessions/retirement.rs",
     ]);
+  });
+
+  it("still scans legacy secret retirement for service domains", () => {
+    const scope = ORG_REFERENCE_SCOPES.find(({ name }) => name === "app source");
+    expect(scope.pathspecs).not.toContain(":!src-tauri/src/agent_sessions/retirement.rs");
+    expect("https://app.opensoftware.co/api").toMatch(scope.pattern);
   });
 
   it("finds no organization references in the repository, CI and app source", () => {

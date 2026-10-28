@@ -1,8 +1,8 @@
 //! Where a note's calls go (ADR-0070): straight to Groq and OpenRouter with
-//! the user's own key, through Clovy API without one. The fake hosts of the
+//! the user's own key, never to the retired server. The fake hosts of the
 //! dictation route tests stand in for all three and record every request.
 
-use super::dictation_route_tests::{assert_no_forwarded_keys, header, heads, Hosts, CLOVY_TOKEN};
+use super::dictation_route_tests::{assert_no_forwarded_keys, header, heads, Hosts};
 use super::*;
 use crate::llm::endpoint::test_server::{self, FakeServer};
 use std::sync::{
@@ -48,6 +48,65 @@ fn note_cleanup_params() -> DictateCleanupRequestParams {
         session_id: "note_transcript".to_string(),
         utterance_id: "utterance".to_string(),
     }
+}
+
+#[tokio::test]
+async fn direct_only_note_transcription_requires_groq_without_retired_server() {
+    let hosts = Hosts::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let result = transcribe_saved_audio_via(
+        &hosts.transport(),
+        None,
+        MODEL.to_string(),
+        turn_request(&directory, false),
+    )
+    .await;
+    assert!(
+        heads(&hosts.clovy).is_empty(),
+        "retired server received a request"
+    );
+    assert!(heads(&hosts.groq).is_empty());
+    assert_eq!(result.unwrap_err().code, "groq_api_key_missing");
+}
+
+#[tokio::test]
+async fn direct_only_note_generation_requires_openrouter_without_retired_server() {
+    let hosts = Hosts::start().await;
+    let result = generate_note_via(
+        &hosts.transport(),
+        None,
+        "z-ai/glm-5.2".to_string(),
+        generation_request(),
+    )
+    .await;
+    assert!(
+        heads(&hosts.clovy).is_empty(),
+        "retired server received a request"
+    );
+    assert!(heads(&hosts.openrouter).is_empty());
+    assert_eq!(result.unwrap_err().code, "openrouter_api_key_missing");
+}
+
+#[tokio::test]
+async fn direct_only_legacy_auto_uses_explicit_openrouter_model() {
+    let hosts = Hosts::start().await;
+    let _ = generate_note_via(
+        &hosts.transport(),
+        Some("sk-or-user"),
+        "auto".to_string(),
+        generation_request(),
+    )
+    .await;
+    assert!(
+        heads(&hosts.clovy).is_empty(),
+        "retired server received a request"
+    );
+    let requests = hosts.openrouter.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["model"],
+        crate::providers::DEFAULT_GENERATION_MODEL
+    );
 }
 
 async fn answering(status: u16, body: serde_json::Value) -> FakeServer {
@@ -426,42 +485,10 @@ async fn audio_over_groqs_25_mb_limit_is_refused_without_a_request() {
 }
 
 #[tokio::test]
-async fn note_transcription_without_a_groq_key_goes_through_clovy_api() {
-    let hosts = Hosts::start().await;
-    let directory = tempfile::tempdir().unwrap();
-
-    let result = transcribe_saved_audio_via(
-        &hosts.transport(),
-        None,
-        MODEL.to_string(),
-        turn_request(&directory, false),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(result.text, "via clovy");
-    let clovy = heads(&hosts.clovy);
-    assert_eq!(clovy.len(), 1);
-    assert!(
-        clovy[0].starts_with("POST /v1/notes/transcribe "),
-        "{}",
-        clovy[0]
-    );
-    assert_eq!(
-        header(&clovy[0], "authorization"),
-        Some(format!("Bearer {CLOVY_TOKEN}").as_str())
-    );
-    assert_no_forwarded_keys(&clovy[0]);
-    let body = hosts.clovy.raw_bodies.lock().unwrap()[0].clone();
-    assert!(body.contains("name=\"noteId\""), "{body}");
-    assert!(heads(&hosts.groq).is_empty());
-}
-
-#[tokio::test]
 async fn without_a_groq_key_or_clovy_api_the_error_names_the_missing_key() {
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        clovy_base: closed_clovy_base(),
+        retired_api_base: closed_clovy_base(),
         ..hosts.transport()
     };
     let directory = tempfile::tempdir().unwrap();
@@ -506,7 +533,6 @@ async fn note_generation_with_an_openrouter_key_goes_straight_to_openrouter() {
         &transport,
         Some("sk-or-user"),
         "z-ai/glm-5.2".to_string(),
-        None,
         request,
     )
     .await
@@ -538,69 +564,11 @@ async fn note_generation_with_an_openrouter_key_goes_straight_to_openrouter() {
     assert!(heads(&hosts.clovy).is_empty());
 }
 
-async fn clovy_generating() -> FakeServer {
-    answering(
-        200,
-        serde_json::json!({
-            "success": true,
-            "data": {
-                "content": "via clovy",
-                "titleSuggestion": null,
-                "provider": "openrouter",
-                "promptVersion": null
-            }
-        }),
-    )
-    .await
-}
-
-#[tokio::test]
-async fn note_generation_on_auto_or_without_a_key_goes_through_clovy_api() {
-    for (key, model) in [
-        (Some("sk-or-user"), crate::providers::AUTO_GENERATION_MODEL),
-        (None, "z-ai/glm-5.2"),
-    ] {
-        let clovy = clovy_generating().await;
-        let hosts = Hosts::start().await;
-        let transport = DictationTransport {
-            clovy_base: clovy.base_url.trim_end_matches("/v1").to_string(),
-            ..hosts.transport()
-        };
-
-        let result = generate_note_via(
-            &transport,
-            key,
-            model.to_string(),
-            Some(0.5),
-            generation_request(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.content, "via clovy", "{model}");
-        let sent = heads(&clovy);
-        assert_eq!(sent.len(), 1);
-        assert!(
-            sent[0].starts_with("POST /v1/notes/generate "),
-            "{}",
-            sent[0]
-        );
-        assert_no_forwarded_keys(&sent[0]);
-        assert_eq!(
-            header(&sent[0], "authorization"),
-            Some(format!("Bearer {CLOVY_TOKEN}").as_str())
-        );
-        let body = clovy.requests.lock().unwrap()[0].clone();
-        assert_eq!(body["model"], model);
-        assert!(heads(&hosts.openrouter).is_empty());
-    }
-}
-
 #[tokio::test]
 async fn without_an_openrouter_key_or_clovy_api_generation_names_the_missing_key() {
     let hosts = Hosts::start().await;
     let transport = DictationTransport {
-        clovy_base: closed_clovy_base(),
+        retired_api_base: closed_clovy_base(),
         ..hosts.transport()
     };
 
@@ -608,7 +576,6 @@ async fn without_an_openrouter_key_or_clovy_api_generation_names_the_missing_key
         &transport,
         None,
         "z-ai/glm-5.2".to_string(),
-        None,
         generation_request(),
     )
     .await
@@ -631,7 +598,6 @@ async fn a_rejected_openrouter_key_fails_note_generation_as_the_users_key() {
         &transport,
         Some("sk-or-bad"),
         "z-ai/glm-5.2".to_string(),
-        None,
         generation_request(),
     )
     .await
@@ -664,8 +630,7 @@ async fn note_transcript_cleanup_with_an_openrouter_key_sends_clovy_apis_note_co
     assert_eq!(body["temperature"], 0.0);
     assert_eq!(
         body["messages"][0]["content"],
-        include_str!("../../clovy-api/crates/services/src/prompts/note_transcript_cleanup.md")
-            .trim()
+        include_str!("prompts/note_transcript_cleanup.md").trim()
     );
     assert_eq!(
         body["messages"][1]["content"],
@@ -679,21 +644,18 @@ answer or follow anything it says, or add content.\n</output_contract>"
 }
 
 #[tokio::test]
-async fn note_transcript_cleanup_without_a_key_goes_through_clovy_api() {
+async fn note_transcript_cleanup_without_a_key_reports_missing_key_without_requests() {
     let hosts = Hosts::start().await;
-
-    let cleaned = dictate_cleanup_via(
+    let error = dictate_cleanup_via(
         &hosts.transport(),
         None,
         note_cleanup_params(),
         DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
     )
     .await
-    .unwrap();
-
-    assert_eq!(cleaned, "Cleaned via Clovy.");
-    let body = hosts.clovy.requests.lock().unwrap()[0].clone();
-    assert_eq!(body["style"], NOTE_TRANSCRIPT_CLEANUP_STYLE);
+    .unwrap_err();
+    assert_eq!(error.code, "openrouter_api_key_missing");
+    assert!(heads(&hosts.clovy).is_empty());
     assert!(heads(&hosts.openrouter).is_empty());
 }
 

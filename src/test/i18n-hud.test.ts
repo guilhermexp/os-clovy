@@ -137,6 +137,54 @@ describe("HUD windows in pt-BR", () => {
     expect(document.querySelector("#hud-error-text")).toHaveTextContent("Upstream said no.");
   });
 
+  it.each([
+    "en",
+    "pt-BR",
+  ] as const)("shows the missing Groq key setup path in %s", async (locale) => {
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await switchLocale(locale);
+    await mocks.listeners.get("dictation-event")?.({
+      payload: {
+        type: "error",
+        payload: { code: "groq_api_key_missing", message: "native fallback" },
+      },
+    });
+    await flush();
+    expect(document.querySelector("#hud-error-text")).toHaveTextContent(
+      locale === "en"
+        ? "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings."
+        : "Adicione sua chave de API da Groq em Configurações > Modelos > Mais opções > Chaves de API de provedores para transcrever gravações.",
+    );
+    expect(document.querySelector("#hud-error-text")).not.toHaveTextContent("native fallback");
+  });
+
+  it.each([
+    "en",
+    "pt-BR",
+  ] as const)("names the missing OpenRouter key while pasting raw dictation in %s", async (locale) => {
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await switchLocale(locale);
+    await mocks.listeners.get("dictation-event")?.({
+      payload: {
+        type: "dictation_cleanup_skipped",
+        payload: { provider: "openrouter", code: "openrouter_api_key_missing" },
+      },
+    });
+    await mocks.listeners.get("dictation-event")?.({
+      payload: { type: "paste_target", payload: { app: "Notes" } },
+    });
+    expect(document.querySelector("#hud-status")).toHaveTextContent(
+      locale === "en"
+        ? "Pasting into Notes without cleanup: OpenRouter API key missing."
+        : "Colando em Notes sem limpeza: falta a chave de API da OpenRouter.",
+    );
+    expect(document.querySelector("#hud")).toHaveAttribute("data-state", "pasting");
+  });
+
   it("translates the persistent destination name and unknown fallback", async () => {
     loadPage("hud.html");
     await import("../hud");

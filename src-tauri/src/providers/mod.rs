@@ -863,7 +863,11 @@ fn set_provider_model_impl(
     state: &ProviderSettingsState,
     request: SetProviderModelRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let model_id = request.model_id.trim().to_string();
+    let model_id = match request.model_id.trim() {
+        AUTO_GENERATION_MODEL if request.mode == ModelMode::Generation => DEFAULT_GENERATION_MODEL,
+        value => value,
+    }
+    .to_string();
     if model_id.is_empty() {
         return Err(AppError::new("provider_model_required", "Select a model."));
     }
@@ -1566,9 +1570,9 @@ fn default_settings() -> ProviderModelSettings {
         transcription_provider: PROVIDER_GROQ.to_string(),
         generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
-        generation_model: default_generation_model_for_release(),
+        generation_model: default_generation_model(),
         cost_quality: DEFAULT_COST_QUALITY,
-        remote_generation_model: default_generation_model_for_release(),
+        remote_generation_model: default_generation_model(),
         image_model: DEFAULT_IMAGE_MODEL.to_string(),
         video_model: DEFAULT_VIDEO_MODEL.to_string(),
         provider_api_keys_configured: ProviderApiKeysConfigured::default(),
@@ -1611,16 +1615,6 @@ fn default_cost_quality() -> u8 {
     DEFAULT_COST_QUALITY
 }
 
-fn default_generation_model_for_release() -> String {
-    let enabled = option_env!("OS_CLOVY_AUTO_MODE_DEFAULT")
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
-    if enabled {
-        AUTO_GENERATION_MODEL.to_string()
-    } else {
-        DEFAULT_GENERATION_MODEL.to_string()
-    }
-}
-
 fn default_image_model() -> String {
     DEFAULT_IMAGE_MODEL.to_string()
 }
@@ -1656,13 +1650,22 @@ fn settings_from_json(
     raw: &str,
     store: &dyn crate::llm::secrets::SecretStore,
 ) -> Option<(ProviderModelSettings, bool)> {
-    let parsed = serde_json::from_str::<ProviderModelSettings>(raw).ok()?;
-    let retired_chat = !matches!(parsed.llm_usage.chat, ProviderRef::Cli { .. });
+    let document: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let retired_usage = document["llmUsage"]["notes"]["kind"] == "clovy"
+        || document["llmUsage"].get("dictationCleanup").is_some();
+    let retired_auto = document["generationModel"] == AUTO_GENERATION_MODEL
+        || document["remoteGenerationModel"] == AUTO_GENERATION_MODEL;
+    let missing_chat = document["llmUsage"].get("chat").is_none();
+    let parsed = serde_json::from_value::<ProviderModelSettings>(document).ok()?;
+    let retired_chat = missing_chat || !matches!(parsed.llm_usage.chat, ProviderRef::Cli { .. });
     let was_migrated = parsed.llm_registry_migrated;
     let remote_models_migrated = parsed.remote_models_migrated;
     let migrated = crate::llm::registry::migrate_legacy_local_generation(parsed, store);
-    let migrated_now =
-        retired_chat || migrated.llm_registry_migrated != was_migrated || !remote_models_migrated;
+    let migrated_now = retired_chat
+        || retired_usage
+        || retired_auto
+        || migrated.llm_registry_migrated != was_migrated
+        || !remote_models_migrated;
     Some((
         sanitize_settings(migrated, &default_settings()),
         migrated_now,
@@ -1678,7 +1681,9 @@ fn sanitize_settings(
     // against their curated sets on every load.
     let migrate_text = !settings.remote_models_migrated;
     let migrate = |model: String| {
-        if migrate_text {
+        if model == AUTO_GENERATION_MODEL {
+            DEFAULT_GENERATION_MODEL.to_string()
+        } else if migrate_text {
             migrate_legacy_text_model(model)
         } else {
             model
@@ -1694,9 +1699,8 @@ fn sanitize_settings(
         &defaults.remote_generation_model,
     ));
     let local_generation = sanitize_local_generation(settings.local_generation);
-    // Chat on an endpoint is restored from `llm_usage` by `normalize` below;
-    // here a persisted local provider only must not leak its stale local
-    // model id into the remote model.
+    // A historical chat endpoint must not leak its stale local model id into
+    // the independent OpenRouter model. The endpoint itself remains for notes.
     let generation_model = if settings.generation_provider == PROVIDER_LOCAL {
         remote_generation_model.clone()
     } else {
@@ -1829,11 +1833,11 @@ pub fn current_text_model_id(model: &str) -> &str {
 }
 
 /// Maps a text model id from a settings file saved before the OpenRouter
-/// cutover: Auto stays Auto, a model Clovy API now serves through OpenRouter
-/// keeps being that model, and any other pre-cutover id moves to the default.
+/// cutover. Auto and unknown legacy ids become the explicit default; known
+/// equivalents retain their OpenRouter model identity.
 fn migrate_legacy_text_model(model: String) -> String {
     if model == AUTO_GENERATION_MODEL {
-        return model;
+        return DEFAULT_GENERATION_MODEL.to_string();
     }
     let current = current_text_model_id(&model);
     if current == model.trim() {
@@ -2602,8 +2606,11 @@ mod tests {
                 id: CliKind::Claude
             }
         );
-        assert_eq!(migrated.llm_usage.notes, ProviderRef::Clovy);
-        assert_eq!(migrated.llm_usage.dictation_cleanup, ProviderRef::Clovy);
+        assert_eq!(migrated.llm_usage.notes, ProviderRef::OpenRouter);
+        assert_eq!(
+            migrated.llm_usage.dictation_cleanup,
+            ProviderRef::OpenRouter
+        );
         assert_eq!(migrated.llm_endpoints.len(), 1);
         assert_eq!(migrated.llm_endpoints[0].id, "ep-lan");
         assert!(migrated.llm_endpoints[0].has_api_key);
@@ -2648,10 +2655,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_text_models_keep_auto_and_same_model_equivalents() {
+    fn legacy_text_models_retire_auto_and_keep_same_model_equivalents() {
         let store = crate::llm::secrets::MemorySecretStore::default();
         for (legacy, expected) in [
-            (AUTO_GENERATION_MODEL, AUTO_GENERATION_MODEL),
+            (AUTO_GENERATION_MODEL, DEFAULT_GENERATION_MODEL),
             ("kimi-k2-6", "moonshotai/kimi-k2.6"),
             ("venice-uncensored", DEFAULT_GENERATION_MODEL),
         ] {
@@ -2665,6 +2672,84 @@ mod tests {
             assert_eq!(migrated.generation_model, expected, "{legacy}");
             assert_eq!(migrated.remote_generation_model, expected, "{legacy}");
         }
+    }
+
+    #[test]
+    fn retired_provider_usage_and_auto_migrate_once_without_changing_cli_chat() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "generationProvider": "openrouter",
+            "generationModel": "open-software/auto",
+            "remoteGenerationModel": "open-software/auto",
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true,
+            "llmCliDefaultApplied": true,
+            "llmUsage": {
+                "chat": { "kind": "cli", "id": "claude" },
+                "notes": { "kind": "clovy" },
+                "dictationCleanup": { "kind": "clovy" },
+                "activity": { "kind": "none" }
+            }
+        })
+        .to_string();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("provider-settings.json");
+        fs::write(&path, raw).unwrap();
+        let (settings, migrated) =
+            settings_from_json(&fs::read_to_string(&path).unwrap(), &store).unwrap();
+        let state = ProviderSettingsState {
+            path: path.clone(),
+            settings: Mutex::new(settings.clone()),
+        };
+        save_settings(&state, &settings).unwrap();
+        let rewritten = fs::read_to_string(&path).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(written["llmUsage"]["notes"]["kind"], "openrouter");
+        assert!(written["llmUsage"].get("dictationCleanup").is_none());
+        assert_eq!(settings.generation_model, DEFAULT_GENERATION_MODEL);
+        assert_eq!(settings.remote_generation_model, DEFAULT_GENERATION_MODEL);
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(settings.llm_usage.activity, ProviderRef::None);
+        assert!(migrated);
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, settings);
+    }
+
+    #[test]
+    fn retired_dictation_cleanup_choice_is_fixed_openrouter_and_not_persisted() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true,
+            "llmUsage": {
+                "chat": { "kind": "cli", "id": "claude" },
+                "notes": { "kind": "cli", "id": "codex" },
+                "dictationCleanup": { "kind": "endpoint", "id": "old" }
+            }
+        })
+        .to_string();
+        let (settings, migrated) = settings_from_json(&raw, &store).unwrap();
+        assert_eq!(
+            settings
+                .llm_usage
+                .get(crate::llm::registry::LlmUsage::DictationCleanup)
+                .key(),
+            "openrouter"
+        );
+        assert_eq!(
+            settings.llm_usage.notes,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert!(serde_json::to_value(&settings).unwrap()["llmUsage"]
+            .get("dictationCleanup")
+            .is_none());
+        assert!(migrated);
     }
 
     #[test]
@@ -3098,7 +3183,7 @@ mod tests {
             sanitized.llm_endpoints[0].base_url,
             "http://192.168.1.5:11434/v1"
         );
-        assert_eq!(sanitized.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(sanitized.llm_usage.notes, ProviderRef::OpenRouter);
         assert_eq!(sanitized.llm_usage.activity, ProviderRef::None);
         let dto = ProviderModelSettingsDto::from(&sanitized);
         assert!(dto.local_generation.model_id.is_empty());

@@ -1,8 +1,8 @@
 //! `llm`: Clovy's own-provider core. One-shot generation (text, or JSON
 //! constrained by a schema) through the user's agent CLIs or named
 //! OpenAI-compatible endpoints, the provider registry, per-use selection, and
-//! the connection test. Clovy API stays a separate route
-//! (`crate::clovy_api`); callers ask [`provider_for`] which one serves a use.
+//! the connection test. Callers route OpenRouter note generation directly and
+//! ask [`provider_for`] which provider serves each use.
 //!
 //! Stable entry points for feature code:
 //! - [`generate`]: one call on an explicit provider.
@@ -189,7 +189,7 @@ async fn generate_with_registry(
             let env = shell_env::login_env().await;
             run_cli(*id, &request, env.as_ref()).await?
         }
-        ProviderRef::Clovy | ProviderRef::None => return Err(LlmError::NotLocal),
+        ProviderRef::OpenRouter | ProviderRef::None => return Err(LlmError::NotLocal),
     };
     let json = match &request.schema {
         Some(schema) => {
@@ -248,7 +248,7 @@ where
     Fut: Future<Output = Result<GenerateOutput, LlmError>>,
 {
     let provider = registry.usage.activity.clone();
-    if matches!(provider, ProviderRef::None | ProviderRef::Clovy) {
+    if matches!(provider, ProviderRef::None | ProviderRef::OpenRouter) {
         return Err(LlmError::ActivityProviderMissing);
     }
     if let ProviderRef::Cli { id } = &provider {
@@ -405,7 +405,7 @@ pub async fn test_provider(provider: &ProviderRef) -> Result<ProviderTest, LlmEr
                 tested_endpoint: None,
             })
         }
-        ProviderRef::Clovy | ProviderRef::None => Err(LlmError::NotLocal),
+        ProviderRef::OpenRouter | ProviderRef::None => Err(LlmError::NotLocal),
     }
 }
 

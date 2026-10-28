@@ -92,8 +92,7 @@ const sampleProviders: LlmProvidersDto = {
   ],
   usage: {
     chat: { kind: "cli", id: "claude" },
-    notes: { kind: "clovy" },
-    dictationCleanup: { kind: "clovy" },
+    notes: { kind: "openrouter" },
     activity: { kind: "none" },
   },
   cliLevels: {},
@@ -336,8 +335,8 @@ describe("LlmProvidersSection", () => {
     ]);
     expect(values.some((value) => value.startsWith("endpoint:") || value === "clovy")).toBe(false);
     const notesSelect = screen.getByRole("combobox", { name: "Notes" }) as HTMLSelectElement;
-    expect(notesSelect.options[0]).toHaveValue("clovy");
-    expect(notesSelect.options[0]).toHaveTextContent(/^Clovy$/);
+    expect(notesSelect.options[0]).toHaveValue("openrouter");
+    expect(notesSelect.options[0]).toHaveTextContent(/^OpenRouter$/);
   });
 
   it("does not offer the native fallback when no default CLI is installed", async () => {

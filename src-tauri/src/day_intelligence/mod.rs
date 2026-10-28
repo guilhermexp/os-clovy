@@ -93,7 +93,7 @@ pub struct DayRequest {
 pub fn provider_state() -> ProviderState {
     let registry = crate::llm::registry();
     let provider = registry.usage.activity.clone();
-    if matches!(provider, ProviderRef::None | ProviderRef::Clovy) {
+    if matches!(provider, ProviderRef::None | ProviderRef::OpenRouter) {
         return ProviderState::Missing;
     }
     if registry

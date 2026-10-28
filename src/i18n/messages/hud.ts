@@ -17,6 +17,8 @@ export default defineMessages({
     "hud.status.pasting": "Pasting",
     "hud.status.pastingInto": "Pasting into {app}",
     "hud.status.pastingIntoUncleaned": "Pasting into {app} without cleanup",
+    "hud.status.pastingIntoMissingOpenRouterKey":
+      "Pasting into {app} without cleanup: OpenRouter API key missing.",
     "hud.status.previousApp": "previous app",
     "hud.status.dictationFailed": "Dictation failed.",
     // Dictation errors by stable code (src/lib/errors.ts); the native message
@@ -119,6 +121,8 @@ export default defineMessages({
     "hud.status.pasting": "Colando",
     "hud.status.pastingInto": "Colando em {app}",
     "hud.status.pastingIntoUncleaned": "Colando em {app} sem limpeza",
+    "hud.status.pastingIntoMissingOpenRouterKey":
+      "Colando em {app} sem limpeza: falta a chave de API da OpenRouter.",
     "hud.status.previousApp": "app anterior",
     "hud.status.dictationFailed": "Falha no ditado.",
     "hud.error.recordingStartBusy": "O ditado já está começando.",

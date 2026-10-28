@@ -704,6 +704,15 @@ describe("NoteEditor", () => {
       <NoteEditor
         {...props}
         note={note({ activeTab: "transcription" })}
+        recordingStatus={{ ...recordingStatus, livePreviewEnabled: false }}
+      />,
+    );
+    expect(screen.queryByText("Listening for transcript preview...")).not.toBeInTheDocument();
+
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({ activeTab: "transcription" })}
         recordingStatus={{
           ...recordingStatus,
           livePreviewEnabled: true,

@@ -176,23 +176,19 @@ describe("Clovy technical identity", () => {
     expect(workflowTriggerPaths(apiChecks, "push")).toEqual(apiCheckPaths);
   });
 
-  it("preserves released API and C ABI contracts while publishing canonical aliases", async () => {
+  it("preserves released C ABI contracts while publishing canonical aliases", async () => {
     const [
-      desktopApi,
       canonicalHeader,
       canonicalCompatibilityHeader,
       oldPathCompatibilityHeader,
       cryptoSource,
     ] = await Promise.all([
-      read("src-tauri/src/clovy_api.rs"),
       read("crates/clovy-companion-crypto/include/clovy_companion_crypto.h"),
       read("crates/clovy-companion-crypto/include/june_companion_crypto.h"),
       read("crates/june-companion-crypto/include/june_companion_crypto.h"),
       read("crates/clovy-companion-crypto/src/lib.rs"),
     ]);
 
-    expect(desktopApi).toContain('b"june-api-operation-id-v1\\0"');
-    expect(desktopApi).toContain('format!("june-op-');
     expect(canonicalHeader).toContain("clovy_crypto_generate_identity");
     expect(canonicalCompatibilityHeader).toContain("june_crypto_generate_identity");
     expect(oldPathCompatibilityHeader).toContain("june_crypto_generate_identity");
@@ -240,8 +236,7 @@ describe("Clovy technical identity", () => {
     expect(meetingDetection).not.toContain("os_june_capture_active: bool");
     expect(obsidian).toContain(".clovy-obsidian-write-probe-");
     expect(obsidian).not.toContain(".june-obsidian-write-probe-");
-    expect(desktopApi).toContain("Clovy API returned an invalid response stream error");
-    // The Clovy API client takes its user agent from the shared HTTP builder.
+    // Provider requests take their user agent from the shared HTTP builder.
     expect(desktopApi).toContain("crate::http_client::base_client_builder()");
     expect(httpClient).toContain('pub const USER_AGENT: &str = concat!("clovy/"');
     expect(httpClient).toContain(".user_agent(USER_AGENT)");

@@ -5815,7 +5815,7 @@ fn dictation_transcription_provider(provider: String) -> Result<String, AppError
     if provider != PROVIDER_GROQ {
         return Err(AppError::new(
             "dictation_provider_not_configured",
-            "Dictation requires a Groq transcription model through Clovy's model service.",
+            "Dictation requires a Groq transcription model.",
         ));
     }
     Ok(provider)
@@ -7359,6 +7359,10 @@ fn stop_take_during_update(app: &AppHandle, take_id: String) {
 /// Lets a take start unless an update is installing; a refused start clears
 /// the shortcut state it prepared.
 fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), AppError> {
+    let key = crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
+        .inspect_err(|_| reset_shortcut_activation(app))?;
+    crate::clovy_api::require_groq_key(key.as_deref())
+        .inspect_err(|_| reset_shortcut_activation(app))?;
     crate::update_gate::UPDATE_GATE
         .begin_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE))
         .inspect_err(|_| reset_shortcut_activation(app))
@@ -9378,6 +9382,7 @@ mod tests {
         peak_in_flight: std::sync::atomic::AtomicUsize,
         delay: Duration,
         fail_on: Option<String>,
+        failure_code: Option<&'static str>,
         /// Calls whose text contains it answer with empty text.
         blank_on: Option<String>,
         /// Answers without any sentence punctuation.
@@ -9398,7 +9403,10 @@ mod tests {
                 .as_deref()
                 .is_some_and(|marker| call.text.contains(marker))
             {
-                return Err(AppError::new("clovy_request_failed", "upstream failed"));
+                return Err(AppError::new(
+                    self.failure_code.unwrap_or("clovy_request_failed"),
+                    "upstream failed",
+                ));
             }
             if self
                 .blank_on
@@ -9576,6 +9584,31 @@ mod tests {
         assert_eq!(
             result.cleanup_skipped.map(|error| error.code).as_deref(),
             Some("dictation_cleanup_timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_openrouter_key_pastes_raw_dictation_with_a_reason_for_the_notice() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            fail_on: Some("samir".to_string()),
+            failure_code: Some("openrouter_api_key_missing"),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("openrouter_api_key_missing")
         );
     }
 

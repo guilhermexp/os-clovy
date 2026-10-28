@@ -4,12 +4,23 @@
 
 - [ ] 1.1 Concluir a fase 4 de `cli-substitui-agente-nativo`: tarefas 3.2, 4.1 a 4.5 e 4.7, com a 4.6 trocada por esta change. Verificar: tarefas marcadas lá, com a evidência que cada uma pede.
 
+Implementação dos grupos2-6 liberada pela instrução do orquestrador de 2026-10-28 após o código da fase4 (commit `0693e0db`). Gates do código: Rust2141/0, clippy/fmt, frontend e regressões focadas; os dois erros Biome de configuração preexistentes permanecem fora de escopo. 1.1 continua aberta porque o bundle final, o smoke MCP e4.7 ainda não estão integralmente provados. O aceite do dono está registrado na tarefa3.3 após o primeiro smoke real; essa decisão não declara sucesso da ferramenta que falhou por socket longo.
+
 ## 2. Provedores diretos sem reserva
 
-- [ ] 2.1 Copiar `note_generate.md` e `note_transcript_cleanup.md` para `src-tauri/src/prompts/` e apontar os `include_str!`, inclusive nos testes. Verificar: `cargo test --manifest-path src-tauri/Cargo.toml --locked` compila sem ler `clovy-api/`.
-- [ ] 2.2 Transcrição de nota, prévia ao vivo e ditado: só Groq. Sem chave, devolver o código de chave ausente sem requisição, com a frase nova no HUD do ditado e o portão da prévia pela chave; apagar o pacer e a reserva do servidor em `processing.rs`. Verificar: testes com Groq falsa e servidor falso em `127.0.0.1:8080` com zero requisições; teste do HUD em en e pt-BR.
+- [x] 2.1 Copiar `note_generate.md` e `note_transcript_cleanup.md` para `src-tauri/src/prompts/` e apontar os `include_str!`, inclusive nos testes. Verificar: `cargo test --manifest-path src-tauri/Cargo.toml --locked` compila sem ler `clovy-api/`.
+- [x] 2.2 Transcrição de nota, prévia ao vivo e ditado: só Groq. Sem chave, devolver o código de chave ausente sem requisição, com a frase nova no HUD do ditado e o portão da prévia pela chave; apagar o pacer e a reserva do servidor em `processing.rs`. Verificar: testes com Groq falsa e servidor falso em `127.0.0.1:8080` com zero requisições; teste do HUD em en e pt-BR.
 - [ ] 2.3 Geração e limpeza da nota e limpeza do ditado: só OpenRouter, CLI ou endpoint. Saem o ramo `/v1/notes/generate` com SSE, Auto, custo/qualidade e `cleanup_text` remoto; a migração de `ProviderRef::Clovy` para OpenRouter acontece uma vez. Verificar: testes de cada cenário de `llm-providers` e `dictation`, mais a fixture de `provider-settings.json`.
-- [ ] 2.4 Aquecimento da rota só na Groq, sem `/healthz`; rotinas só em CLI, com erro claro sem Claude nem Codex. Verificar: testes de `dictation.rs` e `routines.rs`.
+- [x] 2.4 Aquecimento da rota só na Groq, sem `/healthz`; rotinas só em CLI, com erro claro sem Claude nem Codex. Verificar: testes de `dictation.rs` e `routines.rs`.
+
+
+Evidência do grupo 2 (2026-10-28): `.tmp/verify/remover-clovy-api/group2-rust-delivery.md`. RED: 6 transportes, depois 8 com o portão da prévia (`group2-red.log`, `group2-preview-red.log`); as duas migrações também falharam antes da implementação. GREEN: `cargo test --manifest-path src-tauri/Cargo.toml --locked`, 2144 passaram, 0 falhas, 22 ignorados (`group2-all-tests-complete.log`); clippy em todos os alvos e fmt saída 0. Os oito testes `direct_only_` observaram zero requisições no listener aposentado, em porta efêmera conforme autorização do orquestrador. Os testes de tempo/benchmark passaram a usar provedores falsos diretos, chaves em memória e origens injetáveis somente sob `cfg(test)`.
+
+Frontend: 103 testes focados e 93 de HUD/i18n passaram; typecheck e Biome dos arquivos alterados passaram. A bateria completa teve 1834/1837 antes de atualizar duas guardas: o teste de identidade ainda exigia ID de operação/SSE removidos, e a guarda da identidade recusava os nomes de Keychain usados somente na aposentadoria dos segredos. Após os ajustes, os 8 testes de identidade e os 4 da guarda passaram (`group2-technical-identity-green.log`, `group2-retirement-guard-green.log`). A exceção da identidade é limitada ao módulo de aposentadoria; o módulo continua coberto pela varredura de domínios. `pnpm check`/`make verify` continuam com somente os dois erros preexistentes em `.mcp.json` e `opencode.json` (`group2-biome-all.log`, `group2-make-verify.log`).
+
+2.3: geração/limpeza diretas e migração com gravação/recarga passaram. A tarefa permanece aberta até remover os campos Auto/custo/qualidade legados dos seletores/DTOs e do proxy que será apagado nos grupos seguintes. Nenhuma chamada real de provedor, turno Codex, prova nativa final ou prova de Keychain é declarada por estes testes.
+
+`trail check` encontrou sete conflitos lexicais nos registros do smoke/ADRs, já presentes no corte anterior (`group2-trail-check.log`; limite de diff de 400 KB). Refutação: esses textos registram o turno Claude concluído e a falha MCP, sem declarar ferramentas provadas nem bloquear a implementação pelo smoke. O aceite do dono não equivale à aprovação do smoke incompleto. O commit registra essa distinção.
 
 ## 3. Catálogo e seletor de texto
 

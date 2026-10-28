@@ -2621,17 +2621,7 @@ pub(crate) fn groq_direct_pacer(fingerprint: &str) -> Arc<RequestPacer> {
     }))
 }
 
-/// Clovy API's route without a user key: the service paces its own Groq
-/// account, so only a 429 it relays holds these requests.
-static CLOVY_API_PACER: std::sync::LazyLock<Arc<RequestPacer>> =
-    std::sync::LazyLock::new(|| Arc::new(RequestPacer::new(usize::MAX, GROQ_REQUEST_WINDOW)));
-
-pub(crate) fn clovy_api_pacer() -> Arc<RequestPacer> {
-    Arc::clone(&CLOVY_API_PACER)
-}
-
-/// The route a note transcription takes now, read once: the saved Groq key
-/// and its account's pacer, or Clovy API's route without a key.
+/// The saved Groq key and its account's pacer, resolved once per request.
 fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
     note_route_from(
         crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
@@ -2639,22 +2629,16 @@ fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
     )
 }
 
-/// The route for the saved Groq key as the credential store answered. Only
-/// no saved key takes Clovy API's route: a saved key the store cannot
-/// return (`provider_api_key_unavailable`) fails the request with that
-/// error, so it never spends the service's credits silently and the note
-/// says what to do.
+/// A missing or unreadable key fails before any audio leaves the device.
 fn note_route_from(
     saved_key: Result<Option<String>, AppError>,
     model: String,
 ) -> Result<TranscriptionRoute, AppError> {
-    let groq_key = saved_key?;
-    let pacer = groq_key
-        .as_deref()
-        .map(|key| groq_direct_pacer(&key_fingerprint(key)))
-        .unwrap_or_else(clovy_api_pacer);
+    let key = saved_key?;
+    let groq_key = crate::clovy_api::require_groq_key(key.as_deref())?.to_string();
+    let pacer = groq_direct_pacer(&key_fingerprint(&groq_key));
     Ok(TranscriptionRoute {
-        groq_key,
+        groq_key: Some(groq_key),
         model,
         pacer,
     })
@@ -2749,7 +2733,7 @@ fn cached_chunk_transcriber(
 /// pacer, the kept-chunk key and the transport all use this one value.
 #[derive(Clone)]
 pub(crate) struct TranscriptionRoute {
-    /// The user's Groq key; `None` takes Clovy API's route.
+    /// The user's Groq key; production routes always require it.
     pub(crate) groq_key: Option<String>,
     pub(crate) model: String,
     pub(crate) pacer: Arc<RequestPacer>,
@@ -2789,8 +2773,7 @@ fn note_chain(
     routed(cached_chunk_transcriber(paced(call), repos), resolve)
 }
 
-/// The note-transcription request on a resolved route: Groq with its key,
-/// else Clovy API, with the route's model.
+/// The note-transcription request with the resolved Groq key and model.
 fn note_provider_call() -> RoutedCall<TranscriptionProviderResult> {
     Arc::new(|route, request| {
         Box::pin(async move {
@@ -11173,7 +11156,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pause_on_one_groq_key_holds_neither_another_key_nor_clovy_api() {
+    async fn a_pause_on_one_groq_key_does_not_hold_another_key() {
         let key_a = format!("gsk-a-{}", uuid::Uuid::new_v4());
         let key_b = format!("gsk-b-{}", uuid::Uuid::new_v4());
         groq_direct_pacer(&key_fingerprint(&key_a)).pause_for(Duration::from_secs(3_600));
@@ -11186,10 +11169,6 @@ mod tests {
             .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
             .await
             .expect("another Groq account is not paused");
-        clovy_api_pacer()
-            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
-            .await
-            .expect("Clovy API's route is not paused");
     }
 
     #[test]
@@ -11420,10 +11399,8 @@ mod tests {
             .expect_err("a saved key the store cannot return is an error");
         assert_eq!(error.code, "provider_api_key_unavailable");
 
-        // Only no saved key at all takes Clovy API's route.
-        let clovy = note_route_from(Ok(None), model.clone()).unwrap();
-        assert!(clovy.groq_key.is_none());
-        assert!(Arc::ptr_eq(&clovy.pacer, &clovy_api_pacer()));
+        let error = note_route_from(Ok(None), model.clone()).unwrap_err();
+        assert_eq!(error.code, "groq_api_key_missing");
         let direct = note_route_from(Ok(Some("gsk-user".to_string())), model).unwrap();
         assert_eq!(direct.groq_key.as_deref(), Some("gsk-user"));
     }
@@ -11456,6 +11433,26 @@ mod tests {
             crate::providers::DEFAULT_TRANSCRIPTION_MODEL.to_string(),
         );
         assert!(live_preview_route_from(route, 8_000).is_none());
+    }
+
+    #[test]
+    fn direct_only_missing_groq_key_does_not_start_live_preview() {
+        let route = note_route_from(
+            Ok(None),
+            crate::providers::DEFAULT_TRANSCRIPTION_MODEL.to_string(),
+        );
+        assert!(live_preview_route_from(route, 8_000).is_none());
+    }
+
+    #[test]
+    fn direct_only_missing_groq_key_names_the_setup_action() {
+        let error = note_route_from(
+            Ok(None),
+            crate::providers::DEFAULT_TRANSCRIPTION_MODEL.to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "groq_api_key_missing");
+        assert!(error.message.contains("Settings"));
     }
 
     #[tokio::test]

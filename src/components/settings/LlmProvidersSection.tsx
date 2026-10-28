@@ -321,8 +321,7 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
   const endpoints = data?.endpoints ?? [];
   const usage = data?.usage ?? {
     chat: { kind: "cli", id: "claude" },
-    notes: { kind: "clovy" },
-    dictationCleanup: { kind: "clovy" },
+    notes: { kind: "openrouter" },
     activity: { kind: "none" },
   };
 
@@ -333,7 +332,7 @@ export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSecti
     if (forUsage === "activity") {
       options.push({ value: "none", label: t("settingsPanels.llm.providerNone") });
     } else if (forUsage !== "chat") {
-      options.push({ value: "clovy", label: t("settingsPanels.llm.providerClovy") });
+      options.push({ value: "openrouter", label: t("settingsPanels.llm.providerOpenRouter") });
     }
 
     for (const ep of forUsage === "chat" ? [] : endpoints) {

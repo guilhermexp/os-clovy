@@ -33,6 +33,7 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   escape_cancel_unavailable: "hud.error.escapeCancelUnavailable",
   // Desktop dictation pipeline (src-tauri/src/dictation.rs)
   no_speech: "hud.error.noSpeech",
+  groq_api_key_missing: "notes.failure.groqKeyMissing",
   // A capture start refused while an update installs (src-tauri/src/update_gate.rs)
   update_installing: "hud.error.updateInstalling",
   // Update restart outcomes (src-tauri/src/updates.rs, shutdown.rs)
