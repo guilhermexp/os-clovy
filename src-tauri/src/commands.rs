@@ -2665,7 +2665,6 @@ async fn retry_processing_from(
     )
     .await?;
     let (ticket, depth) = processing_queue::enqueue(&request.note_id);
-    let queued_behind_another_run = depth > 1;
     // A resume's claim already set the note to transcribing.
     if depth <= 1 && origin == RetryOrigin::Manual {
         repos
@@ -2709,12 +2708,13 @@ async fn retry_processing_from(
                 return;
             }
         };
-        // Whatever ran while this run waited may have finished the note: a
-        // second run would generate it again, billed, and replace the result.
+        // Whatever ran after this run was queued may have finished the note:
+        // a second run would generate it again, billed, and replace the
+        // result. Checked under the lock for every run, whatever its depth.
         if !processing_queue::queued_retry_should_run(
             origin,
             note.processing_status,
-            queued_behind_another_run,
+            ticket.runs_completed_since_enqueue(),
         ) {
             tracing::info!(
                 note_id = %task_note_id,

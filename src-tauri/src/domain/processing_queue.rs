@@ -47,6 +47,11 @@ impl ProcessingTicket {
         self.lock.clone()
     }
 
+    /// Runs on this note that finished after this one was enqueued.
+    pub fn runs_completed_since_enqueue(&self) -> u64 {
+        0
+    }
+
     /// Mark this job done: drop it from the pending count and prune the note's
     /// queue entry once nothing else is waiting.
     pub fn finish(&self) {
@@ -123,11 +128,13 @@ pub enum RetryOrigin {
 pub fn queued_retry_should_run(
     origin: RetryOrigin,
     status: crate::domain::types::ProcessingStatus,
-    queued_behind_another_run: bool,
+    runs_completed_since_enqueue: u64,
 ) -> bool {
     use crate::domain::types::ProcessingStatus;
     match origin {
-        RetryOrigin::Manual => !queued_behind_another_run || status == ProcessingStatus::Failed,
+        RetryOrigin::Manual => {
+            runs_completed_since_enqueue == 0 || status == ProcessingStatus::Failed
+        }
         RetryOrigin::Resume => status == ProcessingStatus::Transcribing,
     }
 }
@@ -140,50 +147,75 @@ mod tests {
     #[test]
     fn a_queued_retry_runs_only_while_its_note_still_needs_it() {
         use RetryOrigin::{Manual, Resume};
-        // First in line, a manual retry set the note to transcribing itself.
+        // Nothing ran since it was queued: the Retry of a failed note runs.
         assert!(queued_retry_should_run(
             Manual,
             ProcessingStatus::Transcribing,
-            false
+            0
         ));
-        assert!(queued_retry_should_run(
-            Manual,
-            ProcessingStatus::Failed,
-            false
-        ));
-        // Behind another run, it runs only if that run left the note failed.
-        assert!(queued_retry_should_run(
-            Manual,
-            ProcessingStatus::Failed,
-            true
-        ));
-        assert!(!queued_retry_should_run(
-            Manual,
-            ProcessingStatus::Ready,
-            true
-        ));
+        assert!(queued_retry_should_run(Manual, ProcessingStatus::Failed, 0));
+        // A run finished meanwhile: only a note it left failed runs again.
+        assert!(queued_retry_should_run(Manual, ProcessingStatus::Failed, 1));
+        assert!(!queued_retry_should_run(Manual, ProcessingStatus::Ready, 1));
         assert!(!queued_retry_should_run(
             Manual,
             ProcessingStatus::Generating,
-            true
+            1
         ));
-        // A resume runs only on the note its claim left transcribing: a
-        // manual retry that got there first already ran or regenerated it.
+        // A ready note is never processed again by a retry.
+        assert!(!queued_retry_should_run(Manual, ProcessingStatus::Ready, 0));
+        // A resume runs only on the note its claim left transcribing, with no
+        // run in between.
         assert!(queued_retry_should_run(
             Resume,
             ProcessingStatus::Transcribing,
-            false
+            0
         ));
         assert!(!queued_retry_should_run(
             Resume,
-            ProcessingStatus::Ready,
-            true
+            ProcessingStatus::Transcribing,
+            1
         ));
+        assert!(!queued_retry_should_run(Resume, ProcessingStatus::Ready, 1));
         assert!(!queued_retry_should_run(
             Resume,
             ProcessingStatus::Failed,
-            true
+            1
         ));
+    }
+
+    #[test]
+    fn a_retry_queued_first_but_run_second_sees_the_run_that_finished_first() {
+        // The resume claimed the pause; the manual retry queued first (depth
+        // 1) but was suspended, and the resume (depth 2) took the lock first.
+        let note_id = format!("note-race-{}", uuid::Uuid::new_v4());
+        let (manual, manual_depth) = enqueue(&note_id);
+        let (resume, resume_depth) = enqueue(&note_id);
+        assert_eq!((manual_depth, resume_depth), (1, 2));
+
+        assert_eq!(resume.runs_completed_since_enqueue(), 0);
+        assert!(queued_retry_should_run(
+            RetryOrigin::Resume,
+            ProcessingStatus::Transcribing,
+            resume.runs_completed_since_enqueue()
+        ));
+        resume.finish();
+
+        // The resume left the note ready: the manual retry must not generate
+        // it again, whatever its queue depth was.
+        assert_eq!(manual.runs_completed_since_enqueue(), 1);
+        assert!(!queued_retry_should_run(
+            RetryOrigin::Manual,
+            ProcessingStatus::Ready,
+            manual.runs_completed_since_enqueue()
+        ));
+        // Had the resume failed again, the Retry still runs.
+        assert!(queued_retry_should_run(
+            RetryOrigin::Manual,
+            ProcessingStatus::Failed,
+            manual.runs_completed_since_enqueue()
+        ));
+        manual.finish();
     }
 
     #[test]

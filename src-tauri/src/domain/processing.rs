@@ -225,6 +225,7 @@ fn note_transcription_span_id(
 fn note_transcription_configuration_fingerprint(
     title: &str,
     dictionary_context: Option<&str>,
+    _model: &str,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"june-note-transcription-configuration-v1\0");
@@ -1174,6 +1175,9 @@ async fn process_saved_source_audio_pipeline(
     )
     .await?;
     let transcription_provider = crate::providers::configured_transcription_provider();
+    // Read once per run: every request of the run, its durable identity and
+    // its kept chunks use this model.
+    let transcription_model = crate::providers::transcription_model();
     let dictionary_entries = match repos.list_dictionary_entries().await {
         Ok(entries) => entries,
         Err(error) => {
@@ -1349,6 +1353,7 @@ async fn process_saved_source_audio_pipeline(
             dictionary
                 .as_ref()
                 .map(|dictionary| dictionary.context.as_str()),
+            &transcription_model,
         );
         let mut fallback_plans = build_source_fallback_plans(&all_preparation_jobs)
             .into_iter()
@@ -2697,6 +2702,45 @@ fn cached_chunk_transcriber(inner: TurnTranscriber, repos: Repositories) -> Turn
             result
         }) as TranscriptionFuture
     })
+}
+
+/// The account and model one note-transcription request goes with: the
+/// pacer, the kept-chunk key and the transport all use this one value.
+#[derive(Clone)]
+pub(crate) struct TranscriptionRoute {
+    /// The user's Groq key; `None` takes Clovy API's route.
+    pub(crate) groq_key: Option<String>,
+    pub(crate) model: String,
+    pub(crate) pacer: Arc<RequestPacer>,
+}
+
+impl std::fmt::Debug for TranscriptionRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TranscriptionRoute")
+            .field("groq_key", &self.groq_key.as_ref().map(|_| "<redacted>"))
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+type RouteResolver = Arc<dyn Fn() -> TranscriptionRoute + Send + Sync>;
+type RoutedCall<T> =
+    Arc<dyn Fn(TranscriptionRoute, TranscriptionRequest) -> ProviderFuture<T> + Send + Sync>;
+
+/// A note run's turn transcriber: the route resolved for each request, the
+/// kept chunks, the pacer and the provider call.
+fn note_chain(
+    call: RoutedCall<TranscriptionProviderResult>,
+    resolve: RouteResolver,
+    repos: Repositories,
+) -> TurnTranscriber {
+    let pacer_resolve = Arc::clone(&resolve);
+    let inner: TurnTranscriber = Arc::new(move |request| {
+        let route = resolve();
+        call(route, request)
+    });
+    cached_chunk_transcriber(paced(inner, Arc::new(move || pacer_resolve().pacer)), repos)
 }
 
 /// Whether a live preview chunk of `duration_ms` may go to the provider now
@@ -7339,18 +7383,43 @@ mod tests {
 
     #[test]
     fn durable_configuration_fingerprint_tracks_output_affecting_context() {
-        let base = note_transcription_configuration_fingerprint("Meeting", Some("- June"));
+        let model = crate::providers::DEFAULT_TRANSCRIPTION_MODEL;
+        let base = note_transcription_configuration_fingerprint("Meeting", Some("- June"), model);
         assert_eq!(
             base,
-            note_transcription_configuration_fingerprint("Meeting", Some("- June"))
+            note_transcription_configuration_fingerprint("Meeting", Some("- June"), model)
         );
         assert_ne!(
             base,
-            note_transcription_configuration_fingerprint("Renamed meeting", Some("- June"))
+            note_transcription_configuration_fingerprint("Renamed meeting", Some("- June"), model)
         );
         assert_ne!(
             base,
-            note_transcription_configuration_fingerprint("Meeting", Some("- Junho"))
+            note_transcription_configuration_fingerprint("Meeting", Some("- Junho"), model)
+        );
+    }
+
+    #[test]
+    fn the_transcription_model_is_part_of_a_jobs_durable_identity() {
+        let default = note_transcription_configuration_fingerprint(
+            "Meeting",
+            Some("- June"),
+            crate::providers::DEFAULT_TRANSCRIPTION_MODEL,
+        );
+        // Turns already transcribed with the default model keep the identity
+        // they had before the model was part of it, so they are reused.
+        assert_eq!(
+            default,
+            "afe5ed88fc712a2454bbb35a912fb57f97507c86f29886c5091b027ac4ab6579"
+        );
+        // Another model is another transcription: no finished turn is reused.
+        assert_ne!(
+            default,
+            note_transcription_configuration_fingerprint(
+                "Meeting",
+                Some("- June"),
+                "whisper-large-v3"
+            )
         );
     }
 
@@ -11079,5 +11148,141 @@ mod tests {
             .await
             .unwrap();
         assert!(!repos.claim_paused_note(&note_id, paused).await.unwrap());
+    }
+
+    fn test_route(
+        groq_key: Option<&str>,
+        model: &str,
+        pacer: Arc<RequestPacer>,
+    ) -> TranscriptionRoute {
+        TranscriptionRoute {
+            groq_key: groq_key.map(str::to_string),
+            model: model.to_string(),
+            pacer,
+        }
+    }
+
+    /// A provider call that records each request's route and answers with
+    /// the chunk index of its operation id.
+    fn recording_routed_call() -> (
+        RoutedCall<TranscriptionProviderResult>,
+        Arc<Mutex<Vec<(Option<String>, String, String)>>>,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let call = {
+            let calls = Arc::clone(&calls);
+            Arc::new(
+                move |route: TranscriptionRoute, request: TranscriptionRequest| {
+                    let operation_id = request.operation_id();
+                    calls.lock().unwrap().push((
+                        route.groq_key.clone(),
+                        route.model.clone(),
+                        operation_id.clone(),
+                    ));
+                    Box::pin(async move { Ok(test_provider_result(&operation_id)) })
+                        as ProviderFuture<TranscriptionProviderResult>
+                },
+            ) as RoutedCall<TranscriptionProviderResult>
+        };
+        (call, calls)
+    }
+
+    #[tokio::test]
+    async fn kept_chunks_of_another_model_are_not_reused() {
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let directory = tempfile::tempdir().unwrap();
+        let audio_path = directory.path().join("microphone.wav");
+        write_loud_wav(&audio_path, 16_000, 16_000 * 90);
+        let (call, calls) = recording_routed_call();
+        let pacer = Arc::new(RequestPacer::new(18, Duration::from_secs(60)));
+        let run = |model: &'static str| {
+            let transcriber = note_chain(
+                Arc::clone(&call),
+                {
+                    let pacer = Arc::clone(&pacer);
+                    Arc::new(move || test_route(Some("gsk-a"), model, Arc::clone(&pacer)))
+                },
+                repos.clone(),
+            );
+            transcribe_prepared_audio(
+                transcriber,
+                TranscribePreparedAudioRequest {
+                    provider: "test".to_string(),
+                    audio_path: audio_path.clone(),
+                    temp_dir: directory.path().to_path_buf(),
+                    chunk_stem: "microphone-turn-0".to_string(),
+                    title: "Meeting".to_string(),
+                    asr_hint: None,
+                    operation_id: format!("{session_id}:microphone:turn:0:90000:fingerprint"),
+                    max_chunk_ms: Some(30_000),
+                },
+            )
+        };
+
+        run("whisper-large-v3-turbo").await.unwrap();
+        run("whisper-large-v3-turbo").await.unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 3, "same model: chunks reused");
+
+        // The user switched models between the pause and the resume.
+        run("whisper-large-v3").await.unwrap();
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 6, "{calls:?}");
+        assert!(calls[3..]
+            .iter()
+            .all(|(_, model, _)| model == "whisper-large-v3"));
+    }
+
+    #[tokio::test]
+    async fn each_request_reads_its_route_once_for_the_pacer_and_the_call() {
+        let (repos, _session_id) = test_source_processing_repositories().await;
+        let paused = Arc::new(RequestPacer::new(18, Duration::from_secs(60)));
+        paused.pause_for(Duration::from_secs(3_600));
+        let free = Arc::new(RequestPacer::new(18, Duration::from_secs(60)));
+        // The saved key changes from A (paused account) to B between reads.
+        let routes = Arc::new(Mutex::new(VecDeque::from(vec![
+            test_route(Some("gsk-a"), "whisper-large-v3-turbo", Arc::clone(&paused)),
+            test_route(Some("gsk-b"), "whisper-large-v3-turbo", Arc::clone(&free)),
+            test_route(Some("gsk-a"), "whisper-large-v3-turbo", Arc::clone(&paused)),
+            test_route(Some("gsk-b"), "whisper-large-v3-turbo", Arc::clone(&free)),
+        ])));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let resolve = {
+            let routes = Arc::clone(&routes);
+            let reads = Arc::clone(&reads);
+            Arc::new(move || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                routes
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("a route per read")
+            }) as RouteResolver
+        };
+        let (call, calls) = recording_routed_call();
+        let transcriber = note_chain(call, resolve, repos);
+
+        let first = transcriber(test_transcription_request("m0")).await;
+        let second = transcriber(test_transcription_request("m1")).await;
+
+        // Key A's account is paused: its request waits for A, not B's slot.
+        assert_eq!(
+            first.expect_err("A is paused").code,
+            TRANSCRIPTION_RATE_LIMITED_CODE
+        );
+        assert!(second.is_ok());
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "one route read per request"
+        );
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(key, _, _)| key.clone())
+                .collect::<Vec<_>>(),
+            vec![Some("gsk-b".to_string())]
+        );
     }
 }
