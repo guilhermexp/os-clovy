@@ -921,6 +921,7 @@ async fn start_cli_claim(
         crate::chat_engine::CliTurnRequest {
             session_id: session_id.to_string(),
             run_id: run_id.to_string(),
+            previous_run_id: None,
             kind,
             workspace: workspace.to_path_buf(),
             input: routine_cli_prompt(claim),
@@ -2830,6 +2831,7 @@ mod tests {
         let context = crate::chat_engine::turn::TurnContext {
             session_id: session_id.clone(),
             run_id: run_id.clone(),
+            previous_run_id: None,
             kind: CliKind::Claude,
             program,
             env: std::collections::BTreeMap::from([(

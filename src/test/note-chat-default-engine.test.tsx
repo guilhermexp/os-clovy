@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   createSession: vi.fn(),
+  getSession: vi.fn(),
   startRun: vi.fn(),
 }));
 
@@ -16,7 +17,7 @@ vi.mock("../lib/tauri", () => ({
   agentRuntimeBindings: {
     createSession: mocks.createSession,
     startRun: mocks.startRun,
-    getSession: vi.fn(),
+    getSession: mocks.getSession,
     listItems: vi.fn(async () => []),
     cancelRun: vi.fn(),
     retryRun: vi.fn(),
@@ -25,6 +26,9 @@ vi.mock("../lib/tauri", () => ({
 
 import { useNoteChat } from "../components/note-chat/useNoteChat";
 
+import { rememberNoteChatSession } from "../components/note-chat/noteChatSessions";
+import { loadSessionModels, rememberSessionModel } from "../lib/agent-session-models";
+
 const note = { id: "note-7", title: "Kickoff" };
 
 describe("note chat engine", () => {
@@ -32,6 +36,7 @@ describe("note chat engine", () => {
     window.localStorage.clear();
     mocks.invoke.mockReset();
     mocks.createSession.mockReset();
+    mocks.getSession.mockReset();
     mocks.startRun.mockReset();
     mocks.createSession.mockImplementation(async (request: { model: string }) => ({
       id: "note-session",
@@ -113,6 +118,86 @@ describe("note chat engine", () => {
     expect(mocks.startRun).toHaveBeenCalledWith(
       expect.objectContaining({ model: "__clovy_cli_engine__:claude" }),
     );
+  });
+
+  it.each([
+    "panel",
+    "external",
+  ])("keeps a newer %s engine choice while a legacy session default resolves", async (choiceSource) => {
+    rememberNoteChatSession(note.id, "note-session");
+    mocks.getSession.mockResolvedValue({
+      id: "note-session",
+      title: "Kickoff",
+      status: "idle",
+      model: "legacy-model",
+      safetyMode: "sandboxed",
+      workspacePath: "/tmp/note-session",
+      source: "user",
+      createdAt: "2026-10-15T12:00:00Z",
+      updatedAt: "2026-10-15T12:00:00Z",
+    });
+    let resolveDefault: (value: unknown) => void = () => undefined;
+    mocks.invoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDefault = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useNoteChat(note));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("chat_default_engine"));
+    act(() => {
+      if (choiceSource === "panel") result.current.setModel("__clovy_cli_engine__:codex");
+      else rememberSessionModel("note-session", "__clovy_cli_engine__:codex");
+    });
+    await act(async () => {
+      resolveDefault({ modelId: "__clovy_cli_engine__:claude" });
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.model).toBe("__clovy_cli_engine__:codex");
+    expect(loadSessionModels()["note-session"]).toBe("__clovy_cli_engine__:codex");
+    await act(async () => {
+      await result.current.submit("Use my choice");
+    });
+    expect(mocks.startRun).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "__clovy_cli_engine__:codex" }),
+    );
+  });
+
+  it("ignores an old legacy default after leaving and returning to the same note session", async () => {
+    rememberNoteChatSession(note.id, "note-session");
+    mocks.getSession.mockResolvedValue({
+      id: "note-session",
+      title: "Kickoff",
+      status: "idle",
+      model: "legacy-model",
+      safetyMode: "sandboxed",
+      workspacePath: "/tmp/note-session",
+      source: "user",
+      createdAt: "2026-10-15T12:00:00Z",
+      updatedAt: "2026-10-15T12:00:00Z",
+    });
+    let resolveFirstDefault: (value: unknown) => void = () => undefined;
+    mocks.invoke.mockResolvedValue({ modelId: "__clovy_cli_engine__:codex" });
+    mocks.invoke.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirstDefault = resolve;
+        }),
+    );
+    const { result, rerender } = renderHook((currentNote) => useNoteChat(currentNote), {
+      initialProps: note,
+    });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
+    rerender({ id: "another-note", title: "Another note" });
+    await waitFor(() => expect(result.current.model).toBe("__clovy_cli_engine__:codex"));
+    rerender(note);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.model).toBe("__clovy_cli_engine__:codex");
+    await act(async () => {
+      resolveFirstDefault({ modelId: "__clovy_cli_engine__:claude" });
+    });
+    expect(result.current.model).toBe("__clovy_cli_engine__:codex");
+    expect(loadSessionModels()["note-session"]).toBe("__clovy_cli_engine__:codex");
   });
 
   it("keeps an engine picked in the panel", async () => {

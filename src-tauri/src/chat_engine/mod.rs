@@ -234,6 +234,8 @@ pub async fn cancel_cli_run(
 pub struct CliTurnRequest {
     pub session_id: String,
     pub run_id: String,
+    /// Retry this attempt in a fresh conversation without its rejected history.
+    pub previous_run_id: Option<String>,
     pub kind: CliKind,
     pub workspace: PathBuf,
     /// The user's message (with attachment paths already appended).
@@ -293,6 +295,7 @@ pub async fn start_cli_turn(
     let context = turn::TurnContext {
         session_id: request.session_id,
         run_id: request.run_id,
+        previous_run_id: request.previous_run_id,
         kind: request.kind,
         program,
         env: env.vars().clone(),

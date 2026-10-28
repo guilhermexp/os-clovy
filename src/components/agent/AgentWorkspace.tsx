@@ -1166,10 +1166,9 @@ export function AgentWorkspace({
         .filter((skill) => skill.enabled)
         .map((skill) => skill.id);
       const preparedPrompt = preparePromptForSession(activeSession.id, prompt);
-      const runModel =
-        homeMode || !submittedModel.startsWith(CLI_ENGINE_MODEL_PREFIX)
-          ? await defaultChatModelId()
-          : submittedModel;
+      const runModel = homeMode
+        ? await defaultChatModelId()
+        : chatModelId(submittedModel, engineCatalog);
       const run = await agentRuntimeBindings.startRun({
         sessionId: activeSession.id,
         prompt: preparedPrompt.text,

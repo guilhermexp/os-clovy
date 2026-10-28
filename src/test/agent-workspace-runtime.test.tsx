@@ -1058,6 +1058,90 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(screen.queryByText("Session not found")).not.toBeInTheDocument();
   });
 
+  it.each([
+    { name: "native history", model: "fast", defaultCli: "codex", expectedCli: "claude" },
+    {
+      name: "endpoint history",
+      model: "__clovy_endpoint_engine__:local",
+      defaultCli: "codex",
+      expectedCli: "claude",
+    },
+    {
+      name: "saved CLI choice",
+      model: "__clovy_cli_engine__:codex",
+      defaultCli: "claude",
+      expectedCli: "codex",
+    },
+    {
+      name: "Home default",
+      model: "fast",
+      defaultCli: "codex",
+      expectedCli: "codex",
+      homeMode: true,
+    },
+    {
+      name: "Codex fallback",
+      model: "fast",
+      defaultCli: "codex",
+      expectedCli: "codex",
+      claudeInstalled: false,
+    },
+  ])("submits the engine displayed for $name", async ({
+    model,
+    defaultCli,
+    expectedCli,
+    homeMode,
+    claudeInstalled = true,
+  }) => {
+    const user = userEvent.setup();
+    const storedSession = { ...session, model };
+    const defaultInvoke = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "get_agent_session") return Promise.resolve(storedSession);
+      if (command === "chat_default_engine")
+        return Promise.resolve({ modelId: `__clovy_cli_engine__:${defaultCli}`, cli: defaultCli });
+      if (command === "chat_engine_catalog")
+        return Promise.resolve({
+          clis: [
+            {
+              id: "claude",
+              name: "Claude Code",
+              installed: claudeInstalled,
+              reason: null,
+              modelId: "__clovy_cli_engine__:claude",
+            },
+            {
+              id: "codex",
+              name: "Codex",
+              installed: true,
+              reason: null,
+              modelId: "__clovy_cli_engine__:codex",
+            },
+          ],
+        });
+      return defaultInvoke?.(command, args);
+    });
+    render(<AgentWorkspace initialSession={storedSession} homeMode={homeMode} />);
+    await screen.findByText("Earlier answer");
+    const label = expectedCli === "claude" ? "Claude Code" : "Codex";
+    if (homeMode)
+      expect(screen.queryByRole("button", { name: /^Chat engine:/ })).not.toBeInTheDocument();
+    else
+      expect(
+        await screen.findByRole("button", { name: `Chat engine: ${label}` }),
+      ).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message Clovy" }),
+      "Continue this conversation",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: `__clovy_cli_engine__:${expectedCli}` }),
+      }),
+    );
+  });
+
   it("hydrates history, shows an optimistic turn, and cancels", async () => {
     const user = userEvent.setup();
     const { container } = render(<AgentWorkspace initialSession={session} />);

@@ -56,6 +56,13 @@ export function AgentSessionBar({
   const [instructionsOpen, setInstructionsOpen] = useState(false);
   const menuWrapRef = useRef<HTMLDivElement>(null);
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!renaming) return;
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
+  }, [renaming]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -117,6 +124,7 @@ export function AgentSessionBar({
               </span>
               {renaming ? (
                 <input
+                  ref={renameInputRef}
                   className="agent-session-rename"
                   aria-label={t("chat.session.name")}
                   value={draft}

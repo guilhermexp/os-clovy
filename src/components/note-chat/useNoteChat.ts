@@ -91,6 +91,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
   const sessionIdRef = useRef<string>();
   const activeSubmitRef = useRef<symbol>();
   const selectedStoredModelRef = useRef(DEFAULT_MODEL);
+  const modelSelectionRevisionRef = useRef(0);
   /** The engine was picked in this panel (or came from the stored session),
    * so the default chat engine no longer applies. */
   const modelChosenRef = useRef(false);
@@ -104,11 +105,13 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
     dispatchAgentSessionStatus(detail);
   }, []);
   const applyStoredModel = useCallback((storedModel: string) => {
+    modelSelectionRevisionRef.current += 1;
     modelChosenRef.current = true;
     selectedStoredModelRef.current = chatModelId(storedModel);
     setModelState(chatModelId(storedModel));
   }, []);
   const setModel = useCallback((nextModel: string) => {
+    modelSelectionRevisionRef.current += 1;
     modelChosenRef.current = true;
     selectedStoredModelRef.current = nextModel;
     setModelState(nextModel);
@@ -121,21 +124,26 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
 
   const hydrate = useCallback(
     async (sessionId: string) => {
+      const generation = generationRef.current;
+      const modelSelectionRevision = modelSelectionRevisionRef.current;
+      const isCurrentSession = () =>
+        generationRef.current === generation && sessionIdRef.current === sessionId;
       const [session, items, latestRun] = await Promise.all([
         agentRuntimeBindings.getSession(sessionId),
         agentRuntimeBindings.listItems(sessionId),
         agentRuntimeBindings.getLatestRun?.(sessionId) ?? Promise.resolve(null),
       ]);
-      if (sessionIdRef.current !== sessionId) return;
+      if (!isCurrentSession()) return;
       setProjection({
         ...createAgentRuntimeProjection({ session, items }),
         run: latestRun ?? undefined,
       });
+      if (modelSelectionRevisionRef.current !== modelSelectionRevision) return;
       const storedModel = loadSessionModels()[session.id] ?? session.model ?? DEFAULT_MODEL;
       const resumedModel = storedModel.startsWith(CLI_ENGINE_MODEL_PREFIX)
         ? storedModel
         : await defaultChatModelId();
-      if (sessionIdRef.current === sessionId) {
+      if (isCurrentSession() && modelSelectionRevisionRef.current === modelSelectionRevision) {
         if (storedModel !== resumedModel) rememberSessionModel(session.id, resumedModel);
         applyStoredModel(resumedModel);
       }

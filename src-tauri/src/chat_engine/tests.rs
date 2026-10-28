@@ -111,6 +111,7 @@ impl Harness {
         TurnContext {
             session_id: self.session_id.clone(),
             run_id: run_id.to_string(),
+            previous_run_id: None,
             kind,
             program: program.to_path_buf(),
             env: BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
@@ -945,6 +946,280 @@ async fn chat_engine_new_cli_conversation_gets_earlier_messages_of_the_session()
     assert!(prompt.contains("Assistant: Noted, Rex."), "{prompt}");
     assert!(prompt.ends_with("What is my dog called?"), "{prompt}");
     assert!(!harness.args(1).iter().any(|arg| arg == "--resume"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_history_replays_available_attachments_even_without_text() {
+    let kind = CliKind::Claude;
+    let harness = Harness::new(kind).await;
+    let earlier = harness
+        .repository
+        .create_run(&harness.session_id, "open-software/auto", None)
+        .await
+        .unwrap();
+    let attachment = |name: &str, available| crate::agent_sessions::MessageAttachmentPayload {
+        id: name.into(),
+        name: name.into(),
+        path: harness.workspace.path().join(name).to_string_lossy().into(),
+        mime_type: Some("text/plain".into()),
+        size_bytes: 4,
+        available,
+        created_at: "now".into(),
+    };
+    let present = attachment("historical-brief.txt", true);
+    std::fs::write(&present.path, "plan").unwrap();
+    harness
+        .repository
+        .append_item(
+            &harness.session_id,
+            Some(&earlier.id),
+            0,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: "old context ".repeat(4000),
+                attachments: vec![],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    harness
+        .repository
+        .append_item(
+            &harness.session_id,
+            Some(&earlier.id),
+            1,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: String::new(),
+                attachments: vec![present.clone(), attachment("unavailable.txt", false)],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let program = harness.fake_cli(kind, FAKE_CLAUDE);
+    harness
+        .turn(kind, &program, "Use the earlier brief", None)
+        .await;
+    let prompt = harness.stdin(1);
+    assert!(
+        prompt.contains("[Clovy attachment manifest v1]"),
+        "missing attachment manifest"
+    );
+    assert!(
+        prompt.contains(&present.path),
+        "missing available historical path"
+    );
+    assert!(!prompt.contains("unavailable.txt"));
+    assert!(prompt.ends_with("Use the earlier brief"));
+    assert!(
+        prompt.chars().count() < 24_200,
+        "history must remain bounded"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_retry_starts_fresh_and_excludes_rejected_attempts() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        for prior_model in ["open-software/auto".to_string(), engine_model_id(kind)] {
+            let harness = Harness::new(kind).await;
+            let accepted = harness
+                .repository
+                .create_run(&harness.session_id, "open-software/auto", None)
+                .await
+                .unwrap();
+            harness
+                .repository
+                .append_item(
+                    &harness.session_id,
+                    Some(&accepted.id),
+                    0,
+                    &AgentItemPayload::UserMessage(MessagePayload {
+                        role: "user".into(),
+                        content: "Keep accepted context".into(),
+                        attachments: vec![],
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let rejected = harness
+                .repository
+                .create_run(&harness.session_id, &prior_model, None)
+                .await
+                .unwrap();
+            for (sequence, payload) in [
+                (
+                    0,
+                    AgentItemPayload::UserMessage(MessagePayload {
+                        role: "user".into(),
+                        content: "Retry this request".into(),
+                        attachments: vec![],
+                    }),
+                ),
+                (
+                    1,
+                    AgentItemPayload::AssistantMessage(MessagePayload {
+                        role: "assistant".into(),
+                        content: "Rejected partial answer".into(),
+                        attachments: vec![],
+                    }),
+                ),
+            ] {
+                harness
+                    .repository
+                    .append_item(
+                        &harness.session_id,
+                        Some(&rejected.id),
+                        sequence,
+                        &payload,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            harness
+            .repository
+            .set_run_config(
+                &rejected.id,
+                &json!({"engine":"cli", "cli":kind.id(), "conversationId":"rejected-conversation"}),
+            )
+            .await
+            .unwrap();
+            let successful = match kind {
+                CliKind::Claude => {
+                    r#"echo '{"type":"system","subtype":"init","session_id":"fresh-retry"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Accepted replacement","session_id":"fresh-retry"}'"#
+                }
+                CliKind::Codex => {
+                    r#"echo '{"type":"thread.started","thread_id":"fresh-retry"}'
+echo '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"Accepted replacement"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'"#
+                }
+                _ => unreachable!(),
+            };
+            // First retry exits before reporting a conversation id. A second retry
+            // still needs the original rejection excluded from its local history.
+            let program = harness.fake_cli(kind, &format!("if [ \"$n\" = 1 ]; then echo 'synthetic launch failure' >&2; exit 1; fi\n{successful}"));
+            let mut previous = rejected.id;
+            // A retry of a retry must also exclude the original rejected attempt.
+            for call in 1..=2 {
+                let run_id = harness.new_run(kind, "Retry this request").await;
+                let sink = TestSink {
+                    repository: harness.repository.clone(),
+                    emitted: StdMutex::new(Vec::new()),
+                };
+                let mut context =
+                    harness.context(kind, &program, &run_id, "Retry this request", None);
+                context.previous_run_id = Some(previous);
+                let (_cancel, receiver) = watch::channel(false);
+                execute_turn(&harness.repository, &sink, context, receiver).await;
+                assert_eq!(
+                    harness.repository.get_run(&run_id).await.unwrap().status,
+                    if call == 1 { "failed" } else { "completed" }
+                );
+                let prompt = harness.stdin(call);
+                assert!(
+                    !harness
+                        .args(call)
+                        .iter()
+                        .any(|arg| arg == "--resume" || arg == "resume"),
+                    "retry resumed a rejected conversation"
+                );
+                assert!(prompt.contains("Keep accepted context"));
+                assert!(!prompt.contains("Rejected partial answer"));
+                assert_eq!(
+                    prompt.matches("Retry this request").count(),
+                    1,
+                    "request replayed twice"
+                );
+                previous = run_id;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_history_excludes_persisted_retry_parents_after_failure_or_engine_switch() {
+    for switched in [false, true] {
+        let kind = CliKind::Claude;
+        let harness = Harness::new(kind).await;
+        let original = harness.new_run(kind, "Original rejected request").await;
+        harness
+            .repository
+            .append_item(
+                &harness.session_id,
+                Some(&original),
+                1,
+                &AgentItemPayload::AssistantMessage(MessagePayload {
+                    role: "assistant".into(),
+                    content: "Rejected partial answer".into(),
+                    attachments: vec![],
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_run_config(
+                &original,
+                &json!({"engine":"cli", "cli":"claude", "conversationId":"rejected-conversation"}),
+            )
+            .await
+            .unwrap();
+        let prior_kind = if switched { CliKind::Codex } else { kind };
+        let retried = harness.new_run(prior_kind, "Accepted retry request").await;
+        let config = if switched {
+            json!({"engine":"cli", "cli":"codex", "conversationId":"clean-retry", "retryOfRunId":original})
+        } else {
+            // A failed attempt never reported a conversation id.
+            json!({"retryOfRunId":original})
+        };
+        harness
+            .repository
+            .set_run_config(&retried, &config)
+            .await
+            .unwrap();
+        // Foreign-session ancestry must not suppress this session's messages.
+        let foreign = harness
+            .repository
+            .create_session(
+                "Other session",
+                &engine_model_id(kind),
+                AgentSafetyMode::Sandboxed,
+                None,
+            )
+            .await
+            .unwrap();
+        let foreign_run = harness
+            .repository
+            .create_run(&foreign.id, &engine_model_id(kind), None)
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_run_config(&foreign_run.id, &json!({"retryOfRunId":retried}))
+            .await
+            .unwrap();
+        let program = harness.fake_cli(kind, FAKE_CLAUDE);
+        harness
+            .turn(kind, &program, "Continue after the retry", None)
+            .await;
+        let prompt = harness.stdin(1);
+        assert!(
+            !harness.args(1).iter().any(|arg| arg == "--resume"),
+            "crossed a failed retry boundary"
+        );
+        assert!(!prompt.contains("Rejected partial answer"));
+        assert!(!prompt.contains("Original rejected request"));
+        assert!(prompt.contains("Accepted retry request"));
+        assert!(prompt.ends_with("Continue after the retry"));
+    }
 }
 
 #[test]

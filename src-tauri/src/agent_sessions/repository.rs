@@ -287,6 +287,33 @@ impl AgentRepository {
         Ok(())
     }
 
+    /// Retain retry ancestry even if CLI discovery or spawning fails before
+    /// a conversation id exists. The parent is assigned once per run.
+    pub(crate) async fn set_run_retry_parent(
+        &self,
+        run_id: &str,
+        previous_run_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        query("UPDATE agent_runs SET run_config_json = json_set(COALESCE(run_config_json, '{}'), '$.retryOfRunId', ?), updated_at = ? WHERE id = ? AND json_extract(run_config_json, '$.retryOfRunId') IS NULL")
+            .bind(previous_run_id).bind(crate::db::repositories::timestamp()).bind(run_id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Save a CLI conversation once while retaining retry ancestry and any
+    /// other run metadata recorded before the process was launched.
+    pub(crate) async fn set_cli_conversation(
+        &self,
+        run_id: &str,
+        cli: &str,
+        conversation_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        query("UPDATE agent_runs SET run_config_json = json_set(COALESCE(run_config_json, '{}'), '$.engine', 'cli', '$.cli', ?, '$.conversationId', ?), updated_at = ? WHERE id = ? AND json_extract(run_config_json, '$.conversationId') IS NULL")
+            .bind(cli).bind(conversation_id).bind(crate::db::repositories::timestamp()).bind(run_id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn run_config(&self, run_id: &str) -> Result<Option<serde_json::Value>, sqlx::Error> {
         let value = query("SELECT run_config_json FROM agent_runs WHERE id = ?")
             .bind(run_id)

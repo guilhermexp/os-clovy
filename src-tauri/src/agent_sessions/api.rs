@@ -644,6 +644,7 @@ pub async fn start_agent_run(app: AppHandle, request: StartRunRequest) -> Result
         CliRunStart {
             session_id: &session.id,
             run_id: &run.id,
+            previous_run_id: None,
             kind,
             workspace: &workspace,
             prompt: &request.prompt,
@@ -658,6 +659,7 @@ pub async fn start_agent_run(app: AppHandle, request: StartRunRequest) -> Result
 struct CliRunStart<'a> {
     session_id: &'a str,
     run_id: &'a str,
+    previous_run_id: Option<&'a str>,
     kind: crate::llm::cli::CliKind,
     workspace: &'a str,
     prompt: &'a str,
@@ -722,6 +724,7 @@ async fn start_cli_run(
             crate::chat_engine::CliTurnRequest {
                 session_id: start.session_id.to_string(),
                 run_id: start.run_id.to_string(),
+                previous_run_id: start.previous_run_id.map(str::to_string),
                 kind: start.kind,
                 workspace: PathBuf::from(start.workspace),
                 input: crate::chat_engine::with_note_reference_context(
@@ -746,15 +749,19 @@ async fn start_cli_run(
 
 /// The attachment manifest a CLI turn receives: the CLI reads the files
 /// with its own tools.
-fn cli_message_with_attachments(message: &str, attachments: &[MessageAttachmentPayload]) -> String {
-    if attachments.is_empty() {
-        return message.to_string();
-    }
+pub(crate) fn cli_message_with_attachments(
+    message: &str,
+    attachments: &[MessageAttachmentPayload],
+) -> String {
     let manifest = attachments
         .iter()
+        .filter(|attachment| attachment.available)
         .map(|attachment| format!("- {} ({})", attachment.name, attachment.path))
         .collect::<Vec<_>>()
         .join("\n");
+    if manifest.is_empty() {
+        return message.to_string();
+    }
     format!(
         "[Clovy attachment manifest v1]\nThe following files are in your workspace. Read them when needed:\n{manifest}\n\n{message}"
     )
@@ -837,6 +844,11 @@ pub async fn retry_agent_run(app: AppHandle, run_id: String) -> Result<Value, Ap
     }
     let enabled_skill_ids = repository.run_enabled_skills(&previous.id).await?;
     let run = repository.create_run(&session.id, &model, None).await?;
+    if let Err(error) = repository.set_run_retry_parent(&run.id, &previous.id).await {
+        let error = AppError::from(error);
+        mark_dispatch_failed(&repository, &run.id, &error).await;
+        return Err(error);
+    }
     if let Err(error) = repository
         .set_run_enabled_skills(&run.id, &enabled_skill_ids)
         .await
@@ -852,6 +864,7 @@ pub async fn retry_agent_run(app: AppHandle, run_id: String) -> Result<Value, Ap
         CliRunStart {
             session_id: &session.id,
             run_id: &run.id,
+            previous_run_id: Some(&previous.id),
             kind,
             workspace: &workspace,
             prompt: &prompt,
@@ -2309,6 +2322,7 @@ mod tests {
         let message = cli_message_with_attachments("Read this.", &attachments);
         assert!(!message.contains("Clovy's file tools"), "{message}");
         assert!(message.contains("- brief.md (/workspace/attachments/brief.md)"));
+        assert!(!message.contains("gone.jpg"));
         assert!(message.ends_with("Read this."));
         assert_eq!(
             cli_image_attachments(&attachments),
