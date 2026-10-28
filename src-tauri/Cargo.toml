@@ -101,6 +101,7 @@ uuid = { version = "1.11", features = ["serde", "v4"] }
 zeroize = { version = "1", features = ["derive"] }
 zip = { version = "=4.2.0", default-features = false }
 tauri-plugin-autostart = "2.5.1"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [dev-dependencies]
 # Paused-clock tests for transcription pacing; the same tokio as above.

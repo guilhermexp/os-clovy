@@ -1,3 +1,4 @@
+import { AgentBackground } from "./AgentBackground";
 import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { IconArrowDown } from "central-icons/IconArrowDown";
@@ -674,6 +675,14 @@ export function AgentWorkspace({
   const selectedSession =
     sessions.find((session) => session.id === selectedId) ?? projection.session;
   const heroMode = !homeMode && newSessionMode && !selectedSession && !pendingInitialTurn;
+  const agentSurfaceVisible = heroMode || homeMode;
+  useLayoutEffect(() => {
+    if (!agentSurfaceVisible) return;
+    document.body.dataset.agentSurface = "true";
+    return () => {
+      delete document.body.dataset.agentSurface;
+    };
+  }, [agentSurfaceVisible]);
   const running = projection.run?.status === "running" || projection.run?.status === "queued";
   const waiting = projection.run?.status === "waiting_for_user";
   const turns = useMemo(() => agentItemsToChatTurns(projection.items), [projection.items]);
@@ -2097,6 +2106,7 @@ export function AgentWorkspace({
         data-hero={heroMode ? "true" : undefined}
         data-home={homeMode ? "true" : undefined}
       >
+        {heroMode || homeMode ? <AgentBackground key={homeMode ? "home" : "hero"} /> : null}
         {!heroMode && !homeMode ? (
           <AgentSessionBar
             origin={origin}

@@ -246,7 +246,7 @@ input:focus-visible,
  * so .agent-scroll has a bounded height to scroll within. */
 .agent-workspace {
   position: relative;
-  /* Own stacking context so the warm fade below (z-index:-1) stays local —
+  /* Own stacking context so the background (z-index:-1) stays local —
    * above this element's own (transparent) background, beneath the hero
    * content. Without it the negative layer falls behind the opaque .main-panel
    * card and never shows. */
@@ -261,61 +261,33 @@ input:focus-visible,
   margin: 0 auto;
 }
 
-/* The new-session accent borrows the original bottom-rising ombre, but keeps
- * it inside the canvas. A broad linear horizon avoids the spotlight effect;
- * the side mask dissolves the wash before it reaches either panel edge. */
-.agent-workspace::before,
-.agent-workspace::after {
-  content: "";
+/* These two conversation surfaces also fit a narrow window. Other desktop
+ * surfaces retain their existing minimum width. */
+body[data-agent-surface="true"] {
+  min-width: 0;
+}
+
+/* One decorative field, isolated behind the conversation's HTML. */
+.agent-background {
+  --ascii-ink: var(--agent-background-ink);
+
   position: absolute;
-  top: 28%;
-  bottom: 0;
-  left: 50%;
-  width: min(var(--hero-wash-max-w), calc(100% - var(--sp-8) - var(--sp-8)));
+  /* The workspace is inside the panel body's horizontal padding. Extend only
+   * the decoration to its padding edges; .main-panel clips the rounded corners. */
+  inset: 0 calc(var(--sp-8) * -1);
   z-index: -1;
   pointer-events: none;
-  opacity: 0;
-  transform: translateX(-50%);
-  transition: opacity 280ms var(--ease-out);
+  border-radius: inherit;
 }
 
-.agent-workspace::before {
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    var(--hero-wash-soft) 42%,
-    var(--hero-wash) 100%
-  );
-  -webkit-mask-image: linear-gradient(
-    to right,
-    transparent,
-    #000 var(--hero-wash-side-fade),
-    #000 calc(100% - var(--hero-wash-side-fade)),
-    transparent
-  );
-  mask-image: linear-gradient(
-    to right,
-    transparent,
-    #000 var(--hero-wash-side-fade),
-    #000 calc(100% - var(--hero-wash-side-fade)),
-    transparent
-  );
-}
-
-.agent-workspace[data-hero="true"]::before {
-  opacity: 1;
-}
-
-/* Home keeps a real (if quiet) share of the hero's warm floor — the wash
- * rising from the composer is what makes the thread feel like Clovy's room
- * rather than a console. Hero owns the full-strength moment. Home re-curves
- * the gradient rather than opacity-scaling it: a taller, gentler ombre (felt
- * from mid-canvas, never loud at the floor). */
 /* Home's top dissolve lives inside the workspace (the card-level fade is
  * disabled for the home view, like the agent view): scrolled content melts at
  * the card's top edge, and the listening bloom (z 4) sits crisp above the
  * veil. The hero rim never renders in home, so its pseudo is free. */
 .agent-workspace[data-home="true"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
   top: 0;
   bottom: auto;
   left: calc(var(--sp-8) * -1);
@@ -341,48 +313,6 @@ input:focus-visible,
   .agent-workspace[data-home="true"]::after {
     animation: main-panel-fade-start linear both;
     animation-timeline: --main-panel-scroll;
-  }
-}
-
-.agent-workspace[data-home="true"]::before {
-  top: 0;
-  bottom: 0;
-  left: calc(var(--sp-8) * -1);
-  right: calc(var(--sp-8) * -1);
-  width: auto;
-  opacity: 1;
-  transform: none;
-  -webkit-mask-image: none;
-  mask-image: none;
-  /* Bottom-hugging: the top third stays pure canvas, then the warmth eases in
-   * and gathers at the floor (hero-strength at the very bottom). */
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    transparent 30%,
-    color-mix(in oklch, var(--brand) 1.5%, transparent) 55%,
-    color-mix(in oklch, var(--brand) 6%, transparent) 78%,
-    color-mix(in oklch, var(--brand) 14%, transparent) 100%
-  );
-}
-
-/* Dark canvas: full-chroma brand alpha over near-black greys into mud, so the
- * dark wash leans on --brand-wash (the chroma-capped surface-tint companion)
- * at lower strength - a quiet glow instead of a milky veil. */
-[data-theme="dark"] .agent-workspace[data-home="true"]::before {
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    transparent 35%,
-    color-mix(in oklch, var(--brand-wash) 3%, transparent) 62%,
-    color-mix(in oklch, var(--brand-wash) 8%, transparent) 100%
-  );
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-workspace::before,
-  .agent-workspace::after {
-    transition: none;
   }
 }
 
@@ -5507,8 +5437,7 @@ button.agent-user-attachment:hover {
  * instead: full-bleed to the card edges minus the scrollbar's lane,
  * stretched down to the card's bottom edge, beneath the frosted box (z -1)
  * but over the conversation. Anchoring it here also scopes it for free —
- * chat panel only, gone in the hero — and leaves the workspace's ::before
- * to the warm wash and its handoff fade. */
+ * chat panel only, gone in the hero — while the workspace owns its background. */
 .agent-composer:not([data-hero="true"])::before {
   content: "";
   position: absolute;
@@ -5524,31 +5453,17 @@ button.agent-user-attachment:hover {
   background: linear-gradient(to bottom, transparent, var(--card) 72%);
 }
 
-/* Home's dissolve must vanish into the warm floor, not paint a card-white
- * band over it. The card layer still dissolves the scrolling conversation;
- * the alpha-brand layer on top re-applies the wash's floor intensity with the
- * same compositing math (brand alpha over card) as the workspace wash, so
- * the veil is invisible against it. */
-.agent-workspace[data-home="true"] .agent-composer:not([data-hero="true"])::before {
-  background:
-    linear-gradient(
-      to bottom,
-      transparent,
-      color-mix(in oklch, var(--brand) 13.5%, transparent) 72%
-    ),
-    linear-gradient(to bottom, transparent, var(--card) 72%);
-}
-
-[data-theme="dark"]
-  .agent-workspace[data-home="true"]
-  .agent-composer:not([data-hero="true"])::before {
-  background:
-    linear-gradient(
-      to bottom,
-      transparent,
-      color-mix(in oklch, var(--brand-wash) 7.5%, transparent) 72%
-    ),
-    linear-gradient(to bottom, transparent, var(--card) 72%);
+/* Home keeps the neutral dissolve inside the composer card. Extending it to
+ * the panel bottom would paint over the field and leave a fixed empty band. */
+.agent-workspace[data-home="true"] .agent-composer::before {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  max-width: min(var(--chat-max), var(--content-max));
+  height: 100%;
+  margin-inline: auto;
+  border-radius: var(--r-xl);
 }
 
 /* Floating "jump to live edge" pill. Absolute (never fixed on its own: a
@@ -8108,6 +8023,7 @@ button.agent-user-attachment:hover {
 
 .agent-hero-title {
   margin: 0;
+  text-align: center;
   font-family: var(--font-serif);
   font-weight: 400;
   font-size: var(--fs-display);
@@ -8130,6 +8046,12 @@ button.agent-user-attachment:hover {
   pointer-events: auto;
 }
 
+@media (max-width: 720px) {
+  .agent-workspace[data-hero="true"] .agent-composer-toolbar {
+    flex-wrap: wrap;
+  }
+}
+
 .agent-composer[data-hero="true"] .agent-composer-box {
   /* Deliberately compact — the hero box is an invitation, not a reading
    * column, so it does not track --chat-max up on larger displays. */
@@ -8144,8 +8066,7 @@ button.agent-user-attachment:hover {
 }
 
 /* Rotating suggestion chips under the hero composer. Three at a time from the
- * shuffled pool (see AGENT_SHORTCUTS) — three so the row never wraps, since a
- * row-count change mid-rotation would shove the footnote around. The hand
+ * shuffled pool (see AGENT_SHORTCUTS), wrapping when the window is narrow. The hand
  * cycles on an idle timer: a cascading fade out left-to-right (the [data-phase]
  * + --chip-i stagger below), deck advance, then the same wave back in.
  * Descriptions live in the tooltip. */
@@ -8162,6 +8083,7 @@ button.agent-user-attachment:hover {
 
 .agent-hero-chips {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   gap: var(--sp-2);
 }
@@ -23669,10 +23591,7 @@ button.memory-project:hover {
 /* Personality is one decision surface: character and greeting establish the
  * selected mood, then the integrated selector retargets that same character.
  * Inactive choices stay borderless so only the current selection reads as a
- * control surface. The stage is a real elevated card (the grey panel wash
- * read muddy on the warm backdrop) with the hero wash rising from its floor,
- * so the accent has a visible source under the picker without tinting the
- * character's headroom. */
+ * control surface. The stage is an elevated card with a neutral surface. */
 .onboarding-personality-stage {
   --onboarding-personality-character-size: calc(var(--onboarding-sticker-card-size) * 2);
 
@@ -23683,9 +23602,7 @@ button.memory-project:hover {
   padding: var(--sp-5) var(--sp-5) var(--sp-3);
   border: var(--border-width) solid var(--border-subtle);
   border-radius: var(--r-xl);
-  background:
-    linear-gradient(to top, var(--hero-wash), var(--hero-wash-soft) 34%, transparent 62%),
-    var(--card);
+  background: var(--card);
   box-shadow: var(--shadow-sm);
   text-align: center;
 }
@@ -27901,4 +27818,43 @@ button.connector-approvals-info {
   .update-relaunch-card:hover:not(:disabled) .update-relaunch-arrow {
     transform: none;
   }
+}
+
+/* One veil strength for both themes; the surface token supplies its color. */
+.agent-image-background {
+  --background-image-veil: 0.82;
+  overflow: hidden;
+}
+.agent-image-background img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+}
+.agent-image-background::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--card);
+  opacity: var(--background-image-veil);
+}
+.background-settings-controls {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-3);
+}
+.background-settings-choice {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.background-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.background-file-name {
+  overflow-wrap: anywhere;
 }

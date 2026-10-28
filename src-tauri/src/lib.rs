@@ -9,6 +9,7 @@ pub mod app_identity;
 pub mod app_paths;
 pub mod approval_broker;
 pub mod audio;
+mod background_image;
 pub mod browser;
 mod browser_broker;
 pub mod chat_engine;
@@ -183,6 +184,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            background_image::choose_background_image,
+            background_image::read_background_image,
+            background_image::remove_background_image,
             theme_icon::set_dock_icon,
             print_current_webview,
             commands::bootstrap_app,
