@@ -2056,7 +2056,7 @@ export function AppSettings({
                           </p>
                         </div>
                       </div>
-                      {(["groq", "openrouter", "fal", "tavily"] as const).map((provider) => (
+                      {(["groq", "openrouter", "fal"] as const).map((provider) => (
                         <ProviderApiKeyRow
                           key={provider}
                           provider={provider}

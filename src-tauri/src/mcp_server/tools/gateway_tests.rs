@@ -229,7 +229,7 @@ async fn gateway_discovery_failure_omits_only_the_failed_server() {
 #[cfg(unix)]
 #[tokio::test]
 async fn fake_clis_receive_only_relay_configuration_without_mcp_credentials() {
-    use crate::agent_runtime::AgentSafetyMode;
+    use crate::agent_sessions::AgentSafetyMode;
     use crate::chat_engine::{cli::turn_invocation, policy::TurnPermissions};
     let http = HttpFixture::new().await;
     let broker = TestBroker::new([]).await;

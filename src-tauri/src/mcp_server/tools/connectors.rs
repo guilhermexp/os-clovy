@@ -164,8 +164,8 @@ pub(crate) trait ConnectorDriver: Send + Sync {
         approval_id: Option<String>,
     ) -> BoxFuture<'a, Result<Value, AppError>>;
 }
-pub(crate) struct NativeConnectors;
-impl ConnectorDriver for NativeConnectors {
+pub(crate) struct DirectConnectors;
+impl ConnectorDriver for DirectConnectors {
     fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
         Box::pin(async move {
             let app = ctx.app.ok_or_else(|| {
@@ -174,7 +174,7 @@ impl ConnectorDriver for NativeConnectors {
                     "The connector host is unavailable.",
                 )
             })?;
-            crate::agent_runtime::native_connectors::descriptors(app).await
+            crate::connectors::agent_tools::descriptors(app).await
         })
     }
     fn invoke<'a>(
@@ -218,7 +218,7 @@ impl ConnectorDriver for NativeConnectors {
                 )
                 .map_err(|e| AppError::new("agent_connector_response_invalid", e.to_string()));
             }
-            crate::agent_runtime::native_connectors::dispatch(app, &call.name, call.arguments)
+            crate::connectors::agent_tools::dispatch(app, &call.name, call.arguments)
                 .await?
                 .ok_or_else(|| AppError::new("mcp_tool_unknown", "Unknown connector tool."))
         })
@@ -237,8 +237,8 @@ impl<D> ConnectorTools<D> {
         }
     }
 }
-pub(crate) static CONNECTORS: ConnectorTools<NativeConnectors> =
-    ConnectorTools::new(NativeConnectors);
+pub(crate) static CONNECTORS: ConnectorTools<DirectConnectors> =
+    ConnectorTools::new(DirectConnectors);
 impl<D: ConnectorDriver> ToolGroup for ConnectorTools<D> {
     fn owns(&self, name: &str) -> bool {
         READS.contains(&name) || WRITES.contains(&name) || name.starts_with("notion-")

@@ -1,4 +1,3 @@
-import { localGenerationEndpointId, rawLocalGenerationModelId } from "./local-generation";
 import { invoke } from "./tauri";
 
 export const CLI_ENGINE_MODEL_PREFIX = "__clovy_cli_engine__:";
@@ -11,17 +10,7 @@ export type ChatEngineCliStatus = {
   modelId: string;
 };
 
-export type ChatEngineEndpoint = {
-  id: string;
-  name: string;
-  modelId: string;
-  optionId: string;
-};
-
-export type ChatEngineCatalog = {
-  clis: ChatEngineCliStatus[];
-  endpoints: ChatEngineEndpoint[];
-};
+export type ChatEngineCatalog = { clis: ChatEngineCliStatus[] };
 
 /** The engines a chat session can use. Missing lists read as empty, so a
  * partial answer never breaks the composer. */
@@ -31,70 +20,34 @@ export async function chatEngineCatalog(): Promise<ChatEngineCatalog> {
   );
   return {
     clis: Array.isArray(catalog?.clis) ? catalog.clis : [],
-    endpoints: Array.isArray(catalog?.endpoints) ? catalog.endpoints : [],
   };
 }
 
-export type ChatEngineClassification =
-  | { kind: "clovy" }
-  | { kind: "cli"; cli: string }
-  /** `endpointId` is null for an older option that only names a model. */
-  | { kind: "endpoint"; modelId: string; endpointId: string | null };
+export type ChatEngineClassification = { kind: "cli"; cli: string };
 
+/** Historical native and endpoint models resume on the available default CLI. */
 export function classifyChatEngineModel(
   modelId: string | null | undefined,
-  catalog?: Pick<ChatEngineCatalog, "endpoints"> | null,
-  clovyModels?: ReadonlyArray<{ id: string }> | null,
+  catalog?: Pick<ChatEngineCatalog, "clis"> | null,
 ): ChatEngineClassification {
-  if (!modelId) {
-    return { kind: "clovy" };
-  }
-  if (modelId.startsWith(CLI_ENGINE_MODEL_PREFIX)) {
-    return { kind: "cli", cli: modelId.slice(CLI_ENGINE_MODEL_PREFIX.length) };
-  }
-  const rawLocal = rawLocalGenerationModelId(modelId);
-  if (rawLocal !== null) {
-    return { kind: "endpoint", modelId: rawLocal, endpointId: localGenerationEndpointId(modelId) };
-  }
-  if (catalog?.endpoints?.some((ep) => ep.modelId === modelId)) {
-    const isClovyModel = clovyModels?.some((model) => model.id === modelId) ?? false;
-    if (!isClovyModel) {
-      return { kind: "endpoint", modelId, endpointId: null };
-    }
-  }
-  return { kind: "clovy" };
+  const cli = modelId?.startsWith(CLI_ENGINE_MODEL_PREFIX)
+    ? modelId.slice(CLI_ENGINE_MODEL_PREFIX.length)
+    : defaultChatCliId(catalog?.clis ?? []);
+  return { kind: "cli", cli: cli || "claude" };
 }
 
-/** The catalog endpoint a session model selects: the one it names, else
- * (older options that only carry a model id) the first serving that model,
- * which is what the agent route resolves too. */
-export function selectedChatEndpoint(
-  model: string | null | undefined,
-  catalog: Pick<ChatEngineCatalog, "endpoints"> | null | undefined,
-  clovyModels?: ReadonlyArray<{ id: string }> | null,
-): ChatEngineEndpoint | undefined {
-  const engine = classifyChatEngineModel(model, catalog, clovyModels);
-  if (engine.kind !== "endpoint") return undefined;
-  const endpoints = catalog?.endpoints ?? [];
-  if (engine.endpointId !== null) {
-    return endpoints.find((endpoint) => endpoint.id === engine.endpointId);
-  }
-  return endpoints.find((endpoint) => endpoint.modelId === engine.modelId);
+export function chatModelId(
+  modelId: string | null | undefined,
+  catalog?: ChatEngineCatalog | null,
+): string {
+  return `${CLI_ENGINE_MODEL_PREFIX}${classifyChatEngineModel(modelId, catalog).cli}`;
 }
 
 /** The CLIs that are the default chat engine, in order of preference
  * (ADR-0062): Claude Code, else Codex. */
 export const DEFAULT_CHAT_CLI_IDS = ["claude", "codex"] as const;
 
-export type ChatDefaultEngine = {
-  /** The session model id of the CLI chat runs on; null when chat is on the
-   * legacy Clovy agent or an endpoint (callers keep their own default). */
-  modelId: string | null;
-  cli: string | null;
-  /** Chat is on the legacy Clovy agent only because neither Claude Code nor
-   * Codex is installed. */
-  legacyFallback: boolean;
-};
+export type ChatDefaultEngine = { modelId: string; cli: string };
 
 /** The engine new chat work starts on: sessions, note chat, Home handoffs,
  * and companion sessions. Needs no network. */
@@ -103,21 +56,19 @@ export async function chatDefaultEngine(): Promise<ChatDefaultEngine> {
   const modelId =
     typeof engine?.modelId === "string" && engine.modelId.startsWith(CLI_ENGINE_MODEL_PREFIX)
       ? engine.modelId
-      : null;
+      : `${CLI_ENGINE_MODEL_PREFIX}claude`;
   return {
     modelId,
-    cli: modelId ? modelId.slice(CLI_ENGINE_MODEL_PREFIX.length) : null,
-    legacyFallback: engine?.legacyFallback === true,
+    cli: modelId.slice(CLI_ENGINE_MODEL_PREFIX.length),
   };
 }
 
-/** The model id new chat work starts on: the default CLI engine when chat is
- * on one, else `fallback` (also when the engine cannot be read). */
-export async function defaultChatModelId(fallback: string): Promise<string> {
+/** New work always starts on a CLI, including when the bridge is unavailable. */
+export async function defaultChatModelId(): Promise<string> {
   try {
-    return (await chatDefaultEngine()).modelId ?? fallback;
+    return (await chatDefaultEngine()).modelId ?? `${CLI_ENGINE_MODEL_PREFIX}claude`;
   } catch {
-    return fallback;
+    return `${CLI_ENGINE_MODEL_PREFIX}claude`;
   }
 }
 

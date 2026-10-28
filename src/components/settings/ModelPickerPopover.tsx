@@ -32,17 +32,11 @@ import type {
   ProviderModelDto,
   ProviderModelMode,
 } from "../../lib/tauri";
-import {
-  thinkingOptionForLevel,
-  THINKING_LEVELS,
-  type ThinkingLevel,
-} from "../../lib/thinking-level";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { rectFromElement, type HoverBridgeRect } from "../ui/hoverBridge";
 import { useCatalogHoverBridge, useModelDetailHoverBridge } from "../ui/useModelHoverBridge";
 import { ModelPrivacyChip, ModelRowPrivacyBadge } from "../ui/ModelPrivacyChip";
 import { Switch } from "../ui/Switch";
-import { ThinkingLevelMeter } from "../ui/ThinkingLevelMeter";
 import { AUTO_MODEL_ID, modelSpecEntries } from "./ModelPickerDialog";
 import { ProviderLogo } from "./ProviderLogo";
 
@@ -50,7 +44,6 @@ export type ModelPickerFlyout =
   | { kind: "model"; id: string }
   | { kind: "all" }
   | { kind: "auto" }
-  | { kind: "effort" }
   | null;
 
 // The automatic router's cost-to-quality preference, shared by this popover's
@@ -157,8 +150,6 @@ export function ModelPickerPopover({
   onCostQualityChange,
   showAutoToggle = true,
   showAutoPreference = true,
-  thinkingLevel,
-  onSelectThinking,
 }: {
   mode: ProviderModelMode;
   flyout: ModelPickerFlyout;
@@ -210,11 +201,6 @@ export function ModelPickerPopover({
    * keeps that preference visible as its own segmented row, so its picker
    * omits the duplicate while retaining the Auto toggle. */
   showAutoPreference?: boolean;
-  /** Enables the Effort drill-in row (agent surfaces): shows the session's
-   * thinking level and opens the three-level submenu. Omitted on surfaces
-   * without reasoning effort control (image/video pickers). */
-  thinkingLevel?: ThinkingLevel;
-  onSelectThinking?: (level: ThinkingLevel) => void;
 }) {
   const t = useT();
   const modeLabels = MODE_LABEL_KEYS[mode];
@@ -223,7 +209,6 @@ export function ModelPickerPopover({
   const suggestedListLabel = suggestedListLabelProp ?? t(modeLabels.suggested);
   const allModelsLabel = allModelsLabelProp ?? t(modeLabels.all);
   const flyoutRef = useRef<HTMLDivElement | null>(null);
-  const focusEffortChoiceRef = useRef(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const hovercardRef = useRef<HTMLDivElement | null>(null);
   // "Private" catalog filter. Local to the popover on purpose: it resets when
@@ -314,17 +299,6 @@ export function ModelPickerPopover({
     if (el.getBoundingClientRect().left < 12) {
       el.dataset.side = "right";
     }
-  }, [flyout]);
-
-  useLayoutEffect(() => {
-    if (flyout?.kind !== "effort" || !focusEffortChoiceRef.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      focusEffortChoiceRef.current = false;
-      flyoutRef.current
-        ?.querySelector<HTMLButtonElement>('[role="menuitemradio"][aria-checked="true"]')
-        ?.focus();
-    });
-    return () => window.cancelAnimationFrame(frame);
   }, [flyout]);
 
   // The detail card opens beside the popover, its top pinned to the active
@@ -516,9 +490,6 @@ export function ModelPickerPopover({
     ...(onCostQualityChange && autoEnabled && showAutoPreference
       ? ["preference", t("settingsPanels.picker.preference"), autoPreferenceLabel]
       : []),
-    ...(thinkingLevel && onSelectThinking
-      ? ["effort", t("settingsPanels.picker.effort"), thinkingOptionForLevel(thinkingLevel).label]
-      : []),
   ];
   const rootControlQueryTerms = rootQuery.split(/\s+/);
   const rootControlsMatch =
@@ -528,8 +499,7 @@ export function ModelPickerPopover({
     );
   const rootVisibleControlCount =
     (onCostQualityChange && showAutoToggle ? 1 : 0) +
-    (onCostQualityChange && autoEnabled && showAutoPreference ? 1 : 0) +
-    (thinkingLevel && onSelectThinking ? 1 : 0);
+    (onCostQualityChange && autoEnabled && showAutoPreference ? 1 : 0);
   const rootMatchingSuggested = rootQueryActive
     ? suggested.filter(({ model: option }) => modelMatchesQuery(option, rootQuery))
     : [];
@@ -894,7 +864,7 @@ export function ModelPickerPopover({
         rootResultsList
       ) : (
         <>
-          {onCostQualityChange || (thinkingLevel && onSelectThinking) ? (
+          {onCostQualityChange ? (
             <div
               className={[
                 "agent-composer-model-controls",
@@ -903,20 +873,18 @@ export function ModelPickerPopover({
                 .filter(Boolean)
                 .join(" ")}
             >
-              {onCostQualityChange && showAutoToggle ? (
-                <>
-                  <div className="agent-composer-model-filter agent-composer-model-auto-toggle">
-                    <span>Auto</span>
-                    <Switch
-                      checked={autoEnabled}
-                      disabled={autoEnabled && !autoOffTarget}
-                      onCheckedChange={toggleAuto}
-                      aria-label={t("settingsPanels.picker.autoAria")}
-                    />
-                  </div>
-                </>
+              {showAutoToggle ? (
+                <div className="agent-composer-model-filter agent-composer-model-auto-toggle">
+                  <span>Auto</span>
+                  <Switch
+                    checked={autoEnabled}
+                    disabled={autoEnabled && !autoOffTarget}
+                    onCheckedChange={toggleAuto}
+                    aria-label={t("settingsPanels.picker.autoAria")}
+                  />
+                </div>
               ) : null}
-              {onCostQualityChange && autoEnabled && showAutoPreference ? (
+              {autoEnabled && showAutoPreference ? (
                 <button
                   type="button"
                   className="agent-composer-model-row agent-composer-model-control-row"
@@ -956,10 +924,7 @@ export function ModelPickerPopover({
                   />
                 </button>
               ) : null}
-              {onCostQualityChange &&
-              autoEnabled &&
-              showAutoPreference &&
-              flyout?.kind === "auto" ? (
+              {autoEnabled && showAutoPreference && flyout?.kind === "auto" ? (
                 <div
                   ref={flyoutRef}
                   className="agent-composer-model-flyout agent-composer-model-auto-panel"
@@ -987,117 +952,6 @@ export function ModelPickerPopover({
                           </span>
                         </span>
                         {option.value === autoPreference ? (
-                          <IconCheckmark2Small
-                            size={14}
-                            aria-hidden
-                            className="agent-composer-model-row-check"
-                          />
-                        ) : null}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              {thinkingLevel && onSelectThinking ? (
-                <button
-                  type="button"
-                  className="agent-composer-model-row agent-composer-model-control-row"
-                  aria-haspopup="true"
-                  aria-expanded={flyout?.kind === "effort"}
-                  data-active={flyout?.kind === "effort" || undefined}
-                  data-flyout-kind="effort"
-                  onMouseEnter={() => {
-                    if (modelBridge.isActive()) {
-                      return;
-                    }
-                    const open = () => {
-                      focusEffortChoiceRef.current = false;
-                      onFlyoutChange({ kind: "effort" });
-                    };
-                    if (flyout) {
-                      cancelHoverIntent();
-                      open();
-                    } else {
-                      hoverIntent(open);
-                    }
-                  }}
-                  onFocus={() => {
-                    cancelHoverIntent();
-                    focusEffortChoiceRef.current = true;
-                    onFlyoutChange({ kind: "effort" });
-                  }}
-                  onClick={() => {
-                    cancelHoverIntent();
-                    focusEffortChoiceRef.current = true;
-                    onFlyoutChange({ kind: "effort" });
-                  }}
-                >
-                  <span className="agent-composer-model-row-name">
-                    {t("settingsPanels.picker.effort")}
-                  </span>
-                  <span className="agent-composer-model-row-value">
-                    <ThinkingLevelMeter level={thinkingLevel} />
-                    {thinkingOptionForLevel(thinkingLevel).label}
-                  </span>
-                  <IconChevronRightSmall
-                    size={16}
-                    aria-hidden
-                    className="agent-composer-model-row-chevron"
-                  />
-                </button>
-              ) : null}
-              {thinkingLevel && onSelectThinking && flyout?.kind === "effort" ? (
-                <div
-                  ref={flyoutRef}
-                  className="agent-composer-model-flyout agent-composer-model-effort-panel"
-                  role="group"
-                  aria-label={t("settingsPanels.picker.thinkingLevel")}
-                  onKeyDown={(event) => {
-                    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-                    const choices = Array.from(
-                      event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                        '[role="menuitemradio"]',
-                      ),
-                    );
-                    if (!choices.length) return;
-                    event.preventDefault();
-                    const currentIndex = Math.max(
-                      0,
-                      choices.indexOf(document.activeElement as HTMLButtonElement),
-                    );
-                    const nextIndex =
-                      event.key === "Home"
-                        ? 0
-                        : event.key === "End"
-                          ? choices.length - 1
-                          : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + choices.length) %
-                            choices.length;
-                    choices[nextIndex]?.focus();
-                  }}
-                  onPointerLeave={() => {
-                    cancelHoverIntent();
-                    setBridging(false);
-                  }}
-                >
-                  <div className="agent-composer-model-surface">
-                    {THINKING_LEVELS.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        className="agent-composer-model-row agent-composer-model-choice-option"
-                        role="menuitemradio"
-                        aria-checked={option.id === thinkingLevel}
-                        tabIndex={option.id === thinkingLevel ? 0 : -1}
-                        onClick={() => onSelectThinking(option.id)}
-                      >
-                        <span className="agent-composer-model-choice-copy">
-                          <span className="agent-composer-model-row-name agent-composer-model-choice-name">
-                            <ThinkingLevelMeter level={option.id} />
-                            {option.label}
-                          </span>
-                          <span className="agent-composer-model-choice-desc">{option.blurb}</span>
-                        </span>
-                        {option.id === thinkingLevel ? (
                           <IconCheckmark2Small
                             size={14}
                             aria-hidden

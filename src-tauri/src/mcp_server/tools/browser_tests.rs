@@ -185,14 +185,6 @@ async fn browser_tools_are_listed_only_for_attended_turns_with_read_only_hints()
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{name}");
         assert_eq!(tool["inputSchema"]["type"], "object", "{name}");
     }
-    // Same names and arguments as the native agent's catalog.
-    let native = super::browser::runtime_descriptors();
-    assert_eq!(names(&native), BROWSER_TOOLS);
-    let click = native.iter().find(|tool| tool["name"] == "click").unwrap();
-    assert_eq!(
-        click["parameters"]["required"],
-        json!(["session_id", "ref"])
-    );
 }
 
 #[tokio::test]

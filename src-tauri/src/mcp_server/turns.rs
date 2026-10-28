@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use rand::RngCore;
 use tokio::sync::watch;
 
-use crate::agent_runtime::domain::AgentSafetyMode;
+use crate::agent_sessions::domain::AgentSafetyMode;
 use crate::llm::cli::CliKind;
 
 /// Random bytes in a token (hex on the wire: 64 characters).

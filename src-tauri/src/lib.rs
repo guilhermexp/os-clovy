@@ -4,7 +4,7 @@ pub mod activity;
 pub mod agent_hud;
 pub mod agent_mcp;
 pub mod agent_recorder;
-pub mod agent_runtime;
+pub mod agent_sessions;
 pub mod app_identity;
 pub mod app_paths;
 pub mod approval_broker;
@@ -186,34 +186,32 @@ pub fn run() {
             theme_icon::set_dock_icon,
             print_current_webview,
             commands::bootstrap_app,
-            agent_runtime::api::list_agent_sessions,
-            agent_runtime::api::get_agent_session,
-            agent_runtime::api::get_latest_agent_run,
-            agent_runtime::api::compact_agent_session,
-            agent_runtime::api::create_agent_session,
-            agent_runtime::api::rename_agent_session,
-            agent_runtime::api::branch_agent_session,
-            agent_runtime::api::delete_agent_session,
-            agent_runtime::api::list_agent_items,
-            agent_runtime::api::import_legacy_home_turns,
-            agent_runtime::api::stage_agent_attachment_bytes,
-            agent_runtime::api::discard_staged_agent_attachments,
-            agent_runtime::api::prune_staged_agent_attachments,
-            agent_runtime::api::start_agent_run,
-            agent_runtime::api::steer_agent_run,
-            agent_runtime::api::cancel_agent_run,
-            agent_runtime::api::retry_agent_run,
-            agent_runtime::api::resolve_agent_interruption,
-            agent_runtime::api::list_agent_artifacts,
-            agent_runtime::api::read_agent_artifact_preview,
-            agent_runtime::api::read_agent_artifact_text,
-            agent_runtime::api::download_agent_artifact,
-            agent_runtime::api::list_agent_skills,
-            agent_runtime::api::read_agent_skill,
-            agent_runtime::api::update_agent_skill,
-            agent_runtime::api::set_agent_skill_enabled,
-            agent_runtime::persona::clovy_persona,
-            agent_runtime::persona::set_clovy_persona,
+            agent_sessions::api::list_agent_sessions,
+            agent_sessions::api::get_agent_session,
+            agent_sessions::api::get_latest_agent_run,
+            agent_sessions::api::create_agent_session,
+            agent_sessions::api::rename_agent_session,
+            agent_sessions::api::branch_agent_session,
+            agent_sessions::api::delete_agent_session,
+            agent_sessions::api::list_agent_items,
+            agent_sessions::api::import_legacy_home_turns,
+            agent_sessions::api::stage_agent_attachment_bytes,
+            agent_sessions::api::discard_staged_agent_attachments,
+            agent_sessions::api::prune_staged_agent_attachments,
+            agent_sessions::api::start_agent_run,
+            agent_sessions::api::cancel_agent_run,
+            agent_sessions::api::retry_agent_run,
+            agent_sessions::api::resolve_agent_interruption,
+            agent_sessions::api::list_agent_artifacts,
+            agent_sessions::api::read_agent_artifact_preview,
+            agent_sessions::api::read_agent_artifact_text,
+            agent_sessions::api::download_agent_artifact,
+            agent_sessions::api::list_agent_skills,
+            agent_sessions::api::read_agent_skill,
+            agent_sessions::api::update_agent_skill,
+            agent_sessions::api::set_agent_skill_enabled,
+            agent_sessions::persona::clovy_persona,
+            agent_sessions::persona::set_clovy_persona,
             agent_recorder::resolve_agent_recorder_request,
             browser_broker::browser_approvals_pending,
             browser_broker::browser_approval_respond,
@@ -437,7 +435,6 @@ pub fn run() {
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
-        .manage(agent_runtime::AgentRuntimeHost::default())
         .manage(chat_engine::ChatEngineHost::default())
         .manage(agent_recorder::AgentRecorderBroker::default())
         .manage(Arc::new(browser_broker::BrowserBroker::default()))
@@ -448,7 +445,7 @@ pub fn run() {
         .manage(connectors::NotionConnectFlow::default())
         .setup(|app| {
             browser::setup_on_app_start();
-            agent_runtime::tools::seed_bundled_skills(app.handle());
+            agent_sessions::skills::seed_bundled_skills(app.handle());
             // Before any CLI turn can ask: cancels requests a previous
             // process left pending.
             approval_broker::setup(app);

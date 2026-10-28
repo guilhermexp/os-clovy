@@ -98,20 +98,3 @@ pub(super) fn character_page(
     let end = offset.saturating_add(limit);
     (page, total, (end < total).then_some(end))
 }
-
-pub(crate) fn byte_page(text: &str, offset: usize, limit: usize) -> (&str, usize, Option<usize>) {
-    let start = floor_char_boundary(text, offset.min(text.len()));
-    let end = floor_char_boundary(text, start.saturating_add(limit).min(text.len()));
-    let end = if end == start && start < text.len() {
-        start + text[start..].chars().next().map_or(0, char::len_utf8)
-    } else {
-        end
-    };
-    (&text[start..end], start, (end < text.len()).then_some(end))
-}
-fn floor_char_boundary(text: &str, mut index: usize) -> usize {
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}

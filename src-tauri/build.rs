@@ -35,7 +35,6 @@ fn main() {
     build_dictation_helper();
     prepare_computer_use_driver();
     build_windows_dictation_helper();
-    ensure_agent_runtime_placeholder();
     ensure_bundled_extension_dir();
     ensure_nm_shim_placeholder();
     export_app_identifier();
@@ -342,54 +341,6 @@ fn ensure_nm_shim_placeholder() {
             )
         }) {
             println!("cargo:warning=could not create {name} placeholder: {error}");
-        }
-    }
-}
-
-/// Tauri validates resource paths during ordinary Cargo invocations, before
-/// the SEA packaging step has run. Keep target-correct placeholders available
-/// for tests and rust-analyzer. `beforeBuildCommand` replaces them with the
-/// Node 24 SEA and its checksum before any application bundle is assembled.
-fn ensure_agent_runtime_placeholder() {
-    let manifest_dir = std::path::PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
-    );
-    let Some(runtime_dir) = manifest_dir
-        .parent()
-        .map(|repo_dir| repo_dir.join(".tauri-agent-runtime"))
-    else {
-        return;
-    };
-    if let Err(error) = std::fs::create_dir_all(&runtime_dir) {
-        println!(
-            "cargo:warning=could not create {}: {error}",
-            runtime_dir.display()
-        );
-        return;
-    }
-    let executable = if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("windows") {
-        runtime_dir.join("clovy-agent-runtime.exe")
-    } else {
-        runtime_dir.join("clovy-agent-runtime")
-    };
-    if !executable.exists() {
-        if let Err(error) = std::fs::write(
-            &executable,
-            b"placeholder: replaced by scripts/build-agent-runtime.mjs\n",
-        ) {
-            println!("cargo:warning=could not write agent runtime placeholder: {error}");
-            return;
-        }
-    }
-    let checksum = executable.with_extension(
-        executable
-            .extension()
-            .map(|extension| format!("{}.sha256", extension.to_string_lossy()))
-            .unwrap_or_else(|| "sha256".to_string()),
-    );
-    if !checksum.exists() {
-        if let Err(error) = std::fs::write(&checksum, b"placeholder\n") {
-            println!("cargo:warning=could not write agent runtime checksum placeholder: {error}");
         }
     }
 }

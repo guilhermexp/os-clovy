@@ -19,7 +19,7 @@
 //! broker's timeout ([`TestBroker::with_timeout`]) passes.
 
 use super::{ApprovalBroker, BrokerIo, Decision, TokioClock, APPROVAL_TIMEOUT};
-use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use crate::mcp_server::turns::TurnBinding;

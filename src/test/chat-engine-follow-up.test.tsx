@@ -131,7 +131,7 @@ describe("CLI chat engine follow-up queuing", () => {
     });
   });
 
-  it("queues a follow-up when steer is rejected by CLI engine and sends it as the next run with the CLI model", async () => {
+  it("queues a follow-up without sidecar IPC and sends it as the next CLI run", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     try {
@@ -147,12 +147,12 @@ describe("CLI chat engine follow-up queuing", () => {
       composer = screen.getByRole("textbox", { name: "Message Clovy" });
       composer.textContent = "Second task after completion";
       fireEvent.input(composer);
-      await user.click(await screen.findByRole("button", { name: "Steer active run" }));
+      await user.click(await screen.findByRole("button", { name: "Queue next turn" }));
 
       expect(await screen.findByText("Queued follow-up")).toBeVisible();
-      expect(warn).toHaveBeenCalledWith(
-        "Live steering was rejected; queued the full follow-up instead.",
-        expect.objectContaining({ reason: "cli_engine", messageId: expect.any(String) }),
+      expect(warn).not.toHaveBeenCalled();
+      expect(mocks.invoke.mock.calls.some(([command]) => command === "steer_agent_run")).toBe(
+        false,
       );
 
       act(() => {

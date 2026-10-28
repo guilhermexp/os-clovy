@@ -91,7 +91,7 @@ const sampleProviders: LlmProvidersDto = {
     },
   ],
   usage: {
-    chat: { kind: "clovy" },
+    chat: { kind: "cli", id: "claude" },
     notes: { kind: "clovy" },
     dictationCleanup: { kind: "clovy" },
     activity: { kind: "none" },
@@ -320,13 +320,13 @@ describe("LlmProvidersSection", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("lists the agent CLIs first for chat and the Clovy agent last, as legacy", async () => {
+  it("lists only agent CLIs for chat while preserving note providers", async () => {
     render(<LlmProvidersSection />);
     expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
 
     const chatSelect = screen.getByRole("combobox", { name: "Chat" }) as HTMLSelectElement;
     const values = Array.from(chatSelect.options).map((option) => option.value);
-    expect(values.slice(0, 6)).toEqual([
+    expect(values).toEqual([
       "cli:claude",
       "cli:codex",
       "cli:pi",
@@ -334,25 +334,18 @@ describe("LlmProvidersSection", () => {
       "cli:cursor-agent",
       "cli:copilot",
     ]);
-    expect(values.at(-1)).toBe("clovy");
-    expect(chatSelect.options[chatSelect.options.length - 1]).toHaveTextContent(
-      "Clovy (legacy agent)",
-    );
-    // Notes keep Clovy API first: it is not the agent.
+    expect(values.some((value) => value.startsWith("endpoint:") || value === "clovy")).toBe(false);
     const notesSelect = screen.getByRole("combobox", { name: "Notes" }) as HTMLSelectElement;
     expect(notesSelect.options[0]).toHaveValue("clovy");
     expect(notesSelect.options[0]).toHaveTextContent(/^Clovy$/);
   });
 
-  it("says why chat is on the legacy agent when no default CLI is installed", async () => {
+  it("does not offer the native fallback when no default CLI is installed", async () => {
     mocks.llmProviders.mockResolvedValue({ ...sampleProviders, cliDefaultPending: true });
     render(<LlmProvidersSection />);
-
-    expect(
-      await screen.findByText(
-        "Claude Code and Codex aren't installed, so chat uses the legacy Clovy agent. Install one and restart Clovy to make it the default.",
-      ),
-    ).toBeVisible();
+    const chatSelect = await screen.findByRole("combobox", { name: "Chat" });
+    expect(chatSelect).toHaveValue("cli:claude");
+    expect(screen.queryByText(/legacy Clovy agent/)).not.toBeInTheDocument();
   });
 
   it("says nothing about the legacy agent once chat is on the default CLI", async () => {
@@ -366,21 +359,22 @@ describe("LlmProvidersSection", () => {
     expect(screen.queryByText(/legacy Clovy agent/)).not.toBeInTheDocument();
   });
 
-  it("re-reads the registry when the text model changes elsewhere", async () => {
+  it("keeps chat on Claude Code when the text model changes elsewhere", async () => {
     mocks.llmProviders.mockResolvedValueOnce({
       ...sampleProviders,
-      usage: { ...sampleProviders.usage, chat: { kind: "endpoint", id: "ep-1" } },
+      usage: { ...sampleProviders.usage, chat: { kind: "cli", id: "claude" } },
     });
     render(<LlmProvidersSection />);
     const chatSelect = (await screen.findByRole("combobox", {
       name: "Chat",
     })) as HTMLSelectElement;
-    await waitFor(() => expect(chatSelect.value).toBe("endpoint:ep-1"));
+    await waitFor(() => expect(chatSelect.value).toBe("cli:claude"));
 
-    // Picking a Clovy model in the text-model picker moved chat back to Clovy.
+    // Text models belong to notes; a new model must not move the chat engine.
     dispatchProviderModelSettingsChanged({ mode: "generation", modelId: "zai-org-glm-5-2" });
 
-    await waitFor(() => expect(chatSelect.value).toBe("clovy"));
+    await waitFor(() => expect(mocks.llmProviders).toHaveBeenCalledTimes(2));
+    expect(chatSelect.value).toBe("cli:claude");
   });
 
   it("loads models of a saved endpoint with its stored key when no key is typed", async () => {

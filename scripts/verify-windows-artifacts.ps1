@@ -84,16 +84,14 @@ try {
 
   $app = Require-One "clovy.exe"
   # The MSVC target statically links WebView2Loader; only GNU builds ship its DLL.
-  $runtime = Require-One "clovy-agent-runtime.exe"
-  $checksum = Require-One "clovy-agent-runtime.exe.sha256"
   $helper = Require-One "clovy-dictation-helper.exe"
-  if ($runtime.DirectoryName -ne $checksum.DirectoryName -or $runtime.DirectoryName -ne $helper.DirectoryName) {
-    throw "Runtime, checksum, and dictation helper are not adjacent in the payload."
-  }
-  $nativeBin = $runtime.DirectoryName.Replace('\', '/').ToLowerInvariant()
+  $nativeBin = $helper.DirectoryName.Replace('\', '/').ToLowerInvariant()
   if (-not $nativeBin.EndsWith('/native/bin')) { throw "Native helpers are not under native/bin." }
 
   foreach ($item in $items) {
+    if ($item.Name -like 'clovy-agent-runtime*') {
+      throw "Retired agent runtime payload found: $($item.FullName)"
+    }
     $relative = $item.FullName.Replace('\', '/').ToLowerInvariant()
     if ($relative.Contains('/native/hermes/') -or $relative.EndsWith('/native/hermes') -or
         $item.Name -ieq 'python.exe' -or $item.Extension -ieq '.pyd' -or
@@ -108,16 +106,6 @@ try {
       throw "Expected an unsigned file, but Authenticode status is $($signature.Status): $($unsignedFile.FullName)"
     }
   }
-  # postject can retain invalid signature metadata from the Node executable.
-  # It must never retain a valid publisher signature after SEA injection.
-  $runtimeSignature = Get-AuthenticodeSignature -LiteralPath $runtime.FullName
-  if ($runtimeSignature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
-    throw "Expected an unsigned agent runtime, but its Authenticode signature is valid: $($runtime.FullName)"
-  }
-
-  $repoRoot = Split-Path -Parent $PSScriptRoot
-  & node (Join-Path $repoRoot "scripts/build-agent-runtime.mjs") --verify $runtime.FullName
-  if ($LASTEXITCODE -ne 0) { throw "Extracted agent runtime verification failed." }
   $updaterNote = if ($hasUpdaterKey) { " with its updater signature" } else { "" }
   Write-Host "Verified unsigned Windows installer payload$($updaterNote): $($installer.FullName)"
 }

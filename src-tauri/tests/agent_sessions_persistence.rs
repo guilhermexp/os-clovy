@@ -1,4 +1,4 @@
-use clovy_lib::agent_runtime::{
+use clovy_lib::agent_sessions::{
     import_legacy_agent_state, legacy_import_completed, AgentItemPayload, AgentRepository,
     LegacyImportOptions, MessagePayload, ToolPayload,
 };
@@ -25,7 +25,7 @@ async fn user_sessions_are_created_in_the_active_data_partition_atomically() {
         .create_session_in_profile(
             "Private chat",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
             "private",
         )
@@ -49,7 +49,7 @@ async fn run_configuration_and_streamed_reasoning_survive_resume_and_hydration()
         .create_session(
             "Durable run",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -105,7 +105,7 @@ async fn streamed_assistant_text_survives_mid_run_hydration_without_duplicates()
         .create_session(
             "Visible active run",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -168,7 +168,7 @@ async fn completed_assistant_text_moves_behind_the_tools_that_produced_it() {
         .create_session(
             "Tool ordering",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -279,7 +279,7 @@ async fn compaction_replaces_old_items_with_one_ordered_visible_summary() {
         .create_session(
             "Compaction",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -376,7 +376,7 @@ async fn run_skills_are_deduplicated_and_persisted_for_retry_and_resume() {
         .create_session(
             "Skills",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -415,7 +415,7 @@ async fn obsidian_run_skill_ids_are_stored_under_the_clovy_id() {
         .create_session(
             "Obsidian skills",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -511,7 +511,7 @@ async fn resumed_run_rebases_process_local_event_sequence() {
         .create_session(
             "Resume",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -567,7 +567,7 @@ async fn restart_interrupts_ordinary_active_runs_but_preserves_waiting_state() {
         .create_session(
             "Running",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -580,7 +580,7 @@ async fn restart_interrupts_ordinary_active_runs_but_preserves_waiting_state() {
         .create_session(
             "Waiting",
             "private-auto",
-            clovy_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
             None,
         )
         .await
@@ -1103,4 +1103,99 @@ async fn legacy_script_routine_is_copied_and_disabled_until_review() {
         .expect("completed import uses June manifest only");
     assert_eq!(second, first);
     assert!(copied_path.is_file());
+}
+
+#[tokio::test]
+async fn native_waiting_runs_are_cancelled_without_losing_history_or_cli_runs() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool.clone());
+    let native = repository
+        .create_session(
+            "Old conversation",
+            "open-software/auto",
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
+            None,
+        )
+        .await
+        .unwrap();
+    let run = repository
+        .create_run(&native.id, "open-software/auto", None)
+        .await
+        .unwrap();
+    repository
+        .append_item(
+            &native.id,
+            Some(&run.id),
+            1,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: "Preserved question".into(),
+                attachments: vec![],
+            }),
+            Some("old-question"),
+        )
+        .await
+        .unwrap();
+    repository.append_item(&native.id, Some(&run.id), 2, &AgentItemPayload::Interruption(serde_json::json!({"id":"old-request", "status":"pending", "secretRef":"opaque-reference"})), Some("old-request")).await.unwrap();
+    repository
+        .update_run_status(
+            &run.id,
+            "waiting_for_user",
+            None,
+            Some(&serde_json::json!({"legacy":true})),
+            None,
+        )
+        .await
+        .unwrap();
+    let cli_model = clovy_lib::chat_engine::engine_model_id(clovy_lib::llm::cli::CliKind::Claude);
+    let cli = repository
+        .create_session(
+            "CLI conversation",
+            &cli_model,
+            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
+            None,
+        )
+        .await
+        .unwrap();
+    let cli_run = repository
+        .create_run(&cli.id, &cli_model, None)
+        .await
+        .unwrap();
+    let items_before = repository.items(&native.id).await.unwrap();
+    query("DELETE FROM schema_migrations WHERE version = 52")
+        .execute(&pool)
+        .await
+        .unwrap();
+    run_migrations(&pool).await.unwrap();
+    let retired = repository.get_run(&run.id).await.unwrap();
+    assert_eq!(retired.status, "cancelled");
+    assert!(retired.interrupted_state.is_none());
+    assert_eq!(
+        repository.get_session(&native.id).await.unwrap().status,
+        "idle"
+    );
+    assert_eq!(
+        repository.get_run(&cli_run.id).await.unwrap().status,
+        "running"
+    );
+    let items = repository.items(&native.id).await.unwrap();
+    assert_eq!(items.len(), items_before.len());
+    assert_eq!(items[0].id, items_before[0].id);
+    assert!(
+        matches!(&items[0].payload, AgentItemPayload::UserMessage(message) if message.content == "Preserved question")
+    );
+    assert!(
+        matches!(&items[1].payload, AgentItemPayload::Interruption(value) if value["status"] == "cancelled")
+    );
+    let secret: String = query("SELECT secret_ref FROM agent_secret_retirements")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("secret_ref");
+    assert_eq!(secret, "opaque-reference");
+    run_migrations(&pool).await.unwrap();
+    assert_eq!(
+        repository.get_run(&run.id).await.unwrap().completed_at,
+        retired.completed_at
+    );
 }

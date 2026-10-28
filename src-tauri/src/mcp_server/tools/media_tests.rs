@@ -17,7 +17,7 @@ use sqlx_sqlite::SqlitePool;
 
 use super::media::{self, MediaApi, MediaTools, VideoPolling, GENERATE_IMAGE};
 use super::{ActivityAccess, McpData, ToolCtx, ToolGroup, TurnBinding};
-use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::approval_broker::testing::TestBroker;
 use crate::clovy_api::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::domain::types::AppError;
@@ -181,7 +181,7 @@ impl Turn {
     }
 
     /// The session's artifacts, as `list_agent_artifacts` reads them.
-    async fn artifacts(&self) -> Vec<crate::agent_runtime::AgentArtifactDto> {
+    async fn artifacts(&self) -> Vec<crate::agent_sessions::AgentArtifactDto> {
         AgentRepository::new(self.pool().clone())
             .artifacts(&self.binding.session_id)
             .await
@@ -252,28 +252,6 @@ async fn media_image_over_the_block_limit_stays_in_the_artifact() {
         turn.artifacts().await[0].id,
         result["artifactId"].as_str().unwrap()
     );
-}
-
-#[tokio::test]
-async fn media_native_image_result_keeps_its_data_url() {
-    let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
-    let target = media::ArtifactTarget {
-        pool: turn.pool(),
-        workspace: turn.workspace.path(),
-        session_id: &turn.binding.session_id,
-        run_id: &turn.binding.run_id,
-    };
-    let result = media::persist_generated_image(&target, "a lake", FakeClovyApi::default().image())
-        .await
-        .unwrap();
-    assert_eq!(
-        result["dataUrl"],
-        format!("data:image/png;base64,{}", BASE64.encode(PNG_BYTES))
-    );
-    assert!(result
-        .get(crate::mcp_server::protocol::CONTENT_KEY)
-        .is_none());
-    assert_eq!(content(&result).len(), 1, "one JSON text block, as before");
 }
 
 #[tokio::test]

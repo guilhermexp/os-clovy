@@ -206,7 +206,7 @@ impl AgentRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_runtime::AgentSafetyMode;
+    use crate::agent_sessions::AgentSafetyMode;
     use serde_json::json;
     use sqlx_sqlite::SqlitePoolOptions;
 

@@ -7,7 +7,7 @@ import type {
   AgentRuntimeEvent,
   AgentSessionDto,
 } from "../lib/agent-runtime-contract";
-import { AGENT_RUN_AUTO_MODEL_PREFIX, AUTO_MODEL_ID } from "../lib/agent-model-selection";
+const AGENT_RUN_AUTO_MODEL_PREFIX = "__june_auto_generation__:";
 import {
   resetCurrentDataPartitionForTests,
   setCurrentDataPartitionName,
@@ -176,14 +176,14 @@ describe("note chat sessions", () => {
     expect(response).toEqual({ accepted: true, current: true });
     expect(mocks.createSession).toHaveBeenCalledWith({
       title: "Planning",
-      model: "auto",
+      model: "__clovy_cli_engine__:claude",
       safetyMode: "sandboxed",
       profile: "private",
     });
     expect(mocks.startRun).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: "note-session",
-        model: "auto",
+        model: "__clovy_cli_engine__:claude",
         safetyMode: "sandboxed",
         attachments: ["/tmp/agenda.pdf"],
         prompt: expect.stringContaining("@note:note-1"),
@@ -221,42 +221,44 @@ describe("note chat sessions", () => {
 
   it("uses a companion-staged model at the next note chat run boundary", async () => {
     rememberNoteChatSession("note-1", "note-session");
-    rememberSessionModel("note-session", "model-b");
+    rememberSessionModel("note-session", "__clovy_cli_engine__:codex");
     mocks.getSession.mockResolvedValue(session());
     mocks.listItems.mockResolvedValue([]);
-    mocks.startRun.mockResolvedValue(run({ model: "model-b" }));
+    mocks.startRun.mockResolvedValue(run({ model: "__clovy_cli_engine__:codex" }));
     const { result } = renderHook(() => useNoteChat({ id: "note-1", title: "Planning" }));
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.model).toBe("model-b");
+    expect(result.current.model).toBe("__clovy_cli_engine__:codex");
     await act(async () => {
       await result.current.submit("Use the staged model.");
     });
 
     expect(mocks.startRun).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "note-session", model: "model-b" }),
+      expect.objectContaining({ sessionId: "note-session", model: "__clovy_cli_engine__:codex" }),
     );
     expect(loadSessionModels()["note-session"]).toBeUndefined();
   });
 
-  it("keeps a companion-staged Auto policy across later note chat runs", async () => {
+  it("resumes a historical native Auto session with Claude Code across later turns", async () => {
     const stagedAuto = `${AGENT_RUN_AUTO_MODEL_PREFIX}20`;
     rememberNoteChatSession("note-1", "note-session");
     rememberSessionModel("note-session", stagedAuto);
     mocks.getSession.mockResolvedValue(session());
     mocks.listItems.mockResolvedValue([]);
-    mocks.startRun.mockResolvedValue(run({ model: stagedAuto, status: "completed" }));
+    mocks.startRun.mockResolvedValue(
+      run({ model: "__clovy_cli_engine__:claude", status: "completed" }),
+    );
     const { result } = renderHook(() => useNoteChat({ id: "note-1", title: "Planning" }));
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.model).toBe(AUTO_MODEL_ID);
+    expect(result.current.model).toBe("__clovy_cli_engine__:claude");
     await act(async () => {
       await result.current.submit("Use the staged Auto policy.");
     });
 
     expect(mocks.startRun).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ sessionId: "note-session", model: stagedAuto }),
+      expect.objectContaining({ sessionId: "note-session", model: "__clovy_cli_engine__:claude" }),
     );
     expect(loadSessionModels()["note-session"]).toBeUndefined();
 
@@ -266,7 +268,7 @@ describe("note chat sessions", () => {
 
     expect(mocks.startRun).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ sessionId: "note-session", model: stagedAuto }),
+      expect.objectContaining({ sessionId: "note-session", model: "__clovy_cli_engine__:claude" }),
     );
   });
 

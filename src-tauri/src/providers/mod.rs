@@ -885,14 +885,10 @@ fn set_provider_model_impl(
             settings.transcription_model = model_id;
         }
         ModelMode::Generation => {
-            // Picking a Clovy model in the text-model picker moves chat back
-            // to Clovy API; `normalize` mirrors it into the legacy fields.
-            settings.llm_usage.chat = ProviderRef::Clovy;
-            settings.llm_cli_default_applied = true;
+            // Text selection is independent from chat and note engine choices.
             settings.generation_provider = PROVIDER_OPENROUTER.to_string();
             settings.generation_model = model_id.clone();
             settings.remote_generation_model = model_id;
-            crate::llm::registry::normalize(settings);
         }
         ModelMode::Image => settings.image_model = model_id,
         ModelMode::Video => settings.video_model = model_id,
@@ -1468,7 +1464,9 @@ pub async fn ensure_cli_default(state: &ProviderSettingsState) {
     let Ok(snapshot) = settings_snapshot(state) else {
         return;
     };
-    if snapshot.llm_cli_default_applied {
+    if snapshot.llm_cli_default_applied
+        && matches!(snapshot.llm_usage.chat, ProviderRef::Cli { .. })
+    {
         return;
     }
     let env = crate::llm::shell_env::login_env().await;
@@ -1476,9 +1474,6 @@ pub async fn ensure_cli_default(state: &ProviderSettingsState) {
     let mut candidate = snapshot.clone();
     crate::llm::registry::apply_cli_default(&mut candidate, installed);
     if candidate == snapshot {
-        tracing::info!(
-            "chat stays on the legacy Clovy agent: neither Claude Code nor Codex is installed"
-        );
         return;
     }
     let mut moved = None;
@@ -1662,10 +1657,12 @@ fn settings_from_json(
     store: &dyn crate::llm::secrets::SecretStore,
 ) -> Option<(ProviderModelSettings, bool)> {
     let parsed = serde_json::from_str::<ProviderModelSettings>(raw).ok()?;
+    let retired_chat = !matches!(parsed.llm_usage.chat, ProviderRef::Cli { .. });
     let was_migrated = parsed.llm_registry_migrated;
     let remote_models_migrated = parsed.remote_models_migrated;
     let migrated = crate::llm::registry::migrate_legacy_local_generation(parsed, store);
-    let migrated_now = migrated.llm_registry_migrated != was_migrated || !remote_models_migrated;
+    let migrated_now =
+        retired_chat || migrated.llm_registry_migrated != was_migrated || !remote_models_migrated;
     Some((
         sanitize_settings(migrated, &default_settings()),
         migrated_now,
@@ -2687,12 +2684,49 @@ mod tests {
 
         let (loaded, migrated_now) = settings_from_json(&raw, &store).unwrap();
 
-        assert!(!migrated_now);
+        // The pre-cut file still needs its missing/native chat choice retired.
+        assert!(migrated_now);
+        let rewritten = serde_json::to_string(&loaded).unwrap();
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, loaded);
         assert_eq!(loaded.transcription_model, "whisper-large-v3");
         assert_eq!(loaded.generation_model, "moonshotai/kimi-k3");
         assert_eq!(loaded.remote_generation_model, "moonshotai/kimi-k3");
         assert!(loaded.provider_api_keys_configured.groq);
         assert!(!loaded.provider_api_keys_configured.openrouter);
+    }
+
+    #[test]
+    fn text_model_selection_preserves_chat_and_note_engines() {
+        let state = test_state();
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.llm_usage.chat = ProviderRef::Cli {
+                id: CliKind::Claude,
+            };
+            settings.llm_usage.notes = ProviderRef::Cli { id: CliKind::Codex };
+        }
+        set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Generation,
+                model_id: "example/text-only".to_string(),
+            },
+        )
+        .unwrap();
+        let settings = state.settings.lock().unwrap();
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(
+            settings.llm_usage.notes,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert_eq!(settings.remote_generation_model, "example/text-only");
     }
 
     #[test]
@@ -3036,7 +3070,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_lan_endpoint_selected_for_chat_activates_the_local_route() {
+    fn llm_lan_endpoint_chat_migrates_without_changing_the_text_model() {
         let raw = r#"{
             "generationProvider": "openrouter",
             "generationModel": "remote-model",
@@ -3051,8 +3085,14 @@ mod tests {
         }"#;
         let store = crate::llm::secrets::MemorySecretStore::default();
         let sanitized = settings_from_json_for_tests(raw, &store).unwrap();
-        assert_eq!(sanitized.generation_provider, PROVIDER_LOCAL);
-        assert_eq!(sanitized.generation_model, "llama3.1:8b");
+        assert_eq!(sanitized.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(sanitized.generation_model, "remote-model");
+        assert_eq!(
+            sanitized.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
         assert_eq!(sanitized.remote_generation_model, "remote-model");
         assert_eq!(
             sanitized.llm_endpoints[0].base_url,
@@ -3061,7 +3101,7 @@ mod tests {
         assert_eq!(sanitized.llm_usage.notes, ProviderRef::Clovy);
         assert_eq!(sanitized.llm_usage.activity, ProviderRef::None);
         let dto = ProviderModelSettingsDto::from(&sanitized);
-        assert_eq!(dto.local_generation.model_id, "llama3.1:8b");
+        assert!(dto.local_generation.model_id.is_empty());
     }
 
     #[test]
@@ -3509,10 +3549,8 @@ mod tests {
         assert!(saved.llm_cli_default_applied);
         // New chat work and the generation picker start on it.
         assert_eq!(
-            crate::chat_engine::default_engine_of(&settings)
-                .model_id
-                .as_deref(),
-            Some("__clovy_cli_engine__:codex")
+            crate::chat_engine::default_engine_of(&settings).model_id,
+            "__clovy_cli_engine__:codex"
         );
         assert_eq!(
             selected_model_for_mode(&state, ModelMode::Generation).unwrap(),
@@ -3522,7 +3560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launch_without_claude_or_codex_keeps_the_legacy_agent_and_warns() {
+    async fn launch_without_claude_or_codex_selects_claude_without_remote_fallback() {
         let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let _restore = RestoreGlobals;
         let _bin = login_path_with(&["pi"]);
@@ -3531,14 +3569,17 @@ mod tests {
         ensure_cli_default(&state).await;
 
         let settings = settings_snapshot(&state).unwrap();
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
-        assert!(!settings.llm_cli_default_applied);
-        // Nothing changed, so nothing was written.
-        assert!(!state.path.exists());
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert!(settings.llm_cli_default_applied);
+        assert!(state.path.exists());
         let engine = crate::chat_engine::default_engine_of(&settings);
-        assert_eq!(engine.model_id, None);
-        assert!(engine.legacy_fallback);
-        assert!(crate::llm::registry::LlmProvidersDto::from(&settings).cli_default_pending);
+        assert_eq!(engine.model_id, "__clovy_cli_engine__:claude");
+        assert!(!crate::llm::registry::LlmProvidersDto::from(&settings).cli_default_pending);
     }
 }
 

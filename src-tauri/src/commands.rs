@@ -41,9 +41,8 @@ use crate::{
             ShareDto, ShareGetRequest, ShareInviteKeyDto, ShareInviteKeySaveRequest,
             ShareInviteKeysGetRequest, ShareInvitesAddedDto, ShareKeyDto, ShareKeyGetRequest,
             ShareKeySaveRequest, ShareRevokeInviteRequest, ShareSummaryDto, SourceReadinessDto,
-            StartMeetingRecordingRequest, StartRecordingRequest, SuggestAgentSessionTitleRequest,
-            SuggestAgentSessionTitleResponse, UpdateDictionaryEntryRequest, UpdateNoteRequest,
-            UpdateNoteResponse,
+            StartMeetingRecordingRequest, StartRecordingRequest, UpdateDictionaryEntryRequest,
+            UpdateNoteRequest, UpdateNoteResponse,
         },
     },
     meeting_detection::{MeetingStartRecordingOutcome, MeetingStartRequestState},
@@ -937,16 +936,6 @@ pub(crate) fn load_memory_settings(path: &Path) -> MemorySettingsDto {
 
 fn memory_disabled_error() -> AppError {
     AppError::new("memory_disabled", "Memory is disabled for this scope.")
-}
-
-#[tauri::command]
-pub async fn suggest_agent_session_title(
-    request: SuggestAgentSessionTitleRequest,
-) -> Result<SuggestAgentSessionTitleResponse, AppError> {
-    let title =
-        crate::clovy_api::suggest_agent_session_title(&request.prompt, request.response.as_deref())
-            .await?;
-    Ok(SuggestAgentSessionTitleResponse { title })
 }
 
 #[tauri::command]
@@ -3220,21 +3209,21 @@ pub(crate) async fn repositories(app: &AppHandle) -> Result<Repositories, AppErr
             run_migrations(&pool)
                 .await
                 .map_err(|error| AppError::new("migration_failed", error.to_string()))?;
-            match crate::agent_runtime::legacy_import_completed(&pool).await {
+            match crate::agent_sessions::legacy_import_completed(&pool).await {
                 Ok(true) => {}
                 Ok(false) | Err(_) => {
                     let legacy_home = paths.data_dir.join("hermes");
                     let user_home = app.path().home_dir().ok();
-                    crate::agent_runtime::stop_legacy_hermes_runtime(
+                    crate::agent_sessions::stop_legacy_hermes_runtime(
                         &legacy_home,
                         user_home.as_deref(),
                     )
                     .await;
                     let legacy_state = legacy_home.join("state.db");
                     let artifact_root = paths.data_dir.join("agent-workspaces");
-                    if let Err(error) = crate::agent_runtime::import_legacy_agent_state(
+                    if let Err(error) = crate::agent_sessions::import_legacy_agent_state(
                         &pool,
-                        &crate::agent_runtime::LegacyImportOptions {
+                        &crate::agent_sessions::LegacyImportOptions {
                             hermes_state_db: legacy_state,
                             hermes_home: Some(legacy_home),
                             artifact_root: Some(artifact_root),
@@ -3245,6 +3234,9 @@ pub(crate) async fn repositories(app: &AppHandle) -> Result<Repositories, AppErr
                         tracing::warn!(%error, "Legacy agent history import did not complete");
                     }
                 }
+            }
+            if let Err(error) = crate::agent_sessions::retirement::cleanup_secrets(&pool).await {
+                tracing::warn!(code = %error.code, "Retired agent secret cleanup did not complete");
             }
             Ok(Repositories::new(pool))
         })

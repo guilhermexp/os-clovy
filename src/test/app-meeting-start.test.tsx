@@ -651,7 +651,9 @@ describe("meeting start transcription event", () => {
         "microphonePlusSystem",
       ),
     );
-    expect(mocks.readPendingMeetingStartRequest).toHaveBeenCalledOnce();
+    // Listener readiness and bootstrap completion can each drain the queue.
+    // Acknowledgement makes repeat reads harmless; recording must start only once.
+    expect(mocks.readPendingMeetingStartRequest).toHaveBeenCalled();
     expect(mocks.startMeetingRecording).toHaveBeenCalledOnce();
   });
 

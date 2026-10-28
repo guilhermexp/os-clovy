@@ -26,7 +26,7 @@ use tauri::AppHandle;
 
 use super::computer_use::MAX_IMAGE_BASE64;
 use super::{ToolCtx, ToolGroup, TurnBinding};
-use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::clovy_api::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::domain::types::AppError;
 use crate::mcp_server::protocol;
@@ -379,16 +379,9 @@ pub(crate) enum VideoJobOutcome {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct VideoPolling {
     pub interval: Duration,
-    /// `None` follows the job until it ends (native engine, which has its own
-    /// cancellation); `Some` answers `StillProcessing` after this long.
+    /// `None` follows the job until it ends; `Some` answers
+    /// `StillProcessing` after this long.
     pub wait: Option<Duration>,
-}
-
-impl VideoPolling {
-    pub(crate) const UNTIL_DONE: VideoPolling = VideoPolling {
-        interval: VIDEO_POLL_INTERVAL,
-        wait: None,
-    };
 }
 
 /// Runs one call. A new video sends its single submit and follows the job it
@@ -572,25 +565,6 @@ async fn store_generated_image(
     let artifact_id =
         record_artifact(target, &path, "created", None, Some(&generated.mime_type)).await?;
     Ok((path, artifact_id))
-}
-
-/// The native tools' image result: the artifact with the image as a data
-/// URL, which the native chat renders.
-pub(crate) async fn persist_generated_image(
-    target: &ArtifactTarget<'_>,
-    prompt: &str,
-    generated: GeneratedImageDto,
-) -> Result<Value, AppError> {
-    let (path, _) = store_generated_image(target, &generated).await?;
-    Ok(json!({
-        "mediaType": "image",
-        "dataUrl": format!("data:{};base64,{}", generated.mime_type, generated.image_base64),
-        "path": crate::filesystem::normalize_path_for_external_use(&path),
-        "mimeType": generated.mime_type,
-        "model": generated.model,
-        "prompt": prompt,
-        "name": path.file_name().map(|name| name.to_string_lossy().into_owned())
-    }))
 }
 
 /// The MCP image result: a text block with the artifact (id, path,

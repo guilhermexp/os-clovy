@@ -1354,6 +1354,14 @@ const MIGRATIONS: &[Migration] = &[
             "../../migrations/035_note_transcription_chunks.sql"
         ))],
     },
+    Migration {
+        version: 52,
+        name: "retire_native_chat",
+        requirements: &[SchemaRequirement::Table("agent_secret_retirements")],
+        steps: &[MigrationStep::Sql(include_str!(
+            "../../migrations/036_retire_native_chat.sql"
+        ))],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2299,6 +2307,7 @@ mod tests {
                 (49, "linear_managed_mcp_repair".to_string()),
                 (50, "agent_artifact_display_names".to_string()),
                 (51, "note_transcription_chunks".to_string()),
+                (52, "retire_native_chat".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
@@ -2620,6 +2629,7 @@ mod tests {
                 (49, "linear_managed_mcp_repair".to_string()),
                 (50, "agent_artifact_display_names".to_string()),
                 (51, "note_transcription_chunks".to_string()),
+                (52, "retire_native_chat".to_string()),
             ]
         );
 
@@ -3011,7 +3021,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("preserved run");
-        assert_eq!(row.get::<String, _>("status"), "waiting_for_user");
+        assert_eq!(row.get::<String, _>("status"), "cancelled");
         assert_eq!(row.get::<Option<String>, _>("run_config_json"), None);
         assert_latest_stamp(&pool).await;
     }

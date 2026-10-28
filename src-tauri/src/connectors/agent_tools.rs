@@ -1,11 +1,5 @@
-//! Direct native connector tools for the Clovy-owned agent runtime.
-//!
-//! The TypeScript harness sees only these function descriptors. Every call is
-//! dispatched here, where Clovy resolves a Keychain-held token and uses the
-//! provider client directly. This deliberately does not call the legacy
-//! connector approval registry: mutations are paused by the SDK through each
-//! descriptor's `requiresApproval` flag, then reach this module exactly once
-//! after the durable agent-run approval has been resolved.
+//! Connector tool descriptors and direct provider dispatch for the Clovy MCP server.
+//! Mutations reach dispatch only after the MCP approval broker authorizes them.
 
 use crate::{
     connectors::{
@@ -548,7 +542,7 @@ pub(crate) async fn dispatch_github(
     })
 }
 
-/// Returns `Ok(None)` for a non-connector tool. A matching native tool is
+/// Returns `Ok(None)` for a non-connector tool. A matching connector tool is
 /// always re-authorized from live account state rather than trusting the
 /// descriptor emitted at run start.
 pub async fn dispatch(
@@ -1175,7 +1169,7 @@ mod tests {
         ));
     }
     #[test]
-    fn mutation_descriptors_require_sdk_approval_and_keep_provider_choices_bounded() {
+    fn mutation_descriptors_require_broker_approval_and_keep_provider_choices_bounded() {
         let catalog = descriptors_from_accounts(&[
             account(ConnectorProvider::Linear, &[policy::LINEAR_WRITE], 1),
             account(ConnectorProvider::Github, &[GITHUB_WRITE], 0),
@@ -1195,7 +1189,7 @@ mod tests {
         );
     }
     #[test]
-    fn native_catalog_never_advertises_linear_accounts() {
+    fn connector_catalog_never_advertises_linear_accounts() {
         let mut stale = account(
             ConnectorProvider::Linear,
             &[policy::LINEAR_READ, policy::LINEAR_WRITE],

@@ -2225,7 +2225,7 @@ fn end_turn_lease_with_run(app: &AppHandle, run_id: String) {
     let own = Arc::clone(&slot);
     let handle = app.clone();
     let id = app.listen_any(
-        crate::agent_runtime::host::AGENT_RUNTIME_EVENT,
+        crate::agent_sessions::events::AGENT_RUNTIME_EVENT,
         move |event| {
             if !is_terminal_event_of(event.payload(), &run_id) {
                 return;

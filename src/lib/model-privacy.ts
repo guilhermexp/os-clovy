@@ -1,5 +1,5 @@
 import { type MessageKey, t } from "../i18n/translate";
-import { AUTO_MODEL_ID } from "./agent-model-selection";
+const AUTO_MODEL_ID = "open-software/auto";
 import type {
   BuiltinProvider,
   ProviderApiKeysConfigured,

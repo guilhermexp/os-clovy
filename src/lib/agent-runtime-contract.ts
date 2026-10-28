@@ -314,11 +314,6 @@ export type AgentRuntimeBindings = {
   listSessions(): Promise<AgentSessionDto[]>;
   getSession(sessionId: string): Promise<AgentSessionDto>;
   getLatestRun?(sessionId: string): Promise<AgentRunDto | null>;
-  compactSession?(sessionId: string): Promise<{
-    compacted: boolean;
-    removedItems: number;
-    estimatedTokens?: number;
-  }>;
   createSession(input: {
     title?: string;
     model: string;
@@ -330,11 +325,6 @@ export type AgentRuntimeBindings = {
   deleteSession(sessionId: string): Promise<void>;
   listItems(sessionId: string): Promise<AgentItemDto[]>;
   startRun(input: StartAgentRunRequest): Promise<AgentRunDto>;
-  steerRun(
-    runId: string,
-    messageId: string,
-    text: string,
-  ): Promise<{ accepted: boolean; reason?: string }>;
   cancelRun(runId: string): Promise<void>;
   retryRun(runId: string): Promise<AgentRunDto>;
   resolveInterruption(input: ResolveAgentInterruptionRequest): Promise<AgentRunDto>;

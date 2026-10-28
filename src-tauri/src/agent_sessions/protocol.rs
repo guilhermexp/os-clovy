@@ -121,7 +121,7 @@ mod tests {
     fn rejects_unknown_protocol_versions() {
         let mut frame = RpcFrame::request(
             "1".into(),
-            "run.start",
+            "session.inspect",
             "session",
             "run",
             0,

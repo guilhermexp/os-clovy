@@ -6322,12 +6322,12 @@ mod tests {
     #[tokio::test]
     async fn moving_profile_atomically_deletes_the_redundant_home_session() {
         let repos = test_repositories().await;
-        let agents = crate::agent_runtime::AgentRepository::new(repos.pool.clone());
+        let agents = crate::agent_sessions::AgentRepository::new(repos.pool.clone());
         let retained = agents
             .create_session_in_profile(
                 "Default Home",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "default",
             )
@@ -6337,7 +6337,7 @@ mod tests {
             .create_session_in_profile(
                 "Work Home",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "work",
             )
@@ -6347,7 +6347,7 @@ mod tests {
             .create_session_in_profile(
                 "Work task",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "work",
             )
@@ -6375,12 +6375,12 @@ mod tests {
     #[tokio::test]
     async fn deleting_profile_deletes_its_agent_sessions_instead_of_exposing_them_as_default() {
         let repos = test_repositories().await;
-        let agents = crate::agent_runtime::AgentRepository::new(repos.pool.clone());
+        let agents = crate::agent_sessions::AgentRepository::new(repos.pool.clone());
         let private_session = agents
             .create_session_in_profile(
                 "Private Home",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "private",
             )

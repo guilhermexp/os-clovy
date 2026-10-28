@@ -13,7 +13,7 @@ use clovy_lib::activity::key::{ActivityKeyStore, KeyStoreError};
 use clovy_lib::activity::settings::ActivitySettings;
 use clovy_lib::activity::store::{ActivityStore, NewFrame, TextSource, ACTIVITY_DB_FILE};
 use clovy_lib::activity::timeline::etl::run_pass;
-use clovy_lib::agent_runtime::domain::AgentSafetyMode;
+use clovy_lib::agent_sessions::domain::AgentSafetyMode;
 use clovy_lib::db::repositories::Repositories;
 use clovy_lib::llm::cli::CliKind;
 use clovy_lib::mcp_server::tools::{ActivityAccess, McpData, ToolCtx};

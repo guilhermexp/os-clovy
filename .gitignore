@@ -30,6 +30,7 @@ keys/
 .tmp/
 coverage
 .tauri-hermes/
+# Retired sidecar build cache: keep old local artifacts out of the product.
 .tauri-agent-runtime/
 /artifacts/windows-unsigned/
 

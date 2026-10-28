@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { composerModelPopoverPosition } from "../components/agent/composer/ModelPicker";
+import { chatEnginePopoverPosition } from "../components/agent/composer/chat-engine-popover-position";
 
 const viewport = {
   viewportWidth: 1200,
@@ -30,9 +30,9 @@ function rect({
   } as DOMRect;
 }
 
-describe("composerModelPopoverPosition", () => {
+describe("chatEnginePopoverPosition", () => {
   it("right-aligns above the trigger when the menu fits", () => {
-    const result = composerModelPopoverPosition({
+    const result = chatEnginePopoverPosition({
       triggerRect: rect({ left: 900, top: 700, width: 100, height: 36 }),
       anchorRect: rect({ left: 100, top: 620, width: 1000, height: 140 }),
       popoverRect: rect({ left: 0, top: 0, width: 232, height: 320 }),
@@ -48,7 +48,7 @@ describe("composerModelPopoverPosition", () => {
   });
 
   it("flips below the trigger when the menu does not fit above", () => {
-    const result = composerModelPopoverPosition({
+    const result = chatEnginePopoverPosition({
       triggerRect: rect({ left: 900, top: 80, width: 100, height: 36 }),
       anchorRect: rect({ left: 100, top: 40, width: 1000, height: 140 }),
       popoverRect: rect({ left: 0, top: 0, width: 232, height: 320 }),
@@ -64,7 +64,7 @@ describe("composerModelPopoverPosition", () => {
   });
 
   it("uses the roomier side and caps the menu when neither side fits", () => {
-    const result = composerModelPopoverPosition({
+    const result = chatEnginePopoverPosition({
       triggerRect: rect({ left: 900, top: 330, width: 100, height: 36 }),
       anchorRect: rect({ left: 100, top: 280, width: 1000, height: 140 }),
       popoverRect: rect({ left: 0, top: 0, width: 232, height: 600 }),
@@ -80,7 +80,7 @@ describe("composerModelPopoverPosition", () => {
   });
 
   it("keeps the menu inside the viewport when the trigger hugs an edge", () => {
-    const result = composerModelPopoverPosition({
+    const result = chatEnginePopoverPosition({
       triggerRect: rect({ left: 8, top: 700, width: 100, height: 36 }),
       anchorRect: rect({ left: 0, top: 620, width: 1100, height: 140 }),
       popoverRect: rect({ left: 0, top: 0, width: 232, height: 320 }),

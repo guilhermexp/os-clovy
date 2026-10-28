@@ -237,7 +237,7 @@ fn binding(run_id: &str, attended: bool) -> TurnBinding {
         session_id: "session-1".into(),
         run_id: run_id.into(),
         cli: CliKind::Claude,
-        safety_mode: crate::agent_runtime::AgentSafetyMode::Sandboxed,
+        safety_mode: crate::agent_sessions::AgentSafetyMode::Sandboxed,
         attended,
         surface: if attended { "chat" } else { "routine" }.into(),
     }

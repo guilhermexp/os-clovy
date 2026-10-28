@@ -7,9 +7,7 @@
 //! duplicate while the original claim is live.
 
 use crate::{
-    agent_runtime::{
-        AgentItemPayload, AgentRepository, AgentRuntimeHost, AgentSafetyMode, MessagePayload,
-    },
+    agent_sessions::{AgentItemPayload, AgentRepository, AgentSafetyMode, MessagePayload},
     browser_broker::{BrowserBroker, RoutineBrowserGrant},
     commands::repositories,
     db::repositories::RoutineBrowserGrantRecord,
@@ -168,32 +166,14 @@ fn validate_state(state: &str) -> Result<(), AppError> {
 
 fn resolve_routine_model(
     stored_model: &str,
-    selected_model: &str,
+    _selected_model: &str,
     default_cli: Option<crate::llm::cli::CliKind>,
 ) -> String {
-    let stored_model = stored_model.trim();
-    if stored_model.is_empty()
-        || stored_model == "auto"
-        || stored_model == crate::providers::AUTO_GENERATION_MODEL
-    {
-        // A Routine's stored Auto value runs on the default CLI engine when
-        // chat is on one (ADR-0062), under the unattended tool policy.
-        if let Some(kind) = default_cli {
-            return crate::chat_engine::engine_model_id(kind);
-        }
-        // Otherwise it resolves against the saved remote selection so
-        // unattended work stays on Clovy's metered model route.
-        // `open-software/auto` is itself supported; the proxy adds its
-        // cost-quality preference before calling the model API.
-        let selected_model = selected_model.trim();
-        if selected_model.is_empty() || selected_model == "auto" {
-            crate::providers::AUTO_GENERATION_MODEL.to_string()
-        } else {
-            selected_model.to_string()
-        }
-    } else {
-        stored_model.to_string()
-    }
+    let kind = crate::chat_engine::cli_for_model(stored_model)
+        .filter(|kind| crate::llm::registry::DEFAULT_CHAT_CLIS.contains(kind))
+        .or(default_cli)
+        .unwrap_or(crate::llm::cli::CliKind::Claude);
+    crate::chat_engine::engine_model_id(kind)
 }
 
 /// Create a durable Routine. The first next run is derived before insertion so
@@ -596,7 +576,7 @@ fn advance_repeat(repeat: &str, metadata: &mut Value) -> bool {
 /// single-flight lease forever. This is deliberately separate from `reconcile`
 /// because calling it during normal scheduler ticks would interrupt live work.
 pub async fn reconcile_after_restart(pool: &SqlitePool) -> Result<(), AppError> {
-    crate::agent_runtime::AgentRepository::new(pool.clone())
+    crate::agent_sessions::AgentRepository::new(pool.clone())
         .reconcile_non_routine_runs_after_restart()
         .await
         .map_err(app_error)?;
@@ -732,9 +712,8 @@ pub fn start_scheduler(app: &AppHandle) {
         loop {
             match scheduler_tick(&pool).await {
                 Ok(claims) => {
-                    let host = app.state::<AgentRuntimeHost>();
                     for claim in claims {
-                        if let Err(error) = start_claim(&app, &host, &pool, claim).await {
+                        if let Err(error) = start_claim(&app, &pool, claim).await {
                             tracing::warn!(error_code = %error.code, "routine scheduled dispatch failed");
                         }
                     }
@@ -753,7 +732,6 @@ pub fn start_scheduler(app: &AppHandle) {
 /// approval-required tool in this set.
 pub async fn start_claim(
     app: &AppHandle,
-    host: &AgentRuntimeHost,
     pool: &SqlitePool,
     claim: Claim,
 ) -> Result<AgentRoutineRunDto, AppError> {
@@ -765,7 +743,8 @@ pub async fn start_claim(
         .map_err(|error| AppError::new("routine_workspace_failed", error.to_string()))?;
     let timestamp = crate::db::repositories::timestamp();
     let mut created_agent_run_id = None;
-    let cli = crate::chat_engine::cli_for_model(&claim.model);
+    let cli =
+        crate::chat_engine::cli_for_model(&claim.model).unwrap_or(crate::llm::cli::CliKind::Claude);
     let started = async {
         let run_id = persist_claim_run(
             pool,
@@ -777,42 +756,17 @@ pub async fn start_claim(
             &mut created_agent_run_id,
         )
         .await?;
-        if let Some(kind) = cli {
-            start_cli_claim(
-                app,
-                &repository,
-                &claim,
-                kind,
-                &session_id,
-                &run_id,
-                &workspace,
-            )
-            .await?;
-            return Ok::<_, AppError>(run_id);
-        }
-        let run = repository.get_run(&run_id).await.map_err(app_error)?;
-        host.ensure_started(app, repository.clone()).await?;
-        let workspace = workspace.to_string_lossy();
-        let request = UnattendedRunRequest {
-            run_id: &run.id,
-            routine_id: &claim.routine_id,
-            model: &claim.model,
-            safety_mode: claim.safety_mode,
-            workspace: workspace.as_ref(),
-            prompt: &claim.prompt,
-            enabled_toolsets: &claim.enabled_toolsets,
-        };
-        let params = unattended_run_params(app, &repository, &request).await?;
-        repository
-            .set_run_config(
-                &run.id,
-                &crate::agent_runtime::api::resumable_run_config(&params),
-            )
-            .await
-            .map_err(app_error)?;
-        host.request("run.start", &session_id, &run.id, params)
-            .await?;
-        Ok::<_, AppError>(run.id)
+        start_cli_claim(
+            app,
+            &repository,
+            &claim,
+            cli,
+            &session_id,
+            &run_id,
+            &workspace,
+        )
+        .await?;
+        Ok::<_, AppError>(run_id)
     }
     .await;
     if let Err(error) = started {
@@ -857,13 +811,12 @@ fn next_run_after_dispatch_failure(claim: &Claim, after: DateTime<Utc>) -> Optio
 
 pub async fn trigger_and_start(
     app: &AppHandle,
-    host: &AgentRuntimeHost,
     pool: &SqlitePool,
     routine_id: &str,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
     reconcile(pool).await?;
     match claim(pool, routine_id, "manual", false).await? {
-        Some(claim) => start_claim(app, host, pool, claim).await.map(Some),
+        Some(claim) => start_claim(app, pool, claim).await.map(Some),
         None => Ok(None),
     }
 }
@@ -879,7 +832,6 @@ pub async fn trigger_from_connector(
     account_id: &str,
 ) -> Result<bool, AppError> {
     let pool = repositories(app).await?.pool;
-    let host = app.state::<AgentRuntimeHost>();
     reconcile(&pool).await?;
     let guard = ConnectorClaimGuard {
         trigger_id,
@@ -887,7 +839,7 @@ pub async fn trigger_from_connector(
         account_id,
     };
     match claim_with_connector_guard(&pool, routine_id, kind, false, Some(guard)).await? {
-        Some(claim) => start_claim(app, &host, &pool, claim).await.map(|_| true),
+        Some(claim) => start_claim(app, &pool, claim).await.map(|_| true),
         None => Ok(false),
     }
 }
@@ -1043,10 +995,9 @@ pub async fn resume_agent_routine(
 #[tauri::command]
 pub async fn trigger_agent_routine(
     app: AppHandle,
-    host: State<'_, AgentRuntimeHost>,
     routine_id: String,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
-    trigger_and_start(&app, &host, &repositories(&app).await?.pool, &routine_id).await
+    trigger_and_start(&app, &repositories(&app).await?.pool, &routine_id).await
 }
 #[tauri::command]
 pub async fn delete_agent_routine(app: AppHandle, routine_id: String) -> Result<(), AppError> {
@@ -1275,215 +1226,6 @@ fn routine_workspace(app: &AppHandle, session_id: &str) -> Result<PathBuf, AppEr
         .join(session_id))
 }
 
-struct UnattendedRunRequest<'a> {
-    run_id: &'a str,
-    routine_id: &'a str,
-    model: &'a str,
-    safety_mode: AgentSafetyMode,
-    workspace: &'a str,
-    prompt: &'a str,
-    enabled_toolsets: &'a [String],
-}
-
-const UNATTENDED_RUN_INSTRUCTIONS: &str = "You are Clovy executing an unattended routine. Complete the requested work without asking questions. Never claim a tool succeeded unless its result confirms success. If a tool needs approval, pause and wait for the user instead of choosing for them.";
-
-async fn unattended_run_params(
-    app: &AppHandle,
-    repository: &AgentRepository,
-    request: &UnattendedRunRequest<'_>,
-) -> Result<Value, AppError> {
-    let skills = if request
-        .enabled_toolsets
-        .iter()
-        .any(|toolset| toolset == "skills")
-    {
-        enabled_skill_ids(&crate::agent_runtime::api::agent_skill_catalog(app, repository).await?)
-    } else {
-        Vec::new()
-    };
-    repository
-        .set_run_enabled_skills(request.run_id, &skills)
-        .await
-        .map_err(app_error)?;
-    let tools = unattended_tools(
-        app,
-        repository,
-        request.safety_mode,
-        std::path::Path::new(request.workspace),
-        request.routine_id,
-        request.enabled_toolsets,
-    )
-    .await;
-    let mcp_descriptors = tools
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|descriptor| {
-            descriptor
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id.starts_with("mcp:"))
-        })
-        .filter_map(|descriptor| serde_json::from_value(descriptor.clone()).ok())
-        .collect::<Vec<crate::agent_mcp::RuntimeToolDescriptorJson>>();
-    crate::agent_mcp::snapshot_run_policies(&repository.pool, request.run_id, &mcp_descriptors)
-        .await
-        .map_err(|error| AppError::new("agent_mcp_policy_snapshot_failed", error.to_string()))?;
-    let instructions =
-        crate::agent_runtime::persona::instructions_for_app(app, UNATTENDED_RUN_INSTRUCTIONS);
-    Ok(
-        json!({ "model": request.model, "reasoningEffort": "medium", "instructions": instructions, "workspace": request.workspace, "safetyMode": request.safety_mode.as_db(), "input": request.prompt, "history": [], "tools": tools, "skills": skills.iter().map(|name| json!({ "name": name, "description": "Enabled Clovy skill", "source": "managed" })).collect::<Vec<_>>(), "contextWindow": 128000, "maxOutputTokens": 8192 }),
-    )
-}
-
-fn enabled_skill_ids(catalog: &[Value]) -> Vec<String> {
-    catalog
-        .iter()
-        .filter(|skill| skill.get("enabled").and_then(Value::as_bool) == Some(true))
-        .filter_map(|skill| skill.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect()
-}
-
-/// Reconstructs the unattended contract only for prerelease interrupted runs
-/// that predate persisted run configuration. New runs always resume from their
-/// exact immutable `run_config_json` snapshot.
-pub async fn reconstruct_unattended_resume_params(
-    app: &AppHandle,
-    repository: &AgentRepository,
-    run_id: &str,
-    session_id: &str,
-    model: &str,
-    safety_mode: AgentSafetyMode,
-    workspace: &str,
-) -> Result<Option<Value>, AppError> {
-    let row = query(
-        "SELECT routines.id, routines.prompt, routines.metadata_json,
-                routines.tool_catalog_version
-         FROM routine_runs
-         JOIN routines ON routines.id = routine_runs.routine_id
-         WHERE routine_runs.agent_session_id = ? AND routine_runs.agent_run_id = ?",
-    )
-    .bind(session_id)
-    .bind(run_id)
-    .fetch_optional(&repository.pool)
-    .await
-    .map_err(app_error)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let metadata = serde_json::from_str::<Value>(&row.get::<String, _>("metadata_json"))
-        .unwrap_or_else(|_| json!({}));
-    let enabled_toolsets =
-        enabled_toolsets_from_metadata(&metadata, row.get::<i64, _>("tool_catalog_version") == 0);
-    let routine_id: String = row.get("id");
-    let prompt: String = row.get("prompt");
-    let request = UnattendedRunRequest {
-        run_id,
-        routine_id: &routine_id,
-        model,
-        safety_mode,
-        workspace,
-        prompt: &prompt,
-        enabled_toolsets: &enabled_toolsets,
-    };
-    Ok(Some(crate::agent_runtime::api::resumable_run_config(
-        &unattended_run_params(app, repository, &request).await?,
-    )))
-}
-async fn unattended_tools(
-    app: &AppHandle,
-    repository: &AgentRepository,
-    safety_mode: AgentSafetyMode,
-    workspace: &std::path::Path,
-    routine_id: &str,
-    enabled_toolsets: &[String],
-) -> Value {
-    let (autonomous_tools, trust_mode) = routine_trust(&repository.pool, routine_id).await;
-    let mut tools = base_unattended_tools();
-    if let Some(descriptors) = tools.as_array_mut() {
-        descriptors.retain(|descriptor| {
-            descriptor
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| routine_base_tool_allowed(name, enabled_toolsets))
-        });
-    }
-    let subsystem = crate::agent_mcp::AgentMcpSubsystem::new(
-        crate::agent_mcp::AgentMcpRepository::new(repository.pool.clone()),
-        crate::agent_mcp::KeychainMcpSecretStore,
-    );
-    match subsystem
-        .refresh_registry_for_workspace_with_managed_linear(
-            app,
-            safety_mode == AgentSafetyMode::Sandboxed,
-            Some(workspace),
-        )
-        .await
-    {
-        Ok(descriptors) => {
-            let mcp_repository = crate::agent_mcp::AgentMcpRepository::new(repository.pool.clone());
-            for descriptor in descriptors {
-                let Some(server_id) = descriptor
-                    .id
-                    .strip_prefix("mcp:")
-                    .and_then(|value| value.split('/').next())
-                else {
-                    continue;
-                };
-                let server_name = if server_id == crate::agent_mcp::MANAGED_LINEAR_SERVER_ID {
-                    crate::agent_mcp::MANAGED_LINEAR_SERVER_NAME.to_string()
-                } else {
-                    let Ok(server) = mcp_repository.get(server_id).await else {
-                        continue;
-                    };
-                    server.name
-                };
-                if routine_mcp_server_enabled(
-                    server_id,
-                    &server_name,
-                    descriptor.requires_approval == Some(true),
-                    enabled_toolsets,
-                ) {
-                    if let Ok(value) = serde_json::to_value(descriptor) {
-                        tools
-                            .as_array_mut()
-                            .expect("routine tool catalog is an array")
-                            .push(value);
-                    }
-                }
-            }
-        }
-        Err(error) => tracing::warn!(
-            error_code = "routine_mcp_discovery_failed",
-            error = %error,
-            "MCP discovery was unavailable for this routine run"
-        ),
-    }
-    match crate::agent_runtime::native_connectors::descriptors(app).await {
-        Ok(descriptors) => tools
-            .as_array_mut()
-            .expect("routine tool catalog is an array")
-            .extend(descriptors.into_iter().filter(|descriptor| {
-                descriptor
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| {
-                        crate::agent_runtime::native_connectors::routine_tool_allowed(
-                            name,
-                            enabled_toolsets,
-                            &autonomous_tools,
-                            trust_mode.as_deref(),
-                        )
-                    })
-            })),
-        Err(error) => tracing::warn!(
-            error_code = %error.code,
-            "native connector tools were unavailable for this routine run"
-        ),
-    }
-    tools
-}
-
 fn enabled_toolsets_from_metadata(metadata: &Value, legacy_catalog: bool) -> Vec<String> {
     let has_explicit_catalog = matches!(metadata.get("enabledToolsets"), Some(Value::Array(_)));
     let imported_catalog =
@@ -1593,7 +1335,7 @@ pub async fn routine_tool_allowed_for_session(
     let (autonomous_tools, trust_mode) = routine_trust(pool, &routine_id).await;
     Ok(Some(
         routine_base_tool_allowed(name, &enabled_toolsets)
-            || crate::agent_runtime::native_connectors::routine_tool_allowed(
+            || crate::connectors::agent_tools::routine_tool_allowed(
                 name,
                 &enabled_toolsets,
                 &autonomous_tools,
@@ -1633,22 +1375,6 @@ pub async fn routine_mcp_server_allowed_for_session(
         requires_approval,
         &enabled_toolsets,
     )))
-}
-
-fn base_unattended_tools() -> Value {
-    json!([
-        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations. Returns each match's id with an excerpt around the match; call get_note with a note id or get_dictation with a dictation id to read it whole.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "get_note", "description": "Read one Clovy note and its latest transcript by note id. Long texts come in pages: call again with contentOffset or transcriptOffset set to the nextContentOffset or nextTranscriptOffset of the previous page.", "parameters": { "type": "object", "properties": { "id": { "type": "string" }, "contentOffset": { "type": "integer", "minimum": 0 }, "transcriptOffset": { "type": "integer", "minimum": 0 } }, "required": ["id"], "additionalProperties": false } },
-        { "name": "get_dictation", "description": "Read one Clovy dictation by id. Long text comes in pages: call again with textOffset set to the nextTextOffset of the previous page.", "parameters": { "type": "object", "properties": { "id": { "type": "string" }, "textOffset": { "type": "integer", "minimum": 0 } }, "required": ["id"], "additionalProperties": false } },
-        { "name": "web_search", "description": "Search the public web.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "web_fetch", "description": "Fetch a public web page.", "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false } },
-        { "name": "list_files", "description": "List files in the routine workspace.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": [], "additionalProperties": false } },
-        { "name": "read_file", "description": "Read a UTF-8 text file in the routine workspace.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
-        { "name": "preview_file", "description": "Read file metadata and a bounded text preview.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
-        { "name": "search_files", "description": "Search text files in the routine workspace.", "parameters": { "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "list_skills", "description": "List enabled Clovy skills for this routine.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "load_skill", "description": "Load instructions for one enabled Clovy skill.", "parameters": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }
-    ])
 }
 
 /// Supports the legacy routine schedule forms Clovy surfaced: one-shot RFC3339,
@@ -1903,21 +1629,13 @@ mod tests {
     }
 
     #[test]
-    fn automatic_routine_model_resolves_to_the_selected_remote_model() {
-        for stored_model in ["", "auto", crate::providers::AUTO_GENERATION_MODEL] {
+    fn native_routine_models_use_claude_when_no_cli_is_selected() {
+        for model in ["", "auto", "open-software/auto", "explicit-model"] {
             assert_eq!(
-                resolve_routine_model(stored_model, "kimi-k2-6", None),
-                "kimi-k2-6"
+                resolve_routine_model(model, "remote-model", None),
+                crate::chat_engine::engine_model_id(crate::llm::cli::CliKind::Claude)
             );
         }
-        assert_eq!(
-            resolve_routine_model("explicit-model", "kimi-k2-6", None),
-            "explicit-model"
-        );
-        assert_eq!(
-            resolve_routine_model("auto", crate::providers::AUTO_GENERATION_MODEL, None),
-            crate::providers::AUTO_GENERATION_MODEL
-        );
     }
 
     #[test]
@@ -2355,39 +2073,15 @@ mod tests {
     }
 
     #[test]
-    fn unattended_skill_catalog_keeps_only_enabled_skills() {
-        let catalog = vec![
-            json!({ "id": "notion-meeting-notes-sync", "enabled": true }),
-            json!({ "id": "disabled-skill", "enabled": false }),
-            json!({ "id": "missing-enabled-flag" }),
-            json!({ "enabled": true }),
-        ];
-
-        assert_eq!(
-            enabled_skill_ids(&catalog),
-            vec!["notion-meeting-notes-sync"]
-        );
-    }
-
-    #[test]
     fn sandboxed_routines_can_load_skill_instructions_without_machine_tools() {
         let toolsets = crate::connectors::policy::SANDBOXED_ROUTINE_BASE_TOOLSETS
             .iter()
-            .map(|toolset| (*toolset).to_string())
+            .map(|name| name.to_string())
             .collect::<Vec<_>>();
-        let tools = base_unattended_tools();
-        let names = tools
-            .as_array()
-            .expect("routine tool catalog")
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-            .filter(|name| routine_base_tool_allowed(name, &toolsets))
-            .collect::<Vec<_>>();
-
-        assert!(names.contains(&"list_skills"));
-        assert!(names.contains(&"load_skill"));
-        assert!(!names.contains(&"write_file"));
-        assert!(!names.contains(&"run_shell"));
+        assert!(routine_base_tool_allowed("list_skills", &toolsets));
+        assert!(routine_base_tool_allowed("load_skill", &toolsets));
+        assert!(!routine_base_tool_allowed("write_file", &toolsets));
+        assert!(!routine_base_tool_allowed("run_shell", &toolsets));
     }
 
     #[tokio::test]
@@ -2401,18 +2095,27 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claim.model, crate::providers::remote_generation_model());
+        assert_eq!(
+            claim.model,
+            crate::chat_engine::engine_model_id(
+                crate::providers::default_unattended_cli()
+                    .unwrap_or(crate::llm::cli::CliKind::Claude)
+            )
+        );
         assert_eq!(claim.safety_mode, AgentSafetyMode::Unrestricted);
         let run = list_runs(&pool, Some("routine-1"))
             .await
             .unwrap()
             .pop()
             .unwrap();
-        assert_eq!(run.model, crate::providers::remote_generation_model());
+        assert_eq!(
+            run.model,
+            crate::chat_engine::engine_model_id(
+                crate::providers::default_unattended_cli()
+                    .unwrap_or(crate::llm::cli::CliKind::Claude)
+            )
+        );
         assert_eq!(run.safety_mode, AgentSafetyMode::Unrestricted);
-        let tools = base_unattended_tools().to_string();
-        assert!(!tools.contains("computer_use"));
-        assert!(!tools.contains("request_clarification"));
     }
 
     #[tokio::test]
@@ -2992,14 +2695,14 @@ mod tests {
                 "__clovy_cli_engine__:claude"
             );
         }
-        // A model the routine names stays its model.
+        // A retired remote model also moves onto the selected local engine.
         assert_eq!(
             resolve_routine_model(
                 "explicit-model",
                 "kimi-k2-6",
                 Some(crate::llm::cli::CliKind::Codex)
             ),
-            "explicit-model"
+            "__clovy_cli_engine__:codex"
         );
     }
 
@@ -3040,8 +2743,8 @@ mod tests {
 
     #[cfg(unix)]
     impl crate::chat_engine::FrameSink for RoutineSink {
-        async fn publish(&self, frame: crate::agent_runtime::protocol::RpcFrame) {
-            crate::agent_runtime::host::persist_runtime_event(&self.repository, &frame)
+        async fn publish(&self, frame: crate::agent_sessions::protocol::RpcFrame) {
+            crate::agent_sessions::events::persist_runtime_event(&self.repository, &frame)
                 .await
                 .expect("event persists");
         }

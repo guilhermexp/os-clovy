@@ -8,10 +8,6 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot "artifacts\windows-unsigned" }
 elseif (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory = Join-Path $repoRoot $OutputDirectory }
 $callerLocation = Get-Location
-$hadPrebuilt = Test-Path Env:CLOVY_AGENT_RUNTIME_PREBUILT
-$previousPrebuilt = $env:CLOVY_AGENT_RUNTIME_PREBUILT
-$hadRuntimeTarget = Test-Path Env:CLOVY_AGENT_RUNTIME_TARGET
-$previousRuntimeTarget = $env:CLOVY_AGENT_RUNTIME_TARGET
 $previousPath = $env:PATH
 $mutexPath = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd([char[]]"\/").ToUpperInvariant()
 $mutexBytes = [System.Text.Encoding]::UTF8.GetBytes($mutexPath)
@@ -86,12 +82,6 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Could not resolve Cargo's target directory." }
   $cargoTargetDirectory = ("$cargoMetadataOutput" | ConvertFrom-Json).target_directory
   if ([string]::IsNullOrWhiteSpace($cargoTargetDirectory)) { throw "Cargo metadata did not report a target directory." }
-  & pnpm agent-runtime:build
-  if ($LASTEXITCODE -ne 0) { throw "Agent runtime TypeScript build failed." }
-  Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT -ErrorAction SilentlyContinue
-  & node scripts/build-agent-runtime.mjs --target windows
-  if ($LASTEXITCODE -ne 0) { throw "Windows agent runtime SEA build failed." }
-
   $releaseDirectory = Join-Path $cargoTargetDirectory "$targetTriple\release"
   $nsisDirectory = Join-Path $releaseDirectory "bundle\nsis"
   if (Test-Path -LiteralPath $nsisDirectory -PathType Container) {
@@ -99,8 +89,6 @@ try {
   }
   $appExecutable = Join-Path $releaseDirectory "clovy.exe"
   Remove-Item -LiteralPath $appExecutable -Force -ErrorAction SilentlyContinue
-  $env:CLOVY_AGENT_RUNTIME_PREBUILT = "1"
-  $env:CLOVY_AGENT_RUNTIME_TARGET = "windows"
   # Authenticode stays off (--no-sign). With the updater key (release
   # workflow) the installer also gets its minisign signature below: --no-sign
   # skips Tauri's own updater signing too, so the .sig comes from
@@ -112,8 +100,6 @@ try {
   }
   & node scripts/tauri-build.mjs @tauriArgs
   if ($LASTEXITCODE -ne 0) { throw "Unsigned Tauri release build failed." }
-  if ($hadPrebuilt) { $env:CLOVY_AGENT_RUNTIME_PREBUILT = $previousPrebuilt } else { Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT }
-  if ($hadRuntimeTarget) { $env:CLOVY_AGENT_RUNTIME_TARGET = $previousRuntimeTarget } else { Remove-Item Env:CLOVY_AGENT_RUNTIME_TARGET }
 
   $installers = @(Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe")
   if ($installers.Count -ne 1) { throw "Expected exactly one release NSIS installer; found $($installers.Count)." }
@@ -142,10 +128,6 @@ try {
 finally {
   try {
     $env:PATH = $previousPath
-    if ($hadPrebuilt) { $env:CLOVY_AGENT_RUNTIME_PREBUILT = $previousPrebuilt }
-    else { Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT -ErrorAction SilentlyContinue }
-    if ($hadRuntimeTarget) { $env:CLOVY_AGENT_RUNTIME_TARGET = $previousRuntimeTarget }
-    else { Remove-Item Env:CLOVY_AGENT_RUNTIME_TARGET -ErrorAction SilentlyContinue }
     Set-Location -LiteralPath $callerLocation
   }
   finally {

@@ -51,12 +51,7 @@ import {
   downloadAgentArtifact,
   dictationHelperCommand,
   importLegacyHomeTurns,
-  listProviderModels,
-  providerModelSettings,
   pruneStagedAgentAttachments,
-  setCostQuality as setProviderCostQuality,
-  type ProviderApiKeysConfigured,
-  type ProviderModelDto,
 } from "../../lib/tauri";
 import {
   type AgentSessionStatusDetail,
@@ -65,8 +60,6 @@ import {
   dispatchAgentSessionsChanged,
 } from "../../lib/agent-events";
 import { messageFromError } from "../../lib/errors";
-import { persistAgentDefaultModel } from "../../lib/agent-default-model";
-import { agentModelSelection, agentRunModelId } from "../../lib/agent-model-selection";
 import {
   clearQueuedAgentFollowUpSteering,
   loadQueuedAgentFollowUps,
@@ -95,20 +88,11 @@ import {
   writeAgentSessionDraft,
 } from "../../lib/agent-session-drafts";
 import {
-  forgetSessionThinkingLevel,
-  loadSessionThinkingLevels,
-  loadThinkingLevel,
-  rememberSessionThinkingLevel,
-  saveThinkingLevel,
-  thinkingEffortForLevel,
-  type ThinkingLevel,
-} from "../../lib/thinking-level";
-import {
   prepareProjectPrompt,
   ProjectContextSignatureStore,
   stripProjectContext,
 } from "../../lib/agent-project-context";
-import { formatNumber, isEnglishLocale, t as translate, useT } from "../../i18n";
+import { formatNumber, t as translate, useT } from "../../i18n";
 import { AgentChatTurnRow } from "./chat-turns/AgentChatTurnRow";
 import {
   AgentArtifactPanel,
@@ -130,7 +114,6 @@ import {
 import { ComposerEditor, type ComposerEditorHandle } from "./composer/ComposerEditor";
 import { AgentAttachmentTile } from "./composer/AgentAttachmentTile";
 import { agentComposerClearance } from "./composer/layout";
-import { ComposerModelPicker, useComposerModelPopoverPosition } from "./composer/ModelPicker";
 import { ChatEnginePicker } from "./composer/ChatEnginePicker";
 import {
   CLI_ENGINE_MODEL_PREFIX,
@@ -139,13 +122,11 @@ import {
   DEFAULT_CHAT_CLI_IDS,
   chatEngineCatalog,
   classifyChatEngineModel,
-  selectedChatEndpoint,
+  chatModelId,
+  defaultChatModelId,
 } from "../../lib/chat-engine";
 import { type LlmCliId, llmSetUsage } from "../../lib/llm-providers";
-import { autoPillDesignation } from "../../lib/suggested-models";
 import { getCurrentDataPartitionName } from "../../lib/data-partition";
-import { AUTO_MODEL_ID, modelOptions, selectedModel } from "../settings/ModelPickerDialog";
-import { ModelPickerPopover, type ModelPickerFlyout } from "../settings/ModelPickerPopover";
 import { Dialog } from "../ui/Dialog";
 import { Spinner } from "../ui/Spinner";
 import { ClovyAlive } from "../brand/ClovyAlive";
@@ -192,7 +173,7 @@ export {
 } from "./agent-workspace-config";
 
 export const AGENT_RUNTIME_EVENT = "clovy://agent-runtime-event";
-const DEFAULT_MODEL = AUTO_MODEL_ID;
+const DEFAULT_MODEL = `${CLI_ENGINE_MODEL_PREFIX}claude`;
 /** Home runs on the default CLI engine (ADR-0064). With no CLI installed it
  * still asks Claude Code, so the turn fails with the CLI sessions' error. */
 const HOME_FALLBACK_ENGINE_MODEL = `${CLI_ENGINE_MODEL_PREFIX}${DEFAULT_CHAT_CLI_IDS[0]}`;
@@ -204,18 +185,6 @@ async function homeEngineModelId(): Promise<string> {
     return HOME_FALLBACK_ENGINE_MODEL;
   }
 }
-const AGENT_SUGGESTED_MODEL_IDS = [AUTO_MODEL_ID] as const;
-const AGENT_AUTO_MODEL: ProviderModelDto = {
-  provider: "",
-  id: AUTO_MODEL_ID,
-  name: "Auto",
-  get description() {
-    return translate("agent.autoModel.description");
-  },
-  modelType: "text",
-  traits: [],
-  capabilities: [],
-};
 const projectContextSignaturesBySessionId = new ProjectContextSignatureStore();
 const USAGE_FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -295,27 +264,6 @@ function queuedFollowUpText(queued: QueuedAgentFollowUp) {
   return queued.attachments.map((path) => path.split(/[\\/]/).pop() || path).join(", ");
 }
 
-function withQueuedSteering(
-  queued: QueuedAgentFollowUps,
-  sessionId: string,
-  messageId: string,
-  steering: QueuedAgentFollowUp["steering"],
-) {
-  const current = queued[sessionId];
-  if (
-    !current ||
-    current.messageId !== messageId ||
-    current.delivery === "attachments" ||
-    current.steering === steering
-  ) {
-    return queued;
-  }
-  const nextFollowUp = { ...current };
-  if (steering) nextFollowUp.steering = steering;
-  else delete nextFollowUp.steering;
-  return { ...queued, [sessionId]: nextFollowUp };
-}
-
 function artifactView(artifact: AgentArtifactDto): AgentArtifact {
   return {
     name: artifact.name,
@@ -358,17 +306,6 @@ export function AgentWorkspace({
   const usagePanelRef = useRef<HTMLElement>(null);
   const usageReturnFocusRef = useRef<HTMLElement | null>(null);
   const usageTitleId = useId();
-  const [compactOpen, setCompactOpen] = useState(false);
-  const [compacting, setCompacting] = useState(false);
-  const [compactResult, setCompactResult] = useState<string>();
-  const [models, setModels] = useState<ProviderModelDto[]>([]);
-  const [providerApiKeysConfigured, setProviderApiKeysConfigured] =
-    useState<ProviderApiKeysConfigured>({
-      groq: false,
-      openrouter: false,
-      fal: false,
-      tavily: false,
-    });
 
   useLayoutEffect(() => {
     if (!usageOpen || !usagePanelRef.current) return;
@@ -416,10 +353,8 @@ export function AgentWorkspace({
   }, [usageOpen]);
 
   const homeEngineModelRef = useRef(HOME_FALLBACK_ENGINE_MODEL);
-  const initialModelSelection = agentModelSelection(initialAgentSession?.model || DEFAULT_MODEL);
-  const [model, setModel] = useState(
-    homeMode ? HOME_FALLBACK_ENGINE_MODEL : initialModelSelection.modelId,
-  );
+  const initialModel = initialAgentSession?.model ?? DEFAULT_MODEL;
+  const [model, setModel] = useState(homeMode ? HOME_FALLBACK_ENGINE_MODEL : initialModel);
   const modelRef = useRef(model);
   modelRef.current = model;
   const [engineCatalog, setEngineCatalog] = useState<ChatEngineCatalog | null>(null);
@@ -437,23 +372,6 @@ export function AgentWorkspace({
   useEffect(() => {
     void refreshEngineCatalog();
   }, [refreshEngineCatalog]);
-  const [costQuality, setCostQuality] = useState(initialModelSelection.costQuality ?? 100);
-  const costQualityRef = useRef(costQuality);
-  costQualityRef.current = costQuality;
-  const confirmedCostQualityRef = useRef(costQuality);
-  const costQualitySaveChainRef = useRef<Promise<void>>(Promise.resolve());
-  const latestCostQualitySaveRef = useRef(0);
-  const costQualityIntentRevisionRef = useRef(0);
-  const sessionCostQualityExplicitRef = useRef(initialModelSelection.costQuality !== undefined);
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
-    if (homeMode) return "instant";
-    const sessionLevel = initialAgentSession?.id
-      ? loadSessionThinkingLevels()[initialAgentSession.id]
-      : undefined;
-    return sessionLevel ?? loadThinkingLevel();
-  });
-  const thinkingLevelRef = useRef(thinkingLevel);
-  thinkingLevelRef.current = thinkingLevel;
   const [safetyMode, setSafetyMode] = useState<AgentSafetyMode>(
     initialAgentSession?.safetyMode ?? "sandboxed",
   );
@@ -537,14 +455,12 @@ export function AgentWorkspace({
     prompt: string;
     attachments: string[];
     model: string;
-    thinkingLevel: ThinkingLevel;
   }>();
   const [recoverableSubmission, setRecoverableSubmission] = useState<{
     id: string;
     prompt: string;
     attachments: string[];
     model: string;
-    thinkingLevel: ThinkingLevel;
   }>();
   const recoverableSubmissionRef = useRef(recoverableSubmission);
   recoverableSubmissionRef.current = recoverableSubmission;
@@ -619,7 +535,6 @@ export function AgentWorkspace({
       setArtifacts([]);
       setShareOpen(false);
       setShareUrl(undefined);
-      setThinkingLevel(loadThinkingLevel());
       setComposerDraft(request?.prompt ?? "");
       setPendingInitialTurn(undefined);
       setSubmitting(false);
@@ -628,48 +543,6 @@ export function AgentWorkspace({
     },
     [abandonComposerAttachments, onSessionSelected, setComposerDraft],
   );
-
-  const applyCostQuality = useCallback((value: number) => {
-    const normalized = Math.max(0, Math.min(100, Math.round(value)));
-    costQualityIntentRevisionRef.current += 1;
-    costQualityRef.current = normalized;
-    setCostQuality(normalized);
-    const sessionId = selectedIdRef.current;
-    if (sessionId) {
-      sessionCostQualityExplicitRef.current = true;
-      rememberSessionModel(sessionId, agentRunModelId(modelRef.current, normalized));
-      return;
-    }
-
-    sessionCostQualityExplicitRef.current = false;
-    const sessionIdAtSave = selectedIdRef.current;
-    const version = ++latestCostQualitySaveRef.current;
-    const save = costQualitySaveChainRef.current.then(() => setProviderCostQuality(normalized));
-    costQualitySaveChainRef.current = save.then(
-      () => undefined,
-      () => undefined,
-    );
-    void save.then(
-      (next) => {
-        confirmedCostQualityRef.current = next.costQuality;
-        if (
-          version !== latestCostQualitySaveRef.current ||
-          selectedIdRef.current !== sessionIdAtSave
-        ) {
-          return;
-        }
-        costQualityRef.current = next.costQuality;
-        setCostQuality(next.costQuality);
-        setError(undefined);
-      },
-      (cause) => {
-        if (version !== latestCostQualitySaveRef.current) return;
-        costQualityRef.current = confirmedCostQualityRef.current;
-        setCostQuality(confirmedCostQualityRef.current);
-        setError(messageFromError(cause));
-      },
-    );
-  }, []);
 
   const selectedSession =
     sessions.find((session) => session.id === selectedId) ?? projection.session;
@@ -694,7 +567,6 @@ export function AgentWorkspace({
     );
     if (persisted) setPendingInitialTurn(undefined);
   }, [pendingInitialTurn, projection.items]);
-  const activeModel = selectedModel(models, model);
 
   const readHomeTaskCards = useCallback(
     (storedSessionId: string) =>
@@ -749,16 +621,7 @@ export function AgentWorkspace({
   }, []);
 
   const applySessionModel = useCallback((storedModel: string) => {
-    const selection = agentModelSelection(storedModel);
-    setModel(selection.modelId || DEFAULT_MODEL);
-    sessionCostQualityExplicitRef.current = selection.costQuality !== undefined;
-    if (selection.costQuality !== undefined) {
-      costQualityRef.current = selection.costQuality;
-      setCostQuality(selection.costQuality);
-    } else {
-      costQualityRef.current = confirmedCostQualityRef.current;
-      setCostQuality(confirmedCostQualityRef.current);
-    }
+    setModel(storedModel);
   }, []);
 
   useEffect(() => {
@@ -807,9 +670,6 @@ export function AgentWorkspace({
       } else {
         applySessionModel(loadSessionModels()[session.id] ?? session.model);
       }
-      setThinkingLevel(
-        homeMode ? "instant" : (loadSessionThinkingLevels()[session.id] ?? loadThinkingLevel()),
-      );
       setSafetyMode(homeMode ? "sandboxed" : session.safetyMode);
       setNewSessionMode(false);
       if (!homeMode) writeLastOpenSessionId(sessionId);
@@ -865,27 +725,6 @@ export function AgentWorkspace({
     void defaultEngine.then((engine) => {
       if (engine?.modelId) applyDefaultModel(engine.modelId);
     });
-    void listProviderModels("generation")
-      .then(async (response) => {
-        setModels(response.models);
-        const engine = await defaultEngine;
-        applyDefaultModel(engine?.modelId ?? response.selectedModel);
-      })
-      .catch(() => undefined);
-    const costQualityRequestRevision = costQualityIntentRevisionRef.current;
-    void providerModelSettings()
-      .then((response) => {
-        setProviderApiKeysConfigured(response.effectiveSettings.providerApiKeysConfigured);
-        if (costQualityRequestRevision !== costQualityIntentRevisionRef.current) return;
-        confirmedCostQualityRef.current = response.settings.costQuality;
-        if (!sessionCostQualityExplicitRef.current) {
-          costQualityRef.current = response.settings.costQuality;
-          setCostQuality(response.settings.costQuality);
-        }
-      })
-      .catch(() =>
-        setProviderApiKeysConfigured({ groq: false, openrouter: false, fal: false, tavily: false }),
-      );
   }, [homeMode, initialAgentSession, initialSessionId, refreshSessions]);
 
   const pendingDraftTakesPriorityRef = useRef(Boolean(pendingRequestRef.current?.prompt));
@@ -1089,7 +928,6 @@ export function AgentWorkspace({
       prompt: queued.prompt,
       attachments: queued.attachments,
       model: queued.model,
-      thinkingLevel: queued.thinkingLevel,
     };
     requestAnimationFrame(() => {
       if (selectedIdRef.current !== ownerSessionId) {
@@ -1197,8 +1035,7 @@ export function AgentWorkspace({
         : undefined;
     if (running) {
       const submittedAttachments = queuedSubmission?.attachments ?? attachmentsRef.current;
-      const submittedModel = queuedSubmission?.model ?? agentRunModelId(model, costQuality);
-      const submittedThinkingLevel = queuedSubmission?.thinkingLevel ?? thinkingLevel;
+      const submittedModel = queuedSubmission?.model ?? model;
       clearQueuedSubmissionAttempt();
       const ownerStoredSessionId = selectedIdRef.current;
       if (!ownerStoredSessionId) return;
@@ -1210,58 +1047,20 @@ export function AgentWorkspace({
           prompt,
           attachments: submittedAttachments,
           model: submittedModel,
-          thinkingLevel: submittedThinkingLevel,
           delivery: "follow_up",
-          steering: "pending",
         }),
       }));
       setComposerDraft("", { persist: false });
       setComposerAttachments([]);
       clearAgentSessionDraftRevision(ownerStoredSessionId, submittedDraftRevision);
       requestSubmittedMessageScroll();
-      if (projection.run) {
-        const activeRunId = projection.run.id;
-        void agentRuntimeBindings
-          .steerRun(activeRunId, messageId, prompt)
-          .then((result) => {
-            if (result.accepted) {
-              updateQueuedFollowUps((current) =>
-                withQueuedSteering(current, ownerStoredSessionId, messageId, "accepted"),
-              );
-              return;
-            }
-            // biome-ignore lint/suspicious/noConsole: steering fallback needs a non-sensitive diagnostic
-            console.warn("Live steering was rejected; queued the full follow-up instead.", {
-              reason: result.reason ?? "unknown",
-              runId: activeRunId,
-              messageId,
-            });
-            updateQueuedFollowUps((current) =>
-              withQueuedSteering(current, ownerStoredSessionId, messageId, undefined),
-            );
-          })
-          .catch((cause: unknown) => {
-            // biome-ignore lint/suspicious/noConsole: steering fallback needs a non-sensitive diagnostic
-            console.warn("Live steering failed; queued the full follow-up instead.", {
-              reason: messageFromError(cause),
-              runId: activeRunId,
-              messageId,
-            });
-            updateQueuedFollowUps((current) =>
-              withQueuedSteering(current, ownerStoredSessionId, messageId, undefined),
-            );
-          });
-      }
       return;
     }
     queuedSubmissionSnapshotRef.current = undefined;
     recoverableSubmissionSnapshotRef.current = undefined;
     const queuedSnapshot = queuedSubmission;
     const recoveredSnapshot = recoveredSubmission;
-    const submittedModel =
-      queuedSnapshot?.model ?? recoveredSnapshot?.model ?? agentRunModelId(model, costQuality);
-    const submittedThinkingLevel =
-      queuedSnapshot?.thinkingLevel ?? recoveredSnapshot?.thinkingLevel ?? thinkingLevel;
+    const submittedModel = queuedSnapshot?.model ?? recoveredSnapshot?.model ?? model;
     const submissionId = crypto.randomUUID();
     submissionOwnerRef.current = submissionId;
     setSubmitting(true);
@@ -1317,13 +1116,9 @@ export function AgentWorkspace({
           profile: getCurrentDataPartitionName(),
         });
         session = createdSession;
-        const latestModel = agentRunModelId(modelRef.current, costQualityRef.current);
+        const latestModel = chatModelId(modelRef.current, engineCatalogRef.current);
         if (latestModel !== submittedModel) {
           rememberSessionModel(createdSession.id, latestModel);
-        }
-        const latestThinkingLevel = thinkingLevelRef.current;
-        if (latestThinkingLevel !== submittedThinkingLevel) {
-          rememberSessionThinkingLevel(createdSession.id, latestThinkingLevel);
         }
         setSessions((current) => [
           createdSession,
@@ -1393,15 +1188,14 @@ export function AgentWorkspace({
         .filter((skill) => skill.enabled)
         .map((skill) => skill.id);
       const preparedPrompt = preparePromptForSession(activeSession.id, prompt);
-      const runModel = homeMode ? await homeEngineModelId() : submittedModel;
+      const runModel =
+        homeMode || !submittedModel.startsWith(CLI_ENGINE_MODEL_PREFIX)
+          ? await defaultChatModelId()
+          : submittedModel;
       const run = await agentRuntimeBindings.startRun({
         sessionId: activeSession.id,
         prompt: preparedPrompt.text,
         model: runModel,
-        reasoningEffort: thinkingEffortForLevel(submittedThinkingLevel) as
-          | "minimal"
-          | "medium"
-          | "high",
         safetyMode: homeMode ? "sandboxed" : safetyMode,
         workspacePath: activeSession.workspacePath,
         enabledSkillIds,
@@ -1434,10 +1228,6 @@ export function AgentWorkspace({
       }
       clearSessionModelIfApplied(activeSession.id, submittedModel);
       projectContextSignaturesBySessionId.set(activeSession.id, preparedPrompt.contextSignature);
-      const storedThinkingLevel = loadSessionThinkingLevels()[activeSession.id];
-      if (!storedThinkingLevel || storedThinkingLevel === submittedThinkingLevel) {
-        rememberSessionThinkingLevel(activeSession.id, submittedThinkingLevel);
-      }
       if (selectedIdRef.current === activeSession.id) {
         setProjection((current) => ({ ...current, run }));
       }
@@ -1502,7 +1292,6 @@ export function AgentWorkspace({
           prompt,
           attachments: attachedPaths,
           model: submittedModel,
-          thinkingLevel: submittedThinkingLevel,
         };
         if (recoveredSnapshot || draftRef.current.trim() || attachmentsRef.current.length > 0) {
           setRecoverableSubmission(failedSubmission);
@@ -1551,7 +1340,6 @@ export function AgentWorkspace({
           ...current.filter((session) => session.id !== createdSession.id),
         ]);
         setProjection(createAgentRuntimeProjection({ session: createdSession }));
-        rememberSessionThinkingLevel(createdSession.id, "instant");
         onHomeSessionCreated?.(createdSession.id);
         return createdSession;
       })
@@ -1709,25 +1497,6 @@ export function AgentWorkspace({
     }
   }
 
-  async function compactContext() {
-    if (!selectedId || !agentRuntimeBindings.compactSession) return;
-    setCompacting(true);
-    setCompactResult(undefined);
-    try {
-      const result = await agentRuntimeBindings.compactSession(selectedId);
-      setCompactResult(
-        result.compacted
-          ? t("agent.compact.done", { count: result.removedItems })
-          : t("agent.compact.nothing"),
-      );
-      await hydrate(selectedId);
-    } catch (cause) {
-      setCompactResult(messageFromError(cause));
-    } finally {
-      setCompacting(false);
-    }
-  }
-
   async function branchFrom(itemId: string) {
     if (!selectedId || !agentRuntimeBindings.branchSession) return;
     setBranchingItemId(itemId);
@@ -1825,7 +1594,6 @@ export function AgentWorkspace({
     const removedStoredSessionId = selectedId;
     await agentRuntimeBindings.deleteSession(removedStoredSessionId);
     projectContextSignaturesBySessionId.delete(removedStoredSessionId);
-    forgetSessionThinkingLevel(removedStoredSessionId);
     forgetSessionModel(removedStoredSessionId);
     forgetLastOpenSessionId(removedStoredSessionId);
     invalidateAgentSessionDraft(removedStoredSessionId);
@@ -1901,30 +1669,7 @@ export function AgentWorkspace({
       setError(messageFromError(cause));
     }
   };
-  const runDisplayModel = agentModelSelection(projection.run?.model ?? "").modelId;
-  const sessionDisplayModel = agentModelSelection(selectedSession?.model ?? model).modelId;
-  const usageModel = selectedModel(
-    models,
-    models.some((candidate) => candidate.id === runDisplayModel)
-      ? runDisplayModel
-      : sessionDisplayModel,
-  );
-  const runUsage = projection.run?.usage;
-  const contextLimit = usageModel?.contextTokens;
-  const contextUsed = runUsage?.inputTokens;
-  const contextPercent =
-    contextUsed !== undefined && contextLimit !== undefined && contextLimit > 0
-      ? Math.min(100, (contextUsed / contextLimit) * 100)
-      : undefined;
-  const estimatedCredits =
-    runUsage?.inputTokens !== undefined &&
-    runUsage.outputTokens !== undefined &&
-    usageModel?.inputCreditsPerMillionTokens !== undefined &&
-    usageModel.outputCreditsPerMillionTokens !== undefined
-      ? (runUsage.inputTokens * usageModel.inputCreditsPerMillionTokens +
-          runUsage.outputTokens * usageModel.outputCreditsPerMillionTokens) /
-        1_000_000
-      : undefined;
+  const sessionDisplayModel = projection.run?.model ?? selectedSession?.model ?? model;
   const toolUsage = [...projection.items]
     .filter(
       (item) =>
@@ -2025,49 +1770,18 @@ export function AgentWorkspace({
         draftHasContentRef.current = hasContent;
       }}
       model={model}
-      setModel={(nextModel, nextCostQuality) => {
-        const selectedCostQuality =
-          nextModel === AUTO_MODEL_ID ? (nextCostQuality ?? costQualityRef.current) : undefined;
+      setModel={(nextModel) => {
         setModel(nextModel);
         if (selectedId) {
-          if (selectedCostQuality !== undefined) {
-            costQualityRef.current = selectedCostQuality;
-            setCostQuality(selectedCostQuality);
-          }
-          sessionCostQualityExplicitRef.current = selectedCostQuality !== undefined;
-          rememberSessionModel(selectedId, agentRunModelId(nextModel, selectedCostQuality));
+          rememberSessionModel(selectedId, nextModel);
           return;
         }
         if (pendingSessionCreationRef.current) return;
-        if (nextCostQuality !== undefined) applyCostQuality(nextCostQuality);
-        const engine = classifyChatEngineModel(nextModel, engineCatalogRef.current, models);
-        if (engine.kind === "cli") {
-          void llmSetUsage("chat", { kind: "cli", id: engine.cli as LlmCliId }).catch((cause) => {
-            if (modelRef.current === nextModel) setError(messageFromError(cause));
-          });
-        } else if (engine.kind === "endpoint") {
-          const endpoint = selectedChatEndpoint(nextModel, engineCatalogRef.current, models);
-          if (endpoint) {
-            void llmSetUsage("chat", { kind: "endpoint", id: endpoint.id }).catch((cause) => {
-              if (modelRef.current === nextModel) setError(messageFromError(cause));
-            });
-          }
-        } else {
-          void persistAgentDefaultModel(nextModel).catch((cause) => {
-            if (modelRef.current === nextModel) setError(messageFromError(cause));
-          });
-        }
+        const engine = classifyChatEngineModel(nextModel);
+        void llmSetUsage("chat", { kind: "cli", id: engine.cli as LlmCliId }).catch((cause) => {
+          if (modelRef.current === nextModel) setError(messageFromError(cause));
+        });
       }}
-      costQuality={costQuality}
-      providerApiKeysConfigured={providerApiKeysConfigured}
-      onCostQualityChange={applyCostQuality}
-      thinkingLevel={thinkingLevel}
-      setThinkingLevel={(level) => {
-        setThinkingLevel(level);
-        saveThinkingLevel(level);
-        if (selectedId) rememberSessionThinkingLevel(selectedId, level);
-      }}
-      models={models}
       safetyMode={safetyMode}
       setSafetyMode={setSafetyMode}
       attachments={attachments}
@@ -2124,14 +1838,6 @@ export function AgentWorkspace({
                 : undefined
             }
             onUsage={sessionActionsAvailable ? () => setUsageOpen(true) : undefined}
-            onCompact={
-              sessionActionsAvailable && agentRuntimeBindings.compactSession && !running && !waiting
-                ? () => {
-                    setCompactResult(undefined);
-                    setCompactOpen(true);
-                  }
-                : undefined
-            }
             onRename={sessionActionsAvailable ? rename : undefined}
             onMoveToProject={
               sessionActionsAvailable && selectedId && onMoveSessionToProject
@@ -2431,23 +2137,19 @@ export function AgentWorkspace({
                 <div className="agent-usage-body">
                   <div className="agent-usage-row">
                     <span className="agent-usage-primary">{t("agent.usage.model")}</span>
-                    <span className="agent-usage-value">
-                      {usageModel?.name ?? sessionDisplayModel}
-                    </span>
+                    <span className="agent-usage-value">{sessionDisplayModel}</span>
                   </div>
-                  {projection.run?.usage?.provider || usageModel?.provider ? (
+                  {projection.run?.usage?.provider ? (
                     <div className="agent-usage-row">
                       <span className="agent-usage-primary">{t("agent.usage.provider")}</span>
-                      <span className="agent-usage-value">
-                        {projection.run?.usage?.provider ?? usageModel?.provider}
-                      </span>
+                      <span className="agent-usage-value">{projection.run?.usage?.provider}</span>
                     </div>
                   ) : null}
-                  {projection.run?.usage?.privacyLevel || usageModel?.privacy ? (
+                  {projection.run?.usage?.privacyLevel ? (
                     <div className="agent-usage-row">
                       <span className="agent-usage-primary">{t("agent.usage.privacy")}</span>
                       <span className="agent-usage-value">
-                        {projection.run?.usage?.privacyLevel ?? usageModel?.privacy}
+                        {projection.run?.usage?.privacyLevel}
                       </span>
                     </div>
                   ) : null}
@@ -2495,59 +2197,6 @@ export function AgentWorkspace({
                       projection.run.usage.outputTokens === undefined &&
                       projection.run.usage.totalTokens === undefined ? (
                         <p className="agent-usage-empty">{t("agent.usage.noTokenCounts")}</p>
-                      ) : null}
-                      {contextPercent !== undefined && contextUsed !== undefined && contextLimit ? (
-                        <div className="agent-usage-context">
-                          <div className="agent-usage-row">
-                            <span className="agent-usage-primary">
-                              {t("agent.usage.latestContext")}
-                            </span>
-                            <span className="agent-usage-value">
-                              {t("agent.usage.contextValue", {
-                                used: formatNumber(contextUsed),
-                                limit: formatNumber(contextLimit),
-                                percent: isEnglishLocale()
-                                  ? contextPercent.toFixed(1)
-                                  : formatNumber(contextPercent, {
-                                      minimumFractionDigits: 1,
-                                      maximumFractionDigits: 1,
-                                    }),
-                              })}
-                            </span>
-                          </div>
-                          <div
-                            className="agent-usage-context-track"
-                            role="progressbar"
-                            aria-label={t("agent.usage.contextUsed")}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                            aria-valuenow={Math.round(contextPercent)}
-                          >
-                            <span style={{ transform: `scaleX(${contextPercent / 100})` }} />
-                          </div>
-                        </div>
-                      ) : null}
-                      {estimatedCredits !== undefined ? (
-                        <div className="agent-usage-row">
-                          <span className="agent-usage-primary">
-                            {t("agent.usage.estimatedCharge")}
-                          </span>
-                          <span className="agent-usage-value">
-                            {t("agent.usage.chargeValue", {
-                              credits: formatNumber(estimatedCredits, {
-                                maximumFractionDigits: estimatedCredits < 1 ? 3 : 1,
-                              }),
-                              usd: isEnglishLocale()
-                                ? `$${(estimatedCredits / 1_000).toFixed(4)}`
-                                : formatNumber(estimatedCredits / 1_000, {
-                                    style: "currency",
-                                    currency: "USD",
-                                    minimumFractionDigits: 4,
-                                    maximumFractionDigits: 4,
-                                  }),
-                            })}
-                          </span>
-                        </div>
                       ) : null}
                       {toolUsage.size > 0 ? (
                         <div className="agent-usage-tools">
@@ -2605,38 +2254,6 @@ export function AgentWorkspace({
           }}
         />
       ) : null}
-      <Dialog
-        open={compactOpen}
-        onClose={() => {
-          if (!compacting) setCompactOpen(false);
-        }}
-        title={t("agent.compact.title")}
-        description={t("agent.compact.description")}
-        footer={
-          <>
-            <button
-              type="button"
-              className="primary-action"
-              disabled={compacting}
-              onClick={() => setCompactOpen(false)}
-            >
-              {compactResult ? t("common.close") : t("common.cancel")}
-            </button>
-            {!compactResult ? (
-              <button
-                type="button"
-                className="primary-action primary-solid"
-                disabled={compacting}
-                onClick={() => void compactContext()}
-              >
-                {compacting ? t("agent.compact.compacting") : t("agent.compact.action")}
-              </button>
-            ) : null}
-          </>
-        }
-      >
-        {compactResult ? <p role="status">{compactResult}</p> : null}
-      </Dialog>
     </>
   );
 }
@@ -2653,12 +2270,6 @@ function AgentComposer({
   onDraftContentChange,
   model,
   setModel,
-  costQuality,
-  providerApiKeysConfigured,
-  onCostQualityChange,
-  thinkingLevel,
-  setThinkingLevel,
-  models,
   safetyMode,
   setSafetyMode,
   attachments,
@@ -2694,12 +2305,6 @@ function AgentComposer({
   onDraftContentChange: (hasContent: boolean) => void;
   model: string;
   setModel: (value: string, costQuality?: number) => void;
-  costQuality: number;
-  providerApiKeysConfigured: ProviderApiKeysConfigured;
-  onCostQualityChange: (value: number) => void;
-  thinkingLevel: ThinkingLevel;
-  setThinkingLevel: (value: ThinkingLevel) => void;
-  models: ProviderModelDto[];
   safetyMode: AgentSafetyMode;
   setSafetyMode: (value: AgentSafetyMode) => void;
   attachments: string[];
@@ -2721,7 +2326,6 @@ function AgentComposer({
   engineCatalog?: ChatEngineCatalog | null;
   onRefreshEngineCatalog?: () => Promise<ChatEngineCatalog | null>;
 }) {
-  const activeEngine = classifyChatEngineModel(model, engineCatalog, models);
   const t = useT();
   const editorRef = useRef<ComposerEditorHandle>(null);
   const [editorDraftOwnerId, setEditorDraftOwnerId] = useState(draftOwnerId);
@@ -2729,14 +2333,6 @@ function AgentComposer({
   const publishedDraftRef = useRef(draft);
   const appliedDraftRevisionRef = useRef(draftRevision);
   const [hasEditorContent, setHasEditorContent] = useState(Boolean(draft.trim()));
-  const [modelOpen, setModelOpen] = useState(false);
-  const [modelFlyout, setModelFlyout] = useState<ModelPickerFlyout>(null);
-  const [modelSearch, setModelSearch] = useState("");
-  const [modelRootSearch, setModelRootSearch] = useState("");
-  const modelTriggerRef = useRef<HTMLButtonElement>(null);
-  const modelPopoverRef = useRef<HTMLDivElement>(null);
-  const modelSearchRef = useRef<HTMLInputElement>(null);
-  const modelRootSearchRef = useRef<HTMLInputElement>(null);
   const [safetyOpen, setSafetyOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
@@ -2745,18 +2341,6 @@ function AgentComposer({
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const safetyTriggerRef = useRef<HTMLButtonElement>(null);
   const safetyMenuRef = useRef<HTMLDivElement>(null);
-  const activeModel = selectedModel(models, model);
-  const pickerModels = models.some((option) => option.id === AUTO_MODEL_ID)
-    ? models
-    : [AGENT_AUTO_MODEL, ...models];
-
-  useComposerModelPopoverPosition({
-    open: modelOpen,
-    triggerRef: modelTriggerRef,
-    popoverRef: modelPopoverRef,
-    anchorRef: formRef,
-  });
-
   useEffect(() => {
     if (draftOwnerId === editorDraftOwnerId) return;
     const editor = editorRef.current;
@@ -2790,47 +2374,27 @@ function AgentComposer({
   }, [draft, draftOwnerId, draftRevision, editorDraftOwnerId]);
 
   useEffect(() => {
-    if (!modelOpen && !safetyOpen && !attachOpen) return;
+    if (!safetyOpen && !attachOpen) return;
     const close = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (modelPopoverRef.current?.contains(target) || modelTriggerRef.current?.contains(target)) {
-        return;
-      }
       if (safetyTriggerRef.current?.contains(target)) return;
       if (safetyMenuRef.current?.contains(target)) return;
       if (attachTriggerRef.current?.contains(target) || attachMenuRef.current?.contains(target)) {
         return;
       }
       if (target instanceof Element && target.closest(".agent-composer-model-hovercard")) return;
-      setModelOpen(false);
       setSafetyOpen(false);
       setAttachOpen(false);
     };
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
-  }, [attachOpen, modelOpen, safetyOpen]);
+  }, [attachOpen, safetyOpen]);
 
   useEffect(() => {
-    if (!modelOpen && !safetyOpen && !attachOpen) return;
+    if (!safetyOpen && !attachOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
-      if (modelOpen) {
-        if (modelFlyout) {
-          if (modelFlyout.kind === "all") setModelSearch("");
-          setModelFlyout(null);
-          requestAnimationFrame(() => modelRootSearchRef.current?.focus());
-          return;
-        }
-        if (modelRootSearch) {
-          setModelRootSearch("");
-          requestAnimationFrame(() => modelRootSearchRef.current?.focus());
-          return;
-        }
-        setModelOpen(false);
-        requestAnimationFrame(() => modelTriggerRef.current?.focus());
-        return;
-      }
       if (safetyOpen) {
         setSafetyOpen(false);
         requestAnimationFrame(() => safetyTriggerRef.current?.focus());
@@ -2841,11 +2405,7 @@ function AgentComposer({
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [attachOpen, modelFlyout, modelOpen, modelRootSearch, safetyOpen]);
-
-  useLayoutEffect(() => {
-    if (modelOpen && modelFlyout === null) modelRootSearchRef.current?.focus();
-  }, [modelFlyout, modelOpen]);
+  }, [attachOpen, safetyOpen]);
 
   function referenceNote() {
     const prefix = draft && !/\s$/.test(draft) ? " @" : "@";
@@ -2983,38 +2543,13 @@ function AgentComposer({
           ) : null}
           <div className="agent-composer-actions">
             {showModelPicker ? (
-              <>
-                <ChatEnginePicker
-                  model={model}
-                  setModel={(nextModel) => {
-                    setModel(nextModel);
-                    setModelOpen(false);
-                  }}
-                  catalog={engineCatalog}
-                  onRefreshCatalog={onRefreshEngineCatalog}
-                  anchorRef={formRef}
-                  clovyModels={models}
-                />
-                {activeEngine.kind === "clovy" ? (
-                  <ComposerModelPicker
-                    open={modelOpen}
-                    model={activeModel}
-                    detail={model === AUTO_MODEL_ID ? autoPillDesignation(costQuality) : undefined}
-                    effort={thinkingLevel}
-                    triggerRef={modelTriggerRef}
-                    onToggleOpen={() => {
-                      if (modelOpen) {
-                        setModelOpen(false);
-                        return;
-                      }
-                      setModelFlyout(null);
-                      setModelSearch("");
-                      setModelRootSearch("");
-                      setModelOpen(true);
-                    }}
-                  />
-                ) : null}
-              </>
+              <ChatEnginePicker
+                model={model}
+                setModel={setModel}
+                catalog={engineCatalog}
+                onRefreshCatalog={onRefreshEngineCatalog}
+                anchorRef={formRef}
+              />
             ) : null}
             <button
               type="button"
@@ -3158,42 +2693,6 @@ function AgentComposer({
             );
           })}
         </div>
-      ) : null}
-      {showModelPicker && modelOpen && activeEngine.kind === "clovy" ? (
-        <ModelPickerPopover
-          mode="generation"
-          flyout={modelFlyout}
-          model={activeModel}
-          options={modelOptions(pickerModels, model)}
-          costQuality={costQuality}
-          providerApiKeysConfigured={providerApiKeysConfigured}
-          search={modelSearch}
-          popoverRef={modelPopoverRef}
-          searchRef={modelSearchRef}
-          rootSearchRef={modelRootSearchRef}
-          rootSearch={modelRootSearch}
-          onRootSearchChange={setModelRootSearch}
-          catalogLoaded={models.length > 0}
-          suggestedModelIds={AGENT_SUGGESTED_MODEL_IDS}
-          showAutoToggle={false}
-          thinkingLevel={thinkingLevel}
-          onFlyoutChange={setModelFlyout}
-          onSearchChange={setModelSearch}
-          onSelect={(nextModel, nextCostQuality, options) => {
-            setModel(nextModel, nextCostQuality);
-            if (!options?.keepOpen) {
-              setModelOpen(false);
-              requestAnimationFrame(() => modelTriggerRef.current?.focus());
-            }
-          }}
-          onCostQualityChange={onCostQualityChange}
-          onSelectThinking={(level) => {
-            setThinkingLevel(level);
-            setModelFlyout(null);
-            setModelOpen(false);
-            requestAnimationFrame(() => modelTriggerRef.current?.focus());
-          }}
-        />
       ) : null}
       <Dialog
         open={confirmUnrestricted}

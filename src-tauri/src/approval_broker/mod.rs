@@ -27,7 +27,7 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
 
-use crate::agent_runtime::AgentSafetyMode;
+use crate::agent_sessions::AgentSafetyMode;
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Map, Value};
@@ -618,7 +618,7 @@ fn interruption_payload(turn: &ApprovalTurn, request: &ApprovalRequest, id: &str
 }
 
 fn sanitize(value: &str) -> String {
-    crate::agent_runtime::host::sanitize_log(value)
+    crate::agent_sessions::events::sanitize_log(value)
 }
 
 /// `<tool> <preview>` or `<tool> <arguments>`, secrets redacted.
@@ -652,9 +652,9 @@ impl BrokerIo for AppIo {
     fn emit(&self, session_id: &str, run_id: &str, sequence: i64, method: &str, data: Value) {
         use tauri::Emitter;
         if let Err(error) = self.app.emit(
-            crate::agent_runtime::host::AGENT_RUNTIME_EVENT,
+            crate::agent_sessions::events::AGENT_RUNTIME_EVENT,
             json!({
-                "protocolVersion": crate::agent_runtime::protocol::PROTOCOL_VERSION,
+                "protocolVersion": crate::agent_sessions::protocol::PROTOCOL_VERSION,
                 "sessionId": session_id,
                 "runId": run_id,
                 "sequence": sequence,
@@ -701,7 +701,7 @@ pub fn setup(app: &tauri::App) {
     // waiting then can never be answered by its tool.
     let on_end = broker;
     app.listen_any(
-        crate::agent_runtime::host::AGENT_RUNTIME_EVENT,
+        crate::agent_sessions::events::AGENT_RUNTIME_EVENT,
         move |event| {
             // Every streamed delta passes here: skip the parse while no tool
             // waits, which is nearly always.

@@ -100,7 +100,7 @@ describe("note chat engine", () => {
     );
   });
 
-  it("keeps the legacy Clovy agent when chat is not on a CLI", async () => {
+  it("defaults to Claude Code when the stored engine is native", async () => {
     mocks.invoke.mockImplementation(async (command: string) =>
       command === "chat_default_engine"
         ? { modelId: null, cli: null, legacyFallback: true }
@@ -110,7 +110,9 @@ describe("note chat engine", () => {
     await act(async () => {
       await result.current.submit("Hello");
     });
-    expect(mocks.startRun).toHaveBeenCalledWith(expect.objectContaining({ model: "auto" }));
+    expect(mocks.startRun).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "__clovy_cli_engine__:claude" }),
+    );
   });
 
   it("keeps an engine picked in the panel", async () => {

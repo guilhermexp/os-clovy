@@ -24,7 +24,6 @@ describe("Clovy technical identity", () => {
   it("uses Clovy for canonical package, service, and helper names", async () => {
     const [
       packageJson,
-      agentPackage,
       extensionPackage,
       desktopCargo,
       windowsHelperCargo,
@@ -34,7 +33,6 @@ describe("Clovy technical identity", () => {
       legacyProtocolCargo,
     ] = await Promise.all([
       read("package.json").then(JSON.parse),
-      read("agent-runtime/package.json").then(JSON.parse),
       read("extension/package.json").then(JSON.parse),
       read("src-tauri/Cargo.toml"),
       read("src-tauri/native/windows-dictation-helper/Cargo.toml"),
@@ -45,8 +43,6 @@ describe("Clovy technical identity", () => {
     ]);
 
     expect(packageJson.name).toBe("clovy");
-    expect(agentPackage.name).toBe("@clovy/agent-runtime");
-    expect(agentPackage.bin).toEqual({ "clovy-agent-runtime": "./dist/main.js" });
     expect(extensionPackage.name).toBe("clovy-extension");
     expect(desktopCargo).toMatch(/^name = "clovy"$/m);
     expect(desktopCargo).toMatch(/^name = "clovy_lib"$/m);
@@ -89,7 +85,7 @@ describe("Clovy technical identity", () => {
     }
     expect(windowsBuild).toContain("ClovyWindowsBuild");
     expect(windowsQualification).toContain("ClovyWindowsBuild");
-    expect(windowsQualification).toContain("firstClovyEnvironmentRestored");
+    expect(windowsQualification).toContain("firstPathRestored");
     expect(sbom.name).toBe("clovy-cua-driver-0.5.0");
   });
 
@@ -207,7 +203,6 @@ describe("Clovy technical identity", () => {
 
   it("uses Clovy for newly written runtime state and private source concepts", async () => {
     const [
-      sdkEngine,
       notifications,
       routines,
       computerUseDriver,
@@ -220,7 +215,6 @@ describe("Clovy technical identity", () => {
       driverContract,
       noteDrag,
     ] = await Promise.all([
-      read("agent-runtime/src/sdk-engine.ts"),
       read("src-tauri/src/notifications.rs"),
       read("src-tauri/src/routines.rs"),
       read("src-tauri/src/computer_use_driver.rs"),
@@ -234,8 +228,6 @@ describe("Clovy technical identity", () => {
       read("src/lib/dnd.ts"),
     ]);
 
-    expect(sdkEngine).toContain("clovyVersion: SERIALIZED_STATE_ENVELOPE_VERSION");
-    expect(sdkEngine).toContain("juneVersion: SERIALIZED_STATE_ENVELOPE_VERSION");
     expect(notifications).toContain('const SESSION_ID_KEY: &str = "clovyAgentSessionId"');
     expect(notifications).toContain('const LEGACY_SESSION_ID_KEY: &str = "juneAgentSessionId"');
     expect(routines).toContain('format!("clovy_browser_routine_{}"');
@@ -268,16 +260,16 @@ describe("Clovy technical identity", () => {
   it("publishes the Obsidian skill under Clovy with a rollback-safe June alias", async () => {
     const [bundledSkill, skillIdentity, agentApi] = await Promise.all([
       read("src-tauri/resources/agent-skills/clovy-obsidian/SKILL.md"),
-      read("src-tauri/src/agent_runtime/skill_identity.rs"),
-      read("src-tauri/src/agent_runtime/api.rs"),
+      read("src-tauri/src/agent_sessions/skill_identity.rs"),
+      read("src-tauri/src/agent_sessions/api.rs"),
     ]);
 
     expect(bundledSkill).toMatch(/^name: clovy-obsidian$/m);
     expect(skillIdentity).toContain('pub const CLOVY_OBSIDIAN_SKILL_ID: &str = "clovy-obsidian"');
     expect(skillIdentity).toContain('pub const LEGACY_OBSIDIAN_SKILL_ID: &str = "june-obsidian"');
     expect(skillIdentity).toContain("write_skill_ids");
-    expect(agentApi).toContain("When the clovy-obsidian skill is available");
-    expect(agentApi).not.toContain("When the june-obsidian skill is available");
+    expect(agentApi).toContain("write_skill_ids(skill_id)");
+    expect(agentApi).toContain("read_skill_ids(&canonical_id)");
   });
 
   it("uses Clovy for ephemeral build and dictation artifacts", async () => {

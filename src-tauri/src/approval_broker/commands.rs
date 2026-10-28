@@ -3,7 +3,7 @@
 //! instead of resuming the sidecar.
 
 use super::{expired_error, store, ApprovalBroker, Decision};
-use crate::agent_runtime::{AgentRepository, AgentRunDto};
+use crate::agent_sessions::{AgentRepository, AgentRunDto};
 use crate::domain::types::AppError;
 use serde_json::Value;
 use sqlx_sqlite::SqlitePool;

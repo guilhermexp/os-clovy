@@ -20,7 +20,6 @@ pub struct AgentRepository {
 pub(crate) enum ContextSummaryReplacement {
     Applied(Box<AgentItemDto>),
     Noop,
-    Conflict,
 }
 
 impl AgentRepository {
@@ -754,33 +753,12 @@ impl AgentRepository {
                 summary_text,
                 summary_metadata,
                 removed_item_ids,
-                None,
             )
             .await?
         {
             ContextSummaryReplacement::Applied(item) => Ok(Some(*item)),
-            ContextSummaryReplacement::Noop | ContextSummaryReplacement::Conflict => Ok(None),
+            ContextSummaryReplacement::Noop => Ok(None),
         }
-    }
-
-    pub(crate) async fn replace_items_with_context_summary_if_unchanged(
-        &self,
-        session_id: &str,
-        run_id: &str,
-        summary_text: &str,
-        summary_metadata: Option<&serde_json::Value>,
-        removed_item_ids: &[String],
-        expected_last_item_sequence: i64,
-    ) -> Result<ContextSummaryReplacement, sqlx::Error> {
-        self.replace_items_with_context_summary_inner(
-            session_id,
-            run_id,
-            summary_text,
-            summary_metadata,
-            removed_item_ids,
-            Some(expected_last_item_sequence),
-        )
-        .await
     }
 
     async fn replace_items_with_context_summary_inner(
@@ -790,45 +768,11 @@ impl AgentRepository {
         summary_text: &str,
         summary_metadata: Option<&serde_json::Value>,
         removed_item_ids: &[String],
-        expected_last_item_sequence: Option<i64>,
     ) -> Result<ContextSummaryReplacement, sqlx::Error> {
         if removed_item_ids.is_empty() {
             return Ok(ContextSummaryReplacement::Noop);
         }
         let mut transaction = self.pool.begin().await?;
-        if let Some(expected_last_item_sequence) = expected_last_item_sequence {
-            // This conditional no-op write is the snapshot compare-and-swap.
-            // It acquires SQLite's write lock before the source rows are read
-            // or deleted, so a run start or history append cannot commit
-            // between validation and replacement.
-            let snapshot_matches = query(
-                "UPDATE agent_sessions SET updated_at = updated_at
-                 WHERE id = ?
-                   AND status NOT IN ('queued', 'running', 'waiting_for_user')
-                   AND ? = (
-                       SELECT COALESCE(MAX(sequence), -1)
-                       FROM agent_items
-                       WHERE session_id = ?
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM agent_runs
-                       WHERE session_id = ?
-                         AND status IN ('queued', 'running', 'waiting_for_user')
-                   )",
-            )
-            .bind(session_id)
-            .bind(expected_last_item_sequence)
-            .bind(session_id)
-            .bind(session_id)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-            if snapshot_matches == 0 {
-                transaction.rollback().await?;
-                return Ok(ContextSummaryReplacement::Conflict);
-            }
-        }
         let mut earliest_sequence: Option<i64> = None;
         for item_id in removed_item_ids {
             let row = query("SELECT sequence FROM agent_items WHERE session_id = ? AND id = ?")
@@ -844,11 +788,7 @@ impl AgentRepository {
         }
         let Some(sequence) = earliest_sequence else {
             transaction.rollback().await?;
-            return Ok(if expected_last_item_sequence.is_some() {
-                ContextSummaryReplacement::Conflict
-            } else {
-                ContextSummaryReplacement::Noop
-            });
+            return Ok(ContextSummaryReplacement::Noop);
         };
         for item_id in removed_item_ids {
             query("DELETE FROM agent_items WHERE session_id = ? AND id = ?")
@@ -937,7 +877,7 @@ impl AgentRepository {
     }
 
     /// Cancel a run that is durably paused for user input. Paused runs are no
-    /// longer active in the sidecar, so they cannot use the ordinary
+    /// awaiting input rather than running, so they cannot use the ordinary
     /// `run.cancel` path. Retire their pending cards in the same transaction
     /// that releases the session for another turn.
     pub async fn cancel_waiting_run(&self, run_id: &str) -> Result<Option<AgentRunDto>, AppError> {
@@ -1217,7 +1157,7 @@ fn decode_error(error: serde_json::Error) -> sqlx::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_runtime::domain::MessagePayload;
+    use crate::agent_sessions::domain::MessagePayload;
     use sqlx_sqlite::SqlitePoolOptions;
 
     async fn repository() -> AgentRepository {
@@ -1594,26 +1534,17 @@ mod tests {
             .await
             .expect("completed run");
         let metadata = serde_json::json!({ "fallback": true });
-        let expected_last_item_sequence = repository
-            .items(&session.id)
-            .await
-            .expect("snapshot items")
-            .last()
-            .expect("last snapshot item")
-            .sequence;
-
         let replacement = repository
-            .replace_items_with_context_summary_if_unchanged(
+            .replace_items_with_context_summary(
                 &session.id,
                 &run.id,
                 "Bounded deterministic context",
                 Some(&metadata),
                 &[first.id, second.id],
-                expected_last_item_sequence,
             )
             .await
             .expect("replace history");
-        let ContextSummaryReplacement::Applied(summary) = replacement else {
+        let Some(summary) = replacement else {
             panic!("unchanged idle history must be replaced");
         };
 
@@ -1622,162 +1553,5 @@ mod tests {
         };
         assert_eq!(payload.metadata, Some(metadata));
         assert_eq!(repository.items(&session.id).await.expect("items").len(), 1);
-    }
-
-    #[tokio::test]
-    async fn manual_compaction_aborts_when_a_run_starts_after_the_history_snapshot() {
-        let repository = repository().await;
-        let session = repository
-            .create_session("Compaction race", "auto", AgentSafetyMode::Sandboxed, None)
-            .await
-            .expect("session");
-        let previous_run = repository
-            .create_run(&session.id, "auto", None)
-            .await
-            .expect("previous run");
-        let first = repository
-            .append_item(
-                &session.id,
-                Some(&previous_run.id),
-                1,
-                &AgentItemPayload::UserMessage(MessagePayload {
-                    role: "user".into(),
-                    content: "Earlier question".into(),
-                    attachments: Vec::new(),
-                }),
-                Some("race-source-1"),
-            )
-            .await
-            .expect("first source")
-            .expect("inserted first source");
-        let second = repository
-            .append_item(
-                &session.id,
-                Some(&previous_run.id),
-                2,
-                &AgentItemPayload::AssistantMessage(MessagePayload {
-                    role: "assistant".into(),
-                    content: "Earlier answer".into(),
-                    attachments: Vec::new(),
-                }),
-                Some("race-source-2"),
-            )
-            .await
-            .expect("second source")
-            .expect("inserted second source");
-        repository
-            .update_run_status(&previous_run.id, "completed", None, None, None)
-            .await
-            .expect("completed previous run");
-        let snapshot = repository
-            .items(&session.id)
-            .await
-            .expect("history snapshot");
-        let expected_last_item_sequence = snapshot.last().expect("last snapshot item").sequence;
-
-        repository
-            .create_run(&session.id, "auto", None)
-            .await
-            .expect("run started while summary model was active");
-
-        let replacement = repository
-            .replace_items_with_context_summary_if_unchanged(
-                &session.id,
-                &previous_run.id,
-                "Stale model summary",
-                None,
-                &[first.id, second.id],
-                expected_last_item_sequence,
-            )
-            .await
-            .expect("guarded replacement");
-
-        assert!(matches!(replacement, ContextSummaryReplacement::Conflict));
-        assert_eq!(
-            repository
-                .items(&session.id)
-                .await
-                .expect("unchanged history"),
-            snapshot
-        );
-    }
-
-    #[tokio::test]
-    async fn manual_compaction_aborts_when_history_advances_after_the_snapshot() {
-        let repository = repository().await;
-        let session = repository
-            .create_session(
-                "Compaction history race",
-                "auto",
-                AgentSafetyMode::Sandboxed,
-                None,
-            )
-            .await
-            .expect("session");
-        let previous_run = repository
-            .create_run(&session.id, "auto", None)
-            .await
-            .expect("previous run");
-        let source = repository
-            .append_item(
-                &session.id,
-                Some(&previous_run.id),
-                1,
-                &AgentItemPayload::UserMessage(MessagePayload {
-                    role: "user".into(),
-                    content: "Earlier question".into(),
-                    attachments: Vec::new(),
-                }),
-                Some("history-race-source"),
-            )
-            .await
-            .expect("source")
-            .expect("inserted source");
-        repository
-            .update_run_status(&previous_run.id, "completed", None, None, None)
-            .await
-            .expect("completed previous run");
-        let snapshot = repository
-            .items(&session.id)
-            .await
-            .expect("history snapshot");
-        let expected_last_item_sequence = snapshot.last().expect("last snapshot item").sequence;
-        repository
-            .append_item(
-                &session.id,
-                None,
-                0,
-                &AgentItemPayload::UserMessage(MessagePayload {
-                    role: "user".into(),
-                    content: "New history after snapshot".into(),
-                    attachments: Vec::new(),
-                }),
-                Some("history-race-new"),
-            )
-            .await
-            .expect("new history")
-            .expect("inserted new history");
-
-        let replacement = repository
-            .replace_items_with_context_summary_if_unchanged(
-                &session.id,
-                &previous_run.id,
-                "Stale model summary",
-                None,
-                &[source.id],
-                expected_last_item_sequence,
-            )
-            .await
-            .expect("guarded replacement");
-
-        assert!(matches!(replacement, ContextSummaryReplacement::Conflict));
-        let items = repository
-            .items(&session.id)
-            .await
-            .expect("current history");
-        assert_eq!(items.len(), 2);
-        assert!(items
-            .iter()
-            .all(|item| !matches!(item.payload, AgentItemPayload::ContextSummary(_))));
     }
 }

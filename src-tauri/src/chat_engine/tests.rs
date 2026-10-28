@@ -1,11 +1,11 @@
 //! Integration tests of the CLI chat engine with fake CLIs (shell scripts in
 //! a temporary directory that reproduce each CLI's measured stream format),
-//! an in-memory agent database, and the sidecar's persistence path.
+//! an in-memory agent database, and the shared persistence path.
 
 use super::cli::{self, EngineEvent, StreamTranslator};
 use super::turn::{execute_turn, TurnContext};
 use super::*;
-use crate::agent_runtime::{AgentItemPayload, AgentRepository, AgentSafetyMode, MessagePayload};
+use crate::agent_sessions::{AgentItemPayload, AgentRepository, AgentSafetyMode, MessagePayload};
 use crate::mcp_server::McpLaunch;
 use serde_json::{json, Value};
 use sqlx_sqlite::SqlitePoolOptions;
@@ -23,9 +23,10 @@ pub(super) struct TestSink {
 
 impl FrameSink for TestSink {
     async fn publish(&self, frame: RpcFrame) {
-        let persisted = crate::agent_runtime::host::persist_runtime_event(&self.repository, &frame)
-            .await
-            .expect("event persists");
+        let persisted =
+            crate::agent_sessions::events::persist_runtime_event(&self.repository, &frame)
+                .await
+                .expect("event persists");
         if let Some(event) = persisted {
             self.emitted
                 .lock()
@@ -395,7 +396,7 @@ async fn chat_engine_two_turns_resume_the_cli_conversation_for_every_cli() {
             "{kind:?} resent history"
         );
 
-        // Both turns are persisted, in order, as the sidecar's items.
+        // Both turns are persisted, in order, as durable session items.
         let transcript = harness.transcript().await;
         let messages = transcript
             .iter()
@@ -1142,286 +1143,6 @@ fn chat_engine_cursor_one_delta_segment_before_a_tool_call_is_not_doubled() {
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Plain answer"}]}}"#,
     ]);
     assert_eq!(text, "Plain answer");
-}
-
-/// A minimal OpenAI-compatible server that streams one tool call
-/// (`search_june`) as server-sent events and records the request body.
-///
-/// Its base URL carries a path prefix unique to this server, and only
-/// `POST <prefix>/chat/completions` is recorded and answered: a freshly
-/// opened localhost port also receives requests from outside the test (a
-/// tool on the machine that probes new ports sends `HEAD /`), which must not
-/// count as a request the code under test sent.
-async fn streaming_tool_call_server() -> (String, std::sync::Arc<StdMutex<Vec<Value>>>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let prefix = format!("/{}/v1", uuid::Uuid::new_v4().simple());
-    let request_line = format!("POST {prefix}/chat/completions ");
-    let requests = std::sync::Arc::new(StdMutex::new(Vec::new()));
-    let recorded = requests.clone();
-    tokio::spawn(async move {
-        while let Ok((mut socket, _)) = listener.accept().await {
-            let recorded = recorded.clone();
-            let request_line = request_line.clone();
-            tokio::spawn(async move {
-                let mut buffer = Vec::new();
-                let mut chunk = [0_u8; 8192];
-                let body = loop {
-                    let read = socket.read(&mut chunk).await.unwrap_or(0);
-                    if read == 0 {
-                        return;
-                    }
-                    buffer.extend_from_slice(&chunk[..read]);
-                    let text = String::from_utf8_lossy(&buffer).to_string();
-                    if let Some(split) = text.find("\r\n\r\n") {
-                        let length = text[..split]
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())?
-                            })
-                            .unwrap_or(0);
-                        if buffer.len() >= split + 4 + length {
-                            break buffer[split + 4..split + 4 + length].to_vec();
-                        }
-                    }
-                };
-                if !buffer.starts_with(request_line.as_bytes()) {
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                        .await;
-                    return;
-                }
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null));
-                let _ = socket
-                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
-                    .await;
-                let chunks = [
-                    json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Let me search. "}}]}),
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search_june","arguments":""}}]}}]}),
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":"}}]}}]}),
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"roadmap\"}"}}]}}]}),
-                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
-                ];
-                for chunk in chunks {
-                    let _ = socket
-                        .write_all(format!("data: {chunk}\n\n").as_bytes())
-                        .await;
-                    let _ = socket.flush().await;
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                let _ = socket.write_all(b"data: [DONE]\n\n").await;
-            });
-        }
-    });
-    (format!("http://{address}{prefix}"), requests)
-}
-
-/// The cause of the intermittent failure of
-/// `chat_engine_endpoint_choice_keeps_its_identity_when_endpoints_share_a_model`
-/// (two requests at the second endpoint): a tool on the machine probed the
-/// newly opened port with `HEAD /`, and the fake server counted it. Requests
-/// that are not this server's own chat completions are never recorded.
-#[tokio::test]
-async fn chat_engine_fake_endpoint_ignores_requests_from_outside_the_test() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (base_url, requests) = streaming_tool_call_server().await;
-    let authority = base_url
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap()
-        .to_string();
-    for probe in [
-        format!(
-            "HEAD / HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
-            authority.rsplit(':').next().unwrap()
-        ),
-        "POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
-            .to_string(),
-    ] {
-        let mut socket = tokio::net::TcpStream::connect(&authority).await.unwrap();
-        socket.write_all(probe.as_bytes()).await.unwrap();
-        let mut answer = String::new();
-        socket.read_to_string(&mut answer).await.unwrap();
-        assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
-    }
-    assert!(requests.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn chat_engine_registered_endpoint_serves_the_agent_with_streamed_tool_calls() {
-    use crate::llm::registry::{LlmEndpointRecord, ProviderRef};
-    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            crate::providers::replace_current_settings_for_tests(
-                crate::providers::default_settings_for_tests(),
-            );
-        }
-    }
-    let _restore = Restore;
-    let (base_url, requests) = streaming_tool_call_server().await;
-    let mut settings = crate::providers::default_settings_for_tests();
-    // Two endpoints; the chat selection is the other one, so the session's
-    // tagged model alone must pick this endpoint.
-    let endpoint = |id: &str, base_url: &str, model_id: &str| LlmEndpointRecord {
-        id: id.into(),
-        name: id.into(),
-        base_url: base_url.into(),
-        model_id: model_id.into(),
-        has_api_key: false,
-        structured_output: None,
-        rpm_limit: None,
-    };
-    settings.llm_endpoints = vec![
-        endpoint("other", "http://127.0.0.1:9/v1", "other-model"),
-        endpoint("lab", &base_url, "tool-model"),
-    ];
-    settings.llm_usage.chat = ProviderRef::Endpoint { id: "other".into() };
-    crate::llm::registry::normalize(&mut settings);
-    crate::providers::replace_current_settings_for_tests(settings);
-
-    let tools = json!([{ "type": "function", "function": { "name": "search_june", "description": "Search Clovy", "parameters": { "type": "object", "properties": { "query": { "type": "string" } } } } }]);
-    let mut response = crate::clovy_api::proxy_agent_chat_completions(json!({
-        "model": "__june_local_generation__:tool-model",
-        "messages": [{ "role": "user", "content": "Find the roadmap note" }],
-        "tools": tools,
-        "stream": true,
-    }))
-    .await
-    .expect("the endpoint answers");
-    assert_eq!(response.status, 200);
-    assert_eq!(response.route.provider.as_deref(), Some("local"));
-
-    // Read it the way the host relays model streams to the sidecar.
-    let mut received = Vec::new();
-    let mut chunk_count = 0;
-    while let Some(bytes) = response.chunk().await.unwrap() {
-        chunk_count += 1;
-        received.extend_from_slice(&bytes);
-    }
-    assert!(chunk_count > 1, "the answer arrived as a stream");
-    let events = String::from_utf8(received)
-        .unwrap()
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .filter(|data| *data != "[DONE]")
-        .map(|data| serde_json::from_str::<Value>(data).unwrap())
-        .collect::<Vec<_>>();
-    let text = events
-        .iter()
-        .filter_map(|event| event["choices"][0]["delta"]["content"].as_str())
-        .collect::<String>();
-    let tool_name = events.iter().find_map(|event| {
-        event["choices"][0]["delta"]["tool_calls"][0]["function"]["name"].as_str()
-    });
-    let arguments = events
-        .iter()
-        .filter_map(|event| {
-            event["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
-        })
-        .collect::<String>();
-    assert_eq!(text, "Let me search. ");
-    assert_eq!(tool_name, Some("search_june"));
-    assert_eq!(
-        serde_json::from_str::<Value>(&arguments).unwrap(),
-        json!({ "query": "roadmap" })
-    );
-
-    let request = requests.lock().unwrap().first().cloned().unwrap();
-    assert_eq!(
-        request["model"],
-        json!("tool-model"),
-        "the endpoint's own model id"
-    );
-    assert_eq!(request["stream"], json!(true));
-    assert_eq!(
-        request["tools"][0]["function"]["name"],
-        json!("search_june")
-    );
-}
-
-#[tokio::test]
-async fn chat_engine_endpoint_choice_keeps_its_identity_when_endpoints_share_a_model() {
-    use crate::llm::registry::{LlmEndpointRecord, LlmRegistry, ProviderRef};
-    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            crate::providers::replace_current_settings_for_tests(
-                crate::providers::default_settings_for_tests(),
-            );
-        }
-    }
-    let _restore = Restore;
-    let (first_url, first_requests) = streaming_tool_call_server().await;
-    let (second_url, second_requests) = streaming_tool_call_server().await;
-    let endpoint = |id: &str, base_url: &str| LlmEndpointRecord {
-        id: id.into(),
-        name: format!("Server {id}"),
-        base_url: base_url.into(),
-        model_id: "shared-model".into(),
-        has_api_key: false,
-        structured_output: None,
-        rpm_limit: None,
-    };
-    let mut settings = crate::providers::default_settings_for_tests();
-    settings.llm_endpoints = vec![
-        endpoint("first", &first_url),
-        endpoint("second", &second_url),
-    ];
-    // Chat is on the first endpoint, which serves the same model id.
-    settings.llm_usage.chat = ProviderRef::Endpoint { id: "first".into() };
-    crate::llm::registry::normalize(&mut settings);
-    let registry = LlmRegistry::from(&settings);
-    crate::providers::replace_current_settings_for_tests(settings);
-
-    // The picker offers two distinct choices.
-    let engines = endpoint_engines(&registry);
-    assert_eq!(engines.len(), 2);
-    assert_ne!(engines[0].option_id, engines[1].option_id);
-    let second = engines
-        .iter()
-        .find(|engine| engine.id == "second")
-        .unwrap()
-        .option_id
-        .clone();
-
-    // A session on the second endpoint talks to the second server only.
-    let mut response = crate::clovy_api::proxy_agent_chat_completions(json!({
-        "model": second,
-        "messages": [{ "role": "user", "content": "Hi" }],
-        "stream": true,
-    }))
-    .await
-    .expect("the chosen endpoint answers");
-    while response.chunk().await.unwrap().is_some() {}
-    assert_eq!(second_requests.lock().unwrap().len(), 1);
-    assert!(first_requests.lock().unwrap().is_empty());
-    assert_eq!(
-        second_requests.lock().unwrap()[0]["model"],
-        json!("shared-model")
-    );
-
-    // A removed endpoint is refused instead of silently using another one.
-    let removed = crate::clovy_api::endpoint_option_id("shared-model", "gone");
-    let error = crate::clovy_api::proxy_agent_chat_completions(json!({
-        "model": removed,
-        "messages": [{ "role": "user", "content": "Hi" }],
-        "stream": true,
-    }))
-    .await
-    .err()
-    .expect("a missing endpoint is refused");
-    assert_eq!(error.code, "local_model_unavailable");
-    assert!(first_requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

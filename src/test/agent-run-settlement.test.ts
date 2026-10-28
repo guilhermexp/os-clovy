@@ -91,7 +91,6 @@ function queueFollowUp(sessionId: string) {
       prompt: "also do X",
       attachments: [],
       model: "m",
-      thinkingLevel: "medium",
     },
   });
 }

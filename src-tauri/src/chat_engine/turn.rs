@@ -1,13 +1,13 @@
 //! One CLI turn: resume lookup, prompt, the child process in its own process
 //! group, stream translation, and the run events persisted through the same
-//! path as the sidecar's (`agent_runtime::host::persist_runtime_event`).
+//! session event path (`agent_sessions::events::persist_runtime_event`).
 
 use super::cli::{self, EngineEvent, StreamTranslator};
 use super::policy::TurnPermissions;
 use super::{engine_model_id, FrameSink};
-use crate::agent_runtime::protocol::{RpcFrame, PROTOCOL_VERSION};
-use crate::agent_runtime::AgentSafetyMode;
-use crate::agent_runtime::{AgentItemPayload, AgentRepository};
+use crate::agent_sessions::protocol::{RpcFrame, PROTOCOL_VERSION};
+use crate::agent_sessions::AgentSafetyMode;
+use crate::agent_sessions::{AgentItemPayload, AgentRepository};
 use crate::llm::cli::CliKind;
 use crate::mcp_server::turns::{TurnBinding, TurnRegistry};
 use crate::mcp_server::McpLaunch;

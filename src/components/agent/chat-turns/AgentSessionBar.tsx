@@ -6,7 +6,6 @@ import { IconPencil } from "central-icons/IconPencil";
 import { IconShareOs } from "central-icons/IconShareOs";
 import { IconTrashCan } from "central-icons/IconTrashCan";
 import { IconAnalytics } from "central-icons/IconAnalytics";
-import { IconConcise } from "central-icons/IconConcise";
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../../../i18n";
 import { ShareLinkCopyAction } from "../../share/ShareLinkCopyAction";
@@ -15,7 +14,7 @@ import { Dialog } from "../../ui/Dialog";
 import type { AgentProjectContext } from "../../../lib/agent-project-context";
 import type { ModelPrivacyBadge } from "../../../lib/model-privacy";
 import type { AgentWorkspaceOrigin } from "../agent-workspace-types";
-import { PrivacyModeBadge, UnrestrictedBadge } from "../composer/ModelPicker";
+import { PrivacyModeBadge, UnrestrictedBadge } from "./SessionBadges";
 
 // Persistent, full-width session bar — same chrome as the Notes/Folders
 // breadcrumb. Stays pinned while the conversation scrolls beneath it, carries
@@ -36,7 +35,6 @@ export function AgentSessionBar({
   onRename,
   onShare,
   onUsage,
-  onCompact,
   onMoveToProject,
   onDelete,
 }: {
@@ -54,7 +52,6 @@ export function AgentSessionBar({
   /** Opens the private-sharing dialog for this session (JUN-308). */
   onShare?: () => void;
   onUsage?: () => void;
-  onCompact?: () => void;
   /** Opens the change-project dialog (which also owns removal). */
   onMoveToProject?: () => void;
   onDelete?: () => void;
@@ -90,9 +87,7 @@ export function AgentSessionBar({
     onRename?.(draft);
   }
 
-  const hasMenu = Boolean(
-    onRename || onShare || onUsage || onCompact || onMoveToProject || onDelete,
-  );
+  const hasMenu = Boolean(onRename || onShare || onUsage || onMoveToProject || onDelete);
 
   return (
     <div className="detail-bar agent-session-bar" data-tauri-drag-region>
@@ -131,7 +126,6 @@ export function AgentSessionBar({
                 <input
                   className="agent-session-rename"
                   aria-label={t("chat.session.name")}
-                  autoFocus
                   value={draft}
                   onChange={(event) => setDraft(event.currentTarget.value)}
                   onBlur={commitRename}
@@ -244,19 +238,6 @@ export function AgentSessionBar({
                   >
                     <IconAnalytics size={14} />
                     {t("chat.session.usage")}
-                  </button>
-                ) : null}
-                {onCompact ? (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onCompact();
-                    }}
-                  >
-                    <IconConcise size={14} />
-                    {t("chat.session.compactContext")}
                   </button>
                 ) : null}
                 {onMoveToProject ? (

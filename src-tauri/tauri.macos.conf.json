@@ -12,8 +12,6 @@
       "../.tauri-helper/clovy-nm-shim": "native/bin/clovy-nm-shim",
       "../.tauri-helper/clovy-mcp": "native/bin/clovy-mcp",
       "../.tauri-helper/Clovy Computer Use Driver.app": "native/bin/Clovy Computer Use Driver.app",
-      "../.tauri-agent-runtime/clovy-agent-runtime": "native/bin/clovy-agent-runtime",
-      "../.tauri-agent-runtime/clovy-agent-runtime.sha256": "native/bin/clovy-agent-runtime.sha256",
       "../extension/dist": "native/extension",
       "resources/agent-skills": "native/agent-skills"
     },

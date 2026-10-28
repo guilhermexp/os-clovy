@@ -1,8 +1,8 @@
 //! Vault discovery and skill loading shared with the legacy agent. MCP uses
 //! globally enabled, discovered skills; the native caller supplies its run snapshot.
 use super::{ToolCtx, ToolGroup};
-use crate::agent_runtime::skill_identity::{canonical_skill_id, read_skill_ids};
-use crate::agent_runtime::AgentRepository;
+use crate::agent_sessions::skill_identity::{canonical_skill_id, read_skill_ids};
+use crate::agent_sessions::AgentRepository;
 use crate::domain::types::AppError;
 use crate::mcp_server::turns::TURN_REQUIRED;
 use futures_util::future::BoxFuture;

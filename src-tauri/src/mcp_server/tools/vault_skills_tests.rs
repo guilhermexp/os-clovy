@@ -1,5 +1,5 @@
 use super::{call, descriptors, ActivityAccess, McpData, ToolCtx};
-use crate::agent_runtime::AgentRepository;
+use crate::agent_sessions::AgentRepository;
 use crate::approval_broker::testing::TestBroker;
 use crate::llm::cli::CliKind;
 use serde_json::json;

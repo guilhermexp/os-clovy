@@ -57,11 +57,6 @@ export const agentRuntimeBindings: AgentRuntimeBindings = {
   listSessions: () => invoke<AgentSessionDto[]>("list_agent_sessions"),
   getSession: (sessionId) => invoke<AgentSessionDto>("get_agent_session", { sessionId }),
   getLatestRun: (sessionId) => invoke<AgentRunDto | null>("get_latest_agent_run", { sessionId }),
-  compactSession: (sessionId) =>
-    invoke<{ compacted: boolean; removedItems: number; estimatedTokens?: number }>(
-      "compact_agent_session",
-      { sessionId },
-    ),
   createSession: (input) => invoke<AgentSessionDto>("create_agent_session", { request: input }),
   renameSession: (sessionId, title) =>
     invoke<AgentSessionDto>("rename_agent_session", { request: { sessionId, title } }),
@@ -70,12 +65,6 @@ export const agentRuntimeBindings: AgentRuntimeBindings = {
   deleteSession: (sessionId) => invoke<void>("delete_agent_session", { sessionId }),
   listItems: (sessionId) => invoke<AgentItemDto[]>("list_agent_items", { sessionId }),
   startRun: (request) => invoke<AgentRunDto>("start_agent_run", { request }),
-  steerRun: (runId, messageId, text) =>
-    invoke<{ accepted: boolean; reason?: string }>("steer_agent_run", {
-      runId,
-      messageId,
-      text,
-    }),
   cancelRun: (runId) => invoke<void>("cancel_agent_run", { runId }),
   retryRun: (runId) => invoke<AgentRunDto>("retry_agent_run", { runId }),
   resolveInterruption: (request) => invoke<AgentRunDto>("resolve_agent_interruption", { request }),
@@ -93,7 +82,6 @@ export const deleteAgentSession = agentRuntimeBindings.deleteSession;
 export const listAgentItems = agentRuntimeBindings.listItems;
 export const startAgentRun = (request: StartAgentRunRequest) =>
   agentRuntimeBindings.startRun(request);
-export const steerAgentRun = agentRuntimeBindings.steerRun;
 export const cancelAgentRun = agentRuntimeBindings.cancelRun;
 export const retryAgentRun = agentRuntimeBindings.retryRun;
 export const resolveAgentInterruption = (request: ResolveAgentInterruptionRequest) =>

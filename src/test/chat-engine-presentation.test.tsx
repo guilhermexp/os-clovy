@@ -45,7 +45,6 @@ const catalog = {
     },
     { id: "pi", name: "Pi", installed: true, reason: null, modelId: "__clovy_cli_engine__:pi" },
   ],
-  endpoints: [],
 } as ChatEngineCatalog;
 
 const session: AgentSessionDto = {
@@ -172,14 +171,6 @@ describe("chat engine presentation", () => {
               modelId: "__clovy_cli_engine__:copilot",
             },
           ],
-          endpoints: [
-            {
-              id: "lab",
-              name: "Lab server",
-              modelId: "qwen3",
-              optionId: "__june_local_generation__:qwen3@lab",
-            },
-          ],
         }}
       />,
     );
@@ -192,7 +183,6 @@ describe("chat engine presentation", () => {
       ["Antigravity", "antigravity"],
       ["Cursor Agent", "cursor"],
       ["GitHub Copilot", "githubcopilot"],
-      ["Lab server", "monogram"],
     ]) {
       const row = screen.getByRole("menuitemradio", { name: new RegExp(`^${name}`) });
       expect(row.querySelector(`[data-brand="${brand}"]`), name).not.toBeNull();

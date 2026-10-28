@@ -21,7 +21,7 @@
 //!
 //! Never, in any combination: the flags in [`FORBIDDEN`].
 
-use crate::agent_runtime::AgentSafetyMode;
+use crate::agent_sessions::AgentSafetyMode;
 use crate::approval_broker::APPROVAL_TIMEOUT;
 use crate::llm::cli::CliKind;
 use crate::mcp_server::SERVER_KEY;

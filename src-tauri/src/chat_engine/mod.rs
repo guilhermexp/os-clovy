@@ -3,12 +3,11 @@
 //! A session's engine is part of its model id: `__clovy_cli_engine__:<cli>`
 //! runs each message on that CLI ([`cli_for_model`]); the tagged endpoint ids
 //! (`__june_local_generation__:<model>`) and Clovy models keep running on the
-//! agent sidecar. A CLI turn is one child process per message that resumes
+//! session store. A CLI turn is one child process per message that resumes
 //! the CLI's own conversation, with its JSON stream translated into the same
-//! runtime events and `agent_items` the sidecar produces
-//! (`agent_runtime::host::persist_and_emit_event`). Cancelling stops the CLI's
-//! whole process group; live steering is refused (`steer_agent_run` answers
-//! `cli_engine`) so the composer sends the message as the next turn. CLIs that
+//! durable events and `agent_items` used by every chat surface
+//! (`agent_sessions::events::persist_and_emit_event`). Cancelling stops the CLI's
+//! whole process group; the composer queues messages for the next turn. CLIs that
 //! accept a per-run MCP configuration get Clovy's MCP server while it is on.
 //!
 //! Contract and per-CLI formats: `docs/llm-providers.md` (CLI chat engine)
@@ -29,8 +28,8 @@ pub mod turn;
 #[path = "windows_tests.rs"]
 mod windows_tests;
 
-use crate::agent_runtime::protocol::RpcFrame;
-use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
+use crate::agent_sessions::protocol::RpcFrame;
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use serde::Serialize;
@@ -100,7 +99,7 @@ pub trait FrameSink: Send + Sync {
     fn publish(&self, frame: RpcFrame) -> impl Future<Output = ()> + Send;
 }
 
-/// Persists and emits through the sidecar's event path.
+/// Persists each event before emitting it to chat surfaces.
 struct AppSink {
     app: AppHandle,
     repository: AgentRepository,
@@ -108,9 +107,12 @@ struct AppSink {
 
 impl FrameSink for AppSink {
     async fn publish(&self, frame: RpcFrame) {
-        if let Err(error) =
-            crate::agent_runtime::host::persist_and_emit_event(&self.app, &self.repository, &frame)
-                .await
+        if let Err(error) = crate::agent_sessions::events::persist_and_emit_event(
+            &self.app,
+            &self.repository,
+            &frame,
+        )
+        .await
         {
             tracing::warn!(
                 code = %error.code,
@@ -332,19 +334,8 @@ pub struct CliEngineDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EndpointEngineDto {
-    pub id: String,
-    pub name: String,
-    pub model_id: String,
-    /// The tagged model id that routes the Clovy agent to this endpoint.
-    pub option_id: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ChatEngineCatalogDto {
     pub clis: Vec<CliEngineDto>,
-    pub endpoints: Vec<EndpointEngineDto>,
 }
 
 /// The engine new chat work starts on (sessions, note chat, Home handoffs;
@@ -352,26 +343,21 @@ pub struct ChatEngineCatalogDto {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatDefaultEngineDto {
-    /// The session model id of the CLI chat runs on; `None` when chat is on
-    /// the Clovy agent or an endpoint (callers keep their own default).
-    pub model_id: Option<String>,
-    pub cli: Option<CliKind>,
-    /// Chat is on the legacy Clovy agent only because neither Claude Code
-    /// nor Codex is installed.
-    pub legacy_fallback: bool,
+    /// The session model id of the local CLI chat runs on.
+    pub model_id: String,
+    pub cli: CliKind,
 }
 
 pub fn default_engine_of(
     settings: &crate::providers::ProviderModelSettings,
 ) -> ChatDefaultEngineDto {
     let cli = match &settings.llm_usage.chat {
-        crate::llm::registry::ProviderRef::Cli { id } => Some(*id),
-        _ => None,
+        crate::llm::registry::ProviderRef::Cli { id } => *id,
+        _ => CliKind::Claude,
     };
     ChatDefaultEngineDto {
-        model_id: cli.map(engine_model_id),
+        model_id: engine_model_id(cli),
         cli,
-        legacy_fallback: crate::llm::registry::cli_default_pending(settings),
     }
 }
 
@@ -387,8 +373,7 @@ pub async fn chat_default_engine(
     )?))
 }
 
-/// The engines a chat session can use: the six CLIs (installed or not) and
-/// the registered endpoints.
+/// The local CLI engines a chat session can use, installed or not.
 #[tauri::command]
 pub async fn chat_engine_catalog() -> Result<ChatEngineCatalogDto, AppError> {
     let env = crate::llm::shell_env::login_env().await;
@@ -403,25 +388,5 @@ pub async fn chat_engine_catalog() -> Result<ChatEngineCatalogDto, AppError> {
             model_id: engine_model_id(cli.id),
         })
         .collect();
-    Ok(ChatEngineCatalogDto {
-        clis,
-        endpoints: endpoint_engines(&crate::llm::registry()),
-    })
-}
-
-/// One entry per registered endpoint. The option id names the endpoint as
-/// well as its model, so two endpoints serving the same model stay distinct
-/// through the picker, the session model, and the agent proxy.
-pub fn endpoint_engines(registry: &crate::llm::registry::LlmRegistry) -> Vec<EndpointEngineDto> {
-    registry
-        .endpoints
-        .iter()
-        .filter(|endpoint| !endpoint.model_id.trim().is_empty())
-        .map(|endpoint| EndpointEngineDto {
-            option_id: crate::clovy_api::endpoint_option_id(&endpoint.model_id, &endpoint.id),
-            id: endpoint.id.clone(),
-            name: endpoint.name.clone(),
-            model_id: endpoint.model_id.clone(),
-        })
-        .collect()
+    Ok(ChatEngineCatalogDto { clis })
 }

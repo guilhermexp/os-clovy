@@ -39,14 +39,6 @@ const sampleCatalog: ChatEngineCatalog = {
       modelId: "__clovy_cli_engine__:pi",
     },
   ],
-  endpoints: [
-    {
-      id: "local",
-      name: "Local Ollama",
-      modelId: "llama3",
-      optionId: "__june_local_generation__:llama3",
-    },
-  ],
 };
 
 describe("ChatEnginePicker", () => {
@@ -68,26 +60,26 @@ describe("ChatEnginePicker", () => {
     applyInterfaceLocale("en");
   });
 
-  it("lists Clovy, endpoints, and CLIs in the picker menu", async () => {
+  it("lists only CLI engines for historical native sessions", async () => {
     const user = userEvent.setup();
     const setModel = vi.fn();
 
     render(<ChatEnginePicker model="auto" setModel={setModel} catalog={sampleCatalog} />);
 
     const trigger = screen.getByRole("button", { name: /Chat engine/i });
-    expect(trigger).toHaveTextContent("Clovy");
+    expect(trigger).toHaveTextContent("Claude Code");
 
     await user.click(trigger);
 
     expect(screen.getByRole("menu", { name: "Chat engine" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: /^Clovy/ })).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: /^Local Ollama/ })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitemradio", { name: /^Clovy/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitemradio", { name: /^Local Ollama/ })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitemradio", { name: /^Claude Code/ })).toBeInTheDocument();
     expect(screen.getByRole("menuitemradio", { name: /^Codex/ })).toBeInTheDocument();
     expect(screen.getByRole("menuitemradio", { name: /Pi/ })).toBeInTheDocument();
   });
 
-  it("lists the CLIs first with Claude Code as the default and Clovy last as legacy", async () => {
+  it("marks Claude Code as the default without a legacy engine", async () => {
     const user = userEvent.setup();
     render(
       <ChatEnginePicker
@@ -101,14 +93,8 @@ describe("ChatEnginePicker", () => {
     const rows = screen.getAllByRole("menuitemradio");
     expect(
       rows.map((row) => row.querySelector(".agent-composer-model-choice-copy")?.textContent),
-    ).toEqual([
-      "Claude CodeDefault",
-      "Codex",
-      "PiNot found on your PATH.",
-      "Local Ollama",
-      "ClovyBuilt-in agent, kept while its tools move to the CLIs",
-    ]);
-    expect(screen.getByText("Legacy")).toBeInTheDocument();
+    ).toEqual(["Claude CodeDefault", "Codex", "PiNot found on your PATH."]);
+    expect(screen.queryByText("Legacy")).not.toBeInTheDocument();
   });
 
   it("marks Codex as the default when Claude Code is not installed", async () => {
@@ -167,61 +153,6 @@ describe("ChatEnginePicker", () => {
     expect(setModel).toHaveBeenCalledWith("__clovy_cli_engine__:claude");
   });
 
-  it("choosing an endpoint sets its optionId", async () => {
-    const user = userEvent.setup();
-    const setModel = vi.fn();
-
-    render(<ChatEnginePicker model="auto" setModel={setModel} catalog={sampleCatalog} />);
-
-    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
-    await user.click(screen.getByRole("menuitemradio", { name: /^Local Ollama/ }));
-
-    expect(setModel).toHaveBeenCalledWith("__june_local_generation__:llama3");
-  });
-
-  it("keeps two endpoints that serve the same model apart", async () => {
-    const user = userEvent.setup();
-    const setModel = vi.fn();
-    const catalog: ChatEngineCatalog = {
-      clis: sampleCatalog.clis,
-      endpoints: [
-        {
-          id: "home",
-          name: "Home server",
-          modelId: "qwen3",
-          optionId: "__june_local_generation__:qwen3@home",
-        },
-        {
-          id: "lab",
-          name: "Lab server",
-          modelId: "qwen3",
-          optionId: "__june_local_generation__:qwen3@lab",
-        },
-      ],
-    };
-
-    render(
-      <ChatEnginePicker
-        model="__june_local_generation__:qwen3@lab"
-        setModel={setModel}
-        catalog={catalog}
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: /Chat engine: Lab server/i })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
-    expect(screen.getByRole("menuitemradio", { name: /^Lab server/ })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    expect(screen.getByRole("menuitemradio", { name: /^Home server/ })).toHaveAttribute(
-      "aria-checked",
-      "false",
-    );
-    await user.click(screen.getByRole("menuitemradio", { name: /^Home server/ }));
-    expect(setModel).toHaveBeenCalledWith("__june_local_generation__:qwen3@home");
-  });
-
   it("keeps an unavailable CLI's logo, name and reason on its own row", async () => {
     const user = userEvent.setup();
     const reason = (bin: string) => `\`${bin}\` was not found in your login shell PATH.`;
@@ -243,7 +174,6 @@ describe("ChatEnginePicker", () => {
           modelId: "__clovy_cli_engine__:copilot",
         },
       ],
-      endpoints: [],
     };
     render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={catalog} />);
     await user.click(screen.getByRole("button", { name: /Chat engine/i }));
@@ -296,7 +226,6 @@ describe("ChatEnginePicker", () => {
           modelId: "__clovy_cli_engine__:copilot",
         },
       ],
-      endpoints: [],
     };
     render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={catalog} />);
     await user.click(screen.getByRole("button"));
@@ -304,16 +233,5 @@ describe("ChatEnginePicker", () => {
     const copilot = screen.getByRole("menuitemradio", { name: /^GitHub Copilot/ });
     expect(copilot).toHaveTextContent("Não encontrado no PATH da sua sessão.");
     expect(copilot).not.toHaveTextContent("was not found");
-  });
-
-  it("gives the legacy Clovy row the Clovy mark like the other rows", async () => {
-    const user = userEvent.setup();
-    render(<ChatEnginePicker model="auto" setModel={vi.fn()} catalog={sampleCatalog} />);
-    await user.click(screen.getByRole("button", { name: /Chat engine/i }));
-
-    const clovy = screen.getByRole("menuitemradio", { name: /^Clovy/ });
-    const logo = clovy.querySelector(".agent-composer-model-row-logo");
-    expect(logo).toHaveAttribute("data-brand", "clovy");
-    expect(logo?.querySelector("svg")).not.toBeNull();
   });
 });

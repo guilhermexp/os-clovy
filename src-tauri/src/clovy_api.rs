@@ -259,18 +259,6 @@ impl AgentChatCompletionsResponse {
     }
 }
 
-#[cfg(test)]
-impl AgentChatCompletionsResponse {
-    pub(crate) fn from_upstream_for_test(upstream: reqwest::Response) -> Self {
-        Self {
-            status: upstream.status().as_u16(),
-            content_type: String::new(),
-            route: AgentModelRouteMetadata::default(),
-            upstream,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDto {
@@ -2308,41 +2296,6 @@ fn inject_local_safety_context(object: &mut serde_json::Map<String, serde_json::
     );
 }
 
-/// A buffered Clovy API response forwarded verbatim to the local web MCP.
-pub struct WebProxyResponse {
-    pub status: u16,
-    pub content_type: String,
-    pub body: Vec<u8>,
-}
-
-/// Forwards a web tool request (`/v1/web/search` or `/v1/web/fetch`) to the
-/// Clovy API with the user's access token, returning the raw response so the
-/// caller can pass the `ApiResponse` envelope straight through. The access
-/// token never leaves this process; the MCP only ever talks to the loopback
-/// proxy.
-pub async fn forward_web_request(
-    path: &str,
-    body: &serde_json::Value,
-) -> Result<WebProxyResponse, AppError> {
-    let response = authed_send(path, true, |client, url, token| {
-        client.post(url).bearer_auth(token).json(body)
-    })
-    .await?;
-    let status = response.status().as_u16();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
-    let bytes = response.bytes().await.map_err(network_error)?;
-    Ok(WebProxyResponse {
-        status,
-        content_type,
-        body: bytes.to_vec(),
-    })
-}
-
 fn limit_agent_chat_messages_for_proxy(body: &mut serde_json::Value) {
     limit_agent_chat_messages(body, AGENT_PROXY_MAX_MESSAGES);
 }
@@ -2433,18 +2386,6 @@ fn decode_tagged_model(model: &str, prefix: &str) -> Option<String> {
     let encoded = model.strip_prefix(prefix)?;
     let decoded = urlencoding::decode(encoded).ok()?.trim().to_string();
     (!decoded.is_empty()).then_some(decoded)
-}
-
-/// The tagged model id of a registered endpoint chosen as a session's engine:
-/// `__june_local_generation__:<model>@<endpoint id>`, both URL-encoded (so
-/// neither part can contain `@`). The older form without `@<endpoint id>`
-/// still routes by model id.
-pub(crate) fn endpoint_option_id(model_id: &str, endpoint_id: &str) -> String {
-    format!(
-        "{LOCAL_GENERATION_OPTION_ID_PREFIX}{}@{}",
-        urlencoding::encode(model_id.trim()),
-        urlencoding::encode(endpoint_id.trim())
-    )
 }
 
 /// The model id and, when present, the endpoint id of a tagged local option.

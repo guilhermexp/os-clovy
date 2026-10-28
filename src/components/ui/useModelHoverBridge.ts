@@ -12,14 +12,12 @@ import {
 // The picker flyout state, shared verbatim by the composer and settings pickers
 // (both declare a structurally identical alias). A row's detail card is open
 // when `kind === "model"`; the searchable catalog when `kind === "all"`; the
-// Auto preference panel when `kind === "auto"`; the Effort submenu when
-// `kind === "effort"` (the bridge itself only ever traverses to "model"
-// cards, so it ignores those kinds).
+// Auto preference panel when `kind === "auto"`. The bridge only traverses
+// model detail cards.
 export type ModelHoverFlyout =
   | { kind: "model"; id: string }
   | { kind: "all" }
   | { kind: "auto" }
-  | { kind: "effort" }
   | null;
 
 // Reports whether a safe-polygon traversal is currently anchored, so the rows
@@ -78,7 +76,7 @@ export function useModelDetailHoverBridge({
         // open card's row and the freshly hovered row both read as highlighted
         // during the delay.
         const flyoutKind = target.dataset.flyoutKind;
-        if (flyoutKind === "auto" || flyoutKind === "effort") {
+        if (flyoutKind === "auto") {
           cancelHoverIntent();
           onFlyoutChange({ kind: flyoutKind });
           setBridging(false);

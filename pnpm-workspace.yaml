@@ -3,11 +3,9 @@
 # Workspace packages: the app root plus the browser extension (JUN-287).
 packages:
   - '.'
-  - 'agent-runtime'
   - 'extension'
 
-# `@openai/agents` currently reaches fast-uri through MCP's schema validator.
-# Keep the patched parser pinned until that transitive chain updates itself.
+# Keep the patched schema parser pinned for any remaining consumers.
 overrides:
   fast-uri: 3.1.4
 

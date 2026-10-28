@@ -130,6 +130,7 @@ function runRunner(sandbox, { args, output, outDir, exitCode = 0 }) {
 }
 
 describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
+  // This exercises real clang and codesign repeatedly; the deadline is not a startup benchmark.
   it("runs the app from its own signed bundle as the process Tauri supervises", async () => {
     const sandbox = createSandbox();
     const outDir = path.join(sandbox.crate, "target", "debug");
@@ -206,7 +207,7 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
     ]);
     expect(statSync(executable).ino).not.toBe(signed);
     expect(spawnSync("/usr/bin/codesign", ["--verify", "--strict", bundle]).status).toBe(0);
-  });
+  }, 30_000);
 
   it("places the bundle in the Cargo profile directory for the requested target", async () => {
     const sandbox = createSandbox();
@@ -222,5 +223,5 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
     expect(result.app.map(({ argv0 }) => argv0)).toEqual([
       path.join(outDir, "Clovy Dev runnertest.app", "Contents", "MacOS", "clovy"),
     ]);
-  });
+  }, 30_000);
 });
