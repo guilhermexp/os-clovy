@@ -2925,13 +2925,25 @@ impl Repositories {
         Ok(())
     }
 
+    /// Shows a manual retry at once, in one statement: only a note still
+    /// failed becomes transcribing, so a retry never writes over a note
+    /// another run made ready or is processing.
     pub async fn mark_failed_note_transcribing(
         &self,
         note_id: &str,
     ) -> Result<bool, sqlx::error::Error> {
-        self.set_note_status(note_id, ProcessingStatus::Transcribing, None)
-            .await?;
-        Ok(true)
+        let result = query(
+            "UPDATE notes
+             SET processing_status = ?, last_error = NULL, updated_at = ?
+             WHERE id = ? AND processing_status = ?",
+        )
+        .bind(ProcessingStatus::Transcribing.as_db())
+        .bind(timestamp())
+        .bind(note_id)
+        .bind(ProcessingStatus::Failed.as_db())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Takes a note paused by a provider rate limit for its automatic resume,

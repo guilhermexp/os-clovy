@@ -133,16 +133,18 @@ pub enum RetryOrigin {
 ///
 /// Checked under the lock for every run, whatever its queue depth: the
 /// order runs take the lock is not the order they were queued. A ready note
-/// is never processed again. When another run finished after this one was
-/// queued, a manual retry runs only on a note that run left failed, and a
-/// resume does not run at all; with nothing finished in between, the Retry
-/// of a failed note runs, and a resume runs on the note its claim left
-/// transcribing.
+/// is never processed again. A manual retry that marked the still-failed
+/// note transcribing itself (`marked_by_this_run`) always runs, so a run
+/// that changed the note is never skipped and never leaves it transcribing.
+/// Otherwise, when another run finished after this one was queued, a manual
+/// retry runs only on a note that run left failed, and a resume does not run
+/// at all; with nothing finished in between, the Retry runs, and a resume
+/// runs on the note its claim left transcribing.
 pub fn queued_retry_should_run(
     origin: RetryOrigin,
     status: crate::domain::types::ProcessingStatus,
     runs_completed_since_enqueue: u64,
-    _marked_by_this_run: bool,
+    marked_by_this_run: bool,
 ) -> bool {
     use crate::domain::types::ProcessingStatus;
     if status == ProcessingStatus::Ready {
@@ -150,7 +152,9 @@ pub fn queued_retry_should_run(
     }
     let nothing_ran_since = runs_completed_since_enqueue == 0;
     match origin {
-        RetryOrigin::Manual => nothing_ran_since || status == ProcessingStatus::Failed,
+        RetryOrigin::Manual => {
+            marked_by_this_run || nothing_ran_since || status == ProcessingStatus::Failed
+        }
         RetryOrigin::Resume => nothing_ran_since && status == ProcessingStatus::Transcribing,
     }
 }
