@@ -36,6 +36,7 @@ const STORED_FAILURE_KEYS: MessageKey[] = [
   "notes.failure.groqKeyMissing",
   "notes.failure.audioTooLarge",
   "notes.failure.groqUsageLimit",
+  "notes.failure.groqKeyUnavailable",
   "notes.failure.generationKeyMissing",
 ];
 

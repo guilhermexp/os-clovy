@@ -86,6 +86,8 @@ export default defineMessages({
       "This recording part is larger than the 25 MB Groq accepts in one request.",
     "notes.failure.groqUsageLimit":
       "Groq reports that its usage limit was reached. Try again later, or check the plan behind your saved Groq key.",
+    "notes.failure.groqKeyUnavailable":
+      "Clovy could not read your saved Groq key. Open Settings and save it again.",
     "notes.failure.rateLimitPaused":
       "Groq usage limit reached. Clovy continues transcribing at {time}. Parts already transcribed are kept.",
     "notes.failure.generationKeyMissing":
@@ -429,6 +431,8 @@ export default defineMessages({
       "Esta parte da gravação passa dos 25 MB que a Groq aceita por requisição.",
     "notes.failure.groqUsageLimit":
       "A Groq informa que o limite de uso foi atingido. Tente de novo mais tarde ou confira o plano da sua chave Groq salva.",
+    "notes.failure.groqKeyUnavailable":
+      "O Clovy não conseguiu ler sua chave Groq salva. Abra as Configurações e salve-a de novo.",
     "notes.failure.rateLimitPaused":
       "Limite de uso da Groq atingido. O Clovy continua a transcrição às {time}. As partes já transcritas ficam salvas.",
     "notes.failure.generationKeyMissing":

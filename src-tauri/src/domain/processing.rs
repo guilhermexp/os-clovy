@@ -2639,12 +2639,16 @@ fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
     )
 }
 
-/// The route for the saved Groq key as the credential store answered.
+/// The route for the saved Groq key as the credential store answered. Only
+/// no saved key takes Clovy API's route: a saved key the store cannot
+/// return (`provider_api_key_unavailable`) fails the request with that
+/// error, so it never spends the service's credits silently and the note
+/// says what to do.
 fn note_route_from(
     saved_key: Result<Option<String>, AppError>,
     model: String,
 ) -> Result<TranscriptionRoute, AppError> {
-    let groq_key = saved_key.ok().flatten();
+    let groq_key = saved_key?;
     let pacer = groq_key
         .as_deref()
         .map(|key| groq_direct_pacer(&key_fingerprint(key)))
