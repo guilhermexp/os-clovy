@@ -103,3 +103,20 @@ transient failure" for 429 and the shape of the final-transcription request.
 
 The limits are the base plan's; a paid plan is paced the same until Clovy
 can read the plan. Clovy API does not change.
+
+Review of the same addendum (2026-10-27, before release):
+
+6. **Split jobs keep their chunks.** A full-Source job (microphone only,
+   the full-Source fallback) or an over-long turn keeps each finished 600 s
+   chunk in `note_transcription_chunks`, so a resume sends only the chunks
+   still missing; without it, two audible hours paused before the last chunk
+   on every run and never finished.
+2. (amended) **One pacer per Groq account, on the wall clock.** The pacer is
+   picked per request: the saved key's account, by a SHA-256 fingerprint
+   that never keeps the key, or Clovy API's route without a key, which has
+   its own. Its pause and its hour of audio are wall-clock times, guarded
+   against a clock set back, so a pause ends on time across sleep.
+3. (amended) **A resume claims its pause once.** The automatic resume sets
+   the note from that very pause to transcribing in one update; a Retry
+   that got there first leaves nothing to claim, and a retry that waited
+   behind another run skips a note that no longer needs it.

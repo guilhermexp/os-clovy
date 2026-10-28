@@ -18,6 +18,26 @@ Na transcrição direta à Groq, um 429 SHALL virar espera pelo tempo que a Groq
 - **THEN** os turnos já transcritos são reaproveitados e só os pendentes vão à Groq
 - Test: integration — `processing.rs`, duas rodadas no mesmo banco contando requisições
 
+#### Scenario: Job longo da faixa inteira termina
+- **WHEN** uma gravação audível vira um job da faixa inteira que passa do áudio da hora e pausa antes do último pedaço
+- **THEN** cada pedaço pronto fica salvo, a retomada só envia os que faltam, e a nota termina
+- Test: integration — `processing.rs`, oito pedaços de 30 s contra 100 s por hora, banco em memória
+
+#### Scenario: A pausa termina pelo relógio de parede
+- **WHEN** a nota pausou e o Mac dormiu além do prazo, ou o relógio voltou
+- **THEN** a pausa termina na hora de parede marcada e nunca se estende por um relógio que voltou
+- Test: unit — `processing.rs`, `RequestPacer` com relógio injetável
+
+#### Scenario: Pausa de uma chave não segura outra rota
+- **WHEN** a conta da chave A está pausada
+- **THEN** uma chave B e a rota do Clovy API sem chave seguem mandando, e a impressão digital da chave nunca contém a chave
+- Test: unit — `processing.rs`
+
+#### Scenario: Retomada e "Tentar de novo" ao mesmo tempo
+- **WHEN** a retomada automática e um "Tentar de novo" disputam a mesma nota pausada
+- **THEN** só um reivindica a pausa e a nota é gerada uma vez só
+- Test: integration — `processing.rs` (reivindicação no banco), unit — `processing_queue.rs` (revalidação ao pegar o lock)
+
 #### Scenario: Ritmo dentro do limite por minuto
 - **WHEN** as duas faixas têm muitos turnos para transcrever
 - **THEN** nunca começam mais de 18 requisições em 60 s, somando as faixas e a prévia

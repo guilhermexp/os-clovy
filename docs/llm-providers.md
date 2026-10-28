@@ -191,13 +191,22 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   `no_speech`), and through `/v1/notes/transcribe` without one (ADR-0070).
   A Groq 429 carries its `retry-after` (else `x-ratelimit-reset-requests`) as
   `details.retryAfterMs`; `send_direct` waits it out only up to 2 s. Final
-  transcription runs behind one process-wide pacer (`domain/processing.rs`
-  `RequestPacer`): 18 requests a minute and 7,200 s of billed audio an hour
-  (each request billed at least 10 s) across both Sources, every note and the
-  live preview. A 429 holds every caller and repeats the same request; a wait
-  over 90 s pauses the note with `transcription_rate_limited` and
-  `details.resumeAtMs`, the note says when it continues, and `commands.rs`
-  resumes it then while Clovy is open. With the key, consecutive speech
+  transcription runs behind the pacer of the route each request takes
+  (`domain/processing.rs` `RequestPacer`): one per Groq account, keyed by the
+  first 8 bytes of the key's SHA-256 (never the key), with 18 requests a
+  minute and 7,200 s of billed audio an hour (each request billed at least
+  10 s) across both Sources, every note and the live preview; Clovy API's
+  route without a key has its own pacer, held only by a 429 it relays. Pacer
+  times are wall-clock milliseconds, so a pause ends on time across sleep,
+  and a clock set back never stretches it. A 429 holds every caller of that
+  pacer and repeats the same request; a wait over 90 s pauses the note with
+  `transcription_rate_limited` and `details.resumeAtMs`, the note says when
+  it continues, and `commands.rs` resumes it then while Clovy is open: the
+  resume claims the pause in one update, so a Retry that got there first
+  leaves it nothing, and a retry that waited behind another run skips a note
+  that no longer needs it. Every finished chunk of a split job (a full-Source
+  job, an over-long turn) is kept in `note_transcription_chunks`, so a resume
+  sends only the chunks still missing. With the key, consecutive speech
   turns of one Source go as turn packs of up to 600 s through
   `transcribe_saved_audio_timed` (`verbose_json`, segment times) and come
   back per turn. The live preview takes a request only when one is free and

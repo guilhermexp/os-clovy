@@ -22,7 +22,6 @@ Medição da prévia ao vivo pelo código: ela vem ligada por padrão (`provider
 
 - Mudar o Clovy API ou o caminho sem chave (sem chave, um turno por requisição, como antes).
 - Ditado (fica fora do pacer; a folga de 2 RPM é dele).
-- Persistir progresso dentro de um pedaço do fallback da faixa inteira.
 - Ler o plano do usuário para acelerar além dos limites base.
 - Mostrar a espera curta (até 90 s) na barra de progresso.
 - Detecção de fala no modo só microfone (continua um job da faixa inteira, agora em pedaços de 600 s).
@@ -35,13 +34,17 @@ Medição da prévia ao vivo pelo código: ela vem ligada por padrão (`provider
 
 ### D2. Um pacer para o processo inteiro
 
-`RequestPacer` em `processing.rs`, estático (`GROQ_TRANSCRIPTION_PACER`): no máximo 18 inícios de requisição em 60 s e no máximo 7.200 s de áudio cobrado (duração do WAV, mínimo 10 s) em 60 min, mais um `paused_until` comum. Serve todas as notas, as duas faixas e a prévia. Um 429 põe `paused_until` para todos (pelo `retry-after`, ou 60 s sem ele, como no exemplo da Groq) e a mesma requisição é repetida, até 5 vezes. A concorrência continua 2. Os testes injetam o próprio pacer e usam o relógio pausado do tokio.
+`RequestPacer` em `processing.rs`: no máximo 18 inícios de requisição em 60 s e no máximo 7.200 s de áudio cobrado (duração do WAV, mínimo 10 s) em 60 min, mais um `paused_until` comum. Há um pacer por conta Groq, escolhido a cada requisição pela impressão digital da chave salva (8 primeiros bytes do SHA-256; a chave nunca é guardada), e um próprio para a rota do Clovy API sem chave, sem teto de requisições nem de áudio, parado só por um 429 que o servidor repasse (revisão G3). Cada pacer serve todas as notas, as duas faixas e a prévia daquela rota. Os tempos são milissegundos do relógio de parede, injetável nos testes e protegido contra o relógio voltar; quem espera olha o relógio de novo a cada 30 s, então uma pausa termina na hora mesmo depois de o Mac dormir (revisão G2). Um 429 põe `paused_until` para todos (pelo `retry-after`, ou 60 s sem ele, como no exemplo da Groq) e a mesma requisição é repetida, até 5 vezes. A concorrência continua 2. Os testes injetam o próprio pacer e usam o relógio pausado do tokio.
 
 Alternativa: ritmo adaptativo, rápido até o primeiro 429. Rejeitada: não há cabeçalho de RPM nem de ASH para áudio, e no plano base o primeiro estouro custa uma espera de até 60 s.
 
 ### D3. Espera longa pausa a nota
 
-Uma espera acima de 90 s, seja a do pacer (orçamento de áudio da hora) ou a da Groq, vira `transcription_rate_limited` com `details.resumeAtMs`. Também vira pausa depois de 5 esperas seguidas. O turno ou pacote que a recebeu é gravado como falha (o job volta a pendente na próxima rodada), o stream para de lançar trabalho, e o fallback da faixa não roda. A nota fica com "Groq usage limit reached. Clovy continues transcribing at HH:MM. Parts already transcribed are kept." (hora local). `commands.rs` agenda a nova rodada para `resumeAtMs` + 5 s, conferindo o relógio a cada minuto (o sono do Mac para o relógio monotônico), se a nota ainda estiver com essa pausa. A nova rodada é a de "Tentar de novo": jobs prontos são reaproveitados e só os pendentes vão à Groq. Se o app fechar, a nota fica com a frase e o botão.
+Uma espera acima de 90 s, seja a do pacer (orçamento de áudio da hora) ou a da Groq, vira `transcription_rate_limited` com `details.resumeAtMs`. Também vira pausa depois de 5 esperas seguidas. O turno ou pacote que a recebeu é gravado como falha (o job volta a pendente na próxima rodada), o stream para de lançar trabalho, e o fallback da faixa não roda. A nota fica com "Groq usage limit reached. Clovy continues transcribing at HH:MM. Parts already transcribed are kept." (hora local). `commands.rs` agenda a nova rodada para `resumeAtMs` + 5 s, conferindo o relógio a cada minuto (o sono do Mac para o relógio monotônico). Na hora, a retomada reivindica a pausa num único `UPDATE` (de `failed` com aquela frase para `transcribing`); um "Tentar de novo" que chegou antes, ou outra retomada, não reivindica nada. Quando uma rodada de nova tentativa pega o lock da nota, ela só roda se a nota ainda precisar: a retomada só na nota que sua reivindicação deixou em `transcribing`, e o "Tentar de novo" atrás de outra rodada só se essa rodada deixou a nota em `failed`. Assim duas rodadas nunca geram a nota duas vezes (revisão G4). A nova rodada é a de "Tentar de novo": jobs prontos são reaproveitados e só os pendentes vão à Groq. Se o app fechar, a nota fica com a frase e o botão.
+
+### D7. Pedaços prontos de um job dividido ficam salvos
+
+Um job da faixa inteira (só microfone, fallback da faixa) ou um turno longo é dividido em pedaços de 600 s. Cada pedaço pronto vai para `note_transcription_chunks` (migração 51, em cascata com a sessão), com a chave do pedaço: o id de operação do pedaço (que carrega a impressão digital da entrada do job durável) mais a duração do áudio dele, para outra divisão nunca reaproveitar um pedaço velho. A retomada lê os pedaços prontos e só envia os que faltam; um pedaço sem fala também fica salvo. Sem isso, duas horas audíveis pausavam antes do último pedaço em toda rodada e a nota nunca terminava (revisão G1).
 
 ### D4. Pedaços de 10 min e pacotes de turnos
 
@@ -72,6 +75,6 @@ Alternativas: reaproveitar o texto da prévia na nota foi rejeitado, porque os c
 - Plano pago fica nos limites base (18 RPM, 7.200 ASH) até o Clovy ler o plano.
 - Um pacote que falha reenvia todos os seus turnos na próxima rodada (até 600 s).
 - Um segmento que atravessa a pausa entre dois turnos vai inteiro para um deles: o texto fica na faixa certa, mas pode trocar de turno vizinho.
-- O fallback da faixa inteira não guarda pedaços: um limite longo no meio dele perde os pedaços daquela rodada.
+- Os pedaços salvos de um job ficam até a sessão ser apagada (são só texto).
 - A retomada automática não sobrevive ao fechamento do app.
 - Em reuniões acima de ~1 h com muita fala, a nota pode pausar pelo ASH e terminar mais tarde, na hora mostrada.

@@ -35,6 +35,19 @@
 
 > A revisão chegou com a implementação em andamento, então os testes de 6.1 a 6.4 vieram depois do código, no mesmo commit GREEN (`6bf8541a`). Cada um foi conferido por mutação: com os pacotes desligados e com o orçamento de áudio desligado, os testes de pacote e de orçamento falham (4 falhas); com o código de volta, passam.
 
+## 8. Revisão 1 (G1–G4)
+
+Revisão do `7bb9ae04` bloqueada (BLOCK) com quatro achados.
+
+- [x] 8.0 RED dos quatro (`7b2681fe`): o teste do G1 reproduz a nota que nunca termina, e o do G4 mostra dois vencedores na reivindicação.
+- [x] 8.1 G2 GREEN (`d7560bf7`): pacer no relógio de parede injetável, protegido contra volta, olhando o relógio a cada 30 s.
+- [x] 8.2 G3 GREEN (`c248fadf`): um pacer por conta Groq (impressão digital SHA-256) e um próprio da rota do Clovy API, escolhidos por requisição.
+- [x] 8.3 G1 GREEN (`c4307809`): `note_transcription_chunks` (migração 51) guarda cada pedaço pronto de um job dividido.
+- [x] 8.4 G4 GREEN (`3ce54680`): reivindicação atômica da pausa e revalidação ao pegar o lock.
+- [ ] 8.5 `make verify` numa worktree limpa, CI, report.
+
+> Os RED dos quatro saíram num commit só porque os testes ficam no mesmo arquivo; os GREEN saíram um por achado, cada um fazendo passar só os seus testes. O teste do G1 usa o relógio do G2, então o G2 veio primeiro.
+
 ## 7. Documentação e verificação
 
 - [x] 7.1 `docs/llm-providers.md`, adendo datado da ADR-0070, `docs/audio-pipeline.md`, termo `Turn pack` no `CONTEXT.md`.
