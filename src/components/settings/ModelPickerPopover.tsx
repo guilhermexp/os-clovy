@@ -13,25 +13,11 @@ import {
 } from "react";
 import type { RefObject } from "react";
 import { createPortal } from "react-dom";
-import { type MessageKey, type TFunction, useT } from "../../i18n";
-import {
-  BUILTIN_PROVIDER_NAME_KEYS,
-  modelAvailableForMode,
-  modelIsPrivate,
-  modelMissingProviderKey,
-  modelProviderAvailabilityUnknown,
-  modelPrivacyBadge,
-} from "../../lib/model-privacy";
+import { type MessageKey, useT } from "../../i18n";
+import { modelAvailableForMode, modelIsPrivate, modelPrivacyBadge } from "../../lib/model-privacy";
 import { modelMatchesQuery } from "../../lib/model-search";
-import {
-  DEFAULT_GENERATION_SUGGESTION_ID,
-  suggestedModelsForMode,
-} from "../../lib/suggested-models";
-import type {
-  ProviderApiKeysConfigured,
-  ProviderModelDto,
-  ProviderModelMode,
-} from "../../lib/tauri";
+import { suggestedModelsForMode } from "../../lib/suggested-models";
+import type { ProviderModelDto, ProviderModelMode } from "../../lib/tauri";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { rectFromElement, type HoverBridgeRect } from "../ui/hoverBridge";
 import { useCatalogHoverBridge, useModelDetailHoverBridge } from "../ui/useModelHoverBridge";
@@ -40,55 +26,7 @@ import { Switch } from "../ui/Switch";
 import { AUTO_MODEL_ID, modelSpecEntries } from "./ModelPickerDialog";
 import { ProviderLogo } from "./ProviderLogo";
 
-export type ModelPickerFlyout =
-  | { kind: "model"; id: string }
-  | { kind: "all" }
-  | { kind: "auto" }
-  | null;
-
-// The automatic router's cost-to-quality preference, shared by this popover's
-// Auto section and the Settings "Auto preference" row so both surfaces read
-// and write the same three presets.
-export type AutoPreference = "cost" | "balanced" | "quality";
-
-export const AUTO_PREFERENCE_VALUES: Record<AutoPreference, number> = {
-  // Keep the cost-first preset above the lowest-quality routing tier. Live
-  // integration evals showed that tier dropping facts and inventing dates.
-  cost: 20,
-  balanced: 50,
-  quality: 100,
-};
-
-export function autoPreferenceFromCostQuality(value: number): AutoPreference {
-  if (value < 34) return "cost";
-  if (value > 66) return "quality";
-  return "balanced";
-}
-
-// The Preference flyout's option rows: each preset carries a one-line
-// explanation, which is the point of drilling in rather than showing bare
-// values.
-const AUTO_PREFERENCE_DETAILS: readonly {
-  value: AutoPreference;
-  label: MessageKey;
-  description: MessageKey;
-}[] = [
-  {
-    value: "cost",
-    label: "settingsPanels.picker.economy",
-    description: "settingsPanels.picker.economyDescription",
-  },
-  {
-    value: "balanced",
-    label: "settingsPanels.picker.balanced",
-    description: "settingsPanels.picker.balancedDescription",
-  },
-  {
-    value: "quality",
-    label: "settingsPanels.picker.quality",
-    description: "settingsPanels.picker.qualityDescription",
-  },
-];
+export type ModelPickerFlyout = { kind: "model"; id: string } | { kind: "all" } | null;
 
 const MODE_LABEL_KEYS = {
   generation: {
@@ -138,8 +76,6 @@ export function ModelPickerPopover({
   ariaLabel: ariaLabelProp,
   suggestedListLabel: suggestedListLabelProp,
   allModelsLabel: allModelsLabelProp,
-  providerApiKeysConfigured,
-  catalogLoaded,
   suggestedModelIds,
   rootSearchRef,
   rootSearch,
@@ -147,9 +83,6 @@ export function ModelPickerPopover({
   onFlyoutChange,
   onSearchChange,
   onSelect,
-  onCostQualityChange,
-  showAutoToggle = true,
-  showAutoPreference = true,
 }: {
   mode: ProviderModelMode;
   flyout: ModelPickerFlyout;
@@ -164,18 +97,7 @@ export function ModelPickerPopover({
   ariaLabel?: string;
   suggestedListLabel?: string;
   allModelsLabel?: string;
-  /** Which providers have the user's own key saved. With it, rows Clovy cannot
-   * serve without that key (`serviceAvailable: false`) stay out of the lists
-   * and a note says which key to add. */
-  providerApiKeysConfigured?: ProviderApiKeysConfigured;
-  /** Whether the provider catalog behind `options` has actually loaded.
-   * `options` alone cannot say: the host injects a synthetic entry for the
-   * current selection, so it is never empty. Hosts that know their raw
-   * catalog should pass this; without it the popover falls back to treating
-   * "any concrete entry present" as loaded. */
-  catalogLoaded?: boolean;
-  /** Optional host-owned suggestion order. Agent sessions use this to keep
-   * Auto as the single quick pick while the full catalog remains searchable. */
+  /** Optional suggestion order for the curated media lists. */
   suggestedModelIds?: readonly string[];
   /** Enables the root-layer search (the /model + composer trigger surface):
    * a field above the pinned controls whose query searches across BOTH
@@ -188,19 +110,7 @@ export function ModelPickerPopover({
   onRootSearchChange?: (value: string) => void;
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
-  /** `keepOpen` asks the host to leave the popover mounted (used by the Auto
-   * toggle, where switching is a mid-flow adjustment, not a final pick). */
   onSelect: (modelId: string, costQuality?: number, options?: { keepOpen?: boolean }) => void;
-  /** Enables the pinned Auto controls on generation surfaces. */
-  onCostQualityChange?: (value: number) => void;
-  /** Whether Auto is a pinned toggle or remains in the host's suggestion
-   * list. Agent sessions keep Auto as their one quick pick and use the
-   * Preference row only after it is selected. */
-  showAutoToggle?: boolean;
-  /** Whether Auto's Preference drill-in appears inside the popover. Settings
-   * keeps that preference visible as its own segmented row, so its picker
-   * omits the duplicate while retaining the Auto toggle. */
-  showAutoPreference?: boolean;
 }) {
   const t = useT();
   const modeLabels = MODE_LABEL_KEYS[mode];
@@ -391,37 +301,8 @@ export function ModelPickerPopover({
 
   const query = search.trim().toLowerCase();
   const selectable = useMemo(
-    () =>
-      options.filter(
-        (option) =>
-          modelAvailableForMode(mode, option) &&
-          !modelProviderAvailabilityUnknown(option, providerApiKeysConfigured) &&
-          !(
-            providerApiKeysConfigured && modelMissingProviderKey(option, providerApiKeysConfigured)
-          ) &&
-          // With the Auto section shown, the toggle is the router's one home;
-          // keep the catalog's Auto entry out of the lists so it doesn't
-          // double up as a row.
-          !(onCostQualityChange && showAutoToggle && option.id === AUTO_MODEL_ID),
-      ),
-    [mode, onCostQualityChange, options, providerApiKeysConfigured, showAutoToggle],
-  );
-  const missingProviderKeys = useMemo(
-    () =>
-      providerApiKeysConfigured
-        ? [
-            ...new Set(
-              options.flatMap((option) => {
-                const provider = modelMissingProviderKey(option, providerApiKeysConfigured);
-                return provider ? [provider] : [];
-              }),
-            ),
-          ]
-        : [],
-    [options, providerApiKeysConfigured],
-  );
-  const availabilityUnknown = options.some((option) =>
-    modelProviderAvailabilityUnknown(option, providerApiKeysConfigured),
+    () => options.filter((option) => modelAvailableForMode(mode, option)),
+    [mode, options],
   );
   const suggested = useMemo(() => {
     if (!suggestedModelIds) return suggestedModelsForMode(mode, selectable);
@@ -438,34 +319,6 @@ export function ModelPickerPopover({
       ];
     });
   }, [mode, selectable, suggestedModelIds, t]);
-  const autoEnabled = onCostQualityChange !== undefined && model?.id === AUTO_MODEL_ID;
-  const autoPreference = autoPreferenceFromCostQuality(costQuality ?? 100);
-  // Toggling stays inside the popover: turning Auto off lands on the leading
-  // suggested pick (the default generation model) so the next step — choosing
-  // an explicit model — is right there, one row away.
-  // The concrete model toggling Auto off lands on: the leading suggested
-  // pick, else the first selectable catalog model. On a LOADED catalog with
-  // no eligible concrete model the switch disables instead — there is
-  // nothing valid to land on. The curated default id steps in only while
-  // the catalog is unloaded (safe to select sight-unseen), preferring the
-  // host's explicit signal and falling back to "no concrete entry present".
-  const treatAsLoaded = catalogLoaded ?? options.some((option) => option.id !== AUTO_MODEL_ID);
-  const autoOffTarget =
-    suggested.find((item) => item.model.id !== AUTO_MODEL_ID)?.model.id ??
-    selectable.find((option) => option.id !== AUTO_MODEL_ID)?.id ??
-    (treatAsLoaded ? undefined : DEFAULT_GENERATION_SUGGESTION_ID);
-  const toggleAuto = useCallback(
-    (on: boolean) => {
-      onFlyoutChange(null);
-      if (on) {
-        onSelect(AUTO_MODEL_ID, undefined, { keepOpen: true });
-        return;
-      }
-      if (!autoOffTarget) return;
-      onSelect(autoOffTarget, undefined, { keepOpen: true });
-    },
-    [autoOffTarget, onFlyoutChange, onSelect],
-  );
   const privacyFiltered = privateOnly ? selectable.filter(modelIsPrivate) : selectable;
   const filteredOptions = query
     ? privacyFiltered.filter((option) => modelMatchesQuery(option, query))
@@ -480,26 +333,6 @@ export function ModelPickerPopover({
   const rootFade = useScrollFade(rootListRef);
   const rootQuery = (rootSearch ?? "").trim().toLowerCase();
   const rootQueryActive = Boolean(rootSearchRef) && Boolean(rootQuery);
-  const autoPreferenceLabel = autoPreferenceLabelFor(t, autoPreference);
-  // English terms stay searchable in every language; the localized row names
-  // join them so a query typed in the interface language matches too.
-  const rootControlTerms = [
-    ...(onCostQualityChange && showAutoToggle
-      ? ["auto", "automatic", t("settingsPanels.picker.automaticTerm")]
-      : []),
-    ...(onCostQualityChange && autoEnabled && showAutoPreference
-      ? ["preference", t("settingsPanels.picker.preference"), autoPreferenceLabel]
-      : []),
-  ];
-  const rootControlQueryTerms = rootQuery.split(/\s+/);
-  const rootControlsMatch =
-    rootQueryActive &&
-    rootControlQueryTerms.every((queryTerm) =>
-      rootControlTerms.some((term) => term.toLowerCase().includes(queryTerm)),
-    );
-  const rootVisibleControlCount =
-    (onCostQualityChange && showAutoToggle ? 1 : 0) +
-    (onCostQualityChange && autoEnabled && showAutoPreference ? 1 : 0);
   const rootMatchingSuggested = rootQueryActive
     ? suggested.filter(({ model: option }) => modelMatchesQuery(option, rootQuery))
     : [];
@@ -523,14 +356,7 @@ export function ModelPickerPopover({
   const matchingModelsStatus = rootResults.length
     ? t("settingsPanels.picker.matchingModels", { count: rootResults.length })
     : t("settingsPanels.picker.noResults");
-  const rootSearchStatus = rootQueryActive
-    ? rootControlsMatch
-      ? t("settingsPanels.picker.settingsShown", {
-          count: rootVisibleControlCount,
-          models: matchingModelsStatus,
-        })
-      : matchingModelsStatus
-    : undefined;
+  const rootSearchStatus = rootQueryActive ? matchingModelsStatus : undefined;
   useEffect(() => {
     setRootActive(0);
   }, [rootQuery]);
@@ -776,7 +602,7 @@ export function ModelPickerPopover({
         ))}
       </div>
     </div>
-  ) : rootControlsMatch ? null : (
+  ) : (
     <p className="agent-composer-model-empty agent-composer-model-root-empty">
       {t("settingsPanels.picker.noResults")}
     </p>
@@ -860,43 +686,37 @@ export function ModelPickerPopover({
           {rootSearchStatus}
         </span>
       ) : null}
-      {rootQueryActive && !rootControlsMatch ? (
+      {rootQueryActive ? (
         rootResultsList
+      ) : mode === "generation" ? (
+        catalogList(allModelsLabel)
       ) : (
         <>
-          {onCostQualityChange ? (
-            <div
-              className={[
-                "agent-composer-model-controls",
-                rootQueryActive ? "agent-composer-model-root-control-results" : null,
-              ]
-                .filter(Boolean)
-                .join(" ")}
-            >
-              {showAutoToggle ? (
-                <div className="agent-composer-model-filter agent-composer-model-auto-toggle">
-                  <span>Auto</span>
-                  <Switch
-                    checked={autoEnabled}
-                    disabled={autoEnabled && !autoOffTarget}
-                    onCheckedChange={toggleAuto}
-                    aria-label={t("settingsPanels.picker.autoAria")}
-                  />
-                </div>
-              ) : null}
-              {autoEnabled && showAutoPreference ? (
+          <p className="agent-composer-model-title">{title}</p>
+          <div
+            className="agent-composer-model-menu"
+            role="listbox"
+            aria-label={suggestedListLabel}
+            onKeyDown={handleListboxNavigation}
+          >
+            {suggested.length ? (
+              suggested.map(({ key, model: option, costQuality: presetCostQuality }) => (
                 <button
+                  key={key}
                   type="button"
-                  className="agent-composer-model-row agent-composer-model-control-row"
-                  aria-haspopup="true"
-                  aria-expanded={flyout?.kind === "auto"}
-                  data-active={flyout?.kind === "auto" || undefined}
-                  data-flyout-kind="auto"
+                  className="agent-composer-model-row"
+                  role="option"
+                  aria-selected={
+                    option.id === model.id &&
+                    (presetCostQuality === undefined || presetCostQuality === costQuality)
+                  }
+                  data-model-id={key}
+                  data-active={(flyout?.kind === "model" && flyout.id === key) || undefined}
                   onMouseEnter={() => {
                     if (modelBridge.isActive()) {
                       return;
                     }
-                    const open = () => onFlyoutChange({ kind: "auto" });
+                    const open = () => onFlyoutChange({ kind: "model", id: key });
                     if (flyout) {
                       cancelHoverIntent();
                       open();
@@ -906,179 +726,65 @@ export function ModelPickerPopover({
                   }}
                   onFocus={() => {
                     cancelHoverIntent();
-                    onFlyoutChange({ kind: "auto" });
+                    onFlyoutChange({ kind: "model", id: key });
                   }}
-                  onClick={() => {
-                    cancelHoverIntent();
-                    onFlyoutChange({ kind: "auto" });
-                  }}
+                  onClick={() => onSelect(option.id, presetCostQuality)}
                 >
-                  <span className="agent-composer-model-row-name">
-                    {t("settingsPanels.picker.preference")}
-                  </span>
-                  <span className="agent-composer-model-row-value">{autoPreferenceLabel}</span>
-                  <IconChevronRightSmall
-                    size={16}
-                    aria-hidden
-                    className="agent-composer-model-row-chevron"
-                  />
+                  <ModelPickerOptionText model={option} />
+                  {option.id === model.id &&
+                  (presetCostQuality === undefined || presetCostQuality === costQuality) ? (
+                    <IconCheckmark2Small
+                      size={14}
+                      aria-hidden
+                      className="agent-composer-model-row-check"
+                    />
+                  ) : null}
+                  <ModelRowPrivacyBadge model={option} />
                 </button>
-              ) : null}
-              {autoEnabled && showAutoPreference && flyout?.kind === "auto" ? (
-                <div
-                  ref={flyoutRef}
-                  className="agent-composer-model-flyout agent-composer-model-auto-panel"
-                  role="group"
-                  aria-label={t("settingsPanels.picker.autoPreference")}
-                  onPointerLeave={() => {
-                    cancelHoverIntent();
-                    setBridging(false);
-                  }}
-                >
-                  <div className="agent-composer-model-surface">
-                    {AUTO_PREFERENCE_DETAILS.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className="agent-composer-model-row agent-composer-model-choice-option"
-                        role="menuitemradio"
-                        aria-checked={option.value === autoPreference}
-                        onClick={() => onCostQualityChange(AUTO_PREFERENCE_VALUES[option.value])}
-                      >
-                        <span className="agent-composer-model-choice-copy">
-                          <span className="agent-composer-model-row-name">{t(option.label)}</span>
-                          <span className="agent-composer-model-choice-desc">
-                            {t(option.description)}
-                          </span>
-                        </span>
-                        {option.value === autoPreference ? (
-                          <IconCheckmark2Small
-                            size={14}
-                            aria-hidden
-                            className="agent-composer-model-row-check"
-                          />
-                        ) : null}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {rootQueryActive ? (
-            rootResultsList
-          ) : (
-            <>
-              {/* The title labels the suggested rows, so it sits below the pinned
-               * controls: with search leading the panel, a top "Suggested" would
-               * read as a caption for Auto and Effort. */}
-              <p className="agent-composer-model-title">{title}</p>
-              {availabilityUnknown ? (
-                <p className="agent-composer-model-auto-note" role="status">
-                  {t("settingsPanels.picker.providerAvailabilityUnknown")}
-                </p>
-              ) : null}
-              {missingProviderKeys.map((provider) => (
-                <p key={provider} className="agent-composer-model-auto-note">
-                  {t("settingsPanels.picker.providerKeyNeeded", {
-                    provider: t(BUILTIN_PROVIDER_NAME_KEYS[provider]),
-                  })}
-                </p>
-              ))}
-              <div
-                className="agent-composer-model-menu"
-                role="listbox"
-                aria-label={suggestedListLabel}
-                onKeyDown={handleListboxNavigation}
-              >
-                {suggested.length ? (
-                  suggested.map(({ key, model: option, costQuality: presetCostQuality }) => (
-                    <button
-                      key={key}
-                      type="button"
-                      className="agent-composer-model-row"
-                      role="option"
-                      aria-selected={
-                        option.id === model.id &&
-                        (presetCostQuality === undefined || presetCostQuality === costQuality)
-                      }
-                      data-model-id={key}
-                      data-active={(flyout?.kind === "model" && flyout.id === key) || undefined}
-                      onMouseEnter={() => {
-                        if (modelBridge.isActive()) {
-                          return;
-                        }
-                        const open = () => onFlyoutChange({ kind: "model", id: key });
-                        if (flyout) {
-                          cancelHoverIntent();
-                          open();
-                        } else {
-                          hoverIntent(open);
-                        }
-                      }}
-                      onFocus={() => {
-                        cancelHoverIntent();
-                        onFlyoutChange({ kind: "model", id: key });
-                      }}
-                      onClick={() => onSelect(option.id, presetCostQuality)}
-                    >
-                      <ModelPickerOptionText model={option} />
-                      {option.id === model.id &&
-                      (presetCostQuality === undefined || presetCostQuality === costQuality) ? (
-                        <IconCheckmark2Small
-                          size={14}
-                          aria-hidden
-                          className="agent-composer-model-row-check"
-                        />
-                      ) : null}
-                      <ModelRowPrivacyBadge model={option} />
-                    </button>
-                  ))
-                ) : missingProviderKeys.length || availabilityUnknown ? null : (
-                  <p className="agent-composer-model-empty">
-                    {t("settingsPanels.picker.loadingSuggested")}
-                  </p>
-                )}
-              </div>
-              <button
-                type="button"
-                className="agent-composer-model-row agent-composer-model-all"
-                aria-haspopup="true"
-                aria-expanded={flyout?.kind === "all"}
-                data-active={flyout?.kind === "all" || undefined}
-                onMouseEnter={() => {
-                  if (modelBridge.isActive()) {
-                    return;
-                  }
-                  const open = () => onFlyoutChange({ kind: "all" });
-                  if (flyout) {
-                    cancelHoverIntent();
-                    open();
-                  } else {
-                    hoverIntent(open);
-                  }
-                }}
-                onFocus={() => {
-                  cancelHoverIntent();
-                  onFlyoutChange({ kind: "all" });
-                }}
-                onClick={() => {
-                  cancelHoverIntent();
-                  onFlyoutChange({ kind: "all" });
-                  searchRef.current?.focus();
-                }}
-              >
-                <span className="agent-composer-model-row-name">
-                  {t("settingsPanels.picker.allModels")}
-                </span>
-                <IconChevronRightSmall
-                  size={16}
-                  aria-hidden
-                  className="agent-composer-model-row-chevron"
-                />
-              </button>
-            </>
-          )}
+              ))
+            ) : (
+              <p className="agent-composer-model-empty">
+                {t("settingsPanels.picker.loadingSuggested")}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="agent-composer-model-row agent-composer-model-all"
+            aria-haspopup="true"
+            aria-expanded={flyout?.kind === "all"}
+            data-active={flyout?.kind === "all" || undefined}
+            onMouseEnter={() => {
+              if (modelBridge.isActive()) {
+                return;
+              }
+              const open = () => onFlyoutChange({ kind: "all" });
+              if (flyout) {
+                cancelHoverIntent();
+                open();
+              } else {
+                hoverIntent(open);
+              }
+            }}
+            onFocus={() => {
+              cancelHoverIntent();
+              onFlyoutChange({ kind: "all" });
+            }}
+            onClick={() => {
+              cancelHoverIntent();
+              onFlyoutChange({ kind: "all" });
+              searchRef.current?.focus();
+            }}
+          >
+            <span className="agent-composer-model-row-name">
+              {t("settingsPanels.picker.allModels")}
+            </span>
+            <IconChevronRightSmall
+              size={16}
+              aria-hidden
+              className="agent-composer-model-row-chevron"
+            />
+          </button>
         </>
       )}
       {detail && portalTarget
@@ -1270,9 +976,4 @@ function ModelPickerOptionText({ model }: { model: ProviderModelDto }) {
       </span>
     </>
   );
-}
-
-function autoPreferenceLabelFor(t: TFunction, preference: AutoPreference) {
-  const detail = AUTO_PREFERENCE_DETAILS.find((option) => option.value === preference);
-  return detail ? t(detail.label) : "";
 }

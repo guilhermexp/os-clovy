@@ -8,6 +8,8 @@
 //! Groq / OpenRouter / fal / Tavily keys live in the Keychain store
 //! (`crate::llm::secrets`), and settings only record that one is saved.
 
+mod catalog;
+
 use crate::domain::types::AppError;
 use crate::llm::{
     cli::CliKind,
@@ -1314,6 +1316,9 @@ fn update_provider_credential(
     }
     *settings = candidate.clone();
     *published = candidate;
+    if provider == BuiltinProvider::OpenRouter {
+        catalog::invalidate();
+    }
     Ok(ProviderModelSettingsDto::from(&*settings))
 }
 
@@ -1418,11 +1423,7 @@ async fn list_provider_models_impl(
 ) -> Result<ProviderModelsResponse, AppError> {
     let model_type = request.mode.api_type();
     let selected_model = selected_model_for_mode(state, request.mode)?;
-    let mut models = crate::clovy_api::list_models(model_type)
-        .await?
-        .into_iter()
-        .map(ProviderModelDto::from)
-        .collect::<Vec<_>>();
+    let mut models = catalog::models(request.mode).await?;
     models.sort_by(|left, right| {
         left.name
             .to_ascii_lowercase()
@@ -2129,11 +2130,7 @@ fn selected_model_for_mode(
         .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
     Ok(match mode {
         ModelMode::Transcription => settings.transcription_model.clone(),
-        // A CLI chosen for chat makes new chat sessions start on that engine.
-        ModelMode::Generation => match &settings.llm_usage.chat {
-            ProviderRef::Cli { id } => crate::chat_engine::engine_model_id(*id),
-            _ => settings.generation_model.clone(),
-        },
+        ModelMode::Generation => settings.generation_model.clone(),
         ModelMode::Image => settings.image_model.clone(),
         ModelMode::Video => settings.video_model.clone(),
     })
@@ -3632,14 +3629,14 @@ mod tests {
             ProviderRef::Cli { id: CliKind::Codex }
         );
         assert!(saved.llm_cli_default_applied);
-        // New chat work and the generation picker start on it.
+        // Chat starts on the CLI; the text picker keeps its independent model.
         assert_eq!(
             crate::chat_engine::default_engine_of(&settings).model_id,
             "__clovy_cli_engine__:codex"
         );
         assert_eq!(
             selected_model_for_mode(&state, ModelMode::Generation).unwrap(),
-            "__clovy_cli_engine__:codex"
+            settings.generation_model
         );
         let _ = fs::remove_dir_all(state.path.parent().unwrap());
     }

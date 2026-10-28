@@ -5,7 +5,6 @@ import {
   PRIVATE_MODEL_DESCRIPTION,
   modelIsPrivate,
   modelAvailableForMode,
-  modelMissingProviderKey,
   modelPrivacyBadge,
   modelSupportsImageInput,
 } from "../lib/model-privacy";
@@ -77,36 +76,14 @@ describe("private catalog filter", () => {
 });
 
 describe("model mode availability", () => {
-  it("keeps Clovy Auto available without pretending it is a concrete tool model", () => {
+  it("excludes the retired Auto router", () => {
     expect(
       modelAvailableForMode("generation", {
         id: "open-software/auto",
         provider: "june",
         capabilities: [],
       }),
-    ).toBe(true);
-  });
-});
-
-describe("models that need the user's own provider key", () => {
-  const noKeys = { groq: false, openrouter: false, fal: false, tavily: false };
-
-  it("asks for the provider key when Clovy has no service key and the user saved none", () => {
-    const row = { provider: "groq", serviceAvailable: false };
-    expect(modelMissingProviderKey(row, noKeys)).toBe("groq");
-    expect(modelMissingProviderKey(row, { ...noKeys, groq: true })).toBe(undefined);
-  });
-
-  it("never blocks a row Clovy can serve, or one from an older API without the flag", () => {
-    expect(
-      modelMissingProviderKey({ provider: "openrouter", serviceAvailable: true }, noKeys),
-    ).toBe(undefined);
-    expect(modelMissingProviderKey({ provider: "openrouter" }, noKeys)).toBe(undefined);
-  });
-
-  it("only asks for the key of the row's own provider", () => {
-    const row = { provider: "openrouter", serviceAvailable: false };
-    expect(modelMissingProviderKey(row, { ...noKeys, groq: true, fal: true })).toBe("openrouter");
+    ).toBe(false);
   });
 });
 

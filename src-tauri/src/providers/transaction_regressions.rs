@@ -259,69 +259,28 @@ fn f2_rejected_settings_candidate_is_never_published_or_saved() {
 }
 
 #[tokio::test]
-async fn f3_native_media_catalog_preserves_remote_and_unknown_availability() {
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+async fn f3_native_media_catalog_uses_curated_models_without_a_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = ProviderSettingsState {
+        path: directory.path().join("settings.json"),
+        settings: Mutex::new(default_settings()),
     };
-    const CHILD: &str = "CLOVY_TEST_MEDIA_CATALOG_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = ProviderSettingsState {
-            path: directory.path().join("settings.json"),
-            settings: Mutex::new(default_settings()),
-        };
-        for availability in [Some(false), Some(true), None] {
-            for mode in [ModelMode::Image, ModelMode::Video] {
-                let response = list_provider_models_impl(&state, ProviderModelsRequest { mode })
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    response.models.len(),
-                    1,
-                    "media request must reach the live catalog"
-                );
-                assert_eq!(response.models[0].service_available, availability);
-                assert_eq!(response.models[0].provider, "fal");
-                assert_eq!(response.model_type, mode.api_type());
-            }
-        }
-        return;
+    for (mode, expected) in [
+        (ModelMode::Image, KNOWN_IMAGE_MODELS),
+        (ModelMode::Video, KNOWN_VIDEO_MODELS),
+    ] {
+        let response = list_provider_models_impl(&state, ProviderModelsRequest { mode })
+            .await
+            .unwrap();
+        assert_eq!(response.models.len(), expected.len());
+        assert_eq!(response.model_type, mode.api_type());
+        assert!(response.models.iter().all(|model| {
+            model.provider == "fal"
+                && model.service_available.is_none()
+                && expected.contains(&model.id.as_str())
+        }));
+        assert!(expected.contains(&response.selected_model.as_str()));
     }
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        for availability in [Some(false), Some(true), None] {
-            for mode in ["image", "video"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = vec![0; 4096];
-                let read = socket.read(&mut request).await.unwrap();
-                let head = String::from_utf8_lossy(&request[..read]);
-                assert!(head.starts_with(&format!("GET /v1/models?type={mode} ")));
-                let mut row = serde_json::json!({"provider":"fal","id":"fixture-media","name":"Fixture media","modelType":mode,"description":null,"privacy":null,"pricing":null,"contextTokens":null,"traits":[],"capabilities":[],"priceUnit":mode,"priceDescription":""});
-                if let Some(available) = availability {
-                    row["serviceAvailable"] = available.into();
-                }
-                let payload = serde_json::json!({"success":true,"data":[row]}).to_string();
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len());
-                socket.write_all(response.as_bytes()).await.unwrap();
-            }
-        }
-    });
-    let output = tokio::task::spawn_blocking(move || std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "providers::transaction_regressions::f3_native_media_catalog_preserves_remote_and_unknown_availability", "--nocapture"])
-        .env(CHILD, "1").env("CLOVY_API_URL", format!("http://{address}"))
-        .output().unwrap()).await.unwrap();
-    if !output.status.success() {
-        server.abort();
-    }
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    server.await.unwrap();
 }
 
 fn isolated_test(name: &str) -> bool {

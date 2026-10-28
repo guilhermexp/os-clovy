@@ -8,7 +8,7 @@ import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
 import { IconMoonStar } from "central-icons/IconMoonStar";
 import { IconSun } from "central-icons/IconSun";
 import { IconTelevision } from "central-icons/IconTelevision";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import {
   INTERFACE_LOCALE_OPTIONS,
@@ -34,7 +34,6 @@ import {
   setDictationShortcut,
   setImageSafeMode,
   setLiveTranscription,
-  setCostQuality,
   setProviderApiKey,
   setProviderModel,
   unpackBundledExtension,
@@ -52,7 +51,6 @@ import type {
   DictationShortcutSetting,
   BuiltinProvider,
   FolderDto,
-  ProviderApiKeysConfigured,
   ProviderModelDto,
   ProviderModelMode,
   ProviderModelSettingsDto,
@@ -90,25 +88,15 @@ import {
 } from "../../lib/platform";
 import { systemAudioAvailability } from "../../lib/source-readiness";
 import { parseDictationHelperEvent } from "../../lib/dictation-events";
-import {
-  dispatchProviderModelSettingsChanged,
-  modelAvailableForMode,
-} from "../../lib/model-privacy";
-import { localGenerationOptionId, withLocalGenerationOption } from "../../lib/local-generation";
+import { dispatchProviderModelSettingsChanged } from "../../lib/model-privacy";
+import type { LlmProvidersDto } from "../../lib/llm-providers";
 import { LlmProvidersSection } from "./LlmProvidersSection";
 import { ProviderLogo } from "./ProviderLogo";
-import { AUTO_MODEL_ID, modelOptions, selectedModel } from "./ModelPickerDialog";
-import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { modelOptions, selectedModel } from "./ModelPickerDialog";
+import { DEFAULT_GENERATION_SUGGESTION_ID } from "../../lib/suggested-models";
 import {
-  DEFAULT_GENERATION_SUGGESTION_ID,
-  suggestedModelsForMode,
-} from "../../lib/suggested-models";
-import {
-  AUTO_PREFERENCE_VALUES,
-  autoPreferenceFromCostQuality,
   ModelPickerCardContent,
   ModelPickerPopover,
-  type AutoPreference,
   type ModelPickerFlyout,
 } from "./ModelPickerPopover";
 import { DEFAULT_IMAGE_MODEL, imageModelCatalog } from "../../lib/image-models";
@@ -203,17 +191,6 @@ function dateFormatOptions(t: TFunction) {
     { value: "month-first", label: t("settings.dateFormat.monthFirst") },
     { value: "day-first", label: t("settings.dateFormat.dayFirst") },
   ] satisfies { value: DateFormatPreference; label: string }[];
-}
-
-function autoPreferenceOptions(t: TFunction): readonly {
-  value: AutoPreference;
-  label: ReactNode;
-}[] {
-  return [
-    { value: "cost", label: t("settings.autoPreference.cost") },
-    { value: "balanced", label: t("settings.autoPreference.balanced") },
-    { value: "quality", label: t("settings.autoPreference.quality") },
-  ];
 }
 
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
@@ -460,9 +437,6 @@ export function AppSettings({
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
   const modelPickerPopoverRef = useRef<HTMLDivElement>(null);
   const modelPickerSearchRef = useRef<HTMLInputElement>(null);
-  const costQualitySaveChainRef = useRef<Promise<void>>(Promise.resolve());
-  const latestCostQualitySaveRef = useRef(0);
-  const confirmedCostQualityRef = useRef(DEFAULT_PROVIDER_MODELS.costQuality);
   const [providerApiKeyDrafts, setProviderApiKeyDrafts] = useState<Record<BuiltinProvider, string>>(
     {
       groq: "",
@@ -479,8 +453,8 @@ export function AppSettings({
     fal: undefined,
     tavily: undefined,
   });
-  const [openRouterKeyAutoBillingChoiceOpen, setOpenRouterKeyAutoBillingChoiceOpen] =
-    useState(false);
+  const [notesProviders, setNotesProviders] = useState<LlmProvidersDto | null>(null);
+  const [generationCatalogFailed, setGenerationCatalogFailed] = useState(false);
   const [showMoreVoiceOptions, setShowMoreVoiceOptions] = useState(false);
   const [showMoreTextOptions, setShowMoreTextOptions] = useState(false);
   const [showMoreImageOptions, setShowMoreImageOptions] = useState(false);
@@ -591,7 +565,6 @@ export function AppSettings({
         // Merge over defaults so a settings payload that predates a field
         // (e.g. imageModel from an older backend) still has every model set.
         const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
-        confirmedCostQualityRef.current = modelSnapshot.settings.costQuality;
         setProviderSettings(modelSnapshot.settings);
         setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
         providerSettingsProfileRef.current = currentDataPartitionLabel;
@@ -780,11 +753,13 @@ export function AppSettings({
       const response = await listProviderModels(mode);
       if (request !== providerCatalogRequests.current[mode]) return;
       setProviderModels((models) => ({ ...models, [mode]: response.models }));
+      if (mode === "generation") setGenerationCatalogFailed(false);
     } catch (error) {
       if (request !== providerCatalogRequests.current[mode]) return;
       // A stale successful fetch must not survive a failed refresh.
       setProviderModels((models) => ({ ...models, [mode]: [] }));
-      setStatus(messageFromError(error));
+      if (mode === "generation") setGenerationCatalogFailed(true);
+      else setStatus(messageFromError(error));
     }
   }
 
@@ -1048,70 +1023,15 @@ export function AppSettings({
     }
   }
 
-  function saveCostQuality(value: number) {
-    const version = ++latestCostQualitySaveRef.current;
-    const save = costQualitySaveChainRef.current.then(() => setCostQuality(value));
-    costQualitySaveChainRef.current = save.then(
-      () => undefined,
-      () => undefined,
-    );
-    void save.then(
-      (next) => {
-        confirmedCostQualityRef.current = next.costQuality;
-        if (version !== latestCostQualitySaveRef.current) return;
-        setProviderSettings((current) => ({
-          ...current,
-          costQuality: next.costQuality,
-        }));
-        setStatus(translate("settings.autoPreference.updated"));
-      },
-      (error) => {
-        if (version !== latestCostQualitySaveRef.current) return;
-        setProviderSettings((current) => ({
-          ...current,
-          costQuality: confirmedCostQualityRef.current,
-        }));
-        setStatus(messageFromError(error));
-      },
-    );
-  }
-
   function closeModelPicker() {
     setPickerMode(undefined);
     setModelPickerFlyout(null);
     setModelSearch("");
   }
 
-  // Optimistic apply + persisted save for the Models row's segmented Auto
-  // preference control.
-  function applyCostQuality(costQuality: number) {
-    setProviderSettings((current) => ({ ...current, costQuality }));
-    saveCostQuality(costQuality);
-  }
-
-  function selectModelFromPicker(
-    mode: ProviderModelMode,
-    modelId: string,
-    costQuality?: number,
-    options?: { keepOpen?: boolean },
-  ) {
-    // Named profiles show their own models read-only; a pick is a no-op.
-    if (showingPartitionModels) {
-      closeModelPicker();
-      return;
-    }
-    const picked = modelOptionsForMode(mode).find((model) => model.id === modelId);
-    if (mode === "generation" && costQuality !== undefined) {
-      applyCostQuality(costQuality);
-    }
-    // The local option is the endpoint already serving chat; the provider is
-    // switched in the Providers section, so picking it changes nothing.
-    if (!(mode === "generation" && picked?.provider === "local")) {
-      void selectProviderModel(mode, modelId);
-    }
-    // The Auto toggle switches models mid-flow, so it asks to keep the picker
-    // open; a row pick is a final choice and closes it.
-    if (!options?.keepOpen) closeModelPicker();
+  function selectModelFromPicker(mode: ProviderModelMode, modelId: string) {
+    if (!showingPartitionModels) void selectProviderModel(mode, modelId);
+    closeModelPicker();
   }
 
   async function saveProviderApiKey(provider: BuiltinProvider) {
@@ -1123,6 +1043,8 @@ export function AppSettings({
     try {
       const next = await setProviderApiKey(provider, apiKey);
       setProviderSettings(next);
+      setEffectiveProviderSettings(next);
+      if (provider === "openrouter") void requestProviderModels("generation");
       void requestProviderModels("image");
       void requestProviderModels("video");
       setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
@@ -1130,9 +1052,6 @@ export function AppSettings({
       const providerName = translate(`settings.providerKeys.${provider}.name`);
       setStatus(translate("settings.providerKeys.saved", { provider: providerName }));
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId: next.generationModel });
-      if (provider === "openrouter" && next.generationModel === AUTO_MODEL_ID) {
-        setOpenRouterKeyAutoBillingChoiceOpen(true);
-      }
     } catch (error) {
       const code = errorCode(error);
       const message = messageFromError(error);
@@ -1147,6 +1066,8 @@ export function AppSettings({
     try {
       const next = await clearProviderApiKey(provider);
       setProviderSettings(next);
+      setEffectiveProviderSettings(next);
+      if (provider === "openrouter") void requestProviderModels("generation");
       void requestProviderModels("image");
       void requestProviderModels("video");
       setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
@@ -1223,40 +1144,34 @@ export function AppSettings({
     providerModels.transcription,
     displayProviderSettings.transcriptionModel,
   );
-  const localModelEnabled = providerSettings.generationProvider === "local";
-  const generationCatalog = useMemo(
-    () => withLocalGenerationOption(providerModels.generation, providerSettings.localGeneration),
-    [
-      providerModels.generation,
-      providerSettings.localGeneration.baseUrl,
-      providerSettings.localGeneration.modelId,
-    ],
+  const generationOptions = modelOptions(
+    providerModels.generation,
+    modelValueForMode("generation"),
   );
-  // Pass the prefixed local id (when local is enabled) so it matches the
-  // catalog's local option. Passing the raw generationModel let modelOptions
-  // prepend a bare duplicate entry that persisted the local id as the remote
-  // model when clicked.
-  const generationOptions = modelOptions(generationCatalog, modelValueForMode("generation"));
-  // Where the billing-choice dialog lands when the user opts out of Auto to
-  // use their OpenRouter key: the leading suggested pick with provider openrouter,
-  // else the first openrouter catalog model, drawn from the same selectable list as the model picker so
-  // the dialog can never persist a model the picker would exclude (the candidate
-  // default stays the last resort for an empty catalog).
-  const selectableGenerationOptions = generationOptions.filter((option) =>
-    modelAvailableForMode("generation", option),
-  );
-  const openRouterKeySwitchTarget =
-    suggestedModelsForMode("generation", selectableGenerationOptions).find(
-      (item) => item.model.provider === "openrouter" && item.model.id !== AUTO_MODEL_ID,
-    )?.model ??
-    selectableGenerationOptions.find(
-      (option) => option.provider === "openrouter" && option.id !== AUTO_MODEL_ID,
-    );
+  const notesProvider = notesProviders?.usage.notes;
+  const cliNames: Record<string, string> = {
+    claude: "Claude Code",
+    codex: "Codex",
+    pi: "Pi",
+    agy: "Antigravity",
+    "cursor-agent": "Cursor Agent",
+    copilot: "GitHub Copilot",
+  };
+  const notesEngineName =
+    notesProvider?.kind === "cli"
+      ? (cliNames[notesProvider.id] ?? notesProvider.id)
+      : notesProvider?.kind === "endpoint"
+        ? (notesProviders?.endpoints.find((endpoint) => endpoint.id === notesProvider.id)?.name ??
+          notesProvider.id)
+        : undefined;
+  const textModelDescription = notesEngineName
+    ? t("settings.models.textOtherEngineDescription", { engine: notesEngineName })
+    : t("settings.models.textDescription");
   const imageOptions = IMAGE_GENERATION_ENABLED
-    ? modelOptions(imageModelCatalog(providerModels.image), displayProviderSettings.imageModel)
+    ? modelOptions(imageModelCatalog(), displayProviderSettings.imageModel)
     : [];
   const videoOptions = VIDEO_GENERATION_ENABLED
-    ? modelOptions(videoModelCatalog(providerModels.video), displayProviderSettings.videoModel)
+    ? modelOptions(videoModelCatalog(), displayProviderSettings.videoModel)
     : [];
 
   useEffect(() => {
@@ -1340,9 +1255,6 @@ export function AppSettings({
   }
 
   function globalGenerationModelValue() {
-    if (localModelEnabled && providerSettings.localGeneration.modelId.trim()) {
-      return localGenerationOptionId(providerSettings.localGeneration.modelId);
-    }
     return providerSettings.generationModel;
   }
 
@@ -1887,7 +1799,6 @@ export function AppSettings({
                     description={t("settings.models.transcriptionDescription")}
                     value={modelValueForMode("transcription")}
                     options={transcriptionOptions}
-                    providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                     open={pickerMode === "transcription"}
                     summarySuppressed={pickerMode !== undefined}
                     flyout={modelPickerFlyout}
@@ -1971,13 +1882,12 @@ export function AppSettings({
                 <div className="settings-rows">
                   <ModelRow
                     mode="generation"
-                    beforeDivider={providerSettings.generationModel !== "open-software/auto"}
                     title={t("settings.models.text")}
-                    description={t("settings.models.textDescription")}
+                    description={textModelDescription}
+                    catalogError={generationCatalogFailed}
+                    onRetry={() => openModelPicker("generation")}
                     value={modelValueForMode("generation")}
                     options={generationOptions}
-                    costQuality={providerSettings.costQuality}
-                    providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                     open={pickerMode === "generation"}
                     summarySuppressed={pickerMode !== undefined}
                     flyout={modelPickerFlyout}
@@ -1992,39 +1902,9 @@ export function AppSettings({
                     }
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
-                    onSelect={(modelId, costQuality, options) =>
-                      selectModelFromPicker("generation", modelId, costQuality, options)
-                    }
-                    onCostQualityChange={applyCostQuality}
+                    onSelect={(modelId) => selectModelFromPicker("generation", modelId)}
                     readOnly={showingPartitionModels}
                   />
-                  {providerSettings.generationModel === "open-software/auto" ? (
-                    <div className="settings-row settings-row-before-divider">
-                      <div className="settings-row-info">
-                        <span className="settings-row-title">
-                          {t("settings.autoPreference.title")}
-                        </span>
-                        <span className="settings-row-description">
-                          {t("settings.autoPreference.description")}
-                        </span>
-                        {providerSettings.providerApiKeysConfigured.openrouter ? (
-                          <span className="settings-row-description settings-row-substatus">
-                            {t("settings.autoPreference.openRouterNote")}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="settings-row-control">
-                        <SegmentedControl<AutoPreference>
-                          aria-label={t("settings.autoPreference.title")}
-                          value={autoPreferenceFromCostQuality(providerSettings.costQuality)}
-                          options={autoPreferenceOptions(t)}
-                          onValueChange={(preference) =>
-                            applyCostQuality(AUTO_PREFERENCE_VALUES[preference])
-                          }
-                        />
-                      </div>
-                    </div>
-                  ) : null}
                   <div className="settings-row-divider" aria-hidden />
                   <button
                     type="button"
@@ -2077,6 +1957,7 @@ export function AppSettings({
             </section>
 
             <LlmProvidersSection
+              onProvidersChanged={setNotesProviders}
               onChatProviderChanged={async () => {
                 try {
                   const modelResponse = await providerModelSettings();
@@ -2091,30 +1972,6 @@ export function AppSettings({
                   // Provider settings refresh failed
                 }
               }}
-            />
-
-            <ConfirmDialog
-              open={openRouterKeyAutoBillingChoiceOpen}
-              onClose={() => setOpenRouterKeyAutoBillingChoiceOpen(false)}
-              onConfirm={async () => {
-                const switched = await selectProviderModel(
-                  "generation",
-                  openRouterKeySwitchTarget?.id ?? DEFAULT_GENERATION_SUGGESTION_ID,
-                );
-                // Keep the dialog open over a failed save so the choice is
-                // never silently dropped; the status line carries the error.
-                if (!switched) throw new Error("openrouter_model_switch_failed");
-              }}
-              title={t("settings.openRouter.autoDialogTitle")}
-              description={t("settings.openRouter.autoDialogDescription", {
-                model:
-                  openRouterKeySwitchTarget?.name ?? t("settings.openRouter.anOpenRouterModel"),
-              })}
-              confirmLabel={t("settings.openRouter.useModel", {
-                model:
-                  openRouterKeySwitchTarget?.name ?? t("settings.openRouter.anOpenRouterModel"),
-              })}
-              cancelLabel={t("settings.openRouter.keepAuto")}
             />
 
             {IMAGE_GENERATION_ENABLED || VIDEO_GENERATION_ENABLED ? (
@@ -2144,7 +2001,6 @@ export function AppSettings({
                         description={t("settings.models.imageDescription")}
                         value={modelValueForMode("image")}
                         options={imageOptions}
-                        providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                         open={pickerMode === "image"}
                         summarySuppressed={pickerMode !== undefined}
                         flyout={modelPickerFlyout}
@@ -2169,7 +2025,6 @@ export function AppSettings({
                         description={t("settings.models.videoDescription")}
                         value={modelValueForMode("video")}
                         options={videoOptions}
-                        providerApiKeysConfigured={providerSettings.providerApiKeysConfigured}
                         open={pickerMode === "video"}
                         summarySuppressed={pickerMode !== undefined}
                         flyout={modelPickerFlyout}
@@ -2730,8 +2585,6 @@ function ModelRow({
   description,
   value,
   options,
-  costQuality,
-  providerApiKeysConfigured,
   open,
   flyout,
   search,
@@ -2742,9 +2595,10 @@ function ModelRow({
   onFlyoutChange,
   onSearchChange,
   onSelect,
-  onCostQualityChange,
   readOnly = false,
   summarySuppressed,
+  catalogError,
+  onRetry,
 }: {
   mode: ProviderModelMode;
   beforeDivider?: boolean;
@@ -2752,8 +2606,6 @@ function ModelRow({
   description: string;
   value: string;
   options: ProviderModelDto[];
-  costQuality?: number;
-  providerApiKeysConfigured?: ProviderApiKeysConfigured;
   open: boolean;
   flyout: ModelPickerFlyout;
   search: string;
@@ -2764,9 +2616,10 @@ function ModelRow({
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
   onSelect: (modelId: string, costQuality?: number, options?: { keepOpen?: boolean }) => void;
-  onCostQualityChange?: (value: number) => void;
   readOnly?: boolean;
   summarySuppressed?: boolean;
+  catalogError?: boolean;
+  onRetry?: () => void;
 }) {
   const t = useT();
   const model = selectedModel(options, value);
@@ -2780,6 +2633,14 @@ function ModelRow({
       <div className="settings-row-info">
         <h3 className="settings-row-title">{title}</h3>
         <p className="settings-row-description">{description}</p>
+        {catalogError ? (
+          <div role="status">
+            <p className="settings-row-description">{t("settings.models.catalogFailed")}</p>
+            <button type="button" className="btn btn-secondary" onClick={onRetry}>
+              {t("settings.models.retryCatalog")}
+            </button>
+          </div>
+        ) : null}
       </div>
       <div className="settings-row-control settings-model-control">
         <HoverTip
@@ -2800,11 +2661,7 @@ function ModelRow({
             aria-expanded={readOnly ? false : open}
             disabled={readOnly}
           >
-            <span
-              className="model-summary-logo"
-              data-brand={model.id === AUTO_MODEL_ID ? "clovy" : undefined}
-              aria-hidden
-            >
+            <span className="model-summary-logo" aria-hidden>
               <ProviderLogo provider={model.provider} id={model.id} name={model.name} />
             </span>
             <span className="model-summary-name">{model.name}</span>
@@ -2817,8 +2674,6 @@ function ModelRow({
             flyout={flyout}
             model={model}
             options={options}
-            costQuality={costQuality}
-            providerApiKeysConfigured={providerApiKeysConfigured}
             search={search}
             popoverRef={popoverRef}
             searchRef={searchRef}
@@ -2828,8 +2683,6 @@ function ModelRow({
             onFlyoutChange={onFlyoutChange}
             onSearchChange={onSearchChange}
             onSelect={onSelect}
-            onCostQualityChange={onCostQualityChange}
-            showAutoPreference={false}
           />
         ) : null}
       </div>

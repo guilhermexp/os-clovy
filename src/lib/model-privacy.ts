@@ -1,11 +1,6 @@
 import { type MessageKey, t } from "../i18n/translate";
 const AUTO_MODEL_ID = "open-software/auto";
-import type {
-  BuiltinProvider,
-  ProviderApiKeysConfigured,
-  ProviderModelDto,
-  ProviderModelMode,
-} from "./tauri";
+import type { BuiltinProvider, ProviderModelDto, ProviderModelMode } from "./tauri";
 
 export type ModelPrivacyMode = "e2ee" | "private" | "anonymous";
 
@@ -74,17 +69,10 @@ export function modelAvailableForMode(
   mode: ProviderModelMode,
   model: Partial<Pick<ProviderModelDto, "id" | "capabilities" | "provider">>,
 ) {
-  // Auto is Clovy's first-party router, not a concrete provider model. Its
-  // catalog row therefore does not need to duplicate every capability of the
-  // concrete model selected at request time.
-  if (mode === "generation" && model.id === AUTO_MODEL_ID) return true;
-  if (mode === "generation" && model.provider && !modelSupportsTools(model)) {
-    return false;
-  }
+  // Text models generate notes; they do not need to call tools.
+  if (mode === "generation" && model.id === AUTO_MODEL_ID) return false;
   return true;
 }
-
-const BUILTIN_PROVIDERS: readonly BuiltinProvider[] = ["groq", "openrouter", "fal", "tavily"];
 
 /** Interface-language display name of each provider a user can save a key for. */
 export const BUILTIN_PROVIDER_NAME_KEYS: Record<BuiltinProvider, MessageKey> = {
@@ -93,28 +81,6 @@ export const BUILTIN_PROVIDER_NAME_KEYS: Record<BuiltinProvider, MessageKey> = {
   fal: "settings.providerKeys.fal.name",
   tavily: "settings.providerKeys.tavily.name",
 };
-
-/** The provider whose own key a catalog row needs before it can run: Clovy
- * holds no service key for it (`serviceAvailable: false`) and the user saved
- * none. `undefined` means no known missing key; media callers also check
- * `modelProviderAvailabilityUnknown`. */
-export function modelMissingProviderKey(
-  model: Pick<ProviderModelDto, "provider" | "serviceAvailable">,
-  keys: ProviderApiKeysConfigured,
-): BuiltinProvider | undefined {
-  if (model.serviceAvailable !== false) return undefined;
-  const provider = BUILTIN_PROVIDERS.find((candidate) => candidate === model.provider);
-  return provider && !keys[provider] ? provider : undefined;
-}
-
-/** Unknown fal service funding must not be presented as available. A saved
- * fal key makes service funding irrelevant, including while offline. */
-export function modelProviderAvailabilityUnknown(
-  model: Pick<ProviderModelDto, "provider" | "serviceAvailable">,
-  keys?: ProviderApiKeysConfigured,
-): boolean {
-  return model.provider === "fal" && model.serviceAvailable == null && !keys?.fal;
-}
 
 /** Whether the model can read image input (vision). Mirrors
  * `modelSupportsTools`: key off the authoritative capability flag on

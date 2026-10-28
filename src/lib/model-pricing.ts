@@ -2,6 +2,8 @@ import { formatNumber, isEnglishLocale, t } from "../i18n/translate";
 import type { ProviderModelDto } from "./tauri";
 
 export function pricingLabel(model: ProviderModelDto) {
+  const tokenPrices = tokenPricingLabels(model);
+  if (tokenPrices) return t("lib.modelPricing.perMillionTokens", tokenPrices);
   const pricing = model.pricing;
   if (pricing && typeof pricing === "object") {
     const display = (pricing as Record<string, unknown>).display;
@@ -39,6 +41,24 @@ export function pricingLabel(model: ProviderModelDto) {
     });
   }
   return undefined;
+}
+
+/** Direct provider prices, expressed in USD per million tokens. */
+export function tokenPricingLabels(
+  model: ProviderModelDto,
+): { input: string; output: string } | undefined {
+  const pricing = model.pricing;
+  if (
+    !pricing ||
+    typeof pricing !== "object" ||
+    !("unit" in pricing) ||
+    pricing.unit !== "per_million_tokens"
+  )
+    return;
+  const input = priceForPath(pricing, ["input", "usd"]);
+  const output = priceForPath(pricing, ["output", "usd"]);
+  if (input === undefined || output === undefined) return;
+  return { input: usd(formatUsd(input)), output: usd(formatUsd(output)) };
 }
 
 function priceForPath(value: unknown, path: string[]) {

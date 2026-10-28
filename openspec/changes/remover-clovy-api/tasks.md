@@ -24,8 +24,8 @@ Frontend: 103 testes focados e 93 de HUD/i18n passaram; typecheck e Biome dos ar
 
 ## 3. Catálogo e seletor de texto
 
-- [ ] 3.1 `list_provider_models(Generation)` vindo do OpenRouter `/models` (com mapeamento, cache e tempo limite); listas curadas para transcrição, imagem e vídeo; `set_provider_model` sem efeito no chat. Verificar: testes Rust de mapeamento, falha e chat preservado.
-- [ ] 3.2 Frontend:
+- [x] 3.1 `list_provider_models(Generation)` vindo do OpenRouter `/models` (com mapeamento, cache e tempo limite); listas curadas para transcrição, imagem e vídeo; `set_provider_model` sem efeito no chat. Verificar: testes Rust de mapeamento, falha e chat preservado.
+- [x] 3.2 Frontend:
   - sai a exigência de ferramentas no modo texto;
   - recarga após salvar ou remover a chave OpenRouter;
   - aviso de falha com nova tentativa;
@@ -33,6 +33,15 @@ Frontend: 103 testes focados e 93 de HUD/i18n passaram; typecheck e Biome dos ar
   - saem Auto e a opção "Clovy" (que vira "OpenRouter") de `LlmProvidersSection`, `ChatEnginePicker`, `ModelPickerDialog` e `chat-engine.ts`.
 
   Verificar: testes de componente e `i18n-catalog.test.ts`.
+
+
+Evidência do grupo 3 (2026-10-28): catálogo direto em `providers/catalog.rs`, com saída textual sem exigência de ferramentas, preço USD por milhão de tokens, cache de 10 minutos e prazo total de 10 segundos. A chave só segue para a OpenRouter, redirecionamentos ficam desligados e o corpo é limitado a 8 MiB. Salvar/remover a chave invalida o cache; o modelo escolhido não altera o motor de chat nem de Notas. Transcrição, imagem e vídeo usam listas locais curadas, visíveis também sem chave.
+
+TDD: cinco testes de catálogo falharam antes da implementação (`group3-catalog-red.log`); a seleção independente também falhou em `group3-selection-group4-fal-red.log`. Revisão por outro agente encontrou espera no mutex fora do prazo: `group3-deadline-red.log` reproduziu uma falha; o prazo agora inclui essa espera. GREEN final: 71 testes de provedores (`group3-catalog-green-final.log`). A suíte Rust completa anterior à correção estreita do prazo passou com 2149 testes/0 falhas/22 ignorados (`group3-rust-all.log`); os alvos afetados foram repetidos depois da correção. Clippy em todos os alvos e fmt registrados em `group3-clippy-final.log` e `group3-fmt.log`.
+
+Frontend: RED do catálogo/preço e recarga, GREEN de 77 testes/12 arquivos (`group3-frontend-green-final-3.log`) e suíte completa de 1849/1849 (`group3-frontend-all.log`). Na integração, as regras antigas escondiam mídia sem disponibilidade do servidor: seis RED e 43 GREEN confirmaram listas visíveis, falha de atualização e seleção persistida (`group3-media-red.log`, `group3-media-green.log`). Typecheck/Biome dos arquivos alterados passaram, Impeccable `[]`. `i18n-catalog.test.ts` foi criado e passou. `make verify` continua limitado pelos mesmos dois erros de configuração preexistentes (`group3-make-verify.log`).
+
+O catálogo público foi consultado anonimamente, sem inferência: 464 modelos com saída textual, incluindo 67 sem ferramentas (`openrouter-public-models.json`). Isso não é a prova nativa do seletor, que segue em 7.2. O `trail check` repetiu os mesmos sete conflitos lexicais já refutados acima, com o mesmo limite de 400 KB (`group3-trail-check.log`).
 
 ## 4. Mídia direto na fal
 

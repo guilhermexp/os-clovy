@@ -9,7 +9,7 @@ import {
   modelPrivacyFlags,
 } from "../../lib/model-privacy";
 import { formatNumber, isEnglishLocale, t as translate, useT } from "../../i18n";
-import { formatCreditsAsUsd, pricingLabel } from "../../lib/model-pricing";
+import { pricingLabel, tokenPricingLabels } from "../../lib/model-pricing";
 import { suggestedModelsForMode } from "../../lib/suggested-models";
 import type { ProviderModelMode, ProviderModelDto } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
@@ -25,10 +25,6 @@ type ModelPickerEntry = {
   reason?: string;
   costQuality?: number;
 };
-
-function withClovyModelName(model: ProviderModelDto): ProviderModelDto {
-  return model.id === AUTO_MODEL_ID && model.name !== "Auto" ? { ...model, name: "Auto" } : model;
-}
 
 // Model catalog UI shared between Settings (the Models tab rows) and the
 // agent workspace (the session bar's model pill): the picker dialog itself
@@ -260,7 +256,7 @@ export function ModelPickerDialog({
 }
 
 export function selectedModel(options: ProviderModelDto[], value: string) {
-  return withClovyModelName(
+  return (
     options.find((model) => model.id === value) ?? {
       provider: "",
       id: value,
@@ -268,7 +264,7 @@ export function selectedModel(options: ProviderModelDto[], value: string) {
       modelType: "",
       traits: [],
       capabilities: [],
-    },
+    }
   );
 }
 
@@ -301,32 +297,15 @@ function trimNumber(value: number) {
 // The hover card's spec list: the pricing/context facts split into label/value
 // pairs so the card renders a compact spec table instead of a prose sentence.
 // Falls back to a single "Pricing" row when there is no clean input/output
-// credit split.
+// USD token-price split.
 export function modelSpecEntries(model: ProviderModelDto): { label: string; value: string }[] {
-  // Auto is a routing preference, not a concrete model. Its eventual model,
-  // price, and context window vary by request, so fixed catalog specs would be
-  // misleading even when the compatibility catalog provides placeholders.
-  if (model.id === "open-software/auto") return [];
-
   const entries: { label: string; value: string }[] = [];
-  // Use Clovy's billed credit price (with margin) for the input/output split.
-  // The raw `pricing.*.usd` on the DTO is upstream provider metadata the backend
-  // keeps for reference only — the user-facing price must come from the credit
-  // price (see clovy-api handlers/models.rs), so it is never shown as the price
-  // here. Anything without the credit split defers to `pricingLabel`, which
-  // resolves the price the same way the rest of the app does.
-  if (
-    model.priceUnit === "tokens" &&
-    typeof model.inputCreditsPerMillionTokens === "number" &&
-    typeof model.outputCreditsPerMillionTokens === "number"
-  ) {
-    entries.push({
-      label: translate("settingsPanels.models.input"),
-      value: `${formatCreditsAsUsd(model.inputCreditsPerMillionTokens)} /1M`,
-    });
+  const prices = tokenPricingLabels(model);
+  if (prices) {
+    entries.push({ label: translate("settingsPanels.models.input"), value: `${prices.input} /1M` });
     entries.push({
       label: translate("settingsPanels.models.output"),
-      value: `${formatCreditsAsUsd(model.outputCreditsPerMillionTokens)} /1M`,
+      value: `${prices.output} /1M`,
     });
   } else {
     const price = pricingLabel(model);
@@ -350,19 +329,19 @@ export function modelSpecEntries(model: ProviderModelDto): { label: string; valu
 
 export function modelOptions(models: ProviderModelDto[], selectedModel: string) {
   const modelId = selectedModel.trim();
-  const namedModels = models.map(withClovyModelName);
-  if (!modelId || namedModels.some((model) => model.id === modelId)) {
+  const namedModels = models.filter((model) => model.id !== AUTO_MODEL_ID);
+  if (!modelId || modelId === AUTO_MODEL_ID || namedModels.some((model) => model.id === modelId)) {
     return namedModels;
   }
   return [
-    withClovyModelName({
+    {
       provider: "",
       id: modelId,
       name: modelId,
       modelType: "",
       traits: [],
       capabilities: [],
-    }),
+    },
     ...namedModels,
   ];
 }

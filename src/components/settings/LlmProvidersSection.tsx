@@ -31,6 +31,7 @@ import { RuntimeLogo } from "../brand/RuntimeLogo";
 
 export type LlmProvidersSectionProps = {
   onChatProviderChanged?: () => void;
+  onProvidersChanged?: (providers: LlmProvidersDto) => void;
 };
 
 type EndpointDraft = {
@@ -67,13 +68,19 @@ function formatLevel(level: StructuredOutputLevel | undefined, t: TFunction): st
   }
 }
 
-export function LlmProvidersSection({ onChatProviderChanged }: LlmProvidersSectionProps) {
+export function LlmProvidersSection({
+  onChatProviderChanged,
+  onProvidersChanged,
+}: LlmProvidersSectionProps) {
   const t = useT();
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string>();
   const [data, setData] = useState<LlmProvidersDto | null>(null);
   const [clis, setClis] = useState<LlmCliStatusDto[]>([]);
+  useEffect(() => {
+    if (data) onProvidersChanged?.(data);
+  }, [data, onProvidersChanged]);
   const [clisDetecting, setClisDetecting] = useState(false);
 
   // Per-usage errors (e.g. rejection when structured output is insufficient)
