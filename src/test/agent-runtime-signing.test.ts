@@ -13,6 +13,7 @@ describe("CLI-only desktop packaging", () => {
       "src-tauri/tauri.macos.conf.json",
       "src-tauri/tauri.windows.conf.json",
       "scripts/tauri-before-dev.mjs",
+      "scripts/build-macos-release.sh",
       "scripts/build-windows.ps1",
       "scripts/qualify-windows-build.ps1",
     ]) {

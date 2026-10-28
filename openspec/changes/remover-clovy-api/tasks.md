@@ -82,7 +82,9 @@ OpenSpec estrito passou (`group6-openspec-final.log`); tracker QA 4/4 passou (`g
 
 ## 7. Verificação integrada
 
-- [ ] 7.1 Gates: `pnpm check`, `pnpm typecheck`, `NODE_OPTIONS=--no-experimental-webstorage pnpm test`, `cargo fmt --manifest-path src-tauri/Cargo.toml --all --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings`, `pnpm test:rust` e `make verify`. Verificar: saída sem falhas novas.
+- [x] 7.1 Gates: `pnpm check`, `pnpm typecheck`, `NODE_OPTIONS=--no-experimental-webstorage pnpm test`, `cargo fmt --manifest-path src-tauri/Cargo.toml --all --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings`, `pnpm test:rust` e `make verify`. Verificar: saída sem falhas novas.
+  Verificado em 2026-10-28: `make -k verify` executou todos os alvos, com frontend 196 arquivos/1834 testes, Rust desktop+companion 2146 passados/0 falhas/21 ignorados, typecheck, fmt, clippy e ambas as guardas aprovados. Exit 2 somente por `pnpm check` nos dois erros de formatação preexistentes `.mcp.json` e `opencode.json`, explicitamente fora do escopo pelo orquestrador. `make verify` sem `-k` confirma a mesma parada em `check`. Logs: `.tmp/verify/remover-clovy-api/final-make-verify-all.log`, `final-gates-summary.txt`, `group5-make-verify.log`. Não foi contornada a configuração dos checks, e esses arquivos não foram alterados.
+
 - [ ] 7.2 Prova no app de dev (identificador próprio), com um servidor falso escutando `127.0.0.1:8080` e registrando requisições. Roteiro:
   - ditado com e sem chave Groq;
   - gravação de nota com motor Claude Code e com motor OpenRouter;
@@ -97,3 +99,25 @@ OpenSpec estrito passou (`group6-openspec-final.log`); tracker QA 4/4 passou (`g
 
 - Arquivar esta change e `cli-substitui-agente-nativo` depois da revisão e atualizar o `AGENTS.md` do projeto.
 - O dono decide o destino de `replace-venice-with-groq-openrouter-fal-tavily`.
+
+### Prova nativa parcial e revisão, 2026-10-28
+
+Prova pós-corte em `.tmp/verify/remover-clovy-api/run-20261028-final/report.md`, app debug com identidade compilada `dev.g.clovy.apiproof1028` e perfil sintético novo. `lsof` confirmou somente bancos/socket do perfil próprio. Catálogo público, modelos sem tools, troca entre dois modelos Moondream preservando chat Claude e descrição do motor Notas foram observados. Ditado sem Groq mostrou a frase exigida. Claude/MCP completou clarificação e escrita aprovada; escrita negada não aparece no banco; cancelamento persistiu `cancelled`; `generate_image` sem fal retornou `fal_api_key_required`, sem asset/retry. Nenhum turno Codex ou chamada paga foi feito.
+
+O primeiro listener registrou dez GETs não atribuídos a `/props` e `/models` às 10:54; o log foi preservado e não representa zero global. Segundo listener em 8080, com atribuição de conexões habilitada, registrou **zero** durante repetição do ditado sem chave, catálogo/seleção, negação/cancelamento e erro fal. Ambos foram encerrados pelo run; app próprio também encerrado, perfil preservado e autostart do dono intacto. Áudio com chave/permissões, gravação e inferência OpenRouter/fal permanecem não provados. 7.2 continua aberta; prova pós-corte não reclassifica o MCP pré-corte que falhou em 3.2.
+
+Rodada1 de review-pair: `.tmp/verify/remover-clovy-api/review-pair/1/summary.md`, **exit 10**, sem permissão para commit final. OpenQodex incompleto (limite de tempo) e cargo-deny sem crate de outra plataforma no cache; CodeRabbit não recebeu o snapshot devido ao gate. O suposto segredo é uma literal sintética no teste de sanitização já existente na base e apagado nesta branch; SHA-256 e uso local foram conferidos sem expor o valor, e a allowlist exata suportada pelo reviewer está em `review-secret-allowlist.json`. Não há exceção ampla nem desligamento do scanner.
+
+Tratamento dos quatro achados: dois majors duplicam a dependência real do sidecar em `scripts/build-macos-release.sh`, sucessor do arquivo nomeado na tarefa4.1 (rename `95a60d3c`); removidos build SEA, packaging e smokes obsoletos, regressão RED/GREEN 11/11 e sintaxe bash válidas. Os minors em `.cursor/hooks.json:7` e `.trail/hook.cjs:143` pertencem às alterações do usuário de Graft para Trail, anteriores/separadas desta tarefa e fora do escopo autorizado; preservados e encaminhados ao dono, sem alegar que foram corrigidos. A segunda rodada deve usar saída nova e prazo maior; exit4/10 continua bloqueando o commit final.
+
+Rodada2: CodeRabbit recusou o diff completo com `too_many_files` (433 arquivos, limite150), sem achados e sem revisão concluída; mensagem em `.tmp/verify/remover-clovy-api/review-pair/2/coderabbit/stdout.ndjson`. Não foram usados créditos, plano pago nem escopo reduzido. O orquestrador precisa fornecer capacidade ou revisão em lotes com cobertura integral antes de um gate válido. OpenQodex continua nesta rodada; não há autorização para commit final com exit4/10.
+
+Rodada2 encerrada pelo run após confirmar a recusa não recuperável de tamanho do CodeRabbit: `.tmp/verify/remover-clovy-api/review-pair/2/summary.md`, **exit130**, OpenQodex interrompido e CodeRabbit `skip:too_many_files`. Gate de segredos limpo com a exceção exata verificada. Nenhum resultado dessa rodada é tratado como revisão concluída; não foi feito commit final. Opções concretas de desbloqueio/contrato de cobertura em `review-unblock.md`. Será necessária nova rodada em diretório vazio após decisão do orquestrador.
+
+### Decisão de fechamento do orquestrador, 2026-10-28
+
+"per-commit review because the full diff exceeds CodeRabbit's 150-file limit (2026-10-28)". O histórico não publicado será reescrito em commits de até140 arquivos alterados, com exclusões puras das árvores agent-runtime e clovy-api separadas, preservando a árvore final. Cada commit será revisado em worktree temporária detached fora deste checkout, com base no próprio pai, mesma allowlist exata e saída `review-pair/c-<shortsha>-<n>/`; a worktree será removida depois. Não se altera o harness nem se usam créditos. Exit4/10 bloqueia; achados de exit6 serão corrigidos em commit adicional revisado ou refutados com evidência aqui.
+
+O smoke3.2 foi aceito explicitamente com a prova Claude pós-corte e o relatório pré-corte existente; o retry foi encerrado sem lançamento e seus outputs próprios removidos. Fluxos positivos Groq/OpenRouter/fal permanecem declarados não provados, para o dono tratar separadamente, conforme decisão do orquestrador. O segundo listener de8080 com zero requisições permanece a prova aceita. A atribuição barata dos GETs iniciais está em `localhost-probe-binary-scan.json`; sem PID histórico não se afirma autoria.
+
+Atribuição barata concluída: no executável pós-corte a única ocorrência de `/props` é o nome de fonte `icu_properties-2.2.0/src/props.rs`, não uma rota; relay/shim/helpers não contêm a rota. `/models` tem usos legítimos de catálogo direto. Outra aplicação local é plausível, porém autoria não é provada sem o PID histórico. A janela zero do segundo listener é aceita pelo orquestrador. Scan/contexto nos arquivos de evidência acima.
