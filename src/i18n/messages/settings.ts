@@ -4,7 +4,7 @@ export default defineMessages({
   en: {
     "settings.appearance.title": "Appearance",
     "settings.appearance.blurb":
-      "Choose the language, theme, accent color, text size, and date format Clovy uses.",
+      "Choose the language, theme, background, accent color, text size, and date format Clovy uses.",
     "settings.interfaceLanguage.title": "Interface language",
     "settings.interfaceLanguage.description":
       "The language of Clovy's menus, buttons, and messages. Dictation and note transcription keep their own language setting.",
@@ -18,6 +18,16 @@ export default defineMessages({
     "settings.theme.systemAria": "Match system theme",
     "settings.theme.lightAria": "Use light theme",
     "settings.theme.darkAria": "Use dark theme",
+    "settings.background.title": "Background",
+    "settings.background.description": "The background in New session and Home.",
+    "settings.background.drift": "Drift",
+    "settings.background.none": "None",
+    "settings.background.image": "Image",
+    "settings.background.choose": "Choose image",
+    "settings.background.remove": "Remove",
+    "settings.background.missing": "Image unavailable. Choose another file.",
+    "settings.background.error":
+      "Could not use this image. Choose a readable PNG, JPEG or WebP up to 20 MB and 8192 pixels per side. Try reducing its resolution.",
     "settings.textSize.title": "Text size",
     "settings.textSize.description":
       "Make text across the app larger. Affects every label, note, and conversation.",
@@ -343,7 +353,7 @@ export default defineMessages({
   "pt-BR": {
     "settings.appearance.title": "Aparência",
     "settings.appearance.blurb":
-      "Escolha o idioma, o tema, a cor de destaque, o tamanho do texto e o formato de data do Clovy.",
+      "Escolha o idioma, o tema, o fundo, a cor de destaque, o tamanho do texto e o formato de data do Clovy.",
     "settings.interfaceLanguage.title": "Idioma da interface",
     "settings.interfaceLanguage.description":
       "O idioma dos menus, botões e mensagens do Clovy. Ditado e transcrição de notas mantêm a própria configuração de idioma.",
@@ -357,6 +367,16 @@ export default defineMessages({
     "settings.theme.systemAria": "Seguir o tema do sistema",
     "settings.theme.lightAria": "Usar tema claro",
     "settings.theme.darkAria": "Usar tema escuro",
+    "settings.background.title": "Fundo",
+    "settings.background.description": "O fundo da Nova sessão e do Início.",
+    "settings.background.drift": "Drift",
+    "settings.background.none": "Nenhum",
+    "settings.background.image": "Imagem",
+    "settings.background.choose": "Escolher imagem",
+    "settings.background.remove": "Remover",
+    "settings.background.missing": "Imagem indisponível. Escolha outro arquivo.",
+    "settings.background.error":
+      "Não foi possível usar esta imagem. Escolha um PNG, JPEG ou WebP legível de até 20 MB e 8192 pixels por lado. Tente reduzir a resolução.",
     "settings.textSize.title": "Tamanho do texto",
     "settings.textSize.description":
       "Aumente o texto em todo o app. Afeta todos os rótulos, notas e conversas.",

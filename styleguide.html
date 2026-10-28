@@ -13,7 +13,7 @@
 
   URL params:
     ?section=<id>            open a specific section (e.g. ?section=type)
-    ?theme=light|dark        force a theme (else os-clovy:theme / system)
+    ?theme=light|dark        force a theme (else os-clovy:theme / dark)
     ?brand=rose|clay|sage|ocean|plum
                              force a brand preset (else os-clovy:brand / sage)
 -->
@@ -27,6 +27,7 @@
       // override so a link can pick a theme). Keep the storage key in sync
       // with src/lib/theme.ts.
       (function () {
+        document.documentElement.setAttribute("data-theme", "dark");
         try {
           var stored =
             new URLSearchParams(location.search).get("theme") ||
@@ -34,9 +35,9 @@
           var resolved =
             stored === "light" || stored === "dark"
               ? stored
-              : window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
+              : stored === "system" && !window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "light"
+                : "dark";
           document.documentElement.setAttribute("data-theme", resolved);
         } catch (e) {}
       })();
