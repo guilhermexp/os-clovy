@@ -44,7 +44,9 @@ Revisão do `7bb9ae04` bloqueada (BLOCK) com quatro achados.
 - [x] 8.2 G3 GREEN (`c248fadf`): um pacer por conta Groq (impressão digital SHA-256) e um próprio da rota do Clovy API, escolhidos por requisição.
 - [x] 8.3 G1 GREEN (`c4307809`): `note_transcription_chunks` (migração 51) guarda cada pedaço pronto de um job dividido.
 - [x] 8.4 G4 GREEN (`3ce54680`): reivindicação atômica da pausa e revalidação ao pegar o lock.
-- [ ] 8.5 `make verify` numa worktree limpa, CI, report.
+- [x] 8.5 `make verify` numa worktree limpa, CI, report.
+
+> 8.5: `make verify` no `a5f6a766`: a primeira rodada caiu só em `llm::tests::llm_cli_timeout_kills_the_cli_and_its_children` (timeout de 500 ms com a máquina carregada, fora desta mudança; isolado passa 3/3); a segunda deu EXIT=0 (vitest 1867/1867, Rust 2022 + integração). CI run 40615043799 só com os vermelhos conhecidos (vitest `mcp-server-dev-runner`, clippy `dictation.rs:211`/`notion.rs`); o job do Windows passou inteiro.
 
 > Os RED dos quatro saíram num commit só porque os testes ficam no mesmo arquivo; os GREEN saíram um por achado, cada um fazendo passar só os seus testes. O teste do G1 usa o relógio do G2, então o G2 veio primeiro.
 
