@@ -15,7 +15,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc, LazyLock, Mutex,
     },
 };
@@ -26,6 +26,9 @@ struct NoteQueue {
     lock: Arc<AsyncMutex<()>>,
     /// Jobs queued or running for this note (1 = running, 2 = one waiting, …).
     pending: Arc<AtomicI64>,
+    /// Jobs on this note that have finished, for a queued job to see what
+    /// ran after it was enqueued.
+    completed: Arc<AtomicU64>,
 }
 
 static QUEUES: LazyLock<Mutex<HashMap<String, NoteQueue>>> =
@@ -37,6 +40,8 @@ pub struct ProcessingTicket {
     note_id: String,
     lock: Arc<AsyncMutex<()>>,
     pending: Arc<AtomicI64>,
+    completed: Arc<AtomicU64>,
+    completed_at_enqueue: u64,
     finished: AtomicBool,
 }
 
@@ -49,7 +54,9 @@ impl ProcessingTicket {
 
     /// Runs on this note that finished after this one was enqueued.
     pub fn runs_completed_since_enqueue(&self) -> u64 {
-        0
+        self.completed
+            .load(Ordering::SeqCst)
+            .saturating_sub(self.completed_at_enqueue)
     }
 
     /// Mark this job done: drop it from the pending count and prune the note's
@@ -59,6 +66,7 @@ impl ProcessingTicket {
             return;
         }
         let mut map = QUEUES.lock().expect("processing queue mutex poisoned");
+        self.completed.fetch_add(1, Ordering::SeqCst);
         let remaining = self.pending.fetch_sub(1, Ordering::SeqCst) - 1;
         if remaining <= 0 {
             // Only remove if the map still points at our queue (a concurrent
@@ -87,12 +95,15 @@ pub fn enqueue(note_id: &str) -> (ProcessingTicket, i64) {
     let queue = map.entry(note_id.to_string()).or_insert_with(|| NoteQueue {
         lock: Arc::new(AsyncMutex::new(())),
         pending: Arc::new(AtomicI64::new(0)),
+        completed: Arc::new(AtomicU64::new(0)),
     });
     let depth = queue.pending.fetch_add(1, Ordering::SeqCst) + 1;
     let ticket = ProcessingTicket {
         note_id: note_id.to_string(),
         lock: queue.lock.clone(),
         pending: queue.pending.clone(),
+        completed: queue.completed.clone(),
+        completed_at_enqueue: queue.completed.load(Ordering::SeqCst),
         finished: AtomicBool::new(false),
     };
     (ticket, depth)
@@ -120,22 +131,26 @@ pub enum RetryOrigin {
 /// Whether a retry run that just took the note's processing lock should
 /// still run.
 ///
-/// A run waits behind any earlier run on the same note. A manual retry first
-/// in line set the note to transcribing itself; behind another run it still
-/// runs only if that run left the note failed, so two retries never
-/// regenerate the note twice. A resume runs only on the note its claim left
-/// transcribing: if anything else ran first, the note no longer needs it.
+/// Checked under the lock for every run, whatever its queue depth: the
+/// order runs take the lock is not the order they were queued. A ready note
+/// is never processed again. When another run finished after this one was
+/// queued, a manual retry runs only on a note that run left failed, and a
+/// resume does not run at all; with nothing finished in between, the Retry
+/// of a failed note runs, and a resume runs on the note its claim left
+/// transcribing.
 pub fn queued_retry_should_run(
     origin: RetryOrigin,
     status: crate::domain::types::ProcessingStatus,
     runs_completed_since_enqueue: u64,
 ) -> bool {
     use crate::domain::types::ProcessingStatus;
+    if status == ProcessingStatus::Ready {
+        return false;
+    }
+    let nothing_ran_since = runs_completed_since_enqueue == 0;
     match origin {
-        RetryOrigin::Manual => {
-            runs_completed_since_enqueue == 0 || status == ProcessingStatus::Failed
-        }
-        RetryOrigin::Resume => status == ProcessingStatus::Transcribing,
+        RetryOrigin::Manual => nothing_ran_since || status == ProcessingStatus::Failed,
+        RetryOrigin::Resume => nothing_ran_since && status == ProcessingStatus::Transcribing,
     }
 }
 
