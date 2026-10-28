@@ -197,8 +197,18 @@ downmixed peak and sample count, and the second carries one global linear
 resampler position across chunks while applying gain and writing incrementally.
 Its working memory is fixed regardless of recording duration, and its global
 resampler position preserves the historical whole-buffer output byte for byte.
-The normalized WAV is then split into **≤30-second** chunks with rolling
-context.
+Same-source turns separated by at most 2.5 s coalesce up to **600 s**
+(`FINAL_TRANSCRIPTION_SPAN_MS`), never across the other Source's turn or a
+trimmed bleed span. With the user's Groq key, consecutive turns of one Source
+then go as **turn packs**: their normalized WAVs back to back, 0.5 s apart, up
+to 600 s (19.2 MB, under Groq's 25 MB cap) in one request with segment times,
+split back per turn; silence between turns is never sent. A WAV longer than
+600 s (a full-Source job, an over-long turn) splits into 600 s chunks that
+repeat the last **10 s** (`SPLIT_OVERLAP_MS`) at the start of the next one;
+the repeated words are dropped when the texts are joined. A session that
+already has turns transcribed in the 30 s layout of earlier builds keeps it,
+so a retry never sends a finished turn again. Pacing and the rate-limit pause
+are in `docs/llm-providers.md` (ADR-0070 addendum).
 
 ## Recovery
 

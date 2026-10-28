@@ -187,8 +187,22 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   per-source fallback, live preview) posts straight to Groq with the user's
   own Groq key, with the parameters Clovy API sends (`response_format=json`,
   canonical `audio.wav`/`audio.m4a` name, dictionary prompt, language, 25 MB
-  cap, one retry of a 408/429/5xx or transport failure; an empty transcript is
+  cap, one retry of a 408/5xx or transport failure; an empty transcript is
   `no_speech`), and through `/v1/notes/transcribe` without one (ADR-0070).
+  A Groq 429 carries its `retry-after` (else `x-ratelimit-reset-requests`) as
+  `details.retryAfterMs`; `send_direct` waits it out only up to 2 s. Final
+  transcription runs behind one process-wide pacer (`domain/processing.rs`
+  `RequestPacer`): 18 requests a minute and 7,200 s of billed audio an hour
+  (each request billed at least 10 s) across both Sources, every note and the
+  live preview. A 429 holds every caller and repeats the same request; a wait
+  over 90 s pauses the note with `transcription_rate_limited` and
+  `details.resumeAtMs`, the note says when it continues, and `commands.rs`
+  resumes it then while Clovy is open. With the key, consecutive speech
+  turns of one Source go as turn packs of up to 600 s through
+  `transcribe_saved_audio_timed` (`verbose_json`, segment times) and come
+  back per turn. The live preview takes a request only when one is free and
+  within 3,600 s of the hour's audio, otherwise it drops the chunk (ADR-0070
+  addendum).
   Without the key and without a reachable Clovy API, the note names the
   missing key (`groq_api_key_missing`, `openrouter_api_key_missing`) instead of
   the HTTP error.

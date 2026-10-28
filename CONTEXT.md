@@ -203,6 +203,13 @@ Detection is energy-based (RMS windows + noise floor), never diarization.
 _Avoid_: segment (that is a live-preview chunk), utterance, speaker (no
 speaker identity is inferred).
 
+**Turn pack** (OpenSpec: _pacote de turnos_):
+Consecutive Turns of one Source sent to Groq as one final-transcription
+request of up to 600 s, 0.5 s apart, and split back per Turn by the
+provider's segment times. Each Turn keeps its own durable job; only the
+direct route with the user's Groq key packs (ADR-0070 addendum).
+_Avoid_: batch, chunk (a chunk is a fixed split of one long audio file).
+
 **Speaker bleed (echo)**:
 System audio re-captured by the microphone after playing through the
 loudspeakers — "speaker" is the device, never a person; no speaker identity
