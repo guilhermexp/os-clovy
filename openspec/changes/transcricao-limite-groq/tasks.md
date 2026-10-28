@@ -58,7 +58,9 @@ A revisão 2 (`e1c11cef`) confirmou G1–G4 e deixou três P2.
 - [x] 9.1 H3 GREEN (`84267472`): uma rota por requisição (chave, modelo do run, pacer dessa chave) para o cache, o pacer e o transporte; a prévia também.
 - [x] 9.2 H1 GREEN (`7eac3914`): modelo na impressão digital da configuração (o padrão não muda a identidade antiga) e modelo e idioma na chave do pedaço.
 - [x] 9.3 H2 GREEN (`fc57dbb9`): a fila conta as rodadas concluídas por nota, e todo retry revalida sob o lock.
-- [ ] 9.4 `make verify` numa worktree limpa, CI, report.
+- [x] 9.4 `make verify` numa worktree limpa, CI, report.
+
+> 9.4: `make verify` no `a1ed1105`: EXIT=0 na primeira rodada (vitest 1867/1867, Rust 2026 + integração). CI run 40625442214 só com os vermelhos conhecidos (vitest `mcp-server-dev-runner`, clippy `dictation.rs:211`/`notion.rs`, clipboard `activity::windows`).
 
 > H3 veio antes de H1 porque a chave do pedaço usa o modelo da rota.
 
