@@ -2572,28 +2572,56 @@ impl RequestPacer {
     }
 }
 
-/// The one pacer of the process: Groq limits the account, not the note.
-static GROQ_TRANSCRIPTION_PACER: std::sync::LazyLock<Arc<RequestPacer>> =
-    std::sync::LazyLock::new(|| {
+/// Wall-clock milliseconds since the epoch, injectable for tests.
+pub(crate) type PacerClock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// Picks the pacer of the account a request goes to, when it starts.
+type PacerSelector = Arc<dyn Fn() -> Arc<RequestPacer> + Send + Sync>;
+
+/// A Groq key's identity for pacing: the first 8 bytes of its SHA-256, in
+/// hex. The key itself is never kept.
+pub(crate) fn key_fingerprint(key: &str) -> String {
+    Sha256::digest(key.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// One pacer per Groq account the user's keys reach: Groq limits the
+/// account, not the note, and a pause on one key never holds another.
+static GROQ_DIRECT_PACERS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, Arc<RequestPacer>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn groq_direct_pacer(fingerprint: &str) -> Arc<RequestPacer> {
+    let mut pacers = GROQ_DIRECT_PACERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(pacers.entry(fingerprint.to_string()).or_insert_with(|| {
         Arc::new(
             RequestPacer::new(GROQ_REQUESTS_PER_WINDOW, GROQ_REQUEST_WINDOW)
                 .with_audio_budget(GROQ_AUDIO_BUDGET, GROQ_AUDIO_WINDOW),
         )
-    });
-
-/// Wall-clock milliseconds since the epoch, injectable for tests.
-pub(crate) type PacerClock = Arc<dyn Fn() -> i64 + Send + Sync>;
-
-pub(crate) fn key_fingerprint(key: &str) -> String {
-    key.to_string()
+    }))
 }
 
-pub(crate) fn groq_direct_pacer(_fingerprint: &str) -> Arc<RequestPacer> {
-    Arc::clone(&GROQ_TRANSCRIPTION_PACER)
-}
+/// Clovy API's route without a user key: the service paces its own Groq
+/// account, so only a 429 it relays holds these requests.
+static CLOVY_API_PACER: std::sync::LazyLock<Arc<RequestPacer>> =
+    std::sync::LazyLock::new(|| Arc::new(RequestPacer::new(usize::MAX, GROQ_REQUEST_WINDOW)));
 
 pub(crate) fn clovy_api_pacer() -> Arc<RequestPacer> {
-    Arc::clone(&GROQ_TRANSCRIPTION_PACER)
+    Arc::clone(&CLOVY_API_PACER)
+}
+
+/// The pacer of the route a note transcription takes now: the saved Groq
+/// key's account, or Clovy API's route without a key.
+fn note_transcription_pacer() -> Arc<RequestPacer> {
+    match crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq) {
+        Ok(Some(key)) => groq_direct_pacer(&key_fingerprint(&key)),
+        _ => clovy_api_pacer(),
+    }
 }
 
 fn cached_chunk_transcriber(inner: TurnTranscriber, _repos: Repositories) -> TurnTranscriber {
@@ -2601,9 +2629,9 @@ fn cached_chunk_transcriber(inner: TurnTranscriber, _repos: Repositories) -> Tur
 }
 
 /// Whether a live preview chunk of `duration_ms` may go to the provider now
-/// (`audio/live_preview.rs`): it shares the note transcription's pacer.
+/// (`audio/live_preview.rs`): it shares the pacer of the route it takes.
 pub(crate) fn live_preview_may_transcribe(duration_ms: i64) -> bool {
-    GROQ_TRANSCRIPTION_PACER.try_acquire(billed_audio(duration_ms), LIVE_PREVIEW_AUDIO_SHARE)
+    note_transcription_pacer().try_acquire(billed_audio(duration_ms), LIVE_PREVIEW_AUDIO_SHARE)
 }
 
 /// The audio Groq bills for a request of `duration_ms`.
@@ -2618,14 +2646,15 @@ fn is_provider_rate_limit(error: &AppError) -> bool {
 type ProviderFuture<T> = Pin<Box<dyn Future<Output = Result<T, AppError>> + Send>>;
 type ProviderCall<T> = Arc<dyn Fn(TranscriptionRequest) -> ProviderFuture<T> + Send + Sync>;
 
-/// Every request through `pacer`, billed by its audio's duration. A provider
-/// rate limit holds all callers for the wait it names and repeats the same
-/// request; a wait too long to sit through, the pacer's or the provider's,
-/// becomes [`TRANSCRIPTION_RATE_LIMITED_CODE`].
-fn paced<T: Send + 'static>(inner: ProviderCall<T>, pacer: Arc<RequestPacer>) -> ProviderCall<T> {
+/// Every request through the pacer `select` picks when it starts, billed by
+/// its audio's duration. A provider rate limit holds all callers of that
+/// pacer for the wait it names and repeats the same request; a wait too long
+/// to sit through, the pacer's or the provider's, becomes
+/// [`TRANSCRIPTION_RATE_LIMITED_CODE`].
+fn paced<T: Send + 'static>(inner: ProviderCall<T>, select: PacerSelector) -> ProviderCall<T> {
     Arc::new(move |request| {
         let inner = Arc::clone(&inner);
-        let pacer = Arc::clone(&pacer);
+        let pacer = select();
         Box::pin(async move {
             let billed = billed_audio(source_wav_duration_ms(&request.audio_path).unwrap_or(0));
             let max_wait = Duration::from_millis(RATE_LIMIT_MAX_INLINE_WAIT_MS);
@@ -2670,8 +2699,12 @@ fn paced<T: Send + 'static>(inner: ProviderCall<T>, pacer: Arc<RequestPacer>) ->
     })
 }
 
+fn fixed_pacer(pacer: Arc<RequestPacer>) -> PacerSelector {
+    Arc::new(move || Arc::clone(&pacer))
+}
+
 fn paced_turn_transcriber(inner: TurnTranscriber, pacer: Arc<RequestPacer>) -> TurnTranscriber {
-    paced(inner, pacer)
+    paced(inner, fixed_pacer(pacer))
 }
 
 fn rate_limit_pause(wait_ms: u64) -> AppError {
@@ -2694,8 +2727,9 @@ fn rate_limit_paused_message(resume_at: &chrono::DateTime<chrono::Local>) -> Str
     )
 }
 
-/// The final-turn transcriber of a note run: Groq (or Clovy API) behind the
-/// process-wide pacer.
+/// The final-turn transcriber of a note run: Groq with the user's key, or
+/// Clovy API without one, each request behind the pacer of the route it
+/// takes then.
 fn note_turn_transcriber() -> TurnTranscriber {
     #[cfg(test)]
     if let Ok((transcriber, pacer)) = TEST_NOTE_TRANSCRIPTION
@@ -2703,9 +2737,9 @@ fn note_turn_transcriber() -> TurnTranscriber {
     {
         return paced_turn_transcriber(transcriber, pacer);
     }
-    paced_turn_transcriber(
+    paced(
         default_turn_transcriber(),
-        Arc::clone(&GROQ_TRANSCRIPTION_PACER),
+        Arc::new(note_transcription_pacer),
     )
 }
 
@@ -2723,24 +2757,26 @@ fn note_pack_transcriber() -> Option<PackTranscriber> {
     #[cfg(test)]
     {
         TEST_NOTE_PACKS
-            .try_with(|(transcriber, pacer)| paced(transcriber.clone(), pacer.clone()))
+            .try_with(|(transcriber, pacer)| paced(transcriber.clone(), fixed_pacer(pacer.clone())))
             .ok()
     }
     #[cfg(not(test))]
     {
-        let direct = matches!(
-            crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
-            Ok(Some(_))
-        );
-        direct.then(|| {
-            paced(
-                Arc::new(|request| {
-                    Box::pin(crate::clovy_api::transcribe_saved_audio_timed(request))
-                        as ProviderFuture<TimedTranscription>
-                }) as PackTranscriber,
-                Arc::clone(&GROQ_TRANSCRIPTION_PACER),
-            )
-        })
+        let Ok(Some(key)) =
+            crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
+        else {
+            return None;
+        };
+        // Only the key's fingerprint outlives this call.
+        let fingerprint = key_fingerprint(&key);
+        drop(key);
+        Some(paced(
+            Arc::new(|request| {
+                Box::pin(crate::clovy_api::transcribe_saved_audio_timed(request))
+                    as ProviderFuture<TimedTranscription>
+            }) as PackTranscriber,
+            Arc::new(move || groq_direct_pacer(&fingerprint)),
+        ))
     }
 }
 
