@@ -87,6 +87,17 @@ describe("Groq rate limits", () => {
     );
   });
 
+  it("says in Portuguese that the saved Groq key could not be read", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(
+      userFacingFailureMessage(
+        "Microphone: Clovy could not read your saved Groq key. Open Settings and save it again.",
+      ),
+    ).toBe(
+      "Microfone: O Clovy não conseguiu ler sua chave Groq salva. Abra as Configurações e salve-a de novo.",
+    );
+  });
+
   it("shows when a paused note continues, in Portuguese", () => {
     applyInterfaceLocale("pt-BR");
     expect(userFacingFailureMessage(paused)).toBe(

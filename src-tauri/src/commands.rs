@@ -2664,13 +2664,13 @@ async fn retry_processing_from(
         request.recording_session_id.as_deref(),
     )
     .await?;
-    let (ticket, depth) = processing_queue::enqueue(&request.note_id);
-    // A resume's claim already set the note to transcribing.
-    if depth <= 1 && origin == RetryOrigin::Manual {
-        repos
-            .set_note_status(&request.note_id, ProcessingStatus::Transcribing, None)
+    let (ticket, _depth) = processing_queue::enqueue(&request.note_id);
+    // Show the retry at once, but only on a note that is still failed: never
+    // over a ready note, and a resume's claim already did it for the resume.
+    let marked_by_this_run = origin == RetryOrigin::Manual
+        && repos
+            .mark_failed_note_transcribing(&request.note_id)
             .await?;
-    }
 
     let mut note = repos.get_note(&request.note_id).await?;
     note.queued_recordings = processing_queue::queued_behind(&request.note_id);
@@ -2715,6 +2715,7 @@ async fn retry_processing_from(
             origin,
             note.processing_status,
             ticket.runs_completed_since_enqueue(),
+            marked_by_this_run,
         ) {
             tracing::info!(
                 note_id = %task_note_id,

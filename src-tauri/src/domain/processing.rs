@@ -2632,19 +2632,28 @@ pub(crate) fn clovy_api_pacer() -> Arc<RequestPacer> {
 
 /// The route a note transcription takes now, read once: the saved Groq key
 /// and its account's pacer, or Clovy API's route without a key.
-fn note_route(model: String) -> TranscriptionRoute {
-    let groq_key = crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
-        .ok()
-        .flatten();
+fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
+    note_route_from(
+        crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
+        model,
+    )
+}
+
+/// The route for the saved Groq key as the credential store answered.
+fn note_route_from(
+    saved_key: Result<Option<String>, AppError>,
+    model: String,
+) -> Result<TranscriptionRoute, AppError> {
+    let groq_key = saved_key.ok().flatten();
     let pacer = groq_key
         .as_deref()
         .map(|key| groq_direct_pacer(&key_fingerprint(key)))
         .unwrap_or_else(clovy_api_pacer);
-    TranscriptionRoute {
+    Ok(TranscriptionRoute {
         groq_key,
         model,
         pacer,
-    }
+    })
 }
 
 /// Resolves a run's route for each of its requests, with the run's model.
@@ -2752,14 +2761,18 @@ impl std::fmt::Debug for TranscriptionRoute {
     }
 }
 
-type RouteResolver = Arc<dyn Fn() -> TranscriptionRoute + Send + Sync>;
+type RouteResolver = Arc<dyn Fn() -> Result<TranscriptionRoute, AppError> + Send + Sync>;
 type RoutedCall<T> =
     Arc<dyn Fn(TranscriptionRoute, TranscriptionRequest) -> ProviderFuture<T> + Send + Sync>;
 
 /// Resolves the route once when each request starts and hands that same
-/// route to every layer below: the kept chunks, the pacer and the call.
+/// route to every layer below: the kept chunks, the pacer and the call. A
+/// route that cannot be resolved fails the request with its error.
 fn routed<T: Send + 'static>(inner: RoutedCall<T>, resolve: RouteResolver) -> ProviderCall<T> {
-    Arc::new(move |request| inner(resolve(), request))
+    Arc::new(move |request| match resolve() {
+        Ok(route) => inner(route, request),
+        Err(error) => Box::pin(async move { Err(error) }) as ProviderFuture<T>,
+    })
 }
 
 /// A note run's turn transcriber: the route resolved for each request, the
@@ -2809,7 +2822,17 @@ fn note_timed_call() -> RoutedCall<TimedTranscription> {
 /// now (`audio/live_preview.rs`): it shares the pacer of that route, and the
 /// chunk is sent with this same route.
 pub(crate) fn live_preview_route(duration_ms: i64) -> Option<TranscriptionRoute> {
-    let route = note_route(crate::providers::transcription_model());
+    live_preview_route_from(
+        note_route(crate::providers::transcription_model()),
+        duration_ms,
+    )
+}
+
+fn live_preview_route_from(
+    route: Result<TranscriptionRoute, AppError>,
+    duration_ms: i64,
+) -> Option<TranscriptionRoute> {
+    let route = route.ok()?;
     route
         .pacer
         .try_acquire(billed_audio(duration_ms), LIVE_PREVIEW_AUDIO_SHARE)
@@ -2898,10 +2921,12 @@ fn ignoring_route<T: Send + 'static>(inner: ProviderCall<T>) -> RoutedCall<T> {
 #[cfg(test)]
 fn fixed_route(model: &str, pacer: Arc<RequestPacer>) -> RouteResolver {
     let model = model.to_string();
-    Arc::new(move || TranscriptionRoute {
-        groq_key: None,
-        model: model.clone(),
-        pacer: Arc::clone(&pacer),
+    Arc::new(move || {
+        Ok(TranscriptionRoute {
+            groq_key: None,
+            model: model.clone(),
+            pacer: Arc::clone(&pacer),
+        })
     })
 }
 
@@ -11290,7 +11315,7 @@ mod tests {
                 Arc::clone(&call),
                 {
                     let pacer = Arc::clone(&pacer);
-                    Arc::new(move || test_route(Some("gsk-a"), model, Arc::clone(&pacer)))
+                    Arc::new(move || Ok(test_route(Some("gsk-a"), model, Arc::clone(&pacer))))
                 },
                 repos.clone(),
             );
@@ -11341,11 +11366,11 @@ mod tests {
             let reads = Arc::clone(&reads);
             Arc::new(move || {
                 reads.fetch_add(1, Ordering::SeqCst);
-                routes
+                Ok(routes
                     .lock()
                     .unwrap()
                     .pop_front()
-                    .expect("a route per read")
+                    .expect("a route per read"))
             }) as RouteResolver
         };
         let (call, calls) = recording_routed_call();
@@ -11373,6 +11398,123 @@ mod tests {
                 .map(|(key, _, _)| key.clone())
                 .collect::<Vec<_>>(),
             vec![Some("gsk-b".to_string())]
+        );
+    }
+
+    fn unreadable_groq_key() -> AppError {
+        AppError::new(
+            "provider_api_key_unavailable",
+            "Clovy could not read your saved Groq key. Open Settings and save it again.",
+        )
+    }
+
+    #[test]
+    fn an_unreadable_saved_key_fails_the_route_instead_of_using_clovy_api() {
+        let model = crate::providers::DEFAULT_TRANSCRIPTION_MODEL.to_string();
+
+        let error = note_route_from(Err(unreadable_groq_key()), model.clone())
+            .expect_err("a saved key the store cannot return is an error");
+        assert_eq!(error.code, "provider_api_key_unavailable");
+
+        // Only no saved key at all takes Clovy API's route.
+        let clovy = note_route_from(Ok(None), model.clone()).unwrap();
+        assert!(clovy.groq_key.is_none());
+        assert!(Arc::ptr_eq(&clovy.pacer, &clovy_api_pacer()));
+        let direct = note_route_from(Ok(Some("gsk-user".to_string())), model).unwrap();
+        assert_eq!(direct.groq_key.as_deref(), Some("gsk-user"));
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_route_fails_reaches_no_provider_and_names_the_key() {
+        let (call, calls) = recording_routed_call();
+        let transcriber = routed(
+            call,
+            Arc::new(|| {
+                note_route_from(
+                    Err(unreadable_groq_key()),
+                    crate::providers::DEFAULT_TRANSCRIPTION_MODEL.to_string(),
+                )
+            }) as RouteResolver,
+        );
+
+        let error = transcriber(test_transcription_request("m0"))
+            .await
+            .expect_err("the route failed");
+
+        assert_eq!(error.code, "provider_api_key_unavailable");
+        assert!(calls.lock().unwrap().is_empty(), "nothing was sent");
+    }
+
+    #[test]
+    fn the_live_preview_sends_nothing_when_the_saved_key_cannot_be_read() {
+        let route = note_route_from(
+            Err(unreadable_groq_key()),
+            crate::providers::DEFAULT_TRANSCRIPTION_MODEL.to_string(),
+        );
+        assert!(live_preview_route_from(route, 8_000).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_manual_retry_only_marks_a_note_that_is_still_failed() {
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let note_id = paused_note(&repos, &session_id, "Some failure").await;
+
+        assert!(repos.mark_failed_note_transcribing(&note_id).await.unwrap());
+        let note = repos.get_note(&note_id).await.unwrap();
+        assert_eq!(note.processing_status, ProcessingStatus::Transcribing);
+        assert_eq!(note.last_error, None);
+
+        // Never over a note another run finished or is processing.
+        for status in [ProcessingStatus::Ready, ProcessingStatus::Transcribing] {
+            repos.set_note_status(&note_id, status, None).await.unwrap();
+            assert!(!repos.mark_failed_note_transcribing(&note_id).await.unwrap());
+            assert_eq!(
+                repos.get_note(&note_id).await.unwrap().processing_status,
+                status
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retry_suspended_while_the_resume_finished_leaves_the_note_ready() {
+        use crate::domain::processing_queue::{enqueue, queued_retry_should_run, RetryOrigin};
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let paused = "Groq usage limit reached. Clovy continues transcribing at 11:20. Parts already transcribed are kept.";
+        let note_id = paused_note(&repos, &session_id, paused).await;
+
+        // 1. The timer claims the pause.
+        assert!(repos.claim_paused_note(&note_id, paused).await.unwrap());
+        // 2. The manual retry queues first and is suspended before it marks
+        //    the note.
+        let (manual, _) = enqueue(&note_id);
+        // 3. The resume queues second, takes the lock first and finishes.
+        let (resume, _) = enqueue(&note_id);
+        assert!(queued_retry_should_run(
+            RetryOrigin::Resume,
+            repos.get_note(&note_id).await.unwrap().processing_status,
+            resume.runs_completed_since_enqueue(),
+            false
+        ));
+        repos
+            .set_note_status(&note_id, ProcessingStatus::Ready, None)
+            .await
+            .unwrap();
+        resume.finish();
+        // 4. The manual retry wakes up: it must not mark the ready note.
+        let marked = repos.mark_failed_note_transcribing(&note_id).await.unwrap();
+        let status = repos.get_note(&note_id).await.unwrap().processing_status;
+        assert!(!queued_retry_should_run(
+            RetryOrigin::Manual,
+            status,
+            manual.runs_completed_since_enqueue(),
+            marked
+        ));
+        manual.finish();
+
+        // 5. Skipped, it left the note as the resume left it.
+        assert_eq!(
+            repos.get_note(&note_id).await.unwrap().processing_status,
+            ProcessingStatus::Ready
         );
     }
 }

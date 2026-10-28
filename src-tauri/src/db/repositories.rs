@@ -2925,6 +2925,15 @@ impl Repositories {
         Ok(())
     }
 
+    pub async fn mark_failed_note_transcribing(
+        &self,
+        note_id: &str,
+    ) -> Result<bool, sqlx::error::Error> {
+        self.set_note_status(note_id, ProcessingStatus::Transcribing, None)
+            .await?;
+        Ok(true)
+    }
+
     /// Takes a note paused by a provider rate limit for its automatic resume,
     /// in one statement: only while the note still shows that very pause, so
     /// a Retry that got there first, or a second resume, claims nothing.
