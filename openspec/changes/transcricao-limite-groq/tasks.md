@@ -64,6 +64,15 @@ A revisão 2 (`e1c11cef`) confirmou G1–G4 e deixou três P2.
 
 > H3 veio antes de H1 porque a chave do pedaço usa o modelo da rota.
 
+## 10. Revisão 3 (I1–I2)
+
+A revisão 3 (`e19b446e`) aprovou H1 e a rota no caminho normal e deixou dois P2.
+
+- [x] 10.0 RED dos dois (`9d08e9d8`): a chave salva ilegível caía na rota do Clovy API, e o retry manual marcava `transcribing` por cima de uma nota `ready`.
+- [x] 10.1 I1 GREEN (`7dd6d5fb`): a resolução de rota propaga `provider_api_key_unavailable`; só `Ok(None)` vai ao Clovy API; a prévia não envia nada; frase traduzida no banner.
+- [x] 10.2 I2 GREEN (`3b8f160f`): compare-and-set de `failed` para `transcribing`; um retry que marcou a nota sempre roda.
+- [ ] 10.3 `make verify` numa worktree limpa, CI, report.
+
 ## 7. Documentação e verificação
 
 - [x] 7.1 `docs/llm-providers.md`, adendo datado da ADR-0070, `docs/audio-pipeline.md`, termo `Turn pack` no `CONTEXT.md`.

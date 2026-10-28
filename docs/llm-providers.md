@@ -193,7 +193,10 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   `details.retryAfterMs`; `send_direct` waits it out only up to 2 s. Final
   transcription reads one route per request (the saved key, the run's
   model, that key's pacer) and its kept chunks, pacer and transport all use
-  it; the key is never read again for that request. It runs behind the
+  it; the key is never read again for that request. Only no saved key
+  takes Clovy API's route: a saved key the credential store cannot return
+  fails the request with `provider_api_key_unavailable` (the note says to
+  save it again) and the live preview sends nothing. It runs behind the
   pacer of that route (`domain/processing.rs` `RequestPacer`): one per Groq account, keyed by the
   first 8 bytes of the key's SHA-256 (never the key), with 18 requests a
   minute and 7,200 s of billed audio an hour (each request billed at least
@@ -207,6 +210,9 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   resume claims the pause in one update, so a Retry that got there first
   leaves it nothing, and every retry checks under the note's lock how many
   runs finished since it was queued: a ready note is never processed again.
+  A manual retry shows itself at once only by turning a still-failed note
+  into transcribing (a compare-and-set), and a retry that did so always
+  runs, so no skipped run leaves the note transcribing.
   Every finished chunk of a split job (a full-Source job, an over-long turn)
   is kept in `note_transcription_chunks`, keyed with its model and language,
   so a resume sends only the chunks still missing. A job's durable identity

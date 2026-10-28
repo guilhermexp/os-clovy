@@ -48,6 +48,16 @@ Na transcrição direta à Groq, um 429 SHALL virar espera pelo tempo que a Groq
 - **THEN** cada requisição lê a rota uma vez, e o pacer e a chamada usam a mesma chave
 - Test: unit — `processing.rs`
 
+#### Scenario: Chave salva que o cofre não devolve
+- **WHEN** há chave Groq salva nas configurações, mas o cofre não a devolve
+- **THEN** a transcrição falha com `provider_api_key_unavailable` e a nota diz, em pt-BR ou en, para salvar a chave de novo; nada vai ao Clovy API e a prévia não envia nada
+- Test: unit — `processing.rs`, `src/test/note-failure-banner.test.tsx`
+
+#### Scenario: Retry suspenso enquanto a retomada termina
+- **WHEN** o retry manual é suspenso antes de mostrar o estado e a retomada termina a nota
+- **THEN** o retry não grava `transcribing` por cima da nota `ready` e, pulado, deixa a nota como a retomada a deixou
+- Test: integration — `processing.rs` (banco em memória e tickets reais da fila)
+
 #### Scenario: Ritmo dentro do limite por minuto
 - **WHEN** as duas faixas têm muitos turnos para transcrever
 - **THEN** nunca começam mais de 18 requisições em 60 s, somando as faixas e a prévia

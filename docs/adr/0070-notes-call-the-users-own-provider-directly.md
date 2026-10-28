@@ -132,3 +132,13 @@ Second review of the same addendum (2026-10-28, before release):
 - **Every retry revalidates under the lock.** The note's queue counts
   finished runs; a retry that sees a run finish after it was queued, or a
   ready note, does not process the note again, whatever its queue depth.
+
+Third review of the same addendum (2026-10-28, before release):
+
+- **An unreadable saved key is an error, not Clovy API's route.** Only no
+  saved key takes Clovy API's route; a saved key the credential store
+  cannot return fails the request with `provider_api_key_unavailable`,
+  and the live preview sends nothing.
+- **A manual retry marks only a still-failed note.** Its early
+  transcribing status is a compare-and-set from failed; a retry that made
+  it always runs, so a skipped run never leaves the note in between.
