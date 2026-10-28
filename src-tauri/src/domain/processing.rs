@@ -10,8 +10,8 @@ use crate::{
         },
     },
     clovy_api::{
-        generate_note_from_transcript, transcribe_saved_audio, GenerationRequest,
-        TimedTranscription, TranscriptSegment, TranscriptionProviderResult, TranscriptionRequest,
+        generate_note_from_transcript, GenerationRequest, TimedTranscription, TranscriptSegment,
+        TranscriptionProviderResult, TranscriptionRequest,
     },
     db::repositories::{NoteTranscriptionChunk, Repositories},
     domain::types::{
@@ -1607,7 +1607,7 @@ async fn process_saved_source_audio_pipeline(
     };
     let transcriber = retain_cleanup_during_note_transcription(
         instrument_turn_transcriber(
-            cached_chunk_transcriber(note_turn_transcriber(), repos.clone()),
+            note_turn_transcriber(repos.clone(), transcription_model.clone()),
             timeline.clone(),
         ),
         Arc::clone(&turn_wav_dir_cleanup),
@@ -1622,7 +1622,7 @@ async fn process_saved_source_audio_pipeline(
         guarded_turn_preparer(Arc::clone(&turn_wav_dir_cleanup)),
         guarded_fallback_preparer(Arc::clone(&turn_wav_dir_cleanup)),
         transcriber,
-        note_pack_transcriber(),
+        note_pack_transcriber(transcription_model.clone()),
         Some(job_claimer),
         Some(result_sink),
         DEFAULT_TURN_TRANSCRIPTION_CONCURRENCY,
@@ -2363,8 +2363,9 @@ fn retain_cleanup_during_note_transcription(
     })
 }
 
+#[cfg(test)]
 fn default_turn_transcriber() -> TurnTranscriber {
-    Arc::new(|request| Box::pin(transcribe_saved_audio(request)))
+    Arc::new(|request| Box::pin(crate::clovy_api::transcribe_saved_audio(request)))
 }
 
 /// A note run stopped by a provider rate limit too long to wait out; its
@@ -2584,9 +2585,6 @@ impl RequestPacer {
 /// Wall-clock milliseconds since the epoch, injectable for tests.
 pub(crate) type PacerClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-/// Picks the pacer of the account a request goes to, when it starts.
-type PacerSelector = Arc<dyn Fn() -> Arc<RequestPacer> + Send + Sync>;
-
 /// A Groq key's identity for pacing: the first 8 bytes of its SHA-256, in
 /// hex. The key itself is never kept.
 pub(crate) fn key_fingerprint(key: &str) -> String {
@@ -2624,13 +2622,26 @@ pub(crate) fn clovy_api_pacer() -> Arc<RequestPacer> {
     Arc::clone(&CLOVY_API_PACER)
 }
 
-/// The pacer of the route a note transcription takes now: the saved Groq
-/// key's account, or Clovy API's route without a key.
-fn note_transcription_pacer() -> Arc<RequestPacer> {
-    match crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq) {
-        Ok(Some(key)) => groq_direct_pacer(&key_fingerprint(&key)),
-        _ => clovy_api_pacer(),
+/// The route a note transcription takes now, read once: the saved Groq key
+/// and its account's pacer, or Clovy API's route without a key.
+fn note_route(model: String) -> TranscriptionRoute {
+    let groq_key = crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
+        .ok()
+        .flatten();
+    let pacer = groq_key
+        .as_deref()
+        .map(|key| groq_direct_pacer(&key_fingerprint(key)))
+        .unwrap_or_else(clovy_api_pacer);
+    TranscriptionRoute {
+        groq_key,
+        model,
+        pacer,
     }
+}
+
+/// Resolves a run's route for each of its requests, with the run's model.
+fn note_route_resolver(model: String) -> RouteResolver {
+    Arc::new(move || note_route(model.clone()))
 }
 
 /// The durable key of one chunk request of a split saved-audio job: the
@@ -2653,13 +2664,16 @@ fn chunk_cache_key(request: &TranscriptionRequest) -> Option<(String, String)> {
 /// over-long turn, the full-Source fallback) in `note_transcription_chunks`:
 /// a run paused by a rate limit resumes with only the chunks still missing,
 /// instead of sending the whole job again into the same limit.
-fn cached_chunk_transcriber(inner: TurnTranscriber, repos: Repositories) -> TurnTranscriber {
-    Arc::new(move |request| {
+fn cached_chunk_transcriber(
+    inner: RoutedCall<TranscriptionProviderResult>,
+    repos: Repositories,
+) -> RoutedCall<TranscriptionProviderResult> {
+    Arc::new(move |route, request| {
         let inner = Arc::clone(&inner);
         let repos = repos.clone();
         Box::pin(async move {
             let Some((chunk_key, session_id)) = chunk_cache_key(&request) else {
-                return inner(request).await;
+                return inner(route, request).await;
             };
             match repos.note_transcription_chunk(&chunk_key).await {
                 Ok(Some(chunk)) if chunk.no_speech => {
@@ -2677,7 +2691,7 @@ fn cached_chunk_transcriber(inner: TurnTranscriber, repos: Repositories) -> Turn
                     tracing::warn!(%error, "could not read a finished transcription chunk");
                 }
             }
-            let result = inner(request).await;
+            let result = inner(route, request).await;
             let finished = match &result {
                 Ok(transcript) => Some(NoteTranscriptionChunk {
                     text: transcript.text.clone(),
@@ -2700,7 +2714,7 @@ fn cached_chunk_transcriber(inner: TurnTranscriber, repos: Repositories) -> Turn
                 }
             }
             result
-        }) as TranscriptionFuture
+        }) as ProviderFuture<TranscriptionProviderResult>
     })
 }
 
@@ -2728,6 +2742,12 @@ type RouteResolver = Arc<dyn Fn() -> TranscriptionRoute + Send + Sync>;
 type RoutedCall<T> =
     Arc<dyn Fn(TranscriptionRoute, TranscriptionRequest) -> ProviderFuture<T> + Send + Sync>;
 
+/// Resolves the route once when each request starts and hands that same
+/// route to every layer below: the kept chunks, the pacer and the call.
+fn routed<T: Send + 'static>(inner: RoutedCall<T>, resolve: RouteResolver) -> ProviderCall<T> {
+    Arc::new(move |request| inner(resolve(), request))
+}
+
 /// A note run's turn transcriber: the route resolved for each request, the
 /// kept chunks, the pacer and the provider call.
 fn note_chain(
@@ -2735,18 +2755,58 @@ fn note_chain(
     resolve: RouteResolver,
     repos: Repositories,
 ) -> TurnTranscriber {
-    let pacer_resolve = Arc::clone(&resolve);
-    let inner: TurnTranscriber = Arc::new(move |request| {
-        let route = resolve();
-        call(route, request)
-    });
-    cached_chunk_transcriber(paced(inner, Arc::new(move || pacer_resolve().pacer)), repos)
+    routed(cached_chunk_transcriber(paced(call), repos), resolve)
 }
 
-/// Whether a live preview chunk of `duration_ms` may go to the provider now
-/// (`audio/live_preview.rs`): it shares the pacer of the route it takes.
-pub(crate) fn live_preview_may_transcribe(duration_ms: i64) -> bool {
-    note_transcription_pacer().try_acquire(billed_audio(duration_ms), LIVE_PREVIEW_AUDIO_SHARE)
+/// The note-transcription request on a resolved route: Groq with its key,
+/// else Clovy API, with the route's model.
+fn note_provider_call() -> RoutedCall<TranscriptionProviderResult> {
+    Arc::new(|route, request| {
+        Box::pin(async move {
+            crate::clovy_api::transcribe_saved_audio_with(
+                route.groq_key.as_deref(),
+                route.model,
+                request,
+            )
+            .await
+        }) as ProviderFuture<TranscriptionProviderResult>
+    })
+}
+
+/// A timed (turn pack) request on a resolved route; only Groq with the
+/// user's key answers with segment times. Tests pack with a fake instead.
+#[cfg_attr(test, allow(dead_code))]
+fn note_timed_call() -> RoutedCall<TimedTranscription> {
+    Arc::new(|route, request| {
+        Box::pin(async move {
+            let Some(groq_key) = route.groq_key else {
+                return Err(AppError::new(
+                    "groq_api_key_missing",
+                    crate::clovy_api::GROQ_API_KEY_MISSING_MESSAGE,
+                ));
+            };
+            crate::clovy_api::transcribe_saved_audio_timed_with(&groq_key, route.model, request)
+                .await
+        }) as ProviderFuture<TimedTranscription>
+    })
+}
+
+/// The route a live preview chunk of `duration_ms` takes, when it may go
+/// now (`audio/live_preview.rs`): it shares the pacer of that route, and the
+/// chunk is sent with this same route.
+pub(crate) fn live_preview_route(duration_ms: i64) -> Option<TranscriptionRoute> {
+    let route = note_route(crate::providers::transcription_model());
+    route
+        .pacer
+        .try_acquire(billed_audio(duration_ms), LIVE_PREVIEW_AUDIO_SHARE)
+        .then_some(route)
+}
+
+pub(crate) async fn transcribe_on_route(
+    route: TranscriptionRoute,
+    request: TranscriptionRequest,
+) -> Result<TranscriptionProviderResult, AppError> {
+    note_provider_call()(route, request).await
 }
 
 /// The audio Groq bills for a request of `duration_ms`.
@@ -2761,15 +2821,15 @@ fn is_provider_rate_limit(error: &AppError) -> bool {
 type ProviderFuture<T> = Pin<Box<dyn Future<Output = Result<T, AppError>> + Send>>;
 type ProviderCall<T> = Arc<dyn Fn(TranscriptionRequest) -> ProviderFuture<T> + Send + Sync>;
 
-/// Every request through the pacer `select` picks when it starts, billed by
-/// its audio's duration. A provider rate limit holds all callers of that
-/// pacer for the wait it names and repeats the same request; a wait too long
-/// to sit through, the pacer's or the provider's, becomes
+/// Every request through its route's pacer, billed by its audio's duration.
+/// A provider rate limit holds all callers of that pacer for the wait it
+/// names and repeats the same request on the same route; a wait too long to
+/// sit through, the pacer's or the provider's, becomes
 /// [`TRANSCRIPTION_RATE_LIMITED_CODE`].
-fn paced<T: Send + 'static>(inner: ProviderCall<T>, select: PacerSelector) -> ProviderCall<T> {
-    Arc::new(move |request| {
+fn paced<T: Send + 'static>(inner: RoutedCall<T>) -> RoutedCall<T> {
+    Arc::new(move |route, request| {
         let inner = Arc::clone(&inner);
-        let pacer = select();
+        let pacer = Arc::clone(&route.pacer);
         Box::pin(async move {
             let billed = billed_audio(source_wav_duration_ms(&request.audio_path).unwrap_or(0));
             let max_wait = Duration::from_millis(RATE_LIMIT_MAX_INLINE_WAIT_MS);
@@ -2784,7 +2844,7 @@ fn paced<T: Send + 'static>(inner: ProviderCall<T>, select: PacerSelector) -> Pr
                     );
                     return Err(rate_limit_pause(wait_ms));
                 }
-                match inner(request.clone()).await {
+                match inner(route.clone(), request.clone()).await {
                     Err(error) if is_provider_rate_limit(&error) => {
                         let wait_ms = retry_after_ms(&error).unwrap_or(RATE_LIMIT_DEFAULT_WAIT_MS);
                         pacer.pause_for(Duration::from_millis(wait_ms));
@@ -2814,14 +2874,29 @@ fn paced<T: Send + 'static>(inner: ProviderCall<T>, select: PacerSelector) -> Pr
     })
 }
 
+/// A provider call that ignores the route: a test's fake transcriber.
 #[cfg(test)]
-fn fixed_pacer(pacer: Arc<RequestPacer>) -> PacerSelector {
-    Arc::new(move || Arc::clone(&pacer))
+fn ignoring_route<T: Send + 'static>(inner: ProviderCall<T>) -> RoutedCall<T> {
+    Arc::new(move |_route, request| inner(request))
+}
+
+/// One fixed route with `pacer`, for tests.
+#[cfg(test)]
+fn fixed_route(model: &str, pacer: Arc<RequestPacer>) -> RouteResolver {
+    let model = model.to_string();
+    Arc::new(move || TranscriptionRoute {
+        groq_key: None,
+        model: model.clone(),
+        pacer: Arc::clone(&pacer),
+    })
 }
 
 #[cfg(test)]
 fn paced_turn_transcriber(inner: TurnTranscriber, pacer: Arc<RequestPacer>) -> TurnTranscriber {
-    paced(inner, fixed_pacer(pacer))
+    routed(
+        paced(ignoring_route(inner)),
+        fixed_route(crate::providers::DEFAULT_TRANSCRIPTION_MODEL, pacer),
+    )
 }
 
 fn rate_limit_pause(wait_ms: u64) -> AppError {
@@ -2845,19 +2920,20 @@ fn rate_limit_paused_message(resume_at: &chrono::DateTime<chrono::Local>) -> Str
 }
 
 /// The final-turn transcriber of a note run: Groq with the user's key, or
-/// Clovy API without one, each request behind the pacer of the route it
-/// takes then.
-fn note_turn_transcriber() -> TurnTranscriber {
+/// Clovy API without one, with the run's `model`; each request reads its
+/// route once and keeps it for its kept chunks, its pacer and its call.
+fn note_turn_transcriber(repos: Repositories, model: String) -> TurnTranscriber {
     #[cfg(test)]
     if let Ok((transcriber, pacer)) = TEST_NOTE_TRANSCRIPTION
         .try_with(|(transcriber, pacer)| (transcriber.clone(), pacer.clone()))
     {
-        return paced_turn_transcriber(transcriber, pacer);
+        return note_chain(
+            ignoring_route(transcriber),
+            fixed_route(&model, pacer),
+            repos,
+        );
     }
-    paced(
-        default_turn_transcriber(),
-        Arc::new(note_transcription_pacer),
-    )
+    note_chain(note_provider_call(), note_route_resolver(model), repos)
 }
 
 #[cfg(test)]
@@ -2870,30 +2946,27 @@ tokio::task_local! {
 
 /// Turns go in packs only straight to Groq with the user's key: Clovy API's
 /// note route answers without segment times.
-fn note_pack_transcriber() -> Option<PackTranscriber> {
+/// Each pack request reads its route once, like a turn, so its pacer and
+/// its call use the same key.
+fn note_pack_transcriber(model: String) -> Option<PackTranscriber> {
     #[cfg(test)]
     {
         TEST_NOTE_PACKS
-            .try_with(|(transcriber, pacer)| paced(transcriber.clone(), fixed_pacer(pacer.clone())))
+            .try_with(|(transcriber, pacer)| {
+                routed(
+                    paced(ignoring_route(transcriber.clone())),
+                    fixed_route(&model, pacer.clone()),
+                )
+            })
             .ok()
     }
     #[cfg(not(test))]
     {
-        let Ok(Some(key)) =
-            crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
-        else {
-            return None;
-        };
-        // Only the key's fingerprint outlives this call.
-        let fingerprint = key_fingerprint(&key);
-        drop(key);
-        Some(paced(
-            Arc::new(|request| {
-                Box::pin(crate::clovy_api::transcribe_saved_audio_timed(request))
-                    as ProviderFuture<TimedTranscription>
-            }) as PackTranscriber,
-            Arc::new(move || groq_direct_pacer(&fingerprint)),
-        ))
+        let direct = matches!(
+            crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
+            Ok(Some(_))
+        );
+        direct.then(|| routed(paced(note_timed_call()), note_route_resolver(model)))
     }
 }
 
@@ -10966,8 +11039,11 @@ mod tests {
                     as TranscriptionFuture
             }) as TurnTranscriber
         };
-        let transcriber =
-            cached_chunk_transcriber(paced_turn_transcriber(inner, pacer), repos.clone());
+        let transcriber = note_chain(
+            ignoring_route(inner),
+            fixed_route(crate::providers::DEFAULT_TRANSCRIPTION_MODEL, pacer),
+            repos.clone(),
+        );
         let operation_id = format!("{session_id}:microphone:turn:0:240000:fingerprint");
 
         let mut runs = 0;
@@ -11164,10 +11240,10 @@ mod tests {
 
     /// A provider call that records each request's route and answers with
     /// the chunk index of its operation id.
-    fn recording_routed_call() -> (
-        RoutedCall<TranscriptionProviderResult>,
-        Arc<Mutex<Vec<(Option<String>, String, String)>>>,
-    ) {
+    /// Each call's Groq key, model and operation id.
+    type RoutedCalls = Arc<Mutex<Vec<(Option<String>, String, String)>>>;
+
+    fn recording_routed_call() -> (RoutedCall<TranscriptionProviderResult>, RoutedCalls) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let call = {
             let calls = Arc::clone(&calls);

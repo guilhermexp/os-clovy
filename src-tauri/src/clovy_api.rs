@@ -372,6 +372,26 @@ pub async fn transcribe_saved_audio(
     .await
 }
 
+/// Note transcription with a Groq key and model the caller already resolved
+/// for this request, so the request goes with the same key its pacer chose.
+pub(crate) async fn transcribe_saved_audio_with(
+    groq_key: Option<&str>,
+    model: String,
+    request: TranscriptionRequest,
+) -> Result<TranscriptionProviderResult, AppError> {
+    transcribe_saved_audio_via(&production_notes_transport(), groq_key, model, request).await
+}
+
+/// The timed (turn pack) request with an already resolved Groq key and model.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) async fn transcribe_saved_audio_timed_with(
+    groq_key: &str,
+    model: String,
+    request: TranscriptionRequest,
+) -> Result<TimedTranscription, AppError> {
+    transcribe_saved_audio_timed_via(&production_notes_transport(), groq_key, model, request).await
+}
+
 /// The note's failure when neither the user's Groq key nor Clovy API is
 /// there. Kept byte-identical to `notes.failure.groqKeyMissing`.
 pub(crate) const GROQ_API_KEY_MISSING_MESSAGE: &str =
