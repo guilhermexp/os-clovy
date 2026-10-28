@@ -247,6 +247,8 @@ pub struct CliTurnRequest {
     /// A person watches the turn: `true` for chat, `false` for routines
     /// (read-only tools, and every approval is refused).
     pub attended: bool,
+    /// Saved routine file/web capabilities for Claude's built-in tool policy.
+    pub routine_tools: Option<policy::RoutineBuiltinTools>,
 }
 
 /// Refuses an unattended turn on a CLI whose tools Clovy cannot confine.
@@ -305,6 +307,7 @@ pub async fn start_cli_turn(
         turns,
         safety_mode: request.safety_mode,
         attended: request.attended,
+        routine_tools: request.routine_tools,
         images: request.images,
     };
     let sink = AppSink {

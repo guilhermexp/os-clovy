@@ -52,12 +52,23 @@ pub const CLAUDE_CLOVY_TOOLS: &str = "mcp__clovy__*";
 /// answer.
 pub const CLAUDE_QUESTION_TOOL: &str = "AskUserQuestion";
 
-/// The built-in claude tools an unattended turn has (`--tools`); every other
-/// built-in tool (Bash, Edit, Write, ...) does not exist in that turn.
-pub const UNATTENDED_CLAUDE_TOOLS: &str = "Read,Grep,Glob,WebSearch,WebFetch";
-/// The tools an unattended claude turn may use without asking
-/// (`--allowedTools`): the read-only set above and Clovy's MCP tools.
-pub const UNATTENDED_CLAUDE_ALLOWED: &str = "Read,Grep,Glob,WebSearch,WebFetch,mcp__clovy__*";
+/// The saved routine capabilities Claude can expose as read-only built-ins.
+/// An absent snapshot grants neither capability. Codex retains its sandbox
+/// policy separately; these flags describe Claude's built-in tool surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoutineBuiltinTools {
+    pub file: bool,
+    pub web: bool,
+}
+
+impl RoutineBuiltinTools {
+    pub fn from_toolsets(toolsets: &[String]) -> Self {
+        Self {
+            file: toolsets.iter().any(|toolset| toolset == "file"),
+            web: toolsets.iter().any(|toolset| toolset == "web"),
+        }
+    }
+}
 
 /// Arguments (and argument fragments) no turn may ever carry: each skips or
 /// pre-grants approvals, or lifts the sandbox.
@@ -82,6 +93,7 @@ pub struct TurnPermissions {
     pub safety_mode: AgentSafetyMode,
     /// A person watches the turn (`false` for routines).
     pub attended: bool,
+    pub routine_tools: Option<RoutineBuiltinTools>,
 }
 
 /// The policy of one turn, placed by [`super::cli::turn_invocation`].
@@ -127,13 +139,24 @@ fn claude(permissions: TurnPermissions, interaction_tools: bool) -> TurnPolicy {
         // run without a prompt (nobody can answer one), and the user's other
         // MCP servers are not loaded. Clovy's write tools reach the broker,
         // which refuses them in an unattended turn.
+        let capabilities = permissions.routine_tools.unwrap_or_default();
+        let mut tools = Vec::new();
+        if capabilities.file {
+            tools.extend(["Read", "Grep", "Glob"]);
+        }
+        if capabilities.web {
+            tools.extend(["WebSearch", "WebFetch"]);
+        }
+        let builtins = tools.join(",");
+        tools.push(CLAUDE_CLOVY_TOOLS);
+        let allowed = tools.join(",");
         policy.args = strings(&[
             "--permission-mode",
             "default",
             "--tools",
-            UNATTENDED_CLAUDE_TOOLS,
+            &builtins,
             "--allowedTools",
-            UNATTENDED_CLAUDE_ALLOWED,
+            &allowed,
             "--strict-mcp-config",
         ]);
         // The server lists `approve_action` to every claude turn; with no

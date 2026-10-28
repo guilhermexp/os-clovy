@@ -57,6 +57,7 @@ pub struct TurnContext {
     pub safety_mode: AgentSafetyMode,
     /// A person watches the turn (`false` for routines).
     pub attended: bool,
+    pub routine_tools: Option<super::policy::RoutineBuiltinTools>,
     /// Image attachments of the message (absolute paths in the workspace).
     pub images: Vec<PathBuf>,
 }
@@ -66,6 +67,7 @@ impl TurnContext {
         TurnPermissions {
             safety_mode: self.safety_mode,
             attended: self.attended,
+            routine_tools: self.routine_tools,
         }
     }
 
@@ -785,6 +787,9 @@ async fn with_earlier_messages(repository: &AgentRepository, context: &TurnConte
                 if !message.trim().is_empty() {
                     lines.push(format!("Assistant: {message}"));
                 }
+            }
+            AgentItemPayload::Steering(steering) if !steering.text.trim().is_empty() => {
+                lines.push(format!("User: {}", steering.text.trim()));
             }
             AgentItemPayload::ContextSummary(summary) if !summary.text.trim().is_empty() => {
                 lines.push(format!(

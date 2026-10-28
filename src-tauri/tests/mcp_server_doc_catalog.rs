@@ -261,6 +261,7 @@ fn claude_only_tools_are_kept_from_the_model_in_every_claude_turn() {
                 TurnPermissions {
                     safety_mode,
                     attended,
+                    routine_tools: None,
                 },
             );
             let mut args = policy.mcp_args.clone();

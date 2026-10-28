@@ -31,6 +31,8 @@ pub(crate) mod notes;
 #[cfg(test)]
 mod notes_tests;
 mod read;
+#[cfg(test)]
+mod read_tests;
 pub(crate) mod recorder;
 #[cfg(test)]
 mod recorder_tests;
@@ -54,6 +56,7 @@ use crate::domain::types::AppError;
 
 pub use super::turns::TurnBinding;
 use super::turns::TURN_REQUIRED;
+pub(crate) use read::is_read_tool;
 pub use read::{
     is_activity_tool, ReadTools, ACTIVITY_TOOLS, GET_ACTIVE_SESSION, GET_ACTIVITY_STATS,
     GET_DAY_PANELS, GET_DAY_SCHEDULE, GET_DAY_SUMMARY, GET_NOTE, GET_SESSION_DETAIL,

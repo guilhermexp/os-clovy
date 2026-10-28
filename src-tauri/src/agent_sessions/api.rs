@@ -733,6 +733,7 @@ async fn start_cli_run(
                 images: cli_image_attachments(start.attachments),
                 safety_mode: start.safety_mode,
                 attended: true,
+                routine_tools: None,
             },
             ticket,
         )

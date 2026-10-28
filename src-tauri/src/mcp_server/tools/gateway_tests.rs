@@ -265,6 +265,7 @@ async fn fake_clis_receive_only_relay_configuration_without_mcp_credentials() {
             TurnPermissions {
                 safety_mode: AgentSafetyMode::Sandboxed,
                 attended: true,
+                routine_tools: None,
             },
             &[],
         );

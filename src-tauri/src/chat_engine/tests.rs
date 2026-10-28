@@ -121,6 +121,7 @@ impl Harness {
             turns: None,
             safety_mode: AgentSafetyMode::Sandboxed,
             attended: true,
+            routine_tools: None,
             images: Vec::new(),
         }
     }
@@ -924,6 +925,13 @@ async fn chat_engine_new_cli_conversation_gets_earlier_messages_of_the_session()
                 attachments: Vec::new(),
             }),
         ),
+        (
+            2,
+            AgentItemPayload::Steering(crate::agent_sessions::TextPayload {
+                text: "Correction: my dog is actually called Max.".into(),
+                metadata: None,
+            }),
+        ),
     ] {
         harness
             .repository
@@ -944,6 +952,10 @@ async fn chat_engine_new_cli_conversation_gets_earlier_messages_of_the_session()
     let prompt = harness.stdin(1);
     assert!(prompt.contains("User: My dog is Rex"), "{prompt}");
     assert!(prompt.contains("Assistant: Noted, Rex."), "{prompt}");
+    assert!(
+        prompt.contains("User: Correction: my dog is actually called Max."),
+        "{prompt}"
+    );
     assert!(prompt.ends_with("What is my dog called?"), "{prompt}");
     assert!(!harness.args(1).iter().any(|arg| arg == "--resume"));
 }
@@ -1235,10 +1247,15 @@ fn chat_engine_model_ids_round_trip() {
 const ATTENDED: policy::TurnPermissions = policy::TurnPermissions {
     safety_mode: AgentSafetyMode::Sandboxed,
     attended: true,
+    routine_tools: None,
 };
 const UNATTENDED: policy::TurnPermissions = policy::TurnPermissions {
     safety_mode: AgentSafetyMode::Sandboxed,
     attended: false,
+    routine_tools: Some(policy::RoutineBuiltinTools {
+        file: true,
+        web: true,
+    }),
 };
 
 #[test]

@@ -84,7 +84,7 @@ pub fn is_activity_tool(name: &str) -> bool {
     ACTIVITY_TOOLS.contains(&name)
 }
 
-fn is_read_tool(name: &str) -> bool {
+pub(crate) fn is_read_tool(name: &str) -> bool {
     DATA_TOOLS.contains(&name) || is_activity_tool(name)
 }
 
@@ -104,14 +104,56 @@ impl ToolGroup for ReadTools {
         descriptors(&ctx.data.activity)
     }
 
+    fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Vec<Value>> {
+        Box::pin(async move {
+            let mut catalog = Vec::new();
+            for descriptor in self.descriptors(ctx) {
+                let Some(name) = descriptor["name"].as_str() else {
+                    continue;
+                };
+                match routine_read_allowed(ctx, name).await {
+                    Ok(true) => catalog.push(descriptor),
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(code = %error.code, "Read tool permissions unavailable");
+                    }
+                }
+            }
+            catalog
+        })
+    }
+
     fn call<'a>(
         &'a self,
         ctx: &'a ToolCtx<'a>,
         name: &'a str,
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<Value, AppError>> {
-        Box::pin(call(ctx.data, name, arguments))
+        Box::pin(async move {
+            // Catalogs are hints, not grants: recheck before arguments or
+            // data access in case the owner revoked the routine's toolset.
+            if !routine_read_allowed(ctx, name).await? {
+                return Err(AppError::new(
+                    "routine_tool_not_enabled",
+                    "This tool is not enabled for the routine.",
+                ));
+            }
+            call(ctx.data, name, arguments).await
+        })
     }
+}
+
+async fn routine_read_allowed(ctx: &ToolCtx<'_>, name: &str) -> Result<bool, AppError> {
+    let Some(binding) = ctx.binding else {
+        return Ok(true);
+    };
+    Ok(crate::routines::routine_tool_allowed_for_session(
+        &ctx.data.notes,
+        &binding.session_id,
+        name,
+    )
+    .await?
+        != Some(false))
 }
 
 fn read_only(name: &str, description: &str, input_schema: Value) -> Value {

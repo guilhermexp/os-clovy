@@ -928,6 +928,11 @@ async fn start_cli_claim(
             images: Vec::new(),
             safety_mode: claim.safety_mode,
             attended: false,
+            routine_tools: Some(
+                crate::chat_engine::policy::RoutineBuiltinTools::from_toolsets(
+                    &claim.enabled_toolsets,
+                ),
+            ),
         },
         ticket,
     )
@@ -1281,7 +1286,9 @@ async fn routine_trust(pool: &SqlitePool, routine_id: &str) -> (Vec<String>, Opt
 fn routine_base_tool_allowed(name: &str, enabled_toolsets: &[String]) -> bool {
     let has = |toolset: &str| enabled_toolsets.iter().any(|value| value == toolset);
     match name {
-        "search_june" | "get_note" | "get_dictation" => {
+        name if matches!(name, "search_june" | "get_dictation")
+            || crate::mcp_server::tools::is_read_tool(name) =>
+        {
             has("context_engine") || has("memory") || has("session_search")
         }
         "web_search" | "web_fetch" => has("web"),
@@ -2784,42 +2791,49 @@ mod tests {
         use crate::llm::cli::CliKind;
         use std::os::unix::fs::PermissionsExt;
 
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
+        for (toolsets, expected_tools) in [
+            (vec![], ""),
+            (vec!["file"], "Read,Grep,Glob"),
+            (vec!["web"], "WebSearch,WebFetch"),
+            (vec!["file", "web"], "Read,Grep,Glob,WebSearch,WebFetch"),
+        ] {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            crate::db::migrations::run_migrations(&pool).await.unwrap();
+            let mut request = create_request("every 1h");
+            request.model = crate::chat_engine::engine_model_id(CliKind::Claude);
+            request.enabled_toolsets = Some(toolsets.into_iter().map(str::to_string).collect());
+            create(&pool, request).await.unwrap();
+            let claimed = claim(&pool, "routine-1", "manual", false)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(claimed.model, "__clovy_cli_engine__:claude");
+
+            let repository = AgentRepository::new(pool.clone());
+            let workspace = tempfile::tempdir().unwrap();
+            let session_id = Uuid::new_v4().to_string();
+            let mut created = None;
+            let run_id = persist_claim_run(
+                &pool,
+                &repository,
+                &claimed,
+                &session_id,
+                workspace.path(),
+                &crate::db::repositories::timestamp(),
+                &mut created,
+            )
             .await
             .unwrap();
-        crate::db::migrations::run_migrations(&pool).await.unwrap();
-        let mut request = create_request("every 1h");
-        request.model = crate::chat_engine::engine_model_id(CliKind::Claude);
-        create(&pool, request).await.unwrap();
-        let claimed = claim(&pool, "routine-1", "manual", false)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(claimed.model, "__clovy_cli_engine__:claude");
+            assert_eq!(created.as_deref(), Some(run_id.as_str()));
 
-        let repository = AgentRepository::new(pool.clone());
-        let workspace = tempfile::tempdir().unwrap();
-        let session_id = Uuid::new_v4().to_string();
-        let mut created = None;
-        let run_id = persist_claim_run(
-            &pool,
-            &repository,
-            &claimed,
-            &session_id,
-            workspace.path(),
-            &crate::db::repositories::timestamp(),
-            &mut created,
-        )
-        .await
-        .unwrap();
-        assert_eq!(created.as_deref(), Some(run_id.as_str()));
-
-        let bin = tempfile::tempdir().unwrap();
-        let log = bin.path().join("args");
-        let program = bin.path().join("claude");
-        std::fs::write(
+            let bin = tempfile::tempdir().unwrap();
+            let log = bin.path().join("args");
+            let program = bin.path().join("claude");
+            std::fs::write(
             &program,
             format!(
                 "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{log}'\ncat > '{log}.stdin'\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-1\"}}'\necho '{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"Three notes mention the launch.\"}}]}}}}'\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Three notes mention the launch.\"}}'\n",
@@ -2827,64 +2841,87 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let context = crate::chat_engine::turn::TurnContext {
-            session_id: session_id.clone(),
-            run_id: run_id.clone(),
-            previous_run_id: None,
-            kind: CliKind::Claude,
-            program,
-            env: std::collections::BTreeMap::from([(
-                "PATH".to_string(),
-                "/usr/bin:/bin".to_string(),
-            )]),
-            workspace: workspace.path().to_path_buf(),
-            input: routine_cli_prompt(&claimed),
-            mcp: None,
-            turns: None,
-            safety_mode: claimed.safety_mode,
-            attended: false,
-            images: Vec::new(),
-        };
-        let sink = RoutineSink {
-            repository: repository.clone(),
-        };
-        let (_cancel, receiver) = tokio::sync::watch::channel(false);
-        crate::chat_engine::turn::execute_turn(&repository, &sink, context, receiver).await;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let context = crate::chat_engine::turn::TurnContext {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                previous_run_id: None,
+                kind: CliKind::Claude,
+                program,
+                env: std::collections::BTreeMap::from([(
+                    "PATH".to_string(),
+                    "/usr/bin:/bin".to_string(),
+                )]),
+                workspace: workspace.path().to_path_buf(),
+                input: routine_cli_prompt(&claimed),
+                mcp: None,
+                turns: None,
+                safety_mode: claimed.safety_mode,
+                attended: false,
+                routine_tools: Some(
+                    crate::chat_engine::policy::RoutineBuiltinTools::from_toolsets(
+                        &claimed.enabled_toolsets,
+                    ),
+                ),
+                images: Vec::new(),
+            };
+            let sink = RoutineSink {
+                repository: repository.clone(),
+            };
+            let (_cancel, receiver) = tokio::sync::watch::channel(false);
+            crate::chat_engine::turn::execute_turn(&repository, &sink, context, receiver).await;
 
-        let args = std::fs::read_to_string(&log).unwrap();
-        assert!(args.lines().any(|line| line == "--tools"), "{args}");
-        assert!(
-            args.lines().any(|line| line == "--strict-mcp-config"),
-            "{args}"
-        );
-        let stdin = std::fs::read_to_string(format!("{}.stdin", log.display())).unwrap();
-        assert!(stdin.contains("running unattended"), "{stdin}");
-        assert!(stdin.ends_with("Summarize notes"), "{stdin}");
+            let args = std::fs::read_to_string(&log).unwrap();
+            assert!(args.lines().any(|line| line == "--tools"), "{args}");
+            let args_list = args.lines().collect::<Vec<_>>();
+            let tools_at = args_list
+                .iter()
+                .position(|value| *value == "--tools")
+                .unwrap();
+            assert_eq!(args_list[tools_at + 1], expected_tools);
+            let allowed_at = args_list
+                .iter()
+                .position(|value| *value == "--allowedTools")
+                .unwrap();
+            let expected_allowed = if expected_tools.is_empty() {
+                "mcp__clovy__*".to_string()
+            } else {
+                format!("{expected_tools},mcp__clovy__*")
+            };
+            assert_eq!(args_list[allowed_at + 1], expected_allowed);
+            assert!(
+                args.lines().any(|line| line == "--strict-mcp-config"),
+                "{args}"
+            );
+            let stdin = std::fs::read_to_string(format!("{}.stdin", log.display())).unwrap();
+            assert!(stdin.contains("running unattended"), "{stdin}");
+            assert!(stdin.ends_with("Summarize notes"), "{stdin}");
 
-        // The routine history records the CLI's result like a Clovy run's.
-        let runs = list_runs(&pool, Some("routine-1")).await.unwrap();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, "completed");
-        assert_eq!(runs[0].agent_run_id.as_deref(), Some(run_id.as_str()));
-        let answer = repository
-            .items(&session_id)
-            .await
-            .unwrap()
-            .into_iter()
-            .find_map(|item| match item.payload {
-                AgentItemPayload::AssistantMessage(message) => Some(message.content),
-                _ => None,
-            });
-        assert_eq!(answer.as_deref(), Some("Three notes mention the launch."));
-        let routine = query("SELECT last_status, claim_token FROM routines WHERE id = 'routine-1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(routine.get::<Option<String>, _>("claim_token"), None);
-        assert_eq!(
-            routine.get::<Option<String>, _>("last_status").as_deref(),
-            Some("ok")
-        );
+            // The routine history records the CLI's result like a Clovy run's.
+            let runs = list_runs(&pool, Some("routine-1")).await.unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].status, "completed");
+            assert_eq!(runs[0].agent_run_id.as_deref(), Some(run_id.as_str()));
+            let answer = repository
+                .items(&session_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|item| match item.payload {
+                    AgentItemPayload::AssistantMessage(message) => Some(message.content),
+                    _ => None,
+                });
+            assert_eq!(answer.as_deref(), Some("Three notes mention the launch."));
+            let routine =
+                query("SELECT last_status, claim_token FROM routines WHERE id = 'routine-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(routine.get::<Option<String>, _>("claim_token"), None);
+            assert_eq!(
+                routine.get::<Option<String>, _>("last_status").as_deref(),
+                Some("ok")
+            );
+        }
     }
 }

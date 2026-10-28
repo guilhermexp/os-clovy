@@ -11,6 +11,29 @@ fn permissions(safety_mode: AgentSafetyMode, attended: bool) -> TurnPermissions 
     TurnPermissions {
         safety_mode,
         attended,
+        routine_tools: (!attended).then_some(RoutineBuiltinTools {
+            file: true,
+            web: true,
+        }),
+    }
+}
+
+#[test]
+fn policy_claude_routine_without_a_capability_snapshot_has_no_builtins() {
+    for safety_mode in MODES {
+        let policy = turn_policy(
+            CliKind::Claude,
+            TurnPermissions {
+                safety_mode,
+                attended: false,
+                routine_tools: None,
+            },
+        );
+        assert_eq!(values_of(&policy.args, "--tools"), vec![String::new()]);
+        assert_eq!(
+            values_of(&policy.args, "--allowedTools"),
+            vec![CLAUDE_CLOVY_TOOLS.to_string()]
+        );
     }
 }
 
