@@ -21,7 +21,9 @@ Current upstreams are **Groq** for audio, **OpenRouter** for remote text,
 remain separate. In this fork the desktop has no sign-in: it runs on a fixed
 local identity (`src-tauri/src/local_identity.rs`) against Clovy API at
 `http://127.0.0.1:8080` by default (`CLOVY_API_URL` overrides); the local
-agent harness uses the **OpenAI Agents SDK**.
+chat runs through installed CLI engines: Claude Code by default, with Codex
+as the existing local fallback. Clovy tools reach those turns through MCP and
+the local approval broker.
 
 > Read **[CONTEXT.md](CONTEXT.md)** before naming anything, and
 > **[docs/index.md](docs/index.md)** to find the doc for the area you touch.
@@ -38,7 +40,7 @@ os-clovy/
 │   └── test/                # vitest suites (all frontend tests live here)
 ├── src-tauri/               # Rust native shell (Cargo package `clovy`)
 │   ├── src/audio/           # recording, source separation, turn detection, live preview
-│   ├── src/agent_runtime/   # sidecar protocol, tools, persistence, and migration
+│   ├── src/agent_sessions/  # engine-neutral sessions, events, persistence, and migration
 │   ├── src/local_identity.rs # fixed local user + bearer token sent to Clovy API (no sign-in)
 │   ├── src/providers/       # model-settings persistence
 │   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
@@ -64,7 +66,7 @@ os-clovy/
 
 - **[CONTEXT.md](CONTEXT.md)** — the domain glossary / ubiquitous language.
   Read before naming anything; terms are canonical and the `_Avoid_` lists are
-  binding (dictation vs note transcription, Source vs channel, agent harness
+  binding (dictation vs note transcription, Source vs channel, chat engine
   vs model, credit price vs cost, stored vs runtime session id).
 - **[docs/index.md](docs/index.md)** — the annotated index of every doc: ADRs,
   subsystem docs, release/ops runbooks, PRDs, QA, and the feature specs.
@@ -206,9 +208,8 @@ build scripts in `pnpm-workspace.yaml` — live in
   only on Windows, so `make verify` on the Mac does not run them. Run
   `cargo test --manifest-path src-tauri/Cargo.toml --locked <activity|llm|chat_engine>`
   on a Windows host; CI's `windows-rust` job (manual dispatch) runs the same three.
-- **Agent runtime gate:** `pnpm agent-runtime:typecheck` +
-  `pnpm agent-runtime:test` + `pnpm agent-runtime:build` before changing the
-  sidecar or its OpenAI Agents SDK pin.
+- **Chat and tools gate:** `cargo test chat_engine`, `cargo test mcp_server`,
+  and `cargo test approval_broker` cover CLI turns and local tool authority.
 - **Lint / format:** `pnpm check` (Biome: format + lint for `src/` and
   `scripts/`, including the lucide import ban) and `pnpm typecheck`
   (`tsc --noEmit`); `pnpm format` / `pnpm check:write` apply Biome fixes. Rust
@@ -256,7 +257,7 @@ build scripts in `pnpm-workspace.yaml` — live in
   exception documented in the dated [ADR-0021 addendum](docs/adr/0021-june-api-v1-compatibility-policy.md).
   It is not authority to publish a breaking production update: publication and
   support for older clients require a separate owner decision.
-- **Clovy presents as Clovy.** The local harness is an implementation detail;
+- **Clovy presents as Clovy.** CLI execution is an implementation detail;
   product instructions assert Clovy's identity.
 - **No Open Software services in the desktop (fork).** The app has no OS
   Accounts sign-in, billing, credits funding, telemetry, issue reports,
@@ -300,7 +301,6 @@ Gates (run from the repo root, judge by failure count per the notes above):
 - Desktop Rust: `cargo fmt --manifest-path src-tauri/Cargo.toml --all --check`,
   `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings`,
   `pnpm test:rust`.
-- Agent sidecar (when touched): `pnpm agent-runtime:typecheck && pnpm agent-runtime:test`.
 - Full CI parity: `make verify`.
 
 Functional proof (Reality) for desktop features:
@@ -399,9 +399,8 @@ end-to-end capabilities or an account's actual price.
 }
 ```
 
-The agent sidecar is packaged as a Node SEA, which needs an official Node 24
-binary carrying `NODE_SEA_FUSE_*`; Homebrew's node lacks it ("Could not find
-the sentinel"). This machine keeps one at `~/.local/share/node-official/node24`.
+Node builds the frontend; the app does not bundle a JavaScript agent executable.
+This machine keeps Node 24 at `~/.local/share/node-official/node24`.
 With Xcode 27, release builds under `MACOSX_DEPLOYMENT_TARGET=14.0` corrupt
 proc-macro dylibs when Cargo strips build dependencies ("mis-aligned LINKEDIT
 string pool", then `can't find crate for zerofrom_derive`);

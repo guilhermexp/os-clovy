@@ -47,9 +47,10 @@ licensed.
   system audio, orders the transcript into conversation turns, and generates
   editable notes. Saved audio is kept so failed steps can be retried without
   recording again.
-- **Agent.** A Clovy-owned local agent built on the OpenAI Agents SDK that
-  helps with files, research, and drafts. Sessions are sandboxed by default
-  and risky actions wait for your approval. Extend it with skills.
+- **Agent.** Claude Code runs chat through your installed CLI and its login,
+  with Codex as the existing local fallback. Clovy supplies notes, skills,
+  and other local tools through MCP. Sessions are sandboxed by default, and
+  Clovy tool mutations wait for the local approval broker.
 - **Image generation.** Create images from a prompt. Clovy API sends image
   requests to fal.
 - **Your choice of models.** Pick generation, transcription, and dictation
@@ -75,8 +76,8 @@ licensed.
 ## How Clovy keeps it private
 
 1. **Local by default.** App state, recordings, transcripts, and agent memory
-   live on your machine. The agent runs locally inside a macOS write-jail
-   unless you opt a session out.
+   live on your machine. CLI processes run locally with the selected execution
+   policy; their model requests follow the CLI's own account and provider.
 2. **Provider-dependent model privacy.** Clovy API sends audio to Groq, text
    to OpenRouter, images and video to fal, and web search and fetch to Tavily.
    What a provider retains or trains on depends on that provider and route.
@@ -96,7 +97,7 @@ Clovy runs on macOS 14 or later, Apple Silicon and Intel. There are no
 published releases: build it from source (see below).
 
 Windows builds cover the app shell, sign-in, microphone recording, notes, and
-the bundled agent runtime. On Windows 10 1903+ and Windows 11 x64 they also
+installed CLI chat engines. On Windows 10 1903+ and Windows 11 x64 they also
 include encrypted text-only [activity capture](docs/activity-capture.md), the
 [activity timeline](docs/activity-timeline.md), local coding-agent session
 ingestion, and CPU embeddings for day intelligence. Global dictation paste,

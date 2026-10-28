@@ -331,7 +331,10 @@ There are no published releases or release workflows (removed by the
 see [release-macos.md](release-macos.md) and
 [release-windows.md](release-windows.md).
 
-Changes to the local agent sidecar or its OpenAI Agents SDK pin must pass
-`pnpm agent-runtime:typecheck`, `pnpm agent-runtime:test`, and
-`pnpm agent-runtime:build`. Release builds package the result as a signed Node 24
-single executable and verify its checksum and startup from a path with spaces.
+Chat uses installed CLI engines and the bundled `clovy-mcp` relay. Run
+`cargo test chat_engine`, `cargo test mcp_server`, and `cargo test approval_broker`
+when changing that path, then the full `make verify` gate. Session persistence
+lives in `src-tauri/src/agent_sessions/`; no JavaScript agent executable is
+built or packaged. Native proof uses an isolated run-owned debug identity and
+the data-safety rules in `AGENTS.md`. A CLI login and authorized model usage
+are separate from a successful desktop build.

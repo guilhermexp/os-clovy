@@ -162,11 +162,12 @@ selected-resource proof, and an honest privacy claim.
 
 These are the exact third-party canonical names currently returned by Notion's
 hosted MCP preview. Clovy preserves them through discovery, policy checks, Rust
-preflight, and provider invocation. The OpenAI Agents SDK converts punctuation
-in function-tool names to underscores, so the model-facing aliases replace
-each hyphen with an underscore (for example, `notion_update_page`) before the
-SDK dispatches back to the canonical operation. Future hosted tools are not
-part of this contract until they are separately reviewed and added here.
+preflight, and provider invocation. CLI turns reach the connector through the
+Clovy MCP gateway and local approval broker (ADR-0072). Historical model-facing
+aliases from the retired native loop are not the current transport contract;
+the gateway binds each invocation to the discovered canonical operation.
+Future hosted tools are not part of this contract until they are separately
+reviewed and added here.
 
 Tool results preserve page/block/data-source ids, parent ids, canonical URLs,
 last-edited time, property schema, pagination cursor, and a compact content

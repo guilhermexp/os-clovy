@@ -86,15 +86,13 @@ Clovy supports macOS 14.0 and later on Apple Silicon and Intel Macs, including
 macOS 15. Release builds are universal macOS apps. System
 audio capture uses Core Audio process taps and is available only on macOS 14.2
 and later. On macOS 14.0 or 14.1, recording falls back to microphone-only mode.
-The signed Node 24 agent sidecar carries separate `arm64` and `x86_64`
-executables that are combined into one universal binary. Release builds verify
-both architectures, the sidecar checksum, and startup from a path with spaces
-before the universal app is assembled.
+Chat uses the user's installed CLI. The app bundles the `clovy-mcp` relay and
+native helpers, without a separate model-and-tool loop executable.
 
 ## Build
 
-The local release recipe (Node 24 official binary for the agent sidecar, the
-Xcode strip workaround) is in `AGENTS.md` under **Build**; it produces an
+The local release recipe (frontend tooling and the Xcode strip workaround) is
+in `AGENTS.md` under **Build**; it produces an
 unsigned-updater build for local use. For the release files, with the updater
 key and an ad hoc signature unless Apple variables are set:
 
@@ -120,18 +118,12 @@ plutil -extract CFBundleURLTypes xml1 -o - "$APP/Contents/Info.plist"
 lipo -archs "$APP/Contents/MacOS/clovy"
 lipo -archs "$APP/Contents/Resources/native/bin/Clovy Dictation Helper.app/Contents/MacOS/clovy-dictation-helper"
 lipo -archs "$APP/Contents/Resources/native/bin/Clovy Audio Capture.app/Contents/MacOS/clovy-system-audio-recorder"
-RUNTIME="$APP/Contents/Resources/native/bin/clovy-agent-runtime"
-test "$(shasum -a 256 "$RUNTIME" | awk '{print $1}')" = "$(cat "$RUNTIME.sha256")"
-codesign --verify --strict --verbose=2 "$RUNTIME"
-/usr/bin/arch -arm64 "$RUNTIME"
-/usr/bin/arch -x86_64 "$RUNTIME"
 ```
 
 Confirm `clovy` appears in `CFBundleURLSchemes` and each `lipo` command
-prints both `x86_64` and `arm64`. The runtime checksum and signature must pass,
-and both architecture commands must execute successfully. On an
-Apple Silicon validation host, the x86_64 command is a real Rosetta execution,
-not an architecture inferred from file metadata.
+prints both `x86_64` and `arm64`. Validate CLI chat independently with an
+installed, signed-in CLI and the isolated debug-app proof described in
+`AGENTS.md`; a bundle architecture check does not prove a model turn.
 
 Also confirm the compatibility path resolves to the Clovy presentation name:
 
@@ -143,10 +135,5 @@ Do not replace this with a raw `CFBundleDisplayName` assertion. Finder requires
 the base display name to match the physical bundle name before it applies the
 localized Clovy value.
 
-The Node sidecar is a separate hardened executable and must retain both
-`com.apple.security.cs.allow-jit` and
-`com.apple.security.cs.allow-unsigned-executable-memory` after the outer app is
-signed. These are the narrow V8 executable-memory exceptions. Do not replace
-them with `disable-executable-page-protection` or disable library validation.
-Check the packaged sidecar entitlements and run both architecture slices
-before notarizing.
+The desktop no longer needs V8 executable-memory entitlements for an agent
+process. Preserve the entitlements required by the remaining native helpers.

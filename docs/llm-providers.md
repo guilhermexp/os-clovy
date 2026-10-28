@@ -142,39 +142,23 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
 
 - **Migration.** A legacy `localGeneration` endpoint becomes endpoint `local`
   ("Local model") with the same URL, model, and key (key moved to the
-  Keychain). If the legacy local model was enabled, chat and notes select it.
+  Keychain). If the legacy local model was enabled, notes select it; chat is
+  separately normalized to a CLI.
   If the Keychain refuses the key, the legacy key stays in the file, keeps
   working, and the move is retried on the next launch. Saving a new key for
   `local` ends a pending migration and drops the legacy key, so the retry can
   never overwrite the new key.
-- **Default chat engine** ([ADR-0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md)).
-  Claude Code, else Codex, is the default chat engine; the Clovy agent is
-  the legacy engine. `providers::ensure_cli_default` runs at launch and
-  before `chat_default_engine` answers: chat on Clovy (the old default, new
-  installs included) moves once to the first of claude, codex on the
-  login-shell PATH (`llm::registry::apply_cli_default`), recorded as
-  `llmCliDefaultApplied`. Any other chat choice is kept and recorded; an
-  explicit chat choice later (`llm_set_usage`, picking a Clovy model) is
-  recorded too and never moved. With neither CLI installed nothing is
-  recorded, the next launch retries, and `llm_providers` reports
-  `cliDefaultPending: true`, which Settings shows under Chat. The chat
-  select lists the CLIs first and "Clovy (legacy agent)" last.
-- **Chat.** Chat on an endpoint is mirrored into the legacy
-  `generationProvider = "local"` / `generationModel` fields, so the existing
-  agent route, model picker, and capability lookups work unchanged. Agent
-  requests resolve their endpoint by model id (chat endpoint first, then any
-  endpoint serving that model). A CLI chosen for chat makes new chat sessions
-  start on that CLI: `list_provider_models("generation").selectedModel` returns
-  its engine id (below). Picking a Clovy model in the text-model picker moves
-  chat back to Clovy, whose remote text runs on OpenRouter through Clovy API
-  (`generationProvider = "openrouter"`). An agent session that recorded a text
-  model id from before the OpenRouter cutover is resolved to the same model's
-  current id at the remote boundary; the session's runs and messages keep the
-  id they recorded. An agent request that carries tools, `tool_choice`, or
-  `response_format` reaches OpenRouter with `provider.require_parameters:
-  true`, so a route that cannot honor them declines the request instead of
-  running it without tools; the run then fails (the exact status OpenRouter
-  returns in that case has not been observed yet).
+- **Default chat engine** ([ADR-0072](adr/0072-cli-chat-replaces-the-native-agent.md)).
+  Claude Code is the default, with Codex as the existing installed fallback.
+  A one-time settings migration moves old Clovy or endpoint chat selections
+  to that default. No native or endpoint engine remains in chat. If no eligible
+  CLI is installed, chat reports the installation/connection requirement.
+- **Chat.** New sessions use the chosen CLI engine. Changing the generation
+  model affects notes, never `llmUsage.chat`. Old session messages, runs,
+  interruptions, and artifacts remain readable. Sending or retrying an old
+  native session uses the CLI default; stale native runs waiting for a user
+  are cancelled by migration rather than resumed. Legacy endpoint settings
+  remain available to notes and activity through `llm::generate`.
 - **Notes.** `clovy_api::generate_note_from_transcript` uses the notes
   selection: Clovy (with the saved remote model), the endpoint, or the CLI
   (same system prompt and source layout as the endpoint route; stored provider
@@ -246,26 +230,19 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
 
 ## CLI chat engine
 
-A chat session's **chat engine** is part of its model id
-(`crate::chat_engine`): `__clovy_cli_engine__:<cli>` runs each message on that
-CLI; a tagged endpoint id runs the Clovy agent on that endpoint (Clovy's tools,
-streaming, and live steering, as on Clovy API); anything else is a Clovy model.
-New work starts on the default engine: `chat_default_engine` returns
-`{ modelId, cli, legacyFallback }` (`modelId` is the CLI engine id when chat
-is on a CLI, else `null` and the caller keeps its own default) without the
-network, and the desktop's new sessions, Home's turns
-([home-assistant.md](home-assistant.md), ADR-0064), and note chat create their
-session on it.
-The engine picker writes `__june_local_generation__:<model>@<endpoint id>`
-(both URL-encoded), so two endpoints serving the same model stay distinct and
-the agent proxy uses exactly the chosen endpoint (a removed endpoint is
-refused with `local_model_unavailable`, never replaced by another); the older
-`__june_local_generation__:<model>` still routes by model id. The composer's
-engine picker (`src/components/agent/composer/`, also in the note chat panel)
-lists the six CLIs first (the default one, Claude Code or else Codex, marked
-"Default"), then the registered endpoints, then Clovy under "Legacy"
-(`chat_engine_catalog`). The Clovy model picker shows only on the Clovy
-engine, and Clovy credits only gate the Clovy engine.
+A chat session's **chat engine** is an installed CLI, encoded as
+`__clovy_cli_engine__:<cli>` (`crate::chat_engine`). `chat_default_engine`
+resolves the default locally: Claude Code, otherwise the existing Codex
+fallback. New sessions, Home turns
+([home-assistant.md](home-assistant.md), ADR-0064), and note chat use it.
+The composer's engine picker lists CLI engines only; endpoints remain in the
+note/activity provider settings. Picking a text model never changes chat.
+
+Session and run persistence lives in `src-tauri/src/agent_sessions/`, separate
+from process orchestration. Historical native or endpoint sessions open with
+their existing records; their next message or retry runs on the CLI default.
+Clovy does not ship a second model-and-tool loop or fall back to a remote
+chat route. No installed eligible CLI produces a clear setup requirement.
 
 One message on a CLI engine is one CLI process in the session workspace:
 
@@ -387,12 +364,11 @@ argument: its installer ships `agy.exe`.
   same CLI. A CLI that starts a new conversation in a session with earlier
   messages (another engine answered before, or a branch) gets them, bounded
   to 24,000 characters, ahead of the new message.
-- **Stream.** Text, reasoning, and tool activity become the runtime events the
-  sidecar emits (`message.delta`, `reasoning.delta`, `tool.started`,
+- **Stream.** Text, reasoning, and tool activity become stable session events
+  (`message.delta`, `reasoning.delta`, `tool.started`,
   `tool.completed`/`tool.failed`, `message.completed`, `run.completed`/
-  `run.failed`/`run.cancelled`) and are persisted through the same function
-  (`agent_runtime::host::persist_runtime_event`), so the session shows and
-  keeps them like a Clovy run.
+  `run.failed`/`run.cancelled`). The neutral `agent_sessions` module persists
+  them so the UI and stored history share the same event/item contract.
 - **Cancel.** The run's cancellation is registered (`ChatEngineHost::register`)
   before anything is awaited for it, and the turn checks it and the run's
   status again right before spawning, so a cancel during launch preparation
@@ -443,8 +419,8 @@ still runs there.
 
 | Command | Args | Returns |
 |---|---|---|
-| `chat_default_engine` | none | `{ modelId: string \| null, cli: string \| null, legacyFallback: boolean }` |
-| `chat_engine_catalog` | none | `{ clis: [{ id, name, installed, reason?, modelId, clovyTools }], endpoints: [{ id, name, modelId, optionId }] }` |
+| `chat_default_engine` | none | `{ modelId: string, cli: string }` |
+| `chat_engine_catalog` | none | `{ clis: [{ id, name, installed, reason?, modelId, clovyTools }] }` |
 
 ## Tauri commands
 
@@ -505,8 +481,9 @@ through byte for byte; for chat turns see [CLI chat engine](#cli-chat-engine).
   the turn token (present in each CLI's server arguments, bound to the run,
   revoked at the end) and a write tool approved, denied, and cancelled through
   the broker over a real socket and the relay code (`chat_engine::binding_tests`),
-  and the endpoint as the agent's model against a fake streaming server with a
-  tool call. `cargo test chat_engine_real -- --ignored --nocapture` runs two
+  and historical session routing to the CLI default. The ignored
+  `chat_engine_real` tests exercise installed engines with authorized usage:
+  `cargo test chat_engine_real -- --ignored --nocapture` runs two
   turns on the installed claude, codex, and pi, and the policy's argv on the
   installed claude and codex with the built `clovy-mcp` and an approval card
   (`chat_engine_real_policy_smoke`, after `cargo build --bin clovy-mcp`).

@@ -37,11 +37,11 @@ recording, dictation shortcuts and paste, note generation, folders, and settings
 backed by Clovy API. macOS system-audio capture and Seatbelt
 sandbox features are macOS-only.
 
-Windows builds bundle the signed Node 24 agent sidecar, so Clovy can
-start the agent on a clean machine without Python, GitHub downloads, or a
-first-run runtime install. Sandboxed mode restricts host file tools to the
-workspace and disables shell execution on Windows. Unrestricted mode supports
-shell execution with approval for sensitive actions.
+Chat requires an installed CLI and its own login. Claude Code is the default,
+with Codex as the existing local fallback. The installer bundles the `clovy-mcp`
+relay for Clovy tools, not a model-and-tool loop. CLI execution policy and
+Clovy's local approval broker govern each turn; see
+[llm-providers.md](llm-providers.md#cli-chat-engine).
 
 ## Qualifying an unsigned build on native Windows
 

@@ -4,8 +4,8 @@ Clovy is a Tauri desktop app that records meetings/dictation, transcribes
 the audio, turns the transcript into structured notes, and hosts an AI agent
 you can chat with over those notes. It runs under a fixed **local identity**
 against a **Clovy API** server (local by default), with no sign-in, billing,
-telemetry or companion app, and runs a Clovy-owned **agent harness** built on
-the OpenAI Agents SDK.
+telemetry or companion app. Chat runs on installed **CLI chat engines**, with
+Clovy tools exposed through the **Clovy MCP server** and local approval broker.
 
 This document is a glossary, not a spec. Terms are canonical; the `_Avoid_`
 lines are binding. Implementation, endpoints, and code shape live under
@@ -89,7 +89,7 @@ dictation), local model (unless the endpoint is on this machine).
 
 **Provider use (usage selection)**:
 Which provider serves each use: **chat**, **notes**, or **activity**. Clovy
-API is the default for the first two; activity defaults to **none**, never
+API serves notes; chat uses a CLI only. Activity defaults to **none**, never
 falls back to Clovy API, and requires a provider with `json_schema` structured
 output. The stored `dictationCleanup` slot stays on Clovy API: **dictation
 cleanup** never runs on an own provider.
@@ -111,24 +111,21 @@ Clovy's own calls. Distinct from an **agent run**.
 _Avoid_: completion (unqualified), query.
 
 **Chat engine**:
-What answers the messages of one chat session: **Clovy** (the agent harness,
-on a Clovy API model or a registered endpoint, with Clovy's own tools) or an
-**agent CLI** (a **CLI chat engine**: one CLI process per message that
-resumes the CLI's own conversation, with the CLI's own tools and, when the CLI
-accepts a per-run MCP configuration and the server is on, Clovy's tools
-through the **Clovy MCP server**). Stored as the session's model id
-(`__clovy_cli_engine__:<cli>` for a CLI). See
+The installed **agent CLI** that answers a chat session, one process per message,
+resuming its own conversation. Clovy tools reach a bound turn through the
+**Clovy MCP server** and the local approval broker. The session stores
+`__clovy_cli_engine__:<cli>` as its engine id. Registered endpoints and the
+text model used for notes are separate from chat. See
 [docs/llm-providers.md](docs/llm-providers.md#cli-chat-engine).
-_Avoid_: backend, runtime (that is the agent harness process), provider
-(unqualified).
+_Avoid_: backend, model (an engine is not a model), provider (unqualified).
 
 **Default chat engine**:
-The chat engine new work starts on: Claude Code, else Codex, when one is
-installed; otherwise the **legacy Clovy agent** (the agent harness as a chat
-engine, kept until its tools reach the Clovy MCP server). Routines run on it
-as an **unattended turn** (read-only tools, Clovy's MCP tools, and the web).
-See [ADR-0062](docs/adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md).
-_Avoid_: native agent (say the legacy Clovy agent or the agent harness).
+Claude Code when installed, otherwise the existing Codex fallback. Without
+an eligible installed CLI, chat asks for installation or connection; it never
+starts a bundled agent or an endpoint. Routines use the CLI default as an
+**unattended turn** with their existing tool policy. See
+[ADR-0072](docs/adr/0072-cli-chat-replaces-the-native-agent.md).
+_Avoid_: native agent, legacy engine (neither is a current chat engine).
 
 **Structured-output level**:
 How strongly a provider can be held to a JSON schema: `none`, `prompt`,
@@ -321,34 +318,27 @@ paste.
 _Avoid_: foreground app, frontmost app (both name a live value, not the pin);
 focus target.
 
-### Agent runtime
+### Agent sessions
 
 **Home conversation**:
 Clovy's persistent conversation on the home screen. Each message is a turn of
-the default CLI engine in the Home backing session, which works like any CLI
-session (tools, approvals, errors) and is the conversation's store. Each data
-partition has at most one Home backing session, omitted from focused-session
-lists and native recent-session shortcuts. Task cards from older builds still
-open the focused **agent session** they started; Home no longer starts one.
+the default CLI engine in the Home backing session, with the same tools,
+approvals, and errors as other CLI sessions. Each data partition has at most
+one Home backing session, omitted from focused-session lists. Task cards from
+older builds still open the focused **agent session** they started.
 _Avoid_: dashboard, default agent session, Hermes Home.
 
-**Agent harness**:
-The Clovy-owned local service that runs the OpenAI Agents SDK model and tool
-loop. It is a trusted orchestration process, while Rust owns secrets,
-persistence, approvals, and every machine-touching tool.
-_Avoid_: brain, Hermes, gateway.
-
-**Runtime protocol**:
-Clovy's versioned newline-delimited JSON-RPC contract over the agent harness's
-stdin and stdout. It carries run requests, host tool calls, streaming events,
-interruptions, cancellation, and shutdown without exposing a localhost port.
-_Avoid_: gateway, WebSocket control plane.
+**Agent sessions**:
+The engine-neutral Rust module that owns session and run records, ordered
+items, persisted events, and historical imports. CLI orchestration belongs to
+`chat_engine`; tool authority belongs to the MCP server and approval broker.
+_Avoid_: agent harness, model loop (neither describes session persistence).
 
 **Runtime mode**:
-The per-session execution policy applied by Rust tools: `sandboxed` or
-`unrestricted`. The trusted harness itself is not sandboxed. On macOS,
-sandboxed shell tools use Seatbelt. On Windows, sandboxed file tools are
-workspace-scoped and sandboxed shell execution is unavailable.
+The per-session execution policy: `sandboxed` or `unrestricted`. CLI launch
+flags enforce the engine's supported policy; Clovy tools independently enforce
+local grants and approvals through the broker. See the permission table in
+[docs/llm-providers.md](docs/llm-providers.md#cli-chat-engine).
 _Avoid_: permission, profile.
 
 ### Legacy agent data
@@ -372,8 +362,8 @@ _Avoid_: web browsing (that is `june_web` search/fetch), browser toolset
 
 **Browser access grant**:
 The stored, on-device opt-in that allows Browser use in attended sessions.
-Turning it off disables Clovy's internal `june_browser` MCP server and ends
-active browser broker sessions.
+Turning it off disables attended browser-tool access through the Clovy MCP
+server and ends active browser broker sessions.
 _Avoid_: browser permission, browser toggle.
 
 **Routine Browser use opt-in**:
@@ -385,10 +375,11 @@ _Avoid_: routine browser permission, global routine browsing.
 **Computer use**:
 The consent-gated capability (JUN-278 phase 2) that lets the agent operate
 Mac apps in the background without moving the user's real pointer, stealing
-keyboard focus, or changing the active Space. It uses the pinned runtime's
-computer-use toolset and a Clovy-bundled pinned cua-driver.
+keyboard focus, or changing the active Space. The turn-bound `computer_use`
+MCP tool uses the Rust broker and a Clovy-bundled pinned cua-driver.
 The first access to each verified target app requires one authorization for
-the current attended task; requires a vision-capable model. Bringing a parked
+the current attended task. Local grants, the driver, and macOS permissions
+determine availability (ADR-0067). Bringing a parked
 window into Clovy's current Stage Manager group is part of that authorized app
 use and does not ask again.
 _Avoid_: desktop automation (vague), computer_use toolset (that is the
@@ -404,8 +395,9 @@ _Avoid_: mouse cursor (ambiguous with the user's real pointer), cursor movement
 
 **Stored session id** vs **runtime session id**:
 The persistent id Clovy keys all UI and history on, versus the live process's
-per-resume id. `session.create` returns both; conflating them attaches
-traces/artifacts to the wrong identity.
+per-resume conversation id. The CLI conversation id is saved in run
+configuration; conflating it with the stored id attaches history to the wrong
+identity.
 _Avoid_: "the session id" (always say which).
 
 **Archived session**:
@@ -423,9 +415,9 @@ _Avoid_: completed (in user-facing copy; internal persistence names keep
 completed_at), "archived" for the Hermes flag without saying Hermes.
 
 **Agent run**:
-The user-initiated execution that starts with `run.start` and ends with a
-terminal runtime event or a persisted interruption, including its tool loop.
-One agent run keeps one captured model, safety mode, skill set, and MCP policy.
+The execution of one CLI chat request, including its tool activity, from
+submission to a terminal event. Pending tool approvals belong to that run.
+One agent run keeps one captured CLI, safety mode, skill set, and MCP policy.
 A later picker choice is applied at the next agent-run boundary, never inside
 the active run.
 _Avoid_: response (only the visible text), turn (ambiguous with transcript and
@@ -593,9 +585,9 @@ snapshot), persona, memory (that is the Clovy **memory entry** store; the
 upstream agent memory toolset is a third thing again — qualify which).
 
 **Admin surface**:
-A Clovy-native management view for the local agent harness: skills, MCP servers,
-connector health, and similar settings. Rust owns configuration, secrets, and
-safety policy. The UI never exposes raw harness diagnostics.
+A Clovy-native management view for skills, MCP servers, connector health, and
+similar settings. Rust owns configuration, secrets, and safety policy. The UI
+exposes capabilities rather than process diagnostics.
 _Avoid_: admin panel, runtime UI.
 
 ### AI work & billing
@@ -968,8 +960,8 @@ _Avoid_: do not disturb (that is the macOS Focus feature).
   Never use it for upstream provider cost (which is dollars).
 - **"the session id"** is ambiguous — say **stored** (persistent, UI-facing) or
   **runtime** (live process) session id.
-- **"the model"** never means the agent harness; it is the LLM selected through
-  Clovy's model gateway and called by the runtime.
+- **"the model"** never means the chat engine. A CLI owns its chat model;
+  Clovy's text-model selection controls remote note generation independently.
 - **"channel"** is overloaded: a **Source** lane (mic/system) or a WAV
   interleave channel. Qualify.
 
