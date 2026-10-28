@@ -22,8 +22,8 @@ private while we investigate, and coordinate disclosure timing with you.
 In scope:
 
 - Clovy desktop app local storage, permissions, and credential handling.
-- Clovy API local token authentication, model proxying, request validation,
-  and logging.
+- Direct provider credential isolation, request validation, bounded media
+  downloads, and CLI/MCP turn authorization.
 - GitHub Actions workflows.
 
 Out of scope:

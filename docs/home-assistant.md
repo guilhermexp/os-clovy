@@ -2,7 +2,7 @@
 
 Home is Clovy's persistent conversation on the home screen. Since
 [ADR-0064](adr/0064-home-runs-on-the-default-cli-engine.md) every Home message
-is a turn of the default CLI engine, in a hidden session, without Clovy API.
+is a turn of the default CLI engine, in a hidden session, without a remote chat route.
 
 ## Product contract
 

@@ -1,10 +1,11 @@
 # LLM providers (own providers)
 
-Clovy can run text generation on the user's own providers instead of Clovy
-API: the agent CLIs installed on the Mac and any number of named
-OpenAI-compatible endpoints. The core lives in `src-tauri/src/llm/`; the
-settings UI is `src/components/settings/LlmProvidersSection.tsx` (Settings,
-Models). Transcription always stays on Clovy API (CLIs do not transcribe).
+Notes can use OpenRouter directly with the user's key, an installed CLI, or
+an explicit OpenAI-compatible endpoint. Chat uses CLI engines only. The
+one-shot API remains in `src-tauri/src/llm/`; direct provider transports and
+note orchestration live under `src-tauri/src/providers/`. Settings are in
+`src/components/settings/LlmProvidersSection.tsx`. Transcription uses Groq
+with the user's own key; CLIs and endpoints do not transcribe audio.
 
 ## Pieces
 
@@ -25,7 +26,7 @@ Models). Transcription always stays on Clovy API (CLIs do not transcribe).
 ```rust
 use crate::llm::{self, registry::{LlmUsage, ProviderRef}, GenerateRequest};
 
-// One call on an explicit provider (endpoint or CLI). Clovy/None -> LlmError::NotLocal.
+// One call on an explicit provider (endpoint or CLI). OpenRouter/None -> LlmError::NotLocal.
 let out = llm::generate(&provider, GenerateRequest {
     system: Some(instructions),
     prompt: user_text,
@@ -45,7 +46,7 @@ llm::generate_for_activity(request).await?;
 
 - activity provider "none" (the default) returns `LlmError::ActivityProviderMissing`
   without any call, so no activity text leaves the machine and nothing falls
-  back to Clovy API;
+  back to another provider;
 - a provider whose measured level is below `json_schema` (or never tested)
   returns `LlmError::StructuredOutputInsufficient`;
 - calls are serialized by a process-wide semaphore (one at a time).
@@ -56,9 +57,8 @@ summarize a coding-agent block with that agent's own CLI
 ([coding-agent-sessions.md](coding-agent-sessions.md)). It takes the same
 semaphore and follows the CLI isolation contract below.
 
-`llm::provider_for(LlmUsage::X)` returns the selection for chat, notes,
-dictation cleanup, or activity. The dictation-cleanup selection is always
-Clovy API and nothing reads it (see below).
+`llm::provider_for(LlmUsage::X)` returns the chat, notes or activity selection.
+Dictation cleanup is fixed to OpenRouter and has no selectable engine.
 
 ## Structured output levels
 
@@ -109,8 +109,7 @@ Every allowed one-shot call also:
   the shell PATH) and runs with the login-shell environment, so `HOME`,
   `PI_CODING_AGENT_DIR`, and other profile variables reach the CLI unchanged;
   Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`, `OS_ACCOUNTS_*`, `CLOVY_*`,
-  `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`, such as the local development bearer token
-  from `.env`) are removed by `llm::shell_env::cli_environment`, the one filter
+  `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`) are removed by `llm::shell_env::cli_environment`, the one filter
   for one-shot calls, `--version` detection, the login-shell capture, and the
   CLI chat engine; Clovy never logs in or edits CLI configuration; on
   Windows see [Windows resolution](#windows-resolution);
@@ -136,8 +135,8 @@ Every allowed one-shot call also:
 
 The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
 `baseUrl`, `modelId`, `hasApiKey`, measured `structuredOutput`, optional
-`rpmLimit`), `llmUsage` (`chat`, `notes`, `dictationCleanup`, `activity`, each
-`{ "kind": "clovy" | "none" | "endpoint" | "cli", "id"? }`), `llmCliLevels`, and
+`rpmLimit`), `llmUsage` (`chat`, `notes`, `activity`, each
+`{ "kind": "openrouter" | "none" | "endpoint" | "cli", "id"? }`), `llmCliLevels`, and
 `llmRegistryMigrated`. Endpoint keys are never in the file or any DTO.
 
 - **Migration.** A legacy `localGeneration` endpoint becomes endpoint `local`
@@ -159,33 +158,31 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   native session uses the CLI default; stale native runs waiting for a user
   are cancelled by migration rather than resumed. Legacy endpoint settings
   remain available to notes and activity through `llm::generate`.
-- **Notes.** `clovy_api::generate_note_from_transcript` uses the notes
-  selection: Clovy (with the saved remote model), the endpoint, or the CLI
-  (same system prompt and source layout as the endpoint route; stored provider
-  `cli:<id>`). On Clovy with the user's own OpenRouter key and an explicit
-  model, the note is one chat completion straight to OpenRouter with Clovy
-  API's `note_generate.md` prompt, source layout, and source-label cleanup
-  (stored provider `openrouter`); Auto or no key goes through
-  `/v1/notes/generate` (ADR-0070).
-- **Note transcription.** `clovy_api::transcribe_saved_audio` (final turns, the
+- **Notes.** The selected Notes engine generates and cleans the transcript:
+  OpenRouter directly with the user's key and saved model, or the existing
+  endpoint/CLI route through `llm::generate`. Prompts live in
+  `src-tauri/src/prompts/`. Missing OpenRouter keys return
+  `openrouter_api_key_missing` before network access. There is no Auto or
+  fallback route. A one-time migration rewrites the old server selection to
+  OpenRouter and the old Auto model to the default. CLI/endpoint choices stay.
+- **Note transcription.** `transcribe_saved_audio` in the provider layer (final turns, the
   per-source fallback, live preview) posts straight to Groq with the user's
-  own Groq key, with the parameters Clovy API sends (`response_format=json`,
+  own Groq key, with the transcription parameters (`response_format=json`,
   canonical `audio.wav`/`audio.m4a` name, dictionary prompt, language, 25 MB
   cap, one retry of a 408/5xx or transport failure; an empty transcript is
-  `no_speech`), and through `/v1/notes/transcribe` without one (ADR-0070).
+  `no_speech`). Without a key it returns `groq_api_key_missing` before a request.
   A Groq 429 carries its `retry-after` (else `x-ratelimit-reset-requests`) as
   `details.retryAfterMs`; `send_direct` waits it out only up to 2 s. Final
   transcription reads one route per request (the saved key, the run's
   model, that key's pacer) and its kept chunks, pacer and transport all use
-  it; the key is never read again for that request. Only no saved key
-  takes Clovy API's route: a saved key the credential store cannot return
+  it; the key is never read again for that request. A saved key the credential store cannot return
   fails the request with `provider_api_key_unavailable` (the note says to
   save it again) and the live preview sends nothing. It runs behind the
   pacer of that route (`domain/processing.rs` `RequestPacer`): one per Groq account, keyed by the
   first 8 bytes of the key's SHA-256 (never the key), with 18 requests a
   minute and 7,200 s of billed audio an hour (each request billed at least
-  10 s) across both Sources, every note and the live preview; Clovy API's
-  route without a key has its own pacer, held only by a 429 it relays. Pacer
+  10 s) across both Sources, every note and the live preview. There is no
+  server-route pacer. Pacer
   times are wall-clock milliseconds, so a pause ends on time across sleep,
   and a clock set back never stretches it. A 429 holds every caller of that
   pacer and repeats the same request; a wait over 90 s pauses the note with
@@ -207,26 +204,27 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   back per turn. The live preview takes a request only when one is free and
   within 3,600 s of the hour's audio, otherwise it drops the chunk (ADR-0070
   addendum).
-  Without the key and without a reachable Clovy API, the note names the
-  missing key (`groq_api_key_missing`, `openrouter_api_key_missing`) instead of
-  the HTTP error.
-- **Dictation cleanup.** Never an own provider: `llm_set_usage` refuses a CLI,
-  an endpoint, or none for `dictationCleanup` (`llm_provider_not_allowed`), and
-  `normalize` moves a stored CLI or endpoint choice back to Clovy API, so the
-  Models tab has no dictation cleanup row. Dictation cleanup is optional and
-  off by default; when on, `clovy_api::dictate_cleanup` sends one OpenRouter
-  chat completion per chunk on the model chosen in the dictation settings,
-  straight to OpenRouter with the user's own key or through
-  `/v1/dictate/cleanup` without it ([dictation.md](dictation.md), ADR-0065).
-- **Note transcript cleanup.** `clovy_api::cleanup_text` sends style
-  `note_transcript_cleanup` on the notes selection (the engine that writes the
-  note: Clovy, the endpoint, or the CLI; on Clovy it goes straight to
-  OpenRouter with the user's key, with Clovy API's `note_transcript_cleanup.md`
-  prompt at temperature 0, else through `/v1/dictate/cleanup`); it selects the note correction prompt with the full
-  dictionary and earlier same-source turns as context; the Whisper prompt
-  itself only carries the short dictionary hint (see
-  [configuration.md](configuration.md#transcription-context)).
-- **Activity.** Defaults to none; Clovy API is not allowed.
+  The live preview runs only when the Groq key is available. Missing keys
+  are configuration errors, not HTTP errors or permission failures.
+- **Dictation cleanup.** Optional and off by default. When enabled it calls
+  OpenRouter directly with the user's key and the dictation cleanup model;
+  it never runs through the Notes engine, a CLI or an endpoint. No key means
+  no cleanup request, and the raw transcript is delivered with a HUD notice.
+- **Note transcript cleanup.** Uses the Notes engine, the local
+  `note_transcript_cleanup.md` prompt, the full dictionary, and earlier
+  same-source turns. The Groq spelling hint stays short; see
+  [configuration.md](configuration.md#transcription-context).
+- **Activity.** Defaults to none; remote OpenRouter selection is not allowed.
+
+## Text-model catalog
+
+The text picker reads OpenRouter's `/models` catalog and includes all
+text-output models, without a tools requirement. The cache lasts ten minutes;
+requests have a ten-second total deadline. Key changes invalidate the cache
+and reload the picker; load failures provide retry. Selecting a model updates
+only the remote generation model, never `llmUsage` or the chat engine. The
+picker description names the active Notes engine. Audio and media lists are
+curated locally; missing keys are checked when an operation is requested.
 
 ## CLI chat engine
 
@@ -398,24 +396,19 @@ argument: its installer ships `agy.exe`.
   an unattended turn's writes are refused (`unattended_requires_approval`),
   see [mcp-server.md](mcp-server.md#tools-for-turn-bound-connections). The
   agent's web search and fetch come from the CLI itself (claude's
-  `WebSearch`/`WebFetch`, codex `web_search="live"`), not Clovy API. Compaction is refused (`agent_compaction_unsupported`):
+  `WebSearch`/`WebFetch`, codex `web_search="live"`). Compaction is refused (`agent_compaction_unsupported`):
   the CLI manages its own context.
 
 ## Routines on a CLI engine
 
-A routine whose stored model is Auto runs on the chat engine when it is
-Claude Code or Codex (`providers::default_unattended_cli`); the claim
-snapshots `__clovy_cli_engine__:<cli>` as its model. `routines::start_claim`
-writes the session, run, prompt, and claim mapping as for the Clovy agent
-(`persist_claim_run`) and starts the turn with `chat_engine::start_cli_turn`
-unattended (`attended: false`, with the routine's safety mode) under the
-policy above. The prompt tells the CLI it runs
-unattended and which tools it has. Its events go through the same persistence
-as a chat turn, which projects the routine run's end, status, and error into
-the routine history (`mark_agent_run_terminal`); the CLI's answer is the
-session's assistant message. The routine's toolset choices apply only on the
-Clovy agent: a routine with an explicit model, or with chat on anything else,
-still runs there.
+Routines run on an installed Claude Code or Codex engine selected by
+`providers::default_unattended_cli`; an unavailable engine produces a clear
+setup error without fallback. The claim snapshots `__clovy_cli_engine__:<cli>`.
+`routines::start_claim` persists the session, run, prompt and claim mapping,
+then calls `chat_engine::start_cli_turn` unattended with the routine's safety
+mode. Events use the same session persistence as chat turns and project the
+terminal state into routine history. The turn retains unattended tool limits;
+old explicit remote-model selections do not revive the removed native loop.
 
 | Command | Args | Returns |
 |---|---|---|

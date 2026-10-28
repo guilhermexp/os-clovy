@@ -8,6 +8,16 @@ source of truth, provider speed is secondary. See
 helper), and [ADR-0002](adr/0002-live-transcript-preview-strategy.md) (live
 preview).
 
+## Provider boundary
+
+Saved-note transcription and live preview call Groq directly with the user's
+key. Missing keys fail before network access; live preview remains off until
+the key is available. Notes and transcript cleanup use the selected Notes
+engine: OpenRouter with the user's key, CLI, or endpoint. No inference server
+or provider fallback participates. Prompts remain local under
+`src-tauri/src/prompts/`, and CLI/endpoint calls retain `llm::generate`.
+See [llm-providers.md](llm-providers.md) for pacing, retries and saved jobs.
+
 ## Data flow
 
 1. **`start_recording`** → `capture::start_capture` opens `microphone.partial.wav`

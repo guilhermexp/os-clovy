@@ -145,23 +145,8 @@ release runner or diagnosing a signed-build regression.
 - If focus, pointer, Space, target binding, or unapproved-mutation behavior
   regresses, hold the promotion and keep the previous release live.
 
-## Emergency rollout
+## Local capability policy
 
-Since ADR-0067 the desktop no longer reads this decision; the section below
-documents the Clovy API route kept for older clients.
-
-Clovy API's `[computer_use]` section supports:
-
-```toml
-[computer_use]
-enabled = true
-disabled_june_versions = ["0.0.33", "0.1.*"]
-disabled_macos_versions = ["15.5.*"]
-```
-
-Entries are exact or use one trailing wildcard. After changing production
-configuration, deploy Clovy API and verify `/v1/computer-use/rollout` with the
-affected `x-june-app-version` and `x-june-macos-version` headers. A desktop
-that observes a disable stops active work and keeps that disable sticky if the
-API subsequently becomes unavailable. The normal successful-decision cache is
-five minutes.
+Computer use depends on local readiness and approval (ADR-0067). The retired
+server rollout route is gone; there is no server override or deployment step.
+Release decisions use the native proof and rollback criteria above.

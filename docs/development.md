@@ -1,7 +1,7 @@
 # Local development
 
-Day-to-day development reference for the desktop app and a local Clovy API.
-Configuration details (every env var, pricing, custom models, connected mode)
+Day-to-day development reference for the desktop app.
+Configuration details (environment, provider keys, and text engines)
 live in [configuration.md](configuration.md); when the two disagree, the env
 example files win.
 
@@ -15,58 +15,29 @@ remains excluded while the source files are checked normally.
 
 ## Quick start
 
-Clone the repo, copy both env examples, add the service keys for the providers
-you want to exercise, and run the desktop app:
+Clone the repo, copy the desktop env example, and run the app:
 
 ```sh
 cp .env.example .env
-cp clovy-api/.env.example clovy-api/.env
-# Edit clovy-api/.env and set the keys you need: CLOVY__UPSTREAMS__GROQ__API_KEY
-# (transcription), CLOVY__UPSTREAMS__OPENROUTER__API_KEY (remote text),
-# CLOVY__UPSTREAMS__FAL__API_KEY (images and video), CLOVY__UPSTREAMS__TAVILY__API_KEY (web).
-pnpm install
+sfw pnpm install
 pnpm tauri:dev
 ```
 
-`pnpm tauri:dev` starts Vite and a local Clovy API when their ports are free.
-If `127.0.0.1:1421` or `127.0.0.1:8080` is already listening, the script
-reuses the existing service. Set `VITE_PORT` or `CLOVY_API_PORT` to choose a
-different port. Set `CLOVY_DEV_SKIP_LOCAL_API=1` to skip the local Clovy API
-entirely and leave the port probe alone.
+`pnpm tauri:dev` starts or reuses Vite at `127.0.0.1:1421`; `VITE_PORT`
+changes that port. Verify ownership before reusing an occupied port. It does
+not start an inference server. Restart it after changing the root `.env`.
 
-Replay first-run onboarding without wiping all app data:
+Replay first-run onboarding without wiping app data:
 
 ```sh
 pnpm tauri:dev --replay-onboarding
 ```
 
-You can also run Clovy API directly:
-
-```sh
-(cd clovy-api && cargo run -p clovy-api-server -- serve)
-```
-
-Restart `pnpm tauri:dev` after changing the root `.env`. The running Tauri
-process does not reload client configuration.
-
-The desktop app has no sign-in, billing or credit charges: it always runs on a
-fixed local identity (`src-tauri/src/local_identity.rs`), the bearer token
-`OS_CLOVY_LOCAL_DEV_BEARER_TOKEN` (default `local-dev-token`), and calls Clovy
-API at `http://127.0.0.1:8080` unless `CLOVY_API_URL` says otherwise. The
-example env files run Clovy API in local mode, which accepts that bearer token.
-The token must match in `.env` and `clovy-api/.env`; it is not an OS Accounts
-token, just the shared secret between the local desktop app and the local Clovy
-API. No provider keys go in the desktop env. The Clovy
-API env example binds local mode to `127.0.0.1`; if you bind it to a network
-interface, replace the default local bearer token in both env files first.
-
-Provider keys and the OS Accounts App API key belong only in `clovy-api/.env`,
-never in the root desktop `.env`. Outside local mode Clovy API refuses to start
-without all four service keys. In local mode a blank or placeholder key is
-allowed: requests to that provider then need the user's own key, sent by the
-desktop app, and fail with `<provider>_not_configured` without one. A missing
-service key does not remove a model from the `/v1/models` catalog: Groq and
-OpenRouter models report `serviceAvailable: false` instead.
+The app has no sign-in or local bearer token. Chat uses installed CLI engines,
+with Claude Code as default and Codex as the existing local fallback. Save
+Groq, OpenRouter, and fal keys through Settings, never in the desktop `.env`.
+Missing keys fail clearly without contacting another service. See
+[configuration.md](configuration.md) for catalogs and note-engine selection.
 
 ## Local connector OAuth
 
@@ -225,7 +196,6 @@ pnpm check
 pnpm typecheck
 pnpm test
 pnpm test:rust
-pnpm test:clovy-api
 pnpm build
 pnpm tauri:build
 ```

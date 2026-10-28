@@ -21,8 +21,8 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0009](adr/0009-hermes-config-shared-ownership-merge.md) — config.yaml is shared with the Hermes dashboard; Clovy deep-merges on spawn, never overwrites (superseded by ADR-0038)
 - [adr/0010](adr/0010-note-references-in-agent-chat.md) — note references in agent chat: `@note:<id>` text token + `get_meeting_note` fetch-by-id
 - [adr/0011](adr/0011-bundled-hermes-skills.md) — selected Hermes skills ship as read-only app resources when the runtime pin cannot move (superseded by ADR-0038)
-- [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); Clovy API generates the team-facing diagnosis (superseded in this fork: the desktop no longer sends issue reports)
-- [adr/0013](adr/0013-stream-inference-responses-through-june-api.md) — inference responses stream through Clovy API (SSE pass-through + keep-alive heartbeats); charges settle after the stream ends
+- [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); the former server generated the team-facing diagnosis (superseded in this fork: the desktop no longer sends issue reports)
+- [adr/0013](adr/0013-stream-inference-responses-through-june-api.md) — historical server streaming and settlement (superseded by ADR-0073)
 - [adr/0013](adr/0013-agent-recorder-tool-via-frontend-event.md) — agent recording control: the recorder tool asks the main webview to start or stop through a frontend event, so capture always runs the visible UI path (shares the 0013 number with the streaming ADR)
 - [adr/0014](adr/0014-pinned-dictation-paste-target.md) — the dictation paste target is pinned when the recording stops, never re-resolved at paste time
 - [adr/0015](adr/0015-video-generation-tools.md) — `/video` fast path + LLM tools, async job + poll; the 2026-10-08 addendum replaces Venice quotes with endpoint-specific fal estimates
@@ -54,7 +54,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0041](adr/0041-june-companion-trust-boundaries.md) - original companion trust boundaries, relay-first E2EE, and desktop authority (superseded in this fork: the desktop companion was removed)
 - [adr/0042](adr/0042-june-companion-native-swiftui.md) - native SwiftUI companion presentation; its mobile-login decision is superseded by ADRs 0043, 0046, and 0047 (superseded in this fork: the desktop companion was removed)
 - [adr/0043](adr/0043-companion-desktop-authorized-device-credential.md) - desktop-authorized pairing and revocable device credentials; its authorization model is current again through ADR 0047 (superseded in this fork: the desktop companion was removed)
-- [adr/0044](adr/0044-companion-device-generates-relay-credential.md) - companion-generated relay credentials; Clovy API receives and stores only their hashes (superseded in this fork: the desktop companion was removed)
+- [adr/0044](adr/0044-companion-device-generates-relay-credential.md) - companion-generated relay credentials; the former relay received and stored only their hashes (superseded in this fork: the desktop companion was removed)
 - [adr/0045](adr/0045-companion-relay-single-replica-mvp.md) - the MVP relay is single-replica until pairing and live routing have shared cross-instance state (superseded in this fork: the desktop companion was removed)
 - [adr/0046](adr/0046-companion-native-os-accounts-login.md) - superseded by ADR-0047 (superseded in this fork: the desktop companion was removed)
 - [adr/0047](adr/0047-companion-pairing-is-mobile-authorization.md) - the authenticated Desktop-created QR pairing is the phone's short-lived authorization; the phone has no account session (superseded in this fork: the desktop companion was removed)
@@ -72,17 +72,18 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0059](adr/0059-activity-is-per-installation-not-per-data-partition.md) - activity (timeline and coding-agent blocks) belongs to the installation, not to a data partition; MCP activity tools read it like the "Today" view while notes, dictations, and memories stay in the current partition
 - [adr/0060](adr/0060-development-app-runs-as-a-signed-bundle-that-owns-its-grants.md) - `pnpm tauri:dev` runs a signed `Clovy Dev.app` beside Cargo's output that owns its privacy grants: no TCC resets, one Apple Development identity for the app and its helpers, and a launcher that disclaims the terminal's responsibility
 - [adr/0061](adr/0061-dates-and-numbers-follow-the-interface-language.md) - dates, times, and numbers always format in the interface language (supersedes ADR-0056 decision 4); the date-format preference only picks day/month order; native errors are worded by stable code in the frontend
-- [adr/0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md) - Claude Code, else Codex, is the default engine of new sessions, note chat, Home (since ADR-0064), companion sessions, and Auto routines (unattended, read-only tools plus Clovy's MCP and web); one recorded settings move; the legacy fallback is superseded by ADR-0072 (earlier superseded ADR-0038/0039 in part)
+- [adr/0062](adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md) - Claude Code, else Codex, is the default engine of new sessions, note chat, Home (since ADR-0064), companion sessions, and routines (unattended, read-only tools plus Clovy's MCP and web); one recorded settings move; the legacy fallback is superseded by ADR-0072 (earlier superseded ADR-0038/0039 in part)
 - [adr/0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md) - CLI chat turns get Clovy's write tools through a turn-bound `clovy-mcp` connection and an in-app approval broker; external clients stay read-only; user MCP servers and Linear reach CLIs through the same gateway
-- [adr/0064](adr/0064-home-runs-on-the-default-cli-engine.md) - Home runs on the default CLI engine in its hidden session, without Clovy API; old Home turns are imported once from local storage; the Clovy API Home commands are removed (supersedes ADR-0062 in part)
-- [adr/0065](adr/0065-dictation-calls-the-users-own-provider-directly.md) - with the user's own Groq or OpenRouter key, dictation transcription and cleanup go straight from the desktop to that provider carrying only that key; service keys stay in Clovy API
+- [adr/0064](adr/0064-home-runs-on-the-default-cli-engine.md) - Home runs on the default CLI engine in its hidden session, without a remote chat route; old Home turns are imported once from local storage; the former remote Home commands are removed (supersedes ADR-0062 in part)
+- [adr/0065](adr/0065-dictation-calls-the-users-own-provider-directly.md) - direct dictation with the user's own key; server fallback superseded by ADR-0073
 - [adr/0066](adr/0066-github-connector-can-ride-the-github-cli-login.md) - the GitHub connector can connect on its own through a signed-in GitHub CLI (`credentialSource: "gh"`), reading the token from `gh` on every call and never storing it; read only at first, disconnect turns the automation off (amends ADR-0036)
 - [adr/0067](adr/0067-computer-use-depends-only-on-local-gates.md) - Computer use is ready from the grant, the pinned driver and macOS permissions alone: no Pro/Max plan, Clovy vision model or remote rollout; the tool is offered only to CLI turns through `clovy-mcp` (amends ADR-0028)
 - [adr/0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md) - supersedes ADR-0055: the app becomes `dev.guilhermexp.clovy` (`Clovy.app`, `clovy`), the extension gets the owner's key pair, and the first launch on macOS copies the June-era profile and credentials once (Windows starts clean); the compatibility bridges are removed
 - [adr/0069](adr/0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md) - amends ADR-0001: releases on `guilhermexp/os-clovy` with one stable channel and the owner's minisign key; only release builds check, every install waits for the owner and for recordings to end; Mac signing optional
-- [adr/0070](adr/0070-notes-call-the-users-own-provider-directly.md) - amends ADR-0065 §5: with the notes engine on Clovy and the user's own key, note transcription goes straight to Groq and note generation (not Auto) and note transcript cleanup to OpenRouter, with Clovy API's own contract; without a key and without Clovy API, the note names the missing key
+- [adr/0070](adr/0070-notes-call-the-users-own-provider-directly.md) - direct note transcription/generation with the user's key; server fallback and Auto exception superseded by ADR-0073
 
 - [adr/0072](adr/0072-cli-chat-replaces-the-native-agent.md) - removes the native agent and endpoint chat engines; CLI turns use Clovy MCP tools and the local approval broker, while neutral session persistence preserves history
+- [adr/0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md) - remove the inference server and local token; direct user-key providers, independent text catalog, fal queue recovery, and no sharing/funding service
 
 ## Enforceable rules (spec/)
 
@@ -118,10 +119,10 @@ Per-repo config the engineering skills read before acting (see the
 ## Subsystems
 
 - [home-assistant.md](home-assistant.md) - persistent Home conversation on the default CLI engine, its hidden session, and the legacy history import
-- [companion-protocol.md](companion-protocol.md) - versioned encrypted application protocol of the companion crates (the desktop companion was removed in this fork; crates and relay go in a later change)
+- [companion-protocol.md](companion-protocol.md) - versioned encrypted application protocol of the companion crates (the desktop companion and relay are removed; protocol crates remain historical)
 - [browser-computer-use-prd.md](browser-computer-use-prd.md) — PRD: Browser use + Computer use plugins (JUN-278); extension in the user's browser + routines-only managed browser, phase-2 computer use
 - [release-extension.md](release-extension.md) - browser extension store identity and local packaging checks (no automated store publication)
-- [private-sharing-design.md](private-sharing-design.md) — private link sharing (JUN-308): bearer-link product contract, optional passcode, and the end-to-end encrypted snapshot model
+- [private-sharing-design.md](private-sharing-design.md) — retirement notice for private link sharing; no replacement service
 - [computer-use-cua-driver-spike.md](computer-use-cua-driver-spike.md) — spike (JUN-288): run the bundled cua-driver outside the write jail as a broker-owned, separately-signed daemon (recommended on identity/lifecycle grounds; a fully relocated daemon does start in-jail, up to the TCC gate); pinning + installer-never-runs confirmed
 - [plugins/portfolio.md](plugins/portfolio.md) — JUN-309 portfolio: current ChatGPT plugin surface inventory, ranking rubric, Clovy's top 10, shared product contract, sequencing, metrics, and explicit deferrals
   - [Google Workspace](plugins/google-workspace-prd.md) — [implementation plan](plugins/google-workspace-implementation-plan.md)
@@ -153,14 +154,14 @@ Per-repo config the engineering skills read before acting (see the
 - [coding-agent-sessions.md](coding-agent-sessions.md) - coding-agent session ingestion: read-only readers for seven local agents, block cutting and lifecycle, summaries by the agent's own CLI or the activity provider, the `coding_agent_blocks` schema (activity migration 3) and its query API, the "Today" view lane
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
-- [dictation.md](dictation.md) - dictation take: shortcut to capture start, the transcription route (direct to Groq with the user's key, else Clovy API), optional OpenRouter cleanup, "no speech" after Whisper, paste, warm-up, and latency targets
+- [dictation.md](dictation.md) - dictation take: shortcut to capture start, the direct Groq transcription route with the user's key, optional OpenRouter cleanup, "no speech" after Whisper, paste, warm-up, and latency targets
 - [llm-providers.md](llm-providers.md) - own providers: agent CLIs and named OpenAI-compatible endpoints, per-use selection, one-shot generation API, structured-output levels, CLI isolation contract, and the CLI chat engine (per-CLI turn, resume, stream, cancel, permissions, Clovy's tools)
-- [clovy-api-prd.md](clovy-api-prd.md) — Clovy API: upstream AI calls + OS Accounts authorize/charge (the canonical service spec)
+- [clovy-api-prd.md](clovy-api-prd.md) — historical server PRD; retired by ADR-0073, not a current implementation/deployment contract
 - [telemetry-p3a-implementation-plan.md](telemetry-p3a-implementation-plan.md) — historical implementation plan for Clovy P3A (removed from the desktop in this fork)
-- [private-connectors-prd.md](private-connectors-prd.md) — private connectors & away-mode relay: an assistant that acts in email and calendar without OpenSoftware readable data (local mode shipping; away mode proposed)
+- [private-connectors-prd.md](private-connectors-prd.md) — private connectors & away-mode relay: an assistant that acts in email and calendar without OpenSoftware readable data (local mode remains; hosted/away-mode portions are historical)
 - [private-connectors-implementation-plan.md](private-connectors-implementation-plan.md) — implementation plan for private connectors phases (Phases 1-2 local mode implemented; see [adr/0016](adr/0016-private-connectors-local-mode.md))
 - [private-connectors-threat-model.md](private-connectors-threat-model.md) — local-mode threat model: the source of truth for all connector privacy copy (what OpenSoftware can and cannot see, the trust surface, agent protections, the known runtime limitation)
-- [configuration.md](configuration.md) — env + config reference (desktop client + Clovy API)
+- [configuration.md](configuration.md) — desktop configuration, direct provider keys, text catalog and fal queue limits
 - [auto-model-rollout.md](auto-model-rollout.md) — canary, enablement, and rollback steps for automatic private model routing
 - [development.md](development.md) — local development: quick start, local data, permissions, agent skills, verification commands
 - [onboarding-design.md](onboarding-design.md) — onboarding flow design (verify against what shipped)
@@ -180,6 +181,10 @@ Per-repo config the engineering skills read before acting (see the
 - [qa/jun-334-note-transcription-latency.md](qa/jun-334-note-transcription-latency.md) — measured baseline and proof for note transcription latency
 - `qa/feature-user-stories.tsv` — story → code → test traceability matrix
 - `qa/agent-e2e-qa-runs/` — dated end-to-end QA run logs
+
+## Historical server records
+
+- [history/clovy-api-migrations/README.md](history/clovy-api-migrations/README.md) - byte-for-byte archive of the two retired server SQL migrations (shares and companion devices); never executed by the app or added to its desktop migration catalog (ADR-0073)
 
 ## Feature designs and implementation plans
 

@@ -12,18 +12,13 @@ shell commands, and other important information, read
 
 Clovy is a local-first **Tauri desktop app** for meeting notes: it records a
 meeting or dictation, transcribes audio, turns transcripts into structured
-notes, and hosts an AI agent over the user's notes. The frontend is **React**
-(`src/`), the native shell is **Rust** (`src-tauri/`), and the **Rust backend,
-Clovy API** (`clovy-api/`), routes remote inference and runs only in local
-mode (one local bearer token, no billing, bound to `127.0.0.1`).
-Current upstreams are **Groq** for audio, **OpenRouter** for remote text,
-**fal** for media, and **Tavily** for web. Own text engines (CLI and endpoints)
-remain separate. In this fork the desktop has no sign-in: it runs on a fixed
-local identity (`src-tauri/src/local_identity.rs`) against Clovy API at
-`http://127.0.0.1:8080` by default (`CLOVY_API_URL` overrides); the local
-chat runs through installed CLI engines: Claude Code by default, with Codex
-as the existing local fallback. Clovy tools reach those turns through MCP and
-the local approval broker.
+notes, and hosts CLI chat over the user's notes. The frontend is **React**
+(`src/`), and the native shell is **Rust** (`src-tauri/`). Chat uses installed
+CLI engines, with Claude Code as default and Codex as the existing local
+fallback. The desktop calls **Groq**, **OpenRouter**, and **fal** directly with
+the user's own keys. CLI and endpoint note routes remain separate. There is
+no Clovy inference server, native agent sidecar, local bearer token, sign-in,
+sharing service, or credit balance. Clovy tools remain available through MCP.
 
 > Read **[CONTEXT.md](CONTEXT.md)** before naming anything, and
 > **[docs/index.md](docs/index.md)** to find the doc for the area you touch.
@@ -41,8 +36,7 @@ os-clovy/
 ├── src-tauri/               # Rust native shell (Cargo package `clovy`)
 │   ├── src/audio/           # recording, source separation, turn detection, live preview
 │   ├── src/agent_sessions/  # engine-neutral sessions, events, persistence, and migration
-│   ├── src/local_identity.rs # fixed local user + bearer token sent to Clovy API (no sign-in)
-│   ├── src/providers/       # model-settings persistence
+│   ├── src/providers/       # model settings, direct Groq/OpenRouter/fal clients and catalogs
 │   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
@@ -51,8 +45,6 @@ os-clovy/
 │   ├── src/chat_engine/     # agent CLIs as a chat session's engine (Home included, ADR-0064): resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface; every command invoked from `src/` must be in `lib.rs` `generate_handler!` (guard: `src/test/tauri-command-registry.test.ts`)
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060)
-├── clovy-api/               # Rust backend (Cargo workspace, crates prefixed `clovy-`)
-│   └── crates/              # domain / services / providers / config / api / app  (hexagonal)
 ├── docs/                    # see docs/index.md — ADRs, subsystem docs, runbooks, PRDs, QA
 ├── specs/                   # Spec Kit feature specs (001-003)
 ├── spec/                    # enforceable coding rules (see spec/index.md) — distinct from specs/
@@ -67,7 +59,7 @@ os-clovy/
 - **[CONTEXT.md](CONTEXT.md)** — the domain glossary / ubiquitous language.
   Read before naming anything; terms are canonical and the `_Avoid_` lists are
   binding (dictation vs note transcription, Source vs channel, chat engine
-  vs model, credit price vs cost, stored vs runtime session id).
+  vs model, provider price vs observed charge, stored vs runtime session id).
 - **[docs/index.md](docs/index.md)** — the annotated index of every doc: ADRs,
   subsystem docs, release/ops runbooks, PRDs, QA, and the feature specs.
 - **[docs/adr/](docs/adr/)** — Architecture Decision Records. Read the ADRs for
@@ -131,9 +123,7 @@ Every PR description should state (the template in
 
 - whether the change was **tested visually** — for UI changes, attach a
   screenshot or recording;
-- whether it **needs a Clovy API (backend) deploy** to work end to end (a desktop
-  change that depends on an unshipped Clovy API change will not work until Clovy
-  API is deployed);
+- whether it changes a provider contract or requires user configuration;
 - the **root cause**, for bug fixes (the actual cause, not just the symptom);
 - what is deliberately **out of scope**;
 - any **followups** it sets up or defers (link issues where possible).
@@ -195,8 +185,7 @@ build scripts in `pnpm-workspace.yaml` — live in
   storage test fails locally (experimental web storage shadows jsdom's
   `localStorage`); run `NODE_OPTIONS=--no-experimental-webstorage pnpm test`
   and do not "fix" the tests.
-- **Rust tests:** `pnpm test:rust` (src-tauri) and `pnpm test:clovy-api` (the
-  backend workspace).
+- **Rust tests:** `pnpm test:rust` (src-tauri).
 - **Windows native activity tests:** clipboard fixtures must run in a child
   process with a private window station/desktop, never the console clipboard.
   The installed-package icon test is ignored by default and requires Calculator
@@ -213,12 +202,11 @@ build scripts in `pnpm-workspace.yaml` — live in
 - **Lint / format:** `pnpm check` (Biome: format + lint for `src/` and
   `scripts/`, including the lucide import ban) and `pnpm typecheck`
   (`tsc --noEmit`); `pnpm format` / `pnpm check:write` apply Biome fixes. Rust
-  uses `cargo fmt` / `cargo clippy` (config lives under `src-tauri/` and
-  `clovy-api/`). Biome ratchets high-volume retrofit rules (a11y, hook-deps,
+  uses `cargo fmt` / `cargo clippy` (config lives under `src-tauri/`). Biome ratchets high-volume retrofit rules (a11y, hook-deps,
   non-null assertions) to `warn` in `biome.json`; keep new code clean and fix
   the warnings incrementally. Never leave checks broken.
 - **CI parity:** `make verify` runs the full gate locally (Biome, typecheck,
-  vitest, and `cargo fmt`/`clippy`/`test` for both Rust crates); `make help`
+  vitest, and `cargo fmt`/`clippy`/`test` for the desktop Rust crate); `make help`
   lists every target. A green `make verify` should mean green CI. It adds
   `cargo clippy --all-targets`, which the narrower targets skip — "green" from
   `cargo test` + `pnpm test` alone is **not** CI-green.
@@ -238,33 +226,25 @@ build scripts in `pnpm-workspace.yaml` — live in
   empty profile) and of one-way reads; never write a June-era
   name again ([ADR-0068](docs/adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md),
   superseding ADR-0055).
-- **Service-managed upstream provider keys live only in Clovy API, never in the desktop binary.**
-  Keys for Groq, OpenRouter, fal and Tavily, and the OS Accounts App API key,
-  belong to Clovy API. Explicit user BYOK credentials stay in the local
-  credential store and go only to their own provider: forwarded through Clovy
-  API on that provider's eligible route, or, for dictation and notes
-  (transcription, cleanup, and note generation except Auto), sent from the
-  desktop straight to that provider
-  ([ADR-0065](docs/adr/0065-dictation-calls-the-users-own-provider-directly.md),
-  [ADR-0070](docs/adr/0070-notes-call-the-users-own-provider-directly.md)).
-  They are never credentials for another vendor.
-- **Clovy API must stay backward-compatible — no breaking changes.** Clovy ships
-  and auto-updates in production, so installs in the wild keep calling older
-  `/v1/*` contracts. Never remove or repurpose an existing endpoint, request
-  field, or response shape; add new optional fields or new endpoints instead. A
-  breaking API change strands every app version that has not updated yet.
-  The local-only retired-provider credential rejection is an acknowledged
-  exception documented in the dated [ADR-0021 addendum](docs/adr/0021-june-api-v1-compatibility-policy.md).
-  It is not authority to publish a breaking production update: publication and
-  support for older clients require a separate owner decision.
+- **The app never calls a Clovy inference server.** Groq transcription,
+  OpenRouter text, and fal media use the user's own provider key directly.
+  Missing or unreadable keys fail clearly before a request; never substitute
+  a service key, another provider, a local bearer token, or a retired route.
+  Keys remain in the credential store and go only to their own provider;
+  media downloads carry none. Chat stays on CLI engines. Notes may use a CLI,
+  an explicitly configured endpoint, or OpenRouter. Keep `llm::generate`
+  and the CLI/endpoint note routes intact. See
+  [ADR-0073](docs/adr/0073-desktop-calls-user-providers-without-a-clovy-server.md).
 - **Clovy presents as Clovy.** CLI execution is an implementation detail;
   product instructions assert Clovy's identity.
 - **No Open Software services in the desktop (fork).** The app has no OS
   Accounts sign-in, billing, credits funding, telemetry, issue reports,
-  companion, or June updater; it uses the fixed local identity. `src/`,
+  companion, or June updater; it needs no account identity or server token. `src/`,
   `src-tauri/src/` and `src-tauri/*.json` (outside `src/test/`) must not name
   `opensoftware.co`, `june.link` or `open-software-network`
-  (`make org-references-check`, part of `make verify`).
+  (`make org-references-check`, part of `make verify`). The same full gate
+  rejects retired inference-server identifiers and routes; direct provider
+  URLs remain allowed.
 
 ## Fork guilhermexp (harness ~/orchestrator)
 
@@ -308,8 +288,9 @@ Functional proof (Reality) for desktop features:
 1. Isolation: debug builds only. The owner's `dev.guilhermexp.clovy-dev` profile
    is not a throwaway fixture. For automation compile a separate identifier:
    `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"dev.guilhermexp.clovy.timelineproof"}'`
-   (Node 24 PATH below). Choose a run-owned identifier/profile; copy the dev
-   profile without its live MCP socket before launch. This example uses
+   (Node 24 PATH below). Choose a run-owned identifier/profile and create a fresh synthetic
+   profile before launch. Only use a copied profile when that scenario is
+   explicitly authorized; never copy its live MCP socket. This example uses
    `~/Library/Application Support/dev.guilhermexp.clovy.timelineproof-dev`.
    A proof identifier never migrates the June-era profile; to prove the
    migration, set the debug-only `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE=<id>` to
@@ -373,20 +354,18 @@ launcher, restart or rebuild. Observe the actual window and permission state,
 then restart/rebuild that same identity; do not reset TCC or grant privileges
 by editing OS databases.
 
-For the **provider cutover**, exercise the actual desktop against the updated
-local Clovy API, not a deployed old backend. In an isolated copied profile,
-check migration without changing CLI/endpoints/history, configured/missing
-key states, remote model availability and actionable errors. Native dictation
-and notes require voice/audio actions; chat, note generation and note transcript
-cleanup require the selected text engine; dictation cleanup is optional and
-runs only on an OpenRouter model (`docs/dictation.md`). Media proof includes generated/edited images,
-non-square/oriented/extreme-ratio inputs, video generation and image animation
-through valid final assets; a recoverable BYOK poll must resume the same job
-without another submit. Search and extraction require real normalized results.
-Provider calls needing credentials or paid usage remain unproven until the
-owner supplies the configuration and authorizes the bounded actions. Local
-contract tests, public catalog reads and free key checks do not prove those
-end-to-end capabilities or an account's actual price.
+For the **provider cutover**, use a fresh isolated profile under a run-owned
+identifier and synthetic data. Exercise dictation with and without a Groq key,
+notes through Claude Code and OpenRouter, the text catalog, and model selection
+that leaves chat on Claude Code. A fake listener on `127.0.0.1:8080`, bound only
+when free, must receive zero requests. Automated tests may inject an ephemeral
+retired origin. Check migration without changing endpoints/history; never copy
+or launch the owner's production profile. Only one native proof runs at once.
+Media proof includes valid final assets, oriented/non-square/extreme-ratio
+edits, and resuming a recoverable video job without resubmission. Paid media,
+OpenRouter inference, and Codex turns require explicit owner authorization;
+anything not run remains unproven. Public catalog reads and local contract
+tests do not prove live inference or an account's price.
 
 ### Build
 

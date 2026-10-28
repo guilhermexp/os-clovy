@@ -1,5 +1,14 @@
 # Clovy API — proxy all upstream AI traffic and fully integrate OS Accounts authorize/charge
 
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
+
 > Read [`/CONTEXT.md`](../CONTEXT.md) first for the glossary. Terms in **bold**
 > below (Clovy, Clovy API, OS Accounts, upstream provider, dictation, note
 > transcription, note generation, credit price) are defined there.

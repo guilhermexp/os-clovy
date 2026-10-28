@@ -73,8 +73,12 @@ Foram removidos os 115 arquivos versionados de `clovy-api/`, seu workflow/ação
 
 ## 6. Docs e regras
 
-- [ ] 6.1 ADR nova superando a ADR-0021 e as partes de servidor das ADRs 0008, 0013, 0015, 0062, 0065 e 0070; atualizar `AGENTS.md` e `CLAUDE.md` (regras de fronteira), `CONTEXT.md`, `README.md`, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md` e `docs/{configuration,llm-providers,dictation,audio-pipeline,development,index,private-sharing-design,qa/agent-driven-integration}.md`. Verificar: busca por "Clovy API" em docs vigentes só encontra a menção histórica da ADR nova.
-- [ ] 6.2 Em `cli-substitui-agente-nativo`, confirmar que o requisito "Contrato do clovy-api preservado" saiu do delta e que a tarefa 4.6 aponta para esta change. Verificar: `openspec validate cli-substitui-agente-nativo --strict`.
+- [x] 6.1 ADR nova superando a ADR-0021 e as partes de servidor das ADRs 0008, 0013, 0015, 0062, 0065 e 0070; atualizar `AGENTS.md` e `CLAUDE.md` (regras de fronteira), `CONTEXT.md`, `README.md`, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md` e `docs/{configuration,llm-providers,dictation,audio-pipeline,development,index,private-sharing-design,qa/agent-driven-integration}.md`. Verificar: busca por "Clovy API" em docs vigentes só encontra a menção histórica da ADR nova.
+- [x] 6.2 Em `cli-substitui-agente-nativo`, confirmar que o requisito "Contrato do clovy-api preservado" saiu do delta e que a tarefa 4.6 aponta para esta change. Verificar: `openspec validate cli-substitui-agente-nativo --strict`.
+
+Evidência do grupo 6 (2026-10-28): `group6-doc-delivery.md`, manifesto `group6-owned-docs.txt`, links/história em `group6-doc-static-checks.log` e `group5-migration-archive.log`. ADR-0073 após conferir main (0070) e reservar 0071 para a outra branch; ADR-0072 é do corte anterior nesta branch. As sete ADRs existentes receberam somente adendos; seus bytes anteriores foram preservados. Docs vigentes descrevem provedores diretos, chat CLI e catálogo independente; planos/medições antigos estão identificados como históricos. A busca literal restante encontra somente história/ADRs e linhas retiradas do tracker. Os dois SQL arquivados são registros históricos, sem execução pelo app.
+
+OpenSpec estrito passou (`group6-openspec-final.log`); tracker QA 4/4 passou (`group6-qa-tracker-retirement.log`), links relativos resolvem e `CLAUDE.md` permanece symlink. O bloco Trail alterado pelo usuário foi preservado byte a byte na árvore e não entra no commit: somente as regras/documentação desta change são staged. `trail check` mantém a mesma refutação do grupo 5: a regra de MCP para análise de vídeo não proíbe MCP no chat e a prova nativa pendente não bloqueia implementação autorizada. Nenhuma prova de provider pago ou aceite nativo final é declarada nestes docs.
 
 ## 7. Verificação integrada
 

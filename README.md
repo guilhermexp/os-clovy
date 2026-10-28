@@ -9,9 +9,8 @@
 
 <p align="center">
   Clovy brings chat, voice dictation, meeting notes, and a local agent into a single
-  private workspace. Local by default, with remote inference routed through a
-  Clovy API you run yourself, and open source so the privacy claims can be
-  checked instead of believed.
+  private workspace. Local by default, with direct calls to the providers you
+  configure, and open source so the privacy boundaries can be inspected.
 </p>
 
 <p align="center">
@@ -28,11 +27,10 @@ agent with that reach is a remote company's window into your work.
 
 Clovy is built the other way around. The app and the agent run on your Mac.
 Notes, recordings, transcripts, files, sessions, and agent memory stay on your
-machine by default. When Clovy needs remote inference, the request goes
-through Clovy API, an open source service that runs on your own machine,
-keeps provider keys out of the desktop app, and routes each capability to its
-provider: Groq for audio, OpenRouter for text, fal for images and video, and
-Tavily for web. What a provider retains depends on that provider and route.
+machine by default. Audio goes directly to Groq, remote note text to
+OpenRouter, and images/video to fal, each with your own key. Chat runs through
+your installed CLI and its account. A configured endpoint can also generate
+notes. What a provider retains depends on that provider and route.
 You do not have to take any of this on faith: the entire product is MIT
 licensed.
 
@@ -51,12 +49,14 @@ licensed.
   with Codex as the existing local fallback. Clovy supplies notes, skills,
   and other local tools through MCP. Sessions are sandboxed by default, and
   Clovy tool mutations wait for the local approval broker.
-- **Image generation.** Create images from a prompt. Clovy API sends image
-  requests to fal.
-- **Your choice of models.** Pick generation, transcription, and dictation
-  models from the live catalog. A model shows a privacy tier only when the
-  catalog states one. Bring your own Groq, OpenRouter, fal, or Tavily key in
-  Settings if you prefer.
+- **Image generation.** Generate and edit images, and create videos, directly
+  through fal with your own key. Clovy's MCP media tools retain their local
+  approval and artifact handling.
+- **Your choice of models.** The text picker lists OpenRouter's text-output
+  catalog, including models without tools. It reloads when the key changes,
+  identifies the current Notes engine, and never changes the chat engine.
+  Audio and media use curated model lists. Add provider keys in
+  Settings > Models > More options > Provider API keys.
 
 <table>
   <tr>
@@ -78,25 +78,22 @@ licensed.
 1. **Local by default.** App state, recordings, transcripts, and agent memory
    live on your machine. CLI processes run locally with the selected execution
    policy; their model requests follow the CLI's own account and provider.
-2. **Provider-dependent model privacy.** Clovy API sends audio to Groq, text
-   to OpenRouter, images and video to fal, and web search and fetch to Tavily.
-   What a provider retains or trains on depends on that provider and route.
-   A model without a stated privacy tier makes no retention claim; unknown
-   does not mean zero retention.
-3. **No accounts, no billing.** Clovy API runs locally with a single bearer
-   token. There is no sign-in and no metering; prompts, audio, transcripts, and
-   files are not stored by Clovy API.
-4. **Verifiable, not promised.** The desktop app and Clovy API are built from
-   this repository, so you can read and build the exact code you run. Model
-   privacy remains explicit provider evidence: Groq, OpenRouter, fal, and
-   Tavily retain what their own policies and routes allow.
+2. **Provider-dependent model privacy.** Audio, text, and media leave the
+   device for the provider you selected. CLI model calls follow the CLI's
+   account. There is no claim of zero retention without provider evidence.
+3. **No Clovy account or billing.** There is no sign-in, local server token,
+   credit balance, or shared service key. Provider usage belongs to your
+   account. A missing key produces a setup message before a request.
+4. **Inspectable boundaries.** The desktop and its local tools are built from
+   this repository. Keys stay in the credential store and are sent only to
+   their own provider; media downloads carry no credentials.
 
 ## Platforms
 
 Clovy runs on macOS 14 or later, Apple Silicon and Intel. There are no
 published releases: build it from source (see below).
 
-Windows builds cover the app shell, sign-in, microphone recording, notes, and
+Windows builds cover the app shell, microphone recording, notes, and
 installed CLI chat engines. On Windows 10 1903+ and Windows 11 x64 they also
 include encrypted text-only [activity capture](docs/activity-capture.md), the
 [activity timeline](docs/activity-timeline.md), local coding-agent session
@@ -106,25 +103,19 @@ primary target.
 
 ## Repository layout
 
-This repo contains the full product: the desktop app and the service that
-powers its remote AI calls.
+This repo contains the desktop app and its local tools.
 
 ```text
 src/         React and TypeScript frontend
 src-tauri/   Tauri v2 Rust desktop backend and native helpers
-clovy-api/    Clovy API: models, transcription, generation, and web (local only)
 docs/        Architecture notes, ADRs, subsystem guides, and runbooks
 spec/        Enforceable coding rules
 specs/       Feature specs, plans, and validation notes
 ```
 
-Clovy's service keys for Groq, OpenRouter, fal, and Tavily live only in
-Clovy API, never in the desktop app or its
-`.env`. A key you bring for one of those providers is saved from Settings in
-the system credential store (the Keychain on macOS) and sent to Clovy API only
-with that provider's requests. Start with [docs/index.md](docs/index.md) for
-the full doc map, [CONTEXT.md](CONTEXT.md) for the domain glossary, and
-[AGENTS.md](AGENTS.md) for the contributor guide.
+Provider keys are saved from Settings in the system credential store (Keychain
+on macOS), never in the desktop `.env`. Start with [docs/index.md](docs/index.md),
+[CONTEXT.md](CONTEXT.md), and [AGENTS.md](AGENTS.md).
 
 ## Build from source
 
@@ -141,21 +132,15 @@ encrypted on both supported platforms.
 git clone https://github.com/guilhermexp/os-clovy
 cd os-clovy
 cp .env.example .env
-cp clovy-api/.env.example clovy-api/.env
-# Edit clovy-api/.env and set the CLOVY__UPSTREAMS__*__API_KEY service keys you need.
-pnpm install
+sfw pnpm install
 pnpm tauri:dev
 ```
 
-Clovy API runs only in local mode: no login, no billing, bound to
-`127.0.0.1`, and authenticated by a shared bearer token.
-Service keys belong only in `clovy-api/.env`, never in the root desktop
-`.env`: Groq for transcription and dictation, OpenRouter for text (chat,
-notes, dictation cleanup), fal for images and video, and Tavily for web search
-and fetch. A provider without a service key still works with your own key
-for it, saved in Settings. With your own Groq and OpenRouter keys, dictation
-and notes call those providers directly, so a packaged app needs no Clovy API
-for them.
+Install and sign in to Claude Code for chat; Codex remains the existing local
+fallback. Save your Groq key for transcription and dictation, an OpenRouter
+key for remote note generation and optional dictation cleanup, and a fal key
+for media. No local inference server needs to be started. Sharing links and
+the About verification action have been removed.
 
 See [docs/development.md](docs/development.md) for the day-to-day development
 guide (ports, onboarding replay, local data, permissions, agent skills, and
@@ -177,7 +162,6 @@ pnpm check         # lint and format (Biome)
 pnpm typecheck
 pnpm test          # frontend (Vitest)
 pnpm test:rust     # desktop Rust
-pnpm test:clovy-api # Clovy API
 ```
 
 `make verify` mirrors CI. Start with [CONTRIBUTING.md](CONTRIBUTING.md), then

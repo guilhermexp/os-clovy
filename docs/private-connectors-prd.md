@@ -1,5 +1,14 @@
 # PRD: Private connectors & away-mode relay
 
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
+
 **Owner:** CEO · **Date:** 2026-07-09 · **Status:** Draft for review
 **Companion doc:** [private-connectors-implementation-plan.md](private-connectors-implementation-plan.md) (CTO)
 **One-liner:** Give Clovy Town-grade integrations — an assistant that acts in your email, calendar, and work tools, proactively — without OpenSoftware ever being able to read user data.

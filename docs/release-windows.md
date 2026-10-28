@@ -34,7 +34,7 @@ Windows always starts with a new profile.
 
 The Windows installer supports the app shell, microphone
 recording, dictation shortcuts and paste, note generation, folders, and settings
-backed by Clovy API. macOS system-audio capture and Seatbelt
+using direct user-key providers or the selected CLI/endpoint Notes engine. macOS system-audio capture and Seatbelt
 sandbox features are macOS-only.
 
 Chat requires an installed CLI and its own login. Claude Code is the default,
@@ -85,9 +85,8 @@ Start-Process "$env:LOCALAPPDATA\Clovy\clovy.exe"
 The installed app is branded as Clovy, but the current Windows binary on disk is
 `clovy.exe` under `$env:LOCALAPPDATA\Clovy`.
 
-Confirm the app launches as Clovy, the bundled agent starts on a clean VM with
-no Python installed, and Windows dictation can record from the microphone and
+Confirm the app launches as Clovy and an installed CLI starts with its own login, and Windows dictation can record from the microphone and
 paste into a normal app. Record from the microphone and generate a note against
-a running Clovy API. `Get-AuthenticodeSignature` reports `Valid` only for a
+the configured Groq key and selected Notes engine. `Get-AuthenticodeSignature` reports `Valid` only for a
 build signed with your own Authenticode certificate; an unsigned build reports
 `NotSigned`.
