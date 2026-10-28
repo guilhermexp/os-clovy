@@ -2442,6 +2442,10 @@ impl RequestPacer {
         self
     }
 
+    pub(crate) fn with_clock(self, _clock: PacerClock) -> Self {
+        self
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, RequestPacerState> {
         self.state
             .lock()
@@ -2539,6 +2543,25 @@ static GROQ_TRANSCRIPTION_PACER: std::sync::LazyLock<Arc<RequestPacer>> =
                 .with_audio_budget(GROQ_AUDIO_BUDGET, GROQ_AUDIO_WINDOW),
         )
     });
+
+/// Wall-clock milliseconds since the epoch, injectable for tests.
+pub(crate) type PacerClock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+pub(crate) fn key_fingerprint(key: &str) -> String {
+    key.to_string()
+}
+
+pub(crate) fn groq_direct_pacer(_fingerprint: &str) -> Arc<RequestPacer> {
+    Arc::clone(&GROQ_TRANSCRIPTION_PACER)
+}
+
+pub(crate) fn clovy_api_pacer() -> Arc<RequestPacer> {
+    Arc::clone(&GROQ_TRANSCRIPTION_PACER)
+}
+
+fn cached_chunk_transcriber(inner: TurnTranscriber, _repos: Repositories) -> TurnTranscriber {
+    inner
+}
 
 /// Whether a live preview chunk of `duration_ms` may go to the provider now
 /// (`audio/live_preview.rs`): it shares the note transcription's pacer.
@@ -10673,5 +10696,208 @@ mod tests {
         // system pack is never sent into the same limit.
         assert_eq!(pack_lengths_ms.lock().unwrap().len(), 1);
         assert_eq!(*sunk.lock().unwrap(), vec![(0, true), (1, true)]);
+    }
+
+    /// A wall clock the test moves by hand, in milliseconds since the epoch.
+    fn manual_clock(start_ms: i64) -> (PacerClock, Arc<AtomicI64>) {
+        let now_ms = Arc::new(AtomicI64::new(start_ms));
+        let clock = {
+            let now_ms = Arc::clone(&now_ms);
+            Arc::new(move || now_ms.load(Ordering::SeqCst)) as PacerClock
+        };
+        (clock, now_ms)
+    }
+
+    #[tokio::test]
+    async fn a_long_full_source_job_keeps_its_finished_chunks_across_hourly_pauses() {
+        // Two audible hours in 600 s chunks bill more than the 7,200 s an
+        // hour allows. Scaled down here: eight 30 s chunks against 100 s an
+        // hour, so every run pauses before the last chunk.
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let directory = tempfile::tempdir().unwrap();
+        let audio_path = directory.path().join("microphone.wav");
+        write_loud_wav(&audio_path, 16_000, 16_000 * 240);
+        let (clock, now_ms) = manual_clock(1_000_000_000);
+        let pacer = Arc::new(
+            RequestPacer::new(18, Duration::from_secs(60))
+                .with_audio_budget(Duration::from_secs(100), Duration::from_secs(3_600))
+                .with_clock(clock),
+        );
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let inner = {
+            let requested = Arc::clone(&requested);
+            Arc::new(move |request: TranscriptionRequest| {
+                let operation_id = request.operation_id();
+                requested.lock().unwrap().push(operation_id.clone());
+                let index = operation_id.rsplit("-chunk-").next().unwrap_or_default().to_string();
+                Box::pin(async move { Ok(test_provider_result(&format!("chunk {index}"))) })
+                    as TranscriptionFuture
+            }) as TurnTranscriber
+        };
+        let transcriber =
+            cached_chunk_transcriber(paced_turn_transcriber(inner, pacer), repos.clone());
+        let operation_id = format!("{session_id}:microphone:turn:0:240000:fingerprint");
+
+        let mut runs = 0;
+        let result = loop {
+            runs += 1;
+            assert!(runs <= 4, "the note never finishes");
+            match transcribe_prepared_audio(
+                Arc::clone(&transcriber),
+                TranscribePreparedAudioRequest {
+                    provider: "test".to_string(),
+                    audio_path: audio_path.clone(),
+                    temp_dir: directory.path().to_path_buf(),
+                    chunk_stem: "microphone-turn-0".to_string(),
+                    title: "Meeting".to_string(),
+                    asr_hint: None,
+                    operation_id: operation_id.clone(),
+                    max_chunk_ms: Some(30_000),
+                },
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(error) => {
+                    assert_eq!(error.code, TRANSCRIPTION_RATE_LIMITED_CODE);
+                    // The resume runs once the hour's audio has left the window.
+                    now_ms.fetch_add(3_600_000, Ordering::SeqCst);
+                }
+            }
+        };
+
+        assert_eq!(runs, 3);
+        let requested = requested.lock().unwrap().clone();
+        assert_eq!(requested.len(), 8, "a finished chunk was sent again: {requested:?}");
+        assert_eq!(
+            result.transcript.text,
+            (0..8).map(|index| format!("chunk {index}")).collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pause_ends_by_the_wall_clock_even_when_the_mac_slept() {
+        let (clock, now_ms) = manual_clock(1_000_000_000);
+        let pacer = RequestPacer::new(18, Duration::from_secs(60)).with_clock(clock);
+        pacer.pause_for(Duration::from_secs(30 * 60));
+        assert!(pacer
+            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
+            .await
+            .is_err());
+
+        // Asleep for 31 minutes: the wall clock moved, the monotonic one did not.
+        now_ms.fetch_add(31 * 60 * 1_000, Ordering::SeqCst);
+
+        pacer
+            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
+            .await
+            .expect("the pause ended while the Mac slept");
+    }
+
+    #[tokio::test]
+    async fn a_clock_set_back_does_not_stretch_a_pause() {
+        let (clock, now_ms) = manual_clock(1_000_000_000);
+        let pacer = RequestPacer::new(18, Duration::from_secs(60)).with_clock(clock);
+        pacer.pause_for(Duration::from_secs(60));
+
+        now_ms.fetch_sub(2 * 3_600 * 1_000, Ordering::SeqCst);
+        let wait = pacer
+            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
+            .await
+            .expect_err("still paused");
+        assert!(wait <= Duration::from_secs(60), "{wait:?}");
+
+        now_ms.fetch_add(61 * 1_000, Ordering::SeqCst);
+        pacer
+            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
+            .await
+            .expect("the pause ends 60 s of clock later");
+    }
+
+    #[tokio::test]
+    async fn a_pause_on_one_groq_key_holds_neither_another_key_nor_clovy_api() {
+        let key_a = format!("gsk-a-{}", uuid::Uuid::new_v4());
+        let key_b = format!("gsk-b-{}", uuid::Uuid::new_v4());
+        groq_direct_pacer(&key_fingerprint(&key_a)).pause_for(Duration::from_secs(3_600));
+
+        assert!(groq_direct_pacer(&key_fingerprint(&key_a))
+            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
+            .await
+            .is_err());
+        groq_direct_pacer(&key_fingerprint(&key_b))
+            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
+            .await
+            .expect("another Groq account is not paused");
+        clovy_api_pacer()
+            .acquire(GROQ_MIN_BILLED_AUDIO, Duration::ZERO)
+            .await
+            .expect("Clovy API's route is not paused");
+    }
+
+    #[test]
+    fn a_key_fingerprint_never_holds_the_key() {
+        let key = "gsk-secret-value-1234567890";
+        let fingerprint = key_fingerprint(key);
+        assert_eq!(fingerprint.len(), 16);
+        assert!(fingerprint.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(!fingerprint.contains("secret") && !key.contains(&fingerprint));
+        assert_eq!(fingerprint, key_fingerprint(key));
+        assert_ne!(fingerprint, key_fingerprint("gsk-other"));
+    }
+
+    async fn paused_note(repos: &Repositories, session_id: &str, message: &str) -> String {
+        let note_id: String =
+            sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_one(&repos.pool)
+                .await
+                .unwrap();
+        repos
+            .set_note_status(&note_id, ProcessingStatus::Failed, Some(message.to_string()))
+            .await
+            .unwrap();
+        note_id
+    }
+
+    #[tokio::test]
+    async fn a_paused_note_is_claimed_for_its_resume_only_once() {
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let paused = "Groq usage limit reached. Clovy continues transcribing at 14:35. Parts already transcribed are kept.";
+        let note_id = paused_note(&repos, &session_id, paused).await;
+
+        let (first, second) = tokio::join!(
+            repos.claim_paused_note(&note_id, paused),
+            repos.claim_paused_note(&note_id, paused)
+        );
+
+        assert_eq!(
+            [first.unwrap(), second.unwrap()]
+                .iter()
+                .filter(|claimed| **claimed)
+                .count(),
+            1
+        );
+        let note = repos.get_note(&note_id).await.unwrap();
+        assert_eq!(note.processing_status, ProcessingStatus::Transcribing);
+    }
+
+    #[tokio::test]
+    async fn a_manual_retry_first_leaves_no_pause_to_claim() {
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let paused = "Groq usage limit reached. Clovy continues transcribing at 09:05. Parts already transcribed are kept.";
+        let note_id = paused_note(&repos, &session_id, paused).await;
+        // Retry sets the note to transcribing before it queues its run.
+        repos
+            .set_note_status(&note_id, ProcessingStatus::Transcribing, None)
+            .await
+            .unwrap();
+
+        assert!(!repos.claim_paused_note(&note_id, paused).await.unwrap());
+        // Nor a pause other than the one the resume was scheduled for.
+        repos
+            .set_note_status(&note_id, ProcessingStatus::Failed, Some("Other".to_string()))
+            .await
+            .unwrap();
+        assert!(!repos.claim_paused_note(&note_id, paused).await.unwrap());
     }
 }

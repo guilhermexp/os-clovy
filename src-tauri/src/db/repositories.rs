@@ -2873,6 +2873,14 @@ impl Repositories {
         Ok(row.get("updated_at"))
     }
 
+    pub async fn claim_paused_note(
+        &self,
+        _note_id: &str,
+        _paused_message: &str,
+    ) -> Result<bool, sqlx::error::Error> {
+        Ok(true)
+    }
+
     pub async fn set_note_transcription_warning(
         &self,
         note_id: &str,

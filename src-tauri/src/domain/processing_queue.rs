@@ -102,9 +102,47 @@ pub fn queued_behind(note_id: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Who asked for a retry run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryOrigin {
+    /// The note's Retry button.
+    Manual,
+    /// The automatic resume of a note paused by a provider rate limit, after
+    /// it claimed the pause.
+    Resume,
+}
+
+/// Whether a retry run that just took the note's processing lock should
+/// still run.
+pub fn queued_retry_should_run(
+    _origin: RetryOrigin,
+    _status: crate::domain::types::ProcessingStatus,
+    _queued_behind_another_run: bool,
+) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::types::ProcessingStatus;
+
+    #[test]
+    fn a_queued_retry_runs_only_while_its_note_still_needs_it() {
+        use RetryOrigin::{Manual, Resume};
+        // First in line, a manual retry set the note to transcribing itself.
+        assert!(queued_retry_should_run(Manual, ProcessingStatus::Transcribing, false));
+        assert!(queued_retry_should_run(Manual, ProcessingStatus::Failed, false));
+        // Behind another run, it runs only if that run left the note failed.
+        assert!(queued_retry_should_run(Manual, ProcessingStatus::Failed, true));
+        assert!(!queued_retry_should_run(Manual, ProcessingStatus::Ready, true));
+        assert!(!queued_retry_should_run(Manual, ProcessingStatus::Generating, true));
+        // A resume runs only on the note its claim left transcribing: a
+        // manual retry that got there first already ran or regenerated it.
+        assert!(queued_retry_should_run(Resume, ProcessingStatus::Transcribing, false));
+        assert!(!queued_retry_should_run(Resume, ProcessingStatus::Ready, true));
+        assert!(!queued_retry_should_run(Resume, ProcessingStatus::Failed, true));
+    }
 
     #[test]
     fn first_job_runs_immediately_and_reports_nothing_queued() {
