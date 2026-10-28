@@ -2384,37 +2384,58 @@ const RATE_LIMIT_MAX_INLINE_WAITS: usize = 5;
 /// The wait of a rate limit that names none, as in Groq's own example.
 const RATE_LIMIT_DEFAULT_WAIT_MS: u64 = 60_000;
 
+/// How often a waiting request looks at the clock again: a monotonic sleep
+/// stops while the Mac sleeps, and the pacer's times are wall-clock times.
+const PACER_RECHECK: Duration = Duration::from_secs(30);
+
+fn pacer_ms(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX / 4)
+}
+
+fn pacer_duration(ms: i64) -> Duration {
+    Duration::from_millis(u64::try_from(ms).unwrap_or(0))
+}
+
 /// Paces requests to one provider account: at most `max_requests` starts in
 /// any `window`, at most `audio_budget` of billed audio in any
 /// `audio_window`, and nothing while a provider rate limit holds every caller.
+/// Times are wall-clock milliseconds, so a pause or an hour of audio ends on
+/// time even across sleep; a clock set back never stretches them.
 pub(crate) struct RequestPacer {
     max_requests: usize,
     window: Duration,
     audio_budget: Duration,
     audio_window: Duration,
+    clock: PacerClock,
     state: std::sync::Mutex<RequestPacerState>,
 }
 
 #[derive(Default)]
 struct RequestPacerState {
-    starts: VecDeque<tokio::time::Instant>,
-    audio: VecDeque<(tokio::time::Instant, Duration)>,
-    paused_until: Option<tokio::time::Instant>,
+    starts: VecDeque<i64>,
+    audio: VecDeque<(i64, Duration)>,
+    paused_until: Option<i64>,
+    /// The latest time read, and what is added to the raw clock after it
+    /// was set back, so the pacer's time never goes backwards.
+    clock_last_ms: i64,
+    clock_offset_ms: i64,
 }
 
 impl RequestPacerState {
-    fn prune(&mut self, now: tokio::time::Instant, window: Duration, audio_window: Duration) {
+    fn prune(&mut self, now: i64, window: Duration, audio_window: Duration) {
+        let window = pacer_ms(window);
+        let audio_window = pacer_ms(audio_window);
         while self
             .starts
             .front()
-            .is_some_and(|start| now.duration_since(*start) >= window)
+            .is_some_and(|start| now - start >= window)
         {
             self.starts.pop_front();
         }
         while self
             .audio
             .front()
-            .is_some_and(|(start, _)| now.duration_since(*start) >= audio_window)
+            .is_some_and(|(start, _)| now - start >= audio_window)
         {
             self.audio.pop_front();
         }
@@ -2425,6 +2446,10 @@ impl RequestPacerState {
     }
 }
 
+fn wall_clock_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 impl RequestPacer {
     pub(crate) fn new(max_requests: usize, window: Duration) -> Self {
         Self {
@@ -2432,6 +2457,7 @@ impl RequestPacer {
             window,
             audio_budget: Duration::MAX,
             audio_window: Duration::from_secs(3_600),
+            clock: Arc::new(wall_clock_ms),
             state: std::sync::Mutex::new(RequestPacerState::default()),
         }
     }
@@ -2442,7 +2468,8 @@ impl RequestPacer {
         self
     }
 
-    pub(crate) fn with_clock(self, _clock: PacerClock) -> Self {
+    pub(crate) fn with_clock(mut self, clock: PacerClock) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -2452,18 +2479,27 @@ impl RequestPacer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The clock, never earlier than a time already read.
+    fn now(&self, state: &mut RequestPacerState) -> i64 {
+        let now = (self.clock)().saturating_add(state.clock_offset_ms);
+        if now < state.clock_last_ms {
+            state.clock_offset_ms += state.clock_last_ms - now;
+            return state.clock_last_ms;
+        }
+        state.clock_last_ms = now;
+        now
+    }
+
     /// How long until a request billing `billed` may start; zero takes the
     /// slot now.
     fn wait_for_slot(&self, billed: Duration) -> Duration {
         let mut state = self.state();
-        let now = tokio::time::Instant::now();
+        let now = self.now(&mut state);
         state.prune(now, self.window, self.audio_window);
-        let mut wait = state
-            .paused_until
-            .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
+        let mut wait_ms = state.paused_until.map_or(0, |until| until - now).max(0);
         if state.starts.len() >= self.max_requests {
             if let Some(oldest) = state.starts.front() {
-                wait = wait.max((*oldest + self.window).saturating_duration_since(now));
+                wait_ms = wait_ms.max(oldest + pacer_ms(self.window) - now);
             }
         }
         // A request larger than the whole budget waits for an empty window.
@@ -2475,16 +2511,17 @@ impl RequestPacer {
             for (start, spent) in &state.audio {
                 used = used.saturating_sub(*spent);
                 if used <= allowed {
-                    wait = wait.max((*start + self.audio_window).saturating_duration_since(now));
+                    wait_ms = wait_ms.max(start + pacer_ms(self.audio_window) - now);
                     break;
                 }
             }
         }
-        if wait.is_zero() {
+        if wait_ms <= 0 {
             state.starts.push_back(now);
             state.audio.push_back((now, billed));
+            return Duration::ZERO;
         }
-        wait
+        pacer_duration(wait_ms)
     }
 
     /// Takes a slot for a request billing `billed`, waiting while the wait is
@@ -2502,7 +2539,7 @@ impl RequestPacer {
             if wait > max_wait {
                 return Err(wait);
             }
-            tokio::time::sleep(wait).await;
+            tokio::time::sleep(wait.min(PACER_RECHECK)).await;
         }
     }
 
@@ -2511,7 +2548,7 @@ impl RequestPacer {
     /// what the final transcription needs.
     pub(crate) fn try_acquire(&self, billed: Duration, audio_share: Duration) -> bool {
         let mut state = self.state();
-        let now = tokio::time::Instant::now();
+        let now = self.now(&mut state);
         state.prune(now, self.window, self.audio_window);
         let free = !state.paused_until.is_some_and(|until| until > now)
             && state.starts.len() < self.max_requests
@@ -2525,8 +2562,8 @@ impl RequestPacer {
 
     /// Holds every caller for `wait`, as a provider rate limit does.
     pub(crate) fn pause_for(&self, wait: Duration) {
-        let until = tokio::time::Instant::now() + wait;
         let mut state = self.state();
+        let until = self.now(&mut state).saturating_add(pacer_ms(wait));
         state.paused_until = Some(
             state
                 .paused_until
@@ -10023,7 +10060,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_request_pacer_never_starts_more_than_its_budget_per_window() {
-        let pacer = RequestPacer::new(18, Duration::from_secs(60));
+        let pacer = RequestPacer::new(18, Duration::from_secs(60)).with_clock(tokio_clock());
         let started = tokio::time::Instant::now();
         let mut starts = Vec::new();
         for _ in 0..40 {
@@ -10045,7 +10082,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_request_pacer_pause_holds_every_caller() {
-        let pacer = Arc::new(RequestPacer::new(18, Duration::from_secs(60)));
+        let pacer =
+            Arc::new(RequestPacer::new(18, Duration::from_secs(60)).with_clock(tokio_clock()));
         pacer.pause_for(Duration::from_secs(30));
         let started = tokio::time::Instant::now();
         let other = {
@@ -10072,7 +10110,8 @@ mod tests {
             Err(groq_rate_limit(Some(20_000))),
             Ok("after the wait"),
         ]);
-        let pacer = Arc::new(RequestPacer::new(18, Duration::from_secs(60)));
+        let pacer =
+            Arc::new(RequestPacer::new(18, Duration::from_secs(60)).with_clock(tokio_clock()));
         let transcriber = paced_turn_transcriber(inner, Arc::clone(&pacer));
         let started = tokio::time::Instant::now();
 
@@ -10099,7 +10138,7 @@ mod tests {
             scripted_transcriber(vec![Err(groq_rate_limit(None)), Ok("after a minute")]);
         let transcriber = paced_turn_transcriber(
             inner,
-            Arc::new(RequestPacer::new(18, Duration::from_secs(60))),
+            Arc::new(RequestPacer::new(18, Duration::from_secs(60)).with_clock(tokio_clock())),
         );
         let started = tokio::time::Instant::now();
 
@@ -10115,7 +10154,7 @@ mod tests {
         let (inner, requested) = scripted_transcriber(vec![Err(groq_rate_limit(Some(3_600_000)))]);
         let transcriber = paced_turn_transcriber(
             inner,
-            Arc::new(RequestPacer::new(18, Duration::from_secs(60))),
+            Arc::new(RequestPacer::new(18, Duration::from_secs(60)).with_clock(tokio_clock())),
         );
         let before_ms = chrono::Utc::now().timestamp_millis();
 
@@ -10241,7 +10280,9 @@ mod tests {
             .scope(
                 (
                     transcriber,
-                    Arc::new(RequestPacer::new(18, Duration::from_secs(60))),
+                    Arc::new(
+                        RequestPacer::new(18, Duration::from_secs(60)).with_clock(tokio_clock()),
+                    ),
                 ),
                 process_saved_source_audio(
                     repos,
@@ -10414,7 +10455,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_request_pacer_keeps_an_hour_of_billed_audio_within_its_budget() {
         let pacer = RequestPacer::new(100, Duration::from_secs(60))
-            .with_audio_budget(Duration::from_secs(100), Duration::from_secs(3_600));
+            .with_audio_budget(Duration::from_secs(100), Duration::from_secs(3_600))
+            .with_clock(tokio_clock());
         for _ in 0..10 {
             pacer
                 .acquire(Duration::from_secs(10), Duration::ZERO)
@@ -10434,7 +10476,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_live_preview_never_waits_and_keeps_to_its_share_of_the_audio() {
         let pacer = RequestPacer::new(3, Duration::from_secs(60))
-            .with_audio_budget(Duration::from_secs(100), Duration::from_secs(3_600));
+            .with_audio_budget(Duration::from_secs(100), Duration::from_secs(3_600))
+            .with_clock(tokio_clock());
         let share = Duration::from_secs(30);
 
         assert!(pacer.try_acquire(Duration::from_secs(10), share));
@@ -10698,6 +10741,13 @@ mod tests {
         assert_eq!(*sunk.lock().unwrap(), vec![(0, true), (1, true)]);
     }
 
+    /// A wall clock that follows tokio's (pausable) time, for paced tests.
+    fn tokio_clock() -> PacerClock {
+        let started = tokio::time::Instant::now();
+        let base_ms = 1_000_000_000_i64;
+        Arc::new(move || base_ms + started.elapsed().as_millis() as i64)
+    }
+
     /// A wall clock the test moves by hand, in milliseconds since the epoch.
     fn manual_clock(start_ms: i64) -> (PacerClock, Arc<AtomicI64>) {
         let now_ms = Arc::new(AtomicI64::new(start_ms));
@@ -10729,7 +10779,11 @@ mod tests {
             Arc::new(move |request: TranscriptionRequest| {
                 let operation_id = request.operation_id();
                 requested.lock().unwrap().push(operation_id.clone());
-                let index = operation_id.rsplit("-chunk-").next().unwrap_or_default().to_string();
+                let index = operation_id
+                    .rsplit("-chunk-")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
                 Box::pin(async move { Ok(test_provider_result(&format!("chunk {index}"))) })
                     as TranscriptionFuture
             }) as TurnTranscriber
@@ -10768,10 +10822,17 @@ mod tests {
 
         assert_eq!(runs, 3);
         let requested = requested.lock().unwrap().clone();
-        assert_eq!(requested.len(), 8, "a finished chunk was sent again: {requested:?}");
+        assert_eq!(
+            requested.len(),
+            8,
+            "a finished chunk was sent again: {requested:?}"
+        );
         assert_eq!(
             result.transcript.text,
-            (0..8).map(|index| format!("chunk {index}")).collect::<Vec<_>>().join("\n")
+            (0..8)
+                .map(|index| format!("chunk {index}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 
@@ -10839,7 +10900,9 @@ mod tests {
         let key = "gsk-secret-value-1234567890";
         let fingerprint = key_fingerprint(key);
         assert_eq!(fingerprint.len(), 16);
-        assert!(fingerprint.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(fingerprint
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
         assert!(!fingerprint.contains("secret") && !key.contains(&fingerprint));
         assert_eq!(fingerprint, key_fingerprint(key));
         assert_ne!(fingerprint, key_fingerprint("gsk-other"));
@@ -10853,7 +10916,11 @@ mod tests {
                 .await
                 .unwrap();
         repos
-            .set_note_status(&note_id, ProcessingStatus::Failed, Some(message.to_string()))
+            .set_note_status(
+                &note_id,
+                ProcessingStatus::Failed,
+                Some(message.to_string()),
+            )
             .await
             .unwrap();
         note_id
@@ -10895,7 +10962,11 @@ mod tests {
         assert!(!repos.claim_paused_note(&note_id, paused).await.unwrap());
         // Nor a pause other than the one the resume was scheduled for.
         repos
-            .set_note_status(&note_id, ProcessingStatus::Failed, Some("Other".to_string()))
+            .set_note_status(
+                &note_id,
+                ProcessingStatus::Failed,
+                Some("Other".to_string()),
+            )
             .await
             .unwrap();
         assert!(!repos.claim_paused_note(&note_id, paused).await.unwrap());
