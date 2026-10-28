@@ -120,3 +120,15 @@ Review of the same addendum (2026-10-27, before release):
    the note from that very pause to transcribing in one update; a Retry
    that got there first leaves nothing to claim, and a retry that waited
    behind another run skips a note that no longer needs it.
+
+Second review of the same addendum (2026-10-28, before release):
+
+- **The model is part of what a resume reuses.** A job's durable identity
+  and each kept chunk's key include the transcription model a run reads
+  once (and the chunk's language); the default model adds nothing to the
+  identity, so sessions transcribed before keep theirs.
+- **One route per request.** A request reads the saved key once and its
+  kept chunks, pacer and transport use that same key and model.
+- **Every retry revalidates under the lock.** The note's queue counts
+  finished runs; a retry that sees a run finish after it was queued, or a
+  ready note, does not process the note again, whatever its queue depth.

@@ -38,6 +38,16 @@ Na transcrição direta à Groq, um 429 SHALL virar espera pelo tempo que a Groq
 - **THEN** só um reivindica a pausa e a nota é gerada uma vez só
 - Test: integration — `processing.rs` (reivindicação no banco), unit — `processing_queue.rs` (revalidação ao pegar o lock)
 
+#### Scenario: Troca de modelo entre a pausa e a retomada
+- **WHEN** o modelo de transcrição muda entre a pausa e a retomada
+- **THEN** nenhum turno nem pedaço do outro modelo é reaproveitado, e uma sessão do modelo padrão de antes mantém a identidade dos seus turnos
+- Test: unit/integration — `processing.rs`
+
+#### Scenario: Chave trocada no meio do run
+- **WHEN** a chave Groq salva muda entre duas requisições
+- **THEN** cada requisição lê a rota uma vez, e o pacer e a chamada usam a mesma chave
+- Test: unit — `processing.rs`
+
 #### Scenario: Ritmo dentro do limite por minuto
 - **WHEN** as duas faixas têm muitos turnos para transcrever
 - **THEN** nunca começam mais de 18 requisições em 60 s, somando as faixas e a prévia

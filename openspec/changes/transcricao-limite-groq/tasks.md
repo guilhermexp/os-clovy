@@ -50,6 +50,18 @@ Revisão do `7bb9ae04` bloqueada (BLOCK) com quatro achados.
 
 > Os RED dos quatro saíram num commit só porque os testes ficam no mesmo arquivo; os GREEN saíram um por achado, cada um fazendo passar só os seus testes. O teste do G1 usa o relógio do G2, então o G2 veio primeiro.
 
+## 9. Revisão 2 (H1–H3)
+
+A revisão 2 (`e1c11cef`) confirmou G1–G4 e deixou três P2.
+
+- [x] 9.0 RED dos três (`9f480486`): o modelo não mudava a identidade do job nem a chave do pedaço, o retry manual não via o run que terminou antes dele, e cada requisição resolvia a rota duas vezes.
+- [x] 9.1 H3 GREEN (`84267472`): uma rota por requisição (chave, modelo do run, pacer dessa chave) para o cache, o pacer e o transporte; a prévia também.
+- [x] 9.2 H1 GREEN (`7eac3914`): modelo na impressão digital da configuração (o padrão não muda a identidade antiga) e modelo e idioma na chave do pedaço.
+- [x] 9.3 H2 GREEN (`fc57dbb9`): a fila conta as rodadas concluídas por nota, e todo retry revalida sob o lock.
+- [ ] 9.4 `make verify` numa worktree limpa, CI, report.
+
+> H3 veio antes de H1 porque a chave do pedaço usa o modelo da rota.
+
 ## 7. Documentação e verificação
 
 - [x] 7.1 `docs/llm-providers.md`, adendo datado da ADR-0070, `docs/audio-pipeline.md`, termo `Turn pack` no `CONTEXT.md`.
