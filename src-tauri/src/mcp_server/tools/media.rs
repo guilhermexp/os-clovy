@@ -27,10 +27,10 @@ use tauri::AppHandle;
 use super::computer_use::MAX_IMAGE_BASE64;
 use super::{ToolCtx, ToolGroup, TurnBinding};
 use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
-use crate::clovy_api::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::domain::types::AppError;
 use crate::mcp_server::protocol;
 use crate::mcp_server::turns::TURN_REQUIRED;
+use crate::providers::fal::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::providers::{EditImageRequest, GenerateImageRequest, GenerateVideoRequest};
 
 pub const GENERATE_IMAGE: &str = "generate_image";
@@ -70,7 +70,7 @@ impl ToolGroup for MediaTools {
     ) -> BoxFuture<'a, Result<Value, AppError>> {
         Box::pin(async move {
             let binding = ctx.binding.ok_or_else(turn_required)?;
-            let api = ClovyApiMedia { app: ctx.app };
+            let api = FalMedia { app: ctx.app };
             let polling = VideoPolling {
                 interval: VIDEO_POLL_INTERVAL,
                 wait: Some(MCP_VIDEO_WAIT),
@@ -123,7 +123,7 @@ fn descriptors() -> Vec<Value> {
     ]
 }
 
-/// What the media tools need from Clovy API, so tests can stand in for it.
+/// The media operations used by MCP tools, with an injectable test adapter.
 pub(crate) trait MediaApi: Send + Sync {
     fn generate_image(
         &self,
@@ -140,14 +140,13 @@ pub(crate) trait MediaApi: Send + Sync {
     fn video_status(&self, job_id: String) -> BoxFuture<'_, Result<VideoStatusDto, AppError>>;
 }
 
-/// The app's Clovy API client (the same provider commands the native tools
-/// and the media screens call).
-pub(crate) struct ClovyApiMedia<'a> {
+/// The direct fal provider commands shared with the media screens.
+pub(crate) struct FalMedia<'a> {
     /// Where finished videos are written; `None` without a Tauri runtime.
     pub app: Option<&'a AppHandle>,
 }
 
-impl MediaApi for ClovyApiMedia<'_> {
+impl MediaApi for FalMedia<'_> {
     fn generate_image(
         &self,
         request: GenerateImageRequest,

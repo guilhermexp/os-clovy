@@ -61,6 +61,7 @@ dirs = "6"
 dotenvy = "0.15"
 futures-util = { version = "0.3", features = ["sink"] }
 hound = "3.5"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 imagesize = "0.13"
 # fd plumbing (pipe/dup2) for the managed browser's CDP pipe transport.
 libc = "0.2"

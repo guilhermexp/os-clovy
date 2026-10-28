@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -19,9 +19,9 @@ use super::media::{self, MediaApi, MediaTools, VideoPolling, GENERATE_IMAGE};
 use super::{ActivityAccess, McpData, ToolCtx, ToolGroup, TurnBinding};
 use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::approval_broker::testing::TestBroker;
-use crate::clovy_api::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
+use crate::providers::fal::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::providers::{EditImageRequest, GenerateImageRequest, GenerateVideoRequest};
 
 const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake image";
@@ -29,7 +29,7 @@ const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake image";
 /// A fake Clovy API: records each request, answers images with fixed bytes
 /// and video polls from a script, then done (or still rendering, `stuck`).
 #[derive(Default)]
-struct FakeClovyApi {
+struct FakeMediaApi {
     calls: Mutex<Vec<String>>,
     statuses: Mutex<VecDeque<Result<VideoStatusDto, AppError>>>,
     /// The generated image's bytes (default: a small PNG).
@@ -39,7 +39,7 @@ struct FakeClovyApi {
     video_file: Option<std::path::PathBuf>,
 }
 
-impl FakeClovyApi {
+impl FakeMediaApi {
     fn polling(video_file: &Path, statuses: Vec<Result<VideoStatusDto, AppError>>) -> Self {
         Self {
             statuses: Mutex::new(statuses.into()),
@@ -83,7 +83,7 @@ fn processing() -> Result<VideoStatusDto, AppError> {
     })
 }
 
-impl MediaApi for FakeClovyApi {
+impl MediaApi for FakeMediaApi {
     fn generate_image(
         &self,
         request: GenerateImageRequest,
@@ -172,7 +172,7 @@ impl Turn {
 
     async fn call(
         &self,
-        api: &FakeClovyApi,
+        api: &FakeMediaApi,
         polling: VideoPolling,
         name: &str,
         arguments: Value,
@@ -221,9 +221,9 @@ async fn media_image_over_the_block_limit_stays_in_the_artifact() {
     let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
     // 2.5 MB of bytes: about 3.3 MiB of base64, over the 3 MiB limit.
     let big = vec![7u8; 2_500_000];
-    let api = FakeClovyApi {
+    let api = FakeMediaApi {
         image_bytes: Some(big.clone()),
-        ..FakeClovyApi::default()
+        ..FakeMediaApi::default()
     };
     let result = turn
         .call(
@@ -257,7 +257,7 @@ async fn media_image_over_the_block_limit_stays_in_the_artifact() {
 #[tokio::test]
 async fn media_generate_image_lands_in_the_session_workspace_and_artifact_list() {
     let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
-    let api = FakeClovyApi::default();
+    let api = FakeMediaApi::default();
 
     let result = turn
         .call(
@@ -346,7 +346,7 @@ async fn media_edit_image_reads_sources_in_the_workspace_and_only_there_when_san
 
     let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
     std::fs::write(turn.workspace.path().join("photo.png"), PNG_BYTES).unwrap();
-    let api = FakeClovyApi::default();
+    let api = FakeMediaApi::default();
     let polling = quick(Duration::from_secs(5));
     let edited = turn
         .call(
@@ -396,7 +396,7 @@ async fn media_edit_image_reads_sources_in_the_workspace_and_only_there_when_san
     assert_eq!(turn.artifacts().await.len(), 1);
 
     let unrestricted = Turn::new(AgentSafetyMode::Unrestricted).await;
-    let api = FakeClovyApi::default();
+    let api = FakeMediaApi::default();
     unrestricted
         .call(
             &api,
@@ -415,7 +415,7 @@ async fn media_generate_video_polls_until_done_and_records_the_video() {
     let downloads = tempfile::tempdir().unwrap();
     let video = downloads.path().join("generated-video.mp4");
     std::fs::write(&video, b"fake mp4!").unwrap();
-    let api = FakeClovyApi::polling(&video, vec![processing(), processing()]);
+    let api = FakeMediaApi::polling(&video, vec![processing(), processing()]);
 
     let result = turn
         .call(
@@ -455,7 +455,7 @@ async fn media_generate_video_answers_processing_before_the_cli_timeout_and_cont
     let video = downloads.path().join("generated-video.mp4");
     std::fs::write(&video, b"fake mp4!").unwrap();
     // Still rendering when this call's wait runs out.
-    let api = FakeClovyApi::polling(&video, vec![]);
+    let api = FakeMediaApi::polling(&video, vec![]);
     *api.stuck.lock().unwrap() = true;
     let waiting = turn
         .call(
@@ -508,7 +508,7 @@ async fn media_generate_video_answers_processing_before_the_cli_timeout_and_cont
 async fn media_generate_video_stops_when_the_run_ends() {
     let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
     let video = tempfile::NamedTempFile::new().unwrap();
-    let api = FakeClovyApi::polling(video.path(), vec![]);
+    let api = FakeMediaApi::polling(video.path(), vec![]);
     *api.stuck.lock().unwrap() = true;
     let repository = AgentRepository::new(turn.pool().clone());
     let run_id = turn.binding.run_id.clone();
@@ -536,7 +536,7 @@ async fn media_generate_video_stops_when_the_run_ends() {
 async fn media_generate_video_waiting_for_the_fal_key_is_a_normal_result() {
     let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
     let video = tempfile::NamedTempFile::new().unwrap();
-    let api = FakeClovyApi::polling(
+    let api = FakeMediaApi::polling(
         video.path(),
         vec![Err(AppError::new("fal_api_key_rejected", "rejected"))],
     );
@@ -555,7 +555,7 @@ async fn media_generate_video_waiting_for_the_fal_key_is_a_normal_result() {
     assert_eq!(result["reason"], "fal_api_key_rejected");
     assert!(turn.artifacts().await.is_empty());
 
-    let failed = FakeClovyApi::polling(
+    let failed = FakeMediaApi::polling(
         video.path(),
         vec![Ok(VideoStatusDto::Failed {
             reason: "content_rejected".into(),
@@ -590,7 +590,7 @@ async fn media_routine_session_refuses_tools_its_routine_does_not_enable() {
         .execute(turn.pool())
         .await
         .unwrap();
-    let api = FakeClovyApi::default();
+    let api = FakeMediaApi::default();
     let error = turn
         .call(
             &api,
@@ -605,13 +605,24 @@ async fn media_routine_session_refuses_tools_its_routine_does_not_enable() {
     assert!(turn.artifacts().await.is_empty());
 }
 
-/// The production client against a fake Clovy API over HTTP. Runs itself in
-/// a child process with `CLOVY_API_URL` and a local-dev token, so the
-/// environment of the other tests never changes.
+/// The production MCP/provider path against a fake fal queue and media host.
+/// Isolated process state prevents synthetic keys from affecting other tests.
 #[tokio::test]
-async fn media_generate_image_reaches_a_fake_clovy_api_over_http() {
+async fn media_generate_image_reaches_fal_directly_over_http() {
     const CHILD: &str = "CLOVY_MEDIA_TOOLS_HTTP_CHILD";
+    const ORIGIN: &str = "CLOVY_TEST_FAL_ORIGIN";
     if std::env::var(CHILD).is_ok() {
+        let origin = std::env::var(ORIGIN).unwrap();
+        crate::providers::fal::install_test_client(&origin, &origin).unwrap();
+        crate::llm::secrets::store()
+            .set(
+                crate::providers::BuiltinProvider::Fal.secret_account(),
+                "fixture-fal-key",
+            )
+            .unwrap();
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.provider_api_keys_configured.fal = true;
+        crate::providers::replace_current_settings_for_tests(settings);
         let turn = Turn::new(AgentSafetyMode::Sandboxed).await;
         let data = turn.data();
         let ctx = ToolCtx {
@@ -623,72 +634,107 @@ async fn media_generate_image_reaches_a_fake_clovy_api_over_http() {
             .await
             .unwrap();
         let result = image_text(&result);
-        assert_eq!(result["model"], "fixture-image");
-        assert_eq!(
-            std::fs::read(result["path"].as_str().unwrap()).unwrap(),
-            PNG_BYTES
-        );
+        assert_eq!(result["model"], crate::providers::DEFAULT_IMAGE_MODEL);
+        let bytes = std::fs::read(result["path"].as_str().unwrap()).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
         assert_eq!(turn.artifacts().await.len(), 1);
         return;
     }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let media_url = format!("{origin}/asset.png");
+    let mut image = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut image, image::ImageFormat::Png)
+        .unwrap();
+    let png = image.into_inner();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&requests);
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        let mut buffer = vec![0; 8192];
-        // Head and JSON body (small) until the body parses.
-        let body = loop {
-            let read = socket.read(&mut buffer).await.unwrap();
-            assert!(read > 0, "connection closed early");
-            request.extend_from_slice(&buffer[..read]);
-            let text = String::from_utf8_lossy(&request).into_owned();
-            if let Some((_, body)) = text.split_once("\r\n\r\n") {
-                if let Ok(body) = serde_json::from_str::<Value>(body) {
-                    break (text, body);
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let (head, body) = loop {
+                let mut buffer = [0; 8192];
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "connection closed before request completed");
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request).into_owned();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break (head.to_string(), body.to_string());
+                    }
                 }
-            }
-        };
-        let payload = json!({ "success": true, "data": {
-            "imageBase64": BASE64.encode(PNG_BYTES), "mimeType": "image/png",
-            "model": "fixture-image", "provider": "fal" } })
-        .to_string();
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len());
-        socket.write_all(response.as_bytes()).await.unwrap();
-        body
+            };
+            observed.lock().unwrap().push((head.clone(), body.clone()));
+            let path = head.split_whitespace().nth(1).unwrap();
+            let (status, content_type, payload) = match path {
+                "/fal-ai/flux/dev" => {
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&body).unwrap()["prompt"],
+                        "a lighthouse"
+                    );
+                    (
+                        200,
+                        "application/json",
+                        json!({"request_id":"fal-image-id"})
+                            .to_string()
+                            .into_bytes(),
+                    )
+                }
+                "/fal-ai/flux/requests/fal-image-id/status" => (
+                    200,
+                    "application/json",
+                    json!({"status":"COMPLETED"}).to_string().into_bytes(),
+                ),
+                "/fal-ai/flux/requests/fal-image-id" => (
+                    200,
+                    "application/json",
+                    json!({"images":[{"url":media_url}]})
+                        .to_string()
+                        .into_bytes(),
+                ),
+                "/asset.png" => (200, "image/png", png.clone()),
+                _ => (404, "application/json", b"{}".to_vec()),
+            };
+            let response = format!("HTTP/1.1 {status} Response\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len());
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(&payload).await.unwrap();
+        }
     });
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "mcp_server::tools::media_tests::media_generate_image_reaches_a_fake_clovy_api_over_http",
-                "--nocapture",
-            ])
+            .args(["--exact", "mcp_server::tools::media_tests::media_generate_image_reaches_fal_directly_over_http", "--nocapture"])
             .env(CHILD, "1")
-            .env("CLOVY_API_URL", format!("http://{address}"))
-            .env("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "media-test-token")
-            .output()
-            .unwrap()
-    })
-    .await
-    .unwrap();
-    if !output.status.success() {
-        server.abort();
-    }
+            .env(ORIGIN, &origin)
+            .output().unwrap()
+    }).await.unwrap();
+    server.abort();
     assert!(
         output.status.success(),
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let (head, body) = server.await.unwrap();
-    assert!(head.starts_with("POST /v1/image/generate "), "{head}");
-    assert!(
-        head.to_ascii_lowercase()
-            .contains("authorization: bearer media-test-token"),
-        "{head}"
-    );
-    assert_eq!(body["prompt"], "a lighthouse");
-    assert!(body["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    for (head, _) in requests.iter() {
+        let lower = head.to_ascii_lowercase();
+        if head.starts_with("GET /asset.png ") {
+            assert!(!lower.contains("authorization:"));
+        } else {
+            assert!(lower.contains("authorization: key fixture-fal-key"));
+        }
+        assert!(!head.contains("/v1/"));
+    }
 }

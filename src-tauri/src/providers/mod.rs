@@ -9,6 +9,7 @@
 //! (`crate::llm::secrets`), and settings only record that one is saved.
 
 mod catalog;
+pub(crate) mod fal;
 
 use crate::domain::types::AppError;
 use crate::llm::{
@@ -1044,18 +1045,16 @@ pub struct EditImageRequest {
     pub request_id: Option<String>,
     #[serde(default)]
     pub mime_type: Option<String>,
-    /// Optional edit-model override; absent uses Clovy API's default edit model.
+    /// Optional edit-model override; absent uses the curated fal edit model.
     #[serde(default)]
     pub model: Option<String>,
 }
 
-/// Generates an image from a prompt via Clovy API, defaulting to the saved
-/// image model. Provider keys and the upstream call live in Clovy API; this
-/// command only resolves the model and forwards the prompt.
+/// Generates an image directly with the user's fal key and saved model.
 #[tauri::command]
 pub async fn generate_image(
     request: GenerateImageRequest,
-) -> Result<crate::clovy_api::GeneratedImageDto, AppError> {
+) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
         return Err(AppError::new("image_prompt_required", "Enter a prompt."));
@@ -1070,15 +1069,14 @@ pub async fn generate_image(
         .map(|request_id| request_id.trim().to_string())
         .filter(|request_id| !request_id.is_empty());
     let safe_mode = request.safe_mode.unwrap_or_else(image_safe_mode);
-    crate::clovy_api::generate_image(prompt, model, Some(safe_mode), request_id).await
+    crate::providers::fal::generate_image(prompt, model, Some(safe_mode), request_id).await
 }
 
-/// Edits a source image through Clovy API. Provider keys and the upstream call
-/// live in Clovy API; this command only validates and forwards the image bytes.
+/// Edits a source image directly with the user's fal key.
 #[tauri::command]
 pub async fn edit_image(
     request: EditImageRequest,
-) -> Result<crate::clovy_api::GeneratedImageDto, AppError> {
+) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
     let image = request.image.trim().to_string();
     if image.is_empty() {
         return Err(AppError::new(
@@ -1105,7 +1103,7 @@ pub async fn edit_image(
         .mime_type
         .map(|mime_type| mime_type.trim().to_string())
         .filter(|mime_type| !mime_type.is_empty());
-    crate::clovy_api::edit_image(
+    crate::providers::fal::edit_image(
         image,
         prompt,
         mime_type,
@@ -1119,14 +1117,14 @@ pub async fn edit_image(
 #[tauri::command]
 pub async fn video_generate(
     request: GenerateVideoRequest,
-) -> Result<crate::clovy_api::VideoJobDto, AppError> {
+) -> Result<crate::providers::fal::VideoJobDto, AppError> {
     video_generate_with_enabled(request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
 }
 
 async fn video_generate_with_enabled(
     request: GenerateVideoRequest,
     enabled: bool,
-) -> Result<crate::clovy_api::VideoJobDto, AppError> {
+) -> Result<crate::providers::fal::VideoJobDto, AppError> {
     ensure_video_generation_enabled(enabled)?;
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -1156,7 +1154,7 @@ async fn video_generate_with_enabled(
         .map(|aspect_ratio| aspect_ratio.trim().to_string())
         .filter(|aspect_ratio| !aspect_ratio.is_empty())
         .or_else(|| Some(DEFAULT_VIDEO_ASPECT_RATIO.to_string()));
-    crate::clovy_api::video_generate(crate::clovy_api::VideoGenerateParams {
+    crate::providers::fal::video_generate(crate::providers::fal::VideoGenerateParams {
         prompt,
         model,
         request_id,
@@ -1172,14 +1170,14 @@ async fn video_generate_with_enabled(
 pub async fn video_status(
     app: AppHandle,
     request: VideoStatusRequest,
-) -> Result<crate::clovy_api::VideoStatusDto, AppError> {
+) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
     video_status_with_enabled(app, request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
 }
 
 /// Absolute path of the generated-videos directory. Lets the frontend resolve a
 /// bare `generated-video-*.mp4` filename (the agent frequently names a finished
 /// video by filename only when asked to show it again) to an asset-scoped path
-/// the webview can load. Mirrors the directory `clovy_api::write_video_bytes`
+/// the webview can load. Mirrors the directory `providers::fal::video_status`
 /// and the agent video tool write into.
 #[tauri::command]
 pub fn generated_video_dir(app: AppHandle) -> Result<String, AppError> {
@@ -1195,9 +1193,9 @@ async fn video_status_with_enabled(
     app: AppHandle,
     request: VideoStatusRequest,
     enabled: bool,
-) -> Result<crate::clovy_api::VideoStatusDto, AppError> {
+) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
     let job_id = video_status_job_id_with_enabled(request, enabled)?;
-    crate::clovy_api::video_status(&app, job_id).await
+    crate::providers::fal::video_status(&app, job_id).await
 }
 
 fn video_status_job_id_with_enabled(
