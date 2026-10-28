@@ -62,13 +62,52 @@ pub fn seed_bundled_skills(app: &AppHandle) {
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn sandbox_profile(workspace: &std::path::Path) -> String {
-    let escaped = workspace.to_string_lossy().replace('"', "\\\"");
+    let escaped = workspace
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     format!("(version 1) (allow default) (deny file-write*) (allow file-write* (subpath \"{escaped}\")) (allow file-write* (subpath \"/private/tmp\"))")
 }
 
 #[cfg(test)]
 mod tests {
     use super::sandbox_profile;
+    #[test]
+    fn escape_regression_sandbox_profile_preserves_workspace_paths() {
+        for path in [
+            "/tmp/plain",
+            "/tmp/quoted\"name",
+            "/tmp/slash\\\"quote",
+            "/tmp/trailing\\",
+        ] {
+            let profile = sandbox_profile(std::path::Path::new(path));
+            let quoted = serde_json::to_string(path).unwrap();
+            assert!(
+                profile.contains(&format!("(subpath {quoted})")),
+                "{profile}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn escape_regression_sandbox_exec_accepts_quoted_and_trailing_backslash_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["plain", "quoted\"name", "slash\\\"quote", "trailing\\"] {
+            let workspace = directory.path().join(name);
+            std::fs::create_dir(&workspace).unwrap();
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &sandbox_profile(&workspace), "/usr/bin/true"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn sandbox_profile_only_grants_workspace_and_tmp_writes() {
         let profile = sandbox_profile(std::path::Path::new("/Users/example/Clovy Workspace"));

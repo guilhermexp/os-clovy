@@ -481,10 +481,14 @@ fn redact_named_secrets(value: &str) -> String {
                     output.push(char::from(quote));
                     output.push_str("[redacted]");
                     let mut value_end = value_start + 1;
-                    while value_end < bytes.len()
-                        && bytes[value_end] != quote
-                        && !matches!(bytes[value_end], b'\r' | b'\n')
-                    {
+                    let mut escaped = false;
+                    while value_end < bytes.len() && !matches!(bytes[value_end], b'\r' | b'\n') {
+                        if bytes[value_end] == quote && !escaped {
+                            break;
+                        }
+                        // An odd backslash run escapes the next quote; an
+                        // even run leaves it as the closing delimiter.
+                        escaped = bytes[value_end] == b'\\' && !escaped;
                         value_end += 1;
                     }
                     if value_end < bytes.len() && bytes[value_end] == quote {
@@ -593,6 +597,47 @@ fn redact_key_tokens(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn escape_regression_redacts_quotes_using_backslash_parity() {
+        // All values are harmless synthetic fixtures, never real credentials.
+        for quote in ['"', '\''] {
+            for count in 0..=5 {
+                let slashes = "\\".repeat(count);
+                let (input, expected) = if count % 2 == 0 {
+                    (
+                        format!("password={quote}fixture{slashes}{quote}; visible=ok"),
+                        format!("password={quote}[redacted]{quote}; visible=ok"),
+                    )
+                } else {
+                    (
+                        format!(
+                            "password={quote}fixture{slashes}{quote}hidden-tail{quote}; visible=ok"
+                        ),
+                        format!("password={quote}[redacted]{quote}; visible=ok"),
+                    )
+                };
+                assert_eq!(
+                    sanitize_log(&input),
+                    expected,
+                    "quote={quote}, slashes={count}"
+                );
+            }
+        }
+        for value in [
+            "synthetic\"suffix",
+            "synthetic\\",
+            "synthetic\\\"suffix",
+            "é\\\\\"suffix",
+        ] {
+            let input = json!({ "password": value, "visible": "preserved" }).to_string();
+            let sanitized: Value = serde_json::from_str(&sanitize_log(&input)).unwrap();
+            assert_eq!(
+                sanitized,
+                json!({ "password": "[redacted]", "visible": "preserved" })
+            );
+        }
+    }
+
     #[test]
     fn consumed_steering_uses_message_id_as_its_persisted_external_id() {
         assert_eq!(
