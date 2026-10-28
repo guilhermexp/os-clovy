@@ -22,7 +22,7 @@ use crate::{
             process_saved_source_audio_with_progress, NoteProcessingProgressReporter,
             ProcessingTiming, NOTE_PROCESSING_PROGRESS_EVENT, TRANSCRIPTION_RATE_LIMITED_CODE,
         },
-        processing_queue,
+        processing_queue::{self, RetryOrigin},
         types::{
             AppError, AssignNoteToFolderRequest, AssignSessionToFolderRequest,
             AssignSessionToProfileRequest, BootstrapResponse, CheckRecordingSourceReadinessRequest,
@@ -1997,26 +1997,34 @@ fn schedule_rate_limited_resume(note_id: &str, recording_session_id: &str, error
         let Ok(repos) = repositories(&app).await else {
             return;
         };
-        let still_paused = repos.get_note(&note_id).await.is_ok_and(|note| {
-            note.processing_status == ProcessingStatus::Failed
-                && note.last_error.as_deref() == Some(paused_message.as_str())
-        });
-        if !still_paused {
+        // One claim per pause: a Retry that got there first, or another
+        // resume, leaves nothing to claim.
+        if !repos
+            .claim_paused_note(&note_id, &paused_message)
+            .await
+            .unwrap_or(false)
+        {
             return;
         }
         // Boxed: the resumed run can pause and schedule another resume.
         let resumed: std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<NoteDto, AppError>> + Send>,
-        > = Box::pin(retry_processing(
+        > = Box::pin(retry_processing_from(
             app,
             RetryProcessingRequest {
                 note_id: note_id.clone(),
                 step: None,
                 recording_session_id: Some(recording_session_id),
             },
+            RetryOrigin::Resume,
         ));
         if let Err(error) = resumed.await {
             tracing::warn!(%note_id, code = %error.code, "rate-limited note did not resume");
+            // The claim set the note to transcribing; give the pause back so
+            // the note keeps its message and its Retry.
+            let _ = repos
+                .set_note_status(&note_id, ProcessingStatus::Failed, Some(paused_message))
+                .await;
         }
     });
 }
@@ -2639,6 +2647,14 @@ pub async fn retry_processing(
     app: AppHandle,
     request: RetryProcessingRequest,
 ) -> Result<NoteDto, AppError> {
+    retry_processing_from(app, request, RetryOrigin::Manual).await
+}
+
+async fn retry_processing_from(
+    app: AppHandle,
+    request: RetryProcessingRequest,
+    origin: RetryOrigin,
+) -> Result<NoteDto, AppError> {
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
     let sources = retry_audio_sources(
@@ -2649,7 +2665,9 @@ pub async fn retry_processing(
     )
     .await?;
     let (ticket, depth) = processing_queue::enqueue(&request.note_id);
-    if depth <= 1 {
+    let queued_behind_another_run = depth > 1;
+    // A resume's claim already set the note to transcribing.
+    if depth <= 1 && origin == RetryOrigin::Manual {
         repos
             .set_note_status(&request.note_id, ProcessingStatus::Transcribing, None)
             .await?;
@@ -2691,6 +2709,22 @@ pub async fn retry_processing(
                 return;
             }
         };
+        // Whatever ran while this run waited may have finished the note: a
+        // second run would generate it again, billed, and replace the result.
+        if !processing_queue::queued_retry_should_run(
+            origin,
+            note.processing_status,
+            queued_behind_another_run,
+        ) {
+            tracing::info!(
+                note_id = %task_note_id,
+                ?origin,
+                status = ?note.processing_status,
+                "retry skipped: the note no longer needs it"
+            );
+            ticket.finish();
+            return;
+        }
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);

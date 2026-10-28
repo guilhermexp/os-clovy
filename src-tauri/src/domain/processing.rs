@@ -2471,6 +2471,7 @@ impl RequestPacer {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_clock(mut self, clock: PacerClock) -> Self {
         self.clock = clock;
         self
@@ -2769,10 +2770,12 @@ fn paced<T: Send + 'static>(inner: ProviderCall<T>, select: PacerSelector) -> Pr
     })
 }
 
+#[cfg(test)]
 fn fixed_pacer(pacer: Arc<RequestPacer>) -> PacerSelector {
     Arc::new(move || Arc::clone(&pacer))
 }
 
+#[cfg(test)]
 fn paced_turn_transcriber(inner: TurnTranscriber, pacer: Arc<RequestPacer>) -> TurnTranscriber {
     paced(inner, fixed_pacer(pacer))
 }

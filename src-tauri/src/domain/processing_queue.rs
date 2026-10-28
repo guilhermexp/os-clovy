@@ -114,12 +114,22 @@ pub enum RetryOrigin {
 
 /// Whether a retry run that just took the note's processing lock should
 /// still run.
+///
+/// A run waits behind any earlier run on the same note. A manual retry first
+/// in line set the note to transcribing itself; behind another run it still
+/// runs only if that run left the note failed, so two retries never
+/// regenerate the note twice. A resume runs only on the note its claim left
+/// transcribing: if anything else ran first, the note no longer needs it.
 pub fn queued_retry_should_run(
-    _origin: RetryOrigin,
-    _status: crate::domain::types::ProcessingStatus,
-    _queued_behind_another_run: bool,
+    origin: RetryOrigin,
+    status: crate::domain::types::ProcessingStatus,
+    queued_behind_another_run: bool,
 ) -> bool {
-    true
+    use crate::domain::types::ProcessingStatus;
+    match origin {
+        RetryOrigin::Manual => !queued_behind_another_run || status == ProcessingStatus::Failed,
+        RetryOrigin::Resume => status == ProcessingStatus::Transcribing,
+    }
 }
 
 #[cfg(test)]
@@ -131,17 +141,49 @@ mod tests {
     fn a_queued_retry_runs_only_while_its_note_still_needs_it() {
         use RetryOrigin::{Manual, Resume};
         // First in line, a manual retry set the note to transcribing itself.
-        assert!(queued_retry_should_run(Manual, ProcessingStatus::Transcribing, false));
-        assert!(queued_retry_should_run(Manual, ProcessingStatus::Failed, false));
+        assert!(queued_retry_should_run(
+            Manual,
+            ProcessingStatus::Transcribing,
+            false
+        ));
+        assert!(queued_retry_should_run(
+            Manual,
+            ProcessingStatus::Failed,
+            false
+        ));
         // Behind another run, it runs only if that run left the note failed.
-        assert!(queued_retry_should_run(Manual, ProcessingStatus::Failed, true));
-        assert!(!queued_retry_should_run(Manual, ProcessingStatus::Ready, true));
-        assert!(!queued_retry_should_run(Manual, ProcessingStatus::Generating, true));
+        assert!(queued_retry_should_run(
+            Manual,
+            ProcessingStatus::Failed,
+            true
+        ));
+        assert!(!queued_retry_should_run(
+            Manual,
+            ProcessingStatus::Ready,
+            true
+        ));
+        assert!(!queued_retry_should_run(
+            Manual,
+            ProcessingStatus::Generating,
+            true
+        ));
         // A resume runs only on the note its claim left transcribing: a
         // manual retry that got there first already ran or regenerated it.
-        assert!(queued_retry_should_run(Resume, ProcessingStatus::Transcribing, false));
-        assert!(!queued_retry_should_run(Resume, ProcessingStatus::Ready, true));
-        assert!(!queued_retry_should_run(Resume, ProcessingStatus::Failed, true));
+        assert!(queued_retry_should_run(
+            Resume,
+            ProcessingStatus::Transcribing,
+            false
+        ));
+        assert!(!queued_retry_should_run(
+            Resume,
+            ProcessingStatus::Ready,
+            true
+        ));
+        assert!(!queued_retry_should_run(
+            Resume,
+            ProcessingStatus::Failed,
+            true
+        ));
     }
 
     #[test]

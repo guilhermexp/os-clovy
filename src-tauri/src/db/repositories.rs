@@ -2925,12 +2925,27 @@ impl Repositories {
         Ok(())
     }
 
+    /// Takes a note paused by a provider rate limit for its automatic resume,
+    /// in one statement: only while the note still shows that very pause, so
+    /// a Retry that got there first, or a second resume, claims nothing.
     pub async fn claim_paused_note(
         &self,
-        _note_id: &str,
-        _paused_message: &str,
+        note_id: &str,
+        paused_message: &str,
     ) -> Result<bool, sqlx::error::Error> {
-        Ok(true)
+        let result = query(
+            "UPDATE notes
+             SET processing_status = ?, updated_at = ?
+             WHERE id = ? AND processing_status = ? AND last_error = ?",
+        )
+        .bind(ProcessingStatus::Transcribing.as_db())
+        .bind(timestamp())
+        .bind(note_id)
+        .bind(ProcessingStatus::Failed.as_db())
+        .bind(paused_message)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn set_note_transcription_warning(
