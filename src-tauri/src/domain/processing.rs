@@ -222,18 +222,26 @@ fn note_transcription_span_id(
     format!("{session_id}:{source}:{}:{start_ms}:{end_ms}", kind.as_db())
 }
 
+/// What a job's transcript depends on beyond its audio: the language, the
+/// title, the dictionary and the transcription model. The default model adds
+/// nothing, so turns transcribed before the model was part of the identity
+/// keep it and are reused; any other model is another transcription.
 fn note_transcription_configuration_fingerprint(
     title: &str,
     dictionary_context: Option<&str>,
-    _model: &str,
+    model: &str,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"june-note-transcription-configuration-v1\0");
+    let model = (model != crate::providers::DEFAULT_TRANSCRIPTION_MODEL).then_some(model);
     for value in [
         crate::dictation::configured_transcription_language().as_deref(),
         Some(title),
         dictionary_context,
-    ] {
+    ]
+    .into_iter()
+    .chain(model.map(Some))
+    {
         match value {
             Some(value) => {
                 digest.update(b"some");
@@ -2645,17 +2653,23 @@ fn note_route_resolver(model: String) -> RouteResolver {
 }
 
 /// The durable key of one chunk request of a split saved-audio job: the
-/// chunk's operation id (the durable job's own, then `-chunk-N`) and its
-/// audio length, so another split never reuses a stale chunk. `None` for a
-/// request that is not a chunk of a durable job, which its job already keeps.
-fn chunk_cache_key(request: &TranscriptionRequest) -> Option<(String, String)> {
+/// chunk's operation id (the durable job's own, then `-chunk-N`), its audio
+/// length, so another split never reuses a stale chunk, and the model and
+/// language it is transcribed with, so a resume after either changed sends
+/// the chunk again. `None` for a request that is not a chunk of a durable
+/// job, which its job already keeps.
+fn chunk_cache_key(
+    route: &TranscriptionRoute,
+    request: &TranscriptionRequest,
+) -> Option<(String, String)> {
     let operation_id = request.operation_id.as_deref()?;
     let (job_operation_id, _) = operation_id.rsplit_once("-chunk-")?;
     // Durable operation ids start with the recording session id.
     let (session_id, _) = job_operation_id.split_once(':')?;
     let duration_ms = source_wav_duration_ms(&request.audio_path).unwrap_or_default();
+    let language = request.language.as_deref().unwrap_or("auto");
     Some((
-        format!("{operation_id}|{duration_ms}"),
+        format!("{operation_id}|{duration_ms}|{}|{language}", route.model),
         session_id.to_string(),
     ))
 }
@@ -2672,7 +2686,7 @@ fn cached_chunk_transcriber(
         let inner = Arc::clone(&inner);
         let repos = repos.clone();
         Box::pin(async move {
-            let Some((chunk_key, session_id)) = chunk_cache_key(&request) else {
+            let Some((chunk_key, session_id)) = chunk_cache_key(&route, &request) else {
                 return inner(route, request).await;
             };
             match repos.note_transcription_chunk(&chunk_key).await {
