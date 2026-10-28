@@ -13,7 +13,7 @@ use crate::{
         generate_note_from_transcript, transcribe_saved_audio, GenerationRequest,
         TimedTranscription, TranscriptSegment, TranscriptionProviderResult, TranscriptionRequest,
     },
-    db::repositories::Repositories,
+    db::repositories::{NoteTranscriptionChunk, Repositories},
     domain::types::{
         AppError, DictionaryEntryDto, NoteDto, NoteProcessingProgressDto, NoteProcessingStage,
         NoteTranscriptionJobKind, NoteTranscriptionJobPlan, NoteTranscriptionJobRecord,
@@ -1601,7 +1601,10 @@ async fn process_saved_source_audio_pipeline(
         replaced_sources: HashSet::new(),
     };
     let transcriber = retain_cleanup_during_note_transcription(
-        instrument_turn_transcriber(note_turn_transcriber(), timeline.clone()),
+        instrument_turn_transcriber(
+            cached_chunk_transcriber(note_turn_transcriber(), repos.clone()),
+            timeline.clone(),
+        ),
         Arc::clone(&turn_wav_dir_cleanup),
     );
     let pipeline_result = prepare_and_transcribe_turn_jobs_with_packs(
@@ -2624,8 +2627,75 @@ fn note_transcription_pacer() -> Arc<RequestPacer> {
     }
 }
 
-fn cached_chunk_transcriber(inner: TurnTranscriber, _repos: Repositories) -> TurnTranscriber {
-    inner
+/// The durable key of one chunk request of a split saved-audio job: the
+/// chunk's operation id (the durable job's own, then `-chunk-N`) and its
+/// audio length, so another split never reuses a stale chunk. `None` for a
+/// request that is not a chunk of a durable job, which its job already keeps.
+fn chunk_cache_key(request: &TranscriptionRequest) -> Option<(String, String)> {
+    let operation_id = request.operation_id.as_deref()?;
+    let (job_operation_id, _) = operation_id.rsplit_once("-chunk-")?;
+    // Durable operation ids start with the recording session id.
+    let (session_id, _) = job_operation_id.split_once(':')?;
+    let duration_ms = source_wav_duration_ms(&request.audio_path).unwrap_or_default();
+    Some((
+        format!("{operation_id}|{duration_ms}"),
+        session_id.to_string(),
+    ))
+}
+
+/// Keeps each finished chunk of a split job (a full-Source job, an
+/// over-long turn, the full-Source fallback) in `note_transcription_chunks`:
+/// a run paused by a rate limit resumes with only the chunks still missing,
+/// instead of sending the whole job again into the same limit.
+fn cached_chunk_transcriber(inner: TurnTranscriber, repos: Repositories) -> TurnTranscriber {
+    Arc::new(move |request| {
+        let inner = Arc::clone(&inner);
+        let repos = repos.clone();
+        Box::pin(async move {
+            let Some((chunk_key, session_id)) = chunk_cache_key(&request) else {
+                return inner(request).await;
+            };
+            match repos.note_transcription_chunk(&chunk_key).await {
+                Ok(Some(chunk)) if chunk.no_speech => {
+                    return Err(AppError::new("no_speech", "no_speech"));
+                }
+                Ok(Some(chunk)) => {
+                    return Ok(TranscriptionProviderResult {
+                        text: chunk.text,
+                        language: chunk.language,
+                        provider: request.provider,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "could not read a finished transcription chunk");
+                }
+            }
+            let result = inner(request).await;
+            let finished = match &result {
+                Ok(transcript) => Some(NoteTranscriptionChunk {
+                    text: transcript.text.clone(),
+                    language: transcript.language.clone(),
+                    no_speech: false,
+                }),
+                Err(error) if is_no_speech_error(error) => Some(NoteTranscriptionChunk {
+                    text: String::new(),
+                    language: None,
+                    no_speech: true,
+                }),
+                Err(_) => None,
+            };
+            if let Some(chunk) = finished {
+                if let Err(error) = repos
+                    .save_note_transcription_chunk(&chunk_key, &session_id, &chunk)
+                    .await
+                {
+                    tracing::warn!(%error, "could not keep a finished transcription chunk");
+                }
+            }
+            result
+        }) as TranscriptionFuture
+    })
 }
 
 /// Whether a live preview chunk of `duration_ms` may go to the provider now

@@ -35,6 +35,14 @@ pub struct Repositories {
     pub pool: SqlitePool,
 }
 
+#[derive(Debug, Clone)]
+pub struct NoteTranscriptionChunk {
+    pub text: String,
+    pub language: Option<String>,
+    /// The provider found no speech in this chunk.
+    pub no_speech: bool,
+}
+
 pub struct PendingDictationHistoryItem {
     transaction: sqlx::transaction::Transaction<'static, Sqlite>,
     item: DictationHistoryItemDto,
@@ -2871,6 +2879,50 @@ impl Repositories {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get("updated_at"))
+    }
+
+    /// A finished chunk of a split saved-audio job, by its chunk key.
+    pub async fn note_transcription_chunk(
+        &self,
+        chunk_key: &str,
+    ) -> Result<Option<NoteTranscriptionChunk>, sqlx::error::Error> {
+        let row = query(
+            "SELECT text, language, no_speech FROM note_transcription_chunks WHERE chunk_key = ?",
+        )
+        .bind(chunk_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| NoteTranscriptionChunk {
+            text: row.get("text"),
+            language: row.get("language"),
+            no_speech: row.get::<i64, _>("no_speech") != 0,
+        }))
+    }
+
+    pub async fn save_note_transcription_chunk(
+        &self,
+        chunk_key: &str,
+        recording_session_id: &str,
+        chunk: &NoteTranscriptionChunk,
+    ) -> Result<(), sqlx::error::Error> {
+        query(
+            "INSERT INTO note_transcription_chunks
+             (chunk_key, recording_session_id, text, language, no_speech, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(chunk_key) DO UPDATE SET
+               text = excluded.text,
+               language = excluded.language,
+               no_speech = excluded.no_speech",
+        )
+        .bind(chunk_key)
+        .bind(recording_session_id)
+        .bind(&chunk.text)
+        .bind(&chunk.language)
+        .bind(i64::from(chunk.no_speech))
+        .bind(timestamp())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn claim_paused_note(
