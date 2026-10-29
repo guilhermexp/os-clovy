@@ -2767,6 +2767,45 @@ async fn retry_audio_sources(
     Ok(sources)
 }
 
+pub(crate) async fn discard_recoverable_recording(
+    repos: &Repositories,
+    paths: &crate::app_paths::AppPaths,
+    info: &crate::db::repositories::RecordingRecoveryInfo,
+) -> Result<NoteDto, AppError> {
+    let video_paths = repos
+        .video_artifact_paths_for_session(&info.session_id)
+        .await?;
+    let source_paths = repos
+        .source_artifact_paths_for_session(&info.session_id)
+        .await?;
+    // Revoke database ownership before unlinking. A worker that renames after
+    // cleanup then sees the missing row and removes its own late output.
+    repos
+        .commit_recording_discard(&info.session_id, &info.note_id)
+        .await?;
+    // Hydration is intentionally after cleanup: commit success is independent of
+    // whether a concurrently deleted note can still be returned to the caller.
+    for path in video_paths {
+        let _ = paths.remove_recording_file(&path);
+    }
+    for artifact in source_paths {
+        for path in [&artifact.partial_path, &artifact.final_path]
+            .into_iter()
+            .flatten()
+        {
+            let _ = paths
+                .remove_recording_file(path)
+                .map_err(|error| AppError::new("audio_delete_failed", error.to_string()));
+        }
+    }
+    for path in [&info.partial_path, &info.final_path].into_iter().flatten() {
+        let _ = paths
+            .remove_recording_file(path)
+            .map_err(|error| AppError::new("audio_delete_failed", error.to_string()));
+    }
+    Ok(repos.get_note(&info.note_id).await?)
+}
+
 #[tauri::command]
 pub async fn recover_recording(
     app: AppHandle,
@@ -2785,33 +2824,7 @@ pub async fn recover_recording(
         ));
     };
     if request.action == "discard" {
-        for path in repos
-            .video_artifact_paths_for_session(&request.session_id)
-            .await?
-        {
-            let _ = paths.remove_recording_file(&path);
-        }
-        for artifact in repos
-            .source_artifact_paths_for_session(&request.session_id)
-            .await?
-        {
-            for path in [&artifact.partial_path, &artifact.final_path]
-                .into_iter()
-                .flatten()
-            {
-                let _ = paths
-                    .remove_recording_file(path)
-                    .map_err(|error| AppError::new("audio_delete_failed", error.to_string()));
-            }
-        }
-        for path in [&info.partial_path, &info.final_path].into_iter().flatten() {
-            let _ = paths
-                .remove_recording_file(path)
-                .map_err(|error| AppError::new("audio_delete_failed", error.to_string()));
-        }
-        return Ok(repos
-            .mark_recording_discarded(&info.session_id, &info.note_id)
-            .await?);
+        return discard_recoverable_recording(&repos, &paths, &info).await;
     }
     let _ =
         crate::domain::processing::optional_note_video_input(&repos, &paths, &request.session_id)

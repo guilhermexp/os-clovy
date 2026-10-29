@@ -118,6 +118,7 @@ describe("meeting video options", () => {
     const toggle = await screen.findByRole("switch", { name: "Record meeting video" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
     expect(screen.getByText("Chrome: Meet - Product review")).toBeInTheDocument();
+    expect(toggle).toHaveAccessibleDescription("Chrome: Meet - Product review");
     fireEvent.click(toggle);
     fireEvent.click(screen.getByRole("button", { name: "Record" }));
     expect(props.onStartRecording).toHaveBeenCalledWith({ windowId: 42 });

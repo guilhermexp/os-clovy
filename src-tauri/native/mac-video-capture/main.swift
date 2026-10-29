@@ -305,8 +305,38 @@ func isMeetingWindow(bundle: String, title: String, microphoneOwned: Bool) -> Bo
         let indicators = zoom ? ["zoom meeting", "zoom webinar", "reunião do zoom", "reunião zoom", "webinar do zoom"] : ["teams meeting", "meeting | microsoft teams", "meeting - microsoft teams", "reunião do teams", "reunião do microsoft teams"]
         return indicators.contains { title.contains($0) } || (microphoneOwned && ["meeting", "webinar", "reunião"].contains(title))
     }
-    let browser = family("company.thebrowser.browser") || ["chrome", "safari", "firefox", "edge", "brave", "opera"].contains { bundle.contains($0) }
-    return browser && ["meet -", "meet.google.com", "google meet", "zoom meeting", "zoom.us/j", "teams meeting", "meeting | microsoft teams", "reunião do teams", "reunião do microsoft teams"].contains { title.contains($0) }
+    let browser = ["company.thebrowser.browser", "com.google.chrome", "com.apple.safari", "org.mozilla.firefox", "com.microsoft.edgemac", "com.brave.browser", "com.operasoftware.opera"].contains { family($0) }
+    return browser && isBrowserMeetingTitle(title)
+}
+
+func isBrowserMeetingTitle(_ title: String) -> Bool {
+    var core = title
+    for browser in ["google chrome", "chrome", "arc", "safari", "firefox", "microsoft edge", "brave", "opera"] {
+        for separator in [" - ", " – ", " — "] {
+            let suffix = separator + browser
+            if core.hasSuffix(suffix) { core = String(core.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+    }
+    if [" - google search", " - bing", " - duckduckgo", " - search"].contains(where: { core.hasSuffix($0) }) { return false }
+    if core.hasPrefix("meet - ") && !core.dropFirst(7).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+    if ["zoom meeting", "teams meeting", "meeting | microsoft teams", "reunião do teams", "reunião do microsoft teams"].contains(core) { return true }
+    let url = core.hasPrefix("https://") ? String(core.dropFirst(8)) : core
+    guard url.hasPrefix("meet.google.com/"), !url.contains(where: { $0.isWhitespace }) else { return false }
+    let code = url.dropFirst(16).split(omittingEmptySubsequences: false, whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? ""
+    return code.utf8.count == 12 && code.utf8.enumerated().allSatisfy { index, byte in
+        (index == 3 || index == 8) ? byte == 45 : (97...122).contains(byte)
+    }
+}
+
+// ScreenCaptureKit windows are measured in points; stream/writer dimensions are pixels.
+func videoCaptureSize(points: CGSize, pixelScale: CGFloat) -> (width: Int, height: Int)? {
+    guard points.width.isFinite, points.height.isFinite, pixelScale.isFinite,
+          points.width > 0, points.height > 0, pixelScale > 0 else { return nil }
+    let pixels = CGSize(width: points.width * pixelScale, height: points.height * pixelScale)
+    guard pixels.width.isFinite, pixels.height.isFinite else { return nil }
+    let scale = min(1, 1920 / max(pixels.width, pixels.height))
+    return (max(2, Int(pixels.width * scale) / 2 * 2),
+            max(2, Int(pixels.height * scale) / 2 * 2))
 }
 
 struct VideoTimingCheckpoint: Codable {
@@ -540,9 +570,12 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             app = window.owningApplication?.applicationName ?? ""
             title = window.title ?? ""
-            let scale = min(1, 1920 / max(window.frame.width, window.frame.height))
-            width = max(2, Int(window.frame.width * scale) / 2 * 2)
-            height = max(2, Int(window.frame.height * scale) / 2 * 2)
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let pixelScale = CGFloat(SCShareableContent.info(for: filter).pointPixelScale)
+            guard let size = videoCaptureSize(points: window.frame.size, pixelScale: pixelScale) else {
+                throw NSError(domain: "video", code: 3)
+            }
+            width = size.width; height = size.height
             let configuration = SCStreamConfiguration()
             configuration.width = width; configuration.height = height
             configuration.minimumFrameInterval = CMTime(value: 1, timescale: 5)
@@ -563,7 +596,6 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             writer.add(input); self.writer = writer; self.input = input
             guard writer.startWriting() else { throw writer.error ?? NSError(domain: "video", code: 2) }
             writer.startSession(atSourceTime: .zero)
-            let filter = SCContentFilter(desktopIndependentWindow: window)
             captureFilter = filter; captureConfiguration = configuration
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             self.stream = stream

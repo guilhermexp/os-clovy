@@ -181,7 +181,7 @@ evidence directory is removed on completion or error. A missing prerequisite,
 different Notes engine, capture error, analysis failure or timeout falls back
 to the ordinary transcript-only route. `generation_results.video_analysis`
 persists `analyzed` or the failure reason, and the note displays the localized
-outcome. Video paths and frames never enter the Clovy API or endpoint
+outcome. Video paths and frames never enter an OpenRouter or endpoint
 generation request.
 
 ### Provider settings

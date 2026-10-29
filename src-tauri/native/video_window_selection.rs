@@ -60,25 +60,81 @@ pub fn is_candidate(window: &Window, microphone_bundles: &[String]) -> bool {
             || (microphone_owned(window, microphone_bundles)
                 && ["meeting", "webinar", "reunião"].contains(&title.as_str()));
     }
-    let browser = bundle == "company.thebrowser.browser"
-        || bundle.starts_with("company.thebrowser.browser.")
-        || ["chrome", "safari", "firefox", "edge", "brave", "opera"]
-            .iter()
-            .any(|name| bundle.contains(name));
-    browser
-        && [
-            "meet -",
-            "meet.google.com",
-            "google meet",
-            "zoom meeting",
-            "zoom.us/j",
-            "teams meeting",
-            "meeting | microsoft teams",
-            "reunião do teams",
-            "reunião do microsoft teams",
-        ]
+    let browser = [
+        "company.thebrowser.browser",
+        "com.google.chrome",
+        "com.apple.safari",
+        "org.mozilla.firefox",
+        "com.microsoft.edgemac",
+        "com.brave.browser",
+        "com.operasoftware.opera",
+    ]
+    .iter()
+    .any(|family| {
+        bundle == *family
+            || bundle
+                .strip_prefix(family)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    });
+    browser && is_browser_meeting_title(&title)
+}
+
+fn is_browser_meeting_title(title: &str) -> bool {
+    let mut core = title;
+    for browser in [
+        "google chrome",
+        "chrome",
+        "arc",
+        "safari",
+        "firefox",
+        "microsoft edge",
+        "brave",
+        "opera",
+    ] {
+        for separator in [" - ", " – ", " — "] {
+            if let Some(value) = core.strip_suffix(&format!("{separator}{browser}")) {
+                core = value.trim();
+            }
+        }
+    }
+    if [" - google search", " - bing", " - duckduckgo", " - search"]
         .iter()
-        .any(|token| title.contains(token))
+        .any(|suffix| core.ends_with(suffix))
+    {
+        return false;
+    }
+    if core
+        .strip_prefix("meet - ")
+        .is_some_and(|subject| !subject.trim().is_empty())
+    {
+        return true;
+    }
+    if [
+        "zoom meeting",
+        "teams meeting",
+        "meeting | microsoft teams",
+        "reunião do teams",
+        "reunião do microsoft teams",
+    ]
+    .contains(&core)
+    {
+        return true;
+    }
+    let url = core.strip_prefix("https://").unwrap_or(core);
+    if url.chars().any(char::is_whitespace) {
+        return false;
+    }
+    url.strip_prefix("meet.google.com/").is_some_and(|path| {
+        let code = path.split(['?', '#']).next().unwrap_or("");
+        code.len() == 12
+            && code.bytes().enumerate().all(|(index, byte)| {
+                if index == 3 || index == 8 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_lowercase()
+                }
+            })
+    })
 }
 
 // Match utility window names after removing known application labels. Words in a
@@ -307,6 +363,84 @@ mod tests {
         );
         assert_eq!(choose(windows, &[]).unwrap().id, 1);
     }
+    #[test]
+    fn browser_meeting_titles_exclude_searches_guides_and_landing_pages() {
+        for title in [
+            "Meet - planning",
+            "Meet - abc-defg-hij - Google Chrome",
+            "https://meet.google.com/abc-defg-hij",
+            "Zoom Meeting",
+            "Teams meeting",
+            "Meeting | Microsoft Teams",
+        ] {
+            assert!(
+                is_candidate(&window(1, "com.google.Chrome", title), &[]),
+                "{title}"
+            );
+        }
+        for title in [
+            "Google Meet",
+            "Google Meet - Google Search",
+            "Google Meet API documentation",
+            "How to use Google Meet",
+            "Zoom meeting guide",
+            "Teams meeting help",
+            "Meet - abc-defg-hij - Google Search",
+            "meet.google.com documentation",
+            "https://meet.google.com/landing",
+            "https://meet.google.com/?abc-defg-hij",
+            "https://meet.google.com/#abc-defg-hij",
+            "https://meet.google.com/abc-defg-hij?guide text",
+        ] {
+            assert!(
+                !is_candidate(
+                    &window(1, "company.thebrowser.Browser", title),
+                    &["company.thebrowser.Browser".into()]
+                ),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_browser_requires_an_exact_or_dotted_bundle_family() {
+        for family in [
+            "company.thebrowser.browser",
+            "com.google.chrome",
+            "com.apple.safari",
+            "org.mozilla.firefox",
+            "com.microsoft.edgemac",
+            "com.brave.browser",
+            "com.operasoftware.opera",
+        ] {
+            for bundle in [family.to_uppercase(), format!("{family}.helper")] {
+                assert!(
+                    is_candidate(&window(1, &bundle, "Meet - planning"), &[]),
+                    "{bundle}"
+                );
+                assert!(
+                    !is_candidate(&window(1, &bundle, "Email - Inbox"), &[]),
+                    "{bundle}"
+                );
+            }
+            let unrelated = format!("{family}archive");
+            assert!(
+                !is_candidate(&window(1, &unrelated, "Google Meet notes"), &[]),
+                "{unrelated}"
+            );
+        }
+        for bundle in [
+            "com.example.knowledgebase",
+            "com.google.chromeremotedesktop",
+            "com.example.firefox",
+        ] {
+            assert!(
+                !is_candidate(&window(1, bundle, "Google Meet notes"), &[]),
+                "{bundle}"
+            );
+        }
+    }
+
     #[test]
     fn arc_bundle_and_dot_helpers_are_meeting_browser_candidates() {
         for bundle in [

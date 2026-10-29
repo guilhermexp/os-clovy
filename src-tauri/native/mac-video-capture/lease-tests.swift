@@ -54,10 +54,39 @@ struct VideoLeaseTests {
         startup.pause(at:time(2)); startup.resume(at:time(5))
         assert(startup.outputTime(for:time(7)).seconds == 0)
         assert(startup.outputTime(for:time(9)).seconds == 2)
+        for (width, height, density, expectedWidth, expectedHeight) in [
+            (1440.0, 900.0, 2.0, 1920, 1200), (1440.0, 900.0, 1.0, 1440, 900),
+            (800.0, 600.0, 2.0, 1600, 1200), (900.0, 1440.0, 2.0, 1200, 1920),
+            (101.0, 51.0, 1.5, 150, 76)
+        ] {
+            let size = videoCaptureSize(points: CGSize(width: width, height: height), pixelScale: density)!
+            assert(size.width == expectedWidth && size.height == expectedHeight)
+        }
+        for density in [0.0, -1.0, Double.nan, Double.infinity] {
+            assert(videoCaptureSize(points: CGSize(width: 100, height: 100), pixelScale: density) == nil)
+        }
+        assert(videoCaptureSize(points: CGSize(width: Double.infinity, height: 100), pixelScale: 2) == nil)
+        assert(videoCaptureSize(points: CGSize(width: Double.greatestFiniteMagnitude, height: 100), pixelScale: 2) == nil)
         var cadence = VideoFrameCadence()
         assert([0.0,0.1,0.2,1.2,1.21,1.4].map { cadence.shouldWrite(at:time($0)) } == [true,false,true,true,false,true])
         for (bundle,title) in [("us.zoom.xos","Settings"),("us.zoom.xos","Zoom Meeting Settings"),("us.zoom.xos","Zoom Workplace"),("com.microsoft.teams2","Chat | Microsoft Teams"),("com.microsoft.teams2","Calendar")] {
             assert(!isMeetingWindow(bundle:bundle,title:title,microphoneOwned:true))
+        }
+        for title in ["Meet - planning", "Meet - abc-defg-hij - Google Chrome", "https://meet.google.com/abc-defg-hij", "Zoom Meeting", "Teams meeting", "Meeting | Microsoft Teams"] {
+            assert(isMeetingWindow(bundle: "com.google.Chrome", title: title, microphoneOwned: false), title)
+        }
+        for title in ["Google Meet", "Google Meet - Google Search", "Google Meet API documentation", "How to use Google Meet", "Zoom meeting guide", "Teams meeting help", "Meet - abc-defg-hij - Google Search", "meet.google.com documentation", "https://meet.google.com/landing", "https://meet.google.com/?abc-defg-hij", "https://meet.google.com/#abc-defg-hij", "https://meet.google.com/abc-defg-hij?guide text"] {
+            assert(!isMeetingWindow(bundle: "company.thebrowser.Browser", title: title, microphoneOwned: true), title)
+        }
+        for browser in ["company.thebrowser.browser", "com.google.chrome", "com.apple.safari", "org.mozilla.firefox", "com.microsoft.edgemac", "com.brave.browser", "com.operasoftware.opera"] {
+            for bundle in [browser.uppercased(), browser + ".helper"] {
+                assert(isMeetingWindow(bundle: bundle, title: "Meet - planning", microphoneOwned: false))
+                assert(!isMeetingWindow(bundle: bundle, title: "Email - Inbox", microphoneOwned: false))
+            }
+            assert(!isMeetingWindow(bundle: browser + "archive", title: "Google Meet notes", microphoneOwned: false))
+        }
+        for bundle in ["com.example.knowledgebase", "com.google.chromeremotedesktop", "com.example.firefox"] {
+            assert(!isMeetingWindow(bundle: bundle, title: "Google Meet notes", microphoneOwned: false))
         }
         for bundle in ["company.thebrowser.Browser", "company.thebrowser.Browser.helper"] {
             assert(isMeetingWindow(bundle: bundle, title: "Meet - planning", microphoneOwned: false))

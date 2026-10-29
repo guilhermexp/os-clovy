@@ -114,3 +114,75 @@ fn rebuilt_helper_must_reapply_configured_signing_with_unchanged_plist_and_accep
     assert_eq!((BUILDS.load(Ordering::SeqCst), SIGNS.load(Ordering::SeqCst)), (0,1));
 }
 "##;
+
+#[test]
+fn helper_install_stages_beside_destination_and_preserves_old_binary_on_failure() {
+    let build = include_str!("../build.rs");
+    let start = build.find("fn install_helper_executable(").unwrap();
+    let end = start + build[start..].find("\n/// Bundle identifier").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("install.rs");
+    let binary = temp
+        .path()
+        .join(format!("install{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(
+        &source,
+        format!("{}\n{}", &build[start..end], INSTALL_HARNESS),
+    )
+    .unwrap();
+    let compiled =
+        std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .args(["--edition=2021"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let result = std::process::Command::new(binary)
+        .arg(temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+const INSTALL_HARNESS: &str = r##"
+fn main() {
+    let root = std::path::PathBuf::from(std::env::args_os().nth(1).unwrap());
+    let cache = root.join("cache");
+    let bundle = root.join("bundle");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::create_dir(&bundle).unwrap();
+    let input = cache.join("universal");
+    let output = bundle.join("helper");
+    std::fs::write(&input, b"new helper").unwrap();
+    std::fs::write(&output, b"old helper").unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    install_helper_executable(&input, &output).unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"new helper");
+    assert!(input.exists(), "installation copies from the other filesystem before rename");
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&output).unwrap().permissions().mode() & 0o777, 0o755);
+    }
+    assert!(install_helper_executable(&cache.join("missing"), &output).is_err());
+    assert_eq!(std::fs::read(&output).unwrap(), b"new helper");
+    assert_eq!(std::fs::read_dir(&bundle).unwrap().count(), 1, "failed staging must be removed");
+    let blocked = bundle.join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(install_helper_executable(&input, &blocked).is_err());
+    assert!(blocked.is_dir());
+    assert_eq!(std::fs::read_dir(&bundle).unwrap().count(), 2);
+}
+"##;

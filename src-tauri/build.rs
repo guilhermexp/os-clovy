@@ -363,6 +363,8 @@ fn build_video_capture_helper() {
         .expect("create video helper directory");
     let rebuilt = !swift_helper_executable_current(&source, &executable);
     if rebuilt {
+        // This resource is packaged unconditionally. Continuing after a failed
+        // rebuild could ship a stale helper with a different control protocol.
         assert!(
             build_universal_swift_executable(
                 "video capture",
@@ -921,13 +923,38 @@ fn build_universal_swift_executable(
     if let Ok(permissions) = std::fs::metadata(&slices[0]).map(|metadata| metadata.permissions()) {
         let _ = std::fs::set_permissions(&universal, permissions);
     }
-    if let Err(error) = std::fs::rename(&universal, executable) {
+    if let Err(error) = install_helper_executable(&universal, executable) {
         println!("cargo:warning={helper_name} universal binary could not be installed: {error}");
         let _ = std::fs::remove_dir_all(&slice_dir);
         return false;
     }
     let _ = std::fs::remove_dir_all(&slice_dir);
     true
+}
+
+/// Stage on the bundle's filesystem, then atomically replace its executable.
+/// The configured Cargo target may live on a different volume.
+fn install_helper_executable(
+    universal: &std::path::Path,
+    executable: &std::path::Path,
+) -> std::io::Result<()> {
+    let staged = executable.with_extension(format!("install-{}", std::process::id()));
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let result = (|| {
+        let mut input = std::fs::File::open(universal)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.set_permissions(input.metadata()?.permissions())?;
+        output.sync_all()?;
+        drop(output);
+        std::fs::rename(&staged, executable)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
 }
 
 /// Bundle identifier for a helper built here. Release builds keep the published

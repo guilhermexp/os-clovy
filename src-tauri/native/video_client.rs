@@ -914,7 +914,10 @@ fn run_helper_with_launcher_and_process(
                 }
             }
             if status.event == "stopped" || status.event == "failed" {
-                break;
+                // Status publication precedes the helper's final lease checks. Keep
+                // the lease (and partial path) until its verified process exits so
+                // it cannot erase metadata needed after a database commit failure.
+                stop_at.get_or_insert_with(Instant::now);
             }
         }
         if let Some(record) = record.as_ref() {
@@ -1320,10 +1323,41 @@ fn video_recovery_state_with_binding(
             status.event != "stopped" && status.event != "failed"
         }
     });
+    // A terminal helper status does not release the Rust worker's ownership.
+    // It still has to rename the partial file before revoking this lease.
+    if (record.is_some() || status.is_some()) && partial.with_extension("lease").exists() {
+        if let Some(binding) = binding.as_ref() {
+            let owner_active = match (
+                binding.owner_pid,
+                binding.owner_start_sec,
+                binding.owner_start_usec,
+            ) {
+                (Some(pid), Some(sec), Some(usec)) if pid > 1 => match probe(pid) {
+                    HelperProcessProbe::Gone => false,
+                    HelperProcessProbe::Unknown => true,
+                    HelperProcessProbe::Running {
+                        start_sec,
+                        start_usec,
+                        ..
+                    } => (sec, usec) == (start_sec, start_usec),
+                },
+                _ => true,
+            };
+            if owner_active {
+                return VideoRecoveryState::Active;
+            }
+        }
+    }
     if let Some(status) = status
         .as_ref()
         .filter(|status| status.event == "stopped" || status.event == "failed")
     {
+        let terminal_record = record_from_status(status);
+        if terminal_record.pid > 1
+            && helper_process_active(&terminal_record, probe(terminal_record.pid))
+        {
+            return VideoRecoveryState::Active;
+        }
         let reason = status
             .result
             .failure_reason
@@ -1401,6 +1435,12 @@ fn recover_pending_launch(
         .as_ref()
         .filter(|status| status.event == "stopped" || status.event == "failed")
     {
+        let terminal_record = record_from_status(status);
+        if terminal_record.pid > 1
+            && helper_process_active(&terminal_record, probe(terminal_record.pid))
+        {
+            return VideoRecoveryState::Active;
+        }
         return VideoRecoveryState::Finished(
             status
                 .result
@@ -2385,6 +2425,14 @@ mod tests {
         std::fs::write(&f.partial, torn_container_fixture()).unwrap();
         std::fs::write(f.partial.with_extension("lease"), b"active").unwrap();
         let nonce = f.seed_timing();
+        // Model a crashed app owner, independently of the reused helper PID.
+        let mut binding = read_capture_binding(&f.partial).unwrap();
+        binding.owner_pid = Some(i32::MAX as u32);
+        std::fs::write(
+            f.partial.with_extension("capture.json"),
+            serde_json::to_vec(&binding).unwrap(),
+        )
+        .unwrap();
         // This test process is alive, but it is not the video capture helper.
         std::fs::write(
             f.partial.with_extension("pid"),
@@ -2758,52 +2806,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_discard_transaction_failure_preserves_files_and_ownership() {
+        for trigger in [
+            "CREATE TRIGGER reject_discard BEFORE DELETE ON video_artifacts BEGIN SELECT RAISE(ABORT, 'injected discard failure'); END",
+            "CREATE TRIGGER reject_discard BEFORE UPDATE ON notes BEGIN SELECT RAISE(ABORT, 'injected discard failure'); END",
+        ] {
+            let f = OwnerFixture::new().await;
+            for file in f.owned_files() { std::fs::write(file, b"owned fixture").unwrap(); }
+            let original: String = sqlx::query_scalar::query_scalar("SELECT status FROM recording_sessions WHERE id=?")
+                .bind(&f.session_id).fetch_one(&f.repos.pool).await.unwrap();
+            let info = f.repos.recording_recovery_info(&f.session_id).await.unwrap().unwrap();
+            sqlx::query::query(trigger).execute(&f.repos.pool).await.unwrap();
+            assert!(crate::commands::discard_recoverable_recording(&f.repos, &f.paths, &info).await.is_err());
+            assert!(f.owned_files().iter().all(|file| file.exists()));
+            assert!(f.repos.video_artifact_exists(&f.session_id).await.unwrap());
+            let after: String = sqlx::query_scalar::query_scalar("SELECT status FROM recording_sessions WHERE id=?")
+                .bind(&f.session_id).fetch_one(&f.repos.pool).await.unwrap();
+            assert_eq!(after, original, "every earlier write must roll back");
+            sqlx::query::query("DROP TRIGGER reject_discard").execute(&f.repos.pool).await.unwrap();
+            crate::commands::discard_recoverable_recording(&f.repos, &f.paths, &info).await.unwrap();
+            assert!(f.owned_files().iter().all(|file| !file.exists()));
+            assert!(!f.repos.video_artifact_exists(&f.session_id).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
     async fn video_deleted_between_unlinks_and_rename_cannot_resurrect() {
-        let f = OwnerFixture::new().await;
-        let (_sender, receiver) = mpsc::channel();
-        std::fs::write(&f.partial, [1_u8; 64]).unwrap();
-        std::fs::write(
-            f.partial.with_extension("status.json"),
-            r#"{"event":"stopped","pid":0,"startedAtHostMs":1000}"#,
-        )
-        .unwrap();
-        let files = f
-            .repos
-            .audio_artifact_paths_for_note(&f.note_id)
-            .await
+        for discard in [false, true] {
+            let f = OwnerFixture::new().await;
+            let (_sender, receiver) = mpsc::channel();
+            std::fs::write(&f.partial, [1_u8; 64]).unwrap();
+            std::fs::write(
+                f.partial.with_extension("status.json"),
+                r#"{"event":"stopped","pid":0,"startedAtHostMs":1000}"#,
+            )
             .unwrap();
-        f.repos.delete_note(&f.note_id).await.unwrap();
-        // Deletion visited final before it existed, then the worker wins the rename race.
-        let _ = f.paths.remove_recording_file(&f.final_path);
-        let result = run_helper_with_launcher(
-            &f.partial,
-            &f.final_path,
-            0,
-            receiver,
-            &AtomicBool::new(false),
-            |_| {},
-            |status, _| {
-                std::fs::write(
-                    status,
-                    r#"{"event":"stopped","pid":0,"startedAtHostMs":1000}"#,
-                )
+            let files = f
+                .repos
+                .audio_artifact_paths_for_note(&f.note_id)
+                .await
                 .unwrap();
-                true
-            },
-        );
-        assert!(f.final_path.exists());
-        let _ = f.paths.remove_recording_file(&f.partial);
-        finalize_video_worker(
-            &f.repos,
-            &f.session_id,
-            &f.partial,
-            &f.final_path,
-            &result,
-            &AtomicBool::new(false),
-        )
-        .await;
-        assert!(f.owned_files().iter().all(|path| !path.exists()));
-        assert!(files.iter().any(|path| path.ends_with(".lease")));
+            if discard {
+                f.repos
+                    .mark_recording_discarded(&f.session_id, &f.note_id)
+                    .await
+                    .unwrap();
+            } else {
+                f.repos.delete_note(&f.note_id).await.unwrap();
+            }
+            // Deletion visited final before it existed, then the worker wins the rename race.
+            let _ = f.paths.remove_recording_file(&f.final_path);
+            let result = run_helper_with_launcher(
+                &f.partial,
+                &f.final_path,
+                0,
+                receiver,
+                &AtomicBool::new(false),
+                |_| {},
+                |status, _| {
+                    std::fs::write(
+                        status,
+                        r#"{"event":"stopped","pid":0,"startedAtHostMs":1000}"#,
+                    )
+                    .unwrap();
+                    true
+                },
+            );
+            assert!(f.final_path.exists());
+            let _ = f.paths.remove_recording_file(&f.partial);
+            finalize_video_worker(
+                &f.repos,
+                &f.session_id,
+                &f.partial,
+                &f.final_path,
+                &result,
+                &AtomicBool::new(false),
+            )
+            .await;
+            assert!(f.owned_files().iter().all(|path| !path.exists()));
+            assert!(files.iter().any(|path| path.ends_with(".lease")));
+        }
     }
 
     #[tokio::test]
@@ -2870,6 +2952,147 @@ mod tests {
         open_tx.send(()).unwrap();
         helper.join().unwrap();
         assert!(f.owned_files().iter().all(|path| !path.exists()));
+    }
+
+    #[tokio::test]
+    async fn video_recovery_does_not_rename_a_live_workers_partial_after_helper_exit() {
+        for event in ["recording", "stopped"] {
+            let f = OwnerFixture::new().await;
+            let nonce = f.seed_timing();
+            let bytes = torn_container_fixture();
+            std::fs::write(&f.partial, &bytes).unwrap();
+            std::fs::write(f.partial.with_extension("lease"), b"active").unwrap();
+            std::fs::write(
+                f.partial.with_extension("status.json"),
+                serde_json::json!({"event":event,"pid":2147483647,"captureNonce":nonce})
+                    .to_string(),
+            )
+            .unwrap();
+            let input = f
+                .repos
+                .note_video_input(&f.session_id, &f.paths)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(input.failure_reason.is_some());
+            assert_eq!(std::fs::read(&f.partial).unwrap(), bytes);
+            assert!(
+                !f.final_path.exists(),
+                "recovery must leave the worker's rename alone"
+            );
+            // The worker can still complete normally, with no persistent failed/recovered result.
+            std::fs::rename(&f.partial, &f.final_path).unwrap();
+            std::fs::remove_file(f.partial.with_extension("lease")).unwrap();
+            assert!(f
+                .repos
+                .finalize_video_artifact(&f.session_id, &VideoResult::default())
+                .await
+                .unwrap());
+            let input = f
+                .repos
+                .note_video_input(&f.session_id, &f.paths)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(input.failure_reason.is_none() && !input.path.is_empty());
+        }
+    }
+
+    #[test]
+    fn video_terminal_status_does_not_allow_recovery_while_helper_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join("window.partial.mp4");
+        pending_owner_binding(&partial);
+        std::fs::write(
+            partial.with_extension("status.json"),
+            serde_json::json!({
+                "event":"stopped", "pid":42, "processStartSec":30,"processStartUsec":40,
+                "captureNonce":"d0bee8db-9cf8-4fc3-94d9-e0c911e6db13"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            video_recovery_state_with_probe(&partial, |pid| {
+                if pid == 77 {
+                    HelperProcessProbe::Gone
+                } else {
+                    HelperProcessProbe::Running {
+                        start_sec: 30,
+                        start_usec: 40,
+                        executable: "/owned/clovy-video-capture".into(),
+                    }
+                }
+            }),
+            VideoRecoveryState::Active
+        ));
+        assert!(matches!(
+            video_recovery_state_with_probe(&partial, |_| HelperProcessProbe::Gone),
+            VideoRecoveryState::Finished(None)
+        ));
+    }
+
+    #[test]
+    fn video_terminal_status_keeps_lease_until_helper_exit() {
+        struct FinishingProcess {
+            partial: PathBuf,
+            probes: std::sync::atomic::AtomicUsize,
+        }
+        impl HelperProcessControl for FinishingProcess {
+            fn identity(&self, _: &HelperProcessRecord) -> HelperProcessMatch {
+                let probe = self.probes.fetch_add(1, Ordering::SeqCst);
+                // Model Swift's final lease check after publishing terminal status.
+                assert!(self.partial.with_extension("lease").exists());
+                assert!(self.partial.exists());
+                if probe == 0 {
+                    HelperProcessMatch::Matches
+                } else {
+                    HelperProcessMatch::GoneOrReused
+                }
+            }
+            fn send(&self, _: u32, _: HelperSignal) {}
+        }
+        for event in ["stopped", "failed"] {
+            let dir = tempfile::tempdir().unwrap();
+            let partial = dir.path().join("window.partial.mp4");
+            let final_path = dir.path().join("window.mp4");
+            let process = FinishingProcess {
+                partial: partial.clone(),
+                probes: Default::default(),
+            };
+            let (_sender, receiver) = mpsc::channel();
+            run_helper_with_launcher_and_process(
+                &partial,
+                &final_path,
+                0,
+                receiver,
+                &AtomicBool::new(false),
+                |_| {},
+                |status, _| {
+                    std::fs::write(&partial, [1_u8; 64]).unwrap();
+                    std::fs::write(partial.with_extension("capture.json"), "binding").unwrap();
+                    std::fs::write(partial.with_extension("timing.json"), "timing").unwrap();
+                    std::fs::write(
+                        status,
+                        serde_json::json!({"event":event,"pid":42}).to_string(),
+                    )
+                    .unwrap();
+                    true
+                },
+                &process,
+            );
+            assert!(process.probes.load(Ordering::SeqCst) >= 2);
+            assert!(final_path.exists());
+            assert!(!partial.with_extension("lease").exists());
+            assert_eq!(
+                std::fs::read(partial.with_extension("capture.json")).unwrap(),
+                b"binding"
+            );
+            assert_eq!(
+                std::fs::read(partial.with_extension("timing.json")).unwrap(),
+                b"timing"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3245,21 +3468,22 @@ mod tests {
                 printf '{"event":"recording","pid":%s,"startedAtHostMs":1000}' "$$" > "$VIDEO_TEST_STATUS"
                 while :; do sleep 0.05; done
             "#;
-                child = Some(
-                    std::process::Command::new("/bin/sh")
-                        .arg("-c")
-                        .arg(script)
-                        .env("VIDEO_TEST_LOG", &log)
-                        .env("VIDEO_TEST_STATUS", status)
-                        .env("VIDEO_TEST_PID", pid)
-                        .spawn()
-                        .unwrap(),
-                );
+                let mut helper = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(script)
+                    .env("VIDEO_TEST_LOG", &log)
+                    .env("VIDEO_TEST_STATUS", status)
+                    .env("VIDEO_TEST_PID", pid)
+                    .spawn()
+                    .unwrap();
+                // Reap concurrently: kill(pid, 0) also reports an unreaped child
+                // as live, while production's launched helper is reaped by the OS.
+                child = Some(thread::spawn(move || helper.wait().unwrap()));
                 true
             },
         );
         controls.join().unwrap();
-        child.unwrap().wait().unwrap();
+        child.unwrap().join().unwrap();
         assert!(result.failure_reason.is_none());
         let events = std::fs::read_to_string(log).unwrap();
         assert!(events.contains("pause"));
