@@ -1,12 +1,12 @@
 # Tasks
 
-> Estado para integração: os 17 commits originais têm revisão pareada concluída e achados tratados. A delta final de 35 arquivos foi aprovada em `resumption-final-delta-3` (exit 0, ambos sem achados) e conferida byte a byte contra `966aad9f` antes deste fechamento documental. Seis arquivos adicionais corrigem achados da última revisão de b88 e têm gate próprio registrado no mapa. Entrega do worker pronta para integração; merge e aceite final pertencem ao orquestrador. Testes reais com chaves continuam manuais pós-merge. Os registros abaixo são históricos; o mapa final está em `openspec/changes/remover-clovy-api/review-map.json` e os limites em `.tmp/verify/remover-clovy-api/report.md`.
+> Integrada na main em 2026-10-29 pelo fast-forward para `8d862425`, preservando o fundo de `79441ef3`. Cobertura dos 17 commits originais e revisão da integração concluídas; mapas e limites permanecem nos registros abaixo. Gates da combinação: frontend 1902 testes, Rust 2151 passados/21 ignorados, typecheck/fmt/clippy e smoke sintético conjunto aprovados conforme `.tmp/verify/remover-clovy-api/integration/report.md`. Na main, `make org-references-check clovy-api-references-check` passou. Não se declara novo build instalado, CI completo ou inferência real. A tarefa 7.2 permanece aberta para os testes manuais pós-merge escolhidos pelo dono; esta change não será arquivada antes desse registro.
 
 ## 1. Pré-requisito
 
-- [ ] 1.1 Concluir a fase 4 de `cli-substitui-agente-nativo`: tarefas 3.2, 4.1 a 4.5 e 4.7, com a 4.6 trocada por esta change. Verificar: tarefas marcadas lá, com a evidência que cada uma pede.
+- [x] 1.1 Concluir a fase 4 de `cli-substitui-agente-nativo`: tarefas 3.2, 4.1 a 4.5 e 4.7, com a 4.6 trocada por esta change. Verificar: tarefas marcadas lá, com a evidência que cada uma pede.
 
-Implementação dos grupos 2-6 liberada pela instrução do orquestrador de 2026-10-28 após o código da fase 4 (commit `0693e0db`). Gates do código: Rust 2141/0, clippy/fmt, frontend e regressões focadas; os dois erros Biome de configuração preexistentes permanecem fora de escopo. O bundle final e o smoke Claude/MCP reduzido foram posteriormente aceitos, conforme os registros abaixo e as tarefas 3.2/4.1 da change CLI. 1.1 continua aberta pelo aceite de integração de 4.7; a revisão do worker foi concluída no fechamento de 2026-10-29. A falha histórica por socket longo não foi reclassificada como sucesso.
+Implementação dos grupos 2-6 liberada pela instrução do orquestrador de 2026-10-28 após o código da fase 4. O bundle e o smoke Claude/MCP reduzido foram aceitos com limites explícitos. A integração e o aceite de 4.7 foram concluídos em 2026-10-29, na main `8d862425`; por isso 1.1 está concluída. A falha histórica por socket longo não foi reclassificada como sucesso, e testes reais com chaves permanecem pendentes em 7.2.
 
 ## 2. Provedores diretos sem reserva
 
