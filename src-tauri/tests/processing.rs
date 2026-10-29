@@ -21,6 +21,7 @@ fn note(overrides: impl FnOnce(&mut NoteDto)) -> NoteDto {
         edited_content: None,
         transcript: None,
         transcript_coverage: None,
+        video_analysis: None,
         source_transcripts: Vec::new(),
         recording: None,
         audio: None,
@@ -97,6 +98,7 @@ async fn generation_rejects_empty_transcript() {
             transcript_source_labels: false,
             manual_notes: None,
             language: None,
+            video: None,
         },
     )
     .await

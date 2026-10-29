@@ -589,7 +589,33 @@ export type DownloadNoteAudioResponse = {
   sourceCount: number;
 };
 
+export type NoteVideoAnalysis =
+  | "analyzed"
+  | "engine_unsupported"
+  | "cli_unsupported"
+  | "skill_missing"
+  | "tools_missing"
+  | "permission_denied"
+  | "capture_failed"
+  | "analysis_failed"
+  | "analysis_timeout"
+  | "video_missing";
+
+export type MeetingVideoRequest = { windowId: number };
+
+export type MeetingWindowDto = {
+  windowId: number;
+  appName: string;
+  bundleId: string;
+  title: string;
+};
+
+export async function detectMeetingWindow() {
+  return invoke<MeetingWindowDto | null>("detect_meeting_window");
+}
+
 export type NoteDto = NoteListItemDto & {
+  videoAnalysis?: NoteVideoAnalysis | null;
   calendarEvent?: NoteCalendarEventDto;
   generatedContent?: string;
   editedContent?: string;
@@ -1104,9 +1130,10 @@ export async function openPrivacySettings(
 export async function startRecording(
   noteId: string,
   sourceMode: RecordingSourceMode = "microphoneOnly",
+  video?: MeetingVideoRequest,
 ) {
   return invoke<RecordingSessionDto>("start_recording", {
-    request: { noteId, sourceMode },
+    request: { noteId, sourceMode, ...(video ? { video } : {}) },
   });
 }
 
@@ -1124,9 +1151,10 @@ export type MeetingStartRecordingOutcome =
 export async function startMeetingRecording(
   requestId: string,
   sourceMode: RecordingSourceMode = "microphoneOnly",
+  video?: MeetingVideoRequest,
 ) {
   return invoke<MeetingStartRecordingOutcome>("start_meeting_recording", {
-    request: { requestId, sourceMode },
+    request: { requestId, sourceMode, ...(video ? { video } : {}) },
   });
 }
 

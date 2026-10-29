@@ -2,6 +2,31 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
+    "notes.editor.video.record": "Record meeting video",
+    "notes.editor.video.window": "{app}: {title}",
+    "notes.editor.video.permission":
+      "Clovy Video Capture requests Screen Recording permission. Audio continues if video is unavailable.",
+    "notes.editor.video.status": "Meeting video analysis",
+    "notes.editor.video.analyzed": "Meeting video analyzed. These notes include visual context.",
+    "notes.editor.video.cli_unsupported":
+      "Video not analyzed: update Claude Code to version 2.1.295 or later, then retry.",
+    "notes.editor.video.engine_unsupported":
+      "Video not analyzed: the current Notes engine does not analyze video. Select Claude Code for Notes to include visual context.",
+    "notes.editor.video.skill_missing":
+      "Video not analyzed: install the video-analysis skill, then retry.",
+    "notes.editor.video.tools_missing":
+      "Video not analyzed: install python3, ffmpeg and ffprobe, then retry.",
+    "notes.editor.video.permission_denied":
+      "Video not analyzed: allow Screen Recording for Clovy Video Capture in System Settings before the next recording. Audio was preserved.",
+    "notes.editor.video.capture_failed":
+      "Video not analyzed: the meeting window could not be recorded. These notes use the transcript.",
+    "notes.editor.video.analysis_failed":
+      "Video not analyzed: analysis failed. These notes use the transcript. You can retry.",
+    "notes.editor.video.analysis_timeout":
+      "Video not analyzed: analysis timed out. These notes use the transcript. You can retry.",
+    "notes.editor.video.video_missing":
+      "Video not analyzed: the saved video is unavailable. These notes use the transcript.",
+
     "notes.editor.tabs.notes": "Notes",
     "notes.editor.tabs.transcription": "Transcription",
     "notes.editor.titlePlaceholder": "New note",
@@ -345,6 +370,32 @@ export default defineMessages({
     "notes.projects.relative.days": "{count}d ago",
   },
   "pt-BR": {
+    "notes.editor.video.record": "Gravar vídeo da reunião",
+    "notes.editor.video.window": "{app}: {title}",
+    "notes.editor.video.permission":
+      "Clovy Video Capture pede permissão de Gravação de tela. O áudio continua se o vídeo não estiver disponível.",
+    "notes.editor.video.status": "Análise do vídeo da reunião",
+    "notes.editor.video.analyzed":
+      "Vídeo da reunião analisado. Estas notas incluem o contexto visual.",
+    "notes.editor.video.cli_unsupported":
+      "Vídeo não analisado: atualize o Claude Code para a versão 2.1.295 ou posterior e tente novamente.",
+    "notes.editor.video.engine_unsupported":
+      "Vídeo não analisado: o motor de Notas atual não analisa vídeo. Selecione Claude Code para Notas para incluir o contexto visual.",
+    "notes.editor.video.skill_missing":
+      "Vídeo não analisado: instale a skill video-analysis e tente novamente.",
+    "notes.editor.video.tools_missing":
+      "Vídeo não analisado: instale python3, ffmpeg e ffprobe e tente novamente.",
+    "notes.editor.video.permission_denied":
+      "Vídeo não analisado: permita a Gravação de tela para Clovy Video Capture nos Ajustes do Sistema antes da próxima gravação. O áudio foi preservado.",
+    "notes.editor.video.capture_failed":
+      "Vídeo não analisado: não foi possível gravar a janela da reunião. Estas notas usam a transcrição.",
+    "notes.editor.video.analysis_failed":
+      "Vídeo não analisado: a análise falhou. Estas notas usam a transcrição. Você pode tentar novamente.",
+    "notes.editor.video.analysis_timeout":
+      "Vídeo não analisado: a análise excedeu o tempo limite. Estas notas usam a transcrição. Você pode tentar novamente.",
+    "notes.editor.video.video_missing":
+      "Vídeo não analisado: o vídeo salvo não está disponível. Estas notas usam a transcrição.",
+
     "notes.editor.tabs.notes": "Notas",
     "notes.editor.tabs.transcription": "Transcrição",
     "notes.editor.titlePlaceholder": "Nova nota",

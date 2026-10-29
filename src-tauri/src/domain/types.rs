@@ -130,6 +130,8 @@ pub struct NoteDto {
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_event: Option<NoteCalendarEventDto>,
+    #[serde(default)]
+    pub video_analysis: Option<String>,
     pub generated_content: Option<String>,
     pub edited_content: Option<String>,
     pub transcript: Option<TranscriptDto>,
@@ -435,6 +437,8 @@ pub struct StartRecordingRequest {
     pub note_id: String,
     #[serde(default)]
     pub source_mode: Option<RecordingSourceMode>,
+    #[serde(default)]
+    pub video: Option<RecordingVideoRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,6 +447,23 @@ pub struct StartMeetingRecordingRequest {
     pub request_id: String,
     #[serde(default)]
     pub source_mode: Option<RecordingSourceMode>,
+    #[serde(default)]
+    pub video: Option<RecordingVideoRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingVideoRequest {
+    pub window_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingWindowDto {
+    pub window_id: u32,
+    pub app_name: String,
+    pub bundle_id: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

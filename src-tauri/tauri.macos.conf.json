@@ -7,6 +7,7 @@
   "bundle": {
     "targets": ["app", "dmg"],
     "resources": {
+      "../.tauri-helper/Clovy Video Capture.app": "native/bin/Clovy Video Capture.app",
       "../.tauri-helper/Clovy Audio Capture.app": "native/bin/Clovy Audio Capture.app",
       "../.tauri-helper/Clovy Dictation Helper.app": "native/bin/Clovy Dictation Helper.app",
       "../.tauri-helper/clovy-nm-shim": "native/bin/clovy-nm-shim",

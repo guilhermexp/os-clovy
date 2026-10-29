@@ -72,6 +72,10 @@ recording, the HUD receives `meeting-detection-event` with the app labels
 ownership only: no window titles or URLs, so Google Meet reads as "Chrome
 holds the microphone".
 
+The optional meeting-video offer separately enumerates visible windows and
+uses their app and title to identify a capture candidate. It does not change
+the microphone-ownership trigger or the meeting-end detector.
+
 - **macOS:** CoreAudio process objects with `IsRunningInput` and an input
   device; apps are matched by bundle-id prefix.
 - **Windows:** WASAPI capture sessions in `AudioSessionStateActive` on every
@@ -86,6 +90,115 @@ holds the microphone".
   never adds unlisted apps, so it cannot make meeting-end evidence ambiguous.
   The parser (`meeting_detection/windows_probe.rs`) is pure and tested on any
   host; only the reader is Windows-only.
+
+## Meeting video (macOS)
+
+The recording options and meeting-detected prompt offer an optional
+"Record meeting video" switch when `detect_meeting_window` finds a meeting
+window. It is off by default and identifies the app and window title. The
+helper checks that exact window after audio starts. A Meet tab behind another
+browser tab may not be detected because its title is not the window title.
+Native Zoom and Teams candidates need meeting/webinar title indicators;
+settings, chat, calendar and other known nonmeeting windows are excluded.
+Utility exclusions match whole titles after removing known app labels, so
+explicit meeting subjects may contain words such as calendar or chat.
+Generic meeting titles also require microphone ownership by the app family.
+Ambiguous custom titles are not selected. The displayed app and title identify
+the target before opt-in; the selector never silently switches the chosen ID.
+The HUD's native queue retains that exact choice, including video off, across
+renderer retries. A renderer cannot replace it with another window.
+Enumeration runs in the desktop process. If its Screen Recording permission
+does not allow enumeration, detection returns no candidate and the switch
+is hidden. The host grant is separate from the capture helper's grant.
+
+The audio capture starts first. A separate signed `Clovy Video Capture.app`
+uses ScreenCaptureKit's `desktopIndependentWindow` filter for that one
+window. It writes silent H.264 MP4, at most 5 frames per second, with a long
+side no larger than 1920 pixels and ten-second fragments. It has its own
+Screen Recording permission; denial or helper failure leaves audio running.
+The segmented AVAssetWriter output supplies an initialization segment and
+media fragments, which a serialized delegate appends and synchronizes into
+one MP4. Recovery checks declared sample extents against the available media
+payload and retains earlier complete fragments when the tail is invalid.
+Signals follow the audio helper convention: pause, resume and finish. Paused
+frames are dropped and removed from video time. The artifact records the
+video's start offset relative to recorded audio time.
+Pause and resume first publish fixed-size, sequenced host-clock records to
+an owner-only nonblocking FIFO, then change the audio state. Creating the
+FIFO occurs after audio starts; queued controls survive a pending helper
+launch. The helper drains it immediately before appending a frame. Signals
+are wakeups and finalization requests, while the JSON ledger is diagnostic.
+The audio control path never waits for a disk write, worker or acknowledgement.
+A full or broken channel fails only the video and discards its unsafe files.
+A clean FIFO end after the original host process terminates instead finishes
+the recoverable video. The helper checks the parent's kernel birth identity,
+applies complete queued controls and accepts no further frames. A live or
+unknown parent, malformed controls or a truncated record still fails capture.
+Shutdown arms an independent four-second deadline before status writes or
+awaiting ScreenCaptureKit. A known failure is published before that await;
+a stalled shutdown terminates immediately without cleanup I/O, preserving
+already synchronized fragments and metadata for recovery.
+Pause clears the cached frame, and resume rejects samples captured before
+its boundary, including samples delivered late by ScreenCaptureKit.
+Resume requests a fresh image of the same window so static content can
+continue; a stale completion cannot cross a newer pause or replace a newer
+stream frame.
+The first-frame deadline excludes paused time. A frame timer keeps
+static slides advancing through MP4 fragments without exceeding the frame cap.
+The timer rearms at the next eligible deadline after each write. Early wakeups
+wait for that deadline rather than dropping a whole interval; writer pressure
+waits before retrying, and no catch-up burst can exceed the cap.
+After a delayed control event, frames whose adjusted presentation time would
+overlap the last successful write are deferred until the video timeline is
+again at least 200 ms ahead. The original pause boundaries remain unchanged.
+
+`video_artifacts` is separate from the WAV-oriented `audio_artifacts` table.
+It tracks the session, paths, state, app, window title, offset, dimensions,
+duration and failure reason. Session files are `window.partial.mp4` while
+capturing and `window.mp4` after finalization. Note and recording deletion
+include both paths. Recovery retains completed MP4 fragments; a fragment
+that was not committed before a crash cannot be recovered. Video failures
+do not discard the audio artifacts.
+Deletion also covers projects deleted with their notes and helper metadata.
+It revokes a per-run lease before removing files, so a delayed helper launch
+cannot recreate them. A separate ownership monitor and the final database
+update handle deletion while capture or finalization is already running.
+Interrupted `recording` artifacts may recover complete fragments; explicitly
+failed captures retain their failure notice and use transcript-only generation.
+Errors while loading optional video are logged and produce the capture_failed
+analysis notice while transcript generation continues.
+Recovery and analysis require a contained artifact in the current profile's
+exact session directory. Paths from another profile in a copied database are
+rejected before reading or modifying the video.
+An unfinished artifact is repaired only after terminal helper status or a
+process identity check confirms that its helper is gone. The PID is paired
+with process birth time and executable identity, so PID reuse by another
+process cannot block recovery indefinitely. A live helper, unknown process
+identity or pending launch is left untouched;
+generation falls back instead of truncating a file that may still be written.
+The helper durably checkpoints the audio offset before its first appended
+frame. Recovery restores that timing before repairing a recording; missing
+or invalid timing fails video analysis instead of silently using zero.
+The host records the capture attempt and its own process birth identity before
+creating the startup lease or launching the helper. Recovery cancels a pending
+lease only after confirming that the original host is gone, revokes the lease
+first, then rechecks helper registration. Live or unknown processes remain
+protected, and a delayed launch cannot use the revoked lease. Checkpoints,
+process identity and terminal status must match that attempt; stale metadata
+cannot authorize repair of a newer live capture. After recovery renames a
+file, its database update checks ownership again and removes the owned files
+if note deletion won the race.
+Worker liveness checks also run during paused startup. Signals require a
+verified process identity and use kernel calls without spawning subprocesses.
+
+Note generation passes a local video input only to the Claude Notes engine
+when the user's `video-analysis` skill, Python and FFmpeg prerequisites exist.
+The skill extracts evidence without transcribing; Claude combines those
+frames with the existing transcript and cites timestamps. Other engines or
+failed analysis generate from the transcript and persist a localized
+"Video not analyzed: <reason>" notice. See the tool restrictions in
+[llm-providers.md](llm-providers.md#meeting-video-exception) and
+[ADR-0071](adr/0071-meeting-window-video-and-scoped-claude-analysis.md).
 
 ## Automatic meeting completion
 

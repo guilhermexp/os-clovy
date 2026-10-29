@@ -25,6 +25,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "../../native/video_client.rs"]
+pub mod video;
+
 pub const DEFAULT_SILENCE_THRESHOLD: f32 = 0.012;
 // Healthy devices open quickly; this bounds CPAL/CoreAudio hangs during device handoff.
 pub const CAPTURE_START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -128,6 +131,7 @@ struct ActiveRecording {
     source_mode: RecordingSourceMode,
     system_final_path: Option<PathBuf>,
     system_capture: Option<SystemAudioCapture>,
+    video_capture: Option<video::VideoCapture>,
     started: Instant,
     active_since: Option<Instant>,
     accumulated_active: Duration,
@@ -638,6 +642,7 @@ pub fn start_capture_with_cancel(
         source_mode,
         system_final_path: system_final_path.clone(),
         system_capture,
+        video_capture: None,
         started,
         active_since: Some(started),
         accumulated_active: Duration::ZERO,
@@ -723,6 +728,49 @@ pub fn set_mic_ducked(ducked: bool) {
     }
 }
 
+/// Attach only after audio and its durable rows are ready. The worker never delays microphone startup.
+pub fn attach_video(
+    session_id: &str,
+    repos: crate::db::repositories::Repositories,
+    partial: PathBuf,
+    final_path: PathBuf,
+    window_id: u32,
+    runtime: tokio::runtime::Handle,
+) -> Result<(), AppError> {
+    let mut active = lock_active()?;
+    let recording = active_for_session(active.as_mut(), session_id)?;
+    let capture = video::VideoCapture::start(
+        repos,
+        session_id.to_string(),
+        partial,
+        final_path,
+        window_id,
+        recording.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        runtime,
+    );
+    if recording.paused {
+        capture.pause();
+    }
+    recording.video_capture = Some(capture);
+    Ok(())
+}
+
+// ACTIVE_RECORDING serializes transitions, so the fixed control records retain call order.
+fn publish_video_before_audio(
+    video: Option<&video::VideoCapture>,
+    paused: bool,
+    transition: impl FnOnce(),
+) {
+    if let Some(video) = video {
+        if paused {
+            video.pause();
+        } else {
+            video.resume();
+        }
+    }
+    transition();
+}
+
 pub fn pause_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
     let mut active = lock_active()?;
     let recording = active_for_session(active.as_mut(), session_id)?;
@@ -731,10 +779,12 @@ pub fn pause_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppErr
             recording.accumulated_active += active_since.elapsed();
         }
         recording.paused = true;
-        recording.paused_flag.store(true, Ordering::Release);
-        if let Some(system) = recording.system_capture.as_mut() {
-            system.pause();
-        }
+        publish_video_before_audio(recording.video_capture.as_ref(), true, || {
+            recording.paused_flag.store(true, Ordering::Release);
+            if let Some(system) = recording.system_capture.as_mut() {
+                system.pause();
+            }
+        });
     }
     Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
 }
@@ -745,10 +795,12 @@ pub fn resume_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppEr
     if recording.paused {
         recording.active_since = Some(Instant::now());
         recording.paused = false;
-        recording.paused_flag.store(false, Ordering::Release);
-        if let Some(system) = recording.system_capture.as_mut() {
-            system.resume();
-        }
+        publish_video_before_audio(recording.video_capture.as_ref(), false, || {
+            recording.paused_flag.store(false, Ordering::Release);
+            if let Some(system) = recording.system_capture.as_mut() {
+                system.resume();
+            }
+        });
     }
     Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
 }
@@ -852,6 +904,7 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         final_path,
         source_mode,
         system_capture,
+        video_capture,
         system_final_path,
         stream_error,
         last_callback_at,
@@ -864,6 +917,9 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         ..
     } = recording;
     paused_flag.store(true, Ordering::Release);
+    if let Some(video) = video_capture {
+        video.stop();
+    }
     drop(_stream);
     let dropped_samples = writer.stats().dropped_samples;
     let microphone_finalized = (|| -> Result<_, AppError> {
@@ -1375,6 +1431,53 @@ mod tests {
 
         assert_eq!(state, "unknown");
         assert!(hint.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn video_control_is_visible_before_audio_pause_without_worker_progress() {
+        use std::{io::Read, os::unix::fs::OpenOptionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join("window.partial.mp4");
+        let video = video::VideoCapture::test_control_pipe(&partial);
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(partial.with_extension("control.pipe"))
+            .unwrap();
+        let audio_paused = AtomicBool::new(false);
+        publish_video_before_audio(Some(&video), true, || {
+            assert!(!audio_paused.load(Ordering::Acquire));
+            let mut event = [0_u8; 24];
+            reader.read_exact(&mut event).unwrap();
+            assert_eq!(u64::from_le_bytes(event[16..24].try_into().unwrap()), 1);
+            audio_paused.store(true, Ordering::Release);
+        });
+        assert!(audio_paused.load(Ordering::Acquire));
+        publish_video_before_audio(Some(&video), false, || {
+            let mut event = [0_u8; 24];
+            reader.read_exact(&mut event).unwrap();
+            assert_eq!(u64::from_le_bytes(event[16..24].try_into().unwrap()), 0);
+            assert!(audio_paused.load(Ordering::Acquire));
+            audio_paused.store(false, Ordering::Release);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn video_control_failure_never_prevents_audio_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let video =
+            video::VideoCapture::test_control_pipe(&dir.path().join("absent/session.partial.mp4"));
+        let audio_paused = AtomicBool::new(false);
+        publish_video_before_audio(Some(&video), true, || {
+            audio_paused.store(true, Ordering::Release)
+        });
+        assert!(audio_paused.load(Ordering::Acquire));
+        publish_video_before_audio(Some(&video), false, || {
+            audio_paused.store(false, Ordering::Release)
+        });
+        assert!(!audio_paused.load(Ordering::Acquire));
     }
 
     fn test_writer(dir: &tempfile::TempDir) -> (CaptureInput, MicrophoneWriter) {

@@ -1354,6 +1354,27 @@ const MIGRATIONS: &[Migration] = &[
             "../../migrations/035_note_transcription_chunks.sql"
         ))],
     },
+    Migration {
+        version: 52,
+        name: "meeting_video",
+        requirements: &[
+            SchemaRequirement::Table("video_artifacts"),
+            SchemaRequirement::Column {
+                table: "generation_results",
+                column: "video_analysis",
+            },
+        ],
+        steps: &[
+            MigrationStep::Sql(include_str!("../../migrations/036_meeting_video.sql")),
+            MigrationStep::EnsureColumns {
+                table: "generation_results",
+                columns: &[ColumnDefinition {
+                    name: "video_analysis",
+                    definition: "TEXT",
+                }],
+            },
+        ],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2299,6 +2320,7 @@ mod tests {
                 (49, "linear_managed_mcp_repair".to_string()),
                 (50, "agent_artifact_display_names".to_string()),
                 (51, "note_transcription_chunks".to_string()),
+                (52, "meeting_video".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
@@ -2620,6 +2642,7 @@ mod tests {
                 (49, "linear_managed_mcp_repair".to_string()),
                 (50, "agent_artifact_display_names".to_string()),
                 (51, "note_transcription_chunks".to_string()),
+                (52, "meeting_video".to_string()),
             ]
         );
 

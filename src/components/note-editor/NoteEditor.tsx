@@ -21,12 +21,15 @@ import type {
   LiveTranscriptEventDto,
   NoteCalendarEventDto,
   NoteDto,
+  MeetingVideoRequest,
+  MeetingWindowDto,
   RecordingSourceMode,
   RecordingSourceReadinessDto,
   RecordingStatusDto,
   RecoverableRecordingDto,
   TranscriptDto,
 } from "../../lib/tauri";
+import { detectMeetingWindow } from "../../lib/tauri";
 import { DotSpinner } from "../DotSpinner";
 import { InlineNotice } from "../ui/InlineNotice";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
@@ -77,7 +80,7 @@ type NoteEditorProps = {
    * the dev console driver (window.__recordNoticesDemo) can park it for styling
    * review. Undefined in production, so the recorder timers run untouched. */
   consentReminderPinned?: boolean;
-  onStartRecording: () => void;
+  onStartRecording: (video?: MeetingVideoRequest) => void;
   onPauseRecording: (sessionId: string) => void;
   onResumeRecording: (sessionId: string) => void;
   onFinishRecording: (sessionId: string) => void;
@@ -313,12 +316,49 @@ export function NoteEditor({
   const recordingForNote = recordingStatus;
   const recordingActive = Boolean(recordingForNote);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [meetingWindow, setMeetingWindow] = useState<MeetingWindowDto | null>(null);
+  const [recordVideo, setRecordVideo] = useState(false);
+  const videoLabelId = useId();
+  const videoWindowId = useId();
+  useEffect(() => {
+    setRecordVideo(false);
+    setMeetingWindow(null);
+    if (!optionsOpen || !isMacLikePlatform()) return;
+    let current = true;
+    void detectMeetingWindow()
+      .then((window) => {
+        if (!current) return;
+        setMeetingWindow(window);
+        setRecordVideo(false);
+      })
+      .catch(() => {
+        if (!current) return;
+        setMeetingWindow(null);
+        setRecordVideo(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [optionsOpen]);
+  const startWithSelectedVideo = () => {
+    if (!optionsOpen || !recordVideo || !meetingWindow) {
+      onStartRecording(undefined);
+      return;
+    }
+    // The helper revalidates this exact window after audio starts. Another
+    // detection here would delay audio without changing the selected target.
+    onStartRecording({ windowId: meetingWindow.windowId });
+    setRecordVideo(false);
+  };
   const [consentReminderVisible, setConsentReminderVisible] = useState(false);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   // The source filter is ephemeral view state — reset it when navigating
   // to a different note so it never leaks across transcripts.
   useEffect(() => {
     setSourceFilter("all");
+    setRecordVideo(false);
+    setMeetingWindow(null);
+    setOptionsOpen(false);
   }, [note.id]);
 
   // The filter only earns its place when both sources are present — a
@@ -522,6 +562,14 @@ export function NoteEditor({
       </header>
 
       <section className="editor-content">
+        {note.videoAnalysis ? (
+          <InlineNotice
+            role="status"
+            aria-label={t("notes.editor.video.status")}
+            tone={note.videoAnalysis === "analyzed" ? "info" : "warning"}
+            body={t(`notes.editor.video.${note.videoAnalysis}`)}
+          />
+        ) : null}
         {recovery ? (
           <NoteRecoveryPrompt
             recovery={recovery}
@@ -765,6 +813,36 @@ export function NoteEditor({
                   aria-hidden={!optionsOpen}
                 >
                   <div className="record-options-panel-inner">
+                    {meetingWindow ? (
+                      <div className="record-options-row">
+                        <Switch
+                          checked={recordVideo}
+                          disabled={!optionsOpen}
+                          aria-labelledby={videoLabelId}
+                          aria-describedby={videoWindowId}
+                          onCheckedChange={setRecordVideo}
+                        />
+                        <span className="record-options-label" style={{ whiteSpace: "normal" }}>
+                          <span id={videoLabelId}>{t("notes.editor.video.record")}</span>
+                          <span
+                            id={videoWindowId}
+                            className="record-options-hint"
+                            style={{ display: "block", maxWidth: "28ch" }}
+                          >
+                            {t("notes.editor.video.window", {
+                              app: meetingWindow.appName,
+                              title: meetingWindow.title,
+                            })}
+                          </span>
+                          <span
+                            className="record-options-hint"
+                            style={{ display: "block", maxWidth: "28ch" }}
+                          >
+                            {t("notes.editor.video.permission")}
+                          </span>
+                        </span>
+                      </div>
+                    ) : null}
                     {systemUnsupported ? (
                       <p className="record-options-unsupported">
                         {t("notes.editor.systemAudioRequires")}
@@ -865,7 +943,7 @@ export function NoteEditor({
                               : t("notes.editor.record")
                           }
                           disabled={recordButtonDisabled}
-                          onClick={onStartRecording}
+                          onClick={startWithSelectedVideo}
                         >
                           <IconMicrophone size={20} />
                         </button>
@@ -876,7 +954,13 @@ export function NoteEditor({
                             aria-label={t("notes.editor.recordingOptions")}
                             aria-expanded={optionsOpen}
                             data-rotated={optionsOpen}
-                            onClick={() => setOptionsOpen((value) => !value)}
+                            onClick={() => {
+                              if (optionsOpen) {
+                                setRecordVideo(false);
+                                setMeetingWindow(null);
+                              }
+                              setOptionsOpen((value) => !value);
+                            }}
                           >
                             <IconChevronBottom size={16} />
                           </button>

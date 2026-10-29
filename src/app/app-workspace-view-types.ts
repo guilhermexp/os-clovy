@@ -6,6 +6,7 @@ import type { TabNav } from "./tabs/tabs";
 import type {
   FolderDto,
   LiveTranscriptEventDto,
+  MeetingVideoRequest,
   NoteDto,
   NoteEditablePatch,
   RecoverableRecordingDto,
@@ -88,7 +89,7 @@ export type RenderAppWorkspaceDependencies = {
   ) => Promise<void>;
   handleSourceModeChange: (next: RecordingSourceMode) => void;
   handleStartBundleChat: (prompt: string) => void;
-  handleStartRecording: () => Promise<void>;
+  handleStartRecording: (video?: MeetingVideoRequest) => Promise<void>;
   handleStopNowAfterMeetingEnd: (sessionId: string) => void;
   handleToggleSessionCompleted: (sessionId: string, completed: boolean) => Promise<void>;
   handleUpdateNote: (noteId: string, patch: NoteEditablePatch) => void;
