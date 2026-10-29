@@ -2638,7 +2638,13 @@ pub(crate) fn groq_direct_pacer(fingerprint: &str) -> Arc<RequestPacer> {
 
 /// The saved Groq key and its account's pacer, resolved once per request.
 fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
-    let backend = crate::providers::transcription::current_backend()?;
+    note_route_for_backend(model, crate::providers::transcription::current_backend()?)
+}
+
+fn note_route_for_backend(
+    model: String,
+    backend: TranscriptionBackend,
+) -> Result<TranscriptionRoute, AppError> {
     match backend {
         TranscriptionBackend::Groq { .. }
             if model == crate::providers::transcription::LOCAL_MODEL =>
@@ -2651,6 +2657,15 @@ fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
             ))
         }
         TranscriptionBackend::Groq { key, .. } => note_route_from(Ok(Some(key)), model),
+        TranscriptionBackend::Local { .. }
+            if model != crate::providers::transcription::LOCAL_MODEL =>
+        {
+            // Keep the admitted model/fingerprint consistent across every request.
+            Err(AppError::new(
+                "local_transcriber_failed",
+                crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE,
+            ))
+        }
         backend @ TranscriptionBackend::Local { .. } => Ok(TranscriptionRoute {
             backend,
             model: crate::providers::transcription::LOCAL_MODEL.into(),
@@ -2876,10 +2891,18 @@ fn note_timed_call() -> RoutedCall<TimedTranscription> {
 /// now (`audio/live_preview.rs`): it shares the pacer of that route, and the
 /// chunk is sent with this same route.
 pub(crate) fn live_preview_route(duration_ms: i64) -> Option<TranscriptionRoute> {
-    live_preview_route_from(
-        note_route(crate::providers::transcription_model()),
-        duration_ms,
-    )
+    // A preview chunk has no persisted run fingerprint. Capture its model and
+    // backend together, so a concurrent settings change cannot mix selections.
+    let route = crate::providers::transcription::current_backend().and_then(|backend| {
+        let model = match &backend {
+            TranscriptionBackend::Groq { model, .. } => model.clone(),
+            TranscriptionBackend::Local { .. } => {
+                crate::providers::transcription::LOCAL_MODEL.into()
+            }
+        };
+        note_route_for_backend(model, backend)
+    });
+    live_preview_route_from(route, duration_ms)
 }
 
 fn live_preview_route_from(
@@ -11442,6 +11465,17 @@ mod tests {
             model: "parakeet-ultra".into(),
             pacer: None,
         }
+    }
+
+    #[tokio::test]
+    async fn parakeet_review_groq_run_cannot_change_its_admitted_model_to_local() {
+        crate::providers::transcription::TEST_BACKEND.scope(
+            TranscriptionBackend::Local { model_dir: "/fixture/model".into() },
+            async {
+                assert!(note_route("whisper-large-v3".into()).is_err(),
+                    "a saved Whisper run must not acquire Parakeet output under its old fingerprint");
+            },
+        ).await;
     }
 
     #[tokio::test]

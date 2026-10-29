@@ -4,7 +4,7 @@ use crate::domain::{
     processing::{build_transcription_dictionary, TranscriptionDictionary},
     types::{AppError, ListDictationHistoryResponse},
 };
-use crate::providers::{configured_transcription_provider, PROVIDER_GROQ};
+use crate::providers::PROVIDER_GROQ;
 use crate::providers::{
     groq::{dictate_transcribe_with, DictateTranscribeRequest, TranscriptionProviderResult},
     openrouter::{dictate_cleanup, DictateCleanupRequestParams, DEFAULT_DICTATION_CLEANUP_MODEL},
@@ -182,6 +182,7 @@ struct DictationTakeToken {
 
 struct DictationTakeTokenInner {
     id: String,
+    transcription_settings: crate::providers::ProviderModelSettings,
     state: AtomicU8,
     cancellation: tokio::sync::watch::Sender<bool>,
 }
@@ -192,6 +193,8 @@ impl DictationTakeToken {
         Self {
             inner: Arc::new(DictationTakeTokenInner {
                 id,
+                // Snapshot at capture start; credentials are resolved only at transcription.
+                transcription_settings: crate::providers::effective_current_settings(),
                 state: AtomicU8::new(DICTATION_TAKE_CAPTURING),
                 cancellation,
             }),
@@ -5508,8 +5511,20 @@ async fn transcribe_recording_ready_inner(
             "dictation capture had low speech evidence; automatic paste will be suppressed"
         );
     }
-    let provider = match dictation_transcription_provider(configured_transcription_provider()) {
-        Ok(provider) => provider,
+    let selection = &take.inner.transcription_settings;
+    let (provider, transcriber) = match dictation_transcription_provider(
+        selection.transcription_provider.clone(),
+    )
+    .and_then(|provider| {
+        crate::providers::transcription::effective_transcription_backend(
+            selection,
+            crate::providers::transcription::ready_directory(),
+            crate::providers::local_transcription_supported(),
+            || crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
+        )
+        .map(|backend| (provider, ServiceDictationTranscriber { backend }))
+    }) {
+        Ok(selected) => selected,
         Err(error) => {
             remove_windows_dictation_audio(&recording.audio_path);
             if send_dictation_take_command(
@@ -5557,7 +5572,7 @@ async fn transcribe_recording_ready_inner(
     let pipeline = run_dictation_take_step(
         take,
         run_dictation_pipeline(
-            &ServiceDictationTranscriber,
+            &transcriber,
             &ServiceDictationCleaner,
             DictateTranscribeRequest {
                 audio_path: transcription_audio.clone(),
@@ -5915,20 +5930,22 @@ trait DictationCleaner {
 }
 
 /// The production transcriber.
-struct ServiceDictationTranscriber;
+struct ServiceDictationTranscriber {
+    backend: crate::providers::transcription::TranscriptionBackend,
+}
 
 impl DictationTranscriber for ServiceDictationTranscriber {
     async fn transcribe(
         &self,
         request: DictateTranscribeRequest,
     ) -> Result<TranscriptionProviderResult, AppError> {
-        match crate::providers::transcription::current_backend()? {
+        match &self.backend {
             crate::providers::transcription::TranscriptionBackend::Groq { key, model } => {
-                dictate_transcribe_with(Some(&key), model, request).await
+                dictate_transcribe_with(Some(key), model.clone(), request).await
             }
             crate::providers::transcription::TranscriptionBackend::Local { model_dir } => {
                 crate::providers::local_transcriber::transcribe(
-                    &model_dir,
+                    model_dir,
                     &request.audio_path,
                     request.language.as_deref(),
                 )
@@ -12570,6 +12587,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parakeet_review_dictation_keeps_its_backend_across_an_await() {
+        use crate::providers::{
+            local_transcriber::{FakeLocalTranscriber, TEST_LOCAL},
+            transcription::{TranscriptionBackend, TEST_BACKEND},
+        };
+        let fake = Arc::new(FakeLocalTranscriber::default());
+        TEST_BACKEND
+            .scope(
+                TranscriptionBackend::Local {
+                    model_dir: "/fixture/model".into(),
+                },
+                async {
+                    let transcriber = ServiceDictationTranscriber {
+                        backend: crate::providers::transcription::current_backend().unwrap(),
+                    };
+                    tokio::task::yield_now().await;
+                    TEST_BACKEND
+                        .scope(
+                            TranscriptionBackend::Groq {
+                                key: "fixture-key".into(),
+                                model: "whisper-large-v3".into(),
+                            },
+                            TEST_LOCAL.scope(fake.clone(), async {
+                                let result = transcriber
+                                    .transcribe(DictateTranscribeRequest {
+                                        audio_path: "/fixture/take.m4a".into(),
+                                        language: Some("pt".into()),
+                                        context: None,
+                                        session_id: "session".into(),
+                                        utterance_id: "take".into(),
+                                    })
+                                    .await;
+                                assert!(
+                                    result.is_ok(),
+                                    "the admitted Local backend must be retained: {result:?}"
+                                );
+                                assert_eq!(fake.calls.lock().unwrap().len(), 1);
+                            }),
+                        )
+                        .await;
+                },
+            )
+            .await;
+    }
+
+    #[tokio::test]
     async fn local_dictation_passes_m4a_and_language_without_groq_requests() {
         use crate::providers::{
             local_transcriber::{FakeLocalTranscriber, NetworkSentinel, TEST_LOCAL},
@@ -12590,15 +12653,18 @@ mod tests {
                             model_dir: "/fixture/model".into(),
                         },
                         TEST_LOCAL.scope(fake.clone(), async {
-                            let result = ServiceDictationTranscriber
-                                .transcribe(DictateTranscribeRequest {
-                                    audio_path: "/fixture/take.m4a".into(),
-                                    language: Some("pt".into()),
-                                    context: None,
-                                    session_id: "session".into(),
-                                    utterance_id: "utterance".into(),
-                                })
-                                .await;
+                            let result = ServiceDictationTranscriber {
+                                backend: crate::providers::transcription::current_backend()
+                                    .unwrap(),
+                            }
+                            .transcribe(DictateTranscribeRequest {
+                                audio_path: "/fixture/take.m4a".into(),
+                                language: Some("pt".into()),
+                                context: None,
+                                session_id: "session".into(),
+                                utterance_id: "utterance".into(),
+                            })
+                            .await;
                             if fail {
                                 assert_eq!(result.unwrap_err().code, "local_transcriber_failed");
                             } else {

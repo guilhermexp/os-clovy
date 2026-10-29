@@ -1393,7 +1393,7 @@ fn current_settings() -> ProviderModelSettings {
         .unwrap_or_else(|_| default_settings())
 }
 
-fn effective_current_settings() -> ProviderModelSettings {
+pub(crate) fn effective_current_settings() -> ProviderModelSettings {
     let settings = current_settings();
     effective_settings_for_profile(&settings, "default")
 }

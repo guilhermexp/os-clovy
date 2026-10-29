@@ -76,7 +76,11 @@ impl TranscriptionModel {
         }
     }
     /// Startup registers immediately; disk verification runs away from the window thread.
-    pub async fn refresh_from_disk(&self, progress: impl Fn(ModelState) + Send + Sync) {
+    pub async fn refresh_from_disk(
+        &self,
+        progress: impl Fn(ModelState) + Send + Sync,
+        on_ready: impl FnOnce() + Send,
+    ) {
         let _operation = self.operation.lock().await;
         if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             return;
@@ -99,6 +103,9 @@ impl TranscriptionModel {
             },
             &progress,
         );
+        if ready {
+            on_ready();
+        }
     }
     pub fn directory(&self) -> &std::path::Path {
         &self.dir
@@ -247,6 +254,7 @@ impl TranscriptionModel {
                 .await
                 .map_err(|e| e.to_string())?;
             let mut received = offset;
+            let mut last_progress = None;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| format!("network: {}", file.path))?;
@@ -258,13 +266,23 @@ impl TranscriptionModel {
                 // Make progress a durable watermark: cancel/restart resumes these bytes.
                 output.flush().await.map_err(|e| e.to_string())?;
                 hash.update(&chunk);
-                self.publish(
-                    ModelState::Downloading {
-                        received: completed + received,
-                        total: self.manifest.total_bytes,
-                    },
-                    progress,
-                );
+                // Bound IPC/render work independently of the server's chunk size.
+                // Always publish the first durable bytes and the completed file.
+                let now = std::time::Instant::now();
+                if received == file.bytes
+                    || last_progress.is_none_or(|last| {
+                        now.duration_since(last) >= std::time::Duration::from_millis(100)
+                    })
+                {
+                    self.publish(
+                        ModelState::Downloading {
+                            received: completed + received,
+                            total: self.manifest.total_bytes,
+                        },
+                        progress,
+                    );
+                    last_progress = Some(now);
+                }
                 if token.is_cancelled() {
                     return Ok(());
                 }
@@ -418,9 +436,12 @@ pub fn setup(app: &mut tauri::App) -> Result<(), tauri::Error> {
     let app = app.handle().clone();
     tauri::async_runtime::spawn(async move {
         model
-            .refresh_from_disk(|state| {
-                let _ = app.emit(MODEL_STATE_EVENT, state);
-            })
+            .refresh_from_disk(
+                |state| {
+                    let _ = app.emit(MODEL_STATE_EVENT, state);
+                },
+                crate::providers::local_transcriber::selection_changed,
+            )
             .await;
     });
     Ok(())

@@ -121,7 +121,7 @@ async fn install_verifies_bytes_and_reopens_ready_without_network() {
         }
     )));
     let reopened = TranscriptionModel::new(model.dir.clone(), manifest());
-    reopened.refresh_from_disk(|_| {}).await;
+    reopened.refresh_from_disk(|_| {}, || {}).await;
     assert_eq!(reopened.state(), ModelState::Ready { bytes: 17 });
     reopened.install(&server.url, |_| {}).await.unwrap();
     assert_eq!(server.seen.lock().unwrap().len(), 2);
@@ -150,10 +150,14 @@ async fn cancel_returns_absent_and_resume_uses_range() {
     let temp = tempfile::tempdir().unwrap();
     let server = server(false, true).await;
     let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+    let watermark = Mutex::new(0);
     model
         .install(&server.url, |s| {
-            if matches!(s, ModelState::Downloading { received: 3, .. }) {
-                model.cancel();
+            if let ModelState::Downloading { received, .. } = s {
+                if received >= 3 {
+                    *lock(&watermark) = received;
+                    model.cancel();
+                }
             }
         })
         .await
@@ -161,16 +165,13 @@ async fn cancel_returns_absent_and_resume_uses_range() {
     assert_eq!(model.state(), ModelState::Absent);
     assert!(!model.dir.join("installed.json").exists());
     let reopened = TranscriptionModel::new(model.dir.clone(), manifest());
-    reopened.refresh_from_disk(|_| {}).await;
+    reopened.refresh_from_disk(|_| {}, || {}).await;
     assert_eq!(reopened.state(), ModelState::Absent);
     reopened.install(&server.url, |_| {}).await.unwrap();
     assert_eq!(reopened.state(), ModelState::Ready { bytes: 17 });
-    assert!(server
-        .seen
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|s| s.to_ascii_lowercase().contains("range: bytes=3-")));
+    assert!(server.seen.lock().unwrap().iter().any(|s| s
+        .to_ascii_lowercase()
+        .contains(&format!("range: bytes={}-", *lock(&watermark)))));
 }
 #[tokio::test]
 async fn disk_without_marker_is_verified_and_size_changes_invalidate_marker() {
@@ -220,13 +221,13 @@ async fn startup_registration_does_not_hash_files_or_write_the_install_marker() 
     // A removal queued during startup must not revive readiness.
     let removing = model.begin_removal();
     model
-        .refresh_from_disk(|state| lock(&emitted).push(state))
+        .refresh_from_disk(|state| lock(&emitted).push(state), || {})
         .await;
     assert!(lock(&emitted).is_empty());
     assert!(!dir.join("installed.json").exists());
     drop(removing);
     model
-        .refresh_from_disk(|state| lock(&emitted).push(state))
+        .refresh_from_disk(|state| lock(&emitted).push(state), || {})
         .await;
     assert_eq!(model.state(), ModelState::Ready { bytes: 17 });
     assert_eq!(*lock(&emitted), vec![ModelState::Ready { bytes: 17 }]);
@@ -235,7 +236,7 @@ async fn startup_registration_does_not_hash_files_or_write_the_install_marker() 
 
 async fn reopened_state(dir: PathBuf) -> ModelState {
     let model = TranscriptionModel::new(dir, manifest());
-    model.refresh_from_disk(|_| {}).await;
+    model.refresh_from_disk(|_| {}, || {}).await;
     model.state()
 }
 
@@ -248,4 +249,54 @@ async fn parakeet_review_cancelled_resume_does_not_hash_the_prefix() {
     token.cancel();
     assert!(hash_resume_prefix(&part, &token).await.is_err());
     assert_eq!(std::fs::read(part).unwrap(), b"partial encoder");
+}
+
+#[tokio::test]
+async fn parakeet_review_startup_warms_only_after_ready_is_published() {
+    let temp = tempfile::tempdir().unwrap();
+    let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+    let warmed = Mutex::new(0);
+    model
+        .refresh_from_disk(|_| {}, || *lock(&warmed) += 1)
+        .await;
+    assert_eq!(*lock(&warmed), 0);
+    let server = server(false, false).await;
+    model.install(&server.url, |_| {}).await.unwrap();
+    let reopened = TranscriptionModel::new(model.dir.clone(), manifest());
+    reopened
+        .refresh_from_disk(
+            |_| {},
+            || {
+                assert_eq!(reopened.state(), ModelState::Ready { bytes: 17 });
+                *lock(&warmed) += 1;
+            },
+        )
+        .await;
+    assert_eq!(*lock(&warmed), 1);
+}
+
+#[tokio::test]
+async fn parakeet_review_download_progress_is_throttled_but_finishes_at_total() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = server(false, true).await;
+    let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+    let events = Mutex::new(Vec::new());
+    model
+        .install(&server.url, |state| lock(&events).push(state))
+        .await
+        .unwrap();
+    let events = lock(&events);
+    let downloading: Vec<_> = events
+        .iter()
+        .filter_map(|state| match state {
+            ModelState::Downloading { received, .. } => Some(*received),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        downloading.len() <= 10,
+        "one event per network byte: {downloading:?}"
+    );
+    assert_eq!(downloading.last(), Some(&17));
+    assert_eq!(events.last(), Some(&ModelState::Ready { bytes: 17 }));
 }

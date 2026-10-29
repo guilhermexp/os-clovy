@@ -21,6 +21,7 @@ if (
 }
 const source = path.join(root, "src-tauri/native/mac-local-transcriber");
 const pin = JSON.parse(readFileSync(path.join(source, "pin.json"), "utf8"));
+// Package.resolved is versioned with Package.swift; fail closed if the pinned lockfile is missing.
 const hash = createHash("sha256");
 for (const file of [
   "Package.swift",

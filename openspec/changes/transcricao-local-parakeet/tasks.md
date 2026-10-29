@@ -134,3 +134,20 @@ Rodada 4, correções verdes: `logs/review-4-fixes-green.log` exit 0, 2 regress�
 `logs/resumed-full-verify.log`: frontend 204 suítes/1.914 testes, typecheck, fmt/Clippy all-targets e quatro crates companion passaram. O alvo check encontrou somente `.mcp.json`/`opencode.json`, como autorizado. Rust teve uma falha no teste existente `a_short_groq_retry_after_is_waited_then_retried` (3 chamadas em vez de 2); a repetição isolada passou sem alteração (`logs/groq-retry-isolated.log`, exit 0). A suíte Rust completa é repetida em `logs/resumed-all-rust-tests.log` com `RUST_TEST_THREADS=2` para reduzir concorrência. Não foi alterado o retry Groq nem enfraquecida sua asserção.
 
 6.2 concluída com as exceções expressamente autorizadas pelo dono: `logs/resumed-all-rust-tests.log` exit 0, 2.180 testes passaram/21 ignorados em 28 suítes com dois workers, incluindo o retry Groq. Somado aos demais alvos verdes de `logs/resumed-full-verify.log`, todos os checks estão cobertos; não se declara exit 0 literal de `make verify`, pois `.mcp.json` e `opencode.json` permanecem intocados e fora de formato. A falha de retry anterior é registrada como intermitente sob concorrência; nenhum código ou asserção Groq foi alterado para fazê-la passar.
+
+
+### Revisão pareada, rodada 5
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/5/summary.md`, exit **4**. Ambos os CLIs concluíram; CodeRabbit marcou o WAV de teste como binário excluído, mas o comparador do harness exige todos os paths em `reviewedFiles`, causando `scope_mismatch`. Correção fora do checkout depende da autorização solicitada ao dono; gate não liberado. Stash/pop novamente preservou o hash exato (`review-5-wip-preservation.json`).
+
+- `Package.resolved` ausente: refutado. `logs/review-5-scope-and-lockfile-evidence.log` exit 0 mostra o mesmo blob `f0ab8609d98ca9ff09eaf99093d653557dc0aa3a` no commit inicial `59223a7` e no snapshot revisado `7b9087e`. O próprio revisor lista esse arquivo em `reviewedFiles`.
+- Ditado relê seleção depois de await; nota Groq admite Local com fingerprint antigo; progresso emite por chunk; startup assíncrono perde aquecimento: confirmados, correções em andamento com regressões em `logs/review-5-regressions-red.log`.
+
+
+Rodada 5, regressões reproduzidas: `logs/review-5-regressions-red.log` exit 101, quatro falhas reais. Correções em `logs/review-5-fixes-green.log` exit 0: seis regressões focadas e nove testes do instalador passaram. Ditado captura provider/modelo no token ao iniciar a tomada, resolve credenciais somente ao transcrever e mantém o backend através dos awaits; Local nunca consulta credenciais Groq. Notas recusam também a troca Groq→Local no meio do run. Progresso de download emite no primeiro chunk, no máximo a cada 100 ms e no fim de cada arquivo; cancelamento preserva a retomada no watermark observado. Ready após verificação no worker chama novamente o aquecimento condicionado à seleção atual. `logs/review-5-openspec.log` exit 0 confirma o contrato D6 revisado válido.
+
+
+A primeira suíte completa pós-rodada 5 (`logs/review-5-rust-full.log`, exit 101) detectou um caso adicional: preview lia modelo e backend separadamente, e a proteção simétrica rejeitou a combinação do fixture Local com o modelo global Groq. Corrigida a causa também no caminho real: preview agora captura modelo/backend juntos, enquanto runs persistidos continuam vinculados ao modelo admitido. A suíte completa após esse ajuste está em `logs/review-5-rust-full-fixed.log`.
+
+
+Após corrigir a seleção atômica do preview, a suíte desktop completa passou: **2.184 testes, 21 ignorados, 28 suítes**, incluindo todos os testes Groq (`logs/review-5-rust-full-fixed.log`). Clippy/fmt do mesmo comando continuam em andamento. Nenhum comportamento de retry Groq ou asserção existente foi alterado. O próximo commit é intermediário; não libera a entrega antes do gate 0 e da prova nativa.
