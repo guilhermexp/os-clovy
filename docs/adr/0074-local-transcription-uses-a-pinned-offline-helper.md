@@ -46,3 +46,14 @@ when that receipt is missing or a size differs. This avoids reading and hashing
 632 MB on every launch. External edits that preserve file sizes are not detected
 by this readiness check; inference failures remain local and never switch to Groq.
 The recovery verification runs on a worker, serialized with installation/removal.
+
+## Addendum, 2026-10-29: individual Local note turns
+
+The synthetic three-turn regression with token ends 160 ms late confirmed the
+design's pack-boundary risk: a 400 ms grouping threshold can bridge the 500 ms
+pack gap, leaving two turns empty and assigning all text to the middle turn.
+Use the alternative already accepted in Risks / Trade-offs: one Local request
+per note turn. Keep the timed adapter's 400 ms rule, 600-second chunking, durable
+jobs and retries. Groq packing is unchanged. This trades fewer helper calls for
+correct attribution; all Local calls still reuse the resident model without
+network access or provider fallback.

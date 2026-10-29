@@ -174,6 +174,62 @@ async fn cancel_returns_absent_and_resume_uses_range() {
         .contains(&format!("range: bytes={}-", *lock(&watermark)))));
 }
 #[tokio::test]
+async fn parakeet_review_complete_partial_is_verified_before_retry_downloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = server(false, true).await;
+    let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+    model
+        .install(&server.url, |state| {
+            if matches!(state, ModelState::Downloading { received: 7, .. }) {
+                model.cancel();
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(model.state(), ModelState::Absent);
+    assert_eq!(
+        std::fs::read(model.dir.join("Encoder.mlmodelc/model.mil.part")).unwrap(),
+        b"encoder"
+    );
+    model.install(&server.url, |_| {}).await.unwrap();
+    assert_eq!(model.state(), ModelState::Ready { bytes: 17 });
+    assert_eq!(
+        server
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains("model.mil"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn parakeet_review_corrupt_complete_partial_is_downloaded_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = server(false, false).await;
+    let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+    std::fs::create_dir_all(model.dir.join("Encoder.mlmodelc")).unwrap();
+    std::fs::write(
+        model.dir.join("Encoder.mlmodelc/model.mil.part"),
+        b"invalid",
+    )
+    .unwrap();
+    model.install(&server.url, |_| {}).await.unwrap();
+    assert_eq!(model.state(), ModelState::Ready { bytes: 17 });
+    assert_eq!(
+        std::fs::read(model.dir.join("Encoder.mlmodelc/model.mil")).unwrap(),
+        b"encoder"
+    );
+    let requests = server.seen.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|r| !r.to_ascii_lowercase().contains("range:")));
+}
+
+#[tokio::test]
 async fn disk_without_marker_is_verified_and_size_changes_invalidate_marker() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().join("model");

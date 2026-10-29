@@ -214,6 +214,22 @@ impl TranscriptionModel {
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0);
+            // Cancellation can arrive after the final durable progress event,
+            // before checksum verification/rename. Reuse only a verified part.
+            if offset == file.bytes && verified_during_install(&part, file, token).await? {
+                tokio::fs::rename(&part, &destination)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                completed += file.bytes;
+                self.publish(
+                    ModelState::Downloading {
+                        received: completed,
+                        total: self.manifest.total_bytes,
+                    },
+                    progress,
+                );
+                continue;
+            }
             if offset >= file.bytes {
                 offset = 0;
             }

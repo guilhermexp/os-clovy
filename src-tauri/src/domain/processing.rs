@@ -3072,6 +3072,12 @@ tokio::task_local! {
 /// Each pack request reads its route once, like a turn, so its pacer and
 /// its call use the same key.
 fn note_pack_transcriber(model: String) -> Option<PackTranscriber> {
+    // Design risk mitigation: imprecise Local token ends can bridge a 500 ms
+    // pack gap under the 400 ms pause rule. Keep each turn in its own request
+    // rather than assigning merged text to the wrong turn by midpoint.
+    if model == crate::providers::transcription::LOCAL_MODEL {
+        return None;
+    }
     #[cfg(test)]
     {
         if let Ok(transcriber) = TEST_NOTE_PACKS.try_with(|(transcriber, pacer)| {
@@ -11393,6 +11399,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parakeet_review_imprecise_pack_tokens_use_individual_local_turns() {
+        use crate::providers::local_transcriber::{
+            FakeLocalTranscriber, LocalTranscription, NetworkSentinel, Token, TEST_LOCAL,
+        };
+        use crate::providers::transcription::TEST_BACKEND;
+        // A 160 ms late token end bridges the artificial 500 ms pack gap.
+        let timed = LocalTranscription {
+            text: "Primeiro Segundo Terceiro".into(),
+            tokens: [
+                (0, 660, "▁Primeiro"),
+                (1000, 1660, "▁Segundo"),
+                (2000, 2500, "▁Terceiro"),
+            ]
+            .into_iter()
+            .map(|(start_ms, end_ms, t)| Token {
+                t: t.into(),
+                start_ms,
+                end_ms,
+            })
+            .collect(),
+            duration_ms: 2500,
+            language: Some("pt".into()),
+        }
+        .timed()
+        .unwrap();
+        assert_eq!(
+            split_pack_segments(&[(0, 500), (1000, 1500), (2000, 2500)], &timed.segments),
+            vec!["", "Primeiro Segundo Terceiro", ""]
+        );
+        let fake = Arc::new(FakeLocalTranscriber::default());
+        let sentinel = NetworkSentinel::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        crate::providers::TEST_ORIGIN.scope(sentinel.origin.clone(),
+            TEST_BACKEND.scope(local_test_route().backend,
+                TEST_LOCAL.scope(fake.clone(), async {
+                    assert!(note_pack_transcriber("parakeet-ultra".into()).is_none(),
+                        "the design's per-turn Local path must prevent attribution across pack boundaries");
+                    let transcriber = routed(note_provider_call(), Arc::new(|| Ok(local_test_route())));
+                    for index in 0..3 {
+                        let job = normalized_turn_job(directory.path(), &format!("local-{index}"), "microphone", index, 1);
+                        let event = transcribe_one_turn_job(job, "local".into(), "Reunião".into(),
+                            None, None, transcriber.clone(), None).await.unwrap();
+                        let TurnTranscriptionResult::Candidate(candidate) = event.result else {
+                            panic!("each Local turn must keep its own transcript");
+                        };
+                        assert_eq!(candidate.input.turn_index, Some(index));
+                        assert_eq!(candidate.input.text, "Olá mundo");
+                    }
+                })
+            )
+        ).await;
+        assert_eq!(fake.calls.lock().unwrap().len(), 3);
+        sentinel.assert_unused();
+    }
+
+    #[tokio::test]
     async fn local_forty_minute_note_keeps_chunking_without_groq_pacing_or_network() {
         use crate::providers::{
             local_transcriber::{FakeLocalTranscriber, NetworkSentinel, TEST_LOCAL},
@@ -11432,19 +11494,7 @@ mod tests {
                         .expect("Local must not wait for Groq budgets")
                         .unwrap();
                         assert!(fake.calls.lock().unwrap().len() >= 4);
-                        let packed = note_pack_transcriber("parakeet-ultra".into())
-                            .expect("Local packs enabled")(
-                            test_transcription_request("pack")
-                        )
-                        .await
-                        .unwrap();
-                        assert_eq!(
-                            split_pack_segments(
-                                &[(0, 500), (1000, 1500), (2000, 2500)],
-                                &packed.segments
-                            ),
-                            vec!["Turno 0", "Turno 1", "Turno 2"]
-                        );
+                        assert!(note_pack_transcriber("parakeet-ultra".into()).is_none());
                         let preview =
                             live_preview_route(40 * 60 * 1000).expect("Local preview enabled");
                         transcribe_on_route(preview, test_transcription_request("preview"))

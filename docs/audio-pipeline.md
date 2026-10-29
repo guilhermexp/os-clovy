@@ -275,6 +275,12 @@ terminates the owned process. Initial Core ML loading is slower than warm calls.
 Allow roughly 600–800 MB of helper memory; actual usage and latency require a
 real-model measurement on the target Mac.
 
+Local note turns use one request per turn. The three-turn regression shows that
+an imprecise token end can bridge a 500 ms packed gap under the 400 ms grouping
+rule, assigning text to another turn. This uses the per-turn alternative in the
+accepted design; 600-second chunking, saved jobs and retries stay intact. Groq
+continues to pack turns and split its timed response.
+
 Build/check the helper using `pnpm local-transcriber:prepare`. After installing
 through the dev app's Install button, run:
 
