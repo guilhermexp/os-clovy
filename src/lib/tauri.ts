@@ -1,4 +1,5 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AgentArtifactDto,
   AgentInterruptionDto,
@@ -380,6 +381,7 @@ export type ProviderApiKeysConfigured = {
 };
 
 export type ProviderModelSettingsDto = {
+  localTranscriptionSupported?: boolean;
   transcriptionProvider: string;
   generationProvider: string;
   transcriptionModel: string;
@@ -395,7 +397,7 @@ export type ProviderModelSettingsDto = {
   imageSafeMode: boolean;
   /** Whether the user chose "don't ask again" on the safe-mode consent dialog. */
   imageSafeModePromptDismissed: boolean;
-  /** Live transcript preview while recording. Requires the user's Groq key. */
+  /** Live transcript preview using the selected transcription engine. */
   liveTranscription: boolean;
 };
 
@@ -450,6 +452,7 @@ export type ProviderModelSettingsResponse = {
 };
 
 export type ProviderModelDto = {
+  available?: boolean;
   provider: string;
   id: string;
   name: string;
@@ -1961,4 +1964,33 @@ export async function respondComputerUseApproval(input: { approvalId: string; ap
 
 export function computerUseCaptureSrc(path: string) {
   return convertFileSrc(path);
+}
+
+export type LocalTranscriptionModelState =
+  | { state: "absent" }
+  | { state: "downloading"; received: number; total: number }
+  | { state: "ready"; bytes: number }
+  | { state: "failed"; reason: string };
+export async function localTranscriptionModelState() {
+  return invoke<LocalTranscriptionModelState>("local_transcription_model_state");
+}
+export async function installLocalTranscriptionModel(
+  onProgress: (state: LocalTranscriptionModelState) => void,
+) {
+  const channel = new Channel<LocalTranscriptionModelState>();
+  channel.onmessage = onProgress;
+  return invoke<void>("install_local_transcription_model", { channel });
+}
+export async function cancelLocalTranscriptionModelInstall() {
+  return invoke<void>("cancel_local_transcription_model_install");
+}
+export async function removeLocalTranscriptionModel() {
+  return invoke<{ switched_to_groq: boolean }>("remove_local_transcription_model");
+}
+export async function onLocalTranscriptionModelState(
+  onState: (state: LocalTranscriptionModelState) => void,
+) {
+  return listen<LocalTranscriptionModelState>("local-transcription-model-state", ({ payload }) =>
+    onState(payload),
+  );
 }

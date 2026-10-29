@@ -2,6 +2,24 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
+    "settings.localTranscription.engine": "Transcription engine",
+    "settings.localTranscription.groq": "Groq",
+    "settings.localTranscription.groqDescription": "Cloud, with your own key",
+    "settings.localTranscription.local": "Local (Parakeet Ultra)",
+    "settings.localTranscription.localDescription": "On this device, 25 languages",
+    "settings.localTranscription.install": "Install model (632 MB)",
+    "settings.localTranscription.required": "Install the model to use it",
+    "settings.localTranscription.cancel": "Cancel",
+    "settings.localTranscription.ready": "Ready · {size}",
+    "settings.localTranscription.remove": "Remove",
+    "settings.localTranscription.failed": "Failed: {reason}",
+    "settings.localTranscription.networkFailed":
+      "Could not download {file}. Check your connection and try again.",
+    "settings.localTranscription.retry": "Try again",
+    "settings.localTranscription.removed": "The model was removed. Transcription switched to Groq.",
+    "settings.localTranscription.loading": "Checking model…",
+    "settings.localTranscription.progress": "Model download",
+
     "settings.appearance.title": "Appearance",
     "settings.appearance.blurb":
       "Choose the language, theme, background, accent color, text size, and date format Clovy uses.",
@@ -187,7 +205,7 @@ export default defineMessages({
 
     "settings.liveTranscription.title": "Live transcription",
     "settings.liveTranscription.description":
-      "Show a live transcript while you record using your Groq key. This transcribes audio twice and may increase provider usage. Turning it off shows the transcript after recording ends.",
+      "Show a live transcript with the selected transcription engine. With Groq, this transcribes audio twice and may increase provider usage. Local processes both passes on this device. Turning it off shows the transcript after recording ends.",
     "settings.liveTranscription.aria": "Show a live transcript while recording",
     "settings.liveTranscription.on":
       "Live transcription on: the transcript streams while you record.",
@@ -338,6 +356,24 @@ export default defineMessages({
     "settings.personality.applies": "Applies to future Home replies and the next agent run.",
   },
   "pt-BR": {
+    "settings.localTranscription.engine": "Motor de transcrição",
+    "settings.localTranscription.groq": "Groq",
+    "settings.localTranscription.groqDescription": "Na nuvem, com sua chave",
+    "settings.localTranscription.local": "Local (Parakeet Ultra)",
+    "settings.localTranscription.localDescription": "No dispositivo, 25 idiomas",
+    "settings.localTranscription.install": "Instalar modelo (632 MB)",
+    "settings.localTranscription.required": "Instale o modelo para usar",
+    "settings.localTranscription.cancel": "Cancelar",
+    "settings.localTranscription.ready": "Pronto · {size}",
+    "settings.localTranscription.remove": "Remover",
+    "settings.localTranscription.failed": "Falhou: {reason}",
+    "settings.localTranscription.networkFailed":
+      "Não foi possível baixar {file}. Verifique sua conexão e tente de novo.",
+    "settings.localTranscription.retry": "Tentar de novo",
+    "settings.localTranscription.removed": "O modelo foi removido. A transcrição mudou para Groq.",
+    "settings.localTranscription.loading": "Verificando modelo…",
+    "settings.localTranscription.progress": "Download do modelo",
+
     "settings.appearance.title": "Aparência",
     "settings.appearance.blurb":
       "Escolha o idioma, o tema, o fundo, a cor de destaque, o tamanho do texto e o formato de data do Clovy.",
@@ -528,7 +564,7 @@ export default defineMessages({
 
     "settings.liveTranscription.title": "Transcrição ao vivo",
     "settings.liveTranscription.description":
-      "Mostra uma transcrição ao vivo com sua chave Groq. Isso transcreve o áudio duas vezes e pode aumentar o uso do provedor. Se desativar, a transcrição aparece depois que a gravação termina.",
+      "Mostra a transcrição ao vivo com o motor escolhido. Com Groq, isso transcreve o áudio duas vezes e pode aumentar o uso do provedor. Local processa ambas no dispositivo. Se desativar, a transcrição aparece depois que a gravação termina.",
     "settings.liveTranscription.aria": "Mostrar uma transcrição ao vivo durante a gravação",
     "settings.liveTranscription.on":
       "Transcrição ao vivo ativada: a transcrição aparece enquanto você grava.",

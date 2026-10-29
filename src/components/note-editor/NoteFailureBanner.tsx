@@ -25,6 +25,7 @@ export function userFacingFailureMessage(message?: string) {
  * each key's English text is byte-identical to what Rust stores, and the
  * banner shows it in the interface language. */
 const STORED_FAILURE_KEYS: MessageKey[] = [
+  "notes.failure.localTranscriberFailed",
   "notes.failure.noSpeech",
   "notes.failure.silenceSystem",
   "notes.failure.silenceMicrophone",

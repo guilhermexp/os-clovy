@@ -41,6 +41,8 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   ],
   // Desktop dictation pipeline (src-tauri/src/dictation.rs)
   no_speech: "hud.error.noSpeech",
+  local_transcriber_failed: "notes.failure.localTranscriberFailed",
+  local_model_not_installed: "settings.localTranscription.required",
   groq_api_key_missing: "notes.failure.groqKeyMissing",
   // A capture start refused while an update installs (src-tauri/src/update_gate.rs)
   update_installing: "hud.error.updateInstalling",

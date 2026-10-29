@@ -2,6 +2,8 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
+    "notes.failure.localTranscriberFailed":
+      "The local transcription model failed. Try again or reinstall it in Settings > Models.",
     "notes.editor.tabs.notes": "Notes",
     "notes.editor.tabs.transcription": "Transcription",
     "notes.editor.titlePlaceholder": "New note",
@@ -297,6 +299,8 @@ export default defineMessages({
     "notes.projects.relative.days": "{count}d ago",
   },
   "pt-BR": {
+    "notes.failure.localTranscriberFailed":
+      "O modelo local de transcrição falhou. Tente de novo ou reinstale-o em Configurações > Modelos.",
     "notes.editor.tabs.notes": "Notas",
     "notes.editor.tabs.transcription": "Transcrição",
     "notes.editor.titlePlaceholder": "Nova nota",

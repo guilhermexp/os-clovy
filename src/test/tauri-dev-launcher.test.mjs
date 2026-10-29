@@ -71,8 +71,12 @@ function createSandbox() {
   const sandbox = realpathSync(mkdtempSync(path.join(tmpdir(), "clovy-tauri-dev-launcher-")));
   sandboxes.push(sandbox);
   cpSync(path.join(repoRoot, "scripts"), path.join(sandbox, "scripts"), { recursive: true });
-  // Helper preparation compiles with Cargo; the launcher only needs it to succeed.
+  // Native helper builds are covered separately; assert the launcher prepares them.
   writeFileSync(path.join(sandbox, "scripts", "prepare-cua-driver.mjs"), "");
+  writeFileSync(
+    path.join(sandbox, "scripts", "prepare-local-transcriber.mjs"),
+    'import { writeFileSync } from "node:fs"; writeFileSync("prepared-local-transcriber", "yes");',
+  );
   mkdirSync(path.join(sandbox, "src-tauri"), { recursive: true });
   for (const file of ["cua-driver-pin.json", "tauri.conf.json", "tauri.macos.conf.json"]) {
     cpSync(path.join(repoRoot, "src-tauri", file), path.join(sandbox, "src-tauri", file));
@@ -187,6 +191,7 @@ describe("development frontend startup", () => {
     );
     expect(launch.status, launch.stderr).toBe(0);
     expect(JSON.parse(readFileSync(commands, "utf8"))).toEqual(["run", "dev"]);
+    expect(existsSync(path.join(sandbox, "prepared-local-transcriber"))).toBe(true);
     expect(launch.stderr).not.toContain("Clovy API");
   });
 });

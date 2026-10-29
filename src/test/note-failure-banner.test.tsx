@@ -185,3 +185,18 @@ describe("NoteFailureBanner", () => {
     expect(screen.getByRole("button", { name: /Retry/i })).toBeDisabled();
   });
 });
+
+it("translates the stored local transcription failure and keeps retry", () => {
+  applyInterfaceLocale("pt-BR");
+  try {
+    const message =
+      "The local transcription model failed. Try again or reinstall it in Settings > Models.";
+    expect(userFacingFailureMessage(message)).toBe(
+      "O modelo local de transcrição falhou. Tente de novo ou reinstale-o em Configurações > Modelos.",
+    );
+    render(<NoteFailureBanner errorMessage={message} audioPreserved onRetry={() => undefined} />);
+    expect(screen.getByRole("button", { name: /Tentar de novo/i })).toBeEnabled();
+  } finally {
+    applyInterfaceLocale("en");
+  }
+});

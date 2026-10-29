@@ -1,3 +1,4 @@
+import { LocalTranscriptionSettings } from "./LocalTranscriptionSettings";
 import { BackgroundSettings } from "./BackgroundSettings";
 import { listen } from "@tauri-apps/api/event";
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
@@ -1145,7 +1146,9 @@ export function AppSettings({
     ? effectiveProviderSettings
     : providerSettings;
   const transcriptionOptions = modelOptions(
-    providerModels.transcription,
+    providerModels.transcription.filter(
+      (model) => model.provider === displayProviderSettings.transcriptionProvider,
+    ),
     displayProviderSettings.transcriptionModel,
   );
   const generationOptions = modelOptions(
@@ -1819,7 +1822,29 @@ export function AppSettings({
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
                     onSelect={(modelId) => selectModelFromPicker("transcription", modelId)}
+                    readOnly={
+                      showingPartitionModels ||
+                      displayProviderSettings.transcriptionProvider === "local"
+                    }
+                  />
+                  <LocalTranscriptionSettings
+                    supported={providerSettings.localTranscriptionSupported === true}
+                    provider={displayProviderSettings.transcriptionProvider}
                     readOnly={showingPartitionModels}
+                    onSelect={async (modelId) => {
+                      closeModelPicker();
+                      await selectProviderModel("transcription", modelId);
+                    }}
+                    onRemoved={async () => {
+                      const snapshot = providerModelSettingsSnapshot(await providerModelSettings());
+                      setProviderSettings(snapshot.settings);
+                      setEffectiveProviderSettings(snapshot.effectiveSettings);
+                      dispatchProviderModelSettingsChanged({
+                        mode: "transcription",
+                        modelId: snapshot.settings.transcriptionModel,
+                      });
+                      await requestProviderModels("transcription");
+                    }}
                   />
                   <div className="settings-row-divider" aria-hidden />
                   <button
