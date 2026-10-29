@@ -37,3 +37,12 @@ avoids those costs at the price of a pinned Swift dependency, a JSON-lines proto
 and process lifecycle tests. Windows and Intel remain Groq-only. Initial loading
 cost and memory are visible trade-offs; real Portuguese quality and warm latency
 must be proven separately from fake-helper contract tests.
+
+## Clarification, 2026-10-29: installation receipt
+
+Design D5 deliberately treats `installed.json` as a receipt for files verified at
+installation. Startup compares the pinned manifest and file sizes, rehashing only
+when that receipt is missing or a size differs. This avoids reading and hashing
+632 MB on every launch. External edits that preserve file sizes are not detected
+by this readiness check; inference failures remain local and never switch to Groq.
+The recovery verification runs on a worker, serialized with installation/removal.

@@ -376,6 +376,10 @@ fn write_marker(dir: &std::path::Path, manifest: &Manifest) -> std::io::Result<(
     Ok(())
 }
 fn installed(dir: &std::path::Path, manifest: &Manifest) -> bool {
+    // D5 intentionally treats this marker as the receipt for verified installation bytes.
+    // A matching pinned manifest and file sizes avoid rehashing 632 MB at each startup.
+    // Missing receipts or size changes rehash below; same-size external edits are outside
+    // this readiness check (see ADR-0074 and the change's design.md, D5).
     let marker = std::fs::read(dir.join("installed.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok());
