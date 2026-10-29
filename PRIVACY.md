@@ -4,6 +4,12 @@ Recordings, transcripts, notes, and session history are stored on-device.
 Audio or text leaves the device when a requested operation uses a provider:
 Groq for transcription, OpenRouter for remote notes and optional dictation
 cleanup, and fal for images/video. These calls use your own key directly.
+With Local (Parakeet Ultra) selected, dictation, note transcription, turn
+packs, retries, and live preview process audio on-device, without transcription
+requests or fallback to Groq. Installing the optional model downloads pinned
+files from Hugging Face; those downloads send no audio or provider key.
+Optional text cleanup and note generation still use their separately selected
+provider or CLI and may send the resulting text off-device.
 CLI chat and CLI note generation use the CLI's account; configured endpoints
 receive the content sent to them. Provider retention depends on that route.
 

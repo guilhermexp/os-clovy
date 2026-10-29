@@ -72,10 +72,13 @@ function createSandbox() {
   sandboxes.push(sandbox);
   cpSync(path.join(repoRoot, "scripts"), path.join(sandbox, "scripts"), { recursive: true });
   // Native helper builds are covered separately; assert the launcher prepares them.
-  writeFileSync(path.join(sandbox, "scripts", "prepare-cua-driver.mjs"), "");
+  writeFileSync(
+    path.join(sandbox, "scripts", "prepare-cua-driver.mjs"),
+    'import { existsSync } from "node:fs"; if (!existsSync("prepared-local-transcriber")) throw new Error("Local helper resource must exist before Cargo validation");',
+  );
   writeFileSync(
     path.join(sandbox, "scripts", "prepare-local-transcriber.mjs"),
-    'import { writeFileSync } from "node:fs"; writeFileSync("prepared-local-transcriber", "yes");',
+    'import { writeFileSync } from "node:fs"; writeFileSync("prepared-local-transcriber", "yes"); writeFileSync("local-helper-developer-dir", process.env.DEVELOPER_DIR ?? "");',
   );
   mkdirSync(path.join(sandbox, "src-tauri"), { recursive: true });
   for (const file of ["cua-driver-pin.json", "tauri.conf.json", "tauri.macos.conf.json"]) {
@@ -138,6 +141,7 @@ describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
           ...process.env,
           PATH: `${bin}:${process.env.PATH}`,
           CARGO_TARGET_DIR: "",
+          DEVELOPER_DIR: "/fixture/older-swift",
           CLOVY_DEV_APP_IDENTIFIER: "",
           CLOVY_DEV_SIGNING_IDENTITY: "-",
           CLOVY_SANDBOX_TAURI_ARGS: tauriArgs,
@@ -150,6 +154,11 @@ describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
     );
 
     expect(launch.status, launch.stderr).toBe(0);
+    expect(readFileSync(path.join(sandbox, "local-helper-developer-dir"), "utf8")).toBe(
+      existsSync("/Applications/Xcode.app/Contents/Developer")
+        ? "/Applications/Xcode.app/Contents/Developer"
+        : "/fixture/older-swift",
+    );
     expect(readFileSync(tauriArgs, "utf8").split("\n")).toContain("dev");
     expect(JSON.parse(readFileSync(store, "utf8"))).toEqual(authorizations);
     for (const helper of helpers) {

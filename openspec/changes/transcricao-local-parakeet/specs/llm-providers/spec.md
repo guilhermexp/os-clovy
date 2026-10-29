@@ -25,10 +25,10 @@ O sistema SHALL permitir escolher o provedor separadamente para: chat/agente, ge
 - **THEN** `transcriptionProvider` é gravado como `local`, o modelo exibido é o do pacote instalado, e ditado, notas e prévia passam a usar o motor local
 - Test: integration — gravação, recarga e leitura do motor efetivo
 
-#### Scenario: Override de perfil
+#### Scenario: Override de perfil sem modelo pronto
 - **WHEN** um perfil tem override de transcrição para `local` e o modelo não está pronto
-- **THEN** o motor efetivo do perfil é Groq
-- Test: unit — `effective_settings_for_profile` com estado do modelo falso
+- **THEN** a transcrição desse perfil falha com `local_model_not_installed`, sem requisição à Groq, e a nota ou o ditado mostra a mensagem do motor local
+- Test: unit — `effective_settings_for_profile` com estado do modelo falso; integration — servidor sentinela Groq com zero requisições
 
 ### Requirement: Notas com chave própria vão direto ao provedor
 Com o motor de Notas = OpenRouter, o desktop SHALL mandar a transcrição de nota ao motor de transcrição escolhido (Groq direto com a chave do usuário, ou Local no dispositivo) e a geração e a limpeza da nota à OpenRouter, sempre direto, com um modelo explícito. A requisição MUST levar só a chave do provedor chamado. Não existe rota de reserva: sem a chave, a chamada falha como descrito em "Falha clara sem chave nem servidor".

@@ -178,11 +178,25 @@ Detection is energy-based (RMS windows + noise floor), never diarization.
 _Avoid_: segment (that is a live-preview chunk), utterance, speaker (no
 speaker identity is inferred).
 
+**Transcription engine** (OpenSpec: _motor de transcrição_):
+The selected implementation that converts audio to text for dictation, note
+Turns, fixed chunks, Turn packs, and Live transcript preview. Groq uses the
+user's key; Local (Parakeet Ultra) runs on-device on macOS 14+ Apple Silicon.
+It is independent of the Notes engine and Dictation cleanup. A Local error
+never selects Groq automatically.
+_Avoid_: chat engine, Notes engine, offline app (other features may use a network).
+
+**Local transcription model** (OpenSpec: _modelo local_):
+The pinned Parakeet Ultra Core ML files installed explicitly through Settings.
+Their installation state is absent, downloading, ready, or failed; readiness
+is required to select Local. The model id is `parakeet-ultra`.
+_Avoid_: downloaded provider, local Groq, embedded model (it is optional).
+
 **Turn pack** (OpenSpec: _pacote de turnos_):
-Consecutive Turns of one Source sent to Groq as one final-transcription
+Consecutive Turns of one Source sent to the selected engine as one final-transcription
 request of up to 600 s, 0.5 s apart, and split back per Turn by the
 provider's segment times. Each Turn keeps its own durable job; only the
-direct route with the user's Groq key packs (ADR-0070 addendum).
+Groq route with the user's key and the Local engine both support packs (ADR-0074).
 _Avoid_: batch, chunk (a chunk is a fixed split of one long audio file).
 
 **Speaker bleed (echo)**:
@@ -211,7 +225,7 @@ Optional, ephemeral chunked transcription shown while recording. Revisable,
 never written to `transcripts`, never the note's source of truth (see
 [ADR-0002](docs/adr/0002-live-transcript-preview-strategy.md)). The Settings
 control for it is labeled **Live transcription** (default on); its disclosure
-copy is the consent surface that makes previews billable extra usage, and
+copy discloses extra provider usage with Groq and on-device processing with Local, and
 turning it off stops the preview lanes (gated at capture start and re-checked
 per chunk, so it also takes effect mid-recording) (JUN-375, ADR-0002
 addendum).

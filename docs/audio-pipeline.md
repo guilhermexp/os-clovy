@@ -10,9 +10,9 @@ preview).
 
 ## Provider boundary
 
-Saved-note transcription and live preview call Groq directly with the user's
-key. Missing keys fail before network access; live preview remains off until
-the key is available. Notes and transcript cleanup use the selected Notes
+Saved-note transcription and live preview use the selected transcription engine.
+Groq calls use the user's key; missing keys fail before network access.
+Local (Parakeet Ultra) needs an installed model and never reads a Groq key. Notes and transcript cleanup use the selected Notes
 engine: OpenRouter with the user's key, CLI, or endpoint. No inference server
 or provider fallback participates. Prompts remain local under
 `src-tauri/src/prompts/`, and CLI/endpoint calls retain `llm::generate`.
@@ -229,3 +229,70 @@ finalize, so a crash leaves replayable audio that recovery can finish
 processing. Durable note-transcription jobs record exact Source spans and
 attempt state; interrupted `running` jobs return to `pending`, and explicit
 Retry resumes only jobs whose fingerprint has not already succeeded.
+
+## Local transcription
+
+Local requires macOS 14+ Apple Silicon. Settings > Models > Transcription offers
+an explicit 632,162,964-byte installation, byte progress, Cancel, retry/resume,
+and removal. Files live under `app_paths::app_data_dir()/models/parakeet-ultra-coreml/`.
+Downloads use the pinned Hugging Face revision and per-file SHA-256 manifest in
+`src-tauri/resources/local-transcriber-model.json`; `.mlmodelc` directories are
+expanded into their inner files. Complete files are reused and `.part` files
+resume using HTTP Range. `installed.json` caches the verified manifest; missing
+markers or size changes trigger revalidation. No database migration is needed.
+
+The Rust `TranscriptionBackend` selects the transport before reading credentials.
+All dictation, saved-note turns, 600-second chunks (10-second overlap), turn packs,
+and live preview use that backend. Local skips Groq's 25 MB cap and hourly pacer;
+helper errors are not retried against another provider. A saved Local choice with
+a missing model fails with installation guidance. Unsupported platforms normalize
+the saved choice to Groq. Explicit removal changes Local selections and profile
+overrides to Groq, and the UI warns about that transition.
+
+`Clovy Local Transcriber.app` is a separately signed, lazily spawned arm64 helper.
+The SwiftPM package pins FluidAudio v0.18.0 at
+`e15287985625dbf544a343df679436789ffb03fb`; its source and resolution file are hashed
+by `scripts/prepare-local-transcriber.mjs`. Swift 6.2+ disables optional package
+traits. The helper uses `AsrModels.loadLocal`, not the downloading `load` API.
+stdin/stdout carry one JSON request/response per line:
+
+```json
+{"op":"load","model_dir":"/absolute/model/directory","version":"ultra"}
+{"op":"transcribe","audio_path":"/absolute/take.m4a","language":"pt"}
+{"op":"unload"}
+```
+
+Successful transcription returns `text`, `tokens` (`t`, `start_ms`, `end_ms`),
+`duration_ms`, and the accepted language hint. Unknown hints become nil; the
+hint constrains the alphabet and does not force Portuguese. The SDK decodes
+WAV/M4A directly. Each request resets decoder state while keeping the model loaded.
+Rust serializes requests, bounds responses and deadlines, groups tokens across
+pauses shorter than 400 ms, and treats empty text as `no_speech`. Closing stdin
+ends the helper; switching to Groq, removal, shutdown, timeout or broken protocol
+terminates the owned process. Initial Core ML loading is slower than warm calls.
+Allow roughly 600–800 MB of helper memory; actual usage and latency require a
+real-model measurement on the target Mac.
+
+Build/check the helper using `pnpm local-transcriber:prepare`. After installing
+through the dev app's Install button, run:
+
+```sh
+pnpm local-transcriber:self-test "$DEV_APP_DATA"
+```
+
+Set DEV_APP_DATA to the run-owned debug profile's actual absolute app data directory. The self-test
+never installs weights and explicitly skips when no installation exists. It uses
+the repository's synthesized Portuguese WAV. Do not point proof builds at the
+owner's production or ordinary development profile.
+
+The model is [FluidInference/parakeet-ultra-coreml](https://huggingface.co/FluidInference/parakeet-ultra-coreml/tree/95eaa59a39d4394f047a4dc5cce480388a60d1b6),
+revision `95eaa59a39d4394f047a4dc5cce480388a60d1b6`, under CC BY 4.0. Credit:
+Fluid Inference, Parakeet Ultra Core ML conversion; model files are used unmodified.
+FluidAudio v0.18.0 is Apache-2.0 (its actual pinned LICENSE, copied into the helper
+bundle), rather than MIT. Clovy's license does not replace these licenses.
+Optional transcript cleanup, Notes generation and CLI chat retain their separate
+network boundaries. See [ADR-0074](adr/0074-local-transcription-uses-a-pinned-offline-helper.md).
+
+Switching from Local to Groq terminates the helper. A Local note run already in
+progress fails locally and retains its audio; an explicit retry uses the new
+selection. Remaining Local audio is never silently forwarded to Groq.

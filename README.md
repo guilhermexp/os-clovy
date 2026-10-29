@@ -27,12 +27,27 @@ agent with that reach is a remote company's window into your work.
 
 Clovy is built the other way around. The app and the agent run on your Mac.
 Notes, recordings, transcripts, files, sessions, and agent memory stay on your
-machine by default. Audio goes directly to Groq, remote note text to
+machine by default. Audio uses Groq or the optional local transcription engine; remote note text goes to
 OpenRouter, and images/video to fal, each with your own key. Chat runs through
 your installed CLI and its account. A configured endpoint can also generate
 notes. What a provider retains depends on that provider and route.
-You do not have to take any of this on faith: the entire product is MIT
-licensed.
+You do not have to take any of this on faith: Clovy is MIT licensed; bundled dependencies and optional models retain their own licenses.
+
+## Local transcription
+
+On macOS 14 or later with Apple Silicon, open **Settings > Models > Transcription**,
+click **Install model**, and choose **Local (Parakeet Ultra)** once it is ready.
+The download is 632 MB, shows byte progress, and can be cancelled and resumed.
+The model remains installed across restarts. Local handles dictation, recordings,
+turn packs and live preview without a Groq key or transcription network requests.
+A local failure stays local; it never sends your recording to Groq as a fallback.
+Windows and Intel Macs keep Groq only.
+
+Switching to Groq releases the local helper's memory. Removing the active model
+switches transcription to Groq and shows a warning. Optional text cleanup and
+note generation have separate provider settings and may still send text to them.
+See [the audio pipeline](docs/audio-pipeline.md#local-transcription) for installation,
+licenses, resource use, and the development self-test.
 
 ## What Clovy does
 

@@ -2660,6 +2660,35 @@ mod tests {
         assert_eq!(profile.transcription_model, expected_model);
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn local_profile_override_without_model_fails_before_groq_credentials_or_network() {
+        let mut settings = default_settings();
+        settings.profile_overrides.insert(
+            "work".into(),
+            ProfileModelOverrides {
+                transcription_provider: Some(PROVIDER_LOCAL.into()),
+                transcription_model: Some("parakeet-ultra".into()),
+                ..Default::default()
+            },
+        );
+        let profile = effective_settings_for_profile(&settings, "work");
+        assert_eq!(settings.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(profile.transcription_provider, PROVIDER_LOCAL);
+        let sentinel = local_transcriber::NetworkSentinel::start().await;
+        TEST_ORIGIN
+            .scope(sentinel.origin.clone(), async {
+                let error =
+                    transcription::effective_transcription_backend(&profile, None, true, || {
+                        panic!("Missing Local profile model must not read Groq credentials")
+                    })
+                    .unwrap_err();
+                assert_eq!(error.code, "local_model_not_installed");
+            })
+            .await;
+        sentinel.assert_unused();
+    }
+
     #[test]
     fn local_model_removal_persists_groq_and_clears_local_profile_overrides() {
         let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();

@@ -3,7 +3,7 @@
   "build": {
     "runner": "../scripts/cargo-clovy-runner.sh",
     "beforeBundleCommand": "bash scripts/bundle-nm-shim.sh && bash src-tauri/bundle-clovy-mcp.sh",
-    "beforeBuildCommand": "pnpm run extension:build && node ./scripts/validate-extension-id.mjs && pnpm run computer-use:prepare -- --release && pnpm run local-transcriber:prepare && pnpm run build"
+    "beforeBuildCommand": "pnpm run extension:build && node ./scripts/validate-extension-id.mjs && pnpm run local-transcriber:prepare -- --release && pnpm run computer-use:prepare -- --release && pnpm run build"
   },
   "bundle": {
     "targets": [

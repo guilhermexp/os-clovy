@@ -2640,6 +2640,16 @@ pub(crate) fn groq_direct_pacer(fingerprint: &str) -> Arc<RequestPacer> {
 fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
     let backend = crate::providers::transcription::current_backend()?;
     match backend {
+        TranscriptionBackend::Groq { .. }
+            if model == crate::providers::transcription::LOCAL_MODEL =>
+        {
+            // A run admitted as Local never sends its remaining audio to Groq.
+            // Switching engines terminates that helper; an explicit retry uses the new choice.
+            Err(AppError::new(
+                "local_transcriber_failed",
+                crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE,
+            ))
+        }
         TranscriptionBackend::Groq { key, .. } => note_route_from(Ok(Some(key)), model),
         backend @ TranscriptionBackend::Local { .. } => Ok(TranscriptionRoute {
             backend,
@@ -11432,6 +11442,23 @@ mod tests {
             model: "parakeet-ultra".into(),
             pacer: None,
         }
+    }
+
+    #[tokio::test]
+    async fn local_run_cannot_forward_its_model_or_audio_to_groq_after_switching() {
+        crate::providers::transcription::TEST_BACKEND
+            .scope(
+                TranscriptionBackend::Groq {
+                    key: "fixture-key".into(),
+                    model: "whisper-large-v3".into(),
+                },
+                async {
+                    let error = note_route(crate::providers::transcription::LOCAL_MODEL.into())
+                        .unwrap_err();
+                    assert_eq!(error.code, "local_transcriber_failed");
+                },
+            )
+            .await;
     }
 
     #[tokio::test]

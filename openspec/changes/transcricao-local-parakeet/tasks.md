@@ -63,7 +63,45 @@ Evidência do grupo 6: documentação implementada; `logs/documentation-referenc
 
 A prova nativa aguarda resolver com o dono o conflito de identidade: o brief fixa June/dev antigo, enquanto o AGENTS.md mais recente exige identidade Clovy e perfil próprio. Nenhum app foi aberto, peso instalado, Keychain ou TCC alterado. Os itens que dependem do modelo real continuam abertos.
 
+### Revisão pareada, rodada 1
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/1/summary.md`, exit **10**. Commit final bloqueado. OpenQodex também declarou revisão incompleta: os quatro caches `.trail/cache/.cache/ask-index.json`, `extract.b3c5002f26d64244.json`, `extract.c3679fb5d24a63a0.json` e `.trail/cache/.graph/wiring.json` não couberam na cobertura; são tooling preexistente fora do escopo. O snapshot tinha 81 arquivos/402.711 linhas por incluí-los. Nenhum desses arquivos foi staged.
+
+Tratamento de todos os achados:
+
+- `.cursor/hooks.json:7`, dependência de outro worktree: fora desta entrega, alteração preexistente que o dono mandou preservar. Refutado como regressão deste trabalho; não foi editado nem staged. O diff de `f58ba8ec` contra a base não inclui `.cursor/`.
+- `.trail/hook.cjs:143`, instalação sem sfw (dois achados duplicados): tooling preexistente, fora do escopo e nunca seguido nesta execução. Nenhuma instalação global foi feita. Refutados como regressões desta entrega; arquivo não foi staged.
+- Ordem do helper em `tauri-before-dev.mjs`: confirmado. Regressão reproduzida no launcher (`logs/launcher-order-red.log`, 1 falha) e corrigida (`logs/launcher-order-green.log`, 2 testes). `tauri-dev.mjs` e `tauri-build.mjs` preparam Local antes de qualquer Cargo do helper Computer use. O hook beforeBuild também prepara Local primeiro.
+- Modelo Local encaminhado à Groq durante troca: confirmado; regressão vermelha registrada em `logs/final-ci-parity.log` e `logs/route-engine-switch-red.log`. A correção recusa a rota Groq quando o modelo capturado da rodada é Local; verificação verde (`logs/route-engine-switch-green.log`, exit 0, 1 teste). O run Local deve falhar localmente quando desativado, preservando o áudio para retry com a seleção explícita atual; não pode enviar `parakeet-ultra` ou áudio Local à Groq.
+- `installed.json` evita rehash com tamanho igual: refutado por decisão **D5**, já aceita e imutável no escopo. `design.md:58` exige explicitamente hashes conferidos uma vez, rehash somente sem marcador ou com tamanho divergente. A implementação corresponde a essa decisão; corrupção externa de mesmo tamanho após a instalação é um limite conhecido dessa otimização.
+- Helper de desenvolvimento no build de release: confirmado. Hook macOS passa `--release`, e o wrapper prepara o helper antes do Cargo com o perfil solicitado. Não foi criado bundle de release para validar isso; a checagem é de configuração e os builds de prova são debug.
+
+Gate de segredos: todos os 24 registros são falsos positivos do cache de extração do Trail. Tokens sintéticos foram comparados em memória com os fixtures de `src-tauri/src/activity/redact.rs`. Os dois hashes classificados como chave privada correspondem a spans de 5.234/5.222 bytes do código de regex/teste serializado em JSON, não PEM válido (OpenSSL rejeitou); o segundo cache contém exatamente os mesmos hashes. Nenhum valor foi exibido. Evidência: `logs/verify-secret-fixtures-final.log` (exit 0, 24 verificados/0 pendentes), `secret-fixture-verification.json` e allowlist exata por regra/caminho/SHA-256 em `secret-fixture-allowlist.json`, todos sob `.tmp/verify/transcricao-local-parakeet/`. Rodada seguinte deve usar essa allowlist; nunca liberar por exit 10/4.
+
+### Revisão pareada, rodada 2 e verificações finais
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/2/summary.md`, exit **4**. A allowlist validada eliminou os falsos positivos de segredo. OpenQodex continua incompleto por caches preexistentes; CodeRabbit recusou o payload acima de 100 MiB (`payload_too_large`). Não é quota. A autorização do dono para revisar uma cópia isolada contendo somente a entrega está pendente; nenhum cache protegido foi removido ou staged para contornar o gate.
+
+Tratamento dos cinco achados:
+
+- `.cursor/hooks.json:7` e `.trail/hook.cjs:143`: mesmas alterações preexistentes fora do escopo, refutadas como regressões desta entrega na rodada 1. Permanecem intactas.
+- `scripts/tauri-dev.mjs:55`: confirmado. O caminho do Xcode era definido somente depois do preparo Swift. Teste reproduziu a falha (`logs/launcher-xcode-red.log`, 1 falha); o launcher agora resolve e passa `DEVELOPER_DIR` aos dois helpers antes de compilar, sem mudar o Xcode global. Resultado da correção em `logs/launcher-xcode-green.log` (exit 0, 2 testes).
+- `transcription_model.rs:325`: mesmo comportamento exigido por D5; refutado como na rodada 1. Sem mudança da decisão aceita.
+- `LocalTranscriptionSettings.tsx:193`: confirmado. Remover já persiste Groq antes de apagar arquivos; a UI agora atualiza a seleção também quando o filesystem falha. Teste vermelho→verde em `logs/settings-error-recovery-red.log` e `logs/settings-error-recovery-green.log`. A mesma rodada cobre não duplicar o erro técnico de rede abaixo do estado traduzido (10 testes de UI/launcher e typecheck verdes).
+
+Resultados completos após as correções Rust/UI: `logs/rust-after-review.log` exit 0 (fmt, Clippy all-targets e cargo test --locked, 2.176 testes passaram, 21 ignorados); `logs/frontend-after-review-full.log` exit 0 (204 suítes, 1.913 testes). A última correção do launcher tem regressão focada separada. `logs/final-scoped-checks.log` exit 0: Biome em src/scripts, typecheck e OpenSpec estrito. Capturas atualizadas em `ui/final/` com zero erros JS (`logs/browser-final-code.log`). O servidor de preview criado nesta execução foi encerrado (`logs/stop-owned-preview.log`).
+
+Empacotamento debug: `logs/debug-bundle-direct.log`, `debug-bundle-inspection.log` e `debug-bundle-snapshot.log` exit 0. Bundle arm64 com identidade compilada `dev.guilhermexp.clovy.parakeetproof`, assinatura verificada, copiado à evidência, nunca aberto. Esse artefato antecede as últimas correções de recuperação da UI e não comprova o comportamento nativo final. Nenhum modelo foi baixado. Windows: `logs/windows-cross-check.log` e `windows-rustup-check.log` exit 101; o Rust Homebrew não tem std Windows, e o Rustup instalado avançou até faltar `assert.h` do SDK Windows. Nenhum toolchain foi instalado. Revisão cfg confirma que a implementação nativa só é acessada em macOS e que comandos recusam plataformas não suportadas antes do acesso ao estado; execução Windows permanece não comprovada.
+
 ## Workflow follow-up
 
 - Arquivar `remover-clovy-api` antes desta change; só então `openspec archive transcricao-local-parakeet`.
 - Após o arquivamento, `/sync` do `AGENTS.md` do projeto e `/cleanup` da branch.
+
+### Continuação autorizada pelo dono (2026-10-29)
+
+O dono corrigiu D6 e o cenário de override para erro `local_model_not_installed`, sem fallback. O perfil autorizado para a prova é `dev.guilhermexp.clovy.parakeetproof`, com dados sintéticos novos em `dev.guilhermexp.clovy.parakeetproof-dev`; as referências June de 5.1 ficaram obsoletas. Prova segue AGENTS.md; solicitações de permissão devem parar a execução até confirmação do dono.
+
+Gate: autorizado commit intermediário de toda a entrega, stash temporário somente de `.claude .cursor .mcp.json AGENTS.md opencode.json`, revisão sem `--include-untracked` e restauração imediata do stash. Os erros Biome em `.mcp.json` e `opencode.json` são aceitos pelo dono como preexistentes; os demais alvos de `make verify` continuam obrigatórios.
+
+Contrato D6 revisado: `logs/profile-override-final-contract.log` exit 0, teste `local_profile_override_without_model_fails_before_groq_credentials_or_network` passou e `openspec validate transcricao-local-parakeet --strict` passou. A base global é Groq, o override efetivo é Local, ausência do modelo devolve o código local antes de ler a chave, e a sentinela não recebe conexões.

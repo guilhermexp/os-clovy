@@ -95,3 +95,23 @@ it("explains network failures in the interface language", async () => {
   expect(await screen.findByText(/Verifique sua conexão/)).toBeVisible();
   expect(screen.getByText(/Encoder.mlmodelc/)).toBeVisible();
 });
+it("does not repeat the raw network error when installation rejects", async () => {
+  const reason = "network: Encoder.mlmodelc/weights/weight.bin";
+  api.state
+    .mockResolvedValueOnce({ state: "absent" })
+    .mockResolvedValue({ state: "failed", reason });
+  api.install.mockRejectedValue({ code: "local_model_install_failed", message: reason });
+  render(<LocalTranscriptionSettings {...props()} />);
+  await userEvent.click(await screen.findByRole("button", { name: /Instalar modelo/ }));
+  expect(await screen.findByText(/Verifique sua conexão/)).toBeVisible();
+  expect(screen.queryByText(/^network:/)).toBeNull();
+});
+it("refreshes the selected engine even if deleting model files fails", async () => {
+  api.state.mockResolvedValue({ state: "ready", bytes: 632162964 });
+  api.remove.mockRejectedValue(new Error("Files could not be removed"));
+  const p = props();
+  render(<LocalTranscriptionSettings {...p} provider="local" />);
+  await userEvent.click(await screen.findByRole("button", { name: "Remover" }));
+  expect(await screen.findByText("Files could not be removed")).toBeVisible();
+  expect(p.onRemoved).toHaveBeenCalledOnce();
+});

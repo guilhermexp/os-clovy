@@ -20,6 +20,15 @@ const userArgs = rawUserArgs[0] === "--" ? rawUserArgs.slice(1) : rawUserArgs;
 const target = optionValue(userArgs, "--target");
 const buildPlatform = platformForTarget(target) ?? process.platform;
 if (buildPlatform === "darwin") {
+  const localPrepare = spawnSync(
+    process.execPath,
+    [
+      resolve(dirname(fileURLToPath(import.meta.url)), "prepare-local-transcriber.mjs"),
+      ...(userArgs.includes("--debug") ? [] : ["--release"]),
+    ],
+    { stdio: "inherit" },
+  );
+  if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
   const prepareArgs = [
     resolve(dirname(fileURLToPath(import.meta.url)), "prepare-cua-driver.mjs"),
     "--release",

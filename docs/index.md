@@ -84,6 +84,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 
 - [adr/0072](adr/0072-cli-chat-replaces-the-native-agent.md) - removes the native agent and endpoint chat engines; CLI turns use Clovy MCP tools and the local approval broker, while neutral session persistence preserves history
 - [adr/0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md) - remove the inference server and local token; direct user-key providers, independent text catalog, fal queue recovery, and no sharing/funding service
+- [adr/0074](adr/0074-local-transcription-uses-a-pinned-offline-helper.md) - optional Parakeet Ultra engine, explicit pinned installation, offline helper and no provider fallback
 
 ## Enforceable rules (spec/)
 

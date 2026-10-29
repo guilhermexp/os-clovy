@@ -15,6 +15,10 @@ import {
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(SCRIPT_DIR, "..");
+const developerDir =
+  process.platform === "darwin" && existsSync("/Applications/Xcode.app/Contents/Developer")
+    ? "/Applications/Xcode.app/Contents/Developer"
+    : process.env.DEVELOPER_DIR;
 const branch = spawnSync("git", ["branch", "--show-current"], {
   cwd: ROOT_DIR,
   encoding: "utf8",
@@ -44,9 +48,31 @@ if (process.platform === "darwin") {
     process.exit(1);
   }
 
+  // Cargo validates bundled resources while preparing the Computer use driver.
+  // The Swift helper must exist before that first Cargo invocation on a fresh checkout.
+  const localPrepare = spawnSync(
+    process.execPath,
+    [resolve(SCRIPT_DIR, "prepare-local-transcriber.mjs")],
+    {
+      cwd: ROOT_DIR,
+      env: {
+        ...process.env,
+        ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
+        CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
+        [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity,
+      },
+      stdio: "inherit",
+    },
+  );
+  if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
+
   const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-cua-driver.mjs")], {
     cwd: ROOT_DIR,
-    env: { ...process.env, [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity },
+    env: {
+      ...process.env,
+      ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
+      [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity,
+    },
     stdio: "inherit",
   });
   if (prepare.status !== 0) process.exit(prepare.status ?? 1);
@@ -109,10 +135,6 @@ if (config && !hasConfigOverride) {
 }
 
 const frontendPort = await resolveFrontendPort();
-const developerDir =
-  process.platform === "darwin" && existsSync("/Applications/Xcode.app/Contents/Developer")
-    ? "/Applications/Xcode.app/Contents/Developer"
-    : process.env.DEVELOPER_DIR;
 // Write a tiny config overlay file so Windows shell invocation does not have to
 // preserve inline JSON quoting for `--config`.
 const scriptDir = dirname(fileURLToPath(import.meta.url));

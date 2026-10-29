@@ -76,11 +76,15 @@ export function LocalTranscriptionSettings({
     // Installation remains cancellable while its command is streaming.
     setMessage("");
     setState({ state: "downloading", received: 0, total: 632162964 });
-    void installLocalTranscriptionModel(setState).catch((error) => {
-      setMessage(messageFromError(error));
-      void localTranscriptionModelState()
-        .then(setState)
-        .catch(() => {});
+    void installLocalTranscriptionModel(setState).catch(async (error) => {
+      try {
+        const snapshot = await localTranscriptionModelState();
+        setState(snapshot);
+        // The failed state already renders a localized recovery message.
+        if (snapshot.state !== "failed") setMessage(messageFromError(error));
+      } catch {
+        setMessage(messageFromError(error));
+      }
     });
   }
   return (
@@ -190,9 +194,9 @@ export function LocalTranscriptionSettings({
               disabled={busy || readOnly}
               onClick={() =>
                 void action(async () => {
-                  const result = await removeLocalTranscriptionModel();
+                  // The backend switches engines before filesystem removal, which can fail.
+                  const result = await removeLocalTranscriptionModel().finally(onRemoved);
                   setState({ state: "absent" });
-                  await onRemoved();
                   if (result.switched_to_groq) setMessage(t("settings.localTranscription.removed"));
                 })
               }
