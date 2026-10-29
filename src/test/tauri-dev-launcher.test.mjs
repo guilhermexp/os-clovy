@@ -158,16 +158,23 @@ describe("development frontend startup", () => {
   it("runs Vite without a backend checkout or backend skip flag", () => {
     const { sandbox, bin } = createSandbox();
     const commands = path.join(sandbox, "frontend-command.json");
+    const capture = path.join(bin, "capture.cjs");
     writeFileSync(
-      path.join(bin, "pnpm"),
-      `#!/usr/bin/env node
-require("node:fs").writeFileSync(process.env.CLOVY_SANDBOX_COMMANDS, JSON.stringify(process.argv.slice(2)));
-`,
+      capture,
+      'require("node:fs").writeFileSync(process.env.CLOVY_SANDBOX_COMMANDS, JSON.stringify(process.argv.slice(2)));',
     );
-    chmodSync(path.join(bin, "pnpm"), 0o755);
+    const windows = process.platform === "win32";
+    const stub = path.join(bin, windows ? "pnpm.cmd" : "pnpm");
+    writeFileSync(
+      stub,
+      windows
+        ? `@echo off\r\n"${process.execPath}" "${capture}" %*\r\n`
+        : `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${capture.replaceAll("'", "'\\''")}' "$@"\n`,
+    );
+    chmodSync(stub, 0o755);
     const env = {
       ...process.env,
-      PATH: `${bin}:${process.env.PATH}`,
+      PATH: [bin, process.env.PATH ?? ""].join(path.delimiter),
       VITE_PORT: "0",
       CLOVY_SANDBOX_COMMANDS: commands,
     };

@@ -19,6 +19,17 @@ pub(super) enum FalError {
     Upstream { retryable: bool },
 }
 impl FalError {
+    pub(super) fn definitive_rejection(self) -> bool {
+        matches!(
+            self,
+            Self::Rejected
+                | Self::ContentPolicy
+                | Self::PayloadTooLarge
+                | Self::UserKeyRejected
+                | Self::RequestInaccessible
+        )
+    }
+
     pub(super) fn transient(self) -> bool {
         matches!(self, Self::Upstream { retryable: true })
     }
@@ -199,8 +210,8 @@ impl Queue {
                 crate::video_download_url::validate_video_download_url(&url)
             })
             .await
-            .map_err(|_| FalError::MediaUnavailable)?
-            .map_err(|_| FalError::MediaUnavailable)?;
+            .map_err(|_| FalError::Upstream { retryable: true })?
+            .map_err(download_validation_error)?;
             crate::video_download_url::video_download_client_builder(&validated, &addresses)
                 .map_err(|_| FalError::MediaUnavailable)?
         };
@@ -357,5 +368,28 @@ mod tests {
         ] {
             assert!(!is_fal_cdn_url(&Url::parse(url).unwrap()));
         }
+    }
+}
+
+fn download_validation_error(error: crate::video_download_url::DownloadUrlError) -> FalError {
+    match error {
+        crate::video_download_url::DownloadUrlError::Resolution => {
+            FalError::Upstream { retryable: true }
+        }
+        crate::video_download_url::DownloadUrlError::Rejected(_) => FalError::MediaUnavailable,
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    #[test]
+    fn dns_errors_are_recoverable_but_unsafe_destinations_are_not() {
+        use crate::video_download_url::DownloadUrlError;
+        assert!(download_validation_error(DownloadUrlError::Resolution).transient());
+        assert!(
+            !download_validation_error(DownloadUrlError::Rejected("private address".into()))
+                .transient()
+        );
     }
 }

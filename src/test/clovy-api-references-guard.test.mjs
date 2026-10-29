@@ -157,6 +157,32 @@ describe("retired API reference guard", () => {
     expect(findClovyApiReferences({ root })).toHaveLength(8);
   });
 
+  it("scans current documentation while preserving named historical records", () => {
+    const root = checkout();
+    for (const name of ["README.md", "docs/development.md", "docs/new-guide.md"]) {
+      put(root, name, "CLOVY_API_URL");
+    }
+    for (const name of ["docs/adr/0001-history.md", "docs/clovy-api-prd.md"]) {
+      put(root, name, "CLOVY_API_URL");
+    }
+    expect(findClovyApiReferences({ root }).map(({ file }) => file)).toEqual([
+      "README.md",
+      "docs/development.md",
+      "docs/new-guide.md",
+    ]);
+  });
+
+  it("rejects a staged violation even when the worktree was cleaned or deleted", () => {
+    const root = checkout();
+    put(root, "src/staged.ts", "CLOVY_API_URL", true);
+    put(root, "src/staged.ts", "export const direct = true;");
+    expect(run(root).status).toBe(1);
+    rmSync(path.join(root, "src/staged.ts"));
+    expect(run(root).status).toBe(1);
+    execFileSync("git", ["-C", root, "add", "-u"]);
+    expect(run(root).status).toBe(0);
+  });
+
   it("CLI rejects tracked and untracked references with file:line, then passes after removal", () => {
     const root = checkout();
     put(root, "src/tracked.ts", "// first line\nconst url = CLOVY_API_URL;\n", true);
@@ -165,7 +191,7 @@ describe("retired API reference guard", () => {
     expect(rejected.status).toBe(1);
     expect(rejected.stderr).toContain("src/tracked.ts:2: CLOVY_API_URL");
     expect(rejected.stderr).toContain("src/untracked.ts:2: /v1/notes");
-    put(root, "src/tracked.ts", "export const local = true;\n");
+    put(root, "src/tracked.ts", "export const local = true;\n", true);
     rmSync(path.join(root, "src/untracked.ts"));
     const clean = run(root);
     expect(clean.status).toBe(0);

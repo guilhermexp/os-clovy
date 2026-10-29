@@ -1040,7 +1040,10 @@ export function AppSettings({
     try {
       const next = await setProviderApiKey(provider, apiKey);
       setProviderSettings(next);
-      setEffectiveProviderSettings(next);
+      setEffectiveProviderSettings((current) => ({
+        ...current,
+        providerApiKeysConfigured: next.providerApiKeysConfigured,
+      }));
       if (provider === "openrouter") void requestProviderModels("generation");
       void requestProviderModels("image");
       void requestProviderModels("video");
@@ -1063,7 +1066,10 @@ export function AppSettings({
     try {
       const next = await clearProviderApiKey(provider);
       setProviderSettings(next);
-      setEffectiveProviderSettings(next);
+      setEffectiveProviderSettings((current) => ({
+        ...current,
+        providerApiKeysConfigured: next.providerApiKeysConfigured,
+      }));
       if (provider === "openrouter") void requestProviderModels("generation");
       void requestProviderModels("image");
       void requestProviderModels("video");
@@ -1882,7 +1888,11 @@ export function AppSettings({
                     title={t("settings.models.text")}
                     description={textModelDescription}
                     catalogError={generationCatalogFailed}
-                    onRetry={() => openModelPicker("generation")}
+                    onRetry={() =>
+                      showingPartitionModels
+                        ? void requestProviderModels("generation")
+                        : openModelPicker("generation")
+                    }
                     value={modelValueForMode("generation")}
                     options={generationOptions}
                     open={pickerMode === "generation"}

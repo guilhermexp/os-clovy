@@ -820,7 +820,7 @@ export function ModelPickerPopover({
           <div className="agent-composer-model-surface">{catalogList(allModelsLabel)}</div>
         </div>
       ) : null}
-      {flyout?.kind === "all" && catalogHover && portalTarget
+      {(mode === "generation" || flyout?.kind === "all") && catalogHover && portalTarget
         ? createPortal(
             // Portaled alongside the detail card, for the same reason.
             <div

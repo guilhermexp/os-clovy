@@ -1592,6 +1592,58 @@ describe("AgentWorkspace runtime wiring", () => {
     });
   });
 
+  it.each([
+    "loading",
+    "failed",
+  ])("uses the installed default for a historical session while the engine catalog is %s", async (catalogState) => {
+    const base = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "chat_engine_catalog") {
+        return catalogState === "loading"
+          ? new Promise(() => {})
+          : Promise.reject(new Error("catalog unavailable"));
+      }
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: "__clovy_cli_engine__:codex", cli: "codex" });
+      }
+      return base?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={session} />);
+    await screen.findByText("Earlier answer");
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Continue history");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: "__clovy_cli_engine__:codex" }),
+      }),
+    );
+  });
+
+  it("preserves an explicit CLI choice when the engine catalog fails", async () => {
+    const base = mocks.invoke.getMockImplementation();
+    const selected = { ...session, model: "__clovy_cli_engine__:claude" };
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "chat_engine_catalog")
+        return Promise.reject(new Error("catalog unavailable"));
+      if (command === "get_agent_session") return Promise.resolve(selected);
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: "__clovy_cli_engine__:codex", cli: "codex" });
+      }
+      return base?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={selected} />);
+    await screen.findByText("Earlier answer");
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Keep my engine");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: selected.model }),
+      }),
+    );
+  });
+
   it("does not let a slow global catalog overwrite a restored session model", async () => {
     let resolveCatalog:
       | ((value: {

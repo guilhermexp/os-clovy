@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Inspect app/source/config/script files from both the Git index and worktree.
-// Historical documentation is outside this scope; tests are covered except
+// Only ADRs and explicitly named historical documents are exempt; tests are covered except
 // for this checker's one fixture suite, which deliberately plants violations.
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
@@ -12,8 +12,14 @@ const defaultRoot = path.resolve(path.dirname(scriptPath), "..");
 const exemptions = new Set([
   "scripts/check-clovy-api-references.mjs",
   "src/test/clovy-api-references-guard.test.mjs",
+  // Retained history, not current setup instructions (ADR-0073).
+  "docs/clovy-api-prd.md",
+  "docs/telemetry-p3a-implementation-plan.md",
+  "docs/superpowers/plans/2026-07-15-faster-note-transcription.md",
+  "docs/superpowers/specs/2026-07-15-faster-note-transcription-design.md",
 ]);
 const sourceDirectories = new Set([
+  "docs",
   "src",
   "src-tauri",
   "scripts",
@@ -24,7 +30,7 @@ const sourceDirectories = new Set([
   "crates",
 ]);
 const rootConfig =
-  /(?:\.(?:[cm]?[jt]sx?|rs|py|sh|ps1|jsonc?|ya?ml|toml|lock|html|css|plist|ini|conf|config)$|^(?:Makefile|Dockerfile|Justfile|\.env(?:\..*)?|\.npmrc|\.gitignore|\.gitattributes)$)/i;
+  /(?:\.(?:[cm]?[jt]sx?|md|rs|py|sh|ps1|jsonc?|ya?ml|toml|lock|html|css|plist|ini|conf|config)$|^(?:Makefile|Dockerfile|Justfile|\.env(?:\..*)?|\.npmrc|\.gitignore|\.gitattributes)$)/i;
 const binaryExtension =
   /\.(?:png|jpe?g|gif|webp|avif|ico|icns|pdf|woff2?|ttf|otf|mp[34]|m4a|wav|aiff|flac|ogg|zip|gz|xz|bz2|dmg|exe|dll|dylib|so|a|o|sqlite3?|db)$/i;
 const retiredRoot =
@@ -87,7 +93,8 @@ export function scanClovyApiText(text) {
 }
 
 function inScope(file) {
-  if (exemptions.has(file) || binaryExtension.test(file)) return false;
+  if (exemptions.has(file) || file.startsWith("docs/adr/") || binaryExtension.test(file))
+    return false;
   const parts = file.split("/");
   return parts.length > 1 ? sourceDirectories.has(parts[0]) : rootConfig.test(file);
 }
@@ -103,6 +110,56 @@ export function findClovyApiReferences({ root = defaultRoot } = {}) {
     },
   ).split("\0");
   const findings = [];
+  const seen = new Set();
+  const scan = (file, bytes) => {
+    if (bytes.includes(0)) return;
+    for (const finding of scanClovyApiText(bytes.toString("utf8"))) {
+      const key = JSON.stringify([file, finding.line, finding.match]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      findings.push({ file, ...finding });
+    }
+  };
+  // Read index blobs separately: a cleaned/deleted worktree file must not hide
+  // an unsafe staged version. Object ids avoid interpreting file names as revisions.
+  const entries = execFileSync("git", ["ls-files", "--stage", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  })
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => {
+      const tab = entry.indexOf("\t");
+      const [mode, oid] = entry.slice(0, tab).split(" ");
+      return { mode, oid, file: entry.slice(tab + 1) };
+    })
+    .filter(({ mode, file }) => mode.startsWith("100") && inScope(file));
+  for (let start = 0; start < entries.length; start += 128) {
+    const batch = entries.slice(start, start + 128);
+    const output = execFileSync("git", ["cat-file", "--batch"], {
+      cwd: root,
+      input: `${batch.map(({ oid }) => oid).join("\n")}\n`,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    let offset = 0;
+    for (const { file } of batch) {
+      const end = output.indexOf(10, offset);
+      const [, kind, sizeText] = output.subarray(offset, end).toString("utf8").split(" ");
+      const size = Number(sizeText);
+      if (
+        end < 0 ||
+        kind !== "blob" ||
+        !Number.isSafeInteger(size) ||
+        size < 0 ||
+        end + size + 2 > output.length
+      ) {
+        throw new Error("Could not read an indexed file for the reference guard.");
+      }
+      scan(file, output.subarray(end + 1, end + 1 + size));
+      offset = end + size + 2;
+    }
+  }
   for (const file of [...new Set(files)].filter(inScope).sort()) {
     let bytes;
     try {
@@ -110,14 +167,10 @@ export function findClovyApiReferences({ root = defaultRoot } = {}) {
       if (!lstatSync(absolute).isFile()) continue;
       bytes = readFileSync(absolute);
     } catch (error) {
-      // Deleted tracked files remain in the index until their deletion is staged.
       if (error.code === "ENOENT") continue;
       throw error;
     }
-    if (bytes.includes(0)) continue;
-    for (const finding of scanClovyApiText(bytes.toString("utf8"))) {
-      findings.push({ file, ...finding });
-    }
+    scan(file, bytes);
   }
   return findings;
 }

@@ -131,9 +131,7 @@ impl FalClient {
 
     async fn image_entry(&self, operation: String) -> Result<Arc<ImageEntry>, AppError> {
         let mut state = self.state.lock().await;
-        state
-            .images
-            .retain(|_, value| value.created.elapsed() < IMAGE_REPLAY_TTL);
+        prune_expired_images(&mut state.images);
         if let Some(entry) = state.images.get(&operation) {
             return Ok(Arc::clone(entry));
         }
@@ -151,7 +149,11 @@ impl FalClient {
             let oldest = state
                 .images
                 .iter()
-                .filter(|(_, entry)| entry.complete.load(Ordering::Acquire))
+                // A caller holding an entry may be retrying a rejected POST.
+                // Evict only idle entries so that retry keeps its shared lock.
+                .filter(|(_, entry)| {
+                    entry.complete.load(Ordering::Acquire) && Arc::strong_count(entry) == 1
+                })
                 .min_by_key(|(_, entry)| entry.created)
                 .map(|(key, _)| key.clone());
             if let Some(oldest) = oldest {
@@ -202,11 +204,12 @@ impl FalClient {
         // Cancellation or an ambiguous send leaves this marker; another
         // invocation cannot turn the same operation into a second paid POST.
         *stored = Some(Err(ambiguous_submit()));
+        let mut submission_rejected = false;
         let result = self
-            .image_leg(&request.model, key, &input)
+            .image_leg(&request.model, key, &input, &mut submission_rejected)
             .await
             .map(|asset| image_dto(asset, request.model));
-        finish_image_entry(self, &entry, &mut stored, &result).await;
+        finish_image_entry(self, &entry, &mut stored, &result, submission_rejected).await;
         result
     }
 
@@ -246,11 +249,12 @@ impl FalClient {
             return result.clone();
         }
         *stored = Some(Err(ambiguous_submit()));
+        let mut submission_rejected = false;
         let result = tokio::time::timeout(self.limits.image_timeout, async {
             let plan = image_edit::prepare_request(request.image, self.limits.image_bytes).await?;
             let input = plan.input(prompt, screened_safe_mode(prompt, request.safe_mode));
             let asset = self
-                .image_leg_inner(model, key, &input)
+                .image_leg_inner(model, key, &input, &mut submission_rejected)
                 .await
                 .map_err(|error| image_error(error, true))?;
             let asset = plan
@@ -264,7 +268,7 @@ impl FalClient {
         })
         .await
         .unwrap_or_else(|_| Err(invalid("image_generation_timeout")));
-        finish_image_entry(self, &entry, &mut stored, &result).await;
+        finish_image_entry(self, &entry, &mut stored, &result, submission_rejected).await;
         result
     }
 
@@ -273,10 +277,11 @@ impl FalClient {
         model: &str,
         key: &str,
         input: &Value,
+        submission_rejected: &mut bool,
     ) -> Result<ImageAsset, AppError> {
         tokio::time::timeout(
             self.limits.image_timeout,
-            self.image_leg_inner(model, key, input),
+            self.image_leg_inner(model, key, input, submission_rejected),
         )
         .await
         .map_err(|_| invalid("image_generation_timeout"))?
@@ -287,11 +292,13 @@ impl FalClient {
         model: &str,
         key: &str,
         input: &Value,
+        submission_rejected: &mut bool,
     ) -> Result<ImageAsset, FalError> {
         let id = self
             .queue
             .submit(model, key, input, self.limits.image_timeout)
-            .await?;
+            .await
+            .inspect_err(|error| *submission_rejected = error.definitive_rejection())?;
         loop {
             match self.queue.status(model, &id, key).await {
                 Ok(QueueState::Pending) => {}
@@ -338,9 +345,15 @@ impl FalClient {
         );
         let create = {
             let mut state = self.state.lock().await;
-            state
-                .creates
-                .retain(|_, value| value.created.elapsed() < JOB_RETAIN_TTL);
+            state.creates.retain(|_, value| {
+                // Keep accepted/ambiguous submissions for replay protection.
+                // A definitive rejection has no stored result and can release
+                // admission only when no caller still holds its shared entry.
+                Arc::strong_count(value) > 1
+                    || value.result.try_lock().map_or(true, |result| {
+                        value.created.elapsed() < JOB_RETAIN_TTL && result.is_some()
+                    })
+            });
             state.videos.retain(|_, value| {
                 value
                     .try_lock()
@@ -378,8 +391,13 @@ impl FalClient {
         let provider_id = match result {
             Ok(Ok(id)) => id,
             Ok(Err(error)) => {
+                let rejected = error.definitive_rejection();
                 let error = video_error(error);
-                *stored = Some(Err(error.clone()));
+                *stored = if rejected {
+                    None
+                } else {
+                    Some(Err(error.clone()))
+                };
                 return Err(error);
             }
             Err(_) => return Err(ambiguous_submit()),
@@ -504,12 +522,28 @@ impl FalClient {
     }
 }
 
+fn prune_expired_images(images: &mut HashMap<String, Arc<ImageEntry>>) {
+    // Expiry must preserve the same active-call guard as capacity eviction:
+    // a corrected-key retry may still be using the rejected entry's mutex.
+    images.retain(|_, entry| {
+        Arc::strong_count(entry) > 1 || entry.created.elapsed() < IMAGE_REPLAY_TTL
+    });
+}
+
 async fn finish_image_entry(
     client: &FalClient,
     entry: &ImageEntry,
     stored: &mut Option<Result<GeneratedImageDto, AppError>>,
     result: &Result<GeneratedImageDto, AppError>,
+    submission_rejected: bool,
 ) {
+    if submission_rejected {
+        // A definitive POST rejection created no job. Keep the shared entry
+        // and its mutex so a corrected retry remains serialized.
+        *stored = None;
+        entry.complete.store(true, Ordering::Release);
+        return;
+    }
     // Serialize completion accounting as well as admission: several in-flight
     // images can finish after each observed an empty cache. The first caller
     // still receives its image even when its replay payload cannot be retained.
@@ -685,4 +719,32 @@ fn video_input(request: &VideoGenerateParams) -> Result<Value, AppError> {
         input["num_frames"] = json!(seconds * 16 + 1);
     }
     Ok(input)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn active_image_retry_keeps_shared_entry_past_original_expiry() {
+        let retry = Arc::new(ImageEntry {
+            created: Instant::now() - IMAGE_REPLAY_TTL - Duration::from_secs(1),
+            result: Mutex::new(Some(Err(ambiguous_submit()))),
+            complete: AtomicBool::new(true),
+            bytes: AtomicUsize::new(0),
+        });
+        let mut images = HashMap::from([("corrected-key-retry".to_string(), Arc::clone(&retry))]);
+        let active = retry.result.lock().await;
+        prune_expired_images(&mut images);
+        assert!(images
+            .get("corrected-key-retry")
+            .is_some_and(|entry| Arc::ptr_eq(entry, &retry)));
+        drop(active);
+        drop(retry);
+        prune_expired_images(&mut images);
+        assert!(
+            images.is_empty(),
+            "idle expired entries still release capacity"
+        );
+    }
 }

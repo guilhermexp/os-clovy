@@ -270,7 +270,7 @@ unattended turn every `yes` and `clarification` answers
 | `accept_shared_tab` | browser | attended turns | tray | `session_id`, `share_code` |
 | `computer_use` | computer use | attended turns | yes | `action` (`capture`, `list_apps`, `wait`, `open_app`, `focus_app`, `click`, `double_click`, `right_click`, `drag`, `scroll`, `type`, `key`, `set_value`) and its arguments: every call asks first (also on a linked phone, once); the turn binding opens the run's lease; the capture comes back as an `image` block |
 | `generate_image` | media | every turn | no | `prompt`: calls fal directly with the user's key; the file goes to `artifacts/` of the bound session's workspace and `agent_artifacts`, and comes back as an `image` block while under 3 MiB |
-| `edit_image` | media | every turn | no | `sourcePath` (relative to the session workspace or absolute), `instruction`: same storage |
+| `edit_image` | media | every turn | no | `sourcePath` (relative to the session workspace or absolute), `instruction`: sandboxed turns require the canonical source to remain inside the workspace; same storage |
 | `generate_video` | media | every turn | no | `prompt`, `duration`, `aspectRatio`, `audio`, `jobId` (resumes a job): polls within the CLI's tool timeout; same storage |
 | `start_recording` | recorder | every turn | yes | `sourceMode` (`microphoneOnly`, `microphonePlusSystem`): the frontend starts the visible recording (ADR-0013) after approval |
 | `stop_recording` | recorder | every turn | yes | none: stops the visible recording |

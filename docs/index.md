@@ -162,7 +162,7 @@ Per-repo config the engineering skills read before acting (see the
 - [private-connectors-implementation-plan.md](private-connectors-implementation-plan.md) — implementation plan for private connectors phases (Phases 1-2 local mode implemented; see [adr/0016](adr/0016-private-connectors-local-mode.md))
 - [private-connectors-threat-model.md](private-connectors-threat-model.md) — local-mode threat model: the source of truth for all connector privacy copy (what OpenSoftware can and cannot see, the trust surface, agent protections, the known runtime limitation)
 - [configuration.md](configuration.md) — desktop configuration, direct provider keys, text catalog and fal queue limits
-- [auto-model-rollout.md](auto-model-rollout.md) — canary, enablement, and rollback steps for automatic private model routing
+- [auto-model-rollout.md](auto-model-rollout.md) — historical canary, enablement, and rollback plan for retired automatic private model routing
 - [development.md](development.md) — local development: quick start, local data, permissions, agent skills, verification commands
 - [onboarding-design.md](onboarding-design.md) — onboarding flow design (verify against what shipped)
 

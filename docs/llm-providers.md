@@ -292,7 +292,11 @@ argument: its installer ships `agy.exe`.
   `defaultMode` in the user's own claude settings never decides it. Attended
   turns never get `--strict-mcp-config`: the MCP servers and claude.ai
   connectors the user configured in the CLI also load, and a server of the
-  user's named `clovy` is replaced by the turn's. With Clovy's server, claude
+  user's named `clovy` is replaced by the turn's. These are the CLI's own
+  connections. MCP servers configured in Clovy use the Clovy gateway;
+  their stored credentials are not copied into the CLI configuration
+  ([ADR-0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)).
+  With Clovy's server, claude
   also gets `--permission-prompt-tool mcp__clovy__approve_action
   --disallowedTools mcp__clovy__approve_action AskUserQuestion`
   (`policy::CLAUDE_INTERACTION_TOOLS`): its own permission requests (shell,

@@ -7769,6 +7769,10 @@ fn hud_hide_delay_for_event(
 ) -> Duration {
     match event_type {
         Some("shutdown_ack") => Duration::ZERO,
+        // The webview normally hides immediately after paste, but keeps a
+        // missing-cleanup-key notice for 3 s before its exit animation.
+        // This native fallback must not cut that notice short.
+        Some("paste_completed") => Duration::from_millis(3500),
         Some("error") if event.is_some_and(is_silent_transcription_error) => {
             Duration::from_millis(900)
         }
@@ -9579,6 +9583,22 @@ mod tests {
         assert_eq!(
             result.cleanup_skipped.map(|error| error.code).as_deref(),
             Some("dictation_cleanup_timeout")
+        );
+    }
+
+    #[test]
+    fn paste_completion_fallback_keeps_the_cleanup_notice_readable() {
+        // hud.ts keeps the missing-key notice for 3 s, then allows 240 ms
+        // for its exit animation plus a 60 ms timeout margin.
+        let notice_and_exit = Duration::from_millis(3300);
+        assert!(hud_hide_delay_for_event(Some("paste_completed"), None) >= notice_and_exit);
+        assert_eq!(
+            hud_hide_delay_for_event(Some("recording_discarded"), None),
+            Duration::from_millis(900)
+        );
+        assert_eq!(
+            hud_hide_delay_for_event(Some("shutdown_ack"), None),
+            Duration::ZERO
         );
     }
 

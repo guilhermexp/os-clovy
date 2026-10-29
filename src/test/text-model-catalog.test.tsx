@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSettings } from "../components/settings/AppSettings";
 import { applyInterfaceLocale } from "../i18n/locale";
+import { setCurrentDataPartitionName } from "../lib/data-partition";
 import type { LlmProvidersDto } from "../lib/llm-providers";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -15,6 +16,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }))
 const models = ["vendor/one", "vendor/two", "vendor/three"].map((id, index) => ({
   id,
   name: `Text model ${index + 1}`,
+  description: `Catalog details for ${id}`,
   provider: "openrouter",
   modelType: "text",
   capabilities: index === 1 ? [] : ["supportsFunctionCalling"],
@@ -22,6 +24,7 @@ const models = ["vendor/one", "vendor/two", "vendor/three"].map((id, index) => (
   contextTokens: 128000,
 }));
 let settings: Record<string, unknown>;
+let effectiveSettings: Record<string, unknown> | undefined;
 let providers: LlmProvidersDto;
 let catalogFails: boolean;
 function renderSettings() {
@@ -44,8 +47,10 @@ function generationReads() {
 
 beforeEach(() => {
   mocks.invoke.mockReset();
+  setCurrentDataPartitionName("default");
   applyInterfaceLocale("en");
   catalogFails = false;
+  effectiveSettings = undefined;
   settings = {
     transcriptionProvider: "groq",
     generationProvider: "openrouter",
@@ -69,7 +74,7 @@ beforeEach(() => {
   mocks.invoke.mockImplementation(async (command, args) => {
     if (command === "dictation_settings") return { settings: { microphone: {} } };
     if (command === "dictation_hotkey_status") return { type: "ready", payload: {} };
-    if (command === "provider_model_settings") return { settings };
+    if (command === "provider_model_settings") return { settings, effectiveSettings };
     if (command === "llm_providers") return providers;
     if (command === "llm_detect_clis")
       return [
@@ -110,10 +115,85 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  setCurrentDataPartitionName("default");
   applyInterfaceLocale("en");
 });
 
 describe("OpenRouter text model catalog", () => {
+  it("retries a failed catalog in a read-only named partition", async () => {
+    setCurrentDataPartitionName("Research");
+    catalogFails = true;
+    const user = userEvent.setup();
+    renderSettings();
+    const retry = await screen.findByRole("button", { name: "Retry model list" });
+    const reads = generationReads();
+    catalogFails = false;
+    await user.click(retry);
+    await waitFor(() => expect(generationReads()).toBeGreaterThan(reads));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Retry model list" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Change text model" })).toBeDisabled();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "set_provider_model")).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    "save",
+    "remove",
+  ] as const)("preserves partition model overrides when a global key is %s", async (operation) => {
+    setCurrentDataPartitionName("Research");
+    settings.providerApiKeysConfigured = {
+      groq: false,
+      openrouter: operation === "remove",
+      fal: false,
+      tavily: false,
+    };
+    effectiveSettings = {
+      ...settings,
+      transcriptionModel: "research-transcription",
+      imageModel: "research-image",
+      videoModel: "research-video",
+    };
+    const user = userEvent.setup();
+    renderSettings();
+    const transcription = await screen.findByRole("button", { name: "Change transcription model" });
+    await waitFor(() => expect(transcription).toHaveTextContent("research-transcription"));
+    await user.click(screen.getByRole("button", { name: "More options for text" }));
+    const input = screen.getByLabelText("OpenRouter API key");
+    const row = input.closest(".settings-row") as HTMLElement;
+    if (operation === "save") await user.type(input, "fixture-key");
+    await user.click(
+      within(row).getByRole("button", { name: operation === "save" ? "Save" : "Remove" }),
+    );
+    await waitFor(() =>
+      expect(
+        within(row).getByRole("button", { name: operation === "save" ? "Remove" : "Save" }),
+      ).toBeVisible(),
+    );
+    expect(transcription).toHaveTextContent("research-transcription");
+    expect(screen.getByRole("button", { name: "Change image model" })).toHaveTextContent(
+      "research-image",
+    );
+    expect(screen.getByRole("button", { name: "Change video model" })).toHaveTextContent(
+      "research-video",
+    );
+  });
+
+  it.each([
+    "pointer",
+    "focus",
+  ] as const)("shows generation model details on %s", async (interaction) => {
+    const user = userEvent.setup();
+    renderSettings();
+    await user.click(await screen.findByRole("button", { name: "Change text model" }));
+    const option = await screen.findByRole("option", { name: "Text model 2" });
+    if (interaction === "pointer") await user.hover(option);
+    else fireEvent.focus(option);
+    expect(await screen.findByText("Catalog details for vendor/two")).toBeVisible();
+  });
+
   it("offers all text models without tools or keys and saves only the chosen text model", async () => {
     const user = userEvent.setup();
     renderSettings();

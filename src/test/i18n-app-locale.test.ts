@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { formatTime } from "../components/activity-timeline/timeline-utils";
 import { applyInterfaceLocale } from "../i18n/locale";
-import { formatNumber, intlLocale } from "../i18n/translate";
+import { formatNumber, intlLocale, t } from "../i18n/translate";
 import { clovyHomeDayLabel } from "../lib/clovy-home";
 import { formatCalendarDate, formatListTimestamp } from "../lib/date-format";
 import { messageForErrorCode, messageFromError } from "../lib/errors";
@@ -142,6 +142,30 @@ describe("native error codes", () => {
 
 describe("Direct provider and own-engine errors", () => {
   afterEach(() => applyInterfaceLocale("en"));
+
+  it("localizes direct transport failures without reviving retired service reasons", () => {
+    for (const locale of ["en", "pt-BR"] as const) {
+      applyInterfaceLocale(locale);
+      expect(
+        messageForErrorCode(
+          "clovy_request_failed",
+          "error sending request for url (https://api.groq.com/openai/v1/audio/transcriptions)",
+        ),
+      ).toBe(t("lib.errors.unreachable"));
+      expect(messageForErrorCode("clovy_request_failed", "operation timed out")).toBe(
+        t("lib.errors.unreachable"),
+      );
+      expect(messageForErrorCode("clovy_request_failed", "insufficient_credits")).toBe(
+        "insufficient_credits",
+      );
+      expect(messageForErrorCode("clovy_request_failed", "builder error: invalid URL")).toBe(
+        "builder error: invalid URL",
+      );
+      expect(messageForErrorCode("unrelated", "error sending request")).toBe(
+        "error sending request",
+      );
+    }
+  });
 
   it("localizes direct provider key rejection", () => {
     applyInterfaceLocale("pt-BR");

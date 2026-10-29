@@ -44,7 +44,7 @@ export default defineMessages({
     // Errors.
 
     "lib.errors.emptyResponse": "Clovy returned no data.",
-    "lib.errors.unreachable": "Couldn't reach Clovy.",
+    "lib.errors.unreachable": "Couldn't reach the provider. Check your connection and try again.",
     "lib.errors.requestFailed": "Clovy couldn't complete this request. Try again.",
     "lib.errors.streamInvalid": "The processing service returned an invalid response.",
     "lib.errors.reason.upstreamProviderFailed":
@@ -453,7 +453,8 @@ export default defineMessages({
     "lib.brand.plum": "Ameixa",
 
     "lib.errors.emptyResponse": "O Clovy não retornou dados.",
-    "lib.errors.unreachable": "Não foi possível falar com o Clovy.",
+    "lib.errors.unreachable":
+      "Não foi possível conectar ao provedor. Verifique sua conexão e tente de novo.",
     "lib.errors.requestFailed": "O Clovy não conseguiu concluir este pedido. Tente de novo.",
     "lib.errors.streamInvalid": "O serviço de processamento retornou uma resposta inválida.",
     "lib.errors.reason.upstreamProviderFailed":

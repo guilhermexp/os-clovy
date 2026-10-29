@@ -259,14 +259,7 @@ impl<D: ConnectorDriver> ToolGroup for ConnectorTools<D> {
                         let Some(name) = tool["name"].as_str() else {
                             continue;
                         };
-                        if crate::routines::routine_tool_allowed_for_session(
-                            &ctx.data.notes,
-                            &bound(ctx)?.session_id,
-                            name,
-                        )
-                        .await?
-                            != Some(false)
-                        {
+                        if super::routine_tool_allowed(&ctx.data.notes, bound(ctx)?, name).await? {
                             visible.push(descriptor(&tool));
                         }
                     }
@@ -319,14 +312,7 @@ impl<D: ConnectorDriver> ToolGroup for ConnectorTools<D> {
             } else {
                 None
             };
-            if crate::routines::routine_tool_allowed_for_session(
-                &ctx.data.notes,
-                &binding.session_id,
-                name,
-            )
-            .await?
-                == Some(false)
-            {
+            if !super::routine_tool_allowed(&ctx.data.notes, binding, name).await? {
                 return Err(AppError::new(
                     "routine_tool_not_enabled",
                     "This tool is not enabled for the routine.",

@@ -197,9 +197,7 @@ pub(crate) async fn call(
 ) -> Result<Value, AppError> {
     // A routine session runs only the tools its routine enables, as in the
     // native engine.
-    if crate::routines::routine_tool_allowed_for_session(pool, &binding.session_id, name).await?
-        == Some(false)
-    {
+    if !super::routine_tool_allowed(pool, binding, name).await? {
         return Err(AppError::new(
             "routine_tool_not_enabled",
             "This tool is not enabled for the routine.",

@@ -3029,9 +3029,16 @@ pub(crate) async fn repositories(app: &AppHandle) -> Result<Repositories, AppErr
                     }
                 }
             }
-            if let Err(error) = crate::agent_sessions::retirement::cleanup_secrets(&pool).await {
-                tracing::warn!(code = %error.code, "Retired agent secret cleanup did not complete");
-            }
+            // Credential-store prompts must not hold repository initialization.
+            // Failed or interrupted cleanup stays queued for the next launch.
+            let cleanup_pool = pool.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) =
+                    crate::agent_sessions::retirement::cleanup_secrets(&cleanup_pool).await
+                {
+                    tracing::warn!(code = %error.code, "Retired agent secret cleanup did not complete");
+                }
+            });
             Ok(Repositories::new(pool))
         })
         .await

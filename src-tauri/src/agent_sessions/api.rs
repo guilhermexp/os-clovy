@@ -347,40 +347,36 @@ pub async fn branch_agent_session(
         &crate::db::repositories::timestamp(),
     )
     .await?;
-    let items = sqlx::query::query(
-        "SELECT id, sequence, kind, payload_json, created_at
-         FROM agent_items WHERE session_id = ? AND sequence <= ? ORDER BY sequence ASC",
+    let item_ids = copy_branch_items(&mut transaction, &session_id, &branch.id, sequence).await?;
+    copy_branch_artifacts(
+        &mut transaction,
+        &session_id,
+        &branch.id,
+        &cutoff_created_at,
+        &final_workspace,
+        &item_ids,
     )
-    .bind(&session_id)
-    .bind(sequence)
-    .fetch_all(&mut *transaction)
     .await?;
-    let mut item_ids = HashMap::new();
-    for item in items {
-        let source_item_id: String = item.get("id");
-        let branch_item_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query::query(
-            "INSERT INTO agent_items
-             (id, session_id, sequence, kind, payload_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&branch_item_id)
-        .bind(&branch.id)
-        .bind(item.get::<i64, _>("sequence"))
-        .bind(item.get::<String, _>("kind"))
-        .bind(item.get::<String, _>("payload_json"))
-        .bind(item.get::<String, _>("created_at"))
-        .execute(&mut *transaction)
-        .await?;
-        item_ids.insert(source_item_id, branch_item_id);
-    }
+    transaction.commit().await?;
+    Ok(session_json(repository.get_session(&branch.id).await?))
+}
+
+async fn copy_branch_artifacts(
+    transaction: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    source_session_id: &str,
+    branch_session_id: &str,
+    cutoff_created_at: &str,
+    final_workspace: &Path,
+    item_ids: &HashMap<String, String>,
+) -> Result<(), AppError> {
+    use sqlx::row::Row;
     let artifacts = sqlx::query::query(
         "SELECT id, item_id, provenance, action, path, original_path, display_name, mime_type, size_bytes, available, created_at
          FROM agent_artifacts WHERE session_id = ? AND created_at <= ? ORDER BY created_at ASC",
     )
-    .bind(&session_id)
-    .bind(&cutoff_created_at)
-    .fetch_all(&mut *transaction)
+    .bind(source_session_id)
+    .bind(cutoff_created_at)
+    .fetch_all(&mut **transaction)
     .await?;
     let artifact_root = final_workspace.join("artifacts");
     tokio::fs::create_dir_all(&artifact_root)
@@ -388,6 +384,10 @@ pub async fn branch_agent_session(
         .map_err(io_error)?;
     let mut path_replacements = Vec::new();
     for artifact in artifacts {
+        let source_item_id: Option<String> = artifact.get("item_id");
+        // A retained retry can still reference an attachment from a replaced
+        // message. Keep the existing artifact-copy contract and rewrite paths
+        // in retained payloads even when the original item was omitted.
         let source_path = PathBuf::from(artifact.get::<String, _>("path"));
         let available = artifact.get::<i64, _>("available") != 0 && source_path.is_file();
         let destination = if available {
@@ -412,14 +412,13 @@ pub async fn branch_agent_session(
                     .unwrap_or("missing-artifact"),
             )
         };
-        let source_item_id: Option<String> = artifact.get("item_id");
         sqlx::query::query(
             "INSERT INTO agent_artifacts
              (id, session_id, item_id, provenance, action, path, original_path, display_name, mime_type, size_bytes, available, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&branch.id)
+        .bind(branch_session_id)
         .bind(source_item_id.and_then(|id| item_ids.get(&id).cloned()))
         .bind(artifact.get::<String, _>("provenance"))
         .bind(artifact.get::<String, _>("action"))
@@ -430,15 +429,15 @@ pub async fn branch_agent_session(
         .bind(artifact.get::<Option<i64>, _>("size_bytes"))
         .bind(i64::from(available))
         .bind(artifact.get::<String, _>("created_at"))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
     }
     if !path_replacements.is_empty() {
         let branch_items = sqlx::query::query(
             "SELECT id, payload_json FROM agent_items WHERE session_id = ? ORDER BY sequence ASC",
         )
-        .bind(&branch.id)
-        .fetch_all(&mut *transaction)
+        .bind(branch_session_id)
+        .fetch_all(&mut **transaction)
         .await?;
         for item in branch_items {
             let item_id: String = item.get("id");
@@ -450,12 +449,63 @@ pub async fn branch_agent_session(
             sqlx::query::query("UPDATE agent_items SET payload_json = ? WHERE id = ?")
                 .bind(payload.to_string())
                 .bind(item_id)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
         }
     }
-    transaction.commit().await?;
-    Ok(session_json(repository.get_session(&branch.id).await?))
+    Ok(())
+}
+
+// Branches intentionally omit run IDs. Remove replaced attempts before that
+// provenance is lost, considering only retries reached at the branch point.
+async fn copy_branch_items(
+    transaction: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    source_session_id: &str,
+    branch_session_id: &str,
+    cutoff_sequence: i64,
+) -> Result<HashMap<String, String>, sqlx::Error> {
+    use sqlx::row::Row;
+    let items = sqlx::query::query(
+        "SELECT item.id, item.sequence, item.kind, item.payload_json, item.created_at
+         FROM agent_items AS item
+         WHERE item.session_id = ? AND item.sequence <= ?
+           AND NOT EXISTS (
+             SELECT 1 FROM agent_runs AS retry
+             WHERE retry.session_id = item.session_id
+               AND json_extract(retry.run_config_json, '$.retryOfRunId') = item.run_id
+               AND EXISTS (
+                 SELECT 1 FROM agent_items AS retry_item
+                 WHERE retry_item.session_id = item.session_id
+                   AND retry_item.run_id = retry.id AND retry_item.sequence <= ?
+               )
+           )
+         ORDER BY item.sequence ASC",
+    )
+    .bind(source_session_id)
+    .bind(cutoff_sequence)
+    .bind(cutoff_sequence)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut item_ids = HashMap::new();
+    for item in items {
+        let source_item_id: String = item.get("id");
+        let branch_item_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query::query(
+            "INSERT INTO agent_items
+             (id, session_id, sequence, kind, payload_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&branch_item_id)
+        .bind(branch_session_id)
+        .bind(item.get::<i64, _>("sequence"))
+        .bind(item.get::<String, _>("kind"))
+        .bind(item.get::<String, _>("payload_json"))
+        .bind(item.get::<String, _>("created_at"))
+        .execute(&mut **transaction)
+        .await?;
+        item_ids.insert(source_item_id, branch_item_id);
+    }
+    Ok(item_ids)
 }
 
 fn replace_json_paths(value: &mut Value, replacements: &[(String, String)]) {
@@ -834,15 +884,7 @@ pub async fn retry_agent_run(app: AppHandle, run_id: String) -> Result<Value, Ap
     tokio::fs::create_dir_all(&workspace)
         .await
         .map_err(io_error)?;
-    let model = normalize_agent_model(&session.model);
-    if model != session.model {
-        sqlx::query::query("UPDATE agent_sessions SET model = ?, workspace_path = ? WHERE id = ?")
-            .bind(&model)
-            .bind(&workspace)
-            .bind(&session.id)
-            .execute(&repository.pool)
-            .await?;
-    }
+    let model = persist_retry_session(&repository, &session, &workspace).await?;
     let enabled_skill_ids = repository.run_enabled_skills(&previous.id).await?;
     let run = repository.create_run(&session.id, &model, None).await?;
     if let Err(error) = repository.set_run_retry_parent(&run.id, &previous.id).await {
@@ -875,6 +917,23 @@ pub async fn retry_agent_run(app: AppHandle, run_id: String) -> Result<Value, Ap
         },
     )
     .await
+}
+
+async fn persist_retry_session(
+    repository: &AgentRepository,
+    session: &super::AgentSessionDto,
+    workspace: &str,
+) -> Result<String, AppError> {
+    let model = normalize_agent_model(&session.model);
+    if model != session.model || session.workspace_path.is_none() {
+        sqlx::query::query("UPDATE agent_sessions SET model = ?, workspace_path = ? WHERE id = ?")
+            .bind(&model)
+            .bind(workspace)
+            .bind(&session.id)
+            .execute(&repository.pool)
+            .await?;
+    }
+    Ok(model)
 }
 
 fn retry_message(items: Vec<AgentItemDto>, run_id: &str) -> Option<super::MessagePayload> {
@@ -1771,6 +1830,184 @@ fn attachment_mime_type(path: &std::path::Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn review_delta_branch_retry_keeps_independent_attachment_copy() {
+        let broker = crate::approval_broker::testing::TestBroker::new([]).await;
+        let repository = AgentRepository::new(broker.pool().clone());
+        let source = repository
+            .create_session("Source", "cli:claude", AgentSafetyMode::Sandboxed, None)
+            .await
+            .unwrap();
+        let branch = repository
+            .create_session("Branch", "cli:claude", AgentSafetyMode::Sandboxed, None)
+            .await
+            .unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let source_path = files.path().join("source.txt");
+        std::fs::write(&source_path, "independent attachment").unwrap();
+        let attachment = MessageAttachmentPayload {
+            id: "source-artifact".into(),
+            name: "source.txt".into(),
+            path: source_path.to_string_lossy().into_owned(),
+            mime_type: Some("text/plain".into()),
+            size_bytes: 22,
+            available: true,
+            created_at: source.created_at.clone(),
+        };
+        let payload = super::super::AgentItemPayload::UserMessage(super::super::MessagePayload {
+            role: "user".into(),
+            content: "Read the attachment".into(),
+            attachments: vec![attachment],
+        });
+        let original = repository
+            .create_run(&source.id, "cli:claude", None)
+            .await
+            .unwrap();
+        let first = repository
+            .append_item(&source.id, Some(&original.id), 0, &payload, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let retry = repository
+            .create_run(&source.id, "cli:claude", None)
+            .await
+            .unwrap();
+        repository
+            .set_run_retry_parent(&retry.id, &original.id)
+            .await
+            .unwrap();
+        let last = repository
+            .append_item(&source.id, Some(&retry.id), 0, &payload, None)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query::query("INSERT INTO agent_artifacts (id, session_id, item_id, provenance, action, path, available, created_at) VALUES ('source-artifact', ?, ?, 'user', 'attachment', ?, 1, ?)")
+            .bind(&source.id).bind(&first.id).bind(source_path.to_str().unwrap()).bind(&first.created_at).execute(&repository.pool).await.unwrap();
+        let mut tx = repository.pool.begin().await.unwrap();
+        let mapping = copy_branch_items(&mut tx, &source.id, &branch.id, last.sequence)
+            .await
+            .unwrap();
+        copy_branch_artifacts(
+            &mut tx,
+            &source.id,
+            &branch.id,
+            &last.created_at,
+            &files.path().join("branch"),
+            &mapping,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let artifacts = repository.artifacts(&branch.id).await.unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_ne!(artifacts[0].path, source_path.to_string_lossy());
+        std::fs::remove_file(&source_path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&artifacts[0].path).unwrap(),
+            "independent attachment"
+        );
+        let copied = repository.items(&branch.id).await.unwrap();
+        assert_eq!(copied.len(), 1);
+        let super::super::AgentItemPayload::UserMessage(message) = &copied[0].payload else {
+            panic!("user message");
+        };
+        assert_eq!(message.attachments[0].path, artifacts[0].path);
+    }
+
+    #[tokio::test]
+    async fn branches_exclude_replaced_attempts_only_up_to_the_branch_point() {
+        let broker = crate::approval_broker::testing::TestBroker::new([]).await;
+        let repository = AgentRepository::new(broker.pool().clone());
+        let source = repository
+            .create_session("Source", "cli:claude", AgentSafetyMode::Sandboxed, None)
+            .await
+            .unwrap();
+        let mut runs: Vec<String> = Vec::new();
+        let mut items = Vec::new();
+        for content in ["rejected first", "rejected second", "accepted third"] {
+            let run = repository
+                .create_run(&source.id, "cli:claude", None)
+                .await
+                .unwrap();
+            if let Some(previous) = runs.last() {
+                repository
+                    .set_run_retry_parent(&run.id, previous)
+                    .await
+                    .unwrap();
+            }
+            let item = repository
+                .append_item(
+                    &source.id,
+                    Some(&run.id),
+                    0,
+                    &super::super::AgentItemPayload::AssistantMessage(
+                        super::super::MessagePayload {
+                            role: "assistant".into(),
+                            content: content.into(),
+                            attachments: Vec::new(),
+                        },
+                    ),
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            runs.push(run.id);
+            items.push(item);
+        }
+        for (cutoff, expected) in [(0, 0), (1, 1), (2, 2)] {
+            let branch = repository
+                .create_session("Branch", "cli:claude", AgentSafetyMode::Sandboxed, None)
+                .await
+                .unwrap();
+            let mut transaction = repository.pool.begin().await.unwrap();
+            let mapping = copy_branch_items(&mut transaction, &source.id, &branch.id, cutoff)
+                .await
+                .unwrap();
+            transaction.commit().await.unwrap();
+            let copied = repository.items(&branch.id).await.unwrap();
+            assert_eq!(
+                copied.len(),
+                1,
+                "cutoff {cutoff} must not resurrect replaced attempts"
+            );
+            assert_eq!(
+                copied[0].payload.value().unwrap(),
+                items[expected].payload.value().unwrap()
+            );
+            assert_eq!(mapping.len(), 1);
+            assert!(mapping.contains_key(&items[expected].id));
+            assert!(copied[0].run_id.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_persists_missing_workspace_for_an_unchanged_cli_engine() {
+        let broker = crate::approval_broker::testing::TestBroker::new([]).await;
+        let repository = AgentRepository::new(broker.pool().clone());
+        let model = crate::chat_engine::engine_model_id(crate::llm::cli::CliKind::Claude);
+        let session = repository
+            .create_session(
+                "Imported CLI session",
+                &model,
+                AgentSafetyMode::Sandboxed,
+                None,
+            )
+            .await
+            .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace = workspace.path().to_str().unwrap();
+        assert_eq!(
+            persist_retry_session(&repository, &session, workspace)
+                .await
+                .unwrap(),
+            model
+        );
+        let saved = repository.get_session(&session.id).await.unwrap();
+        assert_eq!(saved.workspace_path.as_deref(), Some(workspace));
+        assert_eq!(saved.model, model);
+    }
 
     #[test]
     fn historical_native_and_endpoint_models_retry_on_a_cli() {

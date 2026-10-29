@@ -104,6 +104,31 @@ async fn routine_read_dispatch_denies_before_arguments_or_data_and_after_revocat
 }
 
 #[tokio::test]
+async fn deleted_routine_loses_read_catalog_and_dispatch_before_arguments() {
+    let (data, binding) = fixture().await;
+    set_toolsets(&data, &["context_engine", "skills"]).await;
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        ..ToolCtx::unbound(&data)
+    };
+    assert_eq!(ReadTools.catalog(&ctx).await.len(), 14);
+    query("DELETE FROM routines WHERE id = 'read-routine'")
+        .execute(&data.notes)
+        .await
+        .unwrap();
+    assert!(ReadTools.catalog(&ctx).await.is_empty());
+    let mut tools = names(&ctx);
+    tools.extend(["get_dictation", "list_skills", "load_skill"].map(str::to_owned));
+    for name in tools {
+        assert_eq!(
+            call(&ctx, &name, &Value::Null).await.unwrap_err().code,
+            "routine_tool_not_enabled",
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn routine_read_enabled_context_permits_data_reads() {
     let (mut data, binding) = fixture().await;
     let (_directory, store) = activity_store().await;

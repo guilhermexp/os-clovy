@@ -27,14 +27,8 @@ impl ToolGroup for NoteTools {
             let Some(binding) = ctx.binding else {
                 return Vec::new();
             };
-            match crate::routines::routine_tool_allowed_for_session(
-                &ctx.data.notes,
-                &binding.session_id,
-                GET_DICTATION,
-            )
-            .await
-            {
-                Ok(Some(false)) => Vec::new(),
+            match super::routine_tool_allowed(&ctx.data.notes, binding, GET_DICTATION).await {
+                Ok(false) => Vec::new(),
                 Ok(_) => self.descriptors(ctx),
                 Err(error) => {
                     tracing::warn!(code = %error.code, "Dictation tool permissions unavailable");
@@ -55,14 +49,7 @@ impl ToolGroup for NoteTools {
             })?;
             // Recheck at dispatch: a routine's toolsets may have changed
             // since its CLI received the catalog.
-            if crate::routines::routine_tool_allowed_for_session(
-                &ctx.data.notes,
-                &binding.session_id,
-                GET_DICTATION,
-            )
-            .await?
-                == Some(false)
-            {
+            if !super::routine_tool_allowed(&ctx.data.notes, binding, GET_DICTATION).await? {
                 return Err(AppError::new(
                     "routine_tool_not_enabled",
                     "This tool is not enabled for the routine.",

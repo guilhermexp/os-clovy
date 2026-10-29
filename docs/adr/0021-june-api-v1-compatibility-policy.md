@@ -129,7 +129,7 @@ remain unchanged.
 
 ## Addendum - 2026-10-28: direct providers only
 
-The additive-only server compatibility requirement are superseded for this fork by
+The additive-only server compatibility requirement is superseded for this fork by
 [ADR-0073](0073-desktop-calls-user-providers-without-a-clovy-server.md). The desktop calls the user's providers directly; chat stays
 on CLI engines and Clovy tools remain local through MCP. The server is removed,
 not replaced or deployed with a breaking contract. Earlier decisions above

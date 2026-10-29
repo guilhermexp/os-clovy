@@ -258,10 +258,33 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
     if !settings.enabled {
         return;
     }
-    // Inactive without an activity provider: nothing is generated or downloaded.
-    if provider_state() != ProviderState::Ready {
-        return;
+    run_scheduled_generation(
+        provider_state(),
+        tick_generation(app, &state, &store, &settings, now),
+    )
+    .await;
+}
+
+/// The scheduler must not poll generation work without a ready provider.
+/// Its state is also the provider state exposed by the day view.
+async fn run_scheduled_generation(
+    provider: ProviderState,
+    work: impl std::future::Future<Output = ()>,
+) -> ProviderState {
+    if provider == ProviderState::Ready {
+        work.await;
     }
+    provider
+}
+
+async fn tick_generation(
+    app: &AppHandle,
+    state: &DayIntelligenceState,
+    store: &ActivityStore,
+    settings: &crate::activity::settings::ActivitySettings,
+    now: chrono::DateTime<Utc>,
+) {
+    let zone = SystemZone;
     // Text is written in the interface language: before the saved file or
     // the webview says which, nothing is generated (the next tick retries).
     let Some(locale) = crate::interface_locale::known() else {
@@ -277,8 +300,8 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
     let today = local_day(&zone, now);
     let sources = AppSources { app: app.clone() };
     let deps = Deps {
-        store: &store,
-        settings: &settings,
+        store,
+        settings,
         generator: &ActivityProvider,
         embedder: state.embedder.as_ref(),
         sources: &sources,
@@ -312,7 +335,7 @@ async fn tick(app: &AppHandle, last_prune: &mut Option<Instant>) {
     }
     let mut records = Vec::with_capacity(2);
     for day in [yesterday, today] {
-        match db::run_record(&store, &format!("auto:{}", day_key(day))).await {
+        match db::run_record(store, &format!("auto:{}", day_key(day))).await {
             Ok(record) => records.push(record),
             Err(error) => {
                 tracing::warn!(%error, "day summary run record unreadable");
@@ -525,4 +548,133 @@ pub async fn day_intelligence_generate(
     emit(&app, &request.day, false);
     result?;
     read_dto(&app, &state, &store, &settings, day).await
+}
+
+#[cfg(test)]
+mod scheduler_provider_tests {
+    use super::test_support as fixture;
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn scheduled_summary_without_provider_stays_disabled_and_makes_no_call() {
+        let _guard = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let mut provider_settings = crate::providers::default_settings_for_tests();
+        provider_settings.llm_usage.activity = ProviderRef::None;
+        crate::providers::replace_current_settings_for_tests(provider_settings);
+        let (_directory, store) = fixture::store().await;
+        let mut settings = fixture::settings();
+        settings.day_summary.time = "18:00".into();
+        let zone = fixture::zone();
+        let now = fixture::local(18, 5);
+        let day = fixture::day();
+        fixture::build_timeline(&store, now).await;
+        let sources = fixture::sources();
+        *lock(&sources.ingestion_scanned_at) = Some(now);
+        let generator = fixture::FakeProvider::new(|request| {
+            Ok(match fixture::kind(request) {
+                "hour" => {
+                    json!({"summary":"Synthetic work", "activities":[{"description":"Synthetic work", "minutes":1}]})
+                }
+                "fold" => json!({"placements":[]}),
+                _ => {
+                    json!({"headline":"Synthetic day", "narrative":"A synthetic meeting happened.", "insights":[], "standup":{"done":["Synthetic meeting"],"in_progress":[],"blockers":[]}})
+                }
+            })
+        });
+        let deps = fixture::deps(
+            &store,
+            &settings,
+            &generator,
+            &sources,
+            &zone,
+            crate::interface_locale::UiLocale::En,
+            now,
+        );
+        let yesterday_done = schedule::RunRecord {
+            attempts: 1,
+            outcome: schedule::RunOutcome::Ok,
+            next_attempt_at: None,
+        };
+        assert_eq!(
+            schedule::auto_summary_day(
+                zone.local(now),
+                &settings.day_summary.time,
+                Some(&yesterday_done),
+                None,
+                now
+            ),
+            Some(day)
+        );
+        let started = AtomicBool::new(false);
+        let scheduled = async {
+            pipeline::catch_up_day(&deps, day, false).await.unwrap();
+            pipeline::run_scheduled_summary(&deps, day, &|| {
+                started.store(true, Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+        };
+        assert_eq!(
+            run_scheduled_generation(provider_state(), scheduled).await,
+            ProviderState::Missing
+        );
+        assert!(generator.calls().is_empty());
+        assert!(!started.load(Ordering::SeqCst));
+        assert!(db::summary_of_day(&store, &day_key(day))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(db::run_record(&store, &format!("auto:{}", day_key(day)))
+            .await
+            .unwrap()
+            .is_none());
+
+        // The actual day-view DTO reports the missing provider and idle state;
+        // no embedder is fetched or initialized by this skipped generation.
+        let models = tempfile::tempdir().unwrap();
+        let state = DayIntelligenceState {
+            embedder: Arc::new(LocalEmbedder::new(models.path())),
+            notices: Mutex::new(NoticeQueue::default()),
+            run: tokio::sync::Mutex::new(()),
+            running: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
+            capture_failure: Mutex::new(None),
+        };
+        let dto = serde_json::to_value(empty_dto(
+            Availability::Ready,
+            &day_key(day),
+            &state,
+            settings.day_summary.time.clone(),
+        ))
+        .unwrap();
+        assert_eq!(dto["provider"], "missing");
+        assert_eq!(dto["running"], false);
+        assert!(dto["summary"].is_null());
+        assert_eq!(state.embedder.status(), EmbedderStatus::Absent);
+
+        // Positive control: the same due work and fixtures really generate
+        // through the scheduler boundary when a provider is ready.
+        run_scheduled_generation(ProviderState::Ready, async {
+            pipeline::catch_up_day(&deps, day, false).await.unwrap();
+            assert!(matches!(
+                pipeline::run_scheduled_summary(&deps, day, &|| {
+                    started.store(true, Ordering::SeqCst);
+                })
+                .await
+                .unwrap(),
+                ScheduledRun::Generated(_)
+            ));
+        })
+        .await;
+        assert!(started.load(Ordering::SeqCst));
+        assert!(!generator.calls().is_empty());
+        assert!(db::summary_of_day(&store, &day_key(day))
+            .await
+            .unwrap()
+            .is_some());
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
+    }
 }

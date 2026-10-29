@@ -1,5 +1,5 @@
-//! Vault discovery and skill loading shared with the legacy agent. MCP uses
-//! globally enabled, discovered skills; the native caller supplies its run snapshot.
+//! Vault discovery and skill loading for bound CLI turns. Skills follow global
+//! enablement; routine skill calls also recheck the saved toolset policy.
 use super::{ToolCtx, ToolGroup};
 use crate::agent_sessions::skill_identity::{canonical_skill_id, read_skill_ids};
 use crate::agent_sessions::AgentRepository;
@@ -29,7 +29,7 @@ impl ToolGroup for VaultSkillTools {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<Value, AppError>> {
         Box::pin(async move {
-            require_turn(ctx)?;
+            require_tool(ctx, name).await?;
             let app = ctx.app.ok_or_else(|| {
                 AppError::new(
                     "mcp_app_unavailable",
@@ -40,6 +40,19 @@ impl ToolGroup for VaultSkillTools {
                 return vault_result(crate::obsidian::discovery_for_app(app));
             }
             call_with_roots(ctx, name, arguments, &skill_roots(app)).await
+        })
+    }
+
+    fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Vec<Value>> {
+        Box::pin(async move {
+            let mut catalog = Vec::new();
+            for descriptor in self.descriptors(ctx) {
+                let name = descriptor["name"].as_str().unwrap_or_default();
+                if require_tool(ctx, name).await.is_ok() {
+                    catalog.push(descriptor);
+                }
+            }
+            catalog
         })
     }
 }
@@ -57,7 +70,7 @@ pub(super) async fn call_with_roots(
     arguments: &Value,
     roots: &[PathBuf],
 ) -> Result<Value, AppError> {
-    require_turn(ctx)?;
+    require_tool(ctx, name).await?;
     let requested = if name == "load_skill" {
         let requested = arguments
             .get("name")
@@ -95,10 +108,21 @@ pub(super) async fn call_with_roots(
         )),
     }
 }
-fn require_turn(ctx: &ToolCtx<'_>) -> Result<(), AppError> {
-    ctx.binding
-        .map(|_| ())
-        .ok_or_else(|| AppError::new(TURN_REQUIRED, "Vault and skill reads require a Clovy turn."))
+async fn require_tool(ctx: &ToolCtx<'_>, name: &str) -> Result<(), AppError> {
+    let binding = ctx.binding.ok_or_else(|| {
+        AppError::new(TURN_REQUIRED, "Vault and skill reads require a Clovy turn.")
+    })?;
+    // Vault discovery keeps its existing bound-turn contract. The routine
+    // skill toolset controls instructions, not discovery of the chosen vault.
+    if matches!(name, "list_skills" | "load_skill")
+        && !super::routine_tool_allowed(&ctx.data.notes, binding, name).await?
+    {
+        return Err(AppError::new(
+            "routine_tool_not_enabled",
+            "This tool is not enabled for the routine.",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn skill_roots(app: &AppHandle) -> Vec<PathBuf> {

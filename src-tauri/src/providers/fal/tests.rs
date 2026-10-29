@@ -905,3 +905,148 @@ async fn concurrent_images_respect_completed_cache_budget() {
         2
     );
 }
+
+#[tokio::test]
+async fn rejected_media_submissions_can_retry_without_replaying_accepted_jobs() {
+    for status in [401, 403, 422, 413] {
+        for video in [false, true] {
+            let posts = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&posts);
+            let queue = Server::start(move |request| {
+                if request.method == "POST" && count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Reply::json(status, json!({}));
+                }
+                image_reply(request)
+            })
+            .await;
+            let client = client(&queue);
+            if video {
+                assert!(client
+                    .video_generate(Some(KEY), video_request())
+                    .await
+                    .is_err());
+                let job = client
+                    .video_generate(Some("corrected-fixture-key"), video_request())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    client
+                        .video_generate(Some(KEY), video_request())
+                        .await
+                        .unwrap()
+                        .job_id,
+                    job.job_id
+                );
+            } else {
+                assert!(client
+                    .generate_image(Some(KEY), image_request())
+                    .await
+                    .is_err());
+                client
+                    .generate_image(Some("corrected-fixture-key"), image_request())
+                    .await
+                    .unwrap();
+                client
+                    .generate_image(Some(KEY), image_request())
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(posts.load(Ordering::SeqCst), 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_key_rejected_after_image_acceptance_never_resubmits() {
+    let queue = Server::start(|request| {
+        if request.method == "POST" {
+            image_reply(request)
+        } else {
+            Reply::json(401, json!({}))
+        }
+    })
+    .await;
+    let client = client(&queue);
+    assert!(client
+        .generate_image(Some(KEY), image_request())
+        .await
+        .is_err());
+    assert!(client
+        .generate_image(Some("corrected-fixture-key"), image_request())
+        .await
+        .is_err());
+    assert_eq!(
+        queue
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn rejected_images_do_not_exhaust_admission_after_correcting_the_key() {
+    let queue = Server::start(|request| {
+        if request.header("authorization") == Some("Key corrected-fixture-key") {
+            image_reply(request)
+        } else {
+            Reply::json(401, json!({}))
+        }
+    })
+    .await;
+    let client = client(&queue);
+    for index in 0..40 {
+        let mut request = image_request();
+        request.request_id = Some(format!("rejected-{index}"));
+        let error = client.generate_image(Some(KEY), request).await.unwrap_err();
+        assert_eq!(error.code, "fal_api_key_rejected", "attempt {index}");
+    }
+    let mut request = image_request();
+    request.request_id = Some("rejected-39".into());
+    client
+        .generate_image(Some("corrected-fixture-key"), request)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST")
+            .count(),
+        41
+    );
+}
+
+#[tokio::test]
+async fn review_delta_rejected_videos_release_admission_after_key_correction() {
+    let queue = Server::start(|request| {
+        if request.header("authorization") == Some("Key corrected-fixture-key") {
+            image_reply(request)
+        } else {
+            Reply::json(401, json!({}))
+        }
+    })
+    .await;
+    let client = client(&queue);
+    for index in 0..40 {
+        let mut request = video_request();
+        request.request_id = Some(format!("rejected-{index}"));
+        let error = client.video_generate(Some(KEY), request).await.unwrap_err();
+        assert_eq!(error.code, "fal_api_key_rejected", "attempt {index}");
+    }
+    let mut request = video_request();
+    request.request_id = Some("rejected-39".into());
+    client
+        .video_generate(Some("corrected-fixture-key"), request)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST")
+            .count(),
+        41
+    );
+}

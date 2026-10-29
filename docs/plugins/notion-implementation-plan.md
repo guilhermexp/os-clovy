@@ -1,15 +1,12 @@
 # Implementation plan: Notion plugin
 
-> **Stale integration point.** This plan predates the runtime migration:
+> **Historical implementation plan.** This plan predates the runtime migration:
 > "Hermes" (and any Hermes bridge commands such as
 > `import_hermes_bridge_file`) refer to the removed embedded Hermes runtime.
-> Agent-facing MCP registration is now Clovy-owned per
-> [ADR-0038](../adr/0038-june-owned-openai-agents-runtime.md) and
-> [ADR-0039](../adr/0039-june-owned-routines-and-mcp.md); read "Hermes" below
-> as "the Clovy agent runtime" and route MCP registration through the ADR-0039
-> mechanism. The MCP-server integration shape itself is superseded: Clovy-owned
-> capabilities are built as in-loop host tools per
-> [ADR-0040](../adr/0040-plugin-capabilities-as-host-tools.md).
+> Those registration references below are historical, not current instructions.
+> CLI turns now reach the connector through the Clovy MCP gateway and local
+> approval broker, as defined by [ADR-0063](../adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)
+> and [ADR-0072](../adr/0072-cli-chat-replaces-the-native-agent.md).
 
 - **Mode:** CTO
 - **Date:** 2026-07-13

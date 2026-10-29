@@ -63,6 +63,20 @@ pub use read::{
     LIST_APP_USAGE, LIST_CODING_AGENT_SESSIONS, LIST_DICTATIONS, LIST_MEMORIES, SEARCH_NOTES,
 };
 
+/// A routine binding remains a routine after its persisted authorization is
+/// deleted. Missing policy must not turn it into an unrestricted chat turn.
+async fn routine_tool_allowed(
+    pool: &SqlitePool,
+    binding: &TurnBinding,
+    name: &str,
+) -> Result<bool, AppError> {
+    Ok(
+        crate::routines::routine_tool_allowed_for_session(pool, &binding.session_id, name)
+            .await?
+            .unwrap_or(binding.surface != "routine"),
+    )
+}
+
 /// What one MCP request may read, resolved by the app per message
 /// (`super::app_data`) or built directly by tests.
 pub struct McpData {

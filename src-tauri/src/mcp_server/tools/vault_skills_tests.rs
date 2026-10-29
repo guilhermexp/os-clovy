@@ -4,6 +4,129 @@ use crate::approval_broker::testing::TestBroker;
 use crate::llm::cli::CliKind;
 use serde_json::json;
 
+async fn routine_fixture() -> (McpData, crate::mcp_server::turns::TurnBinding) {
+    let broker = TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Claude, false).await;
+    let pool = broker.pool().clone();
+    let now = "2026-10-28T00:00:00Z";
+    sqlx::query::query("INSERT INTO routines (id, name, prompt, schedule, created_at, updated_at, metadata_json, tool_catalog_version) VALUES ('skills-routine', 'Daily', 'Summarise', 'every 1d', ?, ?, '{\"enabledToolsets\":[]}', 1)")
+        .bind(now).bind(now).execute(&pool).await.unwrap();
+    sqlx::query::query("INSERT INTO routine_runs (id, routine_id, agent_session_id, claim_token, trigger_kind, status, model, safety_mode, created_at, updated_at) VALUES ('skills-run', 'skills-routine', ?, 'claim', 'schedule', 'running', 'claude', 'sandboxed', ?, ?)")
+        .bind(&binding.session_id).bind(now).bind(now).execute(&pool).await.unwrap();
+    (
+        McpData {
+            notes: pool,
+            profile: "default".into(),
+            memory_enabled: true,
+            activity: ActivityAccess::Off,
+            now: chrono::Utc::now(),
+        },
+        binding,
+    )
+}
+
+async fn routine_skills_enabled(data: &McpData, enabled: bool) {
+    sqlx::query::query("UPDATE routines SET metadata_json = ? WHERE id = 'skills-routine'")
+        .bind(json!({"enabledToolsets": if enabled { vec!["skills"] } else { vec![] }}).to_string())
+        .execute(&data.notes)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn routine_vault_discovery_does_not_require_the_skill_toolset() {
+    let (data, binding) = routine_fixture().await;
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        ..ToolCtx::unbound(&data)
+    };
+    assert!(descriptors(&ctx)
+        .await
+        .iter()
+        .any(|tool| tool["name"] == "get_obsidian_vault"));
+    // Passing policy reaches the native-app boundary; no vault discovery
+    // or real user directories are accessed by this synthetic fixture.
+    assert_eq!(
+        call(&ctx, "get_obsidian_vault", &json!({}))
+            .await
+            .unwrap_err()
+            .code,
+        "mcp_app_unavailable"
+    );
+}
+
+#[tokio::test]
+async fn routine_skill_catalog_obeys_saved_toolsets() {
+    let (data, binding) = routine_fixture().await;
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        ..ToolCtx::unbound(&data)
+    };
+    let names = |catalog: Vec<serde_json::Value>| {
+        catalog
+            .into_iter()
+            .filter_map(|v| v["name"].as_str().map(str::to_owned))
+            .filter(|v| matches!(v.as_str(), "list_skills" | "load_skill"))
+            .collect::<Vec<_>>()
+    };
+    assert!(names(descriptors(&ctx).await).is_empty());
+    routine_skills_enabled(&data, true).await;
+    assert_eq!(
+        names(descriptors(&ctx).await),
+        ["list_skills", "load_skill"]
+    );
+    routine_skills_enabled(&data, false).await;
+    assert!(names(descriptors(&ctx).await).is_empty());
+}
+
+#[tokio::test]
+async fn routine_skill_dispatch_rechecks_policy_before_arguments_and_files() {
+    let (data, binding) = routine_fixture().await;
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        ..ToolCtx::unbound(&data)
+    };
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("example")).unwrap();
+    std::fs::write(
+        root.path().join("example/SKILL.md"),
+        "Synthetic instructions",
+    )
+    .unwrap();
+    let roots = vec![root.path().to_path_buf()];
+    for enabled_before_revoke in [false, true] {
+        if enabled_before_revoke {
+            routine_skills_enabled(&data, true).await;
+            let loaded = super::vault_skills::call_with_roots(
+                &ctx,
+                "load_skill",
+                &json!({"name":"example"}),
+                &roots,
+            )
+            .await
+            .unwrap();
+            assert_eq!(loaded["content"], "Synthetic instructions");
+            routine_skills_enabled(&data, false).await;
+        }
+        for name in ["list_skills", "load_skill"] {
+            assert_eq!(
+                call(&ctx, name, &serde_json::Value::Null)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "routine_tool_not_enabled"
+            );
+            assert_eq!(
+                super::vault_skills::call_with_roots(&ctx, name, &serde_json::Value::Null, &roots)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "routine_tool_not_enabled"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn skills_follow_global_settings_and_preserve_root_precedence() {
     let broker = TestBroker::new([]).await;

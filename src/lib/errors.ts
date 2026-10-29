@@ -31,6 +31,14 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   shortcut_fn_chord_unsupported: "hud.error.shortcutFnChordUnsupported",
   shortcut_register_failed: "hud.error.shortcutRegisterFailed",
   escape_cancel_unavailable: "hud.error.escapeCancelUnavailable",
+  // Direct transports retain this stable code; match transport text only.
+  clovy_request_failed: [
+    {
+      key: "lib.errors.unreachable",
+      match:
+        /^(error sending request|error decoding response body|error following redirect|request or response body error|operation timed out)/i,
+    },
+  ],
   // Desktop dictation pipeline (src-tauri/src/dictation.rs)
   no_speech: "hud.error.noSpeech",
   groq_api_key_missing: "notes.failure.groqKeyMissing",

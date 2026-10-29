@@ -447,17 +447,18 @@ _Avoid_: upload (unqualified).
 A plain-text token — `@note:<id>`, optionally followed by the quoted note
 title — that points the agent at one specific note. Inserted as a composer
 chip via `@`, seeded by "Ask Clovy" on a note, or pasted from "Copy note
-reference"; the agent resolves it on demand through `june_context`'s
-`get_meeting_note` tool (see
-[ADR-0010](docs/adr/0010-note-references-in-agent-chat.md)).
+reference"; the agent resolves it on demand through the Clovy MCP server's
+`get_note` tool (see [docs/agent-note-tools.md](docs/agent-note-tools.md);
+[ADR-0010](docs/adr/0010-note-references-in-agent-chat.md) records its origin).
 _Avoid_: note link (no URL or deep link is involved), note mention (the chip
 is UI; the reference is the token).
 
 **Skill / Toolset / MCP server**:
 A Skill is a bundled/installed capability pack; a Toolset is a togglable tool
-group; an MCP server is an external tool provider (Clovy ships no Clovy-managed
-MCP servers after ADR-0040; Clovy-owned capabilities are host tools in the agent
-loop). User-supplied external MCP servers remain supported through the `mcp_`
+group; an MCP server exposes tools to a client. Clovy-owned capabilities are
+served through `clovy-mcp`, with local policy and the approval broker as their
+authority ([ADR-0072](docs/adr/0072-cli-chat-replaces-the-native-agent.md)).
+User-supplied external MCP servers configured in Clovy remain supported through the `mcp_`
 dispatch prefix. Connector toolsets include `june_gmail`, `june_gcal`,
 `june_notion`, and their `*_actions` counterparts. Linear's official hosted
 MCP supplies a dynamic external tool inventory under the `mcp_linear_*`
@@ -793,7 +794,7 @@ dictations, and memories, without activity. Clients outside a Clovy chat
 turn get read-only tools; a CLI chat turn connects with a **turn binding** and
 also gets Clovy's turn-bound tools, whose writes go through the **approval
 broker** ([ADR-0063](docs/adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)).
-The legacy Clovy agent keeps its host tools.
+There is no legacy native agent; CLI turns reach Clovy tools through this relay.
 _Avoid_: Clovy-managed MCP server (the retired in-loop `june_*` servers), MCP
 bridge, plugin.
 

@@ -147,13 +147,7 @@ async fn routine_read_allowed(ctx: &ToolCtx<'_>, name: &str) -> Result<bool, App
     let Some(binding) = ctx.binding else {
         return Ok(true);
     };
-    Ok(crate::routines::routine_tool_allowed_for_session(
-        &ctx.data.notes,
-        &binding.session_id,
-        name,
-    )
-    .await?
-        != Some(false))
+    super::routine_tool_allowed(&ctx.data.notes, binding, name).await
 }
 
 fn read_only(name: &str, description: &str, input_schema: Value) -> Value {

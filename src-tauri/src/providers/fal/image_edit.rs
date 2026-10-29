@@ -189,9 +189,19 @@ fn prepare(source: String) -> Result<EditPlan, AppError> {
         let png_base64 = reduce(text, size)?;
         return Ok(EditPlan::Reduced { size, png_base64 });
     }
+    // Normalize locally supported formats whose provider input contract is
+    // narrower, without resizing or cropping the source frame.
+    let (mime_type, source) = if matches!(
+        view.format,
+        image::ImageFormat::Bmp | image::ImageFormat::Tiff
+    ) {
+        ("image/png", png_base64(&decode_source(text)?)?)
+    } else {
+        (view.format.to_mime_type(), source)
+    };
     Ok(EditPlan::AsIs {
         size,
-        mime_type: view.format.to_mime_type(),
+        mime_type,
         source,
     })
 }
@@ -564,11 +574,17 @@ fn redraw(
     observed: Option<ImageSize>,
     content: Option<Rect>,
 ) -> Result<ImageAsset, FalError> {
-    let edited = image::load_from_memory(bytes).map_err(|_| FalError::MediaUnavailable)?;
+    let view = read_header(Cursor::new(bytes)).map_err(|_| FalError::MediaUnavailable)?;
     let returned = ImageSize {
-        width: edited.width(),
-        height: edited.height(),
+        width: view.width,
+        height: view.height,
     };
+    if returned != size && Some(returned) != observed {
+        return Err(size_mismatch(size, returned));
+    }
+    // Decode pixels only after the header matches the bounded output geometry.
+    let mut edited = image::load_from_memory(bytes).map_err(|_| FalError::MediaUnavailable)?;
+    edited.apply_orientation(view.orientation);
     let edited = if returned == size {
         edited
     } else if Some(returned) == observed {
@@ -746,6 +762,21 @@ mod decoded_tests {
     }
 
     #[tokio::test]
+    async fn bmp_and_tiff_sources_are_sent_as_png_with_the_whole_frame() {
+        for format in [ImageFormat::Bmp, ImageFormat::Tiff] {
+            let prepared = prepare_request(encoded(&framed(160, 90, format)), 50 * 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(prepared.input("change color", None)["image_urls"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,"));
+            assert_eq!(sent(&prepared).dimensions(), (160, 90));
+            frame_is_intact(&sent(&prepared), [TOP, RIGHT, BOTTOM, LEFT]);
+        }
+    }
+
+    #[tokio::test]
     async fn small_source_keeps_its_original_pixels_and_encoding() {
         let bytes = framed(160, 90, ImageFormat::Png);
         let source = encoded(&bytes);
@@ -821,6 +852,42 @@ mod decoded_tests {
             &image::load_from_memory(&result.bytes).unwrap(),
             [LEFT, TOP, RIGHT, BOTTOM],
         );
+    }
+
+    #[test]
+    fn review_delta_provider_output_applies_rotation_and_mirroring() {
+        let jpeg = framed(640, 480, ImageFormat::Jpeg);
+        for (orientation, size, edges) in [
+            (
+                6,
+                ImageSize {
+                    width: 480,
+                    height: 640,
+                },
+                [LEFT, TOP, RIGHT, BOTTOM],
+            ),
+            (
+                2,
+                ImageSize {
+                    width: 640,
+                    height: 480,
+                },
+                [TOP, LEFT, BOTTOM, RIGHT],
+            ),
+        ] {
+            let mut exif = [
+                0xFF, 0xE1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'I', b'I', 0x2A, 0, 0x08, 0,
+                0, 0, 0x01, 0, 0x12, 0x01, 0x03, 0, 0x01, 0, 0, 0, 0x06, 0, 0, 0, 0, 0, 0, 0,
+            ];
+            exif[28] = orientation;
+            let mut bytes = jpeg[..2].to_vec();
+            bytes.extend_from_slice(&exif);
+            bytes.extend_from_slice(&jpeg[2..]);
+            let result = redraw(&bytes, size, None, None).unwrap();
+            let image = image::load_from_memory(&result.bytes).unwrap();
+            assert_eq!(image.dimensions(), (size.width, size.height));
+            frame_is_intact(&image, edges);
+        }
     }
 
     #[tokio::test]

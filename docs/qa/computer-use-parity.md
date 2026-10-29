@@ -17,8 +17,7 @@ policy where the PRD requires it.
 | Understand access before prompts | The tile explains Accessibility, Screen Recording, selected-model routing, and that captures are not analytics before the explicit Continue action. Enabling the grant alone never opens a macOS prompt. | `computer-use-control.test.tsx`; manual first-run walkthrough. |
 | Install safely | A Clovy-owned helper is compiled from one exact upstream source commit. The upstream CLI, daemon, updater, full registry, and executable are not shipped. Universal builds merge arm64 and x86_64 slices, then sign and bundle the helper. | Git/Cargo pin, source fingerprint, SPDX SBOM, license, `prepare-cua-driver.mjs`, deterministic self-test. |
 | Grant and inspect macOS access | Accessibility and Screen Recording are separate states with direct System Settings links and correctly attributed drag sources: the nested helper for Accessibility, the outer Clovy app for Screen Recording. Readiness requires both preflight and a live ScreenCaptureKit probe for the responsible app. Local dev keeps stable signed identities (`Clovy Dev.app` and a per-worktree helper) and never resets grants on a `make dev` launch. | Native status tests, `computer-use-control.test.tsx`, `tauri-dev-launcher.test.mjs`, `cargo-clovy-runner.test.mjs`, plus signed live release fixture. |
-| Use a compatible model | The selected generation model must have authoritative vision capability. The current model and a Choose model action are shown. | Native readiness gate and component tests. |
-| Meet plan eligibility | Computer use is available to active Pro and Max subscriptions; legacy paid subscriptions without a plan slug remain compatible. Education and revocation remain visible without an eligible plan. | Native plan tests and UI plan-gate test. |
+| Meet local readiness | Computer use requires the user's grant, the pinned bundled driver, local permissions, and task-scoped approval; no subscription is required in this fork (ADR-0067). | Desktop capability/policy tests and native readiness evidence. |
 | Choose a target app | Clovy can list allowed running apps and select an exact app/window without raising it. Clovy, terminals, security tools, and credential managers are omitted or rejected. | Broker allow/deny tests; live multi-window fixture. |
 | Open a missing app | Clovy asks once to use the installed app for the current task, opens it by display name, then returns only verified app/window identity. Opening the same already-approved running identity does not produce a second display-name alias prompt; ambiguous same-name identities fail closed. Paths, URLs, launch arguments, environment, debug ports, and forced new processes are unavailable. | Helper schema/argument tests; broker authorization-alias, blocked-name, and post-launch identity checks; live TextEdit walkthrough. |
 | Restore a parked window | Window bounds and visibility are returned. Clovy collapses a full-size hidden window plus its small shelf proxy to the real Accessibility window. After app authorization, it automatically raises that window into Clovy's current Stage Manager group without a second decision or pointer movement, then re-lists and verifies it. | Stage Manager duplicate-collapse and classification tests, exact-PID/window helper contract, task-scoped authorization test, manual Stage Manager walkthrough. |
@@ -32,7 +31,7 @@ policy where the PRD requires it.
 | Stop or take over | Stop immediately increments the task epoch, hides the Computer use cursor before teardown, denies parked actions, kills the private driver child, clears the target/captures, and leaves the grant available for a later attended task. Queued cursor updates from the old epoch cannot show it again. | Native stop and cursor epoch tests plus the live driver-exit test. |
 | Stay attended | Only a turn submitted from visible Clovy chat receives both the loopback token and a unique native run lease. A routine, manually named MCP server, restored background process, or task after Stop has no lease. | runtime host tests, routine sanitization tests, native lease gate, app lifecycle integration. |
 | Revoke | Turning the shared grant off performs the same stop path and removes the tool from the usable runtime. The UI explains that macOS TCC grants remain until removed in System Settings. | Shared grant integration and component tests. |
-| Recover from permission/model changes | The UI polls while setup is incomplete. A real readiness transition reconfigures the agent runtime once; loss of readiness also stops active work. | Native runtime-readiness transition and UI polling behavior. |
+| Recover from readiness changes | The UI polls while setup is incomplete. A real readiness transition reconfigures the agent runtime once; loss of readiness also stops active work. | Native runtime-readiness transition and UI polling behavior. |
 | Recover from driver failure | A failed driver call discards and kills the child. The next eligible request starts a new private child; version/stamp mismatches fail closed. | Native lifecycle code, pin tests, self-test failure modes. |
 | Keep routines out | The app-owned MCP server is never included in routine toolsets or earned-autonomy servers. | Rust config tests and runtime capability tests. |
 | Stop unsafe execution | Local readiness and task approval govern the capability; losing readiness stops active work. Release rollback is an owner decision, with no remote rollout route. | Desktop capability/policy tests and native gate evidence. |
@@ -48,8 +47,7 @@ policy where the PRD requires it.
   administration surfaces.
 - It cannot enter passwords, secrets, one-time codes, payment details, or use
   clipboard and destructive/system shortcuts.
-- It is unavailable to routines, locked/background sessions, Windows, and
-  models without vision support.
+- It is unavailable to routines, locked/background sessions, and Windows.
 - Its helper rejects direct launch and requires a signed Clovy parent plus a
   fresh in-memory initialization capability.
 - It fails a delayed approval when the target image or control changed instead
@@ -69,10 +67,11 @@ not change. The helper's direct-launch refusal, authenticated MCP handshake,
 closed tool schemas, exact upstream pin, source fingerprint, universal
 architectures, bundle metadata, and code signature were also checked.
 
-The production React surface was then exercised in an isolated Clovy QA app and
+That historical production React surface was then exercised in an isolated Clovy QA app and
 browser harness across `off`, `permission_missing`, `model_unsupported`,
 `plan_required`, `driver_missing`, `rollout_disabled`, `unsupported`, and
-`ready`. Both Allow for this task and Deny removed the parked app authorization
+`ready`. The historical `model_unsupported`, `plan_required`, and `rollout_disabled` states are not
+current fork gates; local readiness and task approval govern availability. Both Allow for this task and Deny removed the parked app authorization
 without a batch or persistent-authorization path.
 
 ![Computer use ready state](./jun-278-computer-use-ready.png)
