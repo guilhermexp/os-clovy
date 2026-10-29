@@ -156,3 +156,35 @@ Após corrigir a seleção atômica do preview, a suíte desktop completa passou
 Clippy da mesma rodada identificou `Option::is_none_or` acima do MSRV 1.80 declarado. Substituído por `map_or(true, ...)`, com a mesma condição de progresso, sem elevar o MSRV nem suprimir o lint. Portanto `logs/review-5-rust-full-fixed.log` tem exit 101 apesar dos 2.184 testes verdes; verificação de lint após a correção em `logs/review-5-msrv-check.log`.
 
 `logs/review-5-msrv-check.log` exit 0: fmt e Clippy all-targets com `-D warnings` passaram após usar a API compatível com MSRV.
+
+
+### Prova nativa, run-native-1
+
+`logs/native-current-debug-build.log` e `logs/native-current-bundle-snapshot.log`, exit 0: build **debug**, arm64, helper reutilizado, bundle copiado para `.tmp/verify/transcricao-local-parakeet/run-native-1/Clovy-Parakeet-Proof.app` e assinatura ad hoc verificada. Identidade compilada `dev.guilhermexp.clovy.parakeetproof`; perfil sintético novo `~/Library/Application Support/dev.guilhermexp.clovy.parakeetproof-dev`. A cópia anterior de evidência foi preservada. Metadados de nome da cópia foram ajustados para “Clovy Parakeet Proof” e reassinados, sem mudar a identidade compilada (`logs/native-distinct-display-name.log`, exit 0).
+
+App aberto pelo caminho exato. `logs/native-isolation-confirmed.log` e `logs/native-waiting-readiness-evidence.log`, exit 0, confirmam bancos do app no perfil de prova; WebKit usa o namespace da mesma identidade. O primeiro validador (`logs/native-startup-isolation.log`, exit 1) era restrito demais e rejeitou o banco interno do WebKit, também isolado; não houve abertura de banco de produção. Login item do dono manteve o mesmo SHA-256 do baseline.
+
+A sessão do macOS está **bloqueada**: `logs/native-console-readiness-fixed.log` exit 0, `CGSSessionScreenIsLocked=true`. Computer Use devolve `cgWindowNotFound`; nenhum prompt de permissão foi observado ou aceito. Solicitado ao dono desbloquear a sessão; não houve tentativa de desbloqueio ou alteração de TCC/Keychain. Nenhum botão Install foi acionado, nenhum peso foi baixado, nenhum ditado/nota gravado. `run-native-1/dictation-events-startup-only.log` contém somente startup, sem tempos de transcrição.
+
+Correção do comparador do harness preparada somente como artefato revisável `harness-binary-scope.patch`, **não aplicada** fora do checkout. `logs/harness-scope-regression-red.log` exit 1 reproduz o defeito; `logs/harness-candidate-regression-green.log` exit 0, 10 testes. O candidato cruza exclusões explícitas do CodeRabbit com binários detectados pelo Git; continua rejeitando texto omitido, base incorreta, arquivo extra, exclusão não declarada ou inválida. O resultado antigo permanece exit 4 e nenhum gate foi dispensado. Aplicação depende da autorização pedida ao dono, pois está fora do escopo original.
+
+Enquanto aguarda o desbloqueio, somente o PID 20635 desta prova foi encerrado (`logs/native-stop-owned-while-locked.log`, exit 0); bundle, perfil sintético e evidências ficam preservados para a retomada. O app do dono não foi controlado.
+
+
+### Retomada autorizada: rodada 6 e desbloqueio da sessão
+
+O dono determinou: consultar `CGSSessionScreenIsLocked` a cada 60 segundos, sem polling mais frequente, e abrir o bundle exato assim que a sessão estiver desbloqueada. Monitor em `run-native-1/console-polls.jsonl`. Pedidos reais de permissão do macOS continuam exigindo parada e confirmação do dono. A reconstrução de histórico foi interrompida por instrução expressa; o manifesto existente foi aceito como suficiente.
+
+Escopo exato da rodada 5: snapshot `ed99edce01948728deea1fe009362fc7612a955f..7b9087e8a923549e12aa6337a96dc3a698741d3d`, **57 paths**. CodeRabbit declarou **56 paths revisados**, a mesma base e revisão `committed`; declarou `src-tauri/tests/fixtures/parakeet-pt.wav` em `excludedBinaryFiles`. Esse WAV é o único `not_reviewed`; não há path inesperado. O CLI concluiu com exit 0, mas o gate exige igualdade literal com os 57 paths e classificou `scope_mismatch`, exit 4. Evidência exata em `review-5-scope-explanation.json` e `review-pair/5/summary.md`. Não é cobertura integral aceita nem liberação de commit. O harness externo não foi alterado; nova tentativa 6 expressamente autorizada pelo dono, sem `--include-untracked`, com allowlist e stash/pop dos mesmos paths protegidos. A última janela de quota informada, da rodada 4, terminou em 2026-10-29 20:29:51 UTC; rodada 5 não informou nova quota.
+
+Fechamento dos achados OpenQodex 3–5 (todos ligados aos summaries absolutos já registrados acima):
+
+- Rodada 3, ordem em `build-macos-release.sh`: corrigida em `8059537e`, regressão de 10 testes do plano de release verde, sem executar build release.
+- Rodada 3, hash no startup: corrigido em `8059537e`, verificação em worker e remoção coordenada; testes do instalador verdes.
+- Rodada 4, nome de certificado na assinatura: corrigido em `749740f2`, resolver comum converte para identidade comparável; seis testes verdes.
+- Rodada 4, helper sobrevive à troca: corrigido em `749740f2`, limpeza assíncrona sob mutex, revalidação de geração; regressão verde.
+- Rodada 4, hash de retomada bloqueia cancelamento: corrigido em `749740f2`, leitura assíncrona cancelável; regressão verde.
+- Rodada 4, confiança em marcador/tamanho: refutado por D5; comentário e adendo ADR em `7b9087e8` documentam a política aceita e o limite de corrupção externa de mesmo tamanho.
+- Rodada 5, perda de aquecimento após verificação assíncrona: corrigida em `9e3d77a3`; callback Ready volta a aplicar a seleção atual e o teste `parakeet_review_startup_warms_only_after_ready_is_published` passou.
+
+Verificações pós-correções: 2.184 testes Rust verdes, fmt e Clippy all-targets verdes (API equivalente compatível com MSRV em `87eb03d4`). Gate 6 não libera commit final a menos que devolva exit 0; prova nativa continua pendente.
