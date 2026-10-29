@@ -159,6 +159,7 @@ const child = spawn(tauri.command, [...tauri.args, "dev", ...tauriArgs], {
     ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
     OS_CLOVY_DEV_APP_NAME: devAppIdentity.productName,
     OS_CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
+    CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
     ...(devSigningIdentity ? { [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity } : {}),
     ...(replayOnboarding ? { VITE_CLOVY_REPLAY_ONBOARDING: "1" } : {}),
   },

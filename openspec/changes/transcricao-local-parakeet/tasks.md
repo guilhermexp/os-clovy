@@ -188,3 +188,15 @@ Fechamento dos achados OpenQodex 3–5 (todos ligados aos summaries absolutos j�
 - Rodada 5, perda de aquecimento após verificação assíncrona: corrigida em `9e3d77a3`; callback Ready volta a aplicar a seleção atual e o teste `parakeet_review_startup_warms_only_after_ready_is_published` passou.
 
 Verificações pós-correções: 2.184 testes Rust verdes, fmt e Clippy all-targets verdes (API equivalente compatível com MSRV em `87eb03d4`). Gate 6 não libera commit final a menos que devolva exit 0; prova nativa continua pendente.
+
+
+### Revisão pareada, rodada 6
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/6/summary.md`, exit **4**. Snapshot integral da entrega em `7f47e46c088f536bbcb17484b8832b58f4fbf93c`: 57 arquivos, sem WIP ou untracked. OpenQodex concluiu com um achado menor novo; CodeRabbit recusou por quota e indicou 7 minutos e 34 segundos. Prazo conservador registrado em `review-6-quota-wait.json`: 2026-10-29 22:15:27 UTC. Nenhum crédito extra, alteração de conta/remoto ou harness. Stash/pop exit 0, hash protegido idêntico em `review-6-wip-preservation.json`.
+
+Achado `scripts/tauri-dev.mjs:61`: confirmado. Em branches com identidade automática, preparo inicial usava a identidade resolvida, mas o hook filho recebia somente `OS_CLOVY_DEV_APP_IDENTIFIER`, não `CLOVY_DEV_APP_IDENTIFIER`, invalidando o cache do helper. Regressão cobre branch isolada sem override e override explícito, com ferramentas e helpers falsos em sandbox; não acessa TCC real. Teste vermelho em `logs/review-6-launcher-red.log`.
+
+As duas observações não contadas no veredito sobre `role=status` são semântica válida de live region já exercitada pela UI; não alteram o contrato nem exigem correção para este achado. Nenhum item fora das linhas da entrega foi incluído no escopo.
+
+
+Rodada 6, correção concluída: `logs/review-6-launcher-red.log` exit 1, uma falha real em branch automaticamente isolada (identidade resolvida no primeiro preparo, vazia no segundo). `scripts/tauri-dev.mjs` agora transmite `CLOVY_DEV_APP_IDENTIFIER` resolvida ao filho Tauri. `logs/review-6-launcher-green.log` exit 0: 16 testes e typecheck verdes; um aviso no código gerado do fixture foi limpo. `logs/review-6-launcher-clean.log` exit 0: 16 testes e Biome sem avisos. Nenhuma chamada a TCC real, compilação nativa ou alteração no bundle de prova nessa correção de launcher. O prazo conservador de quota 22:15:27 UTC passou; próxima rodada é 7, para cobrir o novo diff, com o mesmo stash/pop e allowlist. Sem commit final até gate 0 e aceitação nativa.

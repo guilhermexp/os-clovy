@@ -98,6 +98,53 @@ function createSandbox() {
 }
 
 describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
+  it.each([
+    "",
+    "dev.guilhermexp.clovy.fixture",
+  ])("uses the same resolved helper identity before and inside Tauri (override=%s)", (identifierOverride) => {
+    const { sandbox, bin } = createSandbox();
+    writeFileSync(
+      path.join(bin, "git"),
+      '#!/bin/sh\nprintf "%s\\n" "codex/jun-123-parakeet-fixture"\n',
+    );
+    chmodSync(path.join(bin, "git"), 0o755);
+    const helper = path.join(sandbox, "scripts", "prepare-local-transcriber.mjs");
+    writeFileSync(
+      helper,
+      'import { appendFileSync, writeFileSync } from "node:fs"; writeFileSync("prepared-local-transcriber", "yes"); appendFileSync("helper-identifiers", (process.env.CLOVY_DEV_APP_IDENTIFIER ?? "") + "\\n");',
+    );
+    // Stand in for Tauri invoking beforeDevCommand with the child's environment.
+    writeFileSync(
+      path.join(bin, "tauri"),
+      '#!/bin/sh\nexec "$CLOVY_SANDBOX_NODE" "$CLOVY_SANDBOX_LOCAL_HELPER"\n',
+    );
+    const launch = spawnSync(process.execPath, [path.join(sandbox, "scripts", "tauri-dev.mjs")], {
+      cwd: sandbox,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CLOVY_DEV_APP_IDENTIFIER: identifierOverride,
+        CLOVY_DEV_SIGNING_IDENTITY: "-",
+        CLOVY_SANDBOX_NODE: process.execPath,
+        CLOVY_SANDBOX_LOCAL_HELPER: helper,
+        VITE_PORT: "1999",
+      },
+      timeout: 30_000,
+    });
+    expect(launch.status, launch.stderr).toBe(0);
+    const configured = JSON.parse(
+      readFileSync(path.join(sandbox, "src-tauri", ".tauri.dev.generated.json"), "utf8"),
+    );
+    if (identifierOverride) expect(configured.identifier).toBe(identifierOverride);
+    else expect(configured.identifier).not.toBe("dev.guilhermexp.clovy");
+    expect(readFileSync(path.join(sandbox, "helper-identifiers"), "utf8").split("\n")).toEqual([
+      configured.identifier,
+      configured.identifier,
+      "",
+    ]);
+  });
+
   it("starts Tauri while existing authorizations and signed helper copies survive", () => {
     const { sandbox, bin } = createSandbox();
     const pin = JSON.parse(
