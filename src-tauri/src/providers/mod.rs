@@ -745,6 +745,32 @@ fn set_provider_model_impl(
     })
 }
 
+/// Persist the explicit model-removal transition, including profile overrides.
+pub fn local_transcription_supported() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+pub(crate) fn remove_local_transcription_selection(
+    state: &ProviderSettingsState,
+) -> Result<bool, AppError> {
+    let mut switched = false;
+    update_settings(state, |settings| {
+        if settings.transcription_provider == PROVIDER_LOCAL {
+            switched = true;
+            settings.transcription_provider = PROVIDER_GROQ.into();
+            settings.transcription_model = DEFAULT_TRANSCRIPTION_MODEL.into();
+        }
+        for overrides in settings.profile_overrides.values_mut() {
+            if overrides.transcription_provider.as_deref() == Some(PROVIDER_LOCAL) {
+                switched = true;
+                overrides.transcription_provider = Some(PROVIDER_GROQ.into());
+                overrides.transcription_model = Some(DEFAULT_TRANSCRIPTION_MODEL.into());
+            }
+        }
+    })?;
+    Ok(switched)
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SetImageSafeModeRequest {
@@ -2526,6 +2552,36 @@ mod tests {
         assert_eq!(reloaded.llm_usage.chat, settings.llm_usage.chat);
         assert_eq!(reloaded.llm_usage.notes, settings.llm_usage.notes);
         replace_current_settings(previous);
+    }
+
+    #[test]
+    fn local_model_removal_persists_groq_and_clears_local_profile_overrides() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();
+        let _restore = RestoreGlobals;
+        let state = test_state();
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.transcription_provider = PROVIDER_LOCAL.into();
+            settings.transcription_model = "parakeet-ultra".into();
+            settings.profile_overrides.insert(
+                "work".into(),
+                ProfileModelOverrides {
+                    transcription_provider: Some(PROVIDER_LOCAL.into()),
+                    transcription_model: Some("parakeet-ultra".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(remove_local_transcription_selection(&state).unwrap());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state.path).unwrap()).unwrap();
+        assert_eq!(saved["transcriptionProvider"], "groq");
+        assert_eq!(saved["transcriptionModel"], DEFAULT_TRANSCRIPTION_MODEL);
+        assert_eq!(
+            saved["profileOverrides"]["work"]["transcriptionProvider"],
+            "groq"
+        );
+        assert!(!remove_local_transcription_selection(&state).unwrap());
     }
 
     #[test]

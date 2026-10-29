@@ -55,6 +55,8 @@ pub mod routines;
 mod shutdown;
 mod system_browser;
 pub mod theme_icon;
+#[cfg(target_os = "macos")]
+pub mod transcription_model;
 pub mod update_gate;
 pub mod updates;
 pub mod video_download_url;
@@ -342,6 +344,10 @@ pub fn run() {
             providers::delete_profile_model_overrides,
             providers::list_provider_models,
             providers::set_provider_model,
+            commands::local_transcription_model_state,
+            commands::install_local_transcription_model,
+            commands::cancel_local_transcription_model_install,
+            commands::remove_local_transcription_model,
             providers::set_provider_api_key,
             providers::clear_provider_api_key,
             providers::set_image_safe_mode,
@@ -452,6 +458,8 @@ pub fn run() {
             setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
             providers::setup(app);
+            #[cfg(target_os = "macos")]
+            transcription_model::setup(app)?;
             setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
             updates::setup(app);

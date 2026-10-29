@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
 import { signatureSatisfies } from "./dev-signing-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,7 +18,12 @@ if (
 const source = path.join(root, "src-tauri/native/mac-local-transcriber");
 const pin = JSON.parse(readFileSync(path.join(source, "pin.json"), "utf8"));
 const hash = createHash("sha256");
-for (const file of ["Package.swift", "Package.resolved", "Sources/main.swift"]) {
+for (const file of [
+  "Package.swift",
+  "Package.resolved",
+  "Sources/main.swift",
+  "FluidAudio-LICENSE",
+]) {
   hash
     .update(file)
     .update("\0")
@@ -32,9 +38,14 @@ const contents = path.join(bundle, "Contents");
 const executable = path.join(contents, "MacOS/clovy-local-transcriber");
 const stamp = path.join(contents, "Resources/pin.json");
 const config = JSON.parse(readFileSync(path.join(root, "src-tauri/tauri.conf.json"), "utf8"));
-const identifier = `${process.env.CLOVY_DEV_APP_IDENTIFIER || config.identifier}.local-transcriber`;
+const release = process.argv.includes("--release");
+const identifier = computerUseBundleIdentifier({
+  baseIdentifier: `${process.env.CLOVY_DEV_APP_IDENTIFIER || config.identifier}.local-transcriber`,
+  profile: release ? "release" : "debug",
+  worktreeRoot: root,
+});
 const identity =
-  process.env.APPLE_SIGNING_IDENTITY || process.env.CLOVY_DEV_SIGNING_IDENTITY || "-";
+  (release ? process.env.APPLE_SIGNING_IDENTITY : process.env.CLOVY_DEV_SIGNING_IDENTITY) || "-";
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, stdio: "inherit", ...options });
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`);
@@ -76,6 +87,10 @@ if (!reusable) {
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 </dict></plist>\n`,
+  );
+  copyFileSync(
+    path.join(source, "FluidAudio-LICENSE"),
+    path.join(contents, "Resources/FluidAudio-LICENSE"),
   );
   writeFileSync(stamp, `${fingerprint}\n${identifier}\n`);
 }
