@@ -431,6 +431,7 @@ async fn run_cleanup(app: &tauri::AppHandle, _deadline: ShutdownDeadline) -> Cle
         return CleanupOutcome::NoteSaveFlushFailed;
     }
 
+    crate::providers::local_transcriber::shutdown().await;
     let dictation_app = app.clone();
     let dictation =
         tauri::async_runtime::spawn_blocking(move || crate::dictation::stop_helper(&dictation_app));

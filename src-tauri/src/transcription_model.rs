@@ -48,6 +48,14 @@ pub struct TranscriptionModel {
     state: Mutex<ModelState>,
     cancellation: Mutex<Option<std::sync::Arc<CancellationToken>>>,
     operation: tokio::sync::Mutex<()>,
+    removals: std::sync::atomic::AtomicUsize,
+}
+
+pub struct RemovalGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+impl Drop for RemovalGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -72,13 +80,23 @@ impl TranscriptionModel {
             state: Mutex::new(state),
             cancellation: Mutex::new(None),
             operation: tokio::sync::Mutex::new(()),
+            removals: std::sync::atomic::AtomicUsize::new(0),
         }
     }
     pub fn directory(&self) -> &std::path::Path {
         &self.dir
     }
     pub fn state(&self) -> ModelState {
+        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return ModelState::Absent;
+        }
         lock(&self.state).clone()
+    }
+    pub fn begin_removal(&self) -> RemovalGuard<'_> {
+        self.removals
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.cancel();
+        RemovalGuard(&self.removals)
     }
     pub fn cancel(&self) {
         if let Some(token) = lock(&self.cancellation).as_ref() {
@@ -100,6 +118,9 @@ impl TranscriptionModel {
             .map_err(|_| "local_model_busy".to_string())?;
         let token = std::sync::Arc::new(CancellationToken::new());
         *lock(&self.cancellation) = Some(token.clone());
+        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            token.cancel();
+        }
         self.publish(
             ModelState::Downloading {
                 received: 0,
@@ -245,7 +266,7 @@ impl TranscriptionModel {
         write_marker(&self.dir, &self.manifest).map_err(|e| e.to_string())
     }
     pub async fn remove(&self) -> Result<(), String> {
-        self.cancel();
+        let _removal = self.begin_removal();
         let _operation = self.operation.lock().await;
         // Disable selection before removing any files.
         *lock(&self.state) = ModelState::Absent;

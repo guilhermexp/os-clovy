@@ -307,13 +307,21 @@ pub async fn dictate_transcribe(
     request: DictateTranscribeRequest,
 ) -> Result<TranscriptionProviderResult, AppError> {
     let groq_key = dictation_user_key(BuiltinProvider::Groq)?;
-    let result = dictate_transcribe_via(
-        &production_dictation_transport(),
+    dictate_transcribe_with(
         groq_key.as_deref(),
         crate::providers::transcription_model(),
         request,
     )
-    .await;
+    .await
+}
+
+pub(crate) async fn dictate_transcribe_with(
+    groq_key: Option<&str>,
+    model: String,
+    request: DictateTranscribeRequest,
+) -> Result<TranscriptionProviderResult, AppError> {
+    let result =
+        dictate_transcribe_via(&production_dictation_transport(), groq_key, model, request).await;
     mark_dictation_route_used();
     result
 }

@@ -50,10 +50,14 @@ while let line = readLine() {
             var state = try TdtDecoderState()
             let language = request.language.flatMap(Language.init(rawValue:))
             let result = try await manager.transcribe(URL(fileURLWithPath: path), decoderState: &state, language: language)
+            let durationMs = Int((result.duration * 1000).rounded())
+            // TDT timings are encoder-frame aligned and may extend into final padding.
             let tokens: [[String: Any]] = (result.tokenTimings ?? []).map {
-                ["t": $0.token, "start_ms": Int(($0.startTime * 1000).rounded()), "end_ms": Int(($0.endTime * 1000).rounded())]
+                let start = min(durationMs, max(0, Int(($0.startTime * 1000).rounded())))
+                let end = min(durationMs, max(start, Int(($0.endTime * 1000).rounded())))
+                return ["t": $0.token, "start_ms": start, "end_ms": end]
             }
-            respond(["ok": true, "text": result.text, "tokens": tokens, "duration_ms": Int((result.duration * 1000).rounded()), "language": language?.rawValue as Any? ?? NSNull()])
+            respond(["ok": true, "text": result.text, "tokens": tokens, "duration_ms": durationMs, "language": language?.rawValue as Any? ?? NSNull()])
         case "unload":
             manager = nil
             loadedDirectory = nil

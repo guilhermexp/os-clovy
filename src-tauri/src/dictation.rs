@@ -6,7 +6,7 @@ use crate::domain::{
 };
 use crate::providers::{configured_transcription_provider, PROVIDER_GROQ};
 use crate::providers::{
-    groq::{dictate_transcribe, DictateTranscribeRequest, TranscriptionProviderResult},
+    groq::{dictate_transcribe_with, DictateTranscribeRequest, TranscriptionProviderResult},
     openrouter::{dictate_cleanup, DictateCleanupRequestParams, DEFAULT_DICTATION_CLEANUP_MODEL},
 };
 use chrono::Utc;
@@ -1683,7 +1683,7 @@ pub fn setup(app: &mut tauri::App) {
     manage_settings(app.handle());
     // Keys, token, and the transcription connection are ready before the
     // first press (ditado-rapido D4).
-    crate::providers::groq::warm_dictation_route_if_idle();
+    crate::providers::transcription::warm_dictation_route_if_idle();
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
     });
@@ -3239,7 +3239,7 @@ fn handle_shortcut_key_event(
     if edge == ShortcutKeyEdge::Down {
         // A pooled connection idle for over a minute is reopened while the
         // user speaks, not after release.
-        crate::providers::groq::warm_dictation_route_if_idle();
+        crate::providers::transcription::warm_dictation_route_if_idle();
     }
 
     let Some(kind) = shortcut_kind_from_event(event) else {
@@ -5810,6 +5810,10 @@ fn dictation_session_id() -> String {
 }
 
 fn dictation_transcription_provider(provider: String) -> Result<String, AppError> {
+    if provider == crate::providers::PROVIDER_LOCAL {
+        crate::providers::transcription::require_local_ready()?;
+        return Ok(provider);
+    }
     if provider != PROVIDER_GROQ {
         return Err(AppError::new(
             "dictation_provider_not_configured",
@@ -5914,11 +5918,24 @@ trait DictationCleaner {
 struct ServiceDictationTranscriber;
 
 impl DictationTranscriber for ServiceDictationTranscriber {
-    fn transcribe(
+    async fn transcribe(
         &self,
         request: DictateTranscribeRequest,
-    ) -> impl Future<Output = Result<TranscriptionProviderResult, AppError>> + Send {
-        dictate_transcribe(request)
+    ) -> Result<TranscriptionProviderResult, AppError> {
+        match crate::providers::transcription::current_backend()? {
+            crate::providers::transcription::TranscriptionBackend::Groq { key, model } => {
+                dictate_transcribe_with(Some(&key), model, request).await
+            }
+            crate::providers::transcription::TranscriptionBackend::Local { model_dir } => {
+                crate::providers::local_transcriber::transcribe(
+                    &model_dir,
+                    &request.audio_path,
+                    request.language.as_deref(),
+                )
+                .await?
+                .plain()
+            }
+        }
     }
 }
 
@@ -7356,9 +7373,7 @@ fn stop_take_during_update(app: &AppHandle, take_id: String) {
 /// Lets a take start unless an update is installing; a refused start clears
 /// the shortcut state it prepared.
 fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), AppError> {
-    let key = crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
-        .inspect_err(|_| reset_shortcut_activation(app))?;
-    crate::providers::groq::require_groq_key(key.as_deref())
+    crate::providers::transcription::current_backend()
         .inspect_err(|_| reset_shortcut_activation(app))?;
     crate::update_gate::UPDATE_GATE
         .begin_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE))
@@ -12552,6 +12567,66 @@ mod tests {
             .expect_err("dictation should only accept supported transcripts");
 
         assert_eq!(err.code, "dictation_provider_not_configured");
+    }
+
+    #[tokio::test]
+    async fn local_dictation_passes_m4a_and_language_without_groq_requests() {
+        use crate::providers::{
+            local_transcriber::{FakeLocalTranscriber, NetworkSentinel, TEST_LOCAL},
+            transcription::{TranscriptionBackend, TEST_BACKEND},
+            TEST_ORIGIN,
+        };
+        let sentinel = NetworkSentinel::start().await;
+        for fail in [false, true] {
+            let fake = Arc::new(FakeLocalTranscriber {
+                fail,
+                ..Default::default()
+            });
+            TEST_ORIGIN
+                .scope(
+                    sentinel.origin.clone(),
+                    TEST_BACKEND.scope(
+                        TranscriptionBackend::Local {
+                            model_dir: "/fixture/model".into(),
+                        },
+                        TEST_LOCAL.scope(fake.clone(), async {
+                            let result = ServiceDictationTranscriber
+                                .transcribe(DictateTranscribeRequest {
+                                    audio_path: "/fixture/take.m4a".into(),
+                                    language: Some("pt".into()),
+                                    context: None,
+                                    session_id: "session".into(),
+                                    utterance_id: "utterance".into(),
+                                })
+                                .await;
+                            if fail {
+                                assert_eq!(result.unwrap_err().code, "local_transcriber_failed");
+                            } else {
+                                assert_eq!(result.unwrap().text, "Olá mundo");
+                            }
+                            assert_eq!(
+                                *fake.calls.lock().unwrap(),
+                                vec![(PathBuf::from("/fixture/take.m4a"), Some("pt".into()))]
+                            );
+                        }),
+                    ),
+                )
+                .await;
+        }
+        sentinel.assert_unused();
+    }
+
+    #[test]
+    fn dictation_local_without_model_reports_install_action() {
+        let error = dictation_transcription_provider("local".into()).unwrap_err();
+        assert_eq!(
+            error.code,
+            if crate::providers::local_transcription_supported() {
+                "local_model_not_installed"
+            } else {
+                "local_transcription_unsupported"
+            }
+        );
     }
 
     #[test]

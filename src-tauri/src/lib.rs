@@ -460,6 +460,7 @@ pub fn run() {
             providers::setup(app);
             #[cfg(target_os = "macos")]
             transcription_model::setup(app)?;
+            providers::local_transcriber::setup(app);
             setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
             updates::setup(app);

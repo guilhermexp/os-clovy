@@ -1,3 +1,4 @@
+use crate::providers::transcription::TranscriptionBackend;
 use crate::{
     audio::{
         live_preview::PREVIEW_CHUNK_MS,
@@ -1782,7 +1783,18 @@ async fn process_saved_source_audio_pipeline(
     } else {
         blocking_transcription_failure_summary(&visible_failures)
             .map(|failure_message| AppError::new("transcription_partially_failed", failure_message))
-    };
+    }
+    .map(|mut error| {
+        // Durable turn failures retain the canonical message, not the provider code.
+        // Preserve Local's actionable code when aggregating those saved failures.
+        if visible_failures.iter().any(|failure| {
+            failure.input.warning.as_deref()
+                == Some(crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE)
+        }) {
+            error.code = "local_transcriber_failed".into();
+        }
+        error
+    });
     timeline.flush(repos, session_id).await;
     add_latency_checkpoint(
         repos,
@@ -2626,10 +2638,15 @@ pub(crate) fn groq_direct_pacer(fingerprint: &str) -> Arc<RequestPacer> {
 
 /// The saved Groq key and its account's pacer, resolved once per request.
 fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
-    note_route_from(
-        crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
-        model,
-    )
+    let backend = crate::providers::transcription::current_backend()?;
+    match backend {
+        TranscriptionBackend::Groq { key, .. } => note_route_from(Ok(Some(key)), model),
+        backend @ TranscriptionBackend::Local { .. } => Ok(TranscriptionRoute {
+            backend,
+            model: crate::providers::transcription::LOCAL_MODEL.into(),
+            pacer: None,
+        }),
+    }
 }
 
 /// A missing or unreadable key fails before any audio leaves the device.
@@ -2641,9 +2658,12 @@ fn note_route_from(
     let groq_key = crate::providers::groq::require_groq_key(key.as_deref())?.to_string();
     let pacer = groq_direct_pacer(&key_fingerprint(&groq_key));
     Ok(TranscriptionRoute {
-        groq_key: Some(groq_key),
+        backend: TranscriptionBackend::Groq {
+            key: groq_key,
+            model: model.clone(),
+        },
         model,
-        pacer,
+        pacer: Some(pacer),
     })
 }
 
@@ -2737,16 +2757,26 @@ fn cached_chunk_transcriber(
 #[derive(Clone)]
 pub(crate) struct TranscriptionRoute {
     /// The user's Groq key; production routes always require it.
-    pub(crate) groq_key: Option<String>,
+    pub(crate) backend: TranscriptionBackend,
     pub(crate) model: String,
-    pub(crate) pacer: Arc<RequestPacer>,
+    pub(crate) pacer: Option<Arc<RequestPacer>>,
+}
+
+#[cfg(test)]
+impl TranscriptionRoute {
+    fn groq_key(&self) -> Option<&str> {
+        match &self.backend {
+            TranscriptionBackend::Groq { key, .. } if !key.is_empty() => Some(key),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for TranscriptionRoute {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TranscriptionRoute")
-            .field("groq_key", &self.groq_key.as_ref().map(|_| "<redacted>"))
+            .field("backend", &self.backend)
             .field("model", &self.model)
             .finish()
     }
@@ -2780,13 +2810,26 @@ fn note_chain(
 fn note_provider_call() -> RoutedCall<TranscriptionProviderResult> {
     Arc::new(|route, request| {
         Box::pin(async move {
-            crate::providers::groq::transcribe_saved_audio_with(
-                route.groq_key.as_deref(),
-                route.model,
-                request,
-            )
-            .await
-        }) as ProviderFuture<TranscriptionProviderResult>
+            match route.backend {
+                TranscriptionBackend::Groq { key, .. } => {
+                    crate::providers::groq::transcribe_saved_audio_with(
+                        Some(&key),
+                        route.model,
+                        request,
+                    )
+                    .await
+                }
+                TranscriptionBackend::Local { model_dir } => {
+                    crate::providers::local_transcriber::transcribe(
+                        &model_dir,
+                        &request.audio_path,
+                        request.language.as_deref(),
+                    )
+                    .await?
+                    .plain()
+                }
+            }
+        })
     })
 }
 
@@ -2796,19 +2839,26 @@ fn note_provider_call() -> RoutedCall<TranscriptionProviderResult> {
 fn note_timed_call() -> RoutedCall<TimedTranscription> {
     Arc::new(|route, request| {
         Box::pin(async move {
-            let Some(groq_key) = route.groq_key else {
-                return Err(AppError::new(
-                    "groq_api_key_missing",
-                    crate::providers::groq::GROQ_API_KEY_MISSING_MESSAGE,
-                ));
-            };
-            crate::providers::groq::transcribe_saved_audio_timed_with(
-                &groq_key,
-                route.model,
-                request,
-            )
-            .await
-        }) as ProviderFuture<TimedTranscription>
+            match route.backend {
+                TranscriptionBackend::Groq { key, .. } => {
+                    crate::providers::groq::transcribe_saved_audio_timed_with(
+                        &key,
+                        route.model,
+                        request,
+                    )
+                    .await
+                }
+                TranscriptionBackend::Local { model_dir } => {
+                    crate::providers::local_transcriber::transcribe(
+                        &model_dir,
+                        &request.audio_path,
+                        request.language.as_deref(),
+                    )
+                    .await?
+                    .timed()
+                }
+            }
+        })
     })
 }
 
@@ -2829,7 +2879,10 @@ fn live_preview_route_from(
     let route = route.ok()?;
     route
         .pacer
-        .try_acquire(billed_audio(duration_ms), LIVE_PREVIEW_AUDIO_SHARE)
+        .as_ref()
+        .map_or(true, |pacer| {
+            pacer.try_acquire(billed_audio(duration_ms), LIVE_PREVIEW_AUDIO_SHARE)
+        })
         .then_some(route)
 }
 
@@ -2860,8 +2913,11 @@ type ProviderCall<T> = Arc<dyn Fn(TranscriptionRequest) -> ProviderFuture<T> + S
 fn paced<T: Send + 'static>(inner: RoutedCall<T>) -> RoutedCall<T> {
     Arc::new(move |route, request| {
         let inner = Arc::clone(&inner);
-        let pacer = Arc::clone(&route.pacer);
+        let pacer = route.pacer.clone();
         Box::pin(async move {
+            let Some(pacer) = pacer else {
+                return inner(route, request).await;
+            };
             let billed = billed_audio(source_wav_duration_ms(&request.audio_path).unwrap_or(0));
             let max_wait = Duration::from_millis(RATE_LIMIT_MAX_INLINE_WAIT_MS);
             let mut waits = 0;
@@ -2917,9 +2973,12 @@ fn fixed_route(model: &str, pacer: Arc<RequestPacer>) -> RouteResolver {
     let model = model.to_string();
     Arc::new(move || {
         Ok(TranscriptionRoute {
-            groq_key: None,
+            backend: TranscriptionBackend::Groq {
+                key: String::new(),
+                model: model.clone(),
+            },
             model: model.clone(),
-            pacer: Arc::clone(&pacer),
+            pacer: Some(Arc::clone(&pacer)),
         })
     })
 }
@@ -2982,23 +3041,24 @@ tokio::task_local! {
 fn note_pack_transcriber(model: String) -> Option<PackTranscriber> {
     #[cfg(test)]
     {
-        TEST_NOTE_PACKS
-            .try_with(|(transcriber, pacer)| {
-                routed(
-                    paced(ignoring_route(transcriber.clone())),
-                    fixed_route(&model, pacer.clone()),
-                )
-            })
-            .ok()
+        if let Ok(transcriber) = TEST_NOTE_PACKS.try_with(|(transcriber, pacer)| {
+            routed(
+                paced(ignoring_route(transcriber.clone())),
+                fixed_route(&model, pacer.clone()),
+            )
+        }) {
+            return Some(transcriber);
+        }
+        if crate::providers::local_transcriber::TEST_LOCAL
+            .try_with(|_| ())
+            .is_err()
+        {
+            return None;
+        }
     }
-    #[cfg(not(test))]
-    {
-        let direct = matches!(
-            crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
-            Ok(Some(_))
-        );
-        direct.then(|| routed(paced(note_timed_call()), note_route_resolver(model)))
-    }
+    note_route(model.clone())
+        .ok()
+        .map(|_| routed(paced(note_timed_call()), note_route_resolver(model)))
 }
 
 /// Coalesces turns up to the final span, unless the session already has
@@ -5211,7 +5271,10 @@ async fn maybe_post_process_note_transcript(
     mut transcript: TranscriptionProviderResult,
     context: Option<&str>,
 ) -> TranscriptionProviderResult {
-    if provider != crate::providers::PROVIDER_GROQ {
+    if !matches!(
+        provider,
+        crate::providers::PROVIDER_GROQ | crate::providers::PROVIDER_LOCAL
+    ) {
         return transcript;
     }
     if transcript.text.trim().is_empty() {
@@ -11296,15 +11359,251 @@ mod tests {
         assert!(!repos.claim_paused_note(&note_id, paused).await.unwrap());
     }
 
+    #[tokio::test]
+    async fn local_forty_minute_note_keeps_chunking_without_groq_pacing_or_network() {
+        use crate::providers::{
+            local_transcriber::{FakeLocalTranscriber, NetworkSentinel, TEST_LOCAL},
+            transcription::TEST_BACKEND,
+            TEST_ORIGIN,
+        };
+        let sentinel = NetworkSentinel::start().await;
+        let fake = Arc::new(FakeLocalTranscriber::default());
+        let (repos, _) = test_source_processing_repositories().await;
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("forty-minutes.wav");
+        write_loud_wav(&audio, 1000, 1000 * 40 * 60);
+        TEST_ORIGIN
+            .scope(
+                sentinel.origin.clone(),
+                TEST_BACKEND.scope(
+                    local_test_route().backend,
+                    TEST_LOCAL.scope(fake.clone(), async {
+                        let transcriber = note_turn_transcriber(repos, "parakeet-ultra".into());
+                        tokio::time::timeout(
+                            Duration::from_secs(10),
+                            transcribe_prepared_audio(
+                                transcriber,
+                                TranscribePreparedAudioRequest {
+                                    provider: "local".into(),
+                                    audio_path: audio,
+                                    temp_dir: directory.path().into(),
+                                    chunk_stem: "local-chunk".into(),
+                                    title: "Reunião".into(),
+                                    asr_hint: None,
+                                    operation_id: "forty-minutes".into(),
+                                    max_chunk_ms: Some(600_000),
+                                },
+                            ),
+                        )
+                        .await
+                        .expect("Local must not wait for Groq budgets")
+                        .unwrap();
+                        assert!(fake.calls.lock().unwrap().len() >= 4);
+                        let packed = note_pack_transcriber("parakeet-ultra".into())
+                            .expect("Local packs enabled")(
+                            test_transcription_request("pack")
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(
+                            split_pack_segments(
+                                &[(0, 500), (1000, 1500), (2000, 2500)],
+                                &packed.segments
+                            ),
+                            vec!["Turno 0", "Turno 1", "Turno 2"]
+                        );
+                        let preview =
+                            live_preview_route(40 * 60 * 1000).expect("Local preview enabled");
+                        transcribe_on_route(preview, test_transcription_request("preview"))
+                            .await
+                            .unwrap();
+                    }),
+                ),
+            )
+            .await;
+        sentinel.assert_unused();
+    }
+
+    fn local_test_route() -> TranscriptionRoute {
+        TranscriptionRoute {
+            backend: TranscriptionBackend::Local {
+                model_dir: PathBuf::from("/fixture/model"),
+            },
+            model: "parakeet-ultra".into(),
+            pacer: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_route_transcribes_turns_packs_and_preview_without_a_groq_key() {
+        use crate::providers::local_transcriber::{FakeLocalTranscriber, TEST_LOCAL};
+        let fake = Arc::new(FakeLocalTranscriber::default());
+        TEST_LOCAL
+            .scope(fake.clone(), async {
+                let plain =
+                    note_provider_call()(local_test_route(), test_transcription_request("turn"))
+                        .await
+                        .unwrap();
+                assert_eq!(plain.provider, "local");
+                assert_eq!(plain.text, "Olá mundo");
+                let timed =
+                    note_timed_call()(local_test_route(), test_transcription_request("pack"))
+                        .await
+                        .unwrap();
+                assert_eq!(timed.segments.len(), 3);
+                let route = live_preview_route_from(Ok(local_test_route()), 40 * 60 * 1000)
+                    .expect("Local has no hourly budget");
+                assert_eq!(
+                    transcribe_on_route(route, test_transcription_request("preview"))
+                        .await
+                        .unwrap()
+                        .provider,
+                    "local"
+                );
+                assert_eq!(fake.calls.lock().unwrap().len(), 3);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn local_failure_is_not_retried_and_keeps_actionable_note_message() {
+        use crate::providers::local_transcriber::{
+            FakeLocalTranscriber, LOCAL_TRANSCRIBER_FAILED_MESSAGE, TEST_LOCAL,
+        };
+        let fake = Arc::new(FakeLocalTranscriber {
+            fail: true,
+            ..Default::default()
+        });
+        TEST_LOCAL
+            .scope(fake.clone(), async {
+                let transcriber = routed(note_provider_call(), Arc::new(|| Ok(local_test_route())));
+                let error = transcribe_with_transient_retries(
+                    &transcriber,
+                    test_transcription_request("failed-local"),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(error.code, "local_transcriber_failed");
+                assert_eq!(fake.calls.lock().unwrap().len(), 1);
+                assert_eq!(
+                    user_facing_transcription_failure_message(
+                        &error.code,
+                        &error.message,
+                        false,
+                        "microphone"
+                    ),
+                    LOCAL_TRANSCRIBER_FAILED_MESSAGE
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn local_failure_persists_note_error_and_retains_audio_for_retry() {
+        use crate::providers::local_transcriber::{
+            FakeLocalTranscriber, NetworkSentinel, LOCAL_TRANSCRIBER_FAILED_MESSAGE, TEST_LOCAL,
+        };
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let note_id: String =
+            sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
+                .bind(&session_id)
+                .fetch_one(&repos.pool)
+                .await
+                .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let microphone = directory.path().join("microphone.wav");
+        write_three_turn_microphone(&microphone);
+        let artifact = repos
+            .create_audio_artifact(
+                &note_id,
+                &session_id,
+                &microphone.to_string_lossy(),
+                22_000,
+                0,
+                "checksum",
+            )
+            .await
+            .unwrap();
+        let fake = Arc::new(FakeLocalTranscriber {
+            fail: true,
+            ..Default::default()
+        });
+        let sentinel = NetworkSentinel::start().await;
+        crate::providers::TEST_ORIGIN
+            .scope(
+                sentinel.origin.clone(),
+                TEST_LOCAL.scope(fake.clone(), async {
+                    let transcriber =
+                        routed(note_provider_call(), Arc::new(|| Ok(local_test_route())));
+                    let result = rate_limited_run(
+                        &repos,
+                        &note_id,
+                        &session_id,
+                        vec![(artifact.id, "microphone".into(), microphone.clone(), false)],
+                        transcriber,
+                    )
+                    .await;
+                    assert_eq!(result.unwrap_err().code, "local_transcriber_failed");
+                    let note = repos.get_note(&note_id).await.unwrap();
+                    assert_eq!(note.processing_status, ProcessingStatus::Failed);
+                    assert_eq!(
+                        note.last_error.as_deref(),
+                        Some(format!("Microphone: {LOCAL_TRANSCRIBER_FAILED_MESSAGE}").as_str())
+                    );
+                    assert!(microphone.is_file(), "retry must retain the recording");
+                    assert!(!fake.calls.lock().unwrap().is_empty());
+                }),
+            )
+            .await;
+        sentinel.assert_unused();
+    }
+
+    #[tokio::test]
+    async fn local_route_accepts_audio_above_groq_upload_limit() {
+        use crate::providers::local_transcriber::{
+            FakeLocalTranscriber, NetworkSentinel, TEST_LOCAL,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("large.wav");
+        std::fs::File::create(&audio)
+            .unwrap()
+            .set_len(26_214_401)
+            .unwrap();
+        let fake = Arc::new(FakeLocalTranscriber::default());
+        let sentinel = NetworkSentinel::start().await;
+        crate::providers::TEST_ORIGIN
+            .scope(
+                sentinel.origin.clone(),
+                TEST_LOCAL.scope(fake.clone(), async {
+                    let mut request = test_transcription_request("large-local");
+                    request.audio_path = audio;
+                    assert_eq!(
+                        note_provider_call()(local_test_route(), request)
+                            .await
+                            .unwrap()
+                            .provider,
+                        "local"
+                    );
+                }),
+            )
+            .await;
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        sentinel.assert_unused();
+    }
+
     fn test_route(
         groq_key: Option<&str>,
         model: &str,
         pacer: Arc<RequestPacer>,
     ) -> TranscriptionRoute {
         TranscriptionRoute {
-            groq_key: groq_key.map(str::to_string),
+            backend: TranscriptionBackend::Groq {
+                key: groq_key.unwrap_or_default().into(),
+                model: model.into(),
+            },
             model: model.to_string(),
-            pacer,
+            pacer: Some(pacer),
         }
     }
 
@@ -11321,7 +11620,7 @@ mod tests {
                 move |route: TranscriptionRoute, request: TranscriptionRequest| {
                     let operation_id = request.operation_id();
                     calls.lock().unwrap().push((
-                        route.groq_key.clone(),
+                        route.groq_key().map(str::to_string),
                         route.model.clone(),
                         operation_id.clone(),
                     ));
@@ -11450,7 +11749,7 @@ mod tests {
         let error = note_route_from(Ok(None), model.clone()).unwrap_err();
         assert_eq!(error.code, "groq_api_key_missing");
         let direct = note_route_from(Ok(Some("gsk-user".to_string())), model).unwrap();
-        assert_eq!(direct.groq_key.as_deref(), Some("gsk-user"));
+        assert_eq!(direct.groq_key(), Some("gsk-user"));
     }
 
     #[tokio::test]

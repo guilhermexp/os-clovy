@@ -63,11 +63,17 @@ pub(super) fn direct_notes_client() -> &'static reqwest::Client {
     })
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TEST_ORIGIN: String; }
+
 pub(super) fn production_dictation_transport() -> DirectTransport<'static> {
     // Only test binaries can redirect these provider origins. Timing fixtures
     // run in an isolated child process with ephemeral loopback providers.
     #[cfg(test)]
-    let fake_origin = std::env::var("CLOVY_TEST_NOTE_PROVIDER_ORIGIN").ok();
+    let fake_origin = TEST_ORIGIN
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(|| std::env::var("CLOVY_TEST_NOTE_PROVIDER_ORIGIN").ok());
     #[cfg(test)]
     if let Some(origin) = fake_origin {
         assert!(origin.starts_with("http://127.0.0.1:"));

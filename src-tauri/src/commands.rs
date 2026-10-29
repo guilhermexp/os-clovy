@@ -4084,13 +4084,13 @@ pub async fn remove_local_transcription_model(
     #[cfg(target_os = "macos")]
     {
         let model = crate::transcription_model::runtime()?;
-        model.cancel();
+        let removal = model.begin_removal();
         let switched = crate::providers::remove_local_transcription_selection(&state)?;
-        model
-            .remove()
-            .await
-            .map_err(|reason| AppError::new("local_model_remove_failed", reason))?;
+        crate::providers::local_transcriber::shutdown().await;
+        let removed = model.remove().await;
+        drop(removal);
         let _ = app.emit(crate::transcription_model::MODEL_STATE_EVENT, model.state());
+        removed.map_err(|reason| AppError::new("local_model_remove_failed", reason))?;
         Ok(serde_json::json!({ "switched_to_groq": switched }))
     }
     #[cfg(not(target_os = "macos"))]

@@ -191,3 +191,21 @@ fn disk_without_marker_is_verified_and_size_changes_invalidate_marker() {
         ModelState::Absent
     );
 }
+
+#[tokio::test]
+async fn removal_disables_selection_before_waiting_for_download_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = server(false, false).await;
+    let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+    model.install(&server.url, |_| {}).await.unwrap();
+    let guard = model.operation.lock().await;
+    let removal = model.remove();
+    tokio::pin!(removal);
+    tokio::select! { biased; _ = &mut removal => panic!("operation lock must block filesystem removal"), _ = tokio::task::yield_now() => {} }
+    assert!(
+        !matches!(model.state(), ModelState::Ready { .. }),
+        "removing model must not remain selectable"
+    );
+    drop(guard);
+    removal.await.unwrap();
+}

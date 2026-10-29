@@ -45,7 +45,8 @@ const identifier = computerUseBundleIdentifier({
   worktreeRoot: root,
 });
 const identity =
-  (release ? process.env.APPLE_SIGNING_IDENTITY : process.env.CLOVY_DEV_SIGNING_IDENTITY) || "-";
+  (release ? process.env.APPLE_SIGNING_IDENTITY : process.env.CLOVY_DEV_SIGNING_IDENTITY)?.trim() ||
+  undefined;
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, stdio: "inherit", ...options });
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`);
@@ -94,8 +95,21 @@ if (!reusable) {
   );
   writeFileSync(stamp, `${fingerprint}\n${identifier}\n`);
 }
-if (!reusable || !signatureSatisfies(bundle, identity)) {
-  run("/usr/bin/codesign", ["--force", "--deep", "--sign", identity, "--timestamp=none", bundle]);
+// As with the Computer use helper, an unspecified identity preserves a valid seal.
+const signatureValid = identity
+  ? signatureSatisfies(bundle, identity)
+  : spawnSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle], {
+      encoding: "utf8",
+    }).status === 0;
+if (!reusable || !signatureValid) {
+  run("/usr/bin/codesign", [
+    "--force",
+    "--deep",
+    "--sign",
+    identity ?? "-",
+    "--timestamp=none",
+    bundle,
+  ]);
 }
 run("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle]);
 console.error(

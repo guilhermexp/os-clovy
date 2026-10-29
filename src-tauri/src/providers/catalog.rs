@@ -192,6 +192,7 @@ fn map_text_models(body: &[u8]) -> Result<Vec<ProviderModelDto>, AppError> {
 
 fn model_row(provider: &str, id: &str, name: &str, model_type: &str) -> ProviderModelDto {
     ProviderModelDto {
+        available: None,
         provider: provider.to_string(),
         id: id.to_string(),
         name: name.to_string(),
@@ -217,7 +218,7 @@ pub(super) async fn models(mode: ModelMode) -> Result<Vec<ProviderModelDto>, App
         ModelMode::Image => ("fal", super::KNOWN_IMAGE_MODELS),
         ModelMode::Video => ("fal", super::KNOWN_VIDEO_MODELS),
     };
-    Ok(ids
+    let mut rows: Vec<_> = ids
         .iter()
         .map(|id| {
             let name = match *id {
@@ -232,7 +233,19 @@ pub(super) async fn models(mode: ModelMode) -> Result<Vec<ProviderModelDto>, App
             };
             model_row(provider, id, name, mode.api_type())
         })
-        .collect())
+        .collect();
+    if mode == ModelMode::Transcription && super::local_transcription_supported() {
+        let mut local = model_row(
+            "local",
+            super::transcription::LOCAL_MODEL,
+            "Parakeet Ultra",
+            mode.api_type(),
+        );
+        local.available = Some(super::transcription::ready_directory().is_some());
+        local.privacy = Some("local".into());
+        rows.push(local);
+    }
+    Ok(rows)
 }
 
 pub(super) fn invalidate() {
@@ -423,6 +436,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_transcription_catalog_includes_unavailable_model_only_on_supported_platforms() {
+        let catalog = models(ModelMode::Transcription).await.unwrap();
+        let local = catalog.iter().find(|model| model.id == "parakeet-ultra");
+        if super::super::local_transcription_supported() {
+            let local = local.expect("local choice remains visible before installation");
+            assert_eq!(local.provider, "local");
+            assert_eq!(serde_json::to_value(local).unwrap()["available"], false);
+        } else {
+            assert!(local.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn curated_catalogs_are_local_and_have_no_service_availability() {
         for (mode, expected) in [
             (
@@ -432,7 +458,12 @@ mod tests {
             (ModelMode::Image, super::super::KNOWN_IMAGE_MODELS),
             (ModelMode::Video, super::super::KNOWN_VIDEO_MODELS),
         ] {
-            let models = models(mode).await.unwrap();
+            let models: Vec<_> = models(mode)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.provider != "local")
+                .collect();
             assert_eq!(
                 models
                     .iter()

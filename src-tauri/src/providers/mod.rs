@@ -9,10 +9,14 @@
 
 mod catalog;
 mod direct;
+#[cfg(test)]
+pub(crate) use direct::TEST_ORIGIN;
 pub(crate) mod fal;
 pub mod groq;
+pub mod local_transcriber;
 pub mod notes;
 pub mod openrouter;
+pub mod transcription;
 
 use crate::domain::types::AppError;
 use crate::llm::{
@@ -327,6 +331,7 @@ pub struct ProfileModelOverrides {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelSettingsDto {
+    pub local_transcription_supported: bool,
     pub transcription_provider: String,
     pub generation_provider: String,
     pub transcription_model: String,
@@ -344,6 +349,7 @@ pub struct ProviderModelSettingsDto {
 impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
     fn from(settings: &ProviderModelSettings) -> Self {
         Self {
+            local_transcription_supported: local_transcription_supported(),
             transcription_provider: settings.transcription_provider.clone(),
             generation_provider: settings.generation_provider.clone(),
             transcription_model: settings.transcription_model.clone(),
@@ -475,6 +481,8 @@ pub struct ProviderModelsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
     pub provider: String,
     pub id: String,
     pub name: String,
@@ -662,6 +670,9 @@ fn set_profile_model_overrides_impl(
     let profile = validate_profile_override_name(profile)?.to_string();
     update_settings_result(state, |settings| {
         let overrides = ProfileModelOverrides::from(overrides);
+        if overrides.transcription_provider.as_deref() == Some(PROVIDER_LOCAL) {
+            transcription::require_local_ready()?;
+        }
         if profile_overrides_empty(&overrides) {
             settings.profile_overrides.remove(&profile);
         } else {
@@ -717,31 +728,42 @@ fn set_provider_model_impl(
     if model_id.is_empty() {
         return Err(AppError::new("provider_model_required", "Select a model."));
     }
+    let local = request.mode == ModelMode::Transcription && model_id == transcription::LOCAL_MODEL;
+    if local {
+        transcription::require_local_ready()?;
+    }
     let curated = match request.mode {
         ModelMode::Transcription => Some(KNOWN_TRANSCRIPTION_MODELS),
         ModelMode::Image => Some(KNOWN_IMAGE_MODELS),
         ModelMode::Video => Some(KNOWN_VIDEO_MODELS),
         ModelMode::Generation => None,
     };
-    if curated.is_some_and(|known| !known.contains(&model_id.as_str())) {
+    if !local && curated.is_some_and(|known| !known.contains(&model_id.as_str())) {
         return Err(AppError::new(
             "provider_model_unavailable",
             "This model is not available. Choose another model.",
         ));
     }
-    update_settings(state, |settings| match request.mode {
-        ModelMode::Transcription => {
-            settings.transcription_provider = PROVIDER_GROQ.to_string();
-            settings.transcription_model = model_id;
+    update_settings_result(state, |settings| {
+        if local {
+            transcription::require_local_ready()?;
         }
-        ModelMode::Generation => {
-            // Text selection is independent from chat and note engine choices.
-            settings.generation_provider = PROVIDER_OPENROUTER.to_string();
-            settings.generation_model = model_id.clone();
-            settings.remote_generation_model = model_id;
+        match request.mode {
+            ModelMode::Transcription => {
+                settings.transcription_provider =
+                    if local { PROVIDER_LOCAL } else { PROVIDER_GROQ }.to_string();
+                settings.transcription_model = model_id;
+            }
+            ModelMode::Generation => {
+                // Text selection is independent from chat and note engine choices.
+                settings.generation_provider = PROVIDER_OPENROUTER.to_string();
+                settings.generation_model = model_id.clone();
+                settings.remote_generation_model = model_id;
+            }
+            ModelMode::Image => settings.image_model = model_id,
+            ModelMode::Video => settings.video_model = model_id,
         }
-        ModelMode::Image => settings.image_model = model_id,
-        ModelMode::Video => settings.video_model = model_id,
+        Ok(())
     })
 }
 
@@ -1521,6 +1543,21 @@ fn settings_from_json(
     ))
 }
 
+fn normalize_transcription(provider: &str, model: String) -> (String, String) {
+    if provider == PROVIDER_LOCAL && local_transcription_supported() {
+        (PROVIDER_LOCAL.into(), transcription::LOCAL_MODEL.into())
+    } else {
+        (
+            PROVIDER_GROQ.into(),
+            curated_or_default(
+                model,
+                KNOWN_TRANSCRIPTION_MODELS,
+                DEFAULT_TRANSCRIPTION_MODEL,
+            ),
+        )
+    }
+}
+
 fn sanitize_settings(
     settings: ProviderModelSettings,
     defaults: &ProviderModelSettings,
@@ -1538,10 +1575,9 @@ fn sanitize_settings(
             model
         }
     };
-    let transcription_model = curated_or_default(
+    let (transcription_provider, transcription_model) = normalize_transcription(
+        &settings.transcription_provider,
         settings.transcription_model,
-        KNOWN_TRANSCRIPTION_MODELS,
-        &defaults.transcription_model,
     );
     let mut remote_generation_model = migrate(non_empty_or(
         settings.remote_generation_model,
@@ -1579,7 +1615,7 @@ fn sanitize_settings(
     };
 
     let mut sanitized = ProviderModelSettings {
-        transcription_provider: PROVIDER_GROQ.to_string(),
+        transcription_provider,
         generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model,
         generation_model,
@@ -1620,17 +1656,21 @@ fn sanitize_profile_overrides(
         .filter_map(|(profile, overrides)| {
             let profile = validate_profile_override_name(&profile).ok()?.to_string();
             let overrides = ProfileModelOverrides {
-                // Groq is the only transcription provider, so a recorded
-                // provider override names it.
                 transcription_provider: normalize_optional_model_field(
-                    overrides.transcription_provider,
+                    overrides.transcription_provider.clone(),
                 )
-                .map(|_| PROVIDER_GROQ.to_string()),
-                transcription_model: curated_override(
-                    overrides.transcription_model,
-                    KNOWN_TRANSCRIPTION_MODELS,
-                    DEFAULT_TRANSCRIPTION_MODEL,
-                ),
+                .map(|provider| normalize_transcription(&provider, String::new()).0),
+                transcription_model: if overrides.transcription_provider.as_deref()
+                    == Some(PROVIDER_LOCAL)
+                {
+                    Some(normalize_transcription(PROVIDER_LOCAL, String::new()).1)
+                } else {
+                    curated_override(
+                        overrides.transcription_model,
+                        KNOWN_TRANSCRIPTION_MODELS,
+                        DEFAULT_TRANSCRIPTION_MODEL,
+                    )
+                },
                 image_model: curated_override(
                     overrides.image_model,
                     KNOWN_IMAGE_MODELS,
@@ -1805,6 +1845,13 @@ fn effective_settings_for_profile(
     if let Some(model) = overrides.video_model.as_deref() {
         effective.video_model = model.to_string();
     }
+    (
+        effective.transcription_provider,
+        effective.transcription_model,
+    ) = normalize_transcription(
+        &effective.transcription_provider,
+        effective.transcription_model,
+    );
     effective
 }
 
@@ -1856,7 +1903,9 @@ fn update_settings_result(
     state: &ProviderSettingsState,
     update: impl FnOnce(&mut ProviderModelSettings) -> Result<(), AppError>,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    update_llm_registry(state, update).map(|settings| ProviderModelSettingsDto::from(&settings))
+    let settings = update_llm_registry(state, update)?;
+    local_transcriber::selection_changed();
+    Ok(ProviderModelSettingsDto::from(&settings))
 }
 
 /// Applies a registry change atomically: the closure works on a copy, and
@@ -2552,6 +2601,63 @@ mod tests {
         assert_eq!(reloaded.llm_usage.chat, settings.llm_usage.chat);
         assert_eq!(reloaded.llm_usage.notes, settings.llm_usage.notes);
         replace_current_settings(previous);
+    }
+
+    #[test]
+    fn local_transcription_selection_without_model_is_rejected_without_mutation() {
+        let state = test_state();
+        let error = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: "parakeet-ultra".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            if local_transcription_supported() {
+                "local_model_not_installed"
+            } else {
+                "local_transcription_unsupported"
+            }
+        );
+        assert_eq!(
+            state.settings.lock().unwrap().transcription_provider,
+            "groq"
+        );
+        assert!(!state.path.exists());
+    }
+
+    #[test]
+    fn local_transcription_saved_choice_and_override_survive_supported_platform_load() {
+        let mut settings = default_settings();
+        settings.transcription_provider = "local".into();
+        settings.transcription_model = "old-model".into();
+        settings.profile_overrides.insert(
+            "work".into(),
+            ProfileModelOverrides {
+                transcription_provider: Some("local".into()),
+                transcription_model: Some("old-model".into()),
+                ..Default::default()
+            },
+        );
+        let settings = sanitize_settings(settings, &default_settings());
+        let expected_provider = if local_transcription_supported() {
+            "local"
+        } else {
+            "groq"
+        };
+        let expected_model = if local_transcription_supported() {
+            "parakeet-ultra"
+        } else {
+            DEFAULT_TRANSCRIPTION_MODEL
+        };
+        assert_eq!(settings.transcription_provider, expected_provider);
+        assert_eq!(settings.transcription_model, expected_model);
+        let profile = effective_settings_for_profile(&settings, "work");
+        assert_eq!(profile.transcription_provider, expected_provider);
+        assert_eq!(profile.transcription_model, expected_model);
     }
 
     #[test]
