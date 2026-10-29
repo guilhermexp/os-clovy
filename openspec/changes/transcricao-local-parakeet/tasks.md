@@ -151,3 +151,8 @@ A primeira suíte completa pós-rodada 5 (`logs/review-5-rust-full.log`, exit 10
 
 
 Após corrigir a seleção atômica do preview, a suíte desktop completa passou: **2.184 testes, 21 ignorados, 28 suítes**, incluindo todos os testes Groq (`logs/review-5-rust-full-fixed.log`). Clippy/fmt do mesmo comando continuam em andamento. Nenhum comportamento de retry Groq ou asserção existente foi alterado. O próximo commit é intermediário; não libera a entrega antes do gate 0 e da prova nativa.
+
+
+Clippy da mesma rodada identificou `Option::is_none_or` acima do MSRV 1.80 declarado. Substituído por `map_or(true, ...)`, com a mesma condição de progresso, sem elevar o MSRV nem suprimir o lint. Portanto `logs/review-5-rust-full-fixed.log` tem exit 101 apesar dos 2.184 testes verdes; verificação de lint após a correção em `logs/review-5-msrv-check.log`.
+
+`logs/review-5-msrv-check.log` exit 0: fmt e Clippy all-targets com `-D warnings` passaram após usar a API compatível com MSRV.

@@ -270,7 +270,7 @@ impl TranscriptionModel {
                 // Always publish the first durable bytes and the completed file.
                 let now = std::time::Instant::now();
                 if received == file.bytes
-                    || last_progress.is_none_or(|last| {
+                    || last_progress.map_or(true, |last| {
                         now.duration_since(last) >= std::time::Duration::from_millis(100)
                     })
                 {
