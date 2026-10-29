@@ -121,6 +121,7 @@ async fn install_verifies_bytes_and_reopens_ready_without_network() {
         }
     )));
     let reopened = TranscriptionModel::new(model.dir.clone(), manifest());
+    reopened.refresh_from_disk(|_| {}).await;
     assert_eq!(reopened.state(), ModelState::Ready { bytes: 17 });
     reopened.install(&server.url, |_| {}).await.unwrap();
     assert_eq!(server.seen.lock().unwrap().len(), 2);
@@ -160,6 +161,7 @@ async fn cancel_returns_absent_and_resume_uses_range() {
     assert_eq!(model.state(), ModelState::Absent);
     assert!(!model.dir.join("installed.json").exists());
     let reopened = TranscriptionModel::new(model.dir.clone(), manifest());
+    reopened.refresh_from_disk(|_| {}).await;
     assert_eq!(reopened.state(), ModelState::Absent);
     reopened.install(&server.url, |_| {}).await.unwrap();
     assert_eq!(reopened.state(), ModelState::Ready { bytes: 17 });
@@ -170,26 +172,20 @@ async fn cancel_returns_absent_and_resume_uses_range() {
         .iter()
         .any(|s| s.to_ascii_lowercase().contains("range: bytes=3-")));
 }
-#[test]
-fn disk_without_marker_is_verified_and_size_changes_invalidate_marker() {
+#[tokio::test]
+async fn disk_without_marker_is_verified_and_size_changes_invalidate_marker() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().join("model");
     std::fs::create_dir_all(dir.join("Encoder.mlmodelc")).unwrap();
     std::fs::write(dir.join("Encoder.mlmodelc/model.mil"), b"encoder").unwrap();
-    assert_eq!(
-        TranscriptionModel::new(dir.clone(), manifest()).state(),
-        ModelState::Absent
-    );
+    assert_eq!(reopened_state(dir.clone()).await, ModelState::Absent);
     std::fs::write(dir.join("parakeet_vocab.json"), b"vocabulary").unwrap();
     assert_eq!(
-        TranscriptionModel::new(dir.clone(), manifest()).state(),
+        reopened_state(dir.clone()).await,
         ModelState::Ready { bytes: 17 }
     );
     std::fs::write(dir.join("parakeet_vocab.json"), b"bad").unwrap();
-    assert_eq!(
-        TranscriptionModel::new(dir, manifest()).state(),
-        ModelState::Absent
-    );
+    assert_eq!(reopened_state(dir).await, ModelState::Absent);
 }
 
 #[tokio::test]
@@ -208,4 +204,37 @@ async fn removal_disables_selection_before_waiting_for_download_lock() {
     );
     drop(guard);
     removal.await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_registration_does_not_hash_files_or_write_the_install_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("model");
+    std::fs::create_dir_all(dir.join("Encoder.mlmodelc")).unwrap();
+    std::fs::write(dir.join("Encoder.mlmodelc/model.mil"), b"encoder").unwrap();
+    std::fs::write(dir.join("parakeet_vocab.json"), b"vocabulary").unwrap();
+    let model = TranscriptionModel::new(dir.clone(), manifest());
+    assert_eq!(model.state(), ModelState::Absent);
+    assert!(!dir.join("installed.json").exists());
+    let emitted = Mutex::new(Vec::new());
+    // A removal queued during startup must not revive readiness.
+    let removing = model.begin_removal();
+    model
+        .refresh_from_disk(|state| lock(&emitted).push(state))
+        .await;
+    assert!(lock(&emitted).is_empty());
+    assert!(!dir.join("installed.json").exists());
+    drop(removing);
+    model
+        .refresh_from_disk(|state| lock(&emitted).push(state))
+        .await;
+    assert_eq!(model.state(), ModelState::Ready { bytes: 17 });
+    assert_eq!(*lock(&emitted), vec![ModelState::Ready { bytes: 17 }]);
+    assert!(dir.join("installed.json").exists());
+}
+
+async fn reopened_state(dir: PathBuf) -> ModelState {
+    let model = TranscriptionModel::new(dir, manifest());
+    model.refresh_from_disk(|_| {}).await;
+    model.state()
 }

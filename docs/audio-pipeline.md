@@ -238,7 +238,9 @@ and removal. Files live under `app_paths::app_data_dir()/models/parakeet-ultra-c
 Downloads use the pinned Hugging Face revision and per-file SHA-256 manifest in
 `src-tauri/resources/local-transcriber-model.json`; `.mlmodelc` directories are
 expanded into their inner files. Complete files are reused and `.part` files
-resume using HTTP Range. `installed.json` caches the verified manifest; missing
+resume using HTTP Range. Startup verifies the saved model on a blocking worker, then emits readiness; it
+does not hash model weights on the window thread. Verification shares the install
+and removal lock. `installed.json` caches the verified manifest; missing
 markers or size changes trigger revalidation. No database migration is needed.
 
 The Rust `TranscriptionBackend` selects the transport before reading credentials.

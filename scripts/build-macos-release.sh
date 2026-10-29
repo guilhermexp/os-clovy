@@ -229,6 +229,8 @@ fi
 if [[ "$updater" == "on" ]]; then
   tauri_build_args+=(--config src-tauri/tauri.release.conf.json)
 fi
+# Cargo validates every bundled helper resource before the Tauri build hook.
+pnpm local-transcriber:prepare -- --release
 pnpm computer-use:prepare -- "${computer_use_prepare_args[@]}"
 # Trailing args after `--` reach the cargo runner; --locked keeps the
 # release build from re-resolving past Cargo.lock (spec/package-install-security.md).

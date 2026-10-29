@@ -33,6 +33,14 @@ const notarization = {
 };
 
 describe("macOS release build plan", () => {
+  it("prepares the Local resource before any Computer use Cargo build", () => {
+    const script = readFileSync(SCRIPT, "utf8");
+    const local = script.indexOf("pnpm local-transcriber:prepare -- --release");
+    const computerUse = script.indexOf("pnpm computer-use:prepare");
+    expect(local).toBeGreaterThanOrEqual(0);
+    expect(local).toBeLessThan(computerUse);
+  });
+
   it("signs ad hoc and skips notarization without Apple variables", () => {
     const { status, plan: result } = plan();
     expect(status).toBe(0);

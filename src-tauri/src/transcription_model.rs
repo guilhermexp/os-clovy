@@ -66,22 +66,39 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl TranscriptionModel {
     pub fn new(dir: PathBuf, manifest: Manifest) -> Self {
-        let ready = installed(&dir, &manifest);
-        let state = if ready {
-            ModelState::Ready {
-                bytes: manifest.total_bytes,
-            }
-        } else {
-            ModelState::Absent
-        };
         Self {
             dir,
             manifest,
-            state: Mutex::new(state),
+            state: Mutex::new(ModelState::Absent),
             cancellation: Mutex::new(None),
             operation: tokio::sync::Mutex::new(()),
             removals: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+    /// Startup registers immediately; disk verification runs away from the window thread.
+    pub async fn refresh_from_disk(&self, progress: impl Fn(ModelState) + Send + Sync) {
+        let _operation = self.operation.lock().await;
+        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return;
+        }
+        let dir = self.dir.clone();
+        let manifest = self.manifest.clone();
+        let ready = tokio::task::spawn_blocking(move || installed(&dir, &manifest))
+            .await
+            .unwrap_or(false);
+        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return;
+        }
+        self.publish(
+            if ready {
+                ModelState::Ready {
+                    bytes: self.manifest.total_bytes,
+                }
+            } else {
+                ModelState::Absent
+            },
+            &progress,
+        );
     }
     pub fn directory(&self) -> &std::path::Path {
         &self.dir
@@ -341,7 +358,7 @@ pub const MODEL_STATE_EVENT: &str = "local-transcription-model-state";
 static MODEL: std::sync::OnceLock<std::sync::Arc<TranscriptionModel>> = std::sync::OnceLock::new();
 
 pub fn setup(app: &mut tauri::App) -> Result<(), tauri::Error> {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
     if !crate::providers::local_transcription_supported() {
         return Ok(());
     }
@@ -350,6 +367,15 @@ pub fn setup(app: &mut tauri::App) -> Result<(), tauri::Error> {
         .expect("pinned model manifest");
     let model = MODEL.get_or_init(|| std::sync::Arc::new(TranscriptionModel::new(dir, manifest)));
     app.manage(model.clone());
+    let model = model.clone();
+    let app = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        model
+            .refresh_from_disk(|state| {
+                let _ = app.emit(MODEL_STATE_EVENT, state);
+            })
+            .await;
+    });
     Ok(())
 }
 pub fn runtime(
