@@ -5913,7 +5913,7 @@ struct DictationCleanupCall {
     utterance_id: String,
 }
 
-/// Turns one finished recording into text (Groq Whisper).
+/// Turns one finished recording into text using the captured backend.
 trait DictationTranscriber {
     fn transcribe(
         &self,
@@ -5944,6 +5944,9 @@ impl DictationTranscriber for ServiceDictationTranscriber {
                 dictate_transcribe_with(Some(key), model.clone(), request).await
             }
             crate::providers::transcription::TranscriptionBackend::Local { model_dir } => {
+                // Deselecting Local may have stopped its helper (D4). Keep this
+                // take's backend and propagate that local error to the HUD;
+                // never resolve the new provider and upload the captured audio.
                 crate::providers::local_transcriber::transcribe(
                     model_dir,
                     &request.audio_path,
@@ -12588,48 +12591,88 @@ mod tests {
 
     #[tokio::test]
     async fn parakeet_review_dictation_keeps_its_backend_across_an_await() {
+        use crate::providers::local_transcriber::{
+            NetworkSentinel, LOCAL_TRANSCRIBER_FAILED_MESSAGE,
+        };
         use crate::providers::{
             local_transcriber::{FakeLocalTranscriber, TEST_LOCAL},
             transcription::{TranscriptionBackend, TEST_BACKEND},
         };
-        let fake = Arc::new(FakeLocalTranscriber::default());
-        TEST_BACKEND
-            .scope(
-                TranscriptionBackend::Local {
-                    model_dir: "/fixture/model".into(),
-                },
-                async {
-                    let transcriber = ServiceDictationTranscriber {
-                        backend: crate::providers::transcription::current_backend().unwrap(),
-                    };
-                    tokio::task::yield_now().await;
-                    TEST_BACKEND
-                        .scope(
-                            TranscriptionBackend::Groq {
-                                key: "fixture-key".into(),
-                                model: "whisper-large-v3".into(),
-                            },
-                            TEST_LOCAL.scope(fake.clone(), async {
-                                let result = transcriber
-                                    .transcribe(DictateTranscribeRequest {
-                                        audio_path: "/fixture/take.m4a".into(),
-                                        language: Some("pt".into()),
-                                        context: None,
-                                        session_id: "session".into(),
-                                        utterance_id: "take".into(),
-                                    })
-                                    .await;
-                                assert!(
-                                    result.is_ok(),
-                                    "the admitted Local backend must be retained: {result:?}"
-                                );
-                                assert_eq!(fake.calls.lock().unwrap().len(), 1);
-                            }),
-                        )
-                        .await;
-                },
-            )
-            .await;
+        let sentinel = NetworkSentinel::start().await;
+        for fail in [false, true] {
+            let fake = Arc::new(FakeLocalTranscriber {
+                fail,
+                ..Default::default()
+            });
+            crate::providers::TEST_ORIGIN
+                .scope(
+                    sentinel.origin.clone(),
+                    TEST_BACKEND.scope(
+                        TranscriptionBackend::Local {
+                            model_dir: "/fixture/model".into(),
+                        },
+                        async {
+                            let transcriber = ServiceDictationTranscriber {
+                                backend: crate::providers::transcription::current_backend()
+                                    .unwrap(),
+                            };
+                            tokio::task::yield_now().await;
+                            TEST_BACKEND
+                                .scope(
+                                    TranscriptionBackend::Groq {
+                                        key: "fixture-key".into(),
+                                        model: "whisper-large-v3".into(),
+                                    },
+                                    TEST_LOCAL.scope(fake.clone(), async {
+                                        let result = transcriber
+                                            .transcribe(DictateTranscribeRequest {
+                                                audio_path: "/fixture/take.m4a".into(),
+                                                language: Some("pt".into()),
+                                                context: None,
+                                                session_id: "session".into(),
+                                                utterance_id: "take".into(),
+                                            })
+                                            .await;
+                                        if fail {
+                                            // D4 ends the helper on a switch. Its failure must
+                                            // remain actionable in the HUD, never become Groq.
+                                            let outcome = outcome_from_raw_transcription_result(
+                                                result,
+                                                Some(0.2),
+                                            );
+                                            assert!(outcome.transcript.is_none());
+                                            assert_eq!(
+                                                outcome.helper_command,
+                                                serde_json::json!({"type":"discard_recording"})
+                                            );
+                                            let event = outcome
+                                                .event
+                                                .expect("Local failure must be visible");
+                                            assert_eq!(
+                                                event["payload"]["code"],
+                                                "local_transcriber_failed"
+                                            );
+                                            assert_eq!(
+                                                event["payload"]["message"],
+                                                LOCAL_TRANSCRIBER_FAILED_MESSAGE
+                                            );
+                                        } else {
+                                            let transcript = result.expect(
+                                                "the captured Local backend must be retained",
+                                            );
+                                            assert_eq!(transcript.provider, "local");
+                                            assert_eq!(transcript.text, "Olá mundo");
+                                        }
+                                        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+                                    }),
+                                )
+                                .await;
+                        },
+                    ),
+                )
+                .await;
+        }
+        sentinel.assert_unused();
     }
 
     #[tokio::test]

@@ -11404,6 +11404,7 @@ mod tests {
             FakeLocalTranscriber, LocalTranscription, NetworkSentinel, Token, TEST_LOCAL,
         };
         use crate::providers::transcription::TEST_BACKEND;
+        assert_eq!(PACK_GAP_MS, 500, "the Groq pack gap must stay unchanged");
         // A 160 ms late token end bridges the artificial 500 ms pack gap.
         let timed = LocalTranscription {
             text: "Primeiro Segundo Terceiro".into(),

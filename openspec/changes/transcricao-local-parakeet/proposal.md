@@ -28,6 +28,6 @@ Toda transcrição de áudio do Clovy (ditado, notas e reuniões, prévia ao viv
 - **Swift**: novo pacote `src-tauri/native/mac-local-transcriber/` com dependência FluidAudio (SPM, versão fixa), compilado com `swift build`; assinatura igual aos helpers atuais; mapeado em `bundle.resources`.
 - **Frontend (`src/`)**: `components/settings/AppSettings.tsx` (linha de Transcrição com seletor Groq/Local, botão instalar/remover com progresso), `lib/tauri.ts` (DTOs e comandos novos), `i18n/messages/settings*.ts` (en e pt-BR), mensagens de falha de nota e ditado para o motor local.
 - **Testes**: Rust com transcritor local falso nos caminhos de ditado, notas, pacotes e prévia; download com servidor HTTP falso; frontend para a linha de Transcrição e estados do modelo.
-- **Dependências**: FluidAudio (Swift, MIT) fixada por tag; nenhuma crate Rust nova além das já presentes (`reqwest` stream, `sha2`, `tokio`).
+- **Dependências**: FluidAudio (Swift, Apache-2.0) fixada por tag; nenhuma crate Rust nova além das já presentes (`reqwest` stream, `sha2`, `tokio`).
 - **Build/CI**: `swift build` do pacote do helper passa a fazer parte do build macOS; o CI macOS precisa resolver o pacote SPM (rede ou cache).
 - **Sem mudança de banco**: o cache de trechos (`note_transcription_chunks`) já inclui modelo na chave; o modelo local entra como `parakeet-ultra`.
