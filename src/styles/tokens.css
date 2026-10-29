@@ -95,6 +95,9 @@
 }
 
 :root {
+  /* Owner-selected neutral ink for the Drift background in either theme. */
+  --agent-background-ink: #8f8d86;
+
   /* Type ------------------------------------------------------------- */
   --font-sans:
     "ABC Diatype", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -218,10 +221,6 @@
    * dictation, the editor) so they line up, and steps up on larger displays
    * so the column doesn't feel marooned in whitespace on big monitors. */
   --content-max: 760px;
-  /* New-session ambience is wider than the conversation rail, then dissolves
-   * before the panel edge so it reads as a floor rather than another card. */
-  --hero-wash-max-w: 960px;
-  --hero-wash-side-fade: 16%;
 
   /* Computer use surfaces. These bounds are shared layout contracts rather
    * than incidental component pixels: plugin cards stay usable as the grid
@@ -388,10 +387,6 @@
   --search-match: color-mix(in oklch, var(--brand) 28%, var(--card));
   --search-match-active: color-mix(in oklch, var(--brand) 48%, var(--card));
   --search-match-active-ring: color-mix(in oklch, var(--brand) 70%, var(--foreground));
-  /* Two strengths for the new-session floor wash. The chroma-capped lead-in
-   * keeps the transition quiet; the active accent gathers at the bottom. */
-  --hero-wash: color-mix(in oklch, var(--brand) 10%, transparent);
-  --hero-wash-soft: color-mix(in oklch, var(--brand-wash) 4%, transparent);
   /* Focus ring lives in the warm-grey family so it never reads as a cool
    * macOS-blue glow next to the rest of the palette. */
   --focus-ring: oklch(60% 0.03 84.59 / 22%);

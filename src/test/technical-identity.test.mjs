@@ -318,6 +318,6 @@ describe("Clovy technical identity", () => {
     expect(index).not.toContain("os-june:");
     expect(onboardingPreview).toContain("clovy.replayOnboarding()");
     expect(onboardingPreview).toContain("window.__CLOVY_STUB__");
-    expect(styleguide).toContain("else os-clovy:theme / system");
+    expect(styleguide).toContain("else os-clovy:theme / dark");
   });
 });

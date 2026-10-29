@@ -209,7 +209,10 @@ exclusions and the retention period like the agent tools
 
 ### Tools for every client
 
-Every connection, bound or not, gets these read-only tools (`readOnlyHint`).
+Unbound clients and attended chat turns get these read-only tools
+(`readOnlyHint`). Routine turns also require a saved routine with an enabled
+context toolset (`context_engine`, `memory`, or `session_search`). Missing or
+revoked routine authorization hides these reads and denies their calls.
 
 | Tool | Arguments | Result and limits |
 | --- | --- | --- |
@@ -229,6 +232,10 @@ Every connection, bound or not, gets these read-only tools (`readOnlyHint`).
 | `get_day_schedule` | none | `summaryTime` (local `HH:MM` the day summary is written), `notifications` (`enabled`, `quietHours`: `enabled`, `start`, `end`) from Settings, Activity |
 
 ### Tools for turn-bound connections
+
+The table describes the available catalog. Routine `get_dictation` reads need
+an enabled context toolset; `list_skills` and `load_skill` need `skills`.
+Missing or revoked routine authorization hides those tools and denies calls.
 
 Listed and callable only on a connection bound to a turn. "Listed to" says
 which turns see the tool: `every turn`, `attended turns` (chat; never

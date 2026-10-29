@@ -133,3 +133,46 @@ O orquestrador autorizou reaplicar a divisão de renomes a `b88b5c57`: snapshot 
 A delta corretiva foi aprovada em `.tmp/verify/remover-clovy-api/review-pair/resumption-final-delta-3/summary.md`: exit 0, ambos os revisores sem achados, snapshot `966aad9f600fbddc5b809816b8b7f9d8af0c5007`. Após fechar 17/17, os 35 arquivos foram conferidos byte a byte contra esse snapshot; evidência `.tmp/verify/remover-clovy-api/unchanged-delta-after-17-of-17.json`. Depois disso mudaram somente estes registros de tarefas e o mapa de revisão. Conforme instrução do orquestrador, nenhum teste ou revisão do código inalterado foi repetido. As verificações focadas e a prova nativa limitada já aceitas continuam com seus limites originais.
 
 Entrega revisada do worker concluída. Permanecem para o orquestrador a integração em main preservando `79441ef3`, os gates de integração e o aceite da tarefa 4.7; por isso 1.1 e 4.7 não são marcadas como integradas. Os oito achados do último par têm disposições específicas. As seis correções adicionais passaram em 25 testes focados, typecheck e guarda real; revisão própria em `.tmp/verify/remover-clovy-api/review-pair/b88-corrections-1/summary.md`, sobre base com árvore idêntica à de `966aad9f`, seguida pelo par final `.tmp/verify/remover-clovy-api/review-pair/b88-corrections-3/summary.md` nos dois arquivos do último ajuste. A tentativa 2 teve exit 4 por quota, não aceita como gate. O código aprovado anteriormente não foi reavaliado. Dois apontamentos são comportamento preexistente, comprovado por comparação com a base anterior aos 17 commits: o caminho de endpoint não reserva a fila compartilhada e o cleanup direto aceita a extração parcial em resposta limitada por comprimento. Permanecem limites explícitos, sem alegação de correção nesta entrega. A tarefa 7.2 permanece parcial: inferência real Groq/OpenRouter/fal com chaves do dono será testada manualmente após merge. Não houve merge/push, nova build do app, uso de credenciais reais ou inferência paga.
+
+## Integração autorizada de main na branch — 2026-10-29
+
+O orquestrador aceitou `ef5f699e` e autorizou o merge normal de main
+`79441ef3` em `feat/remover-clovy-api`. A aparência da main é preservada
+byte a byte; providers diretos, CLI padrão e MCP permanecem na branch.
+Locks resolvidos com sfw/pnpm e Cargo, sem versões fora dos dois pais.
+A rodada integrada usa o target existente, dois jobs e incremental desligado.
+O teste documental MCP passou a criar a autorização persistida da rotina:
+sem ela, o catálogo corretamente nega leituras. O comportamento de produção
+não mudou. O documento agora explicita esse requisito.
+
+Evidências: `.tmp/verify/remover-clovy-api/integration/` (gates, smoke sintético,
+comparação com main e locks); mapa da revisão específica contra `ef5f699e` em
+`openspec/changes/remover-clovy-api/integration-review-map.json`.
+A revisão anterior dos 17 commits continua válida e não é repetida aqui.
+O ff-only de main e o aceite final 4.7 continuam com o orquestrador; 1.1/7.2
+não são declaradas concluídas por smoke de navegador. Groq/OpenRouter/fal
+reais, Codex real e Windows nativo permanecem pendentes, sem chaves reais,
+inferência paga ou build adicional do app nesta integração.
+
+Fechamento da integração: cobertura 43/43 caminhos. `integration-1` exit 4 por
+omissão dos dois caminhos antigos não conta como gate completo. Procedimento
+já autorizado: A `4a8497d0367c9d374f46a64c390785c987b475e1` remove somente os
+antigos `.openspec.yaml` e `proposal.md`; B
+`101effc7ae0d1a11c435f386ba4613d0e3a22db6` aplica os 41 caminhos restantes.
+Árvore final `0cb7d627df8af5c4276b110d77b8717acad441e7` exatamente igual à
+integração testada e ao snapshot inicial. `integration-2-deletions` exit 0;
+`integration-3-remainder` exit 6, ambos completos. Summaries sob
+`.tmp/verify/remover-clovy-api/review-pair/`; disposições e fontes em
+`.tmp/verify/remover-clovy-api/integration/review-dispositions.md` e no mapa
+versionado. CodeRabbit declarou ausência de análise detalhada nova no par de
+deleções; esse limite permanece explícito.
+
+Achado condicional do atributo visual refutado pelo host de workspace único.
+Achado de memória reconhece limite preexistente do decoder: o design da main
+já distingue buffer de saída limitado antes de decode e alocações internas
+best effort. Não se promete teto estrito de heap/RSS nem se muda a aparência
+autorizada. Gates finais: frontend 1902/0, Rust 2151/0 (21 ignorados),
+fmt/clippy all-targets/typechecks/guards/OpenSpec 0; smoke conjunto sintético
+PASS, zero requisições no listener aposentado. Após essa revisão mudaram
+somente metadados de fechamento; código e testes mantêm os bytes revisados.
+O orquestrador ainda faz ff-only/aceite em main e testes reais com suas chaves.

@@ -203,13 +203,30 @@ async fn turn_bound_table_is_the_bound_catalog_for_each_kind_of_turn() {
     let bound = rows(&lines);
     assert!(!bound.is_empty());
     let notes = notes_pool().await;
-    for turn in [
+    // The tables describe the available catalog. Routine reads and skill
+    // discovery also require the saved toolsets; a missing routine fails closed.
+    let session = clovy_lib::agent_sessions::AgentRepository::new(notes.clone())
+        .create_session(
+            "Catalog",
+            "__clovy_cli_engine__:claude",
+            AgentSafetyMode::Sandboxed,
+            None,
+        )
+        .await
+        .unwrap();
+    let now = "2026-10-29T00:00:00Z";
+    sqlx::query::query("INSERT INTO routines (id, name, prompt, schedule, created_at, updated_at, metadata_json, tool_catalog_version) VALUES ('doc-routine', 'Catalog', 'List', 'every 1d', ?, ?, '{\"enabledToolsets\":[\"context_engine\",\"skills\"]}', 1)")
+        .bind(now).bind(now).execute(&notes).await.unwrap();
+    sqlx::query::query("INSERT INTO routine_runs (id, routine_id, agent_session_id, claim_token, trigger_kind, status, model, safety_mode, created_at, updated_at) VALUES ('doc-run', 'doc-routine', ?, 'claim', 'schedule', 'running', 'claude', 'sandboxed', ?, ?)")
+        .bind(&session.id).bind(now).bind(now).execute(&notes).await.unwrap();
+    for mut turn in [
         binding(CliKind::Claude, true),
         binding(CliKind::Claude, false),
         binding(CliKind::Codex, true),
         binding(CliKind::Codex, false),
         binding(CliKind::Copilot, true),
     ] {
+        turn.session_id = session.id.clone();
         let mut expected = every_client.clone();
         expected.extend(
             bound

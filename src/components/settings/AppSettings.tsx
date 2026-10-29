@@ -1,3 +1,4 @@
+import { BackgroundSettings } from "./BackgroundSettings";
 import { listen } from "@tauri-apps/api/event";
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
@@ -1441,6 +1442,7 @@ export function AppSettings({
                     />
                   </div>
                 </div>
+                <BackgroundSettings />
                 <div className="settings-row">
                   <div className="settings-row-info">
                     <h3 className="settings-row-title">{t("settings.textSize.title")}</h3>
