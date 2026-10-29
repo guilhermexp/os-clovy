@@ -6,11 +6,6 @@ export function ContextOverflowNoticePart() {
   return <div className="agent-system-notice">{t("chat.notice.contextOverflow")}</div>;
 }
 
-export function CreditsNoticePart(_props: { [key: string]: unknown }) {
-  const t = useT();
-  return <div className="agent-system-notice">{t("chat.notice.needCredits")}</div>;
-}
-
 export function UpstreamProviderFailureNoticePart({
   onRetry,
   kind = "upstream-provider",

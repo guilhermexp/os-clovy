@@ -15,7 +15,7 @@ takes never deliver), and
    on macOS) reports `shortcut_key_down`; `ShortcutActivationController` in
    `src-tauri/src/dictation.rs` answers `start_listening` with a take id. The
    same key-down also rewarms the network route when it has been idle for a
-   minute (`clovy_api::warm_dictation_route_if_idle`).
+   minute (`warm_dictation_route_if_idle` in the Groq provider).
 2. **Capture.** The helper starts recording at once: microphone permission is
    only requested when it is not already granted, and the recorder for the
    next take is prepared after each take and at launch. The start cue plays in
@@ -24,11 +24,12 @@ takes never deliver), and
 3. **Stop.** On release the helper pins the paste target, stops the recorder,
    and emits `recording_ready` with the `.m4a` path and the peak meter level.
    No speech analysis runs before the upload.
-4. **Transcription** (`clovy_api::dictate_transcribe`). With the user's own
+4. **Transcription** (`dictate_transcribe` in the Groq provider). With the user's own
    Groq key it posts straight to `api.groq.com/openai/v1/audio/transcriptions`
    (model, `response_format=verbose_json`, the short dictionary hint as `prompt`, and
-   `language`), carrying only that key. Without one it posts to Clovy API's
-   `/v1/dictate`.
+   `language`), carrying only that key. Without one it returns
+   `groq_api_key_missing` without a request. The HUD identifies the missing Groq key and its location in Settings,
+   in English or pt-BR.
 5. **No speech.** A take under 0.5 s of audio (`audioDurationSeconds` in
    `recording_ready`) is not uploaded. On the direct Groq route the request
    asks for `verbose_json` and segments with `no_speech_prob` of 0.6 or more
@@ -38,9 +39,9 @@ takes never deliver), and
 6. **Cleanup** (optional, off by default). Off, the pasted text is Whisper's
    transcript only trimmed: no filler removal and no style. With **Clean up dictation text** on
    in Settings > Style, the transcript goes to the chosen OpenRouter model in
-   one chat completion (`clovy_api::dictate_cleanup`): straight to
-   `openrouter.ai` with the user's own key, else Clovy API's
-   `/v1/dictate/cleanup`. Transcripts above 800 bytes are split at word
+   one chat completion (`dictate_cleanup` in the OpenRouter provider): straight to
+   `openrouter.ai` with the user's own key. A missing key returns
+   `openrouter_api_key_missing` without a request. Transcripts above 800 bytes are split at word
    boundaries and up to four chunks are cleaned at once, then rejoined in
    order. Any failure or timeout pastes the whole raw transcript, and the HUD
    says "Pasting into {app} without cleanup". Cleanup never runs on an agent
@@ -57,9 +58,9 @@ takes never deliver), and
 `cleanupModel` (an OpenRouter catalog id, default
 `nvidia/nemotron-3-nano-30b-a3b`), and `cleanupMigrated`. A file saved before
 optional cleanup has no `cleanupMigrated`; on the first launch it is migrated
-once to cleanup off, whatever engine cleanup used before (Clovy API, an
-endpoint, or a CLI). The `dictationCleanup` selection in
-`provider-settings.json` is kept on disk but always reads as Clovy API.
+once to cleanup off, whatever engine cleanup used before. The obsolete
+`dictationCleanup` engine slot is removed from provider settings; cleanup
+always uses OpenRouter.
 
 The same file stores `hudPlacement`: `bottom` by default, including files
 without the field, or `top`. Settings > Dictation > Style exposes **Indicator
@@ -90,9 +91,8 @@ import release settings or scan release helper records.
 At launch and on a key-down after a minute idle, Clovy reads the user's Groq
 and OpenRouter keys, each on its own, into the Keychain store's per-account
 cache (the same cache a key save or removal updates; there is no second one),
-reads the local identity's bearer token when the take will use Clovy API, and opens the
-transcription connection without sending audio: `GET /models` on Groq with
-the user's key, else Clovy API's `GET /healthz`. The helper preloads the cues
+and opens the transcription connection without sending audio: `GET /models`
+on Groq with the user's key. Without a Groq key no warm-up request is made. The helper preloads the cues
 and prepares the next recorder after every take. No audio is recorded outside
 a take.
 
@@ -124,10 +124,11 @@ From the `dictation-events.log` of the app being measured:
 - `cargo test dictation` - settings migration, the pipeline with a fake
   transcriber and cleaner (cleanup off, on, failed, timed out, parallel
   chunks), and `no_speech` on an empty transcript.
-- `cargo test dictation_route_tests` - fake Groq, OpenRouter, and Clovy API
-  hosts: requests per destination, only the called provider's key, warm-up.
-- `cargo test llm::registry` - the registry refuses a CLI or endpoint for
-  dictation cleanup.
+- `cargo test dictation_route_tests` - fake Groq and OpenRouter hosts plus an
+  isolated retired-origin listener: direct requests, provider-key separation,
+  warm-up and zero requests to the retired origin.
+- `cargo test llm::registry` - persisted provider migrations preserve CLI and
+  endpoint note selections and remove obsolete cleanup selection.
 - `cargo test dictation_hud_` - top/bottom origin, Dock/no Dock, 1x/2x,
   offset monitors, resize bounds, and settings save/reload compatibility.
 - `src/test/dictation-cleanup-settings.test.tsx` - the cleanup switch,

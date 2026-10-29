@@ -89,8 +89,7 @@ export default defineMessages({
     "agent.usage.latestContext": "Latest request context",
     "agent.usage.contextValue": "{used} of {limit} ({percent}%)",
     "agent.usage.contextUsed": "Context used",
-    "agent.usage.estimatedCharge": "Estimated charge",
-    "agent.usage.chargeValue": "{credits} credits (about {usd})",
+
     "agent.usage.tools": "Tools",
     "agent.usage.toolCalls": { one: "{count} call", other: "{count} calls" },
     "agent.usage.toolCallsWithFailures": {
@@ -117,7 +116,7 @@ export default defineMessages({
     "agent.composer.addFilesOrNotes": "Add files or notes",
     "agent.composer.dictate": "Dictate",
     "agent.composer.startDictation": "Start dictation",
-    "agent.composer.steer": "Steer active run",
+    "agent.composer.steer": "Queue next turn",
     "agent.composer.waitForAttachments": "Wait for files to finish attaching",
     "agent.composer.stop": "Stop Clovy",
     "agent.composer.send": "Send message",
@@ -289,8 +288,7 @@ export default defineMessages({
     "agent.usage.latestContext": "Contexto da última solicitação",
     "agent.usage.contextValue": "{used} de {limit} ({percent}%)",
     "agent.usage.contextUsed": "Contexto usado",
-    "agent.usage.estimatedCharge": "Cobrança estimada",
-    "agent.usage.chargeValue": "{credits} créditos (cerca de {usd})",
+
     "agent.usage.tools": "Ferramentas",
     "agent.usage.toolCalls": { one: "{count} chamada", other: "{count} chamadas" },
     "agent.usage.toolCallsWithFailures": {
@@ -317,7 +315,7 @@ export default defineMessages({
     "agent.composer.addFilesOrNotes": "Adicionar arquivos ou notas",
     "agent.composer.dictate": "Ditar",
     "agent.composer.startDictation": "Iniciar ditado",
-    "agent.composer.steer": "Direcionar a execução em andamento",
+    "agent.composer.steer": "Adicionar próximo turno à fila",
     "agent.composer.waitForAttachments": "Aguarde os arquivos terminarem de anexar",
     "agent.composer.stop": "Parar o Clovy",
     "agent.composer.send": "Enviar mensagem",

@@ -527,7 +527,7 @@ struct GhAccess {
     repos: crate::db::repositories::Repositories,
     env: crate::llm::shell_env::LoginEnv,
 }
-impl crate::agent_runtime::native_connectors::GithubAccess for GhAccess {
+impl crate::connectors::agent_tools::GithubAccess for GhAccess {
     fn accounts(
         &self,
     ) -> BoxFuture<'_, Result<Vec<crate::connectors::ConnectorAccount>, AppError>> {
@@ -561,13 +561,11 @@ impl ConnectorDriver for GhDriver {
         _approval_id: Option<String>,
     ) -> BoxFuture<'a, Result<Value, AppError>> {
         Box::pin(async move {
-            crate::agent_runtime::native_connectors::dispatch_github(
-                &self.0,
-                &call.name,
-                call.arguments,
-            )
-            .await
-            .unwrap_or_else(|| Err(AppError::new("mcp_tool_unknown", "Unknown connector tool.")))
+            crate::connectors::agent_tools::dispatch_github(&self.0, &call.name, call.arguments)
+                .await
+                .unwrap_or_else(|| {
+                    Err(AppError::new("mcp_tool_unknown", "Unknown connector tool."))
+                })
         })
     }
 }

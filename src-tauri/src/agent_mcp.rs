@@ -2502,7 +2502,7 @@ async fn start_stdio_session(
             let mut command = crate::hide_console::tokio_command("/usr/bin/sandbox-exec");
             command
                 .arg("-p")
-                .arg(crate::agent_runtime::tools::sandbox_profile(workspace))
+                .arg(crate::agent_sessions::skills::sandbox_profile(workspace))
                 .arg(executable)
                 .args(&server.args);
             command

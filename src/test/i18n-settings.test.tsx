@@ -76,7 +76,7 @@ describe("settings in Portuguese (Brazil)", () => {
   it("translates the About panel", () => {
     renderSettings("about");
     expect(screen.getByRole("heading", { name: "Sobre" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Verificar servidor" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Verificar servidor" })).not.toBeInTheDocument();
   });
 
   it("translates the Models panel headings and model picker labels", () => {

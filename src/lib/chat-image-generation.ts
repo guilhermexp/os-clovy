@@ -6,7 +6,7 @@ import { t } from "../i18n/translate";
  * Clovy imports a pasted or dropped image into the session workspace and shows it inline as a composer
  * attachment (`attachmentStateFrom` -> `attachImageToSession`, rendered from
  * `previewDataUrl`). This module reuses that path verbatim for a GENERATED
- * image: it calls the Clovy API image endpoint, decodes the base64 result,
+ * image: it calls the native direct fal image command, decodes the base64 result,
  * imports the bytes into the workspace, and returns the same
  * `AgentAttachmentState` a pasted image produces. The caller drops the
  * attachment into the composer list exactly as it does for a paste.
@@ -26,7 +26,7 @@ import { messageFromError } from "./errors";
 import type { GeneratedImageDto } from "./tauri";
 
 export type GenerateChatImageDeps = {
-  /** Calls the Clovy API image endpoint; `model` falls back server-side. */
+  /** Calls the native direct fal image command; `model` defaults to the saved selection. */
   generate: (
     prompt: string,
     model: string | undefined,
@@ -53,7 +53,7 @@ export type GenerateChatImageResult =
 export type EditChatImageDeps = {
   /** Reads the source workspace file as a `data:<mime>;base64,...` URL. */
   readImageData: (path: string) => Promise<string | null>;
-  /** Calls the Clovy API image-edit endpoint. */
+  /** Calls the native direct fal image-edit command. */
   edit: (
     imageBase64: string,
     prompt: string,

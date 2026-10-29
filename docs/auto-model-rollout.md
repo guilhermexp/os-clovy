@@ -1,5 +1,14 @@
 # Automatic model selection
 
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
+
 Clovy supports `open-software/auto` while retaining explicit model selection. Auto persists a
 cost-to-quality preference (`cost_quality`, 0 to 1) and forwards it through the Clovy-owned agent
 runtime and note generation.

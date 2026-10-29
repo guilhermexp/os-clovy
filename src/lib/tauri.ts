@@ -57,11 +57,6 @@ export const agentRuntimeBindings: AgentRuntimeBindings = {
   listSessions: () => invoke<AgentSessionDto[]>("list_agent_sessions"),
   getSession: (sessionId) => invoke<AgentSessionDto>("get_agent_session", { sessionId }),
   getLatestRun: (sessionId) => invoke<AgentRunDto | null>("get_latest_agent_run", { sessionId }),
-  compactSession: (sessionId) =>
-    invoke<{ compacted: boolean; removedItems: number; estimatedTokens?: number }>(
-      "compact_agent_session",
-      { sessionId },
-    ),
   createSession: (input) => invoke<AgentSessionDto>("create_agent_session", { request: input }),
   renameSession: (sessionId, title) =>
     invoke<AgentSessionDto>("rename_agent_session", { request: { sessionId, title } }),
@@ -70,12 +65,6 @@ export const agentRuntimeBindings: AgentRuntimeBindings = {
   deleteSession: (sessionId) => invoke<void>("delete_agent_session", { sessionId }),
   listItems: (sessionId) => invoke<AgentItemDto[]>("list_agent_items", { sessionId }),
   startRun: (request) => invoke<AgentRunDto>("start_agent_run", { request }),
-  steerRun: (runId, messageId, text) =>
-    invoke<{ accepted: boolean; reason?: string }>("steer_agent_run", {
-      runId,
-      messageId,
-      text,
-    }),
   cancelRun: (runId) => invoke<void>("cancel_agent_run", { runId }),
   retryRun: (runId) => invoke<AgentRunDto>("retry_agent_run", { runId }),
   resolveInterruption: (request) => invoke<AgentRunDto>("resolve_agent_interruption", { request }),
@@ -93,7 +82,6 @@ export const deleteAgentSession = agentRuntimeBindings.deleteSession;
 export const listAgentItems = agentRuntimeBindings.listItems;
 export const startAgentRun = (request: StartAgentRunRequest) =>
   agentRuntimeBindings.startRun(request);
-export const steerAgentRun = agentRuntimeBindings.steerRun;
 export const cancelAgentRun = agentRuntimeBindings.cancelRun;
 export const retryAgentRun = agentRuntimeBindings.retryRun;
 export const resolveAgentInterruption = (request: ResolveAgentInterruptionRequest) =>
@@ -396,7 +384,6 @@ export type ProviderModelSettingsDto = {
   generationProvider: string;
   transcriptionModel: string;
   generationModel: string;
-  costQuality: number;
   remoteGenerationModel: string;
   imageModel: string;
   videoModel: string;
@@ -408,9 +395,7 @@ export type ProviderModelSettingsDto = {
   imageSafeMode: boolean;
   /** Whether the user chose "don't ask again" on the safe-mode consent dialog. */
   imageSafeModePromptDismissed: boolean;
-  /** Live transcript preview while recording. On by default; billed as extra
-   * usage and disclosed in Settings, so previews from this build are sent as
-   * consented (JUN-375). Off stops the preview lanes entirely. */
+  /** Live transcript preview while recording. Requires the user's Groq key. */
   liveTranscription: boolean;
 };
 
@@ -477,13 +462,6 @@ export type ProviderModelDto = {
   capabilities: string[];
   priceUnit?: string;
   priceDescription?: string;
-  creditsPerMillionSeconds?: number;
-  inputCreditsPerMillionTokens?: number;
-  outputCreditsPerMillionTokens?: number;
-  /** False when Clovy holds no service key for the row's provider: the model is
-   * usable only with the user's own key for that provider. Absent means unknown
-   * for media; text/ASR retain their legacy handling for older API builds. */
-  serviceAvailable?: boolean;
 };
 
 export type ProviderModelsResponse = {
@@ -716,7 +694,6 @@ export type BootstrapResponse = {
   notes: NoteListItemDto[];
   activeRecoveries: RecoverableRecordingDto[];
   activeRecording?: RecordingStatusDto;
-  providerConfigured: boolean;
 };
 
 export type AudioValidationDto = {
@@ -787,13 +764,6 @@ export type RecordingSourceReadinessDto = {
 
 export async function bootstrapApp() {
   return invoke<BootstrapResponse>("bootstrap_app");
-}
-
-/** Opens the clovy-api /verify page (attestation, routing, retention) in
- * the default browser. Routed through Rust because the webview drops
- * target="_blank" anchors. */
-export async function clovyOpenVerifyPage() {
-  return invoke<void>("clovy_open_verify_page");
 }
 
 export async function createNote(folderId?: string) {
@@ -1265,12 +1235,6 @@ export async function setProviderModel(mode: ProviderModelMode, modelId: string)
   });
 }
 
-export async function setCostQuality(value: number) {
-  return invoke<ProviderModelSettingsDto>("set_cost_quality", {
-    request: { value },
-  });
-}
-
 export async function setProviderApiKey(provider: BuiltinProvider, apiKey: string) {
   return invoke<ProviderModelSettingsDto>("set_provider_api_key", {
     request: { provider, apiKey },
@@ -1313,7 +1277,7 @@ export async function imagePromptMayBeExplicit(prompt: string): Promise<boolean>
   return response.mayBeExplicit;
 }
 
-// Generates an image from a prompt via the Clovy API. `model` is optional; the
+// Generates an image from a prompt directly through fal. `model` is optional; the
 // backend falls back to the saved default image model when it is omitted.
 // `safeMode` pins the safe-mode value a retry must replay; omitted uses the
 // live saved setting.
@@ -2025,123 +1989,4 @@ export async function respondComputerUseApproval(input: { approvalId: string; ap
 
 export function computerUseCaptureSrc(path: string) {
   return convertFileSrc(path);
-}
-
-// ---- Private sharing (JUN-308) -------------------------------------------
-// Owner-side share commands. Ciphertext, IVs, envelopes, and locally stored
-// keys cross the IPC boundary as base64url strings; plaintext and unwrapped
-// keys never leave the webview (see src/lib/share-crypto.ts).
-
-export type ShareKind = "note" | "session";
-
-export type ShareInviteState = "pending" | "accepted" | "revoked";
-
-export type ShareInvitePayload = {
-  email: string;
-  envelopeB64: string;
-  envelopeIvB64: string;
-};
-
-export type ShareCreatedInviteDto = {
-  inviteId: string;
-  email: string;
-};
-
-export type ShareCreatedDto = {
-  shareId: string;
-  invites: ShareCreatedInviteDto[];
-};
-
-// `POST /v1/shares/{id}/invites` returns only the new invites (no shareId).
-export type ShareInvitesAddedDto = {
-  invites: ShareCreatedInviteDto[];
-};
-
-// `GET /v1/shares` returns summaries only; invites live on the detail response.
-export type ShareSummaryDto = {
-  shareId: string;
-  kind: ShareKind;
-  createdAt?: string;
-};
-
-export type ShareInviteDto = {
-  inviteId: string;
-  email: string;
-  state: ShareInviteState;
-  lastAccessAt?: string;
-};
-
-export type ShareDto = {
-  shareId: string;
-  kind: ShareKind;
-  createdAt?: string;
-  invites: ShareInviteDto[];
-};
-
-export type ShareKeyDto = {
-  shareId: string;
-  contentKeyB64: string;
-};
-
-export type ShareInviteKeyDto = {
-  inviteId: string;
-  inviteKeyB64: string;
-};
-
-export async function shareCreate(input: {
-  kind: ShareKind;
-  ciphertextB64: string;
-  ivB64: string;
-  invites: ShareInvitePayload[];
-}) {
-  return invoke<ShareCreatedDto>("share_create", { request: input });
-}
-
-export async function shareList() {
-  return invoke<ShareSummaryDto[]>("share_list");
-}
-
-export async function shareGet(shareId: string) {
-  return invoke<ShareDto>("share_get", { request: { shareId } });
-}
-
-export async function shareAddInvites(shareId: string, invites: ShareInvitePayload[]) {
-  return invoke<ShareInvitesAddedDto>("share_add_invites", { request: { shareId, invites } });
-}
-
-export async function shareRevokeInvite(shareId: string, inviteId: string) {
-  return invoke<void>("share_revoke_invite", { request: { shareId, inviteId } });
-}
-
-export async function shareDelete(shareId: string) {
-  return invoke<void>("share_delete", { request: { shareId } });
-}
-
-export async function shareKeySave(input: {
-  shareId: string;
-  itemKind: ShareKind;
-  itemId: string;
-  contentKeyB64: string;
-}) {
-  return invoke<void>("share_key_save", { request: input });
-}
-
-export async function shareKeyGet(itemKind: ShareKind, itemId: string) {
-  return invoke<ShareKeyDto | null>("share_key_get", { request: { itemKind, itemId } });
-}
-
-export async function shareInviteKeySave(input: {
-  inviteId: string;
-  shareId: string;
-  inviteKeyB64: string;
-}) {
-  return invoke<void>("share_invite_key_save", { request: input });
-}
-
-export async function shareInviteKeysGet(shareId: string) {
-  return invoke<ShareInviteKeyDto[]>("share_invite_keys_get", { request: { shareId } });
-}
-
-export async function getShareBaseUrl() {
-  return invoke<string>("get_share_base_url");
 }

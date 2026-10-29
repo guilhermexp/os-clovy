@@ -31,6 +31,8 @@ pub(crate) mod notes;
 #[cfg(test)]
 mod notes_tests;
 mod read;
+#[cfg(test)]
+mod read_tests;
 pub(crate) mod recorder;
 #[cfg(test)]
 mod recorder_tests;
@@ -54,11 +56,26 @@ use crate::domain::types::AppError;
 
 pub use super::turns::TurnBinding;
 use super::turns::TURN_REQUIRED;
+pub(crate) use read::is_read_tool;
 pub use read::{
     is_activity_tool, ReadTools, ACTIVITY_TOOLS, GET_ACTIVE_SESSION, GET_ACTIVITY_STATS,
     GET_DAY_PANELS, GET_DAY_SCHEDULE, GET_DAY_SUMMARY, GET_NOTE, GET_SESSION_DETAIL,
     LIST_APP_USAGE, LIST_CODING_AGENT_SESSIONS, LIST_DICTATIONS, LIST_MEMORIES, SEARCH_NOTES,
 };
+
+/// A routine binding remains a routine after its persisted authorization is
+/// deleted. Missing policy must not turn it into an unrestricted chat turn.
+async fn routine_tool_allowed(
+    pool: &SqlitePool,
+    binding: &TurnBinding,
+    name: &str,
+) -> Result<bool, AppError> {
+    Ok(
+        crate::routines::routine_tool_allowed_for_session(pool, &binding.session_id, name)
+            .await?
+            .unwrap_or(binding.surface != "routine"),
+    )
+}
 
 /// What one MCP request may read, resolved by the app per message
 /// (`super::app_data`) or built directly by tests.

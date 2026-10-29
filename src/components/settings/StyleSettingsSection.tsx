@@ -7,6 +7,10 @@ import {
   setDictationStyle,
 } from "../../lib/tauri";
 import type { DictationHudPlacement, DictationStyle, ProviderModelDto } from "../../lib/tauri";
+import {
+  PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
+  type ProviderModelSettingsChangedDetail,
+} from "../../lib/model-privacy";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Switch } from "../ui/Switch";
 import { type MessageKey, useT } from "../../i18n";
@@ -82,16 +86,27 @@ export function StyleSettingsSection() {
   useEffect(() => {
     if (!cleanupEnabled) return;
     let cancelled = false;
-    listProviderModels("generation")
-      .then((response) => {
-        if (!cancelled) setModels(cleanupModelOptions(response.models));
-      })
-      .catch(() => {
-        // The current model stays selectable; the catalog is a convenience.
-        if (!cancelled) setModels([]);
-      });
+    let request = 0;
+    const reload = () => {
+      const current = ++request;
+      listProviderModels("generation")
+        .then((response) => {
+          if (!cancelled && current === request) setModels(cleanupModelOptions(response.models));
+        })
+        .catch(() => {
+          // The saved cleanup model remains available when the catalog fails.
+          if (!cancelled && current === request) setModels([]);
+        });
+    };
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<ProviderModelSettingsChangedDetail>).detail.mode === "generation")
+        reload();
+    };
+    reload();
+    window.addEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, changed);
     return () => {
       cancelled = true;
+      window.removeEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, changed);
     };
   }, [cleanupEnabled]);
 

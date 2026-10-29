@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
 import type { NoteChat } from "../components/note-chat/useNoteChat";
-import { AGENT_RUN_AUTO_MODEL_PREFIX } from "../lib/agent-model-selection";
+const AGENT_RUN_AUTO_MODEL_PREFIX = "__june_auto_generation__:";
 import { loadSessionModels, rememberSessionModel } from "../lib/agent-session-models";
 
 const mocks = vi.hoisted(() => ({
@@ -44,10 +44,9 @@ describe("note chat model truthfulness", () => {
     });
     mocks.providerModelSettings.mockReset();
     mocks.providerModelSettings.mockResolvedValue({
-      settings: { generationModel: "concrete-default", costQuality: 100 },
+      settings: { generationModel: "concrete-default" },
       effectiveSettings: {
         generationModel: "concrete-default",
-        costQuality: 100,
         providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       },
     });
@@ -80,7 +79,7 @@ describe("note chat model truthfulness", () => {
       />,
     );
 
-    await waitFor(() => expect(mocks.listProviderModels).toHaveBeenCalledOnce());
+    expect(mocks.listProviderModels).not.toHaveBeenCalled();
     expect(setModel).not.toHaveBeenCalled();
     expect(loadSessionModels()["note-session"]).toBe(stagedAuto);
   });

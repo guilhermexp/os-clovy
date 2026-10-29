@@ -20,6 +20,11 @@ function cssRuleFor(selector: string, css = appCss) {
 }
 
 describe("Home polish styles", () => {
+  it("lets the background surfaces fit a narrow window without clipping the hero controls", () => {
+    expect(cssRuleFor('body[data-agent-surface="true"]')).toContain("min-width: 0;");
+    expect(cssRuleFor(".agent-hero-chips")).toContain("flex-wrap: wrap;");
+    expect(cssRuleFor(".agent-hero-title")).toContain("text-align: center;");
+  });
   it("gives the Home thread room at the top edge", () => {
     const timeline = cssRuleFor('.agent-timeline[data-home="true"]');
 
@@ -90,17 +95,19 @@ describe("Home polish styles", () => {
     expect(eyes).toContain("fill: var(--clovy-pine);");
   });
 
-  it("contains the new-session tint inside a broad bottom-rising falloff", () => {
-    const glow = cssRuleFor(".agent-workspace::before");
-    const activeGlow = cssRuleFor('.agent-workspace[data-hero="true"]::before');
-
-    expect(glow).toContain("background: linear-gradient(");
-    expect(glow).toContain("to bottom");
-    expect(glow).toContain("var(--hero-wash-soft) 42%");
-    expect(glow).toContain("var(--hero-wash) 100%");
-    expect(glow).toContain("mask-image: linear-gradient(");
-    expect(glow).not.toContain("radial-gradient(");
-    expect(activeGlow).toContain("opacity: 1;");
+  it("keeps conversation and onboarding backgrounds free of the brand wash", () => {
+    expect(appCss).not.toContain("--hero-wash");
+    expect(tokensCss).not.toContain("--hero-wash");
+    expect(appCss).not.toContain(".agent-workspace::before");
+    expect(appCss).not.toContain('.agent-workspace[data-home="true"]::before');
+    const veil = cssRuleFor('.agent-composer:not([data-hero="true"])::before');
+    expect(veil).toContain("linear-gradient(to bottom, transparent, var(--card) 72%)");
+    const topFade = cssRuleFor('.agent-workspace[data-home="true"]::after');
+    expect(topFade).toContain("background: linear-gradient(to bottom, var(--card), transparent)");
+    expect(topFade).toContain('content: "";');
+    const personality = cssRuleFor(".onboarding-personality-stage");
+    expect(personality).toContain("background: var(--card);");
+    expect(personality).not.toContain("gradient");
   });
 
   it("drops a composer edge fade immediately when it reaches the visible caret", () => {

@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  autoPillDesignation,
-  preferredVisionFallbackModel,
-  suggestedModelsForMode,
-} from "../lib/suggested-models";
+import { preferredVisionFallbackModel, suggestedModelsForMode } from "../lib/suggested-models";
 import type { ProviderModelDto } from "../lib/tauri";
 
 const model = (id: string, name: string, capabilities: string[]): ProviderModelDto => ({
@@ -58,8 +54,7 @@ describe("preferredVisionFallbackModel", () => {
 
 describe("suggestedModelsForMode", () => {
   it("returns the curated concrete picks present in the catalog, in curated order", () => {
-    // Auto is not a suggested row — it lives in the picker's pinned toggle
-    // section — so the catalog's Auto entry never surfaces here.
+    // Historical Auto entries never surface as suggestions.
     const auto = model("open-software/auto", "Auto", ["supportsFunctionCalling"]);
     const suggestions = suggestedModelsForMode("generation", [auto, kimi, kimi3, glm52]);
 
@@ -68,17 +63,5 @@ describe("suggestedModelsForMode", () => {
       "moonshotai/kimi-k3",
       "moonshotai/kimi-k2.6",
     ]);
-  });
-});
-
-describe("autoPillDesignation", () => {
-  it("buckets the persisted cost-to-quality value onto the preset designations", () => {
-    expect(autoPillDesignation(20)).toBe("Economy");
-    expect(autoPillDesignation(50)).toBe("Balanced");
-    expect(autoPillDesignation(100)).toBe("Quality");
-    // Off-preset values (a hand-edited settings file) land on the nearest tier.
-    expect(autoPillDesignation(0)).toBe("Economy");
-    expect(autoPillDesignation(67)).toBe("Quality");
-    expect(autoPillDesignation(undefined)).toBeUndefined();
   });
 });

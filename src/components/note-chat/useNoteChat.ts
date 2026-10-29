@@ -13,8 +13,7 @@ import {
   type AgentSessionStatusDetail,
   type AgentSessionStatusKind,
 } from "../../lib/agent-events";
-import { agentModelSelection } from "../../lib/agent-model-selection";
-import { defaultChatModelId } from "../../lib/chat-engine";
+import { chatModelId, defaultChatModelId, CLI_ENGINE_MODEL_PREFIX } from "../../lib/chat-engine";
 import {
   AGENT_SESSION_MODEL_CHANGED_EVENT,
   type AgentSessionModelChangedDetail,
@@ -33,9 +32,8 @@ import {
 } from "./noteChatSessions";
 
 const AGENT_RUNTIME_EVENT = "clovy://agent-runtime-event";
-/** The legacy Clovy agent's Auto model: what a note chat uses only when chat
- * is not on a CLI engine (`defaultChatModelId`, ADR-0062). */
-const DEFAULT_MODEL = "auto";
+/** Claude Code is the default when no configured CLI can be resolved. */
+const DEFAULT_MODEL = `${CLI_ENGINE_MODEL_PREFIX}claude`;
 
 export type NoteChatAttachment = {
   id: string;
@@ -76,7 +74,7 @@ function runIsActive(projection: AgentRuntimeProjection) {
 }
 
 /** A note-scoped conversation on the default chat engine (a CLI, which reads
- * the note through Clovy's `get_note` tool; the legacy Clovy agent otherwise).
+ * the note through Clovy's `get_note` tool).
  * The pairing is retained locally so reopening the panel resumes the same
  * session. */
 export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
@@ -93,6 +91,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
   const sessionIdRef = useRef<string>();
   const activeSubmitRef = useRef<symbol>();
   const selectedStoredModelRef = useRef(DEFAULT_MODEL);
+  const modelSelectionRevisionRef = useRef(0);
   /** The engine was picked in this panel (or came from the stored session),
    * so the default chat engine no longer applies. */
   const modelChosenRef = useRef(false);
@@ -106,11 +105,13 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
     dispatchAgentSessionStatus(detail);
   }, []);
   const applyStoredModel = useCallback((storedModel: string) => {
+    modelSelectionRevisionRef.current += 1;
     modelChosenRef.current = true;
-    selectedStoredModelRef.current = storedModel;
-    setModelState(agentModelSelection(storedModel).modelId || DEFAULT_MODEL);
+    selectedStoredModelRef.current = chatModelId(storedModel);
+    setModelState(chatModelId(storedModel));
   }, []);
   const setModel = useCallback((nextModel: string) => {
+    modelSelectionRevisionRef.current += 1;
     modelChosenRef.current = true;
     selectedStoredModelRef.current = nextModel;
     setModelState(nextModel);
@@ -123,17 +124,29 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
 
   const hydrate = useCallback(
     async (sessionId: string) => {
+      const generation = generationRef.current;
+      const modelSelectionRevision = modelSelectionRevisionRef.current;
+      const isCurrentSession = () =>
+        generationRef.current === generation && sessionIdRef.current === sessionId;
       const [session, items, latestRun] = await Promise.all([
         agentRuntimeBindings.getSession(sessionId),
         agentRuntimeBindings.listItems(sessionId),
         agentRuntimeBindings.getLatestRun?.(sessionId) ?? Promise.resolve(null),
       ]);
-      if (sessionIdRef.current !== sessionId) return;
+      if (!isCurrentSession()) return;
       setProjection({
         ...createAgentRuntimeProjection({ session, items }),
         run: latestRun ?? undefined,
       });
-      applyStoredModel(loadSessionModels()[session.id] ?? session.model ?? DEFAULT_MODEL);
+      if (modelSelectionRevisionRef.current !== modelSelectionRevision) return;
+      const storedModel = loadSessionModels()[session.id] ?? session.model ?? DEFAULT_MODEL;
+      const resumedModel = storedModel.startsWith(CLI_ENGINE_MODEL_PREFIX)
+        ? storedModel
+        : await defaultChatModelId();
+      if (isCurrentSession() && modelSelectionRevisionRef.current === modelSelectionRevision) {
+        if (storedModel !== resumedModel) rememberSessionModel(session.id, resumedModel);
+        applyStoredModel(resumedModel);
+      }
     },
     [applyStoredModel],
   );
@@ -153,7 +166,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
     if (!rememberedSessionId) {
       setLoading(false);
       // A new note chat starts on the default chat engine.
-      void defaultChatModelId(DEFAULT_MODEL).then((engineModel) => {
+      void defaultChatModelId().then((engineModel) => {
         if (generation !== generationRef.current || modelChosenRef.current) return;
         selectedStoredModelRef.current = engineModel;
         setModelState(engineModel);
@@ -250,7 +263,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         if (!session) {
           if (!modelChosenRef.current) {
             // Sent before the default engine was read: read it now.
-            selectedStoredModelRef.current = await defaultChatModelId(DEFAULT_MODEL);
+            selectedStoredModelRef.current = await defaultChatModelId();
           }
           session = await agentRuntimeBindings.createSession({
             title: titleFromNote(note),

@@ -118,7 +118,6 @@ const mocks = vi.hoisted(() => ({
   providerModelSettings: vi.fn(),
   videoGenerate: vi.fn(),
   videoStatus: vi.fn(),
-  suggestAgentSessionTitle: vi.fn(),
   gatewayRequest: vi.fn(),
   gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
 }));
@@ -243,13 +242,11 @@ vi.mock("../lib/tauri", () => ({
   acknowledgeMeetingStartRequest: mocks.acknowledgeMeetingStartRequest,
   startMeetingRecording: mocks.startMeetingRecording,
   listAgentTasks: mocks.listAgentTasks,
-  clovyOpenVerifyPage: vi.fn(async () => ""),
   providerModelSettings: mocks.providerModelSettings,
   listProviderModels: mocks.listProviderModels,
   localVideoFileSrc: mocks.localVideoFileSrc,
   videoGenerate: mocks.videoGenerate,
   videoStatus: mocks.videoStatus,
-  suggestAgentSessionTitle: mocks.suggestAgentSessionTitle,
 }));
 
 const now = "2026-05-19T10:00:00Z";
@@ -293,8 +290,6 @@ function generationModel(id: string, overrides: Partial<ProviderModelDto> = {}):
     capabilities: ["supportsFunctionCalling"],
     priceUnit: "tokens",
     priceDescription: "",
-    inputCreditsPerMillionTokens: 850,
-    outputCreditsPerMillionTokens: 4660,
     ...overrides,
   };
 }
@@ -393,7 +388,6 @@ describe("App shortcuts", () => {
       folders: [],
       notes: [first],
       activeRecoveries: [],
-      providerConfigured: true,
     };
 
     mocks.listen.mockResolvedValue(vi.fn());
@@ -449,13 +443,9 @@ describe("App shortcuts", () => {
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
         generationModel: "",
-        costQuality: 100,
         providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
       },
     });
-    mocks.suggestAgentSessionTitle.mockImplementation(async (prompt: string) => ({
-      title: prompt,
-    }));
     mocks.gatewayEventHandlers.clear();
     mocks.gatewayRequest.mockImplementation((method: string) => {
       if (method === "session.create") {
@@ -1141,7 +1131,6 @@ describe("App shortcuts", () => {
       ],
       notes: [first],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockResolvedValue(first);
 
@@ -1291,7 +1280,6 @@ describe("App shortcuts", () => {
       folders: [folder],
       notes: [note()],
       activeRecoveries: [],
-      providerConfigured: true,
     });
 
     render(<App />);

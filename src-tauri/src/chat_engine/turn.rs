@@ -1,20 +1,20 @@
 //! One CLI turn: resume lookup, prompt, the child process in its own process
 //! group, stream translation, and the run events persisted through the same
-//! path as the sidecar's (`agent_runtime::host::persist_runtime_event`).
+//! session event path (`agent_sessions::events::persist_runtime_event`).
 
 use super::cli::{self, EngineEvent, StreamTranslator};
 use super::policy::TurnPermissions;
 use super::{engine_model_id, FrameSink};
-use crate::agent_runtime::protocol::{RpcFrame, PROTOCOL_VERSION};
-use crate::agent_runtime::AgentSafetyMode;
-use crate::agent_runtime::{AgentItemPayload, AgentRepository};
+use crate::agent_sessions::protocol::{RpcFrame, PROTOCOL_VERSION};
+use crate::agent_sessions::AgentSafetyMode;
+use crate::agent_sessions::{AgentItemPayload, AgentRepository};
 use crate::llm::cli::CliKind;
 use crate::mcp_server::turns::{TurnBinding, TurnRegistry};
 use crate::mcp_server::McpLaunch;
 use crate::process_group::{GroupSignal, ProcessTree};
 use serde_json::{json, Value};
 use sqlx::row::Row;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -39,6 +39,8 @@ const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
 pub struct TurnContext {
     pub session_id: String,
     pub run_id: String,
+    /// A retried attempt whose conversation and messages must not be reused.
+    pub previous_run_id: Option<String>,
     pub kind: CliKind,
     pub program: PathBuf,
     /// The complete child environment (the login-shell environment).
@@ -55,6 +57,7 @@ pub struct TurnContext {
     pub safety_mode: AgentSafetyMode,
     /// A person watches the turn (`false` for routines).
     pub attended: bool,
+    pub routine_tools: Option<super::policy::RoutineBuiltinTools>,
     /// Image attachments of the message (absolute paths in the workspace).
     pub images: Vec<PathBuf>,
 }
@@ -64,6 +67,7 @@ impl TurnContext {
         TurnPermissions {
             safety_mode: self.safety_mode,
             attended: self.attended,
+            routine_tools: self.routine_tools,
         }
     }
 
@@ -180,6 +184,22 @@ pub async fn execute_turn<S: FrameSink>(
             json!({ "model": engine_model_id(context.kind) }),
         )
         .await;
+
+    if let Some(previous_run_id) = context.previous_run_id.as_deref() {
+        if let Err(error) = repository
+            .set_run_retry_parent(&context.run_id, previous_run_id)
+            .await
+        {
+            tracing::warn!(%error, "could not retain CLI retry ancestry");
+            frames
+                .emit(
+                    "run.failed",
+                    failure("Could not prepare the retried conversation."),
+                )
+                .await;
+            return;
+        }
+    }
 
     let resumed = match previous_conversation(repository, &context).await {
         Ok(found) => found,
@@ -665,6 +685,11 @@ async fn previous_conversation(
     repository: &AgentRepository,
     context: &TurnContext,
 ) -> Result<Option<String>, sqlx::Error> {
+    // A resume would restore the rejected answer from the CLI's own history,
+    // even if it is excluded from the local replay below.
+    if context.previous_run_id.is_some() {
+        return Ok(None);
+    }
     let engine = engine_model_id(context.kind);
     let rows = sqlx::query::query(
         "SELECT model, run_config_json FROM agent_runs
@@ -692,6 +717,11 @@ async fn previous_conversation(
                 return Ok(Some(id.to_string()));
             }
         }
+        // A retry without a conversation id may have failed before startup.
+        // Older CLI history still contains the answer that retry rejected.
+        if config.get("retryOfRunId").and_then(Value::as_str).is_some() {
+            return Ok(None);
+        }
     }
     Ok(None)
 }
@@ -702,12 +732,10 @@ async fn save_conversation(
     context: &TurnContext,
     conversation_id: &str,
 ) -> bool {
-    let config = json!({
-        "engine": "cli",
-        "cli": context.kind.id(),
-        "conversationId": conversation_id,
-    });
-    match repository.set_run_config(&context.run_id, &config).await {
+    match repository
+        .set_cli_conversation(&context.run_id, context.kind.id(), conversation_id)
+        .await
+    {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(%error, run_id = %context.run_id, "could not save the CLI conversation id");
@@ -727,17 +755,41 @@ async fn with_earlier_messages(repository: &AgentRepository, context: &TurnConte
             return context.input.clone();
         }
     };
+    let excluded = match excluded_retry_runs(repository, context).await {
+        Ok(excluded) => excluded,
+        Err(error) => {
+            tracing::warn!(%error, "could not read rejected retry history");
+            return context.input.clone();
+        }
+    };
     let mut lines = Vec::new();
     for item in items {
-        if item.run_id.as_deref() == Some(context.run_id.as_str()) {
+        if item.run_id.as_deref() == Some(context.run_id.as_str())
+            || item.run_id.as_ref().is_some_and(|id| excluded.contains(id))
+        {
             continue;
         }
         match item.payload {
-            AgentItemPayload::UserMessage(message) if !message.content.trim().is_empty() => {
-                lines.push(format!("User: {}", message.content.trim()));
+            AgentItemPayload::UserMessage(message) => {
+                let message = crate::agent_sessions::api::cli_message_with_attachments(
+                    message.content.trim(),
+                    &message.attachments,
+                );
+                if !message.trim().is_empty() {
+                    lines.push(format!("User: {message}"));
+                }
             }
-            AgentItemPayload::AssistantMessage(message) if !message.content.trim().is_empty() => {
-                lines.push(format!("Assistant: {}", message.content.trim()));
+            AgentItemPayload::AssistantMessage(message) => {
+                let message = crate::agent_sessions::api::cli_message_with_attachments(
+                    message.content.trim(),
+                    &message.attachments,
+                );
+                if !message.trim().is_empty() {
+                    lines.push(format!("Assistant: {message}"));
+                }
+            }
+            AgentItemPayload::Steering(steering) if !steering.text.trim().is_empty() => {
+                lines.push(format!("User: {}", steering.text.trim()));
             }
             AgentItemPayload::ContextSummary(summary) if !summary.text.trim().is_empty() => {
                 lines.push(format!(
@@ -760,4 +812,47 @@ async fn with_earlier_messages(repository: &AgentRepository, context: &TurnConte
         "Earlier messages in this conversation, for context:\n\n{history}\n\nNew message:\n\n{}",
         context.input
     )
+}
+
+/// Exclude replaced attempts on every fresh replay, including later engine
+/// switches. Only this session's links participate; the visited set also
+/// makes malformed cyclic ancestry finite.
+async fn excluded_retry_runs(
+    repository: &AgentRepository,
+    context: &TurnContext,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let rows =
+        sqlx::query::query("SELECT id, run_config_json FROM agent_runs WHERE session_id = ?")
+            .bind(&context.session_id)
+            .fetch_all(&repository.pool)
+            .await?;
+    let mut parents = BTreeMap::new();
+    for row in rows {
+        let config = row
+            .get::<Option<String>, _>("run_config_json")
+            .map(|raw| {
+                serde_json::from_str::<Value>(&raw)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+            })
+            .transpose()?;
+        let parent = config.and_then(|config| {
+            config
+                .get("retryOfRunId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        parents.insert(row.get::<String, _>("id"), parent);
+    }
+    let mut pending = parents.values().flatten().cloned().collect::<Vec<_>>();
+    pending.extend(context.previous_run_id.iter().cloned());
+    let mut excluded = HashSet::new();
+    while let Some(run_id) = pending.pop() {
+        if !parents.contains_key(&run_id) || !excluded.insert(run_id.clone()) {
+            continue;
+        }
+        if let Some(Some(parent)) = parents.get(&run_id) {
+            pending.push(parent.clone());
+        }
+    }
+    Ok(excluded)
 }

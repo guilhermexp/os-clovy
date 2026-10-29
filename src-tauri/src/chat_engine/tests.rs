@@ -1,11 +1,11 @@
 //! Integration tests of the CLI chat engine with fake CLIs (shell scripts in
 //! a temporary directory that reproduce each CLI's measured stream format),
-//! an in-memory agent database, and the sidecar's persistence path.
+//! an in-memory agent database, and the shared persistence path.
 
 use super::cli::{self, EngineEvent, StreamTranslator};
 use super::turn::{execute_turn, TurnContext};
 use super::*;
-use crate::agent_runtime::{AgentItemPayload, AgentRepository, AgentSafetyMode, MessagePayload};
+use crate::agent_sessions::{AgentItemPayload, AgentRepository, AgentSafetyMode, MessagePayload};
 use crate::mcp_server::McpLaunch;
 use serde_json::{json, Value};
 use sqlx_sqlite::SqlitePoolOptions;
@@ -23,9 +23,10 @@ pub(super) struct TestSink {
 
 impl FrameSink for TestSink {
     async fn publish(&self, frame: RpcFrame) {
-        let persisted = crate::agent_runtime::host::persist_runtime_event(&self.repository, &frame)
-            .await
-            .expect("event persists");
+        let persisted =
+            crate::agent_sessions::events::persist_runtime_event(&self.repository, &frame)
+                .await
+                .expect("event persists");
         if let Some(event) = persisted {
             self.emitted
                 .lock()
@@ -110,6 +111,7 @@ impl Harness {
         TurnContext {
             session_id: self.session_id.clone(),
             run_id: run_id.to_string(),
+            previous_run_id: None,
             kind,
             program: program.to_path_buf(),
             env: BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
@@ -119,6 +121,7 @@ impl Harness {
             turns: None,
             safety_mode: AgentSafetyMode::Sandboxed,
             attended: true,
+            routine_tools: None,
             images: Vec::new(),
         }
     }
@@ -395,7 +398,7 @@ async fn chat_engine_two_turns_resume_the_cli_conversation_for_every_cli() {
             "{kind:?} resent history"
         );
 
-        // Both turns are persisted, in order, as the sidecar's items.
+        // Both turns are persisted, in order, as durable session items.
         let transcript = harness.transcript().await;
         let messages = transcript
             .iter()
@@ -922,6 +925,13 @@ async fn chat_engine_new_cli_conversation_gets_earlier_messages_of_the_session()
                 attachments: Vec::new(),
             }),
         ),
+        (
+            2,
+            AgentItemPayload::Steering(crate::agent_sessions::TextPayload {
+                text: "Correction: my dog is actually called Max.".into(),
+                metadata: None,
+            }),
+        ),
     ] {
         harness
             .repository
@@ -942,8 +952,286 @@ async fn chat_engine_new_cli_conversation_gets_earlier_messages_of_the_session()
     let prompt = harness.stdin(1);
     assert!(prompt.contains("User: My dog is Rex"), "{prompt}");
     assert!(prompt.contains("Assistant: Noted, Rex."), "{prompt}");
+    assert!(
+        prompt.contains("User: Correction: my dog is actually called Max."),
+        "{prompt}"
+    );
     assert!(prompt.ends_with("What is my dog called?"), "{prompt}");
     assert!(!harness.args(1).iter().any(|arg| arg == "--resume"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_history_replays_available_attachments_even_without_text() {
+    let kind = CliKind::Claude;
+    let harness = Harness::new(kind).await;
+    let earlier = harness
+        .repository
+        .create_run(&harness.session_id, "open-software/auto", None)
+        .await
+        .unwrap();
+    let attachment = |name: &str, available| crate::agent_sessions::MessageAttachmentPayload {
+        id: name.into(),
+        name: name.into(),
+        path: harness.workspace.path().join(name).to_string_lossy().into(),
+        mime_type: Some("text/plain".into()),
+        size_bytes: 4,
+        available,
+        created_at: "now".into(),
+    };
+    let present = attachment("historical-brief.txt", true);
+    std::fs::write(&present.path, "plan").unwrap();
+    harness
+        .repository
+        .append_item(
+            &harness.session_id,
+            Some(&earlier.id),
+            0,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: "old context ".repeat(4000),
+                attachments: vec![],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    harness
+        .repository
+        .append_item(
+            &harness.session_id,
+            Some(&earlier.id),
+            1,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: String::new(),
+                attachments: vec![present.clone(), attachment("unavailable.txt", false)],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let program = harness.fake_cli(kind, FAKE_CLAUDE);
+    harness
+        .turn(kind, &program, "Use the earlier brief", None)
+        .await;
+    let prompt = harness.stdin(1);
+    assert!(
+        prompt.contains("[Clovy attachment manifest v1]"),
+        "missing attachment manifest"
+    );
+    assert!(
+        prompt.contains(&present.path),
+        "missing available historical path"
+    );
+    assert!(!prompt.contains("unavailable.txt"));
+    assert!(prompt.ends_with("Use the earlier brief"));
+    assert!(
+        prompt.chars().count() < 24_200,
+        "history must remain bounded"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_retry_starts_fresh_and_excludes_rejected_attempts() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        for prior_model in ["open-software/auto".to_string(), engine_model_id(kind)] {
+            let harness = Harness::new(kind).await;
+            let accepted = harness
+                .repository
+                .create_run(&harness.session_id, "open-software/auto", None)
+                .await
+                .unwrap();
+            harness
+                .repository
+                .append_item(
+                    &harness.session_id,
+                    Some(&accepted.id),
+                    0,
+                    &AgentItemPayload::UserMessage(MessagePayload {
+                        role: "user".into(),
+                        content: "Keep accepted context".into(),
+                        attachments: vec![],
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let rejected = harness
+                .repository
+                .create_run(&harness.session_id, &prior_model, None)
+                .await
+                .unwrap();
+            for (sequence, payload) in [
+                (
+                    0,
+                    AgentItemPayload::UserMessage(MessagePayload {
+                        role: "user".into(),
+                        content: "Retry this request".into(),
+                        attachments: vec![],
+                    }),
+                ),
+                (
+                    1,
+                    AgentItemPayload::AssistantMessage(MessagePayload {
+                        role: "assistant".into(),
+                        content: "Rejected partial answer".into(),
+                        attachments: vec![],
+                    }),
+                ),
+            ] {
+                harness
+                    .repository
+                    .append_item(
+                        &harness.session_id,
+                        Some(&rejected.id),
+                        sequence,
+                        &payload,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            harness
+            .repository
+            .set_run_config(
+                &rejected.id,
+                &json!({"engine":"cli", "cli":kind.id(), "conversationId":"rejected-conversation"}),
+            )
+            .await
+            .unwrap();
+            let successful = match kind {
+                CliKind::Claude => {
+                    r#"echo '{"type":"system","subtype":"init","session_id":"fresh-retry"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Accepted replacement","session_id":"fresh-retry"}'"#
+                }
+                CliKind::Codex => {
+                    r#"echo '{"type":"thread.started","thread_id":"fresh-retry"}'
+echo '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"Accepted replacement"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'"#
+                }
+                _ => unreachable!(),
+            };
+            // First retry exits before reporting a conversation id. A second retry
+            // still needs the original rejection excluded from its local history.
+            let program = harness.fake_cli(kind, &format!("if [ \"$n\" = 1 ]; then echo 'synthetic launch failure' >&2; exit 1; fi\n{successful}"));
+            let mut previous = rejected.id;
+            // A retry of a retry must also exclude the original rejected attempt.
+            for call in 1..=2 {
+                let run_id = harness.new_run(kind, "Retry this request").await;
+                let sink = TestSink {
+                    repository: harness.repository.clone(),
+                    emitted: StdMutex::new(Vec::new()),
+                };
+                let mut context =
+                    harness.context(kind, &program, &run_id, "Retry this request", None);
+                context.previous_run_id = Some(previous);
+                let (_cancel, receiver) = watch::channel(false);
+                execute_turn(&harness.repository, &sink, context, receiver).await;
+                assert_eq!(
+                    harness.repository.get_run(&run_id).await.unwrap().status,
+                    if call == 1 { "failed" } else { "completed" }
+                );
+                let prompt = harness.stdin(call);
+                assert!(
+                    !harness
+                        .args(call)
+                        .iter()
+                        .any(|arg| arg == "--resume" || arg == "resume"),
+                    "retry resumed a rejected conversation"
+                );
+                assert!(prompt.contains("Keep accepted context"));
+                assert!(!prompt.contains("Rejected partial answer"));
+                assert_eq!(
+                    prompt.matches("Retry this request").count(),
+                    1,
+                    "request replayed twice"
+                );
+                previous = run_id;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn chat_history_excludes_persisted_retry_parents_after_failure_or_engine_switch() {
+    for switched in [false, true] {
+        let kind = CliKind::Claude;
+        let harness = Harness::new(kind).await;
+        let original = harness.new_run(kind, "Original rejected request").await;
+        harness
+            .repository
+            .append_item(
+                &harness.session_id,
+                Some(&original),
+                1,
+                &AgentItemPayload::AssistantMessage(MessagePayload {
+                    role: "assistant".into(),
+                    content: "Rejected partial answer".into(),
+                    attachments: vec![],
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_run_config(
+                &original,
+                &json!({"engine":"cli", "cli":"claude", "conversationId":"rejected-conversation"}),
+            )
+            .await
+            .unwrap();
+        let prior_kind = if switched { CliKind::Codex } else { kind };
+        let retried = harness.new_run(prior_kind, "Accepted retry request").await;
+        let config = if switched {
+            json!({"engine":"cli", "cli":"codex", "conversationId":"clean-retry", "retryOfRunId":original})
+        } else {
+            // A failed attempt never reported a conversation id.
+            json!({"retryOfRunId":original})
+        };
+        harness
+            .repository
+            .set_run_config(&retried, &config)
+            .await
+            .unwrap();
+        // Foreign-session ancestry must not suppress this session's messages.
+        let foreign = harness
+            .repository
+            .create_session(
+                "Other session",
+                &engine_model_id(kind),
+                AgentSafetyMode::Sandboxed,
+                None,
+            )
+            .await
+            .unwrap();
+        let foreign_run = harness
+            .repository
+            .create_run(&foreign.id, &engine_model_id(kind), None)
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_run_config(&foreign_run.id, &json!({"retryOfRunId":retried}))
+            .await
+            .unwrap();
+        let program = harness.fake_cli(kind, FAKE_CLAUDE);
+        harness
+            .turn(kind, &program, "Continue after the retry", None)
+            .await;
+        let prompt = harness.stdin(1);
+        assert!(
+            !harness.args(1).iter().any(|arg| arg == "--resume"),
+            "crossed a failed retry boundary"
+        );
+        assert!(!prompt.contains("Rejected partial answer"));
+        assert!(!prompt.contains("Original rejected request"));
+        assert!(prompt.contains("Accepted retry request"));
+        assert!(prompt.ends_with("Continue after the retry"));
+    }
 }
 
 #[test]
@@ -959,11 +1247,79 @@ fn chat_engine_model_ids_round_trip() {
 const ATTENDED: policy::TurnPermissions = policy::TurnPermissions {
     safety_mode: AgentSafetyMode::Sandboxed,
     attended: true,
+    routine_tools: None,
 };
 const UNATTENDED: policy::TurnPermissions = policy::TurnPermissions {
     safety_mode: AgentSafetyMode::Sandboxed,
     attended: false,
+    routine_tools: Some(policy::RoutineBuiltinTools {
+        file: true,
+        web: true,
+    }),
 };
+
+#[tokio::test]
+#[cfg(unix)]
+async fn policy_fake_codex_receives_an_existing_workspace_image() {
+    let kind = CliKind::Codex;
+    let harness = Harness::new(kind).await;
+    let attachments = harness.workspace.path().join("attachments");
+    std::fs::create_dir(&attachments).unwrap();
+    let image_path = attachments.join("synthetic.png");
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+        .save(&image_path)
+        .unwrap();
+    let program = harness.fake_cli(kind, r#"
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '--image' ]; then
+    test -f "$argument" || exit 8
+    printf '%s' "$argument" > "$LOG/image-read"
+  fi
+  previous="$argument"
+done
+test -s "$LOG/image-read" || exit 9
+echo '{"type":"thread.started","thread_id":"image-fixture"}'
+echo '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"Image file received."}}'
+echo '{"type":"turn.completed"}'
+"#);
+    let manifest = crate::agent_sessions::api::cli_message_with_attachments(
+        "Inspect the image.",
+        &[crate::agent_sessions::MessageAttachmentPayload {
+            id: "synthetic".into(),
+            name: "synthetic.png".into(),
+            path: image_path.to_string_lossy().into(),
+            mime_type: Some("image/png".into()),
+            size_bytes: i64::try_from(std::fs::metadata(&image_path).unwrap().len()).unwrap(),
+            available: true,
+            created_at: "2026-10-28T00:00:00Z".into(),
+        }],
+    );
+    let run_id = harness.new_run(kind, &manifest).await;
+    let mut context = harness.context(kind, &program, &run_id, &manifest, None);
+    context.images = vec![image_path.clone()];
+    let sink = TestSink {
+        repository: harness.repository.clone(),
+        emitted: StdMutex::new(Vec::new()),
+    };
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    execute_turn(&harness.repository, &sink, context, receiver).await;
+    assert_eq!(
+        harness.repository.get_run(&run_id).await.unwrap().status,
+        "completed"
+    );
+    let argv = harness.args(1);
+    let image_arg = argv.windows(2).find(|pair| pair[0] == "--image").unwrap();
+    assert_eq!(Path::new(&image_arg[1]), image_path);
+    assert!(Path::new(&image_arg[1]).is_file());
+    assert_eq!(
+        std::fs::read_to_string(harness.log.path().join("image-read")).unwrap(),
+        image_path.to_string_lossy()
+    );
+    assert!(harness
+        .stdin(1)
+        .contains(&image_path.to_string_lossy().to_string()));
+}
 
 #[test]
 fn chat_engine_unattended_claude_turn_has_only_read_tools_clovy_mcp_and_web() {
@@ -1144,286 +1500,6 @@ fn chat_engine_cursor_one_delta_segment_before_a_tool_call_is_not_doubled() {
     assert_eq!(text, "Plain answer");
 }
 
-/// A minimal OpenAI-compatible server that streams one tool call
-/// (`search_june`) as server-sent events and records the request body.
-///
-/// Its base URL carries a path prefix unique to this server, and only
-/// `POST <prefix>/chat/completions` is recorded and answered: a freshly
-/// opened localhost port also receives requests from outside the test (a
-/// tool on the machine that probes new ports sends `HEAD /`), which must not
-/// count as a request the code under test sent.
-async fn streaming_tool_call_server() -> (String, std::sync::Arc<StdMutex<Vec<Value>>>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let prefix = format!("/{}/v1", uuid::Uuid::new_v4().simple());
-    let request_line = format!("POST {prefix}/chat/completions ");
-    let requests = std::sync::Arc::new(StdMutex::new(Vec::new()));
-    let recorded = requests.clone();
-    tokio::spawn(async move {
-        while let Ok((mut socket, _)) = listener.accept().await {
-            let recorded = recorded.clone();
-            let request_line = request_line.clone();
-            tokio::spawn(async move {
-                let mut buffer = Vec::new();
-                let mut chunk = [0_u8; 8192];
-                let body = loop {
-                    let read = socket.read(&mut chunk).await.unwrap_or(0);
-                    if read == 0 {
-                        return;
-                    }
-                    buffer.extend_from_slice(&chunk[..read]);
-                    let text = String::from_utf8_lossy(&buffer).to_string();
-                    if let Some(split) = text.find("\r\n\r\n") {
-                        let length = text[..split]
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())?
-                            })
-                            .unwrap_or(0);
-                        if buffer.len() >= split + 4 + length {
-                            break buffer[split + 4..split + 4 + length].to_vec();
-                        }
-                    }
-                };
-                if !buffer.starts_with(request_line.as_bytes()) {
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                        .await;
-                    return;
-                }
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null));
-                let _ = socket
-                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
-                    .await;
-                let chunks = [
-                    json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Let me search. "}}]}),
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search_june","arguments":""}}]}}]}),
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":"}}]}}]}),
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"roadmap\"}"}}]}}]}),
-                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
-                ];
-                for chunk in chunks {
-                    let _ = socket
-                        .write_all(format!("data: {chunk}\n\n").as_bytes())
-                        .await;
-                    let _ = socket.flush().await;
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                let _ = socket.write_all(b"data: [DONE]\n\n").await;
-            });
-        }
-    });
-    (format!("http://{address}{prefix}"), requests)
-}
-
-/// The cause of the intermittent failure of
-/// `chat_engine_endpoint_choice_keeps_its_identity_when_endpoints_share_a_model`
-/// (two requests at the second endpoint): a tool on the machine probed the
-/// newly opened port with `HEAD /`, and the fake server counted it. Requests
-/// that are not this server's own chat completions are never recorded.
-#[tokio::test]
-async fn chat_engine_fake_endpoint_ignores_requests_from_outside_the_test() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (base_url, requests) = streaming_tool_call_server().await;
-    let authority = base_url
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap()
-        .to_string();
-    for probe in [
-        format!(
-            "HEAD / HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
-            authority.rsplit(':').next().unwrap()
-        ),
-        "POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
-            .to_string(),
-    ] {
-        let mut socket = tokio::net::TcpStream::connect(&authority).await.unwrap();
-        socket.write_all(probe.as_bytes()).await.unwrap();
-        let mut answer = String::new();
-        socket.read_to_string(&mut answer).await.unwrap();
-        assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
-    }
-    assert!(requests.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn chat_engine_registered_endpoint_serves_the_agent_with_streamed_tool_calls() {
-    use crate::llm::registry::{LlmEndpointRecord, ProviderRef};
-    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            crate::providers::replace_current_settings_for_tests(
-                crate::providers::default_settings_for_tests(),
-            );
-        }
-    }
-    let _restore = Restore;
-    let (base_url, requests) = streaming_tool_call_server().await;
-    let mut settings = crate::providers::default_settings_for_tests();
-    // Two endpoints; the chat selection is the other one, so the session's
-    // tagged model alone must pick this endpoint.
-    let endpoint = |id: &str, base_url: &str, model_id: &str| LlmEndpointRecord {
-        id: id.into(),
-        name: id.into(),
-        base_url: base_url.into(),
-        model_id: model_id.into(),
-        has_api_key: false,
-        structured_output: None,
-        rpm_limit: None,
-    };
-    settings.llm_endpoints = vec![
-        endpoint("other", "http://127.0.0.1:9/v1", "other-model"),
-        endpoint("lab", &base_url, "tool-model"),
-    ];
-    settings.llm_usage.chat = ProviderRef::Endpoint { id: "other".into() };
-    crate::llm::registry::normalize(&mut settings);
-    crate::providers::replace_current_settings_for_tests(settings);
-
-    let tools = json!([{ "type": "function", "function": { "name": "search_june", "description": "Search Clovy", "parameters": { "type": "object", "properties": { "query": { "type": "string" } } } } }]);
-    let mut response = crate::clovy_api::proxy_agent_chat_completions(json!({
-        "model": "__june_local_generation__:tool-model",
-        "messages": [{ "role": "user", "content": "Find the roadmap note" }],
-        "tools": tools,
-        "stream": true,
-    }))
-    .await
-    .expect("the endpoint answers");
-    assert_eq!(response.status, 200);
-    assert_eq!(response.route.provider.as_deref(), Some("local"));
-
-    // Read it the way the host relays model streams to the sidecar.
-    let mut received = Vec::new();
-    let mut chunk_count = 0;
-    while let Some(bytes) = response.chunk().await.unwrap() {
-        chunk_count += 1;
-        received.extend_from_slice(&bytes);
-    }
-    assert!(chunk_count > 1, "the answer arrived as a stream");
-    let events = String::from_utf8(received)
-        .unwrap()
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .filter(|data| *data != "[DONE]")
-        .map(|data| serde_json::from_str::<Value>(data).unwrap())
-        .collect::<Vec<_>>();
-    let text = events
-        .iter()
-        .filter_map(|event| event["choices"][0]["delta"]["content"].as_str())
-        .collect::<String>();
-    let tool_name = events.iter().find_map(|event| {
-        event["choices"][0]["delta"]["tool_calls"][0]["function"]["name"].as_str()
-    });
-    let arguments = events
-        .iter()
-        .filter_map(|event| {
-            event["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
-        })
-        .collect::<String>();
-    assert_eq!(text, "Let me search. ");
-    assert_eq!(tool_name, Some("search_june"));
-    assert_eq!(
-        serde_json::from_str::<Value>(&arguments).unwrap(),
-        json!({ "query": "roadmap" })
-    );
-
-    let request = requests.lock().unwrap().first().cloned().unwrap();
-    assert_eq!(
-        request["model"],
-        json!("tool-model"),
-        "the endpoint's own model id"
-    );
-    assert_eq!(request["stream"], json!(true));
-    assert_eq!(
-        request["tools"][0]["function"]["name"],
-        json!("search_june")
-    );
-}
-
-#[tokio::test]
-async fn chat_engine_endpoint_choice_keeps_its_identity_when_endpoints_share_a_model() {
-    use crate::llm::registry::{LlmEndpointRecord, LlmRegistry, ProviderRef};
-    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            crate::providers::replace_current_settings_for_tests(
-                crate::providers::default_settings_for_tests(),
-            );
-        }
-    }
-    let _restore = Restore;
-    let (first_url, first_requests) = streaming_tool_call_server().await;
-    let (second_url, second_requests) = streaming_tool_call_server().await;
-    let endpoint = |id: &str, base_url: &str| LlmEndpointRecord {
-        id: id.into(),
-        name: format!("Server {id}"),
-        base_url: base_url.into(),
-        model_id: "shared-model".into(),
-        has_api_key: false,
-        structured_output: None,
-        rpm_limit: None,
-    };
-    let mut settings = crate::providers::default_settings_for_tests();
-    settings.llm_endpoints = vec![
-        endpoint("first", &first_url),
-        endpoint("second", &second_url),
-    ];
-    // Chat is on the first endpoint, which serves the same model id.
-    settings.llm_usage.chat = ProviderRef::Endpoint { id: "first".into() };
-    crate::llm::registry::normalize(&mut settings);
-    let registry = LlmRegistry::from(&settings);
-    crate::providers::replace_current_settings_for_tests(settings);
-
-    // The picker offers two distinct choices.
-    let engines = endpoint_engines(&registry);
-    assert_eq!(engines.len(), 2);
-    assert_ne!(engines[0].option_id, engines[1].option_id);
-    let second = engines
-        .iter()
-        .find(|engine| engine.id == "second")
-        .unwrap()
-        .option_id
-        .clone();
-
-    // A session on the second endpoint talks to the second server only.
-    let mut response = crate::clovy_api::proxy_agent_chat_completions(json!({
-        "model": second,
-        "messages": [{ "role": "user", "content": "Hi" }],
-        "stream": true,
-    }))
-    .await
-    .expect("the chosen endpoint answers");
-    while response.chunk().await.unwrap().is_some() {}
-    assert_eq!(second_requests.lock().unwrap().len(), 1);
-    assert!(first_requests.lock().unwrap().is_empty());
-    assert_eq!(
-        second_requests.lock().unwrap()[0]["model"],
-        json!("shared-model")
-    );
-
-    // A removed endpoint is refused instead of silently using another one.
-    let removed = crate::clovy_api::endpoint_option_id("shared-model", "gone");
-    let error = crate::clovy_api::proxy_agent_chat_completions(json!({
-        "model": removed,
-        "messages": [{ "role": "user", "content": "Hi" }],
-        "stream": true,
-    }))
-    .await
-    .err()
-    .expect("a missing endpoint is refused");
-    assert_eq!(error.code, "local_model_unavailable");
-    assert!(first_requests.lock().unwrap().is_empty());
-}
-
 #[tokio::test]
 #[cfg(unix)]
 async fn chat_engine_app_shutdown_stops_and_awaits_running_cli_turns() {
@@ -1572,10 +1648,13 @@ echo '{"type":"agent_end","messages":[]}'"#,
         ("HOME", "/Users/someone"),
         ("PI_CODING_AGENT_DIR", "/Users/someone/.pi/agent"),
         ("OPENROUTER_API_KEY", "user-own-key"),
-        ("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "clovy-dev-token"),
-        ("OS_JUNE_LOCAL_DEV_BEARER_TOKEN", "june-dev-token"),
+        ("CLOVY_TEST_PRIVATE_TOKEN", "clovy-dev-token"),
+        ("CLOVY_TEST_LEGACY_TOKEN", "june-dev-token"),
         ("OS_ACCOUNTS_CLIENT_ID", "clovy-client"),
-        ("CLOVY_API_URL", "http://127.0.0.1:8787"),
+        (
+            "CLOVY_TEST_RETIRED_PROVIDER_ORIGIN",
+            "http://127.0.0.1:8787",
+        ),
         ("GOOGLE_OAUTH_CLIENT_SECRET", "clovy-oauth-secret"),
     ] {
         context.env.insert(name.to_string(), value.to_string());
@@ -1761,7 +1840,12 @@ async fn chat_engine_home_session_runs_two_turns_on_the_cli_without_clovy_api() 
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
-    std::env::set_var("CLOVY_API_URL", format!("http://{api_address}"));
+    // Inject the historical origin at its original environment boundary. A
+    // reintroduced server resolver would hit this listener; current CLI code
+    // never reads it. Assemble the retired name only inside this regression.
+    let retired_origin_env = ["CLOVY", "API", "URL"].join("_");
+    let previous_origin = std::env::var_os(&retired_origin_env);
+    std::env::set_var(&retired_origin_env, format!("http://{api_address}"));
 
     let kind = CliKind::Claude;
     let mut harness = Harness::new(kind).await;
@@ -1852,4 +1936,8 @@ async fn chat_engine_home_session_runs_two_turns_on_the_cli_without_clovy_api() 
     );
     assert_eq!(api_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     api_server.abort();
+    match previous_origin {
+        Some(value) => std::env::set_var(retired_origin_env, value),
+        None => std::env::remove_var(retired_origin_env),
+    }
 }

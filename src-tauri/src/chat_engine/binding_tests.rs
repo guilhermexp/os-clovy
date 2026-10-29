@@ -14,8 +14,8 @@ use super::tests::{Harness, TestSink};
 use super::turn::{execute_turn, TurnContext};
 use super::*;
 use crate::approval_broker::{
-    commands, ApprovalBroker, ApprovalKind, ApprovalRequest, ApprovalTurn, BrokerIo, TokioClock,
-    APPROVAL_TIMEOUT,
+    commands, ApprovalBroker, ApprovalKind, ApprovalRequest, ApprovalTurn, BrokerIo, Clock,
+    TokioClock, APPROVAL_TIMEOUT,
 };
 use crate::mcp_server::channel::{self, ClientError};
 use crate::mcp_server::tools::{ActivityAccess, McpData, ToolCtx, ToolGroup};
@@ -207,6 +207,10 @@ struct Rig {
 
 impl Rig {
     async fn new(kind: CliKind) -> Self {
+        Self::with_clock(kind, TokioClock).await
+    }
+
+    async fn with_clock(kind: CliKind, clock: impl Clock) -> Self {
         let harness = Harness::new(kind).await;
         let events = Arc::default();
         let broker = ApprovalBroker::new(
@@ -214,7 +218,7 @@ impl Rig {
                 pool: harness.repository.pool.clone(),
                 events: Arc::clone(&events),
             },
-            TokioClock,
+            clock,
             APPROVAL_TIMEOUT,
         );
         let turns = TurnRegistry::default();
@@ -313,7 +317,18 @@ cfg=$(sed -n '/^--mcp-config$/{n;p;}' "$LOG/$n.args"); cp "$cfg" "$LOG/mcp.json"
 echo '{"type":"system","subtype":"init","session_id":"claude-conv-1"}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call-1","name":"mcp__clovy__probe_write","input":{"path":"notes.txt"}}]}}'
 : > "$LOG/calling"
-while [ ! -f "$LOG/outcome" ]; do sleep 0.02; done
+printf '%s' "$MCP_TOOL_TIMEOUT" > "$LOG/configured-timeout"
+while [ ! -f "$LOG/outcome" ]; do
+  if [ -f "$LOG/elapsed" ]; then
+    elapsed=$(cat "$LOG/elapsed"); elapsed=${elapsed:-0}
+    if [ "$elapsed" -ge "${MCP_TOOL_TIMEOUT:-0}" ]; then
+      : > "$LOG/cli-timeout"
+      exit 12
+    fi
+    printf '%s' "$elapsed" > "$LOG/observed-elapsed"
+  fi
+  sleep 0.02
+done
 outcome=$(cat "$LOG/outcome")
 echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"'"$outcome"'","is_error":false}]}}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"'"$outcome"'"}'
@@ -322,13 +337,45 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"'"$outcome
 #[derive(Debug, Clone, Copy)]
 enum Answer {
     Approve,
+    ApproveNearDeadline,
     Deny,
     Cancel,
 }
 
+#[derive(Clone)]
+struct ManualApprovalClock {
+    elapsed: Arc<tokio::sync::watch::Sender<Duration>>,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ManualApprovalClock {
+    fn new() -> Self {
+        Self {
+            elapsed: Arc::new(tokio::sync::watch::channel(Duration::ZERO).0),
+            armed: Arc::default(),
+        }
+    }
+}
+
+impl Clock for ManualApprovalClock {
+    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+        let mut elapsed = self.elapsed.subscribe();
+        let deadline = *elapsed.borrow() + duration;
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            let _ = elapsed.wait_for(|elapsed| *elapsed >= deadline).await;
+        })
+    }
+}
+
 async fn tool_call_through_the_turn_binding(answer: Answer) {
     let kind = CliKind::Claude;
-    let rig = Rig::new(kind).await;
+    let clock = ManualApprovalClock::new();
+    let rig = if matches!(answer, Answer::ApproveNearDeadline) {
+        Rig::with_clock(kind, clock.clone()).await
+    } else {
+        Rig::new(kind).await
+    };
     let program = rig.harness.fake_cli(kind, FAKE_CLAUDE_CALLING);
     let run_id = rig.harness.new_run(kind, "Write it").await;
     let host = Arc::new(ChatEngineHost::default());
@@ -378,6 +425,29 @@ async fn tool_call_through_the_turn_binding(answer: Answer) {
         let broker = rig.broker.clone();
         wait_for("the approval card", || !broker.waiting_ids().is_empty()).await;
         let interruption_id = rig.broker.waiting_ids().remove(0);
+        if matches!(answer, Answer::ApproveNearDeadline) {
+            wait_for("the broker timer", || {
+                clock.armed.load(std::sync::atomic::Ordering::SeqCst)
+            })
+            .await;
+            let elapsed = APPROVAL_TIMEOUT - Duration::from_secs(1);
+            clock.elapsed.send_replace(elapsed);
+            std::fs::write(rig.log("elapsed"), elapsed.as_millis().to_string()).unwrap();
+            wait_for("the fake CLI's controlled clock", || {
+                rig.log("cli-timeout").exists()
+                    || std::fs::read_to_string(rig.log("observed-elapsed"))
+                        .ok()
+                        .as_deref()
+                        == Some(elapsed.as_millis().to_string().as_str())
+            })
+            .await;
+            assert!(!rig.log("cli-timeout").exists());
+            assert_eq!(
+                std::fs::read_to_string(rig.log("configured-timeout")).unwrap(),
+                policy::CLI_TOOL_TIMEOUT.as_millis().to_string()
+            );
+            assert!(rig.broker.is_waiting(&interruption_id));
+        }
         assert_eq!(
             rig.harness
                 .repository
@@ -388,8 +458,8 @@ async fn tool_call_through_the_turn_binding(answer: Answer) {
             "waiting_for_user"
         );
         match answer {
-            Answer::Approve | Answer::Deny => {
-                let choice = if matches!(answer, Answer::Approve) {
+            Answer::Approve | Answer::ApproveNearDeadline | Answer::Deny => {
+                let choice = if matches!(answer, Answer::Approve | Answer::ApproveNearDeadline) {
                     "once"
                 } else {
                     "deny"
@@ -428,7 +498,7 @@ async fn tool_call_through_the_turn_binding(answer: Answer) {
             .unwrap()
             .expect("the card was recorded");
     match answer {
-        Answer::Approve => {
+        Answer::Approve | Answer::ApproveNearDeadline => {
             assert_eq!(result["result"]["isError"], false, "{text}");
             let written: Value = serde_json::from_str(&text).unwrap();
             assert_eq!(written, json!({ "written": true, "runId": run_id }));
@@ -448,7 +518,7 @@ async fn tool_call_through_the_turn_binding(answer: Answer) {
         }
     }
     if !matches!(answer, Answer::Cancel) {
-        let outcome = if matches!(answer, Answer::Approve) {
+        let outcome = if matches!(answer, Answer::Approve | Answer::ApproveNearDeadline) {
             "written"
         } else {
             "denied"
@@ -485,6 +555,11 @@ async fn tool_call_through_the_turn_binding(answer: Answer) {
         matches!(refused, Err(ClientError::TurnExpired)),
         "{answer:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_fake_cli_receives_tool_result_when_approval_is_near_deadline() {
+    tool_call_through_the_turn_binding(Answer::ApproveNearDeadline).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

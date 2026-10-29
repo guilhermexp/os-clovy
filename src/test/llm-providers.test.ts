@@ -17,17 +17,17 @@ describe("llm-providers pure helpers", () => {
   });
 
   it("encodes and decodes providerRefKey correctly", () => {
-    const clovy: LlmProviderRef = { kind: "clovy" };
+    const openrouter: LlmProviderRef = { kind: "openrouter" };
     const none: LlmProviderRef = { kind: "none" };
     const endpoint: LlmProviderRef = { kind: "endpoint", id: "ep-123" };
     const cli: LlmProviderRef = { kind: "cli", id: "codex" };
 
-    expect(providerRefKey(clovy)).toBe("clovy");
+    expect(providerRefKey(openrouter)).toBe("openrouter");
     expect(providerRefKey(none)).toBe("none");
     expect(providerRefKey(endpoint)).toBe("endpoint:ep-123");
     expect(providerRefKey(cli)).toBe("cli:codex");
 
-    expect(parseProviderRefKey("clovy")).toEqual(clovy);
+    expect(parseProviderRefKey("openrouter")).toEqual(openrouter);
     expect(parseProviderRefKey("none")).toEqual(none);
     expect(parseProviderRefKey("endpoint:ep-123")).toEqual(endpoint);
     expect(parseProviderRefKey("cli:codex")).toEqual(cli);

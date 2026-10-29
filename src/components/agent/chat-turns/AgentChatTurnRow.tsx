@@ -42,7 +42,6 @@ import {
 import { AgentGeneratedImage, AgentGeneratedVideo } from "./GeneratedMedia";
 import {
   ContextOverflowNoticePart,
-  CreditsNoticePart,
   SteeringPart,
   UpstreamProviderFailureNoticePart,
 } from "./RunNotices";
@@ -577,9 +576,7 @@ export function AgentChatTurnRow({
                     : undefined
                 }
               />
-            ) : (
-              <CreditsNoticePart key={`${turn.id}:notice:${index}`} />
-            )
+            ) : null
           ) : part.type === "steering" ? (
             <SteeringPart key={`${turn.id}:steering:${index}`} part={part} />
           ) : part.type === "image" ? (

@@ -1,12 +1,18 @@
 //! Model-picker state. The Tauri side persists which transcription /
-//! generation / image / video models the user selected. Clovy API holds the
-//! service keys and URLs of the providers it routes to: Groq for transcription,
-//! OpenRouter for remote text, fal for images and video, and Tavily for the web.
+//! generation / image / video models the user selected. Groq, OpenRouter and
+//! fal requests use the user's provider keys directly.
 //! The user's own providers (named OpenAI-compatible endpoints, agent CLIs, and
 //! the provider chosen per use) are the `llm` registry, also persisted here.
 //! Keys never live in `provider-settings.json`: endpoint keys and a user's own
 //! Groq / OpenRouter / fal / Tavily keys live in the Keychain store
 //! (`crate::llm::secrets`), and settings only record that one is saved.
+
+mod catalog;
+mod direct;
+pub(crate) mod fal;
+pub mod groq;
+pub mod notes;
+pub mod openrouter;
 
 use crate::domain::types::AppError;
 use crate::llm::{
@@ -32,13 +38,11 @@ pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "whisper-large-v3-turbo";
 /// The Groq Whisper models Clovy offers for dictation and notes (Groq
 /// speech-to-text docs). A persisted transcription model outside this set,
 /// such as an id saved before the Groq cutover, loads as the default so the
-/// next recording never carries an id Clovy API cannot price.
+/// next recording always uses a supported transcription model.
 pub const KNOWN_TRANSCRIPTION_MODELS: &[&str] = &[DEFAULT_TRANSCRIPTION_MODEL, "whisper-large-v3"];
 pub const DEFAULT_GENERATION_MODEL: &str = "z-ai/glm-5.2";
-pub const AUTO_GENERATION_MODEL: &str = "open-software/auto";
-const LOCAL_AUTO_VISION_FALLBACK_MODEL: &str = "moonshotai/kimi-k2.6";
-/// Text ids saved before the OpenRouter cutover whose same model Clovy API now
-/// serves through OpenRouter. Settings migrate through this table once (see
+pub const LEGACY_AUTO_GENERATION_MODEL: &str = "open-software/auto";
+/// Text ids saved before the OpenRouter cutover with matching OpenRouter ids. Settings migrate through this table once (see
 /// `remote_models_migrated`); any other pre-cutover id moves to the default.
 const LEGACY_TEXT_MODEL_EQUIVALENTS: &[(&str, &str)] = &[
     ("zai-org-glm-5-2", "z-ai/glm-5.2"),
@@ -51,11 +55,10 @@ const LEGACY_TEXT_MODEL_EQUIVALENTS: &[(&str, &str)] = &[
         "nvidia/nemotron-3-nano-30b-a3b",
     ),
 ];
-pub const DEFAULT_COST_QUALITY: u8 = 100;
 /// fal FLUX.1 [dev]: the default image model.
 pub const DEFAULT_IMAGE_MODEL: &str = "fal-ai/flux/dev";
 /// Curated fal image-generation endpoint ids (mirrors `IMAGE_MODELS` in
-/// `src/lib/image-models.ts` and the clovy-api `image_pricing` allowlist). A
+/// `src/lib/image-models.ts`). A
 /// persisted `image_model` outside this set, such as an id saved before the fal
 /// cutover, loads as `DEFAULT_IMAGE_MODEL`. Keep in sync when the list changes.
 pub const KNOWN_IMAGE_MODELS: &[&str] = &[
@@ -66,13 +69,13 @@ pub const KNOWN_IMAGE_MODELS: &[&str] = &[
 /// fal Wan 2.2 A14B text-to-video: the default video model.
 pub const DEFAULT_VIDEO_MODEL: &str = "fal-ai/wan/v2.2-a14b/text-to-video";
 /// Curated fal text-to-video endpoint ids (mirrors `VIDEO_MODELS` in
-/// `src/lib/video-models.ts` and the clovy-api `video_pricing` allowlist). A
+/// `src/lib/video-models.ts`). A
 /// persisted `video_model` outside this set, such as a delisted model or an id
 /// saved before the fal cutover, loads as `DEFAULT_VIDEO_MODEL` so generation
 /// keeps working after an update. Keep in sync when the curated list changes.
 pub const KNOWN_VIDEO_MODELS: &[&str] = &[DEFAULT_VIDEO_MODEL, "alibaba/wan-3.0/text-to-video"];
 /// The fast path's 5s / 720p / 16:9 shape is accepted by every curated video
-/// model (clovy-api's fal adapter validates per-model ranges before charging).
+/// model; the direct fal adapter validates its supported ranges.
 pub const DEFAULT_VIDEO_DURATION: &str = "5s";
 pub const DEFAULT_VIDEO_RESOLUTION: &str = "720p";
 pub const DEFAULT_VIDEO_ASPECT_RATIO: &str = "16:9";
@@ -82,15 +85,17 @@ const MAX_PROVIDER_API_KEY_CHARS: usize = 4_096;
 static MODEL_SETTINGS: OnceLock<Mutex<ProviderModelSettings>> = OnceLock::new();
 static PROVIDER_KEY_CHECK_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     crate::http_client::build_client(
-        crate::http_client::base_client_builder().timeout(PROVIDER_API_KEY_CHECK_TIMEOUT),
+        crate::http_client::base_client_builder()
+            .timeout(PROVIDER_API_KEY_CHECK_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none()),
         "provider_key_check",
     )
 });
 
-/// A provider Clovy API calls on the user's behalf, one per capability: Groq
-/// transcribes, OpenRouter serves remote text, fal generates images and video,
-/// and Tavily searches and reads the web. The user may save their own key for
-/// each; it is forwarded only with requests for that provider's capability.
+/// Providers whose user-owned keys are stored locally. Groq transcribes,
+/// OpenRouter serves remote text, and fal generates media. Tavily credentials
+/// remain available for explicit connector configuration. Keys are sent only
+/// to their owning provider.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BuiltinProvider {
@@ -139,7 +144,11 @@ impl BuiltinProvider {
             Self::Groq => "https://api.groq.com/openai/v1/models".to_string(),
             Self::OpenRouter => "https://openrouter.ai/api/v1/key".to_string(),
             Self::Fal => {
-                format!("https://api.fal.ai/v1/models/pricing?endpoint_id={DEFAULT_IMAGE_MODEL}")
+                let mut url = reqwest::Url::parse("https://api.fal.ai/v1/models/pricing")
+                    .expect("static fal pricing URL");
+                url.query_pairs_mut()
+                    .append_pair("endpoint_id", DEFAULT_IMAGE_MODEL);
+                url.to_string()
             }
             Self::Tavily => "https://api.tavily.com/usage".to_string(),
         }
@@ -203,8 +212,6 @@ pub struct ProviderModelSettings {
     pub transcription_model: String,
     #[serde(default = "default_generation_model")]
     pub generation_model: String,
-    #[serde(default = "default_cost_quality")]
-    pub cost_quality: u8,
     #[serde(default = "default_generation_model")]
     pub remote_generation_model: String,
     // Defaulted so provider-settings.json files written before image
@@ -324,7 +331,6 @@ pub struct ProviderModelSettingsDto {
     pub generation_provider: String,
     pub transcription_model: String,
     pub generation_model: String,
-    pub cost_quality: u8,
     pub remote_generation_model: String,
     pub image_model: String,
     pub video_model: String,
@@ -342,7 +348,6 @@ impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
             generation_provider: settings.generation_provider.clone(),
             transcription_model: settings.transcription_model.clone(),
             generation_model: settings.generation_model.clone(),
-            cost_quality: settings.cost_quality,
             remote_generation_model: settings.remote_generation_model.clone(),
             image_model: settings.image_model.clone(),
             video_model: settings.video_model.clone(),
@@ -421,12 +426,6 @@ pub struct SetProviderModelRequest {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetCostQualityRequest {
-    pub value: u8,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct ProbeLocalGenerationEndpointRequest {
     pub base_url: String,
     /// A key typed in the form; blank falls back to the key saved for
@@ -492,65 +491,10 @@ pub struct ProviderModelDto {
     pub capabilities: Vec<String>,
     pub price_unit: String,
     pub price_description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credits_per_million_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_credits_per_million_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_credits_per_million_tokens: Option<u64>,
-    /// False when Clovy holds no service key for the row's provider: the model
-    /// is usable only with the user's own key for that provider.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_available: Option<bool>,
-}
-
-impl From<crate::clovy_api::ModelDto> for ProviderModelDto {
-    fn from(value: crate::clovy_api::ModelDto) -> Self {
-        let pricing = pricing_with_display(value.pricing, &value.price_description);
-        Self {
-            description: value.description,
-            provider: value.provider,
-            id: value.id,
-            name: value.name,
-            model_type: value.model_type,
-            privacy: value.privacy,
-            pricing: Some(pricing),
-            context_tokens: value.context_tokens,
-            traits: value.traits,
-            capabilities: value.capabilities,
-            price_unit: value.price_unit,
-            price_description: value.price_description,
-            credits_per_million_seconds: value.credits_per_million_seconds,
-            input_credits_per_million_tokens: value.input_credits_per_million_tokens,
-            output_credits_per_million_tokens: value.output_credits_per_million_tokens,
-            service_available: value.service_available,
-        }
-    }
-}
-
-fn pricing_with_display(pricing: Option<serde_json::Value>, display: &str) -> serde_json::Value {
-    let display = display.trim();
-    match pricing {
-        Some(serde_json::Value::Object(mut map)) => {
-            if !display.is_empty() {
-                map.insert(
-                    "display".to_string(),
-                    serde_json::Value::String(display.to_string()),
-                );
-            }
-            serde_json::Value::Object(map)
-        }
-        Some(value) => value,
-        None => serde_json::json!({ "display": display }),
-    }
 }
 
 pub fn configured_transcription_provider() -> String {
     effective_current_settings().transcription_provider
-}
-
-pub fn provider_configured() -> bool {
-    crate::clovy_api::configured()
 }
 
 pub fn transcription_model() -> String {
@@ -566,12 +510,6 @@ pub fn generation_model() -> String {
 /// on Clovy's metered remote route.
 pub fn remote_generation_model() -> String {
     current_settings().remote_generation_model
-}
-
-pub fn cost_quality() -> f64 {
-    // Keep the wire value safe even if a user manually edits the settings file
-    // after it has been loaded but before a future accessor refactor.
-    f64::from(current_settings().cost_quality.min(100)) / 100.0
 }
 
 pub fn generation_provider() -> String {
@@ -623,10 +561,9 @@ pub fn video_model() -> String {
     effective_current_settings().video_model
 }
 
-/// The user's saved key for `provider`, or `None` when they saved none and the
-/// request runs on Clovy's service key. The Keychain store is read only when
-/// settings record a saved key, never at startup. A recorded key the store
-/// cannot return is an error rather than a silent switch to Clovy credits.
+/// The user's saved key for `provider`, or `None` when none is saved.
+/// The credential store is read only when settings record a saved key.
+/// A recorded key the store cannot return is an error; there is no fallback.
 pub fn provider_api_key(provider: BuiltinProvider) -> Result<Option<String>, AppError> {
     saved_provider_api_key(&current_settings(), crate::llm::secrets::store(), provider)
 }
@@ -675,99 +612,6 @@ pub fn image_safe_mode_prompt_dismissed() -> bool {
 
 pub fn live_transcription() -> bool {
     current_settings().live_transcription
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ClovyModelRuntimeCapabilities {
-    pub context_tokens: Option<i64>,
-    pub supports_vision: bool,
-}
-
-/// Resolves the model-specific limits needed by an agent run. Agent sessions
-/// can select a model independently of the global generation setting, so this
-/// cache is keyed by the run model and shared across turns.
-pub async fn clovy_model_runtime_capabilities(model_id: &str) -> ClovyModelRuntimeCapabilities {
-    if let Ok(cache) = model_runtime_capabilities_cache().lock() {
-        if let Some(capabilities) = cache.get(model_id) {
-            return *capabilities;
-        }
-    }
-    let Ok(models) = crate::clovy_api::list_models(ModelMode::Generation.api_type()).await else {
-        return ClovyModelRuntimeCapabilities::default();
-    };
-    let capabilities = ClovyModelRuntimeCapabilities {
-        context_tokens: models
-            .iter()
-            .find(|model| model.id == model_id)
-            .and_then(|model| model.context_tokens),
-        supports_vision: generation_model_supports_vision_from_catalog(
-            model_id,
-            true,
-            models
-                .iter()
-                .map(|model| (model.id.as_str(), model.capabilities.as_slice())),
-        ),
-    };
-    if let Ok(mut cache) = model_runtime_capabilities_cache().lock() {
-        cache.insert(model_id.to_string(), capabilities);
-    }
-    capabilities
-}
-
-fn model_runtime_capabilities_cache(
-) -> &'static Mutex<BTreeMap<String, ClovyModelRuntimeCapabilities>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<String, ClovyModelRuntimeCapabilities>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-fn generation_model_supports_vision_from_catalog<'a>(
-    model_id: &str,
-    local_dev_enabled: bool,
-    models: impl IntoIterator<Item = (&'a str, &'a [String])>,
-) -> bool {
-    let use_local_auto_fallback = local_dev_enabled && model_id == AUTO_GENERATION_MODEL;
-    let mut preferred_fallback_is_compatible = false;
-    let mut alternate_fallback_is_compatible = false;
-
-    for (catalog_model_id, capabilities) in models {
-        if catalog_model_id == model_id {
-            return capabilities_include_vision(capabilities);
-        }
-        if use_local_auto_fallback && capabilities_support_agent_images(capabilities) {
-            if catalog_model_id == LOCAL_AUTO_VISION_FALLBACK_MODEL {
-                preferred_fallback_is_compatible = true;
-            } else {
-                alternate_fallback_is_compatible = true;
-            }
-        }
-    }
-
-    preferred_fallback_is_compatible || alternate_fallback_is_compatible
-}
-
-/// Mirrors the frontend `modelSupportsImageInput`: key off the authoritative
-/// `capabilities` list (never `traits`), matching the normalized `supportsVision`
-/// name so a rename to snake_case still resolves.
-fn capabilities_include_vision(capabilities: &[String]) -> bool {
-    capabilities_include(capabilities, "supportsvision")
-}
-
-fn capabilities_support_agent_images(capabilities: &[String]) -> bool {
-    capabilities_include_vision(capabilities)
-        && (capabilities_include(capabilities, "functioncalling")
-            || capabilities_include(capabilities, "toolcalling"))
-}
-
-fn capabilities_include(capabilities: &[String], expected: &str) -> bool {
-    capabilities.iter().any(|capability| {
-        let normalized: String = capability
-            .chars()
-            .filter(char::is_ascii_alphabetic)
-            .map(|ch| ch.to_ascii_lowercase())
-            .collect();
-        normalized.contains(expected)
-    })
 }
 
 #[tauri::command]
@@ -856,14 +700,20 @@ pub fn set_provider_model(
 }
 
 /// The mode picks the provider: transcription is Groq, text is OpenRouter
-/// (through Clovy API), image and video are fal. Transcription, image, and
-/// video ids must be curated (Clovy API prices only those); text ids come from
+/// directly, image and video are fal. Transcription, image, and
+/// video ids must be curated; text ids come from
 /// the live OpenRouter catalog.
 fn set_provider_model_impl(
     state: &ProviderSettingsState,
     request: SetProviderModelRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let model_id = request.model_id.trim().to_string();
+    let model_id = match request.model_id.trim() {
+        LEGACY_AUTO_GENERATION_MODEL if request.mode == ModelMode::Generation => {
+            DEFAULT_GENERATION_MODEL
+        }
+        value => value,
+    }
+    .to_string();
     if model_id.is_empty() {
         return Err(AppError::new("provider_model_required", "Select a model."));
     }
@@ -885,32 +735,14 @@ fn set_provider_model_impl(
             settings.transcription_model = model_id;
         }
         ModelMode::Generation => {
-            // Picking a Clovy model in the text-model picker moves chat back
-            // to Clovy API; `normalize` mirrors it into the legacy fields.
-            settings.llm_usage.chat = ProviderRef::Clovy;
-            settings.llm_cli_default_applied = true;
+            // Text selection is independent from chat and note engine choices.
             settings.generation_provider = PROVIDER_OPENROUTER.to_string();
             settings.generation_model = model_id.clone();
             settings.remote_generation_model = model_id;
-            crate::llm::registry::normalize(settings);
         }
         ModelMode::Image => settings.image_model = model_id,
         ModelMode::Video => settings.video_model = model_id,
     })
-}
-
-#[tauri::command]
-pub fn set_cost_quality(
-    state: State<'_, ProviderSettingsState>,
-    request: SetCostQualityRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    if request.value > 100 {
-        return Err(AppError::new(
-            "cost_quality_invalid",
-            "Preference must be from 0 to 100.",
-        ));
-    }
-    update_settings(&state, |settings| settings.cost_quality = request.value)
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1000,10 +832,8 @@ pub struct GenerateImageRequest {
     /// Stable logical request id supplied by the chat orchestration layer.
     #[serde(default)]
     pub request_id: Option<String>,
-    /// Optional safe-mode override pinned at turn creation. A retry must replay
-    /// the exact request shape Clovy API hashed into its replay-ledger key, so a
-    /// settings change between attempt and retry cannot mint a second charge.
-    /// Absent falls back to the live saved setting.
+    /// Optional safe-mode override pinned at turn creation. Absent uses the
+    /// live saved setting; resuming a submitted fal job keeps its original input.
     #[serde(default)]
     pub safe_mode: Option<bool>,
 }
@@ -1042,18 +872,16 @@ pub struct EditImageRequest {
     pub request_id: Option<String>,
     #[serde(default)]
     pub mime_type: Option<String>,
-    /// Optional edit-model override; absent uses Clovy API's default edit model.
+    /// Optional edit-model override; absent uses the curated fal edit model.
     #[serde(default)]
     pub model: Option<String>,
 }
 
-/// Generates an image from a prompt via Clovy API, defaulting to the saved
-/// image model. Provider keys and the upstream call live in Clovy API; this
-/// command only resolves the model and forwards the prompt.
+/// Generates an image directly with the user's fal key and saved model.
 #[tauri::command]
 pub async fn generate_image(
     request: GenerateImageRequest,
-) -> Result<crate::clovy_api::GeneratedImageDto, AppError> {
+) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
         return Err(AppError::new("image_prompt_required", "Enter a prompt."));
@@ -1068,15 +896,14 @@ pub async fn generate_image(
         .map(|request_id| request_id.trim().to_string())
         .filter(|request_id| !request_id.is_empty());
     let safe_mode = request.safe_mode.unwrap_or_else(image_safe_mode);
-    crate::clovy_api::generate_image(prompt, model, Some(safe_mode), request_id).await
+    crate::providers::fal::generate_image(prompt, model, Some(safe_mode), request_id).await
 }
 
-/// Edits a source image through Clovy API. Provider keys and the upstream call
-/// live in Clovy API; this command only validates and forwards the image bytes.
+/// Edits a source image directly with the user's fal key.
 #[tauri::command]
 pub async fn edit_image(
     request: EditImageRequest,
-) -> Result<crate::clovy_api::GeneratedImageDto, AppError> {
+) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
     let image = request.image.trim().to_string();
     if image.is_empty() {
         return Err(AppError::new(
@@ -1103,7 +930,7 @@ pub async fn edit_image(
         .mime_type
         .map(|mime_type| mime_type.trim().to_string())
         .filter(|mime_type| !mime_type.is_empty());
-    crate::clovy_api::edit_image(
+    crate::providers::fal::edit_image(
         image,
         prompt,
         mime_type,
@@ -1117,14 +944,14 @@ pub async fn edit_image(
 #[tauri::command]
 pub async fn video_generate(
     request: GenerateVideoRequest,
-) -> Result<crate::clovy_api::VideoJobDto, AppError> {
+) -> Result<crate::providers::fal::VideoJobDto, AppError> {
     video_generate_with_enabled(request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
 }
 
 async fn video_generate_with_enabled(
     request: GenerateVideoRequest,
     enabled: bool,
-) -> Result<crate::clovy_api::VideoJobDto, AppError> {
+) -> Result<crate::providers::fal::VideoJobDto, AppError> {
     ensure_video_generation_enabled(enabled)?;
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -1154,7 +981,7 @@ async fn video_generate_with_enabled(
         .map(|aspect_ratio| aspect_ratio.trim().to_string())
         .filter(|aspect_ratio| !aspect_ratio.is_empty())
         .or_else(|| Some(DEFAULT_VIDEO_ASPECT_RATIO.to_string()));
-    crate::clovy_api::video_generate(crate::clovy_api::VideoGenerateParams {
+    crate::providers::fal::video_generate(crate::providers::fal::VideoGenerateParams {
         prompt,
         model,
         request_id,
@@ -1170,14 +997,14 @@ async fn video_generate_with_enabled(
 pub async fn video_status(
     app: AppHandle,
     request: VideoStatusRequest,
-) -> Result<crate::clovy_api::VideoStatusDto, AppError> {
+) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
     video_status_with_enabled(app, request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
 }
 
 /// Absolute path of the generated-videos directory. Lets the frontend resolve a
 /// bare `generated-video-*.mp4` filename (the agent frequently names a finished
 /// video by filename only when asked to show it again) to an asset-scoped path
-/// the webview can load. Mirrors the directory `clovy_api::write_video_bytes`
+/// the webview can load. Mirrors the directory `providers::fal::video_status`
 /// and the agent video tool write into.
 #[tauri::command]
 pub fn generated_video_dir(app: AppHandle) -> Result<String, AppError> {
@@ -1193,9 +1020,9 @@ async fn video_status_with_enabled(
     app: AppHandle,
     request: VideoStatusRequest,
     enabled: bool,
-) -> Result<crate::clovy_api::VideoStatusDto, AppError> {
+) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
     let job_id = video_status_job_id_with_enabled(request, enabled)?;
-    crate::clovy_api::video_status(&app, job_id).await
+    crate::providers::fal::video_status(&app, job_id).await
 }
 
 fn video_status_job_id_with_enabled(
@@ -1314,6 +1141,9 @@ fn update_provider_credential(
     }
     *settings = candidate.clone();
     *published = candidate;
+    if provider == BuiltinProvider::OpenRouter {
+        catalog::invalidate();
+    }
     Ok(ProviderModelSettingsDto::from(&*settings))
 }
 
@@ -1418,11 +1248,7 @@ async fn list_provider_models_impl(
 ) -> Result<ProviderModelsResponse, AppError> {
     let model_type = request.mode.api_type();
     let selected_model = selected_model_for_mode(state, request.mode)?;
-    let mut models = crate::clovy_api::list_models(model_type)
-        .await?
-        .into_iter()
-        .map(ProviderModelDto::from)
-        .collect::<Vec<_>>();
+    let mut models = catalog::models(request.mode).await?;
     models.sort_by(|left, right| {
         left.name
             .to_ascii_lowercase()
@@ -1468,7 +1294,9 @@ pub async fn ensure_cli_default(state: &ProviderSettingsState) {
     let Ok(snapshot) = settings_snapshot(state) else {
         return;
     };
-    if snapshot.llm_cli_default_applied {
+    if snapshot.llm_cli_default_applied
+        && matches!(snapshot.llm_usage.chat, ProviderRef::Cli { .. })
+    {
         return;
     }
     let env = crate::llm::shell_env::login_env().await;
@@ -1476,9 +1304,6 @@ pub async fn ensure_cli_default(state: &ProviderSettingsState) {
     let mut candidate = snapshot.clone();
     crate::llm::registry::apply_cli_default(&mut candidate, installed);
     if candidate == snapshot {
-        tracing::info!(
-            "chat stays on the legacy Clovy agent: neither Claude Code nor Codex is installed"
-        );
         return;
     }
     let mut moved = None;
@@ -1537,7 +1362,7 @@ fn replace_current_settings(settings: ProviderModelSettings) {
 
 /// Test-only hook: installs settings into the process-wide store that
 /// `current_settings()` reads, so live integration tests (see
-/// `clovy_api::live_local_tests`) can activate the local provider without a
+/// `providers::notes::live_local_tests`) can activate the local provider without a
 /// running Tauri app.
 #[cfg(test)]
 pub(crate) fn replace_current_settings_for_tests(settings: ProviderModelSettings) {
@@ -1571,9 +1396,8 @@ fn default_settings() -> ProviderModelSettings {
         transcription_provider: PROVIDER_GROQ.to_string(),
         generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
-        generation_model: default_generation_model_for_release(),
-        cost_quality: DEFAULT_COST_QUALITY,
-        remote_generation_model: default_generation_model_for_release(),
+        generation_model: default_generation_model(),
+        remote_generation_model: default_generation_model(),
         image_model: DEFAULT_IMAGE_MODEL.to_string(),
         video_model: DEFAULT_VIDEO_MODEL.to_string(),
         provider_api_keys_configured: ProviderApiKeysConfigured::default(),
@@ -1612,20 +1436,6 @@ fn default_generation_model() -> String {
     DEFAULT_GENERATION_MODEL.to_string()
 }
 
-fn default_cost_quality() -> u8 {
-    DEFAULT_COST_QUALITY
-}
-
-fn default_generation_model_for_release() -> String {
-    let enabled = option_env!("OS_CLOVY_AUTO_MODE_DEFAULT")
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
-    if enabled {
-        AUTO_GENERATION_MODEL.to_string()
-    } else {
-        DEFAULT_GENERATION_MODEL.to_string()
-    }
-}
-
 fn default_image_model() -> String {
     DEFAULT_IMAGE_MODEL.to_string()
 }
@@ -1661,11 +1471,24 @@ fn settings_from_json(
     raw: &str,
     store: &dyn crate::llm::secrets::SecretStore,
 ) -> Option<(ProviderModelSettings, bool)> {
-    let parsed = serde_json::from_str::<ProviderModelSettings>(raw).ok()?;
+    let document: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let retired_usage = document["llmUsage"]["notes"]["kind"] == "clovy"
+        || document["llmUsage"].get("dictationCleanup").is_some();
+    let retired_cost_quality = document.get("costQuality").is_some();
+    let retired_auto = document["generationModel"] == LEGACY_AUTO_GENERATION_MODEL
+        || document["remoteGenerationModel"] == LEGACY_AUTO_GENERATION_MODEL;
+    let missing_chat = document["llmUsage"].get("chat").is_none();
+    let parsed = serde_json::from_value::<ProviderModelSettings>(document).ok()?;
+    let retired_chat = missing_chat || !matches!(parsed.llm_usage.chat, ProviderRef::Cli { .. });
     let was_migrated = parsed.llm_registry_migrated;
     let remote_models_migrated = parsed.remote_models_migrated;
     let migrated = crate::llm::registry::migrate_legacy_local_generation(parsed, store);
-    let migrated_now = migrated.llm_registry_migrated != was_migrated || !remote_models_migrated;
+    let migrated_now = retired_chat
+        || retired_usage
+        || retired_auto
+        || retired_cost_quality
+        || migrated.llm_registry_migrated != was_migrated
+        || !remote_models_migrated;
     Some((
         sanitize_settings(migrated, &default_settings()),
         migrated_now,
@@ -1681,7 +1504,9 @@ fn sanitize_settings(
     // against their curated sets on every load.
     let migrate_text = !settings.remote_models_migrated;
     let migrate = |model: String| {
-        if migrate_text {
+        if model == LEGACY_AUTO_GENERATION_MODEL {
+            DEFAULT_GENERATION_MODEL.to_string()
+        } else if migrate_text {
             migrate_legacy_text_model(model)
         } else {
             model
@@ -1697,9 +1522,8 @@ fn sanitize_settings(
         &defaults.remote_generation_model,
     ));
     let local_generation = sanitize_local_generation(settings.local_generation);
-    // Chat on an endpoint is restored from `llm_usage` by `normalize` below;
-    // here a persisted local provider only must not leak its stale local
-    // model id into the remote model.
+    // A historical chat endpoint must not leak its stale local model id into
+    // the independent OpenRouter model. The endpoint itself remains for notes.
     let generation_model = if settings.generation_provider == PROVIDER_LOCAL {
         remote_generation_model.clone()
     } else {
@@ -1733,7 +1557,6 @@ fn sanitize_settings(
         generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model,
         generation_model,
-        cost_quality: settings.cost_quality.min(100),
         remote_generation_model,
         image_model: curated_or_default(
             settings.image_model,
@@ -1798,11 +1621,8 @@ fn sanitize_profile_overrides(
         .collect()
 }
 
-/// Keeps a curated model id and loads anything else as the default, so an
-/// updated install never carries an id Clovy API rejects as
-/// `model_not_priced` (a delisted video model, or an id saved before the
-/// Groq / fal cutover). Empty falls back to the default like the other model
-/// fields.
+/// Keeps a supported curated model id and loads anything else as the default.
+/// This includes empty, delisted, and pre-cutover model ids.
 fn curated_or_default(persisted: String, curated: &[&str], default: &str) -> String {
     let candidate = non_empty_or(persisted, default);
     if curated.contains(&candidate.as_str()) {
@@ -1818,7 +1638,7 @@ fn curated_override(value: Option<String>, curated: &[&str], default: &str) -> O
     normalize_optional_model_field(value).map(|model| curated_or_default(model, curated, default))
 }
 
-/// The id Clovy API serves today for a text model id saved before the
+/// The OpenRouter id for a text model id saved before the
 /// OpenRouter cutover (`kimi-k2-6` → `moonshotai/kimi-k2.6`); any other id,
 /// Auto included, is returned unchanged. Agent sessions and stored runs keep
 /// the id they recorded, so the remote boundary resolves it here instead of
@@ -1832,11 +1652,11 @@ pub fn current_text_model_id(model: &str) -> &str {
 }
 
 /// Maps a text model id from a settings file saved before the OpenRouter
-/// cutover: Auto stays Auto, a model Clovy API now serves through OpenRouter
-/// keeps being that model, and any other pre-cutover id moves to the default.
+/// cutover. Auto and unknown legacy ids become the explicit default; known
+/// equivalents retain their OpenRouter model identity.
 fn migrate_legacy_text_model(model: String) -> String {
-    if model == AUTO_GENERATION_MODEL {
-        return model;
+    if model == LEGACY_AUTO_GENERATION_MODEL {
+        return DEFAULT_GENERATION_MODEL.to_string();
     }
     let current = current_text_model_id(&model);
     if current == model.trim() {
@@ -2128,11 +1948,7 @@ fn selected_model_for_mode(
         .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
     Ok(match mode {
         ModelMode::Transcription => settings.transcription_model.clone(),
-        // A CLI chosen for chat makes new chat sessions start on that engine.
-        ModelMode::Generation => match &settings.llm_usage.chat {
-            ProviderRef::Cli { id } => crate::chat_engine::engine_model_id(*id),
-            _ => settings.generation_model.clone(),
-        },
+        ModelMode::Generation => settings.generation_model.clone(),
         ModelMode::Image => settings.image_model.clone(),
         ModelMode::Video => settings.video_model.clone(),
     })
@@ -2194,126 +2010,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_settings_default_cost_quality_to_higher_quality() {
+    fn retired_cost_quality_is_not_persisted_or_exposed_to_the_renderer() {
         let settings: ProviderModelSettings =
-            serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(settings.cost_quality, 100);
-    }
-
-    #[test]
-    fn capabilities_include_vision_matches_normalized_supports_vision() {
-        // Mirrors the frontend `modelSupportsImageInput`: normalize (lowercase,
-        // strip non-letters) then match `supportsvision`, so a rename to
-        // snake_case still resolves. Never keys off marketing `traits`.
-        assert!(capabilities_include_vision(&["supportsVision".to_string()]));
-        assert!(capabilities_include_vision(&[
-            "supportsTools".to_string(),
-            "supports_vision".to_string(),
-        ]));
-        assert!(!capabilities_include_vision(&["supportsTools".to_string()]));
-        assert!(!capabilities_include_vision(&[]));
-    }
-
-    #[test]
-    fn generation_vision_uses_selected_catalog_model() {
-        let vision = vec!["supportsVision".to_string()];
-
-        assert!(generation_model_supports_vision_from_catalog(
-            "vision-model",
-            false,
-            [("vision-model", vision.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_uses_catalog_backed_kimi_when_auto_is_absent() {
-        let compatible = vec![
-            "supportsVision".to_string(),
-            "supportsFunctionCalling".to_string(),
-        ];
-
-        assert!(generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, compatible.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_non_local_auto_does_not_use_kimi_fallback() {
-        let compatible = vec![
-            "supportsVision".to_string(),
-            "supportsFunctionCalling".to_string(),
-        ];
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            false,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, compatible.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_rejects_kimi_without_tool_support() {
-        let vision_only = vec!["supportsVision".to_string()];
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, vision_only.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_accepts_an_alternate_compatible_model() {
-        let compatible = vec![
-            "parent.supportsVision".to_string(),
-            "features.toolCalling".to_string(),
-        ];
-
-        assert!(generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [("replacement-model", compatible.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_without_catalog_fallback_is_false() {
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            std::iter::empty(),
-        ));
-    }
-
-    #[test]
-    fn generation_vision_present_auto_wins_over_local_kimi_fallback() {
-        let compatible = vec![
-            "supportsVision".to_string(),
-            "supportsFunctionCalling".to_string(),
-        ];
-        let no_capabilities = Vec::new();
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [
-                (LOCAL_AUTO_VISION_FALLBACK_MODEL, compatible.as_slice()),
-                (AUTO_GENERATION_MODEL, no_capabilities.as_slice()),
-            ],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_requires_a_compatible_catalog_model() {
-        let no_capabilities = Vec::new();
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, no_capabilities.as_slice(),)],
-        ));
+            serde_json::from_value(serde_json::json!({"costQuality": 42})).unwrap();
+        let stored = serde_json::to_value(&settings).unwrap();
+        let dto = serde_json::to_value(ProviderModelSettingsDto::from(&settings)).unwrap();
+        assert!(stored.get("costQuality").is_none());
+        assert!(dto.get("costQuality").is_none());
     }
 
     #[test]
@@ -2592,7 +2295,6 @@ mod tests {
         );
 
         // Everything that is not a Venice selection survives untouched.
-        assert_eq!(migrated.cost_quality, 40);
         assert_eq!(
             migrated.llm_usage.chat,
             ProviderRef::Cli {
@@ -2605,8 +2307,11 @@ mod tests {
                 id: CliKind::Claude
             }
         );
-        assert_eq!(migrated.llm_usage.notes, ProviderRef::Clovy);
-        assert_eq!(migrated.llm_usage.dictation_cleanup, ProviderRef::Clovy);
+        assert_eq!(migrated.llm_usage.notes, ProviderRef::OpenRouter);
+        assert_eq!(
+            migrated.llm_usage.dictation_cleanup,
+            ProviderRef::OpenRouter
+        );
         assert_eq!(migrated.llm_endpoints.len(), 1);
         assert_eq!(migrated.llm_endpoints[0].id, "ep-lan");
         assert!(migrated.llm_endpoints[0].has_api_key);
@@ -2651,10 +2356,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_text_models_keep_auto_and_same_model_equivalents() {
+    fn legacy_text_models_retire_auto_and_keep_same_model_equivalents() {
         let store = crate::llm::secrets::MemorySecretStore::default();
         for (legacy, expected) in [
-            (AUTO_GENERATION_MODEL, AUTO_GENERATION_MODEL),
+            (LEGACY_AUTO_GENERATION_MODEL, DEFAULT_GENERATION_MODEL),
             ("kimi-k2-6", "moonshotai/kimi-k2.6"),
             ("venice-uncensored", DEFAULT_GENERATION_MODEL),
         ] {
@@ -2668,6 +2373,84 @@ mod tests {
             assert_eq!(migrated.generation_model, expected, "{legacy}");
             assert_eq!(migrated.remote_generation_model, expected, "{legacy}");
         }
+    }
+
+    #[test]
+    fn retired_provider_usage_and_auto_migrate_once_without_changing_cli_chat() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "generationProvider": "openrouter",
+            "generationModel": "open-software/auto",
+            "remoteGenerationModel": "open-software/auto",
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true,
+            "llmCliDefaultApplied": true,
+            "llmUsage": {
+                "chat": { "kind": "cli", "id": "claude" },
+                "notes": { "kind": "clovy" },
+                "dictationCleanup": { "kind": "clovy" },
+                "activity": { "kind": "none" }
+            }
+        })
+        .to_string();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("provider-settings.json");
+        fs::write(&path, raw).unwrap();
+        let (settings, migrated) =
+            settings_from_json(&fs::read_to_string(&path).unwrap(), &store).unwrap();
+        let state = ProviderSettingsState {
+            path: path.clone(),
+            settings: Mutex::new(settings.clone()),
+        };
+        save_settings(&state, &settings).unwrap();
+        let rewritten = fs::read_to_string(&path).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(written["llmUsage"]["notes"]["kind"], "openrouter");
+        assert!(written["llmUsage"].get("dictationCleanup").is_none());
+        assert_eq!(settings.generation_model, DEFAULT_GENERATION_MODEL);
+        assert_eq!(settings.remote_generation_model, DEFAULT_GENERATION_MODEL);
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(settings.llm_usage.activity, ProviderRef::None);
+        assert!(migrated);
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, settings);
+    }
+
+    #[test]
+    fn retired_dictation_cleanup_choice_is_fixed_openrouter_and_not_persisted() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true,
+            "llmUsage": {
+                "chat": { "kind": "cli", "id": "claude" },
+                "notes": { "kind": "cli", "id": "codex" },
+                "dictationCleanup": { "kind": "endpoint", "id": "old" }
+            }
+        })
+        .to_string();
+        let (settings, migrated) = settings_from_json(&raw, &store).unwrap();
+        assert_eq!(
+            settings
+                .llm_usage
+                .get(crate::llm::registry::LlmUsage::DictationCleanup)
+                .key(),
+            "openrouter"
+        );
+        assert_eq!(
+            settings.llm_usage.notes,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert!(serde_json::to_value(&settings).unwrap()["llmUsage"]
+            .get("dictationCleanup")
+            .is_none());
+        assert!(migrated);
     }
 
     #[test]
@@ -2687,12 +2470,62 @@ mod tests {
 
         let (loaded, migrated_now) = settings_from_json(&raw, &store).unwrap();
 
-        assert!(!migrated_now);
+        // The pre-cut file still needs its missing/native chat choice retired.
+        assert!(migrated_now);
+        let rewritten = serde_json::to_string(&loaded).unwrap();
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, loaded);
         assert_eq!(loaded.transcription_model, "whisper-large-v3");
         assert_eq!(loaded.generation_model, "moonshotai/kimi-k3");
         assert_eq!(loaded.remote_generation_model, "moonshotai/kimi-k3");
         assert!(loaded.provider_api_keys_configured.groq);
         assert!(!loaded.provider_api_keys_configured.openrouter);
+    }
+
+    #[tokio::test]
+    async fn text_model_selection_preserves_chat_and_note_engines() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let previous = current_settings();
+        let directory = tempfile::tempdir().unwrap();
+        let state = ProviderSettingsState {
+            path: directory.path().join("provider-settings.json"),
+            settings: Mutex::new(default_settings()),
+        };
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.llm_usage.chat = ProviderRef::Cli {
+                id: CliKind::Claude,
+            };
+            settings.llm_usage.notes = ProviderRef::Cli { id: CliKind::Codex };
+        }
+        set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Generation,
+                model_id: "example/text-only".to_string(),
+            },
+        )
+        .unwrap();
+        let settings = state.settings.lock().unwrap();
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(
+            settings.llm_usage.notes,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert_eq!(settings.remote_generation_model, "example/text-only");
+        let saved = fs::read_to_string(&state.path).unwrap();
+        let (reloaded, _) =
+            settings_from_json(&saved, &crate::llm::secrets::MemorySecretStore::default()).unwrap();
+        assert_eq!(reloaded.remote_generation_model, "example/text-only");
+        assert_eq!(reloaded.llm_usage.chat, settings.llm_usage.chat);
+        assert_eq!(reloaded.llm_usage.notes, settings.llm_usage.notes);
+        replace_current_settings(previous);
     }
 
     #[test]
@@ -2918,7 +2751,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_provider_key_missing_from_the_store_is_an_error_not_clovy_credits() {
+    fn recorded_provider_key_missing_from_the_store_is_an_error_without_fallback() {
         let store = crate::llm::secrets::MemorySecretStore::default();
         let mut settings = default_settings();
         // A key left in the store without a record is never sent.
@@ -3036,7 +2869,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_lan_endpoint_selected_for_chat_activates_the_local_route() {
+    fn llm_lan_endpoint_chat_migrates_without_changing_the_text_model() {
         let raw = r#"{
             "generationProvider": "openrouter",
             "generationModel": "remote-model",
@@ -3051,17 +2884,23 @@ mod tests {
         }"#;
         let store = crate::llm::secrets::MemorySecretStore::default();
         let sanitized = settings_from_json_for_tests(raw, &store).unwrap();
-        assert_eq!(sanitized.generation_provider, PROVIDER_LOCAL);
-        assert_eq!(sanitized.generation_model, "llama3.1:8b");
+        assert_eq!(sanitized.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(sanitized.generation_model, "remote-model");
+        assert_eq!(
+            sanitized.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
         assert_eq!(sanitized.remote_generation_model, "remote-model");
         assert_eq!(
             sanitized.llm_endpoints[0].base_url,
             "http://192.168.1.5:11434/v1"
         );
-        assert_eq!(sanitized.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(sanitized.llm_usage.notes, ProviderRef::OpenRouter);
         assert_eq!(sanitized.llm_usage.activity, ProviderRef::None);
         let dto = ProviderModelSettingsDto::from(&sanitized);
-        assert_eq!(dto.local_generation.model_id, "llama3.1:8b");
+        assert!(dto.local_generation.model_id.is_empty());
     }
 
     #[test]
@@ -3385,36 +3224,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn api_model_conversion_prefers_retail_price_description_display() {
-        let model = ProviderModelDto::from(crate::clovy_api::ModelDto {
-            provider: PROVIDER_GROQ.to_string(),
-            id: "asr-model".to_string(),
-            name: "ASR model".to_string(),
-            model_type: "asr".to_string(),
-            description: None,
-            privacy: None,
-            pricing: Some(serde_json::json!({ "display": "$0.001/sec audio" })),
-            context_tokens: None,
-            traits: Vec::new(),
-            capabilities: Vec::new(),
-            price_unit: "seconds".to_string(),
-            price_description: "$0.00006 per second audio".to_string(),
-            credits_per_million_seconds: Some(60_000),
-            input_credits_per_million_tokens: None,
-            output_credits_per_million_tokens: None,
-            service_available: Some(true),
-        });
-
-        assert_eq!(
-            model.pricing.and_then(|pricing| pricing
-                .get("display")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)),
-            Some("$0.00006 per second audio".to_string())
-        );
-    }
-
     #[tokio::test]
     async fn llm_listing_models_of_a_saved_endpoint_sends_its_keychain_key() {
         use crate::llm::endpoint::test_server;
@@ -3507,22 +3316,20 @@ mod tests {
             ProviderRef::Cli { id: CliKind::Codex }
         );
         assert!(saved.llm_cli_default_applied);
-        // New chat work and the generation picker start on it.
+        // Chat starts on the CLI; the text picker keeps its independent model.
         assert_eq!(
-            crate::chat_engine::default_engine_of(&settings)
-                .model_id
-                .as_deref(),
-            Some("__clovy_cli_engine__:codex")
+            crate::chat_engine::default_engine_of(&settings).model_id,
+            "__clovy_cli_engine__:codex"
         );
         assert_eq!(
             selected_model_for_mode(&state, ModelMode::Generation).unwrap(),
-            "__clovy_cli_engine__:codex"
+            settings.generation_model
         );
         let _ = fs::remove_dir_all(state.path.parent().unwrap());
     }
 
     #[tokio::test]
-    async fn launch_without_claude_or_codex_keeps_the_legacy_agent_and_warns() {
+    async fn launch_without_claude_or_codex_selects_claude_without_remote_fallback() {
         let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let _restore = RestoreGlobals;
         let _bin = login_path_with(&["pi"]);
@@ -3531,14 +3338,17 @@ mod tests {
         ensure_cli_default(&state).await;
 
         let settings = settings_snapshot(&state).unwrap();
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
-        assert!(!settings.llm_cli_default_applied);
-        // Nothing changed, so nothing was written.
-        assert!(!state.path.exists());
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert!(settings.llm_cli_default_applied);
+        assert!(state.path.exists());
         let engine = crate::chat_engine::default_engine_of(&settings);
-        assert_eq!(engine.model_id, None);
-        assert!(engine.legacy_fallback);
-        assert!(crate::llm::registry::LlmProvidersDto::from(&settings).cli_default_pending);
+        assert_eq!(engine.model_id, "__clovy_cli_engine__:claude");
+        assert!(!crate::llm::registry::LlmProvidersDto::from(&settings).cli_default_pending);
     }
 }
 

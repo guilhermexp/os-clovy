@@ -2,7 +2,7 @@
 //! migrations, a recorder for emitted events, and a manual clock.
 
 use super::*;
-use crate::agent_runtime::AgentRepository;
+use crate::agent_sessions::AgentRepository;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::watch;
@@ -509,7 +509,7 @@ async fn reopening_cancels_stale_cli_requests() {
             &native_session.id,
             Some(&native_run.id),
             1,
-            &crate::agent_runtime::AgentItemPayload::Interruption(json!({
+            &crate::agent_sessions::AgentItemPayload::Interruption(json!({
                 "id": "native-1", "kind": "approval", "status": "pending",
                 "sessionId": native_session.id, "runId": native_run.id,
             })),
@@ -650,7 +650,7 @@ async fn native_items_are_left_to_the_native_path() {
             &harness.session_id,
             Some(&harness.run_id),
             1,
-            &crate::agent_runtime::AgentItemPayload::Interruption(json!({
+            &crate::agent_sessions::AgentItemPayload::Interruption(json!({
                 "id": "native-1", "kind": "approval", "status": "pending",
             })),
             Some("interruption:native"),

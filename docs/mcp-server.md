@@ -209,7 +209,10 @@ exclusions and the retention period like the agent tools
 
 ### Tools for every client
 
-Every connection, bound or not, gets these read-only tools (`readOnlyHint`).
+Unbound clients and attended chat turns get these read-only tools
+(`readOnlyHint`). Routine turns also require a saved routine with an enabled
+context toolset (`context_engine`, `memory`, or `session_search`). Missing or
+revoked routine authorization hides these reads and denies their calls.
 
 | Tool | Arguments | Result and limits |
 | --- | --- | --- |
@@ -229,6 +232,10 @@ Every connection, bound or not, gets these read-only tools (`readOnlyHint`).
 | `get_day_schedule` | none | `summaryTime` (local `HH:MM` the day summary is written), `notifications` (`enabled`, `quietHours`: `enabled`, `start`, `end`) from Settings, Activity |
 
 ### Tools for turn-bound connections
+
+The table describes the available catalog. Routine `get_dictation` reads need
+an enabled context toolset; `list_skills` and `load_skill` need `skills`.
+Missing or revoked routine authorization hides those tools and denies calls.
 
 Listed and callable only on a connection bound to a turn. "Listed to" says
 which turns see the tool: `every turn`, `attended turns` (chat; never
@@ -269,8 +276,8 @@ unattended turn every `yes` and `clarification` answers
 | `close_tab` | browser | attended turns | tray | `session_id`, `tab_id` |
 | `accept_shared_tab` | browser | attended turns | tray | `session_id`, `share_code` |
 | `computer_use` | computer use | attended turns | yes | `action` (`capture`, `list_apps`, `wait`, `open_app`, `focus_app`, `click`, `double_click`, `right_click`, `drag`, `scroll`, `type`, `key`, `set_value`) and its arguments: every call asks first (also on a linked phone, once); the turn binding opens the run's lease; the capture comes back as an `image` block |
-| `generate_image` | media | every turn | no | `prompt`: bills Clovy API (or the user's fal key); the file goes to `artifacts/` of the bound session's workspace and `agent_artifacts`, and comes back as an `image` block while under 3 MiB |
-| `edit_image` | media | every turn | no | `sourcePath` (relative to the session workspace or absolute), `instruction`: same storage |
+| `generate_image` | media | every turn | no | `prompt`: calls fal directly with the user's key; the file goes to `artifacts/` of the bound session's workspace and `agent_artifacts`, and comes back as an `image` block while under 3 MiB |
+| `edit_image` | media | every turn | no | `sourcePath` (relative to the session workspace or absolute), `instruction`: sandboxed turns require the canonical source to remain inside the workspace; same storage |
 | `generate_video` | media | every turn | no | `prompt`, `duration`, `aspectRatio`, `audio`, `jobId` (resumes a job): polls within the CLI's tool timeout; same storage |
 | `start_recording` | recorder | every turn | yes | `sourceMode` (`microphoneOnly`, `microphonePlusSystem`): the frontend starts the visible recording (ADR-0013) after approval |
 | `stop_recording` | recorder | every turn | yes | none: stops the visible recording |

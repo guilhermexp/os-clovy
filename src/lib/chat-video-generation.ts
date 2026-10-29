@@ -2,7 +2,7 @@ import { t } from "../i18n/translate";
 /**
  * Orchestration for generating a video from chat.
  *
- * Video generation is async: the Clovy API returns a job id first, then the
+ * Video generation is async: the native fal adapter returns a job id first, then the
  * caller polls until the desktop bridge has written the mp4 locally. This file
  * stays UI-free and never throws so the chat surface can render running,
  * complete, and error states deterministically.

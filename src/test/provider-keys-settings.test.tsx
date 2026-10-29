@@ -23,7 +23,6 @@ const baseSettings: ProviderModelSettingsDto = {
   generationProvider: "openrouter",
   transcriptionModel: "whisper-large-v3-turbo",
   generationModel: "z-ai/glm-5.2",
-  costQuality: 100,
   remoteGenerationModel: "z-ai/glm-5.2",
   imageModel: "fal-ai/flux/dev",
   videoModel: "fal-ai/wan/v2.2-a14b/text-to-video",

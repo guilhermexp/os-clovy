@@ -1,5 +1,4 @@
 import { type MessageKey, t } from "../i18n/translate";
-import { mediaModelCatalog } from "./media-models";
 import type { ProviderModelDto } from "./tauri";
 
 // Clovy's default video model. Mirrors DEFAULT_VIDEO_MODEL in the Rust providers
@@ -27,20 +26,11 @@ function videoModel({ descriptionKey, ...model }: VideoModelDefinition): Provide
   return entry;
 }
 
-// Curated fal text-to-video endpoints for the settings picker. Video models are
-// described locally; funding availability comes from Clovy API at render time. Two hard
-// constraints govern any entry; a model that breaks them fails at generation
-// time, not here:
-//   1. It must be priced in clovy-api's `video_pricing` map (ADR 0015): that map
-//      doubles as the allowlist, and an unlisted model is rejected
-//      `model_not_priced`. Keep these ids in sync with that map AND with
-//      `KNOWN_VIDEO_MODELS` in src-tauri/src/providers/mod.rs.
-//   2. It must accept the fixed fast-path shape Clovy injects (5s / 720p / 16:9;
-//      see the DEFAULT_VIDEO_* constants in src-tauri/src/providers/mod.rs).
-//      clovy-api's fal adapter validates each model's ranges before charging.
-// Image-to-video (animation) uses the matching fal endpoints chosen by Clovy
-// API, not this list. The entries carry no privacy label: fal is a third-party
-// processor and Clovy makes no retention claim for it.
+// Curated fal text-to-video endpoints. Keep IDs in sync with KNOWN_VIDEO_MODELS
+// in the native providers module. The direct fal adapter validates supported
+// duration, resolution and aspect ratio before submitting a job. Choosing a
+// model needs no key; generation requires the user's fal key.
+// No retention claim is made for the provider.
 export const VIDEO_MODELS: ProviderModelDto[] = [
   videoModel({
     id: DEFAULT_VIDEO_MODEL,
@@ -54,6 +44,6 @@ export const VIDEO_MODELS: ProviderModelDto[] = [
   }),
 ];
 
-export function videoModelCatalog(remote: ProviderModelDto[] = []): ProviderModelDto[] {
-  return mediaModelCatalog(VIDEO_MODELS, remote);
+export function videoModelCatalog(): ProviderModelDto[] {
+  return VIDEO_MODELS;
 }

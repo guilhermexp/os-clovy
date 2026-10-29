@@ -1,6 +1,7 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { dispatchProviderModelSettingsChanged } from "../lib/model-privacy";
 import { StyleSettingsSection } from "../components/settings/StyleSettingsSection";
 
 const mocks = vi.hoisted(() => ({
@@ -69,6 +70,18 @@ describe("dictation cleanup settings", () => {
         model("cli:claude", "Claude Code", "cli"),
       ],
     });
+  });
+
+  it("refreshes an open cleanup selector after the OpenRouter key changes", async () => {
+    mocks.dictationSettings.mockResolvedValue({ settings: settings(true) });
+    render(<StyleSettingsSection />);
+    await waitFor(() => expect(mocks.listProviderModels).toHaveBeenCalledTimes(1));
+    mocks.listProviderModels.mockResolvedValue({
+      models: [model("vendor/new", "New catalog model")],
+    });
+    act(() => dispatchProviderModelSettingsChanged({ mode: "generation", modelId: "vendor/new" }));
+    expect(await screen.findByRole("option", { name: "New catalog model" })).toBeInTheDocument();
+    expect(mocks.listProviderModels).toHaveBeenCalledTimes(2);
   });
 
   it("starts off and hides the model and style until cleanup is turned on", async () => {

@@ -185,15 +185,13 @@ describe("AgentWorkspace runtime wiring", () => {
               capabilities: ["tool-calling"],
               privacy: "private",
               contextTokens: 200_000,
-              inputCreditsPerMillionTokens: 2_000,
-              outputCreditsPerMillionTokens: 4_000,
             },
           ],
         });
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
-          settings: { costQuality: 100 },
+          settings: {},
           effectiveSettings: {
             providerApiKeysConfigured: {
               groq: false,
@@ -204,10 +202,7 @@ describe("AgentWorkspace runtime wiring", () => {
           },
         });
       }
-      if (command === "set_cost_quality") {
-        const value = (args as { request?: { value?: number } } | undefined)?.request?.value ?? 100;
-        return Promise.resolve({ costQuality: value });
-      }
+
       if (command === "create_agent_session") return Promise.resolve(newSession);
       if (command === "start_agent_run") {
         return Promise.resolve({
@@ -432,7 +427,7 @@ describe("AgentWorkspace runtime wiring", () => {
         id: "run-same-message",
         sessionId: session.id,
         status: "running",
-        model: "fast",
+        model: "__clovy_cli_engine__:claude",
       });
     });
     await waitFor(() => expect(readAgentSessionDraft(session.id)).toBe("Same message"));
@@ -787,8 +782,7 @@ describe("AgentWorkspace runtime wiring", () => {
         messageId: "queued-other-session",
         prompt: "Use queued file",
         attachments: [queuedPath],
-        model: "fast",
-        thinkingLevel: "medium",
+        model: "__clovy_cli_engine__:claude",
       },
     });
     mocks.openDialog.mockResolvedValue([currentPath]);
@@ -1064,13 +1058,97 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(screen.queryByText("Session not found")).not.toBeInTheDocument();
   });
 
+  it.each([
+    { name: "native history", model: "fast", defaultCli: "codex", expectedCli: "claude" },
+    {
+      name: "endpoint history",
+      model: "__clovy_endpoint_engine__:local",
+      defaultCli: "codex",
+      expectedCli: "claude",
+    },
+    {
+      name: "saved CLI choice",
+      model: "__clovy_cli_engine__:codex",
+      defaultCli: "claude",
+      expectedCli: "codex",
+    },
+    {
+      name: "Home default",
+      model: "fast",
+      defaultCli: "codex",
+      expectedCli: "codex",
+      homeMode: true,
+    },
+    {
+      name: "Codex fallback",
+      model: "fast",
+      defaultCli: "codex",
+      expectedCli: "codex",
+      claudeInstalled: false,
+    },
+  ])("submits the engine displayed for $name", async ({
+    model,
+    defaultCli,
+    expectedCli,
+    homeMode,
+    claudeInstalled = true,
+  }) => {
+    const user = userEvent.setup();
+    const storedSession = { ...session, model };
+    const defaultInvoke = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "get_agent_session") return Promise.resolve(storedSession);
+      if (command === "chat_default_engine")
+        return Promise.resolve({ modelId: `__clovy_cli_engine__:${defaultCli}`, cli: defaultCli });
+      if (command === "chat_engine_catalog")
+        return Promise.resolve({
+          clis: [
+            {
+              id: "claude",
+              name: "Claude Code",
+              installed: claudeInstalled,
+              reason: null,
+              modelId: "__clovy_cli_engine__:claude",
+            },
+            {
+              id: "codex",
+              name: "Codex",
+              installed: true,
+              reason: null,
+              modelId: "__clovy_cli_engine__:codex",
+            },
+          ],
+        });
+      return defaultInvoke?.(command, args);
+    });
+    render(<AgentWorkspace initialSession={storedSession} homeMode={homeMode} />);
+    await screen.findByText("Earlier answer");
+    const label = expectedCli === "claude" ? "Claude Code" : "Codex";
+    if (homeMode)
+      expect(screen.queryByRole("button", { name: /^Chat engine:/ })).not.toBeInTheDocument();
+    else
+      expect(
+        await screen.findByRole("button", { name: `Chat engine: ${label}` }),
+      ).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message Clovy" }),
+      "Continue this conversation",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: `__clovy_cli_engine__:${expectedCli}` }),
+      }),
+    );
+  });
+
   it("hydrates history, shows an optimistic turn, and cancels", async () => {
     const user = userEvent.setup();
     const { container } = render(<AgentWorkspace initialSession={session} />);
 
     expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sandboxed" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeEnabled();
     expect(container.querySelector(".agent-scroll .agent-main > .agent-composer")).not.toBeNull();
     const composer = screen.getByRole("textbox", { name: "Message Clovy" });
     await user.click(composer);
@@ -1081,21 +1159,16 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
         request: expect.objectContaining({
-          model: "fast",
+          model: "__clovy_cli_engine__:claude",
           safetyMode: "sandboxed",
           enabledSkillIds: ["notes"],
         }),
       }),
     );
-    const activeRunPicker = screen.getByRole("button", { name: "Model: Fast" });
-    expect(activeRunPicker).toBeEnabled();
-    await user.click(activeRunPicker);
-    await user.click(
-      within(screen.getByRole("listbox", { name: "Suggested text models" })).getByRole("option", {
-        name: /Auto/,
-      }),
+    expect(screen.queryByRole("button", { name: /^Model:/ })).not.toBeInTheDocument();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "list_provider_models")).toBe(
+      false,
     );
-    expect(screen.getByRole("button", { name: "Model: Auto" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Stop Clovy" }));
     await waitFor(() =>
@@ -1116,7 +1189,7 @@ describe("AgentWorkspace runtime wiring", () => {
       });
     });
 
-    const nextRunPicker = await screen.findByRole("button", { name: "Model: Auto" });
+    const nextRunPicker = await screen.findByRole("button", { name: "Chat engine: Claude Code" });
     expect(nextRunPicker).toBeEnabled();
     const nextComposer = screen.getByRole("textbox", { name: "Message Clovy" });
     await user.type(nextComposer, "Use the staged model");
@@ -1125,352 +1198,13 @@ describe("AgentWorkspace runtime wiring", () => {
       expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
         request: expect.objectContaining({
           prompt: "Use the staged model",
-          model: "__june_auto_generation__:100",
+          model: "__clovy_cli_engine__:claude",
         }),
       }),
     );
   });
 
-  it("restores Auto-only suggestions, root model search, and compact effort choices", async () => {
-    const user = userEvent.setup();
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_provider_models") {
-        return Promise.resolve({
-          mode: "generation",
-          selectedModel: "fast",
-          modelType: "text",
-          models: [
-            {
-              provider: "june",
-              id: "fast",
-              name: "Fast",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-            },
-            {
-              provider: "openrouter",
-              id: "moonshotai/kimi-k3",
-              name: "Kimi K3",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-            },
-            {
-              provider: "openrouter",
-              id: "z-ai/glm-5.2",
-              name: "GLM 5.2",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-            },
-          ],
-        });
-      }
-      return defaultInvoke?.(command, args);
-    });
-
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-    await user.click(await screen.findByRole("button", { name: "Model: Fast" }));
-
-    const suggested = screen.getByRole("listbox", { name: "Suggested text models" });
-    const autoOption = within(suggested).getByRole("option", { name: /Auto/ });
-    expect(autoOption).toBeVisible();
-    // Auto routes through OpenRouter models, so it makes no retention claim.
-    expect(autoOption.querySelector(".model-row-privacy")).toBeNull();
-    expect(within(suggested).queryByText("GLM 5.2")).not.toBeInTheDocument();
-    expect(within(suggested).queryByText("Kimi K3")).not.toBeInTheDocument();
-
-    const search = screen.getByRole("combobox", { name: "Search models" });
-    await user.type(search, "Kimi");
-    expect(
-      within(screen.getByRole("listbox", { name: "Matching models" })).getByRole("option", {
-        name: /Kimi K3/,
-      }),
-    ).toBeVisible();
-
-    await user.clear(search);
-    await user.type(search, "no-such-model");
-    const pickerDialog = screen.getByRole("dialog", { name: "Choose text model" });
-    expect(within(pickerDialog).getByRole("status")).toHaveTextContent(
-      "No results match your search.",
-    );
-    await user.clear(search);
-    await user.type(search, "Kimi");
-
-    await user.keyboard("{Escape}");
-    expect(search).toHaveValue("");
-    expect(search).toHaveFocus();
-    await user.click(screen.getByRole("button", { name: "All models" }));
-    expect(screen.getByRole("group", { name: "All text models" })).toBeVisible();
-    const allModelsList = screen.getByRole("listbox", { name: "All text models" });
-    const allModelOptions = within(allModelsList).getAllByRole("option");
-    allModelOptions[0]?.focus();
-    fireEvent.keyDown(allModelsList, { key: "End" });
-    expect(allModelOptions.at(-1)).toHaveFocus();
-    fireEvent.keyDown(allModelsList, { key: "Home" });
-    expect(allModelOptions[0]).toHaveFocus();
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("group", { name: "All text models" })).not.toBeInTheDocument();
-    expect(search).toHaveFocus();
-
-    const effortTrigger = screen.getByRole("button", { name: /Effort.*Medium/ });
-    fireEvent.mouseEnter(effortTrigger);
-    expect(await screen.findByRole("group", { name: "Thinking level" })).toBeVisible();
-    expect(search).toHaveFocus();
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("group", { name: "Thinking level" })).not.toBeInTheDocument();
-    expect(search).toHaveFocus();
-
-    await user.click(effortTrigger);
-    const effort = screen.getByRole("group", { name: "Thinking level" });
-    expect(effort).toHaveClass("agent-composer-model-effort-panel");
-    const lowEffort = within(effort).getByRole("menuitemradio", {
-      name: /Low.*Faster responses/,
-    });
-    const mediumEffort = within(effort).getByRole("menuitemradio", {
-      name: /Medium.*Balances speed/,
-    });
-    const highEffort = within(effort).getByRole("menuitemradio", {
-      name: /High.*Deeper reasoning/,
-    });
-    expect(lowEffort).toBeVisible();
-    expect(highEffort).toBeVisible();
-    await waitFor(() => expect(mediumEffort).toHaveFocus());
-    await user.keyboard("{ArrowDown}");
-    expect(highEffort).toHaveFocus();
-    await user.keyboard("{Enter}");
-    expect(screen.queryByRole("group", { name: "Thinking level" })).not.toBeInTheDocument();
-    const trigger = screen.getByRole("button", { name: "Model: Fast" });
-    await waitFor(() => expect(trigger).toHaveFocus());
-
-    await user.click(trigger);
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("combobox", { name: "Search models" })).not.toBeInTheDocument();
-    await waitFor(() => expect(trigger).toHaveFocus());
-  });
-
-  it("restores Auto Economy, Balanced, and Quality with session-persistent routing", async () => {
-    const user = userEvent.setup();
-    const autoSession = {
-      ...session,
-      model: "__june_auto_generation__:50",
-    };
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([autoSession]);
-      if (command === "get_agent_session") return Promise.resolve(autoSession);
-      if (command === "provider_model_settings") {
-        return Promise.resolve({
-          settings: { costQuality: 100 },
-          effectiveSettings: {
-            providerApiKeysConfigured: {
-              groq: false,
-              openrouter: false,
-              fal: false,
-              tavily: false,
-            },
-          },
-        });
-      }
-      return defaultInvoke?.(command, args);
-    });
-
-    render(<AgentWorkspace initialSession={autoSession} />);
-    await screen.findByText("Earlier answer");
-    const trigger = await screen.findByRole("button", { name: "Model: Auto" });
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Balanced"));
-
-    await user.click(trigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Balanced/ }));
-    const preferences = screen.getByRole("group", { name: "Auto preference" });
-    expect(
-      within(preferences).getByRole("menuitemradio", {
-        name: /Economy.*Favors cheaper models/,
-      }),
-    ).toBeVisible();
-    expect(
-      within(preferences).getByRole("menuitemradio", {
-        name: /Balanced.*Weighs quality against cost/,
-      }),
-    ).toBeVisible();
-    expect(
-      within(preferences).getByRole("menuitemradio", {
-        name: /Quality.*Routes to the strongest model/,
-      }),
-    ).toBeVisible();
-
-    await user.click(within(preferences).getByRole("menuitemradio", { name: /Economy/ }));
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Economy"));
-    expect(mocks.invoke).not.toHaveBeenCalledWith("set_cost_quality", expect.anything());
-
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("group", { name: "Auto preference" })).not.toBeInTheDocument(),
-    );
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Choose text model" })).not.toBeInTheDocument(),
-    );
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use Economy";
-    fireEvent.input(composer);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          sessionId: autoSession.id,
-          prompt: "Use Economy",
-          model: "__june_auto_generation__:20",
-        }),
-      }),
-    );
-  });
-
-  it("persists a fresh Auto preference and applies it to the first run", async () => {
-    const user = userEvent.setup();
-    render(<AgentWorkspace />);
-
-    const trigger = await screen.findByRole("button", { name: "Model: Auto" });
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Quality"));
-    await user.click(trigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Quality/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Auto preference" })).getByRole("menuitemradio", {
-        name: /Economy/,
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("set_cost_quality", {
-        request: { value: 20 },
-      }),
-    );
-
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("group", { name: "Auto preference" })).not.toBeInTheDocument(),
-    );
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Choose text model" })).not.toBeInTheDocument(),
-    );
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Fresh Economy request";
-    fireEvent.input(composer);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
-        request: expect.objectContaining({
-          title: "Fresh Economy request",
-          model: "__june_auto_generation__:20",
-        }),
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          prompt: "Fresh Economy request",
-          model: "__june_auto_generation__:20",
-        }),
-      }),
-    );
-  });
-
-  it("keeps a freshly selected Auto preference when settings hydration finishes late", async () => {
-    const user = userEvent.setup();
-    let resolveSettings: ((value: unknown) => void) | undefined;
-    const pendingSettings = new Promise((resolve) => {
-      resolveSettings = resolve;
-    });
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "provider_model_settings") return pendingSettings;
-      return defaultInvoke?.(command, args);
-    });
-
-    render(<AgentWorkspace />);
-    const trigger = await screen.findByRole("button", { name: "Model: Auto" });
-    await user.click(trigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Quality/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Auto preference" })).getByRole("menuitemradio", {
-        name: /Economy/,
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("set_cost_quality", {
-        request: { value: 20 },
-      }),
-    );
-
-    await act(async () => {
-      resolveSettings?.({
-        settings: { costQuality: 100 },
-        effectiveSettings: {
-          providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
-        },
-      });
-      await pendingSettings;
-    });
-
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Economy"));
-  });
-
-  it("does not overwrite a session preference when a global save finishes after navigation", async () => {
-    const user = userEvent.setup();
-    const balancedSession = { ...session, model: "__june_auto_generation__:50" };
-    let resolveSave: ((value: { costQuality: number }) => void) | undefined;
-    const pendingSave = new Promise<{ costQuality: number }>((resolve) => {
-      resolveSave = resolve;
-    });
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([balancedSession]);
-      if (command === "get_agent_session") return Promise.resolve(balancedSession);
-      if (command === "set_cost_quality") return pendingSave;
-      return defaultInvoke?.(command, args);
-    });
-
-    const { rerender } = render(<AgentWorkspace />);
-    const freshTrigger = await screen.findByRole("button", { name: "Model: Auto" });
-    await user.click(freshTrigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Quality/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Auto preference" })).getByRole("menuitemradio", {
-        name: /Economy/,
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("set_cost_quality", {
-        request: { value: 20 },
-      }),
-    );
-
-    rerender(<AgentWorkspace initialSession={balancedSession} />);
-    const sessionTrigger = await screen.findByRole("button", { name: "Model: Auto" });
-    await waitFor(() =>
-      expect(sessionTrigger).toHaveAttribute(
-        "title",
-        expect.stringContaining("Preference: Balanced"),
-      ),
-    );
-
-    await act(async () => {
-      resolveSave?.({ costQuality: 20 });
-      await pendingSave;
-    });
-
-    expect(sessionTrigger).toHaveAttribute(
-      "title",
-      expect.stringContaining("Preference: Balanced"),
-    );
-  });
-
-  it("shows context, estimated charge, and per-tool usage for the latest run", async () => {
+  it("shows reported tokens and per-tool usage without a model-based credit estimate", async () => {
     const user = userEvent.setup();
     render(
       <div className="app-shell">
@@ -1530,8 +1264,8 @@ describe("AgentWorkspace runtime wiring", () => {
     const usageOverlay = usagePanel.closest(".agent-usage-overlay");
     expect(usageOverlay).not.toBeNull();
     expect(usageOverlay?.parentElement).toBe(document.querySelector(".app-shell"));
-    expect(usagePanel).toHaveTextContent("10,000 of 200,000 (5.0%)");
-    expect(usagePanel).toHaveTextContent("28 credits (about $0.0280)");
+    expect(usagePanel).toHaveTextContent("10,000");
+    expect(usagePanel).not.toHaveTextContent("28 credits (about $0.0280)");
     expect(usagePanel).toHaveTextContent("read_file");
     expect(usagePanel).toHaveTextContent("1 call");
     expect(usagePanel).toHaveTextContent("phala");
@@ -1627,488 +1361,7 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(usagePanel).toHaveTextContent("qa-fixture");
     expect(usagePanel).toHaveTextContent("isolated");
     expect(usagePanel).toHaveTextContent("localhost");
-    expect(usagePanel).toHaveTextContent("Auto");
-    expect(usagePanel).not.toHaveTextContent("__june_auto_generation__");
     expect(usagePanel).toHaveTextContent("Token counts were not reported for this request.");
-  });
-
-  it("steers an active run at the next model boundary and retires the fallback queue", async () => {
-    const user = userEvent.setup();
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Stop Clovy" })).toBeVisible());
-
-    const scroller = document.querySelector<HTMLElement>(".agent-scroll");
-    expect(scroller).not.toBeNull();
-    const scrollTo = vi.fn();
-    Object.defineProperties(scroller as HTMLElement, {
-      scrollHeight: { configurable: true, get: () => 1000 },
-      clientHeight: { configurable: true, get: () => 400 },
-      scrollTop: { configurable: true, writable: true, value: 100 },
-      scrollTo: { configurable: true, value: scrollTo },
-    });
-
-    const activeComposer = screen.getByRole("textbox", { name: "Message Clovy" });
-    activeComposer.textContent = "Use the launch plan";
-    fireEvent.input(activeComposer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "smooth" }));
-
-    const steerCall = mocks.invoke.mock.calls.find(([command]) => command === "steer_agent_run");
-    expect(steerCall?.[1]).toMatchObject({
-      runId: "run-1",
-      text: "Use the launch plan",
-      messageId: expect.any(String),
-    });
-    expect(await screen.findByText("Steering active run")).toBeVisible();
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-steering",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "steering.consumed",
-          data: {
-            itemId: "steering-1",
-            messageId: String((steerCall?.[1] as { messageId?: string })?.messageId),
-            text: "Use the launch plan",
-            createdAt: "2026-07-22T12:01:00Z",
-          },
-        },
-      });
-    });
-
-    expect(await screen.findByText("Steering: Use the launch plan")).toBeVisible();
-    expect(screen.queryByText("Steering active run")).not.toBeInTheDocument();
-  });
-
-  it("steers text with attachments and submits the attachments once after consumption", async () => {
-    const user = userEvent.setup();
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop Clovy" });
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use the attached brief";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    const steerCall = mocks.invoke.mock.calls.find(([command]) => command === "steer_agent_run");
-    expect(steerCall?.[1]).toMatchObject({
-      runId: "run-1",
-      text: "Use the attached brief",
-      messageId: expect.any(String),
-    });
-    expect(
-      await screen.findByText("Steering active run. 1 attachment queued for next turn"),
-    ).toBeVisible();
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-steering-with-attachment",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "steering.consumed",
-          data: {
-            itemId: "steering-with-attachment",
-            messageId: String((steerCall?.[1] as { messageId?: string })?.messageId),
-            text: "Use the attached brief",
-            createdAt: "2026-07-22T12:01:00Z",
-          },
-        },
-      });
-    });
-
-    expect(await screen.findByText("Steering: Use the attached brief")).toBeVisible();
-    expect(screen.getByText("1 attachment queued for next turn")).toBeVisible();
-    expect(screen.getByText("brief.pdf")).toBeVisible();
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-completed-after-attachment-steer",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 4,
-          method: "run.completed",
-          data: { completedAt: "2026-07-22T12:02:00Z" },
-        },
-      });
-    });
-
-    await waitFor(() => {
-      const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-      expect(starts).toHaveLength(2);
-      expect(starts[1]?.[1]).toMatchObject({
-        request: expect.objectContaining({
-          prompt: `Use the attached brief\n\n${ATTACHMENT_FOLLOW_UP_NOTE}`,
-          attachments: ["/tmp/brief.pdf"],
-        }),
-      });
-    });
-    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run"),
-    ).toHaveLength(2);
-  });
-
-  it("merges a later steer into an attachments-only queue without dropping files", async () => {
-    const user = userEvent.setup();
-    mocks.openDialog
-      .mockResolvedValueOnce(["/tmp/brief.pdf"])
-      .mockResolvedValueOnce(["/tmp/notes.md"]);
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop Clovy" });
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use the first brief";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    let steerCalls = mocks.invoke.mock.calls.filter(([command]) => command === "steer_agent_run");
-    const firstMessageId = String(
-      (steerCalls[0]?.[1] as { messageId?: string } | undefined)?.messageId,
-    );
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-consumed-first-brief",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "steering.consumed",
-          data: {
-            itemId: `steering:${firstMessageId}`,
-            messageId: firstMessageId,
-            text: "Use the first brief",
-            createdAt: "2026-07-22T12:01:00Z",
-          },
-        },
-      });
-    });
-    expect(await screen.findByText("1 attachment queued for next turn")).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use the latest plan";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    steerCalls = mocks.invoke.mock.calls.filter(([command]) => command === "steer_agent_run");
-    expect(steerCalls).toHaveLength(2);
-    const secondMessageId = String(
-      (steerCalls[1]?.[1] as { messageId?: string } | undefined)?.messageId,
-    );
-    await waitFor(() => {
-      const stored = JSON.parse(
-        window.localStorage.getItem("clovy.agent.queuedFollowUps") ?? "{}",
-      ) as Record<string, { messageId?: string; prompt?: string; attachments?: string[] }>;
-      expect(stored[session.id]).toMatchObject({
-        messageId: secondMessageId,
-        prompt: "Use the latest plan",
-        attachments: ["/tmp/brief.pdf", "/tmp/notes.md"],
-      });
-    });
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-consumed-latest-plan",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 4,
-          method: "steering.consumed",
-          data: {
-            itemId: `steering:${secondMessageId}`,
-            messageId: secondMessageId,
-            text: "Use the latest plan",
-            createdAt: "2026-07-22T12:01:30Z",
-          },
-        },
-      });
-    });
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-completed-after-merged-steer",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 5,
-          method: "run.completed",
-          data: { completedAt: "2026-07-22T12:02:00Z" },
-        },
-      });
-    });
-
-    await waitFor(() => {
-      const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-      expect(starts).toHaveLength(2);
-      expect(starts[1]?.[1]).toMatchObject({
-        request: expect.objectContaining({
-          prompt: `Use the latest plan\n\n${ATTACHMENT_FOLLOW_UP_NOTE}`,
-          attachments: ["/tmp/brief.pdf", "/tmp/notes.md"],
-        }),
-      });
-    });
-  });
-
-  it("falls back to the full queued follow-up when steering is rejected", async () => {
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "steer_agent_run") {
-        return Promise.resolve({ accepted: false, reason: "not_active" });
-      }
-      return defaultInvoke?.(command, args);
-    });
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-
-    try {
-      const user = userEvent.setup();
-      render(<AgentWorkspace initialSession={session} />);
-      await screen.findByText("Earlier answer");
-
-      let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-      await user.type(composer, "Start the analysis");
-      await user.click(screen.getByRole("button", { name: "Send message" }));
-      await screen.findByRole("button", { name: "Stop Clovy" });
-
-      await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-      await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-      composer = screen.getByRole("textbox", { name: "Message Clovy" });
-      composer.textContent = "Use the attached brief";
-      fireEvent.input(composer);
-      await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-      expect(
-        await screen.findByText("Queued follow-up. 1 attachment queued for next turn"),
-      ).toBeVisible();
-      expect(warn).toHaveBeenCalledWith(
-        "Live steering was rejected; queued the full follow-up instead.",
-        expect.objectContaining({ reason: "not_active", messageId: expect.any(String) }),
-      );
-
-      act(() => {
-        mocks.runtimeListener?.({
-          payload: {
-            protocolVersion: 1,
-            eventId: "event-completed-after-rejected-steer",
-            sessionId: session.id,
-            runId: "run-1",
-            sequence: 3,
-            method: "run.completed",
-            data: { completedAt: "2026-07-22T12:02:00Z" },
-          },
-        });
-      });
-
-      await waitFor(() => {
-        const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-        expect(starts).toHaveLength(2);
-        expect(starts[1]?.[1]).toMatchObject({
-          request: expect.objectContaining({
-            prompt: "Use the attached brief",
-            attachments: ["/tmp/brief.pdf"],
-          }),
-        });
-      });
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("submits an unconsumed live instruction as the next run after settlement", async () => {
-    const user = userEvent.setup();
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Stop Clovy" })).toBeVisible());
-
-    await user.click(screen.getByRole("button", { name: "Model: Fast" }));
-    await user.click(
-      within(screen.getByRole("listbox", { name: "Suggested text models" })).getByRole("option", {
-        name: /Auto/,
-      }),
-    );
-
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Send this next";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    await user.click(screen.getByRole("button", { name: "Model: Auto" }));
-    await user.click(screen.getByRole("button", { name: "All models" }));
-    await user.click(
-      within(screen.getByRole("group", { name: "All text models" })).getByRole("option", {
-        name: /Fast/,
-      }),
-    );
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-completed",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "run.completed",
-          data: { completedAt: "2026-07-22T12:01:00Z" },
-        },
-      });
-    });
-
-    await waitFor(() => {
-      const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-      expect(starts).toHaveLength(2);
-      expect(starts[1]?.[1]).toMatchObject({
-        request: expect.objectContaining({
-          prompt: "Send this next",
-          model: "__june_auto_generation__:100",
-        }),
-      });
-    });
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
-  });
-
-  it("downgrades terminal steering and clears the queued snapshot when delivery races a new run", async () => {
-    const user = userEvent.setup();
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop Clovy" });
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Deliver this after settlement";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-    expect(
-      await screen.findByText("Steering active run. 1 attachment queued for next turn"),
-    ).toBeVisible();
-
-    const frameCallbacks: FrameRequestCallback[] = [];
-    const animationFrame = vi
-      .spyOn(window, "requestAnimationFrame")
-      .mockImplementation((callback) => {
-        frameCallbacks.push(callback);
-        return frameCallbacks.length;
-      });
-    try {
-      act(() => {
-        mocks.runtimeListener?.({
-          payload: {
-            protocolVersion: 1,
-            eventId: "event-terminal-before-queued-delivery",
-            sessionId: session.id,
-            runId: "run-1",
-            sequence: 3,
-            method: "run.completed",
-            data: { completedAt: "2026-07-22T12:01:00Z" },
-          },
-        });
-      });
-
-      expect(
-        await screen.findByText("Queued follow-up. 1 attachment queued for next turn"),
-      ).toBeVisible();
-      await waitFor(() => expect(frameCallbacks.length).toBeGreaterThan(0));
-
-      act(() => {
-        mocks.runtimeListener?.({
-          payload: {
-            protocolVersion: 1,
-            eventId: "event-new-run-before-queued-delivery",
-            sessionId: session.id,
-            runId: "run-2",
-            sequence: 0,
-            method: "run.started",
-            data: {
-              startedAt: "2026-07-22T12:01:01Z",
-              model: "fast",
-            },
-          },
-        });
-      });
-      const queuedFrames = frameCallbacks.splice(0);
-      act(() => {
-        for (const callback of queuedFrames) callback(0);
-      });
-
-      await waitFor(() => {
-        const steerCalls = mocks.invoke.mock.calls.filter(
-          ([command]) => command === "steer_agent_run",
-        );
-        expect(steerCalls).toHaveLength(2);
-        expect(steerCalls[1]?.[1]).toMatchObject({
-          runId: "run-2",
-          text: "Deliver this after settlement",
-        });
-      });
-
-      composer = screen.getByRole("textbox", { name: "Message Clovy" });
-      composer.textContent = "Latest live correction";
-      fireEvent.input(composer);
-      await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-      await waitFor(() => {
-        const steerCalls = mocks.invoke.mock.calls.filter(
-          ([command]) => command === "steer_agent_run",
-        );
-        expect(steerCalls).toHaveLength(3);
-        expect(steerCalls[2]?.[1]).toMatchObject({
-          runId: "run-2",
-          text: "Latest live correction",
-        });
-        const stored = JSON.parse(
-          window.localStorage.getItem("clovy.agent.queuedFollowUps") ?? "{}",
-        ) as Record<string, { prompt?: string; attachments?: string[] }>;
-        expect(stored[session.id]).toMatchObject({
-          prompt: "Latest live correction",
-          attachments: ["/tmp/brief.pdf"],
-        });
-      });
-    } finally {
-      animationFrame.mockRestore();
-    }
   });
 
   it("keeps a queued follow-up owned by its running session across navigation", async () => {
@@ -2149,15 +1402,15 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(await screen.findByText("follow-up.pdf")).toBeVisible();
     composer.textContent = "Only send this in session A";
     fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
+    await user.click(await screen.findByRole("button", { name: "Queue next turn" }));
     expect(
-      await screen.findByText("Steering active run. 1 attachment queued for next turn"),
+      await screen.findByText("Queued follow-up. 1 attachment queued for next turn"),
     ).toBeVisible();
 
     rerender(<AgentWorkspace initialSession={newSession} />);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Stop Clovy" })).toBeNull());
     expect(
-      screen.queryByText("Steering active run. 1 attachment queued for next turn"),
+      screen.queryByText("Queued follow-up. 1 attachment queued for next turn"),
     ).not.toBeInTheDocument();
 
     act(() => {
@@ -2206,7 +1459,7 @@ describe("AgentWorkspace runtime wiring", () => {
         request: expect.objectContaining({
           sessionId: session.id,
           prompt: "Only send this in session A",
-          model: "fast",
+          model: "__clovy_cli_engine__:claude",
           attachments: ["/tmp/follow-up.pdf"],
         }),
       });
@@ -2219,8 +1472,7 @@ describe("AgentWorkspace runtime wiring", () => {
         messageId: "restored-message",
         prompt: "Resume with this file",
         attachments: ["/tmp/restored.pdf"],
-        model: "open-software/auto",
-        thinkingLevel: "hard",
+        model: "__clovy_cli_engine__:claude",
       },
     });
 
@@ -2231,8 +1483,7 @@ describe("AgentWorkspace runtime wiring", () => {
           sessionId: session.id,
           prompt: "Resume with this file",
           attachments: ["/tmp/restored.pdf"],
-          model: "open-software/auto",
-          reasoningEffort: "high",
+          model: "__clovy_cli_engine__:claude",
         }),
       }),
     );
@@ -2245,8 +1496,7 @@ describe("AgentWorkspace runtime wiring", () => {
         messageId: "retry-after-navigation",
         prompt: "Retry this in session A",
         attachments: ["/tmp/retry.pdf"],
-        model: "fast",
-        thinkingLevel: "medium",
+        model: "__clovy_cli_engine__:claude",
       },
     });
     let rejectFirstStart: ((error: Error) => void) | undefined;
@@ -2305,8 +1555,7 @@ describe("AgentWorkspace runtime wiring", () => {
         messageId: "already-consumed",
         prompt: "Use this restored brief",
         attachments: ["/tmp/restored-brief.pdf"],
-        model: "fast",
-        thinkingLevel: "medium",
+        model: "__clovy_cli_engine__:claude",
         delivery: "follow_up",
         steering: "accepted",
       },
@@ -2341,6 +1590,58 @@ describe("AgentWorkspace runtime wiring", () => {
         }),
       });
     });
+  });
+
+  it.each([
+    "loading",
+    "failed",
+  ])("uses the installed default for a historical session while the engine catalog is %s", async (catalogState) => {
+    const base = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "chat_engine_catalog") {
+        return catalogState === "loading"
+          ? new Promise(() => {})
+          : Promise.reject(new Error("catalog unavailable"));
+      }
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: "__clovy_cli_engine__:codex", cli: "codex" });
+      }
+      return base?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={session} />);
+    await screen.findByText("Earlier answer");
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Continue history");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: "__clovy_cli_engine__:codex" }),
+      }),
+    );
+  });
+
+  it("preserves an explicit CLI choice when the engine catalog fails", async () => {
+    const base = mocks.invoke.getMockImplementation();
+    const selected = { ...session, model: "__clovy_cli_engine__:claude" };
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "chat_engine_catalog")
+        return Promise.reject(new Error("catalog unavailable"));
+      if (command === "get_agent_session") return Promise.resolve(selected);
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: "__clovy_cli_engine__:codex", cli: "codex" });
+      }
+      return base?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={selected} />);
+    await screen.findByText("Earlier answer");
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Keep my engine");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: selected.model }),
+      }),
+    );
   });
 
   it("does not let a slow global catalog overwrite a restored session model", async () => {
@@ -2408,7 +1709,7 @@ describe("AgentWorkspace runtime wiring", () => {
         ],
       }),
     );
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeEnabled();
   });
 
   it("resolves approval interruptions against their originating run", async () => {
@@ -2457,13 +1758,11 @@ describe("AgentWorkspace runtime wiring", () => {
   it("updates the desktop picker when a companion stages a session model", async () => {
     render(<AgentWorkspace initialSession={session} />);
     await screen.findByText("Earlier answer");
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeEnabled();
 
-    act(() => rememberSessionModel(session.id, "__june_auto_generation__:20"));
+    act(() => rememberSessionModel(session.id, "__clovy_cli_engine__:codex"));
 
-    expect(screen.getByRole("button", { name: "Model: Auto" }).getAttribute("title")).toContain(
-      "Preference: Economy",
-    );
+    expect(screen.getByRole("button", { name: "Chat engine: Codex" })).toBeEnabled();
   });
 
   it("resolves clarification interruptions through the typed host command", async () => {
@@ -2565,7 +1864,7 @@ describe("AgentWorkspace runtime wiring", () => {
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
-          settings: { costQuality: 100 },
+          settings: {},
           effectiveSettings: {
             providerApiKeysConfigured: {
               groq: false,
@@ -2648,7 +1947,7 @@ describe("AgentWorkspace runtime wiring", () => {
           id: "run-retry",
           sessionId: session.id,
           status: "running",
-          model: "fast",
+          model: "__clovy_cli_engine__:claude",
         });
       }
       return Promise.resolve(undefined);
@@ -2955,88 +2254,6 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(screen.queryByText("Unsent message")).not.toBeInTheDocument();
   });
 
-  it("stages model and effort changes made while a fresh session is still being created", async () => {
-    const user = userEvent.setup();
-    let resolveCreate: ((value: AgentSessionDto) => void) | undefined;
-    const pendingCreate = new Promise<AgentSessionDto>((resolve) => {
-      resolveCreate = resolve;
-    });
-    const createdSession = { ...newSession, model: "fast" };
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      const sessionId = (args as { sessionId?: string } | undefined)?.sessionId;
-      if (command === "create_agent_session") return pendingCreate;
-      if (command === "get_agent_session" && sessionId === createdSession.id) {
-        return Promise.resolve(createdSession);
-      }
-      if (command === "list_agent_items" && sessionId === createdSession.id) {
-        return Promise.resolve([]);
-      }
-      return defaultInvoke?.(command, args);
-    });
-
-    const { container, rerender } = render(<AgentWorkspace />);
-    await user.click(await screen.findByRole("button", { name: "Model: Auto" }));
-    await user.click(screen.getByRole("button", { name: "All models" }));
-    await user.click(
-      within(screen.getByRole("group", { name: "All text models" })).getByRole("option", {
-        name: /Fast/,
-      }),
-    );
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Create this slowly";
-    fireEvent.input(composer);
-    const send = screen.getByRole("button", { name: "Send message" });
-    await waitFor(() => expect(send).toBeEnabled());
-    await user.click(send);
-    await waitFor(
-      () =>
-        expect(container.querySelector(".agent-user-turn")).toHaveTextContent("Create this slowly"),
-      { timeout: 3_000 },
-    );
-    expect(screen.getByText("Thinking…")).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "Model: Fast" }));
-    await user.click(
-      within(screen.getByRole("listbox", { name: "Suggested text models" })).getByRole("option", {
-        name: /Auto/,
-      }),
-    );
-    await user.click(screen.getByRole("button", { name: "Model: Auto" }));
-    await user.click(screen.getByRole("button", { name: /Effort.*Medium/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Thinking level" })).getByRole("menuitemradio", {
-        name: /High.*Deeper reasoning/,
-      }),
-    );
-
-    await act(async () => resolveCreate?.(createdSession));
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          sessionId: createdSession.id,
-          model: "fast",
-          reasoningEffort: "medium",
-        }),
-      }),
-    );
-    expect(screen.getByRole("button", { name: "Model: Auto" })).toHaveAttribute(
-      "title",
-      expect.stringContaining("Effort: High"),
-    );
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "set_provider_model"),
-    ).toHaveLength(1);
-
-    rerender(<AgentWorkspace initialSession={session} />);
-    expect(await screen.findByRole("button", { name: "Model: Fast" })).toBeEnabled();
-    rerender(<AgentWorkspace initialSession={createdSession} />);
-    expect(await screen.findByRole("button", { name: "Model: Auto" })).toHaveAttribute(
-      "title",
-      expect.stringContaining("Effort: High"),
-    );
-  });
-
   it("does not take over the workspace when a delayed fresh session finishes after navigation", async () => {
     const user = userEvent.setup();
     let resolveCreate: ((value: AgentSessionDto) => void) | undefined;
@@ -3080,7 +2297,7 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(onSessionSelected).not.toHaveBeenCalledWith(newSession);
   });
 
-  it("uses the priced Clovy Auto model id for a fresh workspace", async () => {
+  it("uses Claude Code for a fresh workspace when the default command is unavailable", async () => {
     setCurrentDataPartitionName("private");
     const user = userEvent.setup();
     render(<AgentWorkspace />);
@@ -3093,7 +2310,7 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
         request: expect.objectContaining({
-          model: "__june_auto_generation__:100",
+          model: "__clovy_cli_engine__:claude",
           title: "Fresh request",
           profile: "private",
         }),

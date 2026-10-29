@@ -7,14 +7,13 @@ Thanks for helping build private AI.
 - [AGENTS.md](AGENTS.md) is the canonical contributor guide. Read it first;
   this page is the short version and defers to it.
 - [CONTEXT.md](CONTEXT.md) is the domain glossary. Using the right names
-  (Clovy, Clovy API, dictation vs note transcription) keeps reviews fast.
+  (Clovy, CLI chat engine, dictation vs note transcription) keeps reviews fast.
 - [docs/index.md](docs/index.md) maps every architecture doc, ADR, and
   runbook.
 
 ## Ways to contribute
 
 - **Report a bug.** Open a GitHub issue.
-  You can also report directly from inside Clovy, which attaches diagnostics.
 - **Report a security vulnerability.** Never through a public issue; follow
   [SECURITY.md](SECURITY.md).
 - **Propose a feature.** Open a feature request issue.
@@ -27,18 +26,13 @@ Follow [docs/development.md](docs/development.md). The short version:
 
 ```sh
 cp .env.example .env
-cp clovy-api/.env.example clovy-api/.env
-# Edit clovy-api/.env (never the root desktop .env) and set the keys you need:
-# CLOVY__UPSTREAMS__GROQ__API_KEY (transcription), CLOVY__UPSTREAMS__OPENROUTER__API_KEY
-# (remote text), CLOVY__UPSTREAMS__FAL__API_KEY (images and video),
-# CLOVY__UPSTREAMS__TAVILY__API_KEY (web).
-pnpm install
+sfw pnpm install
 pnpm tauri:dev
 ```
 
-The env examples default to open source local mode: no account, no billing,
-and a local Clovy API. See [docs/configuration.md](docs/configuration.md) for
-the full reference.
+The app has no server account or bearer token. Install and sign in to a CLI
+for chat; save your provider keys in Settings for audio, remote text and media.
+See [docs/configuration.md](docs/configuration.md).
 
 ## Before you open a PR
 
@@ -49,7 +43,7 @@ make verify
 ```
 
 Or individually: `pnpm check`, `pnpm typecheck`, `pnpm test`,
-`pnpm test:rust`, `pnpm test:clovy-api`.
+`pnpm test:rust`.
 
 Frontend typecheck/tests and `src-tauri/` macOS Rust checks are local by default
 on PRs to avoid paying for repeated hosted runners while a branch is still
@@ -76,7 +70,7 @@ PR conventions, in brief (details in [AGENTS.md](AGENTS.md)):
 - Attach a screenshot or recording for UI changes.
 - Describe behavior generically; avoid naming or comparing other products in
   PR titles, descriptions, and release notes.
-- Say whether the change needs a Clovy API deploy to work end to end.
+- State any provider-contract or user-configuration requirements.
 
 ## License
 

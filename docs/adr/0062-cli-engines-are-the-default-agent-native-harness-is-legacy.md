@@ -76,3 +76,12 @@ Home's triage on Clovy API (decision 3) and the consequence "Home triage still
 needs Clovy API and credits" no longer hold: Home runs entirely on the default
 CLI engine, in its hidden session
 ([ADR-0064](0064-home-runs-on-the-default-cli-engine.md)).
+
+
+## Addendum - 2026-10-28: direct providers only
+
+The remaining server/native fallback portions are superseded for this fork by
+[ADR-0073](0073-desktop-calls-user-providers-without-a-clovy-server.md). The desktop calls the user's providers directly; chat stays
+on CLI engines and Clovy tools remain local through MCP. The server is removed,
+not replaced or deployed with a breaking contract. Earlier decisions above
+remain as historical records; current behavior follows ADR-0073 and ADR-0072.

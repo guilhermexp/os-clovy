@@ -637,11 +637,11 @@ const retiredDictationTakeIds = new Set<string>();
 function retireDictationTake() {
   if (activeDictationTakeId) retiredDictationTakeIds.add(activeDictationTakeId);
   activeDictationTakeId = undefined;
-  cleanupSkipped = false;
+  cleanupSkippedReason = undefined;
 }
 /** Cleanup failed for the take being pasted: its raw transcript is pasted,
  * and the paste status says so instead of raising an error. */
-let cleanupSkipped = false;
+let cleanupSkippedReason: "openrouter_api_key_missing" | "other" | undefined;
 let receivedLiveDictationEvent = false;
 
 function dictationTakeId(event: DictationHudEvent) {
@@ -1210,6 +1210,7 @@ async function handleDictationEventPayload(payload: unknown) {
       "focus_target",
       "finalizing_transcript",
       "final_transcript",
+      "dictation_cleanup_skipped",
       "paste_target",
       "paste_completed",
       "recording_discarded",
@@ -1220,13 +1221,16 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "dictation_cleanup_skipped") {
-    cleanupSkipped = true;
+    cleanupSkippedReason =
+      dictationEvent.payload?.code === "openrouter_api_key_missing"
+        ? "openrouter_api_key_missing"
+        : "other";
     return;
   }
 
   if (dictationEvent.type === "listening_started") {
     if (eventTakeId !== activeDictationTakeId) retireDictationTake();
-    cleanupSkipped = false;
+    cleanupSkippedReason = undefined;
     resetTarget();
     targetActive = true;
     if (targetNode) targetNode.hidden = false;
@@ -1325,8 +1329,14 @@ async function handleDictationEventPayload(payload: unknown) {
     }
     targetPinned = true;
     const app = dictationEvent.payload?.app;
+    const statusKey =
+      cleanupSkippedReason === "openrouter_api_key_missing"
+        ? "hud.status.pastingIntoMissingOpenRouterKey"
+        : cleanupSkippedReason
+          ? "hud.status.pastingIntoUncleaned"
+          : "hud.status.pastingInto";
     const transition = setHud("pasting", () =>
-      t(cleanupSkipped ? "hud.status.pastingIntoUncleaned" : "hud.status.pastingInto", {
+      t(statusKey, {
         app: app || t("hud.status.previousApp"),
       }),
     );
@@ -1341,8 +1351,13 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "paste_completed") {
+    const showMissingKeyNotice = cleanupSkippedReason === "openrouter_api_key_missing";
     retireDictationTake();
-    void hideHud();
+    if (showMissingKeyNotice) {
+      hideSoon(3000);
+    } else {
+      void hideHud();
+    }
     return;
   }
 
@@ -1709,9 +1724,9 @@ stopButton?.addEventListener("click", async (event) => {
 });
 
 // Cancel makes the current take terminal before asking the helper to discard
-// it. Work that has not started is suppressed; a metered request whose
-// settlement Clovy API already spawned cannot be revoked at the desktop
-// boundary. The helper answers with recording_discarded, which is the
+// it. Work that has not started is suppressed; a provider request already
+// in flight may still complete. The helper answers with recording_discarded,
+// which is the
 // authoritative confirmation that capture actually stopped. Keep the
 // listening HUD visible if the command write fails so an active recording is
 // never concealed behind a dismissed panel.

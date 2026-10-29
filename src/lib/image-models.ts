@@ -1,5 +1,4 @@
 import { type MessageKey, t } from "../i18n/translate";
-import { mediaModelCatalog } from "./media-models";
 import type { ProviderModelDto } from "./tauri";
 
 // Clovy's default image model. Mirrors DEFAULT_IMAGE_MODEL in the Rust providers
@@ -27,9 +26,8 @@ function imageModel({ descriptionKey, ...model }: ImageModelDefinition): Provide
   return entry;
 }
 
-// Curated identity and translated descriptions. Funding availability is merged
-// from Clovy API at render time, never inferred from this local catalog.
-// Keep IDs in sync with KNOWN_IMAGE_MODELS and the API image_pricing map.
+// Curated fal models with translated descriptions. A key is needed to generate,
+// not to choose a model. Keep IDs in sync with KNOWN_IMAGE_MODELS.
 export const IMAGE_MODELS: ProviderModelDto[] = [
   imageModel({
     id: DEFAULT_IMAGE_MODEL,
@@ -48,6 +46,6 @@ export const IMAGE_MODELS: ProviderModelDto[] = [
   }),
 ];
 
-export function imageModelCatalog(remote: ProviderModelDto[] = []): ProviderModelDto[] {
-  return mediaModelCatalog(IMAGE_MODELS, remote);
+export function imageModelCatalog(): ProviderModelDto[] {
+  return IMAGE_MODELS;
 }

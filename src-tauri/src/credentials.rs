@@ -19,10 +19,3 @@ pub(crate) fn delete_password(service: &str, user: &str) -> Result<(), keyring::
         Err(error) => Err(error),
     }
 }
-
-/// Reads a one-shot value and deletes it.
-pub(crate) fn take_password(service: &str, user: &str) -> Result<Option<String>, keyring::Error> {
-    let value = get_password(service, user)?;
-    delete_password(service, user)?;
-    Ok(value)
-}

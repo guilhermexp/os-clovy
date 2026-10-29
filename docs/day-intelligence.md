@@ -81,7 +81,7 @@ Tests: `cargo test --manifest-path src-tauri/Cargo.toml day_intelligence`
 - Inactive without an activity provider with JSON schema support (`provider`
   `missing` / `insufficient` in the DTO): no call, no model download. Every
   call goes through `llm::generate_for_activity` (activity selection only,
-  never Clovy API, one call at a time).
+  never a fallback inference service, one call at a time).
 - Inactive while capture is off. Current exclusions apply: excluded sessions
   and documents with an ignored domain never reach a prompt.
 - Distillation is local. The only network access of this module is the

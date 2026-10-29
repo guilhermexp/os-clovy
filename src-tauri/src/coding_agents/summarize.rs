@@ -83,7 +83,7 @@ impl SummaryBackend for LlmBackend {
         let registry = crate::llm::registry();
         let provider = registry.usage.get(LlmUsage::Activity);
         let tools_off = match provider {
-            ProviderRef::None | ProviderRef::Clovy => false,
+            ProviderRef::None | ProviderRef::OpenRouter => false,
             ProviderRef::Cli { id } => id.one_shot_allowed(),
             ProviderRef::Endpoint { .. } => true,
         };

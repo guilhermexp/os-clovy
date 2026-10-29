@@ -18,37 +18,21 @@ import {
   type AgentChatPart,
   type AgentChatTurn,
 } from "../../lib/agent-chat-runtime";
-import {
-  type ChatEngineCatalog,
-  chatEngineCatalog,
-  classifyChatEngineModel,
-} from "../../lib/chat-engine";
+import { type ChatEngineCatalog, chatEngineCatalog } from "../../lib/chat-engine";
 import { messageFromError } from "../../lib/errors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
-import {
-  dictationHelperCommand,
-  listProviderModels,
-  providerModelSettings,
-  type ProviderApiKeysConfigured,
-  type ProviderModelDto,
-} from "../../lib/tauri";
+import { dictationHelperCommand } from "../../lib/tauri";
 import { MarkdownContent } from "../agent/MarkdownContent";
 import { AgentAttachmentTile } from "../agent/composer/AgentAttachmentTile";
 import { ChatEnginePicker } from "../agent/composer/ChatEnginePicker";
 import { ComposerEditor, type ComposerEditorHandle } from "../agent/composer/ComposerEditor";
 import { UpstreamProviderFailureNoticePart } from "../agent/chat-turns/RunNotices";
-import {
-  ComposerModelPicker,
-  ComposerModelPopover,
-  type ComposerModelFlyout,
-} from "../agent/composer/ModelPicker";
-import { modelOptions, selectedModel } from "../settings/ModelPickerDialog";
 import type { NoteChat, NoteChatAttachment } from "./useNoteChat";
 
 /** Note-tailored presets, shown as the main session view's preset chips (icon
  * + label). Like those, a click prefills the composer rather than sending —
  * the prompt lands in the box so the person sees exactly what will run before
- * spending credits. The note reference is prepended by useNoteChat on the
+ * starting a turn. The note reference is prepended by useNoteChat on the
  * first message, so these are just the questions. The prompt is sent to the
  * model, so it stays in English; only the chip label follows the interface
  * language (a getter, so it reads the locale at render time). */
@@ -234,43 +218,6 @@ export function NoteChatPanel({
   // Model picking shares the regular agent catalog. The runtime receives the
   // selected model with each run, so the panel can change it without a legacy
   // transport-side configuration step.
-  const [models, setModels] = useState<ProviderModelDto[]>([]);
-  const [providerApiKeysConfigured, setProviderApiKeysConfigured] =
-    useState<ProviderApiKeysConfigured>({
-      groq: false,
-      openrouter: false,
-      fal: false,
-      tavily: false,
-    });
-  const [modelOpen, setModelOpen] = useState(false);
-  const [modelFlyout, setModelFlyout] = useState<ComposerModelFlyout>(null);
-  const [modelSearch, setModelSearch] = useState("");
-  const modelTriggerRef = useRef<HTMLButtonElement>(null);
-  const modelPopoverRef = useRef<HTMLDivElement>(null);
-  const modelSearchRef = useRef<HTMLInputElement>(null);
-  // Catalog hydration is presentation-only. The session-local staged choice
-  // is authoritative until a run applies it.
-  useEffect(() => {
-    let stale = false;
-    void listProviderModels("generation")
-      .then((catalog) => {
-        if (stale) return;
-        setModels(catalog.models);
-      })
-      .catch(() => undefined);
-    void providerModelSettings()
-      .then((response) =>
-        setProviderApiKeysConfigured(response.effectiveSettings.providerApiKeysConfigured),
-      )
-      .catch(() =>
-        setProviderApiKeysConfigured({ groq: false, openrouter: false, fal: false, tavily: false }),
-      );
-    return () => {
-      stale = true;
-    };
-  }, []);
-  // The panel picks the chat engine (a CLI first, ADR-0062); the Clovy
-  // model picker only shows for the legacy Clovy engine.
   const [engineCatalog, setEngineCatalog] = useState<ChatEngineCatalog | null>(null);
   const footerRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -284,45 +231,22 @@ export function NoteChatPanel({
       stale = true;
     };
   }, []);
-  const activeEngine = classifyChatEngineModel(activeModelId, engineCatalog, models);
-  const model = selectedModel(models, activeModelId);
-
   function selectModel(nextModelId: string) {
     setModel(nextModelId);
-    setModelOpen(false);
     setComposerError(null);
   }
 
   useEffect(() => {
-    if (!modelOpen) return;
-    function handlePointerDown(event: MouseEvent) {
-      const target = event.target as Node;
-      if (modelPopoverRef.current?.contains(target)) return;
-      if (modelTriggerRef.current?.contains(target)) return;
-      // The hover detail cards are portaled to document.body, so a click inside
-      // one (its "Show more" toggle) lands outside the popover — treat it as in.
-      if (target instanceof Element && target.closest(".agent-composer-model-hovercard")) return;
-      setModelOpen(false);
-    }
-    window.addEventListener("mousedown", handlePointerDown);
-    return () => window.removeEventListener("mousedown", handlePointerDown);
-  }, [modelOpen]);
-
-  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      // Esc walks back one layer at a time: model menu, then the panel. A
+      // The engine menu consumes Escape first. A
       // draft in progress blocks the final close — it must not eat the words.
-      if (modelOpen) {
-        setModelOpen(false);
-        return;
-      }
       if (!draftEmpty) return;
       onCloseRef.current();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [draftEmpty, modelOpen]);
+  }, [draftEmpty]);
 
   // Restore the remembered width once per mount; the var lives on .app-shell
   // because the main card's margin and the editor footer consume it too.
@@ -559,20 +483,7 @@ export function NoteChatPanel({
                   setModel={selectModel}
                   catalog={engineCatalog}
                   anchorRef={footerRef}
-                  clovyModels={models}
                 />
-                {activeEngine.kind === "clovy" ? (
-                  <ComposerModelPicker
-                    open={modelOpen}
-                    model={model}
-                    triggerRef={modelTriggerRef}
-                    onToggleOpen={() => {
-                      setModelFlyout(null);
-                      setModelSearch("");
-                      setModelOpen((open) => !open);
-                    }}
-                  />
-                ) : null}
                 <button
                   type="button"
                   className="agent-composer-mic"
@@ -610,20 +521,6 @@ export function NoteChatPanel({
               </div>
             </div>
           </div>
-          {modelOpen && activeEngine.kind === "clovy" ? (
-            <ComposerModelPopover
-              flyout={modelFlyout}
-              model={model}
-              options={modelOptions(models, model?.id ?? "")}
-              search={modelSearch}
-              popoverRef={modelPopoverRef}
-              searchRef={modelSearchRef}
-              onFlyoutChange={setModelFlyout}
-              onSearchChange={setModelSearch}
-              providerApiKeysConfigured={providerApiKeysConfigured}
-              onSelect={selectModel}
-            />
-          ) : null}
         </footer>
       </aside>
     </>

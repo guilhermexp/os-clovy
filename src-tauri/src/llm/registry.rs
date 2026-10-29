@@ -3,10 +3,8 @@
 //! lives inside `provider-settings.json` (see `crate::providers`); endpoint API
 //! keys live only in the Keychain ([`super::secrets`]).
 //!
-//! The chat selection is mirrored into the legacy `generationProvider` /
-//! `generationModel` fields so every existing chat consumer (agent route,
-//! vision and context-window lookups, the model picker) keeps working
-//! unchanged: chat on an endpoint is exactly the old "local model enabled".
+//! Chat accepts only CLI engines. The text model is independent and serves
+//! note generation when the selected note engine is OpenRouter.
 
 use super::{
     cli::CliKind, endpoint::EndpointConnection, secrets::SecretStore, LlmError,
@@ -14,10 +12,7 @@ use super::{
 };
 use crate::{
     domain::types::AppError,
-    providers::{
-        LocalGenerationSettings, ProviderModelSettings, DEFAULT_GENERATION_MODEL, PROVIDER_LOCAL,
-        PROVIDER_OPENROUTER,
-    },
+    providers::{LocalGenerationSettings, ProviderModelSettings, PROVIDER_LOCAL},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,22 +23,27 @@ const LEGACY_LOCAL_ENDPOINT_NAME: &str = "Local model";
 const MAX_ENDPOINT_NAME_CHARS: usize = 80;
 const MAX_API_KEY_CHARS: usize = 4_096;
 
-/// Which provider serves a use. `Clovy` is Clovy API (not allowed for
-/// activity); `None` means "off" (only allowed for activity).
+/// Which provider serves a use. OpenRouter uses the user's own key for notes;
+/// `None` means off and is only allowed for activity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ProviderRef {
-    Clovy,
+    #[serde(rename = "openrouter", alias = "clovy")]
+    OpenRouter,
     None,
-    Endpoint { id: String },
-    Cli { id: CliKind },
+    Endpoint {
+        id: String,
+    },
+    Cli {
+        id: CliKind,
+    },
 }
 
 impl ProviderRef {
     /// Stable key for logs and the stored `provider` of generated notes.
     pub fn key(&self) -> String {
         match self {
-            ProviderRef::Clovy => "clovy".to_string(),
+            ProviderRef::OpenRouter => "openrouter".to_string(),
             ProviderRef::None => "none".to_string(),
             ProviderRef::Endpoint { id } => format!("endpoint:{id}"),
             ProviderRef::Cli { id } => format!("cli:{}", id.id()),
@@ -64,7 +64,8 @@ impl LlmUsage {
     fn default_provider(self) -> ProviderRef {
         match self {
             LlmUsage::Activity => ProviderRef::None,
-            _ => ProviderRef::Clovy,
+            LlmUsage::Chat => claude(),
+            _ => ProviderRef::OpenRouter,
         }
     }
 }
@@ -72,18 +73,25 @@ impl LlmUsage {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmUsageSelection {
-    #[serde(default = "clovy")]
+    #[serde(default = "claude")]
     pub chat: ProviderRef,
-    #[serde(default = "clovy")]
+    #[serde(default = "openrouter")]
     pub notes: ProviderRef,
-    #[serde(default = "clovy")]
+    // Keep the internal usage API stable; cleanup is fixed and never persisted.
+    #[serde(skip, default = "openrouter")]
     pub dictation_cleanup: ProviderRef,
     #[serde(default = "none")]
     pub activity: ProviderRef,
 }
 
-fn clovy() -> ProviderRef {
-    ProviderRef::Clovy
+fn openrouter() -> ProviderRef {
+    ProviderRef::OpenRouter
+}
+
+fn claude() -> ProviderRef {
+    ProviderRef::Cli {
+        id: CliKind::Claude,
+    }
 }
 
 fn none() -> ProviderRef {
@@ -93,9 +101,9 @@ fn none() -> ProviderRef {
 impl Default for LlmUsageSelection {
     fn default() -> Self {
         Self {
-            chat: ProviderRef::Clovy,
-            notes: ProviderRef::Clovy,
-            dictation_cleanup: ProviderRef::Clovy,
+            chat: claude(),
+            notes: ProviderRef::OpenRouter,
+            dictation_cleanup: ProviderRef::OpenRouter,
             activity: ProviderRef::None,
         }
     }
@@ -225,7 +233,7 @@ impl LlmRegistry {
         match provider {
             ProviderRef::Endpoint { id } => self.endpoint(id)?.structured_output,
             ProviderRef::Cli { id } => self.cli_levels.get(id).copied(),
-            ProviderRef::Clovy | ProviderRef::None => None,
+            ProviderRef::OpenRouter | ProviderRef::None => None,
         }
     }
 
@@ -348,55 +356,54 @@ pub fn migrate_legacy_local_generation(
 /// The CLIs that become the default chat engine, in order of preference.
 pub const DEFAULT_CHAT_CLIS: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
 
-/// The default chat engine on this machine: Claude Code, else Codex, else
-/// none (chat stays on the legacy Clovy agent).
+/// The available default: Claude Code first, then the existing Codex fallback.
 pub fn default_chat_cli(installed: impl Fn(CliKind) -> bool) -> Option<CliKind> {
     DEFAULT_CHAT_CLIS.into_iter().find(|kind| installed(*kind))
 }
 
-/// One-time move of chat to the default CLI engine (ADR-0062). Chat on the
-/// Clovy agent, the old default, moves to [`default_chat_cli`]; any other
-/// chat choice (an endpoint or a CLI) is the user's and is kept. The move is
-/// recorded in `llm_cli_default_applied`, so it never runs twice; with
-/// neither CLI installed nothing is recorded and the next launch retries.
-/// An explicit chat choice made later ([`set_usage`], the text-model picker)
-/// also records it. Returns the CLI chat moved to.
+/// Retire native/endpoint chat selections even if the earlier CLI-default
+/// migration was recorded. A CLI choice survives. When neither CLI is installed,
+/// select Claude Code so its normal setup error is shown without another route.
 pub fn apply_cli_default(
     settings: &mut ProviderModelSettings,
     installed: impl Fn(CliKind) -> bool,
 ) -> Option<CliKind> {
-    if settings.llm_cli_default_applied {
-        return None;
+    if let ProviderRef::Cli { id } = settings.llm_usage.chat {
+        if settings.llm_cli_default_applied || id != CliKind::Claude {
+            settings.llm_cli_default_applied = true;
+            return None;
+        }
     }
-    if settings.llm_usage.chat != ProviderRef::Clovy {
-        settings.llm_cli_default_applied = true;
-        return None;
-    }
-    let kind = default_chat_cli(installed)?;
+    let kind = default_chat_cli(installed).unwrap_or(CliKind::Claude);
     settings.llm_usage.chat = ProviderRef::Cli { id: kind };
     settings.llm_cli_default_applied = true;
     normalize(settings);
     Some(kind)
 }
 
-/// Chat is on the legacy Clovy agent only because no default CLI was found.
+/// The saved default has not yet been resolved against installed CLIs.
 pub fn cli_default_pending(settings: &ProviderModelSettings) -> bool {
-    !settings.llm_cli_default_applied && settings.llm_usage.chat == ProviderRef::Clovy
+    !settings.llm_cli_default_applied
 }
 
 /// Drops selections that point at missing endpoints and invalid kinds, then
-/// mirrors the chat selection into the legacy generation fields.
+/// retires native chat without changing the independent text-model selection.
 pub fn normalize(settings: &mut ProviderModelSettings) {
+    if !matches!(settings.llm_usage.chat, ProviderRef::Cli { .. }) {
+        settings.llm_usage.chat = ProviderRef::Cli {
+            id: CliKind::Claude,
+        };
+        settings.llm_cli_default_applied = false;
+    }
     for usage in [
-        LlmUsage::Chat,
         LlmUsage::Notes,
         LlmUsage::DictationCleanup,
         LlmUsage::Activity,
     ] {
         let current = settings.llm_usage.get(usage).clone();
         let valid = match &current {
-            ProviderRef::Clovy => usage != LlmUsage::Activity,
-            // Dictation cleanup runs only on Clovy's OpenRouter route.
+            ProviderRef::OpenRouter => usage != LlmUsage::Activity,
+            // Dictation cleanup always uses OpenRouter directly.
             _ if usage == LlmUsage::DictationCleanup => false,
             ProviderRef::Endpoint { id } => settings.endpoint(id).is_some(),
             ProviderRef::None => usage == LlmUsage::Activity,
@@ -405,25 +412,6 @@ pub fn normalize(settings: &mut ProviderModelSettings) {
         if !valid {
             *settings.llm_usage.slot(usage) = usage.default_provider();
         }
-    }
-    sync_chat_route(settings);
-}
-
-fn sync_chat_route(settings: &mut ProviderModelSettings) {
-    let chat_endpoint = match &settings.llm_usage.chat {
-        ProviderRef::Endpoint { id } => settings.endpoint(id).map(|e| e.model_id.clone()),
-        _ => None,
-    };
-    if let Some(model_id) = chat_endpoint {
-        settings.generation_provider = PROVIDER_LOCAL.to_string();
-        settings.generation_model = model_id;
-    } else if settings.generation_provider == PROVIDER_LOCAL {
-        settings.generation_provider = PROVIDER_OPENROUTER.to_string();
-        settings.generation_model = if settings.remote_generation_model.trim().is_empty() {
-            DEFAULT_GENERATION_MODEL.to_string()
-        } else {
-            settings.remote_generation_model.clone()
-        };
     }
 }
 
@@ -435,6 +423,12 @@ pub fn set_usage(
     provider: ProviderRef,
     installed: impl Fn(CliKind) -> bool,
 ) -> Result<(), AppError> {
+    if usage == LlmUsage::Chat && !matches!(provider, ProviderRef::Cli { .. }) {
+        return Err(AppError::new(
+            "llm_provider_not_allowed",
+            "Chat uses a CLI engine. Choose Claude Code or another installed CLI.",
+        ));
+    }
     let registry = LlmRegistry::from(&*settings);
     match &provider {
         // Dictation cleanup is a single OpenRouter chat completion (the model
@@ -447,10 +441,10 @@ pub fn set_usage(
                 "Dictation cleanup runs only on an OpenRouter model. Choose it in the dictation settings.",
             ));
         }
-        ProviderRef::Clovy if usage == LlmUsage::Activity => {
+        ProviderRef::OpenRouter if usage == LlmUsage::Activity => {
             return Err(AppError::new(
                 "llm_provider_not_allowed",
-                "Activity features never use Clovy API. Choose one of your own providers or none.",
+                "Activity features use a CLI or registered endpoint. Choose one of those providers or none.",
             ));
         }
         ProviderRef::None if usage != LlmUsage::Activity => {
@@ -477,7 +471,7 @@ pub fn set_usage(
     }
     *settings.llm_usage.slot(usage) = provider;
     if usage == LlmUsage::Chat {
-        // An explicit chat choice, Clovy included, is never moved again.
+        // An explicit CLI choice is preserved across launches.
         settings.llm_cli_default_applied = true;
     }
     normalize(settings);
@@ -657,7 +651,7 @@ pub fn record_level(
         ProviderRef::Cli { id } => {
             settings.llm_cli_levels.insert(*id, level);
         }
-        ProviderRef::Clovy | ProviderRef::None => {}
+        ProviderRef::OpenRouter | ProviderRef::None => {}
     }
 }
 
@@ -687,6 +681,7 @@ fn keychain_error() -> AppError {
 mod tests {
     use super::*;
     use crate::llm::secrets::MemorySecretStore;
+    use crate::providers::PROVIDER_OPENROUTER;
 
     fn legacy_settings_json(provider: &str) -> String {
         format!(
@@ -719,14 +714,19 @@ mod tests {
         assert_eq!(endpoint.model_id, "llama3.1:8b");
         assert!(endpoint.has_api_key);
         assert_eq!(store.get("local").unwrap().as_deref(), Some("sk-legacy"));
-        // The routes that used the local endpoint keep using it.
+        // Notes retain the endpoint; historical chat moves to a CLI.
         let local = ProviderRef::Endpoint {
             id: "local".to_string(),
         };
-        assert_eq!(settings.llm_usage.chat, local);
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
         assert_eq!(settings.llm_usage.notes, local);
-        assert_eq!(settings.generation_provider, PROVIDER_LOCAL);
-        assert_eq!(settings.generation_model, "llama3.1:8b");
+        assert_eq!(settings.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(settings.generation_model, settings.remote_generation_model);
         assert_eq!(settings.llm_usage.activity, ProviderRef::None);
         // The key no longer sits in the settings file.
         assert!(settings.llm_registry_migrated);
@@ -743,8 +743,13 @@ mod tests {
         let store = MemorySecretStore::default();
         let settings = load(&legacy_settings_json("venice"), &store);
         assert!(settings.endpoint("local").is_some());
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
-        assert_eq!(settings.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(settings.llm_usage.notes, ProviderRef::OpenRouter);
         assert_eq!(settings.generation_provider, PROVIDER_OPENROUTER);
     }
 
@@ -958,7 +963,7 @@ mod tests {
         let error = set_usage(
             &mut settings,
             LlmUsage::Activity,
-            ProviderRef::Clovy,
+            ProviderRef::OpenRouter,
             |_| true,
         )
         .unwrap_err();
@@ -978,7 +983,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "llm_cli_not_installed");
-        assert_eq!(settings.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(settings.llm_usage.notes, ProviderRef::OpenRouter);
     }
 
     #[test]
@@ -991,7 +996,7 @@ mod tests {
                 assert_eq!(error.code, "llm_cli_tools_not_disabled", "{id:?} {usage:?}");
             }
         }
-        assert_eq!(settings.llm_usage.notes, ProviderRef::Clovy);
+        assert_eq!(settings.llm_usage.notes, ProviderRef::OpenRouter);
         assert_eq!(settings.llm_usage.activity, ProviderRef::None);
     }
 
@@ -1013,16 +1018,20 @@ mod tests {
     }
 
     #[test]
-    fn llm_chat_selection_drives_the_existing_agent_route() {
+    fn llm_chat_accepts_only_clis_and_leaves_the_text_model_unchanged() {
         let mut settings = settings_with_endpoint(None);
-        let endpoint = ProviderRef::Endpoint {
-            id: "ep".to_string(),
-        };
-        set_usage(&mut settings, LlmUsage::Chat, endpoint, |_| true).unwrap();
-        assert_eq!(settings.generation_provider, PROVIDER_LOCAL);
-        assert_eq!(settings.generation_model, "m");
-        // A CLI for chat leaves the legacy Clovy route fields on Clovy API:
-        // new sessions get the CLI engine id from `selected_model_for_mode`.
+        let model = settings.generation_model.clone();
+        for provider in [
+            ProviderRef::OpenRouter,
+            ProviderRef::Endpoint { id: "ep".into() },
+        ] {
+            assert_eq!(
+                set_usage(&mut settings, LlmUsage::Chat, provider, |_| true)
+                    .unwrap_err()
+                    .code,
+                "llm_provider_not_allowed"
+            );
+        }
         set_usage(
             &mut settings,
             LlmUsage::Chat,
@@ -1038,8 +1047,7 @@ mod tests {
                 id: CliKind::Claude
             }
         );
-        assert_eq!(settings.generation_provider, PROVIDER_OPENROUTER);
-        assert_eq!(settings.generation_model, settings.remote_generation_model);
+        assert_eq!(settings.generation_model, model);
     }
 
     #[test]
@@ -1049,10 +1057,16 @@ mod tests {
         let endpoint = ProviderRef::Endpoint {
             id: "ep".to_string(),
         };
-        set_usage(&mut settings, LlmUsage::Chat, endpoint.clone(), |_| true).unwrap();
+        set_usage(&mut settings, LlmUsage::Notes, endpoint.clone(), |_| true).unwrap();
         set_usage(&mut settings, LlmUsage::Activity, endpoint, |_| true).unwrap();
         delete_endpoint(&mut settings, "ep", &store).unwrap();
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(settings.llm_usage.notes, ProviderRef::OpenRouter);
         assert_eq!(settings.llm_usage.activity, ProviderRef::None);
         assert_eq!(settings.generation_provider, PROVIDER_OPENROUTER);
     }
@@ -1077,9 +1091,40 @@ mod tests {
 
     fn chat_on_clovy() -> ProviderModelSettings {
         let mut settings = crate::providers::default_settings_for_tests();
-        settings.llm_usage.chat = ProviderRef::Clovy;
+        settings.llm_usage.chat = ProviderRef::OpenRouter;
         settings.llm_cli_default_applied = false;
         settings
+    }
+
+    #[test]
+    fn retired_chat_choices_migrate_despite_the_old_default_marker() {
+        for chat in [
+            ProviderRef::OpenRouter,
+            ProviderRef::Endpoint { id: "ep".into() },
+        ] {
+            let mut settings = settings_with_endpoint(None);
+            settings.llm_usage.chat = chat;
+            settings.llm_usage.notes = ProviderRef::Endpoint { id: "ep".into() };
+            settings.llm_cli_default_applied = true;
+            assert_eq!(
+                apply_cli_default(&mut settings, |_| true),
+                Some(CliKind::Claude)
+            );
+            assert_eq!(
+                settings.llm_usage.chat,
+                ProviderRef::Cli {
+                    id: CliKind::Claude
+                }
+            );
+            assert_eq!(
+                settings.llm_usage.notes,
+                ProviderRef::Endpoint { id: "ep".into() }
+            );
+            let saved = serde_json::to_string(&settings).unwrap();
+            let mut reloaded: ProviderModelSettings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(apply_cli_default(&mut reloaded, |_| false), None);
+            assert_eq!(reloaded, settings);
+        }
     }
 
     #[test]
@@ -1097,9 +1142,8 @@ mod tests {
         );
         assert!(settings.llm_cli_default_applied);
         assert!(!cli_default_pending(&settings));
-        // Recorded: a second launch changes nothing, even if the user has
-        // gone back to Clovy since.
-        settings.llm_usage.chat = ProviderRef::Clovy;
+        // A recorded CLI choice survives future launches.
+        settings.llm_usage.chat = ProviderRef::Cli { id: CliKind::Codex };
         let before = settings.clone();
         assert_eq!(apply_cli_default(&mut settings, |_| true), None);
         assert_eq!(settings, before);
@@ -1118,30 +1162,35 @@ mod tests {
         let mut settings = chat_on_clovy();
         assert_eq!(
             apply_cli_default(&mut settings, |kind| kind == CliKind::Pi),
-            None
-        );
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
-    }
-
-    #[test]
-    fn llm_chat_stays_on_clovy_and_retries_when_no_default_cli_is_installed() {
-        let mut settings = chat_on_clovy();
-        assert_eq!(apply_cli_default(&mut settings, |_| false), None);
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
-        // Not recorded, so the next launch tries again; the settings view
-        // says why chat is on the legacy agent.
-        assert!(!settings.llm_cli_default_applied);
-        assert!(cli_default_pending(&settings));
-        assert!(LlmProvidersDto::from(&settings).cli_default_pending);
-        assert_eq!(
-            apply_cli_default(&mut settings, |kind| kind == CliKind::Claude),
             Some(CliKind::Claude)
         );
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
     }
 
     #[test]
-    fn llm_a_chosen_chat_engine_is_never_moved_to_the_default_cli() {
-        // An endpoint or a CLI the user picked stays.
+    fn llm_chat_without_an_installed_cli_still_selects_claude() {
+        let mut settings = chat_on_clovy();
+        assert_eq!(
+            apply_cli_default(&mut settings, |_| false),
+            Some(CliKind::Claude)
+        );
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert!(settings.llm_cli_default_applied);
+        assert!(!cli_default_pending(&settings));
+    }
+
+    #[test]
+    fn llm_a_chosen_cli_is_never_moved_to_the_default() {
         let mut settings = chat_on_clovy();
         settings.llm_usage.chat = ProviderRef::Cli { id: CliKind::Pi };
         assert_eq!(apply_cli_default(&mut settings, |_| true), None);
@@ -1150,17 +1199,22 @@ mod tests {
             ProviderRef::Cli { id: CliKind::Pi }
         );
         assert!(settings.llm_cli_default_applied);
-        // Choosing Clovy explicitly (with no CLI installed yet) is recorded,
-        // so installing Claude Code later does not override it.
-        let mut settings = chat_on_clovy();
-        set_usage(&mut settings, LlmUsage::Chat, ProviderRef::Clovy, |_| false).unwrap();
-        assert_eq!(apply_cli_default(&mut settings, |_| true), None);
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+        assert_eq!(
+            set_usage(
+                &mut settings,
+                LlmUsage::Chat,
+                ProviderRef::OpenRouter,
+                |_| false
+            )
+            .unwrap_err()
+            .code,
+            "llm_provider_not_allowed"
+        );
     }
 
     #[test]
     fn llm_dictation_cleanup_refuses_clis_and_endpoints() {
-        // Dictation cleanup runs only on Clovy's OpenRouter route (ditado-rapido
+        // Dictation cleanup runs only on OpenRouter directly (ditado-rapido
         // D1): never a CLI process nor a local endpoint, even with tools off.
         let mut settings = settings_with_endpoint(Some(StructuredOutputLevel::Strict));
         for provider in [
@@ -1182,18 +1236,21 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.code, "llm_provider_not_allowed", "{provider:?}");
         }
-        assert_eq!(settings.llm_usage.dictation_cleanup, ProviderRef::Clovy);
+        assert_eq!(
+            settings.llm_usage.dictation_cleanup,
+            ProviderRef::OpenRouter
+        );
         set_usage(
             &mut settings,
             LlmUsage::DictationCleanup,
-            ProviderRef::Clovy,
+            ProviderRef::OpenRouter,
             |_| true,
         )
         .unwrap();
     }
 
     #[test]
-    fn llm_normalize_moves_a_cli_or_endpoint_dictation_cleanup_to_clovy() {
+    fn llm_normalize_fixes_dictation_cleanup_on_openrouter() {
         for stored in [
             ProviderRef::Cli {
                 id: CliKind::Claude,
@@ -1207,14 +1264,14 @@ mod tests {
             normalize(&mut settings);
             assert_eq!(
                 settings.llm_usage.dictation_cleanup,
-                ProviderRef::Clovy,
+                ProviderRef::OpenRouter,
                 "{stored:?}"
             );
         }
     }
 
     #[test]
-    fn llm_provider_settings_with_cli_dictation_cleanup_load_on_clovy() {
+    fn llm_provider_settings_with_cli_dictation_cleanup_load_on_openrouter() {
         // The owner's profile before ditado-rapido: cleanup on Claude Code.
         let store = MemorySecretStore::default();
         let raw = r#"{
@@ -1230,7 +1287,10 @@ mod tests {
           }
         }"#;
         let settings = load(raw, &store);
-        assert_eq!(settings.llm_usage.dictation_cleanup, ProviderRef::Clovy);
+        assert_eq!(
+            settings.llm_usage.dictation_cleanup,
+            ProviderRef::OpenRouter
+        );
         // Notes keep their CLI: only dictation cleanup changed.
         assert_eq!(
             settings.llm_usage.notes,
@@ -1246,7 +1306,12 @@ mod tests {
         // the old default and is pending the move.
         let store = MemorySecretStore::default();
         let settings = load(&legacy_settings_json("venice"), &store);
-        assert_eq!(settings.llm_usage.chat, ProviderRef::Clovy);
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
         assert!(!settings.llm_cli_default_applied);
         assert!(cli_default_pending(&settings));
         let written = serde_json::to_value(&settings).unwrap();

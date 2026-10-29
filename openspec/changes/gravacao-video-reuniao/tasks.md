@@ -35,7 +35,7 @@
 ## 8. Verificação integrada
 
 - [ ] 8.1 Gates: `pnpm check`, `pnpm typecheck`, `NODE_OPTIONS=--no-experimental-webstorage pnpm test`, `cargo fmt --manifest-path src-tauri/Cargo.toml --all --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings`, `pnpm test:rust`. Verificar: saída sem falhas novas.
-- [ ] 8.2 Prova no app de dev (identificador próprio, sem tocar no perfil de release): call de teste no Google Meet com slides, gravação com vídeo, pausa e retomada, nota com o conteúdo dos slides e instantes; segunda gravação com motor de Notas Clovy mostra o aviso; apagar a nota remove o vídeo. Evidência em `.tmp/verify/gravacao-video-reuniao/`.
+- [ ] 8.2 Prova no app de dev (identificador próprio, sem tocar no perfil de release): call de teste no Google Meet com slides, gravação com vídeo, pausa e retomada, nota com o conteúdo dos slides e instantes; segunda gravação com motor de Notas diferente de Claude mostra o aviso; apagar a nota remove o vídeo. Evidência em `.tmp/verify/gravacao-video-reuniao/`.
 - [ ] 8.3 Rodar `/Users/guilhermevarela/orchestrator.v5/scripts/review-pair.sh --gate` antes do commit final e tratar os achados. Verificar: exit 0 ou achados refutados registrados aqui com o caminho do `summary.md`.
 
 ## Workflow follow-up
@@ -79,3 +79,12 @@ Todos os caminhos de evidência acima são relativos a `.tmp/verify/gravacao-vid
 - Correções da rodada16 aplicadas: Arc reconhecido por `company.thebrowser.Browser` com limite de família, sem substring genérica; testes Rust/Swift reproduziram os falsos positivos/negativos e passaram. HUD repete consulta após ausência/erro com uma consulta pendente por geração, preserva alvo/opt-in e não espera a consulta para iniciar áudio. RED4falhas -> GREEN125focados e1907frontend/201suítes; typecheck0. Evidências `capture/review16-browser/report-applied.md` e `ui/review16-retry/report.md`.
 - Rodada17 teve cota1min e foi interrompida apenas na árvore própria (exit130); rodada18 iniciou após o prazo, concluiu ambos os revisores e escopo, exit6 (`review-pair/18/summary.md`). Ambos os snapshots contêm exatamente45arquivos da feature. Os11paths rastreados alheios foram preservados em stash explícito, restaurados imediatamente após o snapshot e conferidos por hash/índice; untracked Graft/Trail ficaram intocados e excluídos por configuração temporária. Evidência `review-config/unrelated-preservation-round18.json` e `round18-snapshot-proof.json`. Nenhum arquivo alheio irá no commit.
 - Rodada18: alegação repetida de args ignorados no hook Claude refutada pelo probe real anterior2.1.312, sem nova inferência. Corrigidos fechamento automático do painel que retinha janela antiga (REDcallback42 -> GREEN177focados e1908frontend/201suítes, typecheck0; `ui/review18-auto-close/`) e falha recebida durante shutdown que era descartada (REDstopped:none -> GREENstopped:capture_failed e deadlinefailed:capture_failed; `capture/review18-late-failure/`). A consulta sem índice foi confirmada em fixture50milregistros e teste real do repositório; índice na migração036 ainda não publicada em finalização, com gates conjuntos pendentes. Prova nativa continua bloqueada e não será retomada nesta etapa.
+
+## Retomada sobre main (2026-10-29)
+
+- Checkpoint intermediário autorizado: `863b679a`, preservando os 45 arquivos existentes; não é aceitação final.
+- Integração de `ed99edce01948728deea1fe009362fc7612a955f`: notas em `providers/notes.rs`, sem restaurar Clovy API ou o agente nativo; chat/MCP, tema, fundo e mídia da main preservados.
+- Migração de vídeo renumerada para catálogo54/`038_meeting_video.sql`, após52/53 da main, sem alterar migrações aplicadas. Perfil antigo `dev.clovy.vp1028-dev` permanece intocado e não pode ser usado por este build.
+- Correções Arc/HUD das rodadas16 e18 já estavam aplicadas no checkpoint; relatório principal antigo estava desatualizado. Rodada19 terminou143, sem aprovação. Gates/revisão da árvore integrada pendentes.
+- Build Swift agora respeita `CARGO_TARGET_DIR`, incluindo o teste do protocolo. Os temporários criados pela primeira tentativa foram movidos para o único cache autorizado; nenhum target local permanece.
+- Prova nativa e inferência visual continuam pendentes, com o bloqueio original de permissões/recusa de observação preservado. Validação paga será manual pós-integração, conforme a decisão do dono.

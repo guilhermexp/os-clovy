@@ -19,7 +19,7 @@
 //! broker's timeout ([`TestBroker::with_timeout`]) passes.
 
 use super::{ApprovalBroker, BrokerIo, Decision, TokioClock, APPROVAL_TIMEOUT};
-use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 use crate::mcp_server::turns::TurnBinding;
@@ -75,6 +75,9 @@ impl TestBroker {
     ) -> Self {
         let pool = sqlx_sqlite::SqlitePoolOptions::new()
             .max_connections(1)
+            // A cancelled acquire must not drop the sole in-memory database.
+            // SQLx recommends disabling this await point for size-one fixtures.
+            .test_before_acquire(false)
             .connect("sqlite::memory:")
             .await
             .expect("memory database");

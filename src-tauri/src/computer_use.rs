@@ -44,7 +44,6 @@ use tokio::{
 /// Compatibility identity for restored runs created before Computer use moved
 /// from a Clovy-owned MCP server to host tools in ADR-0040.
 pub const LEGACY_MCP_SERVER_NAME: &str = "june_computer_use";
-pub const PROXY_PATH: &str = "/v1/computer-use/action";
 pub const APPROVALS_CHANGED_EVENT: &str = "clovy://computer-use-approvals-changed";
 
 #[cfg(not(debug_assertions))]
@@ -2225,7 +2224,7 @@ fn end_turn_lease_with_run(app: &AppHandle, run_id: String) {
     let own = Arc::clone(&slot);
     let handle = app.clone();
     let id = app.listen_any(
-        crate::agent_runtime::host::AGENT_RUNTIME_EVENT,
+        crate::agent_sessions::events::AGENT_RUNTIME_EVENT,
         move |event| {
             if !is_terminal_event_of(event.payload(), &run_id) {
                 return;

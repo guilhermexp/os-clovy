@@ -136,7 +136,6 @@ describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
           CARGO_TARGET_DIR: "",
           CLOVY_DEV_APP_IDENTIFIER: "",
           CLOVY_DEV_SIGNING_IDENTITY: "-",
-          CLOVY_DEV_SKIP_LOCAL_API: "1",
           CLOVY_SANDBOX_TAURI_ARGS: tauriArgs,
           CLOVY_SANDBOX_TCC_STORE: store,
           CLOVY_SANDBOX_TCCUTIL: path.join(bin, "tccutil"),
@@ -152,5 +151,42 @@ describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
     for (const helper of helpers) {
       expect(existsSync(path.join(helper, "granted-copy")), helper).toBe(true);
     }
+  });
+});
+
+describe("development frontend startup", () => {
+  it("runs Vite without a backend checkout or backend skip flag", () => {
+    const { sandbox, bin } = createSandbox();
+    const commands = path.join(sandbox, "frontend-command.json");
+    const capture = path.join(bin, "capture.cjs");
+    writeFileSync(
+      capture,
+      'require("node:fs").writeFileSync(process.env.CLOVY_SANDBOX_COMMANDS, JSON.stringify(process.argv.slice(2)));',
+    );
+    const windows = process.platform === "win32";
+    const stub = path.join(bin, windows ? "pnpm.cmd" : "pnpm");
+    writeFileSync(
+      stub,
+      windows
+        ? `@echo off\r\n"${process.execPath}" "${capture}" %*\r\n`
+        : `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${capture.replaceAll("'", "'\\''")}' "$@"\n`,
+    );
+    chmodSync(stub, 0o755);
+    const env = {
+      ...process.env,
+      PATH: [bin, process.env.PATH ?? ""].join(path.delimiter),
+      VITE_PORT: "0",
+      CLOVY_SANDBOX_COMMANDS: commands,
+    };
+    delete env.CLOVY_DEV_SKIP_LOCAL_API;
+    delete env.CLOVY_DEV_PREPARE_ONLY;
+    const launch = spawnSync(
+      process.execPath,
+      [path.join(sandbox, "scripts", "tauri-before-dev.mjs")],
+      { cwd: sandbox, env, encoding: "utf8", timeout: 10_000 },
+    );
+    expect(launch.status, launch.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(commands, "utf8"))).toEqual(["run", "dev"]);
+    expect(launch.stderr).not.toContain("Clovy API");
   });
 });

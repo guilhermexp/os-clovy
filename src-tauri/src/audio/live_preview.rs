@@ -1,7 +1,7 @@
 use crate::{
     audio::turns::normalize_wav_for_transcription,
-    clovy_api::TranscriptionRequest,
     domain::types::{RecordingSource, RecordingSourceMode},
+    providers::groq::TranscriptionRequest,
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
 use serde::Serialize;

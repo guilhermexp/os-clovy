@@ -2,6 +2,7 @@ const SYSTEM_AUDIO_MIN_MACOS_VERSION_FILE: &str = "system-audio-min-macos-versio
 const DICTATION_HELPER_MIN_MACOS_VERSION: &str = "14.0";
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo:rerun-if-changed=tauri.conf.json");
     println!("cargo:rerun-if-changed=Entitlements.plist");
     println!("cargo:rerun-if-changed=icons/icon.icns");
@@ -14,7 +15,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OS_ACCOUNTS_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=GOOGLE_OAUTH_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=GOOGLE_OAUTH_CLIENT_SECRET");
-    println!("cargo:rerun-if-env-changed=CLOVY_API_URL");
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("macos") {
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         link_swift_runtime();
@@ -36,7 +36,6 @@ fn main() {
     build_dictation_helper();
     prepare_computer_use_driver();
     build_windows_dictation_helper();
-    ensure_agent_runtime_placeholder();
     ensure_bundled_extension_dir();
     ensure_nm_shim_placeholder();
     export_app_identifier();
@@ -343,54 +342,6 @@ fn ensure_nm_shim_placeholder() {
             )
         }) {
             println!("cargo:warning=could not create {name} placeholder: {error}");
-        }
-    }
-}
-
-/// Tauri validates resource paths during ordinary Cargo invocations, before
-/// the SEA packaging step has run. Keep target-correct placeholders available
-/// for tests and rust-analyzer. `beforeBuildCommand` replaces them with the
-/// Node 24 SEA and its checksum before any application bundle is assembled.
-fn ensure_agent_runtime_placeholder() {
-    let manifest_dir = std::path::PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
-    );
-    let Some(runtime_dir) = manifest_dir
-        .parent()
-        .map(|repo_dir| repo_dir.join(".tauri-agent-runtime"))
-    else {
-        return;
-    };
-    if let Err(error) = std::fs::create_dir_all(&runtime_dir) {
-        println!(
-            "cargo:warning=could not create {}: {error}",
-            runtime_dir.display()
-        );
-        return;
-    }
-    let executable = if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("windows") {
-        runtime_dir.join("clovy-agent-runtime.exe")
-    } else {
-        runtime_dir.join("clovy-agent-runtime")
-    };
-    if !executable.exists() {
-        if let Err(error) = std::fs::write(
-            &executable,
-            b"placeholder: replaced by scripts/build-agent-runtime.mjs\n",
-        ) {
-            println!("cargo:warning=could not write agent runtime placeholder: {error}");
-            return;
-        }
-    }
-    let checksum = executable.with_extension(
-        executable
-            .extension()
-            .map(|extension| format!("{}.sha256", extension.to_string_lossy()))
-            .unwrap_or_else(|| "sha256".to_string()),
-    );
-    if !checksum.exists() {
-        if let Err(error) = std::fs::write(&checksum, b"placeholder\n") {
-            println!("cargo:warning=could not write agent runtime checksum placeholder: {error}");
         }
     }
 }
@@ -929,8 +880,7 @@ fn build_universal_swift_executable(
         println!("cargo:warning={helper_name} executable path has no file name");
         return false;
     };
-    let slice_dir = manifest_dir
-        .join("target")
+    let slice_dir = helper_target_dir(manifest_dir)
         .join("swift-helper-slices")
         .join(format!("{executable_name}-{}", std::process::id()));
     if let Err(error) = std::fs::create_dir_all(&slice_dir) {
@@ -1142,6 +1092,12 @@ fn sign_helper_app(
     }
 }
 
+fn helper_target_dir(manifest_dir: &std::path::Path) -> std::path::PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("target"))
+}
+
 fn configure_swift_command(
     command: &mut std::process::Command,
     manifest_dir: &std::path::Path,
@@ -1151,7 +1107,7 @@ fn configure_swift_command(
     command
         .arg("-target")
         .arg(format!("{swift_arch}-apple-macosx{macos_version}"));
-    let module_cache = manifest_dir.join("target").join("swift-module-cache");
+    let module_cache = helper_target_dir(manifest_dir).join("swift-module-cache");
     std::fs::create_dir_all(&module_cache).expect("swift module cache dir should be created");
     command.arg("-module-cache-path").arg(module_cache);
 }

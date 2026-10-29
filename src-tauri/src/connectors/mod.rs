@@ -12,6 +12,7 @@
 //! enumerated without keychain prompts. Tokens are never logged and never
 //! serialized into errors.
 
+pub mod agent_tools;
 pub mod approvals;
 pub mod commands;
 pub mod github;

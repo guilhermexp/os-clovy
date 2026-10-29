@@ -19,7 +19,7 @@ export function userFacingFailureMessage(message?: string) {
 
 /** Failure sentences the desktop backend writes into a note
  * (`domain/processing.rs`: `user_facing_transcription_failure_message`,
- * `note_generation_failure_for_user`, and `clovy_api` for a missing provider
+ * `note_generation_failure_for_user`, and direct providers for a missing provider
  * key or oversized audio). Notes persist only that English
  * sentence, not its error code, so the sentence is the stable identifier:
  * each key's English text is byte-identical to what Rust stores, and the
@@ -28,7 +28,6 @@ const STORED_FAILURE_KEYS: MessageKey[] = [
   "notes.failure.noSpeech",
   "notes.failure.silenceSystem",
   "notes.failure.silenceMicrophone",
-  "notes.failure.billingTemporarilyUnavailable",
   "notes.failure.providerFailed",
   "notes.failure.serviceBusy",
   "notes.failure.generationBusy",
@@ -65,8 +64,11 @@ function friendlyFailureSegment(message: string) {
     friendly = translate("notes.failure.noSpeech");
   } else if (isInvalidClovyResponseMessage(body)) {
     friendly = translate("notes.failure.invalidResponse");
-  } else if (normalized.includes("metering_provider_failed")) {
-    friendly = translate("notes.failure.billingUnavailable");
+  } else if (
+    normalized.includes("metering_provider_failed") ||
+    normalized.startsWith("billing is temporarily unavailable")
+  ) {
+    friendly = translate("notes.failure.providerFailed");
   } else if (normalized.includes("upstream_provider_failed")) {
     friendly = translate("notes.failure.providerFailed");
   } else if (normalized.includes("authorization_denied")) {
@@ -105,7 +107,7 @@ export function NoteFailureBanner({ errorMessage, audioPreserved, onRetry }: Pro
   // don't need to reset this state ourselves; the catch covers the case
   // where onRetry rejects and the note stays in `failed`.
   const [retrying, setRetrying] = useState(false);
-  // Mirror the settings balance-refresh affordance: each click advances the
+  // Each retry click advances the
   // rotation by a full turn so the arrow sweeps once on press.
   const [spins, setSpins] = useState(0);
 

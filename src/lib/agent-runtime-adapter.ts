@@ -481,7 +481,14 @@ export function agentItemsToChatTurns(items: AgentItemDto[]): AgentChatTurn[] {
             return {
               ...base,
               role: "system",
-              parts: [{ type: "notice", kind: "credits", text: item.message }],
+              parts: [
+                {
+                  type: "notice",
+                  kind: "runtime",
+                  text: t("chat.notice.runtimeStopped"),
+                  retryable: false,
+                },
+              ],
             };
           }
           return {

@@ -2971,7 +2971,12 @@ mod tests {
         .unwrap();
         assert!(std::process::Command::new("/usr/bin/xcrun")
             .args(["swiftc", "-parse-as-library", "-module-cache-path"])
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/swift-module-cache"))
+            .arg(
+                std::env::var_os("CARGO_TARGET_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"))
+                    .join("swift-module-cache"),
+            )
             .arg(&model)
             .arg(native.join("lease-tests.swift"))
             .arg("-o")

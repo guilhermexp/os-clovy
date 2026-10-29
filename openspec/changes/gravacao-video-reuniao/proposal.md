@@ -27,7 +27,7 @@ Hoje o Clovy grava só áudio (microfone e sistema), e a nota sai só da transcr
 ## Impact
 
 - Captura nova (helper nativo com ScreenCaptureKit e AVFoundation), seguindo o contrato do helper de áudio do sistema (ADR-0004); `src-tauri/build.rs`, `tauri.macos.conf.json`, `Info.plist` (texto de uso da gravação de tela).
-- Rust: `audio/capture.rs` (ciclo de vida junto da sessão), `commands.rs` (início com vídeo, detecção da janela), `domain/types.rs`, migração nova e `db/repositories.rs` (artefato de vídeo), `domain/processing.rs` e `clovy_api.rs` (geração com vídeo e aviso), `llm/cli.rs` e `llm/mod.rs` (concessão de ferramentas só para esse caso).
+- Rust: `audio/capture.rs` (ciclo de vida junto da sessão), `commands.rs` (início com vídeo, detecção da janela), `domain/types.rs`, migração nova e `db/repositories.rs` (artefato de vídeo), `domain/processing.rs` e `providers/notes.rs` (geração com vídeo e aviso), `llm/cli.rs` e `llm/mod.rs` (concessão de ferramentas só para esse caso).
 - Frontend: `NoteEditor.tsx` (painel de opções), `use-recording-start-actions.ts`, `src/lib/tauri.ts`, aviso de reunião detectada (`meeting_hud.rs` e a HUD), faixa de aviso na nota, i18n en e pt-BR.
 - Docs: ADR nova (0071), `docs/llm-providers.md` (contrato de isolamento), `docs/audio-pipeline.md`, `CONTEXT.md` (termo novo), `PRIVACY.md`.
 - Dependência da máquina do usuário: skill em `~/.agents/skills/video-analysis`, `python3` e `ffmpeg`/`ffprobe` no PATH do shell de login. Sem elas, só a transcrição.

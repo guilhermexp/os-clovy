@@ -1,6 +1,6 @@
 //! The media group: `generate_image`, `edit_image`, and `generate_video` for
 //! a CLI turn, with the same arguments, limits, and results as the native
-//! agent's tools. Each call bills Clovy API (or the user's fal key) and
+//! agent's tools. Each call uses the user's fal key directly and
 //! writes its file into `artifacts/` of the bound session's workspace and a
 //! row of `agent_artifacts`, so the group needs a turn but no approval (parity
 //! with the native engine; names fixed in the `clovy-mcp-server` delta of the
@@ -26,11 +26,11 @@ use tauri::AppHandle;
 
 use super::computer_use::MAX_IMAGE_BASE64;
 use super::{ToolCtx, ToolGroup, TurnBinding};
-use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
-use crate::clovy_api::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use crate::mcp_server::protocol;
 use crate::mcp_server::turns::TURN_REQUIRED;
+use crate::providers::fal::{GeneratedImageDto, VideoJobDto, VideoStatusDto};
 use crate::providers::{EditImageRequest, GenerateImageRequest, GenerateVideoRequest};
 
 pub const GENERATE_IMAGE: &str = "generate_image";
@@ -70,7 +70,7 @@ impl ToolGroup for MediaTools {
     ) -> BoxFuture<'a, Result<Value, AppError>> {
         Box::pin(async move {
             let binding = ctx.binding.ok_or_else(turn_required)?;
-            let api = ClovyApiMedia { app: ctx.app };
+            let api = FalMedia { app: ctx.app };
             let polling = VideoPolling {
                 interval: VIDEO_POLL_INTERVAL,
                 wait: Some(MCP_VIDEO_WAIT),
@@ -123,7 +123,7 @@ fn descriptors() -> Vec<Value> {
     ]
 }
 
-/// What the media tools need from Clovy API, so tests can stand in for it.
+/// The media operations used by MCP tools, with an injectable test adapter.
 pub(crate) trait MediaApi: Send + Sync {
     fn generate_image(
         &self,
@@ -140,14 +140,13 @@ pub(crate) trait MediaApi: Send + Sync {
     fn video_status(&self, job_id: String) -> BoxFuture<'_, Result<VideoStatusDto, AppError>>;
 }
 
-/// The app's Clovy API client (the same provider commands the native tools
-/// and the media screens call).
-pub(crate) struct ClovyApiMedia<'a> {
+/// The direct fal provider commands shared with the media screens.
+pub(crate) struct FalMedia<'a> {
     /// Where finished videos are written; `None` without a Tauri runtime.
     pub app: Option<&'a AppHandle>,
 }
 
-impl MediaApi for ClovyApiMedia<'_> {
+impl MediaApi for FalMedia<'_> {
     fn generate_image(
         &self,
         request: GenerateImageRequest,
@@ -198,9 +197,7 @@ pub(crate) async fn call(
 ) -> Result<Value, AppError> {
     // A routine session runs only the tools its routine enables, as in the
     // native engine.
-    if crate::routines::routine_tool_allowed_for_session(pool, &binding.session_id, name).await?
-        == Some(false)
-    {
+    if !super::routine_tool_allowed(pool, binding, name).await? {
         return Err(AppError::new(
             "routine_tool_not_enabled",
             "This tool is not enabled for the routine.",
@@ -379,16 +376,9 @@ pub(crate) enum VideoJobOutcome {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct VideoPolling {
     pub interval: Duration,
-    /// `None` follows the job until it ends (native engine, which has its own
-    /// cancellation); `Some` answers `StillProcessing` after this long.
+    /// `None` follows the job until it ends; `Some` answers
+    /// `StillProcessing` after this long.
     pub wait: Option<Duration>,
-}
-
-impl VideoPolling {
-    pub(crate) const UNTIL_DONE: VideoPolling = VideoPolling {
-        interval: VIDEO_POLL_INTERVAL,
-        wait: None,
-    };
 }
 
 /// Runs one call. A new video sends its single submit and follows the job it
@@ -522,10 +512,9 @@ pub(crate) fn video_cancelled() -> AppError {
     AppError::new("agent_tool_cancelled", "Video generation was cancelled.")
 }
 
-/// Poll failures that leave the job on the server and clear once the user saves
-/// a valid key from the fal account that started it (a rotated key from that
-/// account works): Clovy API's three key answers, and this desktop failing to
-/// read the saved key, which keeps the poll from reaching Clovy API at all.
+/// Poll failures that preserve the fal job until the user saves a valid key
+/// from the account that started it (including a rotated key). An unreadable
+/// local key also preserves the job without sending a request.
 fn video_poll_waits_for_provider_key(error: &AppError) -> bool {
     matches!(
         error.code.as_str(),
@@ -572,25 +561,6 @@ async fn store_generated_image(
     let artifact_id =
         record_artifact(target, &path, "created", None, Some(&generated.mime_type)).await?;
     Ok((path, artifact_id))
-}
-
-/// The native tools' image result: the artifact with the image as a data
-/// URL, which the native chat renders.
-pub(crate) async fn persist_generated_image(
-    target: &ArtifactTarget<'_>,
-    prompt: &str,
-    generated: GeneratedImageDto,
-) -> Result<Value, AppError> {
-    let (path, _) = store_generated_image(target, &generated).await?;
-    Ok(json!({
-        "mediaType": "image",
-        "dataUrl": format!("data:{};base64,{}", generated.mime_type, generated.image_base64),
-        "path": crate::filesystem::normalize_path_for_external_use(&path),
-        "mimeType": generated.mime_type,
-        "model": generated.model,
-        "prompt": prompt,
-        "name": path.file_name().map(|name| name.to_string_lossy().into_owned())
-    }))
 }
 
 /// The MCP image result: a text block with the artifact (id, path,

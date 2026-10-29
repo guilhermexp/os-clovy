@@ -15,7 +15,7 @@ use super::tests::{by_id, data, notes_pool, Captured};
 use super::tools::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 use super::turns::{TurnBinding, TurnRegistry, TURN_EXPIRED};
 use super::*;
-use crate::agent_runtime::domain::AgentSafetyMode;
+use crate::agent_sessions::domain::AgentSafetyMode;
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 

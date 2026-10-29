@@ -18,6 +18,25 @@ const frame = {
 };
 
 describe("agent runtime adapter", () => {
+  it("keeps historical funding failures as inert runtime notices", () => {
+    const turns = agentItemsToChatTurns([
+      {
+        id: "historic",
+        sessionId: "session-1",
+        runId: "run-1",
+        sequence: 1,
+        createdAt: "2026-07-22T12:00:01Z",
+        kind: "error",
+        category: "credits",
+        message: "You need more credits to continue.",
+        retryable: true,
+      },
+    ]);
+    expect(turns[0].parts).toEqual([
+      { type: "notice", kind: "runtime", text: "Clovy stopped unexpectedly.", retryable: false },
+    ]);
+  });
+
   it("coalesces consecutive internal activity from one agent run", () => {
     const turns = agentItemsToChatTurns([
       {

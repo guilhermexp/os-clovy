@@ -1014,7 +1014,7 @@ function FolderSessionRow({
 }) {
   const t = useT();
   const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
-  const title = session.title.trim() || t("notes.share.untitledSession");
+  const title = session.title.trim() || t("chat.session.untitled");
 
   useEffect(() => {
     if (!menu) return;

@@ -1,16 +1,13 @@
-//! The browser group: the 14 Browser use tools of the native agent, served to
+//! The browser group: 14 Browser use tools served to
 //! an attended CLI turn over the same `BrowserBroker` (contract C4 of the
 //! change `cli-substitui-agente-nativo`; names fixed by its `clovy-mcp-server`
 //! delta). The broker keeps its own approval: a consequential action on an
 //! origin the user has not allowed parks in the browser approval tray
 //! (`browser_approvals_pending` / `browser_approval_respond`) and the tool
-//! answers `{parked: true, actionId}`, exactly as for the native agent. The
+//! answers `{parked: true, actionId}`. The
 //! approval broker is not asked again, so the user never sees two cards for
 //! one click. A turn nobody watches (routines) gets no browser: the tools are
 //! hidden and refuse with `unattended_requires_approval`.
-//!
-//! The catalog and the dispatch are shared with the native agent
-//! (`agent_runtime::api::tool_descriptors`, `agent_runtime::tools`).
 
 use std::sync::Arc;
 
@@ -55,7 +52,7 @@ fn session_only() -> Value {
 }
 
 /// `(name, description, JSON Schema of the arguments)` of every Browser use
-/// tool, shared by the native agent's catalog and this group.
+/// tool, used by the MCP catalog and dispatch group.
 pub(crate) fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
     vec![
         (
@@ -131,18 +128,8 @@ pub(crate) fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
     ]
 }
 
-/// The native agent's descriptors (`parameters`, no annotations).
-pub(crate) fn runtime_descriptors() -> Vec<Value> {
-    tool_specs()
-        .into_iter()
-        .map(|(name, description, parameters)| {
-            json!({ "name": name, "description": description, "parameters": parameters })
-        })
-        .collect()
-}
-
 /// Runs one Browser use tool in the attended context, where consequential
-/// actions park in the browser approval tray. Shared with the native agent.
+/// actions park in the browser approval tray. Called after the MCP broker authorizes the turn.
 pub(crate) async fn execute_attended(
     broker: &BrowserBroker,
     name: &str,

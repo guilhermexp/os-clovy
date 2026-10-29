@@ -37,6 +37,7 @@
       // Pre-paint theme bootstrap, same as index.html (plus a ?theme=
       // override so scripted screenshots can pick a theme per URL).
       (function () {
+        document.documentElement.setAttribute("data-theme", "dark");
         try {
           var requested = new URLSearchParams(location.search).get("theme");
           if (requested === "light" || requested === "dark") {
@@ -48,9 +49,9 @@
           var resolved =
             stored === "light" || stored === "dark"
               ? stored
-              : window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
+              : stored === "system" && !window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "light"
+                : "dark";
           document.documentElement.setAttribute("data-theme", resolved);
         } catch (e) {}
       })();

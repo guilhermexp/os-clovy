@@ -22,6 +22,21 @@ impl ToolGroup for NoteTools {
             json!({"name":GET_DICTATION,"description":"Read a retained Clovy dictation by id. Continue with nextTextOffset; offsets count characters.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"textOffset":{"type":"integer","minimum":0,"default":0,"description":"Character offset into the dictation."}},"required":["id"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false,"idempotentHint":true}}),
         ]
     }
+    fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Vec<Value>> {
+        Box::pin(async move {
+            let Some(binding) = ctx.binding else {
+                return Vec::new();
+            };
+            match super::routine_tool_allowed(&ctx.data.notes, binding, GET_DICTATION).await {
+                Ok(false) => Vec::new(),
+                Ok(_) => self.descriptors(ctx),
+                Err(error) => {
+                    tracing::warn!(code = %error.code, "Dictation tool permissions unavailable");
+                    Vec::new()
+                }
+            }
+        })
+    }
     fn call<'a>(
         &'a self,
         ctx: &'a ToolCtx<'a>,
@@ -29,9 +44,17 @@ impl ToolGroup for NoteTools {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<Value, AppError>> {
         Box::pin(async move {
-            ctx.binding.ok_or_else(|| {
+            let binding = ctx.binding.ok_or_else(|| {
                 AppError::new(TURN_REQUIRED, "Dictation reads require a Clovy turn.")
             })?;
+            // Recheck at dispatch: a routine's toolsets may have changed
+            // since its CLI received the catalog.
+            if !super::routine_tool_allowed(&ctx.data.notes, binding, GET_DICTATION).await? {
+                return Err(AppError::new(
+                    "routine_tool_not_enabled",
+                    "This tool is not enabled for the routine.",
+                ));
+            }
             let id = arguments
                 .get("id")
                 .and_then(Value::as_str)
@@ -97,21 +120,4 @@ pub(super) fn character_page(
     let page: String = text.chars().skip(offset).take(limit).collect();
     let end = offset.saturating_add(limit);
     (page, total, (end < total).then_some(end))
-}
-
-pub(crate) fn byte_page(text: &str, offset: usize, limit: usize) -> (&str, usize, Option<usize>) {
-    let start = floor_char_boundary(text, offset.min(text.len()));
-    let end = floor_char_boundary(text, start.saturating_add(limit).min(text.len()));
-    let end = if end == start && start < text.len() {
-        start + text[start..].chars().next().map_or(0, char::len_utf8)
-    } else {
-        end
-    };
-    (&text[start..end], start, (end < text.len()).then_some(end))
-}
-fn floor_char_boundary(text: &str, mut index: usize) -> usize {
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
 }

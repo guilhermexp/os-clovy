@@ -185,3 +185,18 @@ Frames and a local skill keep the integration narrow, at the cost of requiring
 user-installed tools and limiting video analysis to Claude. Video takes more
 disk space than audio; long meetings also increase inference time and usage.
 An unavailable analysis never silently claims to have inspected the video.
+
+## 2026-10-29 integration with direct providers
+
+ADR-0072 and ADR-0073 removed the native chat harness and Clovy API after
+this feature was proposed. Video note routing now lives in
+`providers/notes.rs`; the existing Groq transcription, OpenRouter and endpoint
+fallback routes stay direct. The CLI-only chat engine and Clovy MCP tools
+retain their existing boundaries. No retired module or service is restored.
+
+The video schema is catalog version 54 (`038_meeting_video.sql`), after
+main's immutable retirement versions 52 and 53. The earlier unpublished
+video version 52 belongs only to the isolated pre-integration proof; that
+profile must not be reopened with this build. A new proof requires a fresh
+run-owned identifier and profile. The migration regression upgrades a
+synthetic version-53 database and verifies existing stamps and history survive.

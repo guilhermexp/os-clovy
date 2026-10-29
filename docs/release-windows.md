@@ -34,14 +34,14 @@ Windows always starts with a new profile.
 
 The Windows installer supports the app shell, microphone
 recording, dictation shortcuts and paste, note generation, folders, and settings
-backed by Clovy API. macOS system-audio capture and Seatbelt
+using direct user-key providers or the selected CLI/endpoint Notes engine. macOS system-audio capture and Seatbelt
 sandbox features are macOS-only.
 
-Windows builds bundle the signed Node 24 agent sidecar, so Clovy can
-start the agent on a clean machine without Python, GitHub downloads, or a
-first-run runtime install. Sandboxed mode restricts host file tools to the
-workspace and disables shell execution on Windows. Unrestricted mode supports
-shell execution with approval for sensitive actions.
+Chat requires an installed CLI and its own login. Claude Code is the default,
+with Codex as the existing local fallback. The installer bundles the `clovy-mcp`
+relay for Clovy tools, not a model-and-tool loop. CLI execution policy and
+Clovy's local approval broker govern each turn; see
+[llm-providers.md](llm-providers.md#cli-chat-engine).
 
 ## Qualifying an unsigned build on native Windows
 
@@ -85,9 +85,8 @@ Start-Process "$env:LOCALAPPDATA\Clovy\clovy.exe"
 The installed app is branded as Clovy, but the current Windows binary on disk is
 `clovy.exe` under `$env:LOCALAPPDATA\Clovy`.
 
-Confirm the app launches as Clovy, the bundled agent starts on a clean VM with
-no Python installed, and Windows dictation can record from the microphone and
+Confirm the app launches as Clovy and an installed CLI starts with its own login, and Windows dictation can record from the microphone and
 paste into a normal app. Record from the microphone and generate a note against
-a running Clovy API. `Get-AuthenticodeSignature` reports `Valid` only for a
+the configured Groq key and selected Notes engine. `Get-AuthenticodeSignature` reports `Valid` only for a
 build signed with your own Authenticode certificate; an unsigned build reports
 `NotSigned`.

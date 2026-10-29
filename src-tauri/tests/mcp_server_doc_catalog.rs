@@ -10,9 +10,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
-use clovy_lib::agent_runtime::domain::AgentSafetyMode;
-use clovy_lib::agent_runtime::native_connectors::routine_tool_allowed;
+use clovy_lib::agent_sessions::domain::AgentSafetyMode;
 use clovy_lib::chat_engine::policy::{turn_policy, TurnPermissions};
+use clovy_lib::connectors::agent_tools::routine_tool_allowed;
 use clovy_lib::connectors::notion::runtime_name_to_provider;
 use clovy_lib::connectors::policy::{
     JUNE_GCAL_ACTIONS_SERVER, JUNE_GCAL_SERVER, JUNE_GITHUB_ACTIONS_SERVER, JUNE_GITHUB_SERVER,
@@ -203,13 +203,30 @@ async fn turn_bound_table_is_the_bound_catalog_for_each_kind_of_turn() {
     let bound = rows(&lines);
     assert!(!bound.is_empty());
     let notes = notes_pool().await;
-    for turn in [
+    // The tables describe the available catalog. Routine reads and skill
+    // discovery also require the saved toolsets; a missing routine fails closed.
+    let session = clovy_lib::agent_sessions::AgentRepository::new(notes.clone())
+        .create_session(
+            "Catalog",
+            "__clovy_cli_engine__:claude",
+            AgentSafetyMode::Sandboxed,
+            None,
+        )
+        .await
+        .unwrap();
+    let now = "2026-10-29T00:00:00Z";
+    sqlx::query::query("INSERT INTO routines (id, name, prompt, schedule, created_at, updated_at, metadata_json, tool_catalog_version) VALUES ('doc-routine', 'Catalog', 'List', 'every 1d', ?, ?, '{\"enabledToolsets\":[\"context_engine\",\"skills\"]}', 1)")
+        .bind(now).bind(now).execute(&notes).await.unwrap();
+    sqlx::query::query("INSERT INTO routine_runs (id, routine_id, agent_session_id, claim_token, trigger_kind, status, model, safety_mode, created_at, updated_at) VALUES ('doc-run', 'doc-routine', ?, 'claim', 'schedule', 'running', 'claude', 'sandboxed', ?, ?)")
+        .bind(&session.id).bind(now).bind(now).execute(&notes).await.unwrap();
+    for mut turn in [
         binding(CliKind::Claude, true),
         binding(CliKind::Claude, false),
         binding(CliKind::Codex, true),
         binding(CliKind::Codex, false),
         binding(CliKind::Copilot, true),
     ] {
+        turn.session_id = session.id.clone();
         let mut expected = every_client.clone();
         expected.extend(
             bound
@@ -261,6 +278,7 @@ fn claude_only_tools_are_kept_from_the_model_in_every_claude_turn() {
                 TurnPermissions {
                     safety_mode,
                     attended,
+                    routine_tools: None,
                 },
             );
             let mut args = policy.mcp_args.clone();

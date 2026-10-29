@@ -6,31 +6,12 @@ export type SuggestedModel = {
   id: string;
   /** Picker-only label. The persisted provider model id is unchanged. */
   label?: string;
-  /** Auto-router preference selected with this suggestion (0-100). */
-  costQuality?: number;
   /** One-line "when to choose it" guidance shown in the suggested model card. */
   reason: string;
 };
 
-// Auto owns the visible text suggestions, but image attachment recovery still
-// needs a concrete vision-capable model. Keep that operational fallback
-// independent from picker curation.
+// Historical image attachment recovery uses a concrete vision model.
 const PREFERRED_VISION_FALLBACK_IDS = ["moonshotai/kimi-k2.6"];
-
-/**
- * The composer pill's ghosted designation while Auto is selected ("Auto
- * Quality"): one word, since the pill is a glance surface. The thresholds
- * bucket any persisted cost-to-quality value onto the nearest of the three
- * suggested presets (20 / 50 / 100). Balanced shows too, even though it is
- * the default: a trigger that only sometimes names the preference reads as
- * two different controls.
- */
-export function autoPillDesignation(costQuality: number | undefined): string | undefined {
-  if (costQuality === undefined) return undefined;
-  if (costQuality < 34) return t("lib.suggested.autoEconomy");
-  if (costQuality > 66) return t("lib.suggested.autoQuality");
-  return t("lib.suggested.autoBalanced");
-}
 
 /**
  * Curated picks for the model picker's "Suggested" tab — the handful of
@@ -39,29 +20,6 @@ export function autoPillDesignation(costQuality: number | undefined): string | u
  * tools. No pick claims a privacy property: the catalog reports none for
  * these providers.
  *
- * Auto lives in the picker's pinned toggle section, not in these rows: the
- * suggested rows stay concrete models so they double as the landing spots
- * when Auto is switched off (the first pick is the toggle-off fallback).
- *
- * Curation snapshot (October 2026), from the public OpenRouter catalog and
- * Groq's speech-to-text docs:
- * - GLM 5.2: Clovy's default text model; text input, tools, structured
- *   output, 1M-token context.
- * - Kimi K3: newest Kimi flagship; text, image, and video input, tools,
- *   1M-token context.
- * - Kimi K2.6: Kimi with text and image input and tools, 256K-token context
- *   (also the image-attachment fallback below).
- * - GLM 5.1: previous GLM flagship; text input, tools, 200K-token context.
- * - Whisper Large v3 Turbo: Groq's multilingual default, lowest price per
- *   audio hour.
- * - Whisper Large v3: Groq's most accurate Whisper for error-sensitive audio.
- *
- * The default text model (DEFAULT_GENERATION_MODEL in the Rust providers
- * module, mirrored by the frontend and clovy-api defaults) is the first
- * generation pick here; keep them in sync when this changes.
- *
- * Ids are matched against the live catalog at render time, so a delisted
- * model silently drops out instead of rendering a dead row.
  */
 export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
   generation: [
@@ -101,7 +59,7 @@ function suggestion(id: string, reasonKey: MessageKey): SuggestedModel {
   };
 }
 
-// The Auto toggle's last-resort landing when the catalog is empty or still
+// The default concrete text model when the catalog is empty or still
 // loading: the leading curated pick, which mirrors DEFAULT_GENERATION_MODEL
 // in the Rust providers module — the factory default is safe to select
 // sight-unseen (the pill renders a name-only stub until the catalog arrives).
@@ -141,20 +99,18 @@ export function suggestedModelsForMode(
   key: string;
   model: ProviderModelDto;
   reason: string;
-  costQuality?: number;
 }> {
   return SUGGESTED_MODELS[mode].flatMap((suggested, index) => {
     const model = options.find((option) => option.id === suggested.id);
     if (!model) return [];
     return [
       {
-        key: `${suggested.id}:${suggested.costQuality ?? index}`,
+        key: `${suggested.id}:${index}`,
         model: {
           ...model,
           ...(suggested.label ? { name: suggested.label, description: suggested.reason } : {}),
         },
         reason: suggested.reason,
-        costQuality: suggested.costQuality,
       },
     ];
   });

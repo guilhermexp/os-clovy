@@ -7,17 +7,18 @@
     <script>
       // Pre-paint theme bootstrap. Keep in sync with src/lib/theme.ts; the
       // storage key is duplicated here so the attribute is set before the
-      // module bundle runs, avoiding a light-mode flash on dark systems.
+      // module bundle runs, avoiding a light-mode flash before the saved preference loads.
       (function () {
+        document.documentElement.setAttribute("data-theme", "dark");
         try {
           var stored =
             localStorage.getItem("os-clovy:theme");
           var resolved =
             stored === "light" || stored === "dark"
               ? stored
-              : window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
+              : stored === "system" && !window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "light"
+                : "dark";
           document.documentElement.setAttribute("data-theme", resolved);
           // Pre-paint brand accent + surface wash. Keep the id->[accent, wash]
           // map in sync with src/lib/brand.ts so a non-default accent doesn't

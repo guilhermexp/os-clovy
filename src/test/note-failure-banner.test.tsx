@@ -134,7 +134,7 @@ describe("NoteFailureBanner", () => {
     expect(screen.queryByText(/upstream_provider_failed/i)).not.toBeInTheDocument();
   });
 
-  it("shows a billing message for metering provider failures", () => {
+  it("shows a neutral retry message for historical metering failures", () => {
     render(
       <NoteFailureBanner
         errorMessage="Microphone: metering_provider_failed"
@@ -143,7 +143,7 @@ describe("NoteFailureBanner", () => {
       />,
     );
 
-    expect(screen.getByText(/Billing is temporarily unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/transcription provider could not process/i)).toBeInTheDocument();
     expect(screen.queryByText(/metering_provider_failed/i)).not.toBeInTheDocument();
   });
 

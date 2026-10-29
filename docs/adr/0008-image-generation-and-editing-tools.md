@@ -342,3 +342,12 @@ resend is the existing token refresh after a 401, which Clovy API answers before
 any provider call. Video creation follows the same rule: the desktop never
 resends it before a job id comes back, and status polls of a returned job id are
 safe to repeat.
+
+
+## Addendum - 2026-10-28: direct providers only
+
+The server transport, funding and model-classifier portions are superseded for this fork by
+[ADR-0073](0073-desktop-calls-user-providers-without-a-clovy-server.md). The desktop calls the user's providers directly; chat stays
+on CLI engines and Clovy tools remain local through MCP. The server is removed,
+not replaced or deployed with a breaking contract. Earlier decisions above
+remain as historical records; current behavior follows ADR-0073 and ADR-0072.

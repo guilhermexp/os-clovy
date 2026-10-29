@@ -1,16 +1,17 @@
 # Clovy privacy
 
-Clovy is private by architecture. Recordings, transcripts, notes, and agent
-session content stay on-device except when the user asks Clovy to run model
-inference through Clovy API or a configured own provider.
+Recordings, transcripts, notes, and session history are stored on-device.
+Audio or text leaves the device when a requested operation uses a provider:
+Groq for transcription, OpenRouter for remote notes and optional dictation
+cleanup, and fal for images/video. These calls use your own key directly.
+CLI chat and CLI note generation use the CLI's account; configured endpoints
+receive the content sent to them. Provider retention depends on that route.
 
-## No telemetry
-
-Clovy sends no usage statistics, telemetry, or issue reports, and has no
-account sign-in. It talks only to the Clovy API server you configure
-(`http://127.0.0.1:8080` by default, `CLOVY_API_URL` overrides) and to the
-model providers you set up yourself. With your own Groq or OpenRouter key
-saved, dictation and notes call that provider directly with only that key.
+Clovy sends no usage telemetry or issue reports, requires no Clovy account,
+and offers no sharing service. There is no Clovy inference server or local
+bearer token. Keys are stored in the operating system credential store and
+sent only to their own provider. Media downloads carry no provider credentials.
+Clovy's local MCP tools retain their turn-bound approval and data boundaries.
 
 ## Meeting video
 
@@ -29,9 +30,8 @@ audio. A crash may leave the last incomplete fragment unrecoverable.
 
 When Notes uses the Claude CLI, Clovy can run your installed `video-analysis`
 skill with local Python and FFmpeg. Extracted frames and transcript content
-are then processed by Claude through your configured Claude service. They
-are not sent to Clovy API for video analysis. The per-call temporary evidence
-directory is deleted after analysis, and Claude session persistence is
+are then processed by Claude through your configured Claude service. The per-call
+temporary evidence directory is deleted after analysis, and Claude session persistence is
 disabled. Clovy does not bundle the skill, Python or FFmpeg.
 
 Other Notes engines and unsuccessful analysis use only the transcript, with

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-15
 supersedes: ADR-0058 ("everything is read-only", for turn-bound connections only); ADR-0040 ("June ships no MCP server of its own", for CLI chat engines only)
 ---
@@ -76,3 +76,12 @@ Contract and tool names: OpenSpec change `cli-substitui-agente-nativo`
 - CLIs without MCP (pi, agy, cursor-agent) get no Clovy tools.
 - A later ADR records the removal of the native runtime and supersedes
   ADR-0038, ADR-0040, ADR-0013, and the runtime parts of ADR-0039.
+
+## 2026-10-28 acceptance
+
+The owner accepted removal of the native agent and all server inference routes.
+The exact quote and reduced-smoke evidence are recorded in
+`openspec/changes/cli-substitui-agente-nativo/tasks.md`, task 3.3. This accepts
+the architectural decision; it does not claim that the recorded native MCP
+smoke passed. Codex turns and a copied profile are not required for that smoke
+under the orchestration instruction of the same date.

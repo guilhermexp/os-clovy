@@ -8,7 +8,7 @@ use crate::agent_mcp::{
     self, AgentMcpError, AgentMcpRepository, AgentMcpSubsystem, KeychainMcpSecretStore,
     McpSecretStore, McpToolPolicy, RuntimeToolDescriptorJson,
 };
-use crate::agent_runtime::{AgentRepository, AgentSafetyMode};
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::approval_broker::{ApprovalKind, ApprovalOutcome, ApprovalRequest, ApprovalTurn};
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;

@@ -113,3 +113,64 @@ async fn dictation_pages_round_trip_and_enforce_retention_and_partition() {
     );
     assert!(broker.requests().is_empty());
 }
+
+async fn routine_dictation_fixture() -> (super::McpData, crate::mcp_server::turns::TurnBinding) {
+    let broker = TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Claude, false).await;
+    let pool = notes_pool().await;
+    let now = "2026-10-28T00:00:00Z";
+    query("INSERT INTO routines (id, name, prompt, schedule, created_at, updated_at, metadata_json, tool_catalog_version) VALUES ('dictation-routine', 'Daily', 'Summarise', 'every 1d', ?, ?, '{\"enabledToolsets\":[]}', 1)")
+        .bind(now).bind(now).execute(&pool).await.unwrap();
+    query("INSERT INTO routine_runs (id, routine_id, agent_session_id, claim_token, trigger_kind, status, model, safety_mode, created_at, updated_at) VALUES ('dictation-routine-run', 'dictation-routine', ?, 'claim', 'schedule', 'running', 'claude', 'sandboxed', ?, ?)")
+        .bind(&binding.session_id).bind(now).bind(now).execute(&pool).await.unwrap();
+    (data(pool, ActivityAccess::Off), binding)
+}
+
+#[tokio::test]
+async fn routine_dictation_catalog_requires_an_enabled_context_toolset() {
+    let (data, binding) = routine_dictation_fixture().await;
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        ..ToolCtx::unbound(&data)
+    };
+    assert!(!super::descriptors(&ctx)
+        .await
+        .iter()
+        .any(|tool| tool["name"] == "get_dictation"));
+    query("UPDATE routines SET metadata_json = '{\"enabledToolsets\":[\"context_engine\"]}' WHERE id = 'dictation-routine'")
+        .execute(&data.notes).await.unwrap();
+    assert!(super::descriptors(&ctx)
+        .await
+        .iter()
+        .any(|tool| tool["name"] == "get_dictation"));
+}
+
+#[tokio::test]
+async fn routine_dictation_dispatch_checks_permission_and_rechecks_after_revocation() {
+    let (data, binding) = routine_dictation_fixture().await;
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        ..ToolCtx::unbound(&data)
+    };
+    let args = json!({"id":"dictation-1"});
+    assert_eq!(
+        call(&ctx, "get_dictation", &args).await.unwrap_err().code,
+        "routine_tool_not_enabled"
+    );
+    query("UPDATE routines SET metadata_json = '{\"enabledToolsets\":[\"context_engine\"]}' WHERE id = 'dictation-routine'")
+        .execute(&data.notes).await.unwrap();
+    assert_eq!(
+        call(&ctx, "get_dictation", &args).await.unwrap()["id"],
+        "dictation-1"
+    );
+    query("UPDATE routines SET metadata_json = '{\"enabledToolsets\":[]}' WHERE id = 'dictation-routine'")
+        .execute(&data.notes).await.unwrap();
+    assert_eq!(
+        call(&ctx, "get_dictation", &args).await.unwrap_err().code,
+        "routine_tool_not_enabled"
+    );
+    assert!(!super::descriptors(&ctx)
+        .await
+        .iter()
+        .any(|tool| tool["name"] == "get_dictation"));
+}

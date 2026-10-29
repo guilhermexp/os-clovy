@@ -2,10 +2,10 @@
 
 Clovy is a Tauri desktop app that records meetings/dictation, transcribes
 the audio, turns the transcript into structured notes, and hosts an AI agent
-you can chat with over those notes. It runs under a fixed **local identity**
-against a **Clovy API** server (local by default), with no sign-in, billing,
-telemetry or companion app, and runs a Clovy-owned **agent harness** built on
-the OpenAI Agents SDK.
+you can chat with over those notes. It calls the user-configured providers
+directly, with no sign-in, billing service, local bearer token, telemetry or
+companion app. Chat runs on installed **CLI chat engines**, with
+Clovy tools exposed through the **Clovy MCP server** and local approval broker.
 
 This document is a glossary, not a spec. Terms are canonical; the `_Avoid_`
 lines are binding. Implementation, endpoints, and code shape live under
@@ -29,79 +29,57 @@ June-era data and config directories, WebView store and credential items into
 the new names. All or nothing; the source is never changed.
 _Avoid_: move, rename (the old profile stays), upgrade.
 
-**Clovy API**:
-The local backend service that holds the upstream AI provider keys and
-proxies the AI calls (transcription, generation, agent chat, web) for the Clovy
-app. It runs only in local mode: one local bearer token, no charges, bound to
-`127.0.0.1` by default. The desktop calls `http://127.0.0.1:8080` by default
-(`CLOVY_API_URL` overrides) with the **local identity**'s bearer token. Lives
-in the same repo as Clovy under its own Cargo workspace; Cargo crates use the
-`clovy-*` prefix and the binary is `clovy-api`.
-_Avoid_: backend, proxy, AI proxy (use **Clovy API**).
+**Direct provider**:
+An external service called directly by the desktop with the user's key:
+**Groq** for audio, **OpenRouter** for remote text, and **fal** for media.
+There is no Clovy inference server or service-managed credential fallback.
+_Avoid_: proxy, shared service key, automatic fallback.
 
-**OS Accounts**:
-The Open Software identity-and-credits platform that Clovy API's metering
-(`authorize`→`charge`) talks to outside its local mode. The desktop app no
-longer signs in to it or reads accounts, plans or balances from it; it uses the
-**local identity** instead.
-_Avoid_: accounts, the identity service, the auth service.
-
-**Local identity**:
-The desktop's only identity: the bearer token sent to Clovy API
-(`OS_CLOVY_LOCAL_DEV_BEARER_TOKEN`, default `local-dev-token`), from
-`src-tauri/src/local_identity.rs`. There is no sign-in, so the app is always
-connected.
-_Avoid_: account, login, session (for this), signed-in user.
+**Local account**:
+The account-free desktop state. It has no server identity or local bearer
+token. Operating-system profile isolation and per-provider credentials still
+apply.
+_Avoid_: signed-in user, local token, authenticated server session.
 
 **Upstream provider**:
-A third-party service Clovy API calls on the user's behalf: **Groq** for
-audio, **OpenRouter** for remote text, **fal** for images/video, and
-**Tavily** for web search/extraction. Service-managed keys belong to Clovy
-API, while an explicit **BYOK** key belongs to the user and is used only
-for that upstream provider's eligible actions (through Clovy API, or directly
-from the desktop for dictation, ADR-0065).
-_Avoid_: AI provider, model provider, vendor, "the LLM".
-
-**Model routing service**:
-Clovy API's remote text model selection and routing boundary, using
-OpenRouter's current catalog and capabilities. An effective hosting route
-does not inherit the historical Venice/Phala private-only policy.
-_Avoid_: gateway, router (unqualified).
+The external provider that performs an inference operation. For desktop
+operations this is a **direct provider**; a CLI or configured endpoint can
+choose its own hosting route.
+_Avoid_: the LLM (unqualified).
 
 **BYOK**:
-A user's own key for one of Clovy API's upstream providers, with inference
-funded by that provider account rather than Clovy credits. It is distinct
-from an **own provider**, which is a CLI or endpoint used instead of Clovy
-API.
-_Avoid_: own provider, Venice key (the credential is provider-specific).
+The user's own provider credential, saved in the operating system credential
+store and sent only to that provider. Usage is charged by that provider to
+that account. No key is substituted when it is missing or rejected.
+_Avoid_: service key, credit balance.
 
 **Own provider**:
-A text-generation provider the user brings, used instead of Clovy API: an
-**agent CLI** installed on the Mac (`claude`, `codex`, `pi`, `agy`,
-`cursor-agent`, `copilot`), run through the user's own login and
-subscription, or a named **OpenAI-compatible endpoint** (name, base URL, model,
-optional key kept in the Keychain). The legacy single "local model" is the
-endpoint `local`. Own providers never transcribe audio. See
+An installed **agent CLI**, using its own login, or a named
+**OpenAI-compatible endpoint** (base URL, model, optional credential-store
+key). Notes and activity use these through `llm::generate`; chat accepts only
+CLI engines. They never transcribe audio. See
 [docs/llm-providers.md](docs/llm-providers.md).
-_Avoid_: upstream provider (that is Clovy API's side), BYOK (that is an
-upstream key, used through Clovy API or sent directly to its provider for
-dictation), local model (unless the endpoint is on this machine).
+_Avoid_: local model (unless the endpoint actually runs on this machine).
 
 **Provider use (usage selection)**:
-Which provider serves each use: **chat**, **notes**, or **activity**. Clovy
-API is the default for the first two; activity defaults to **none**, never
-falls back to Clovy API, and requires a provider with `json_schema` structured
-output. The stored `dictationCleanup` slot stays on Clovy API: **dictation
-cleanup** never runs on an own provider.
+The engine assigned to **chat**, **notes**, or **activity**. Chat uses a CLI;
+notes use OpenRouter, CLI or endpoint. Activity defaults to **none** and
+requires measured `json_schema` output support. Dictation cleanup is fixed to
+OpenRouter and has no engine selection.
 _Avoid_: default model, active provider (unqualified).
+
+**Text model catalog**:
+OpenRouter's models with text output, including models without tools. The
+picker selection changes the remote note model, never the chat or Notes
+engine. Its description names the active Notes engine.
+_Avoid_: chat model picker, tool-capable models (as a text-mode requirement).
 
 **Dictation cleanup**:
 The optional pass that punctuates a **dictation** transcript and removes
-filler before it is pasted. Off by default; when on, it is one OpenRouter
-chat completion per chunk on the model chosen in the dictation settings,
-straight to OpenRouter with the user's **BYOK** key or through Clovy API
-without it. Never an agent CLI or endpoint.
-_Avoid_: dictation formatting, polish, rewrite (it keeps the speaker's words).
+filler before pasting. Off by default; when enabled, it calls OpenRouter with
+the user's key and selected cleanup model. A failure preserves the raw
+transcript and is disclosed in the HUD. Never a CLI or endpoint.
+_Avoid_: dictation formatting, rewrite (it keeps the speaker's words).
 
 **One-shot generation**:
 A single isolated prompt-to-answer call on an own provider (text, or JSON
@@ -111,24 +89,21 @@ Clovy's own calls. Distinct from an **agent run**.
 _Avoid_: completion (unqualified), query.
 
 **Chat engine**:
-What answers the messages of one chat session: **Clovy** (the agent harness,
-on a Clovy API model or a registered endpoint, with Clovy's own tools) or an
-**agent CLI** (a **CLI chat engine**: one CLI process per message that
-resumes the CLI's own conversation, with the CLI's own tools and, when the CLI
-accepts a per-run MCP configuration and the server is on, Clovy's tools
-through the **Clovy MCP server**). Stored as the session's model id
-(`__clovy_cli_engine__:<cli>` for a CLI). See
+The installed **agent CLI** that answers a chat session, one process per message,
+resuming its own conversation. Clovy tools reach a bound turn through the
+**Clovy MCP server** and the local approval broker. The session stores
+`__clovy_cli_engine__:<cli>` as its engine id. Registered endpoints and the
+text model used for notes are separate from chat. See
 [docs/llm-providers.md](docs/llm-providers.md#cli-chat-engine).
-_Avoid_: backend, runtime (that is the agent harness process), provider
-(unqualified).
+_Avoid_: backend, model (an engine is not a model), provider (unqualified).
 
 **Default chat engine**:
-The chat engine new work starts on: Claude Code, else Codex, when one is
-installed; otherwise the **legacy Clovy agent** (the agent harness as a chat
-engine, kept until its tools reach the Clovy MCP server). Routines run on it
-as an **unattended turn** (read-only tools, Clovy's MCP tools, and the web).
-See [ADR-0062](docs/adr/0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md).
-_Avoid_: native agent (say the legacy Clovy agent or the agent harness).
+Claude Code when installed, otherwise the existing Codex fallback. Without
+an eligible installed CLI, chat asks for installation or connection; it never
+starts a bundled agent or an endpoint. Routines use the CLI default as an
+**unattended turn** with their existing tool policy. See
+[ADR-0072](docs/adr/0072-cli-chat-replaces-the-native-agent.md).
+_Avoid_: native agent, legacy engine (neither is a current chat engine).
 
 **Structured-output level**:
 How strongly a provider can be held to a JSON schema: `none`, `prompt`,
@@ -311,7 +286,7 @@ dictation transcription, cleanup, history, and delivery without affecting a
 newer take. Cancellation is terminal; a late result never regains delivery
 authority.
 _Avoid_: recording session (that is note-backed), utterance (that identifies a
-metered Clovy API request, not the user-visible capture lifecycle).
+provider request, not the user-visible capture lifecycle).
 
 **Paste target**:
 The destination where a finished dictation transcript is delivered. For native
@@ -330,34 +305,27 @@ paste.
 _Avoid_: foreground app, frontmost app (both name a live value, not the pin);
 focus target.
 
-### Agent runtime
+### Agent sessions
 
 **Home conversation**:
 Clovy's persistent conversation on the home screen. Each message is a turn of
-the default CLI engine in the Home backing session, which works like any CLI
-session (tools, approvals, errors) and is the conversation's store. Each data
-partition has at most one Home backing session, omitted from focused-session
-lists and native recent-session shortcuts. Task cards from older builds still
-open the focused **agent session** they started; Home no longer starts one.
+the default CLI engine in the Home backing session, with the same tools,
+approvals, and errors as other CLI sessions. Each data partition has at most
+one Home backing session, omitted from focused-session lists. Task cards from
+older builds still open the focused **agent session** they started.
 _Avoid_: dashboard, default agent session, Hermes Home.
 
-**Agent harness**:
-The Clovy-owned local service that runs the OpenAI Agents SDK model and tool
-loop. It is a trusted orchestration process, while Rust owns secrets,
-persistence, approvals, and every machine-touching tool.
-_Avoid_: brain, Hermes, gateway.
-
-**Runtime protocol**:
-Clovy's versioned newline-delimited JSON-RPC contract over the agent harness's
-stdin and stdout. It carries run requests, host tool calls, streaming events,
-interruptions, cancellation, and shutdown without exposing a localhost port.
-_Avoid_: gateway, WebSocket control plane.
+**Agent sessions**:
+The engine-neutral Rust module that owns session and run records, ordered
+items, persisted events, and historical imports. CLI orchestration belongs to
+`chat_engine`; tool authority belongs to the MCP server and approval broker.
+_Avoid_: agent harness, model loop (neither describes session persistence).
 
 **Runtime mode**:
-The per-session execution policy applied by Rust tools: `sandboxed` or
-`unrestricted`. The trusted harness itself is not sandboxed. On macOS,
-sandboxed shell tools use Seatbelt. On Windows, sandboxed file tools are
-workspace-scoped and sandboxed shell execution is unavailable.
+The per-session execution policy: `sandboxed` or `unrestricted`. CLI launch
+flags enforce the engine's supported policy; Clovy tools independently enforce
+local grants and approvals through the broker. See the permission table in
+[docs/llm-providers.md](docs/llm-providers.md#cli-chat-engine).
 _Avoid_: permission, profile.
 
 ### Legacy agent data
@@ -381,8 +349,8 @@ _Avoid_: web browsing (that is `june_web` search/fetch), browser toolset
 
 **Browser access grant**:
 The stored, on-device opt-in that allows Browser use in attended sessions.
-Turning it off disables Clovy's internal `june_browser` MCP server and ends
-active browser broker sessions.
+Turning it off disables attended browser-tool access through the Clovy MCP
+server and ends active browser broker sessions.
 _Avoid_: browser permission, browser toggle.
 
 **Routine Browser use opt-in**:
@@ -394,10 +362,11 @@ _Avoid_: routine browser permission, global routine browsing.
 **Computer use**:
 The consent-gated capability (JUN-278 phase 2) that lets the agent operate
 Mac apps in the background without moving the user's real pointer, stealing
-keyboard focus, or changing the active Space. It uses the pinned runtime's
-computer-use toolset and a Clovy-bundled pinned cua-driver.
+keyboard focus, or changing the active Space. The turn-bound `computer_use`
+MCP tool uses the Rust broker and a Clovy-bundled pinned cua-driver.
 The first access to each verified target app requires one authorization for
-the current attended task; requires a vision-capable model. Bringing a parked
+the current attended task. Local grants, the driver, and macOS permissions
+determine availability (ADR-0067). Bringing a parked
 window into Clovy's current Stage Manager group is part of that authorized app
 use and does not ask again.
 _Avoid_: desktop automation (vague), computer_use toolset (that is the
@@ -413,8 +382,9 @@ _Avoid_: mouse cursor (ambiguous with the user's real pointer), cursor movement
 
 **Stored session id** vs **runtime session id**:
 The persistent id Clovy keys all UI and history on, versus the live process's
-per-resume id. `session.create` returns both; conflating them attaches
-traces/artifacts to the wrong identity.
+per-resume conversation id. The CLI conversation id is saved in run
+configuration; conflating it with the stored id attaches history to the wrong
+identity.
 _Avoid_: "the session id" (always say which).
 
 **Archived session**:
@@ -432,9 +402,9 @@ _Avoid_: completed (in user-facing copy; internal persistence names keep
 completed_at), "archived" for the Hermes flag without saying Hermes.
 
 **Agent run**:
-The user-initiated execution that starts with `run.start` and ends with a
-terminal runtime event or a persisted interruption, including its tool loop.
-One agent run keeps one captured model, safety mode, skill set, and MCP policy.
+The execution of one CLI chat request, including its tool activity, from
+submission to a terminal event. Pending tool approvals belong to that run.
+One agent run keeps one captured CLI, safety mode, skill set, and MCP policy.
 A later picker choice is applied at the next agent-run boundary, never inside
 the active run.
 _Avoid_: response (only the visible text), turn (ambiguous with transcript and
@@ -445,7 +415,7 @@ The ProseMirror chat input with slash commands and attachment chips.
 _Avoid_: textbox.
 
 **Issue report** (removed):
-The in-app bug / feedback report dialog and its `/v1/issue-reports` call were
+The in-app bug / feedback report dialog and its remote submission were
 removed from the desktop; see
 [ADR-0012](docs/adr/0012-direct-issue-report-submission.md). Don't reintroduce
 the term for new work.
@@ -486,17 +456,18 @@ _Avoid_: upload (unqualified).
 A plain-text token — `@note:<id>`, optionally followed by the quoted note
 title — that points the agent at one specific note. Inserted as a composer
 chip via `@`, seeded by "Ask Clovy" on a note, or pasted from "Copy note
-reference"; the agent resolves it on demand through `june_context`'s
-`get_meeting_note` tool (see
-[ADR-0010](docs/adr/0010-note-references-in-agent-chat.md)).
+reference"; the agent resolves it on demand through the Clovy MCP server's
+`get_note` tool (see [docs/agent-note-tools.md](docs/agent-note-tools.md);
+[ADR-0010](docs/adr/0010-note-references-in-agent-chat.md) records its origin).
 _Avoid_: note link (no URL or deep link is involved), note mention (the chip
 is UI; the reference is the token).
 
 **Skill / Toolset / MCP server**:
 A Skill is a bundled/installed capability pack; a Toolset is a togglable tool
-group; an MCP server is an external tool provider (Clovy ships no Clovy-managed
-MCP servers after ADR-0040; Clovy-owned capabilities are host tools in the agent
-loop). User-supplied external MCP servers remain supported through the `mcp_`
+group; an MCP server exposes tools to a client. Clovy-owned capabilities are
+served through `clovy-mcp`, with local policy and the approval broker as their
+authority ([ADR-0072](docs/adr/0072-cli-chat-replaces-the-native-agent.md)).
+User-supplied external MCP servers configured in Clovy remain supported through the `mcp_`
 dispatch prefix. Connector toolsets include `june_gmail`, `june_gcal`,
 `june_notion`, and their `*_actions` counterparts. Linear's official hosted
 MCP supplies a dynamic external tool inventory under the `mcp_linear_*`
@@ -561,8 +532,7 @@ The default (and, in v1, only) connector trust model: the OAuth grant is
 minted to the device and stored in the Keychain, and connector calls go
 straight from the device to the provider. OpenSoftware holds no credential that
 can read the user's mail and is not in the *connector* data path. (Routine
-model inference still follows the user's provider selection: Clovy API by
-default, or a local model. The "not in the data path" claim covers token
+model inference runs on the installed CLI selected for the routine. The "not in the data path" claim covers token
 custody and provider calls, never inference.)
 _Avoid_: on-device mode, private mode (unqualified). Contrast with **away
 mode** (the proposed Phase 3 TEE relay, not yet shipped).
@@ -602,9 +572,9 @@ snapshot), persona, memory (that is the Clovy **memory entry** store; the
 upstream agent memory toolset is a third thing again — qualify which).
 
 **Admin surface**:
-A Clovy-native management view for the local agent harness: skills, MCP servers,
-connector health, and similar settings. Rust owns configuration, secrets, and
-safety policy. The UI never exposes raw harness diagnostics.
+A Clovy-native management view for skills, MCP servers, connector health, and
+similar settings. Rust owns configuration, secrets, and safety policy. The UI
+exposes capabilities rather than process diagnostics.
 _Avoid_: admin panel, runtime UI.
 
 ### AI work & billing
@@ -614,8 +584,8 @@ A latency-critical Clovy mode where the user pushes-to-talk, speaks, releases,
 and expects cleaned-up text inserted into the **paste target**. A short phrase
 round-trips in a few hundred milliseconds; a sustained block of speech can take
 many seconds, and everything on the paste path must stay correct across that
-whole window. Distinct from **note transcription**. Goes through Clovy API in
-v1, so the binary holds no upstream provider key.
+whole window. Distinct from **note transcription**. Audio goes directly to
+Groq with the user's own key; missing keys stop the take with setup guidance.
 _Avoid_: speech-to-text (too generic — covers both dictation and note
 transcription).
 
@@ -680,49 +650,18 @@ and [ADR 0015](docs/adr/0015-video-generation-tools.md).
 _Avoid_: NSFW filter/toggle (say **safe mode**), censorship, "video safe
 mode" (there is only one safe mode).
 
-**Credit price** (per upstream model):
-The OS Accounts credits charged for supported work on an upstream model
-or action, using current catalog prices or the curated action schedule.
-Missing pricing is rejected before paid work; a list-price estimate is
-not an observed upstream account charge.
-_Avoid_: rate, tariff, cost (cost is the *upstream's* dollar cost to Clovy;
-credit price is what the user pays in credits).
-
-**Hold** / **authorize**:
-The pre-flight wallet reservation (`POST /authorize` to OS Accounts) that
-returns an **Action token** and an optional `cap_credits`, sized by a flat
-estimate. Expires by TTL if never charged.
-_Avoid_: pre-charge, lock.
-
-**Charge** / **settle**:
-Debiting the wallet (`POST /charge`) for usage already incurred, keyed by a
-deterministic **idempotency key** and clamped to the Hold's cap. Metering
-settles only *after* the upstream call succeeds, so a retry can't double-charge.
-_Avoid_: bill, deduction.
-
-**Action token**:
-The opaque token returned by authorize and consumed by charge, binding a
-single operation to its cap.
-_Avoid_: access token (that is the user's JWT).
-
-**Action slug**:
-The metered-operation id (e.g. `note_transcribe`, `dictate_transcribe`,
-`agent_chat`, `web_search`) that scopes idempotency keys and Hold TTLs and
-splits the bill in the dashboard.
-_Avoid_: operation, endpoint.
-
-**Plan** / **Credit grant** (removed):
-The desktop no longer reads OS Accounts plans, subscriptions or wallet grants,
-and nothing in the app is gated on a plan (Computer use included). Billing,
-funding, referrals and the plan upgrade were removed.
+**Provider price**:
+The provider's listed price for its model or operation, expressed in dollars
+and its stated unit. A catalog estimate is not proof of an account's charge.
+Clovy has no credit wallet, hold, funding gate, or settlement service.
+_Avoid_: credit price, Clovy credits, free inference (from a missing price).
 
 ### Clovy companion (removed)
 
 The desktop no longer has the companion: pairing, the encrypted transport,
 **linked devices**, remote Computer use approvals and the "Linked devices"
-settings tab were removed. The Clovy API **companion relay** and the
-`crates/clovy-companion-*` / `june-companion-*` crates still exist until a
-later change removes them; their wire terms live in
+settings tab and hosted relay were removed. Historical companion protocol
+crates remain outside this cut; their wire terms live in
 [docs/companion-protocol.md](docs/companion-protocol.md). Don't use the
 companion terms for new desktop work.
 
@@ -743,14 +682,14 @@ _Avoid_: "GitHub release" (unqualified).
 **Provider settings / Model mode**:
 The persisted model selection for each remote action, separate from
 **provider use** choices for CLI and endpoint engines. Current upstreams
-are Groq for audio, OpenRouter for remote text, fal for media, and Tavily
-for web.
+are Groq for audio, OpenRouter for remote text, and fal for media. Web search
+belongs to the CLI engine.
 _Avoid_: model config (unqualified).
 
 **Account snapshot** / **Avatar** / **AccountGate** / **FundingGate** (removed):
 The account state, the generated account avatar, the sign-in wall and the
 credits/upgrade wall were removed with OS Accounts sign-in; the app runs on the
-**local identity**.
+**local account**.
 
 **Agent HUD**:
 The floating agent overlay window, toggled from the menu bar and separate
@@ -864,7 +803,7 @@ dictations, and memories, without activity. Clients outside a Clovy chat
 turn get read-only tools; a CLI chat turn connects with a **turn binding** and
 also gets Clovy's turn-bound tools, whose writes go through the **approval
 broker** ([ADR-0063](docs/adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)).
-The legacy Clovy agent keeps its host tools.
+There is no legacy native agent; CLI turns reach Clovy tools through this relay.
 _Avoid_: Clovy-managed MCP server (the retired in-loop `june_*` servers), MCP
 bridge, plugin.
 
@@ -966,34 +905,22 @@ _Avoid_: do not disturb (that is the macOS Focus feature).
 
 ## Flagged ambiguities
 
-- **"proxy"** usually means **Clovy API**, the service in front of its upstream
-  providers, not an HTTP-CONNECT network proxy. Prefer **Clovy API**.
-  (Clovy also runs a separate on-device **provider proxy** for identity
-  stripping — qualify when you mean that.)
+- **"proxy"** must name a concrete component. Direct provider calls do not
+  pass through a Clovy inference service.
 - **"transcribe"** is overloaded between **dictation** (short, latency-
   critical) and **note transcription** (long, batch). Always qualify which.
-- **"credits"** always means the integer units Clovy API prices and meters
-  work in (`$1 = 1000 credits`, OS Accounts credits outside its local mode).
-  Never use it for upstream provider cost (which is dollars).
+- **"credits"** is historical billing vocabulary, not an app balance or
+  current price unit. Provider catalog prices use dollars and explicit units.
 - **"the session id"** is ambiguous — say **stored** (persistent, UI-facing) or
   **runtime** (live process) session id.
-- **"the model"** never means the agent harness; it is the LLM selected through
-  Clovy's model gateway and called by the runtime.
+- **"the model"** never means the chat engine. A CLI owns its chat model;
+  Clovy's text-model selection controls remote note generation independently.
 - **"channel"** is overloaded: a **Source** lane (mic/system) or a WAV
   interleave channel. Qualify.
 
 ## Example dialogue
 
-> **Dev:** "Can I add a Whisper model to the picker?"
+> **Dev:** "Does picking a text model switch chat away from Claude Code?"
 >
-> **PM:** "Sure, but make sure it has a **credit price** before you list it,
-> otherwise **Clovy API** rejects transcribe requests for that **upstream
-> model**. The picker shouldn't show models the server can't price."
->
-> **Dev:** "Got it. And the credit price covers both **dictation** and **note
-> transcription**, right?"
->
-> **PM:** "Yes, same per-second rate for the same model regardless of which
-> surface called it. The **action slug** differs (`dictate_transcribe` vs
-> `note_transcribe`) so we can split the bills, but the price comes from the
-> same entry."
+> **PM:** "No. It changes the remote model used when Notes selects OpenRouter.
+> The picker names the Notes engine, and chat keeps its CLI engine."

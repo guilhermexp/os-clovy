@@ -1,14 +1,14 @@
 #[cfg(target_os = "windows")]
 use crate::audio::turns::normalize_wav_for_transcription;
-use crate::clovy_api::{
-    dictate_cleanup, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
-    TranscriptionProviderResult, DEFAULT_DICTATION_CLEANUP_MODEL,
-};
 use crate::domain::{
     processing::{build_transcription_dictionary, TranscriptionDictionary},
     types::{AppError, ListDictationHistoryResponse},
 };
 use crate::providers::{configured_transcription_provider, PROVIDER_GROQ};
+use crate::providers::{
+    groq::{dictate_transcribe, DictateTranscribeRequest, TranscriptionProviderResult},
+    openrouter::{dictate_cleanup, DictateCleanupRequestParams, DEFAULT_DICTATION_CLEANUP_MODEL},
+};
 use chrono::Utc;
 use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -39,11 +39,9 @@ const DICTATION_CLEANUP_BASE_TIMEOUT_MS: u64 = 15_000;
 /// conservative floor of ~50 tokens/s for the cleanup model.
 const DICTATION_CLEANUP_TIMEOUT_MS_PER_BYTE: u64 = 5;
 const DICTATION_CLEANUP_MAX_TIMEOUT_MS: u64 = 60_000;
-/// No single cleanup request may wait longer than Clovy API's cleanup billing
-/// hold (`cleanup_hold_ttl_seconds`, 30s): a response that arrives after its
-/// hold expired could paste text whose charge no longer settles. The overall
-/// budget above spans multiple sequential chunk requests; this cap bounds
-/// each one. Keep in sync with the clovy-api config default.
+/// Bound each optional cleanup request to 30 seconds. The overall budget
+/// above can span multiple sequential chunks; a failed chunk preserves its
+/// original transcript so cleanup cannot hold the paste indefinitely.
 const DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS: u64 = 30_000;
 /// Above this size, cleanup runs chunked. Measured against the production
 /// prompt (JUN-212): the cleanup model punctuates ~800-byte passages of
@@ -1685,7 +1683,7 @@ pub fn setup(app: &mut tauri::App) {
     manage_settings(app.handle());
     // Keys, token, and the transcription connection are ready before the
     // first press (ditado-rapido D4).
-    crate::clovy_api::warm_dictation_route_if_idle();
+    crate::providers::groq::warm_dictation_route_if_idle();
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
     });
@@ -3241,7 +3239,7 @@ fn handle_shortcut_key_event(
     if edge == ShortcutKeyEdge::Down {
         // A pooled connection idle for over a minute is reopened while the
         // user speaks, not after release.
-        crate::clovy_api::warm_dictation_route_if_idle();
+        crate::providers::groq::warm_dictation_route_if_idle();
     }
 
     let Some(kind) = shortcut_kind_from_event(event) else {
@@ -5815,7 +5813,7 @@ fn dictation_transcription_provider(provider: String) -> Result<String, AppError
     if provider != PROVIDER_GROQ {
         return Err(AppError::new(
             "dictation_provider_not_configured",
-            "Dictation requires a Groq transcription model through Clovy's model service.",
+            "Dictation requires a Groq transcription model.",
         ));
     }
     Ok(provider)
@@ -5924,7 +5922,7 @@ impl DictationTranscriber for ServiceDictationTranscriber {
     }
 }
 
-/// The production cleaner: the chosen OpenRouter model through Clovy API.
+/// The production cleaner calls the chosen OpenRouter model directly.
 struct ServiceDictationCleaner;
 
 impl DictationCleaner for ServiceDictationCleaner {
@@ -6697,8 +6695,7 @@ fn is_blank_transcript(text: &str) -> bool {
     !text.chars().any(char::is_alphanumeric)
 }
 
-/// Clovy API answers an empty Groq transcript with a `no_speech` (or
-/// `dictation_text_empty`) failure rather than empty text.
+/// Accept the no-speech error spellings found in historical dictation results.
 fn is_whisper_no_speech_error(error: &AppError) -> bool {
     let message = error.message.to_ascii_lowercase();
     error.code == "no_speech"
@@ -7359,6 +7356,10 @@ fn stop_take_during_update(app: &AppHandle, take_id: String) {
 /// Lets a take start unless an update is installing; a refused start clears
 /// the shortcut state it prepared.
 fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), AppError> {
+    let key = crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq)
+        .inspect_err(|_| reset_shortcut_activation(app))?;
+    crate::providers::groq::require_groq_key(key.as_deref())
+        .inspect_err(|_| reset_shortcut_activation(app))?;
     crate::update_gate::UPDATE_GATE
         .begin_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE))
         .inspect_err(|_| reset_shortcut_activation(app))
@@ -7768,6 +7769,10 @@ fn hud_hide_delay_for_event(
 ) -> Duration {
     match event_type {
         Some("shutdown_ack") => Duration::ZERO,
+        // The webview normally hides immediately after paste, but keeps a
+        // missing-cleanup-key notice for 3 s before its exit animation.
+        // This native fallback must not cut that notice short.
+        Some("paste_completed") => Duration::from_millis(3500),
         Some("error") if event.is_some_and(is_silent_transcription_error) => {
             Duration::from_millis(900)
         }
@@ -7801,9 +7806,7 @@ fn is_silent_transcription_error(event: &serde_json::Value) -> bool {
         || normalized_message.contains("no recorded audio")
         || normalized_message.contains("audio file is too short")
         || normalized_message.contains("did not return any transcript")
-        // Clovy API collapses an empty dictation to a BadRequest whose message
-        // is the service reason (e.g. "no_speech", "dictation_text_empty").
-        // Treat those as "nothing captured", not a fault.
+        // Historical no-speech results mean nothing was captured.
         || normalized_message.contains("no_speech")
         || normalized_message.contains("dictation_text_empty")
 }
@@ -9378,6 +9381,7 @@ mod tests {
         peak_in_flight: std::sync::atomic::AtomicUsize,
         delay: Duration,
         fail_on: Option<String>,
+        failure_code: Option<&'static str>,
         /// Calls whose text contains it answer with empty text.
         blank_on: Option<String>,
         /// Answers without any sentence punctuation.
@@ -9398,7 +9402,10 @@ mod tests {
                 .as_deref()
                 .is_some_and(|marker| call.text.contains(marker))
             {
-                return Err(AppError::new("clovy_request_failed", "upstream failed"));
+                return Err(AppError::new(
+                    self.failure_code.unwrap_or("clovy_request_failed"),
+                    "upstream failed",
+                ));
             }
             if self
                 .blank_on
@@ -9576,6 +9583,47 @@ mod tests {
         assert_eq!(
             result.cleanup_skipped.map(|error| error.code).as_deref(),
             Some("dictation_cleanup_timeout")
+        );
+    }
+
+    #[test]
+    fn paste_completion_fallback_keeps_the_cleanup_notice_readable() {
+        // hud.ts keeps the missing-key notice for 3 s, then allows 240 ms
+        // for its exit animation plus a 60 ms timeout margin.
+        let notice_and_exit = Duration::from_millis(3300);
+        assert!(hud_hide_delay_for_event(Some("paste_completed"), None) >= notice_and_exit);
+        assert_eq!(
+            hud_hide_delay_for_event(Some("recording_discarded"), None),
+            Duration::from_millis(900)
+        );
+        assert_eq!(
+            hud_hide_delay_for_event(Some("shutdown_ack"), None),
+            Duration::ZERO
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_openrouter_key_pastes_raw_dictation_with_a_reason_for_the_notice() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            fail_on: Some("samir".to_string()),
+            failure_code: Some("openrouter_api_key_missing"),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("openrouter_api_key_missing")
         );
     }
 

@@ -4,8 +4,6 @@
     "publisher": "guilhermexp",
     "targets": ["nsis"],
     "resources": {
-      "../.tauri-agent-runtime/clovy-agent-runtime.exe": "native/bin/clovy-agent-runtime.exe",
-      "../.tauri-agent-runtime/clovy-agent-runtime.exe.sha256": "native/bin/clovy-agent-runtime.exe.sha256",
       "../extension/dist": "native/extension",
       "resources/agent-skills": "native/agent-skills",
       "native/bin/clovy-dictation-helper.exe": "native/bin/clovy-dictation-helper.exe"

@@ -4,8 +4,6 @@ import { t } from "../i18n";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
-import { ShareDialog } from "../components/share/ShareDialog";
-import { buildNotePayload } from "../lib/share-payload";
 import { GlobalRecorderPill } from "../components/recorder/GlobalRecorderPill";
 import { PermissionBanner } from "../components/permissions/PermissionBanner";
 import { Sidebar } from "../components/sidebar/Sidebar";
@@ -91,10 +89,8 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     setMoveDialogNoteIds,
     setMoveDialogSessionIds,
     setNoteChatOpen,
-    setNoteShareUrl,
     setOriginAllNotes,
     setOriginFolderId,
-    setShareNoteOpen,
     setSidebarCollapsed,
     setSidebarResizing,
     setSidebarTransition,
@@ -102,7 +98,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     settingsDetailScrollerActive,
     settingsReturnView,
     settingsTab,
-    shareNoteOpen,
     sidebarCollapsed,
     sidebarRecorderStatus,
     sidebarResizing,
@@ -347,26 +342,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           confirmLabel={t("app.deleteNote.confirm")}
           destructive
         />
-        {selectedNote ? (
-          <ShareDialog
-            key={selectedNote.id}
-            open={shareNoteOpen}
-            onClose={() => setShareNoteOpen(false)}
-            onLinkChange={setNoteShareUrl}
-            item={{
-              kind: "note",
-              itemId: selectedNote.id,
-              title: selectedNote.title,
-              // Notes share the rendered markdown: edited content when
-              // present, generated otherwise. Snapshot at share time.
-              buildPayload: () =>
-                buildNotePayload({
-                  title: selectedNote.title,
-                  markdown: selectedNote.editedContent ?? selectedNote.generatedContent ?? "",
-                }),
-            }}
-          />
-        ) : null}
       </div>
       <Dialog
         open={recordingInactivityPrompt !== null}
