@@ -187,7 +187,7 @@ impl TranscriptionModel {
         let mut completed = 0;
         for file in &self.manifest.files {
             let destination = self.dir.join(&file.path);
-            if verified(&destination, file) {
+            if verified_during_install(&destination, file, token).await? {
                 completed += file.bytes;
                 self.publish(
                     ModelState::Downloading {
@@ -236,7 +236,7 @@ impl TranscriptionModel {
             }
             let mut hash = Sha256::new();
             if offset > 0 {
-                hash_prefix(&part, &mut hash).map_err(|e| e.to_string())?;
+                hash = hash_resume_prefix(&part, token).await?;
             }
             let mut output = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -298,6 +298,49 @@ impl TranscriptionModel {
             }
         }
     }
+}
+
+async fn hash_resume_prefix(
+    path: &std::path::Path,
+    token: &CancellationToken,
+) -> Result<sha2::Sha256, String> {
+    use sha2::Digest;
+    use tokio::io::AsyncReadExt;
+    if token.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let mut input = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut hash = sha2::Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err("cancelled".into()),
+            read = input.read(&mut buffer) => read.map_err(|error| error.to_string())?,
+        };
+        if count == 0 {
+            return Ok(hash);
+        }
+        hash.update(&buffer[..count]);
+    }
+}
+
+async fn verified_during_install(
+    path: &std::path::Path,
+    file: &ModelFile,
+    token: &CancellationToken,
+) -> Result<bool, String> {
+    use sha2::Digest;
+    if !tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|m| m.is_file() && m.len() == file.bytes)
+    {
+        return Ok(false);
+    }
+    let hash = hash_resume_prefix(path, token).await?;
+    Ok(format!("{:x}", hash.finalize()) == file.sha256)
 }
 
 fn hash_prefix(path: &std::path::Path, hash: &mut sha2::Sha256) -> std::io::Result<()> {

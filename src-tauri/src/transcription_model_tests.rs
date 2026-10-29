@@ -238,3 +238,14 @@ async fn reopened_state(dir: PathBuf) -> ModelState {
     model.refresh_from_disk(|_| {}).await;
     model.state()
 }
+
+#[tokio::test]
+async fn parakeet_review_cancelled_resume_does_not_hash_the_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let part = temp.path().join("encoder.part");
+    std::fs::write(&part, b"partial encoder").unwrap();
+    let token = CancellationToken::new();
+    token.cancel();
+    assert!(hash_resume_prefix(&part, &token).await.is_err());
+    assert_eq!(std::fs::read(part).unwrap(), b"partial encoder");
+}

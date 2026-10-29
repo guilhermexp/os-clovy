@@ -146,18 +146,18 @@ impl Process {
 pub struct LocalTranscriber {
     executable: PathBuf,
     timeout: Duration,
-    process: Mutex<Option<Process>>,
+    process: Arc<Mutex<Option<Process>>>,
     stop: watch::Sender<u64>,
-    enabled: AtomicBool,
+    enabled: Arc<AtomicBool>,
 }
 impl LocalTranscriber {
     fn new(executable: PathBuf, timeout: Duration) -> Self {
         Self {
             executable,
             timeout,
-            process: Mutex::new(None),
+            process: Arc::new(Mutex::new(None)),
             stop: watch::channel(0).0,
-            enabled: AtomicBool::new(true),
+            enabled: Arc::new(AtomicBool::new(true)),
         }
     }
     async fn call(
@@ -212,6 +212,11 @@ impl LocalTranscriber {
             result = tokio::time::timeout(self.timeout, operation) => result.unwrap_or_else(|_| Err(failed())),
             _ = cancelled.changed() => Err(failed()),
         };
+        let result = if !self.enabled.load(Ordering::SeqCst) || *cancelled.borrow() != generation {
+            Err(failed())
+        } else {
+            result
+        };
         if result.is_ok() {
             *slot = process;
         } else if let Some(process) = process {
@@ -233,9 +238,17 @@ impl LocalTranscriber {
         self.enabled.store(false, Ordering::SeqCst);
         self.stop
             .send_modify(|generation| *generation = generation.wrapping_add(1));
-        if let Ok(mut slot) = self.process.try_lock() {
-            slot.take();
-        }
+        let process = self.process.clone();
+        let enabled = self.enabled.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut slot = process.lock().await;
+            // A later explicit Local selection may already have reused the client.
+            if !enabled.load(Ordering::SeqCst) {
+                if let Some(process) = slot.take() {
+                    process.stop().await;
+                }
+            }
+        });
     }
 }
 impl LocalTranscribe for LocalTranscriber {
@@ -340,6 +353,28 @@ while IFS= read -r line; do
  *) echo '{"ok":true,"text":"Olá mundo","tokens":[{"t":"▁Olá","start_ms":0,"end_ms":100},{"t":"▁mundo","start_ms":500,"end_ms":700}],"duration_ms":700,"language":"pt"}';;
  esac
 done"#;
+    #[tokio::test]
+    async fn parakeet_review_disable_reaps_a_process_returned_by_an_overlapping_call() {
+        let (_dir, helper) = fake(GOOD, Duration::from_secs(2));
+        helper.warm(Path::new("/model")).await.unwrap();
+        // A successful call owns the slot until it has restored its process.
+        let mut slot = helper.process.lock().await;
+        let process = slot.take();
+        helper.disable();
+        *slot = process;
+        drop(slot);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if helper.process.lock().await.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Deselecting Local must clear a helper restored by an overlapping call");
+    }
+
     #[tokio::test]
     async fn helper_reuses_load_serializes_and_shutdown_reaps() {
         let (dir, helper) = fake(GOOD, Duration::from_secs(2));

@@ -56,7 +56,7 @@ A suíte frontend completa passou: `logs/frontend-final-full.log`, 204 suítes/1
 ## 6. Documentação e integração
 
 - [x] 6.1 `docs/audio-pipeline.md` (backend Local, protocolo do helper, memória, comando do self-test), `PRIVACY.md` (áudio não sai da máquina com Local), `README.md` (como instalar o modelo), ADR novo `docs/adr/` sobre o motor local sem fallback, `CONTEXT.md` (glossário: motor de transcrição, modelo local). Verificar: `make org-references-check clovy-api-references-check` e demais checks de docs do `make verify` verdes.
-- [ ] 6.2 `make verify` completo verde (frontend, Rust, clippy, fmt, biome) e `openspec validate transcricao-local-parakeet --strict`. Verificar: logs em `.tmp/verify/transcricao-local-parakeet/`.
+- [x] 6.2 `make verify` completo verde (frontend, Rust, clippy, fmt, biome) e `openspec validate transcricao-local-parakeet --strict`. Verificar: logs em `.tmp/verify/transcricao-local-parakeet/`.
 - [ ] 6.3 Gate de revisão `scripts/review-pair.sh --gate` do harness (comando no brief) antes do commit final; achados tratados ou refutados aqui com caminho do `summary.md`. Verificar: exit 0, ou achados refutados registrados nesta seção.
 
 Evidência do grupo 6: documentação implementada; `logs/documentation-reference-checks.log` exit 0 e `logs/openspec-validate.log` exit 0. `pnpm check` e `make verify` encontram apenas formatação preexistente em `.mcp.json` e `opencode.json`, que o dono mandou preservar; não foram alterados nem staged. `logs/scoped-final-frontend-checks.log` comprova typecheck e Biome em `src/` e `scripts/`. A rodada `make -k verify` roda os demais alvos; seu frontend capturou o teste de rede ainda vermelho durante implementação, substituído pela suíte final verde acima. Não se declara `make verify` verde.
@@ -115,3 +115,22 @@ Achados em tratamento: o script dedicado `scripts/build-macos-release.sh` també
 Fila de builds: um daemon sccache criado pelo teste deste run reteve o lock depois de terminar. O PID exato foi encerrado (`logs/release-owned-cache-lock.log`); comandos Rust seguintes usam `RUSTC_WRAPPER=` somente no ambiente do comando, sem alterar configuração global.
 
 Rodada 3, correções concluídas: `logs/review-3-fixes-green.log` exit 0, 10 testes do plano de release e 6 testes do instalador. `build-macos-release.sh` prepara Local antes do Computer use; nenhum build de release foi executado. `TranscriptionModel::new` não faz I/O; setup agenda `refresh_from_disk` com `spawn_blocking`, publica o evento ao concluir e usa a mesma exclusão mútua de instalação/remoção. O teste confere ausência de marcador durante registro, recuperação/publicação posterior e que remoção pendente impede reviver Ready. D5 permanece intacta. A espera de quota de 1 minuto foi cumprida durante as correções; rodada 4 é a próxima tentativa.
+
+### Revisão pareada, rodada 4
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/4/summary.md`, exit **4**: OpenQodex concluiu; CodeRabbit sem quota, espera indicada de 7 minutos e 33 segundos, até 2026-10-29 20:29:51 UTC (`review-4-quota-wait.json`). Stash/pop exit 0 e hashes idênticos novamente (`review-4-wip-preservation.json`). Nenhum crédito extra, agente alternativo, mudança de conta/remoto ou push.
+
+Tratamento dos quatro achados:
+
+- `prepare-local-transcriber.mjs:100`: confirmado, nomes de certificado não servem como requisito SHA-1 do matcher. Resolver compartilhado `resolveDevSigningIdentity` agora converte a seleção explícita antes de comparar a assinatura; nenhuma alteração no Keychain.
+- `local_transcriber.rs:216`: confirmado, disable podia perder a corrida com uma chamada bem-sucedida. Teste determinístico devolve um processo ao slot depois de disable sob o mutex, reproduzindo retenção. A limpeza agora adquire o mutex de forma assíncrona e encerra/recolhe o processo; uma nova escolha explícita de Local não é desativada por limpeza antiga. Resultado tardio também revalida geração/seleção.
+- `transcription_model.rs:239`: confirmado, hash de retomada síncrono atrasava Cancelar. Verificação de arquivos reutilizados e prefixos agora usa leitura assíncrona em blocos de 64 KiB, com cancelamento entre leituras. O hash síncrono restante é exclusivo da recuperação em worker da rodada 3.
+- `transcription_model.rs:339`: refutado novamente por D5, `design.md:58`, que exige confiar no marcador e nos tamanhos após a instalação verificada. Re-hashear toda abertura contrariaria a decisão aceita. Limite de corrupção externa de mesmo tamanho permanece explícito nas refutações anteriores. A ausência do marcador e tamanhos divergentes continuam causando verificação.
+
+As duas regressões tiveram falhas reais antes das correções (`logs/review-4-races-red.log`, exit 101, 2 falhas). Verificação das correções em `logs/review-4-fixes-green.log`.
+
+Rodada 4, correções verdes: `logs/review-4-fixes-green.log` exit 0, 2 regressões Rust e 6 testes do resolver de assinatura. `make -k verify` da revisão atual em `logs/resumed-full-verify.log`; somente os dois erros de formatação preexistentes e autorizados podem ser excepcionados.
+
+`logs/resumed-full-verify.log`: frontend 204 suítes/1.914 testes, typecheck, fmt/Clippy all-targets e quatro crates companion passaram. O alvo check encontrou somente `.mcp.json`/`opencode.json`, como autorizado. Rust teve uma falha no teste existente `a_short_groq_retry_after_is_waited_then_retried` (3 chamadas em vez de 2); a repetição isolada passou sem alteração (`logs/groq-retry-isolated.log`, exit 0). A suíte Rust completa é repetida em `logs/resumed-all-rust-tests.log` com `RUST_TEST_THREADS=2` para reduzir concorrência. Não foi alterado o retry Groq nem enfraquecida sua asserção.
+
+6.2 concluída com as exceções expressamente autorizadas pelo dono: `logs/resumed-all-rust-tests.log` exit 0, 2.180 testes passaram/21 ignorados em 28 suítes com dois workers, incluindo o retry Groq. Somado aos demais alvos verdes de `logs/resumed-full-verify.log`, todos os checks estão cobertos; não se declara exit 0 literal de `make verify`, pois `.mcp.json` e `opencode.json` permanecem intocados e fora de formato. A falha de retry anterior é registrada como intermitente sob concorrência; nenhum código ou asserção Groq foi alterado para fazê-la passar.

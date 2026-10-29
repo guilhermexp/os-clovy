@@ -5,7 +5,11 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
-import { signatureSatisfies } from "./dev-signing-identity.mjs";
+import {
+  DEV_SIGNING_IDENTITY_ENV,
+  resolveDevSigningIdentity,
+  signatureSatisfies,
+} from "./dev-signing-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 if (
@@ -44,9 +48,15 @@ const identifier = computerUseBundleIdentifier({
   profile: release ? "release" : "debug",
   worktreeRoot: root,
 });
-const identity =
+const configuredIdentity =
   (release ? process.env.APPLE_SIGNING_IDENTITY : process.env.CLOVY_DEV_SIGNING_IDENTITY)?.trim() ||
   undefined;
+// The shared signature matcher compares the certificate hash, not its display name.
+const identity = configuredIdentity
+  ? resolveDevSigningIdentity({
+      env: { ...process.env, [DEV_SIGNING_IDENTITY_ENV]: configuredIdentity },
+    }).identity
+  : undefined;
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, stdio: "inherit", ...options });
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`);
