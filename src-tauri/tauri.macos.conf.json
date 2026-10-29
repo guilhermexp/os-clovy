@@ -2,10 +2,14 @@
   "productName": "Clovy",
   "build": {
     "runner": "../scripts/cargo-clovy-runner.sh",
-    "beforeBundleCommand": "bash scripts/bundle-nm-shim.sh && bash src-tauri/bundle-clovy-mcp.sh"
+    "beforeBundleCommand": "bash scripts/bundle-nm-shim.sh && bash src-tauri/bundle-clovy-mcp.sh",
+    "beforeBuildCommand": "pnpm run extension:build && node ./scripts/validate-extension-id.mjs && pnpm run computer-use:prepare -- --release && pnpm run local-transcriber:prepare && pnpm run build"
   },
   "bundle": {
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "resources": {
       "../.tauri-helper/Clovy Audio Capture.app": "native/bin/Clovy Audio Capture.app",
       "../.tauri-helper/Clovy Dictation Helper.app": "native/bin/Clovy Dictation Helper.app",
@@ -13,7 +17,8 @@
       "../.tauri-helper/clovy-mcp": "native/bin/clovy-mcp",
       "../.tauri-helper/Clovy Computer Use Driver.app": "native/bin/Clovy Computer Use Driver.app",
       "../extension/dist": "native/extension",
-      "resources/agent-skills": "native/agent-skills"
+      "resources/agent-skills": "native/agent-skills",
+      "../.tauri-helper/Clovy Local Transcriber.app": "native/bin/Clovy Local Transcriber.app"
     },
     "macOS": {
       "bundleName": "Clovy",

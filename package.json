@@ -26,7 +26,9 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "format": "biome format --write .",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p extension"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p extension",
+    "local-transcriber:prepare": "node scripts/prepare-local-transcriber.mjs",
+    "local-transcriber:self-test": "node scripts/local-transcriber-self-test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

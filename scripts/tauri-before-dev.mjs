@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,6 +61,13 @@ function exitFromChild(code, signal) {
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => exitFromChild(0, signal));
 }
+
+const localHelper = spawnSync(
+  process.execPath,
+  [path.join(rootDir, "scripts/prepare-local-transcriber.mjs")],
+  { cwd: rootDir, env: process.env, stdio: "inherit" },
+);
+if (localHelper.status !== 0) process.exit(localHelper.status ?? 1);
 
 if (process.env.CLOVY_DEV_PREPARE_ONLY === "1") {
   process.exit(0);
