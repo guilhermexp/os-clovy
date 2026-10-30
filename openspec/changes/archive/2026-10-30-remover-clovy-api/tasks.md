@@ -97,6 +97,8 @@ OpenSpec estrito passou (`group6-openspec-final.log`); tracker QA 4/4 passou (`g
   O servidor falso precisa registrar zero requisições. Evidência em `.tmp/verify/remover-clovy-api/`.
 - [x] 7.3 Rodar `/Users/guilhermevarela/orchestrator.v5/scripts/review-pair.sh --gate` antes do commit final e tratar os achados. Verificar: exit 0, ou achados refutados registrados aqui com o caminho do `summary.md`.
 
+Arquivamento (2026-10-30): o dono autorizou arquivar esta change com a 7.2 ainda aberta, para liberar o arquivamento de `transcricao-local-parakeet`, que parte destes requisitos. A 7.2 não foi executada nem é declarada como provada; os testes manuais com chaves reais seguem como pendência do dono, fora do OpenSpec.
+
 ## Workflow follow-up
 
 - Arquivar esta change e `cli-substitui-agente-nativo` depois da revisão e atualizar o `AGENTS.md` do projeto.

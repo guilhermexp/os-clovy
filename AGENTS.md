@@ -45,7 +45,7 @@ os-clovy/
 │   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated local socket, read-only tools/resources (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
 │   ├── src/chat_engine/     # agent CLIs as a chat session's engine (Home included, ADR-0064): resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface; every command invoked from `src/` must be in `lib.rs` `generate_handler!` (guard: `src/test/tauri-command-registry.test.ts`)
-│   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060) + `mac-local-transcriber/` (SwiftPM + FluidAudio, pinned model manifest in `resources/local-transcriber-model.json`, built by `scripts/prepare-local-transcriber.mjs`)
+│   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060) + `mac-local-transcriber/` (SwiftPM + FluidAudio, pinned model manifest in `resources/local-transcriber-model.json`, built by `scripts/prepare-local-transcriber.mjs`; plain `cargo` builds bundle only a placeholder, so local transcription needs `pnpm local-transcriber:prepare`)
 ├── docs/                    # see docs/index.md — ADRs, subsystem docs, runbooks, PRDs, QA
 ├── specs/                   # Spec Kit feature specs (001-003)
 ├── spec/                    # enforceable coding rules (see spec/index.md) — distinct from specs/
