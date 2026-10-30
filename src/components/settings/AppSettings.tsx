@@ -1830,6 +1830,7 @@ export function AppSettings({
                   <LocalTranscriptionSettings
                     supported={providerSettings.localTranscriptionSupported === true}
                     provider={displayProviderSettings.transcriptionProvider}
+                    model={displayProviderSettings.transcriptionModel}
                     readOnly={showingPartitionModels}
                     onSelect={async (modelId) => {
                       closeModelPicker();

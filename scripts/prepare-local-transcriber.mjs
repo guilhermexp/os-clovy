@@ -42,6 +42,9 @@ const bundle = path.join(root, ".tauri-helper/Clovy Local Transcriber.app");
 const contents = path.join(bundle, "Contents");
 const executable = path.join(contents, "MacOS/clovy-local-transcriber");
 const stamp = path.join(contents, "Resources/pin.json");
+// Signing changes executable bytes. Keep the post-sign digest outside the sealed bundle.
+const outputDigest = path.join(root, ".tauri-helper/local-transcriber-executable.sha256");
+const executableDigest = () => createHash("sha256").update(readFileSync(executable)).digest("hex");
 const config = JSON.parse(readFileSync(path.join(root, "src-tauri/tauri.conf.json"), "utf8"));
 const release = process.argv.includes("--release");
 const identifier = computerUseBundleIdentifier({
@@ -65,7 +68,9 @@ function run(command, args, options = {}) {
 const reusable =
   existsSync(executable) &&
   existsSync(stamp) &&
-  readFileSync(stamp, "utf8") === `${fingerprint}\n${identifier}\n`;
+  readFileSync(stamp, "utf8") === `${fingerprint}\n${identifier}\n` &&
+  existsSync(outputDigest) &&
+  readFileSync(outputDigest, "utf8").trim() === executableDigest();
 if (!reusable) {
   run("swift", [
     "build",
@@ -123,6 +128,7 @@ if (!reusable || !signatureValid) {
   ]);
 }
 run("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle]);
+writeFileSync(outputDigest, `${executableDigest()}\n`);
 console.error(
   reusable ? "Reusing Local transcriber helper." : "Prepared Local transcriber helper.",
 );

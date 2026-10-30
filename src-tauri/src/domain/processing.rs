@@ -2658,8 +2658,8 @@ fn note_route_for_backend(
             // A run admitted as Local never sends its remaining audio to Groq.
             // Switching engines terminates that helper; an explicit retry uses the new choice.
             Err(AppError::new(
-                "local_transcriber_failed",
-                crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE,
+                "transcription_engine_changed",
+                TRANSCRIPTION_ENGINE_CHANGED_MESSAGE,
             ))
         }
         TranscriptionBackend::Groq { key, .. } => note_route_from(Ok(Some(key)), model),
@@ -11548,7 +11548,8 @@ mod tests {
                 async {
                     let error = note_route(crate::providers::transcription::LOCAL_MODEL.into())
                         .unwrap_err();
-                    assert_eq!(error.code, "local_transcriber_failed");
+                    assert_eq!(error.code, "transcription_engine_changed");
+                    assert_eq!(error.message, TRANSCRIPTION_ENGINE_CHANGED_MESSAGE);
                 },
             )
             .await;

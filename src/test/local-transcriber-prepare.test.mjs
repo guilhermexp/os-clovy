@@ -1,0 +1,92 @@
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import vm from "node:vm";
+import { afterEach, expect, it } from "vitest";
+
+const script = fs.readFileSync(path.resolve("scripts/prepare-local-transcriber.mjs"), "utf8");
+const sandboxes = [];
+afterEach(() => {
+  for (const root of sandboxes.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
+function sandbox() {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "clovy-local-build-"));
+  sandboxes.push(root);
+  const source = path.join(root, "src-tauri/native/mac-local-transcriber");
+  fs.mkdirSync(path.join(source, "Sources"), { recursive: true });
+  const hash = createHash("sha256");
+  for (const file of [
+    "Package.swift",
+    "Package.resolved",
+    "Sources/main.swift",
+    "FluidAudio-LICENSE",
+  ]) {
+    fs.writeFileSync(path.join(source, file), file);
+    hash.update(file).update("\0").update(file).update("\0");
+  }
+  fs.writeFileSync(
+    path.join(source, "pin.json"),
+    JSON.stringify({ sourceSha256: hash.digest("hex") }),
+  );
+  fs.writeFileSync(
+    path.join(root, "src-tauri/tauri.conf.json"),
+    JSON.stringify({ identifier: "test.local" }),
+  );
+  const bin = path.join(root, "build");
+  fs.mkdirSync(bin);
+  const executable = path.join(
+    root,
+    ".tauri-helper/Clovy Local Transcriber.app/Contents/MacOS/clovy-local-transcriber",
+  );
+  let builds = 0;
+  function run() {
+    // Run the real packaging logic, with filesystem fixtures and system tools isolated.
+    vm.runInNewContext(
+      script.replace(/^import[\s\S]*?;\n/gm, "").replaceAll("import.meta.url", "scriptUrl"),
+      {
+        ...fs,
+        createHash,
+        path,
+        fileURLToPath,
+        scriptUrl: pathToFileURL(path.join(root, "scripts/prepare-local-transcriber.mjs")).href,
+        process: { platform: "darwin", env: {}, argv: [] },
+        console: { error() {} },
+        computerUseBundleIdentifier: () => "test.local.helper",
+        signatureSatisfies: () => true,
+        spawnSync(command, args) {
+          if (command === "swift") {
+            if (args.includes("--show-bin-path")) return { status: 0, stdout: bin };
+            builds += 1;
+            fs.writeFileSync(path.join(bin, "clovy-local-transcriber"), "trusted-build");
+          } else if (command === "/usr/bin/codesign" && args.includes("--force")) {
+            fs.appendFileSync(executable, "-signed");
+          }
+          return { status: 0 };
+        },
+      },
+    );
+  }
+  return { run, executable, builds: () => builds };
+}
+
+it("reuses unchanged signed output without invoking Swift again", () => {
+  const build = sandbox();
+  build.run();
+  build.run();
+  expect(build.builds()).toBe(1);
+  expect(fs.readFileSync(build.executable, "utf8")).toBe("trusted-build-signed");
+});
+
+it("rebuilds modified executable bytes instead of blessing them with a new signature", () => {
+  const build = sandbox();
+  build.run();
+  fs.writeFileSync(build.executable, "altered-build-signed");
+  build.run();
+  expect(build.builds()).toBe(2);
+  expect(fs.readFileSync(build.executable, "utf8")).toBe("trusted-build-signed");
+  build.run();
+  expect(build.builds()).toBe(2);
+});

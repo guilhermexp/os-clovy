@@ -162,3 +162,14 @@ it.each([
     }),
   ).toBeEnabled();
 });
+
+it("restores the Groq model selected before switching to Local", async () => {
+  api.state.mockResolvedValue({ state: "ready", bytes: 632162964 });
+  const p = props();
+  const { rerender } = render(<LocalTranscriptionSettings {...p} model="whisper-large-v3" />);
+  await userEvent.click(await screen.findByRole("radio", { name: /Local/ }));
+  expect(p.onSelect).toHaveBeenLastCalledWith("parakeet-ultra");
+  rerender(<LocalTranscriptionSettings {...p} provider="local" model="parakeet-ultra" />);
+  await userEvent.click(screen.getByRole("radio", { name: /Groq/ }));
+  expect(p.onSelect).toHaveBeenLastCalledWith("whisper-large-v3");
+});

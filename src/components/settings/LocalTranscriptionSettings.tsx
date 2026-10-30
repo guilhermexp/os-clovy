@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import {
@@ -14,17 +14,29 @@ import "./local-transcription-settings.css";
 export function LocalTranscriptionSettings({
   supported,
   provider,
+  model,
   onSelect,
   onRemoved,
   readOnly = false,
 }: {
   supported: boolean;
   provider: string;
+  model?: string;
   onSelect: (model: string) => Promise<void>;
   onRemoved: (result?: { switched_to_groq: boolean }) => Promise<void>;
   readOnly?: boolean;
 }) {
   const t = useT();
+  // D6 stores only the active model. Remember the Groq choice while this settings view is open.
+  const lastGroqModel = useRef("whisper-large-v3-turbo");
+  useEffect(() => {
+    if (
+      provider === "groq" &&
+      (model === "whisper-large-v3" || model === "whisper-large-v3-turbo")
+    ) {
+      lastGroqModel.current = model;
+    }
+  }, [provider, model]);
   const [state, setState] = useState<LocalTranscriptionModelState>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -100,7 +112,7 @@ export function LocalTranscriptionSettings({
             type="radio"
             name="transcription-engine"
             checked={provider === "groq"}
-            onChange={() => void action(() => onSelect("whisper-large-v3-turbo"))}
+            onChange={() => void action(() => onSelect(lastGroqModel.current))}
           />
           <span>
             <span className="local-transcription-name">
