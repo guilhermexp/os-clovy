@@ -92,6 +92,22 @@ it("reuses unchanged signed output without invoking Swift again", () => {
   expect(fs.readFileSync(build.executable, "utf8")).toBe("trusted-build-signed");
 });
 
+it("drops the cargo placeholder from built and reused helpers", () => {
+  const build = sandbox();
+  const placeholder = path.join(
+    path.dirname(path.dirname(build.executable)),
+    "Resources/PLACEHOLDER.md",
+  );
+  fs.mkdirSync(path.dirname(placeholder), { recursive: true });
+  fs.writeFileSync(placeholder, "No local transcriber in this build.\n");
+  build.run();
+  expect(fs.existsSync(placeholder)).toBe(false);
+  fs.writeFileSync(placeholder, "No local transcriber in this build.\n");
+  build.run();
+  expect(build.builds()).toBe(1);
+  expect(fs.existsSync(placeholder)).toBe(false);
+});
+
 it("rebuilds modified executable bytes instead of blessing them with a new signature", () => {
   const build = sandbox();
   build.run();

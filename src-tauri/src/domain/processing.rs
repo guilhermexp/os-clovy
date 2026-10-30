@@ -786,6 +786,18 @@ pub fn manual_notes_for_generation(note: &NoteDto) -> Option<String> {
     })
 }
 
+/// The local day the recording started, for the note prompt's summary line.
+/// A note can be created long before it is recorded, so the note's own
+/// creation time is not used.
+async fn note_recorded_on(repos: &Repositories, session_id: &str) -> Option<String> {
+    repos
+        .recording_session_started_at(session_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|started| crate::providers::notes::recording_date(&started))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 pub(crate) async fn process_saved_audio(
@@ -1005,6 +1017,7 @@ pub(crate) async fn process_saved_audio(
         transcript_source_labels: false,
         manual_notes,
         language: transcript.language,
+        recorded_on: note_recorded_on(repos, session_id).await,
     })
     .await
     {
@@ -1854,6 +1867,7 @@ async fn process_saved_source_audio_pipeline(
         transcript_source_labels,
         manual_notes,
         language: None,
+        recorded_on: note_recorded_on(repos, session_id).await,
     })
     .await
     {
@@ -5426,6 +5440,28 @@ mod tests {
             .await
             .expect("recording session");
         (repos, recording_session_id)
+    }
+
+    #[tokio::test]
+    async fn note_date_is_the_day_the_recording_started_not_when_the_note_was_created() {
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let started = "2026-10-28T15:00:00.000Z";
+        sqlx::query::query("UPDATE notes SET created_at = '2026-01-05T15:00:00.000Z'")
+            .execute(&repos.pool)
+            .await
+            .expect("age the note");
+        sqlx::query::query("UPDATE recording_sessions SET started_at = ? WHERE id = ?")
+            .bind(started)
+            .bind(&session_id)
+            .execute(&repos.pool)
+            .await
+            .expect("date the recording");
+
+        assert_eq!(
+            note_recorded_on(&repos, &session_id).await,
+            crate::providers::notes::recording_date(started)
+        );
+        assert_eq!(note_recorded_on(&repos, "missing-session").await, None);
     }
 
     #[tokio::test]

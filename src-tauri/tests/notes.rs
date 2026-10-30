@@ -285,6 +285,45 @@ async fn generated_note_derives_title_from_all_section_headings() {
 }
 
 #[tokio::test]
+async fn generated_note_title_uses_subjects_not_fixed_sections() {
+    let repos = repos().await;
+    let note = repos.create_note("default", None).await.expect("note");
+
+    let generated = repos
+        .set_generated_note(
+            &note.id,
+            Some("New note".to_string()),
+            "# Resumo\n\nReunião gravada em 28 de outubro de 2026.\n\n# Discussão\n\n## Integrações DHL e Azul\n\n- Falta a credencial.\n\n## Site para a loja de carros\n\n- Vitrine sem venda online.\n\n# Tarefas\n\n- **Cliente:** enviar o logo"
+                .to_string(),
+        )
+        .await
+        .expect("generated note");
+
+    assert_eq!(
+        generated.title,
+        "Integrações DHL e Azul and Site para a loja de carros"
+    );
+}
+
+#[tokio::test]
+async fn generated_note_title_uses_continuation_subjects() {
+    let repos = repos().await;
+    let note = repos.create_note("default", None).await.expect("note");
+
+    let generated = repos
+        .set_generated_note(
+            &note.id,
+            Some("New note".to_string()),
+            "# Continuação — 30 de outubro de 2026\n\nNesta parte.\n\n## Discussão\n\n### Credencial da Azul\n\n- Encontrada.\n\n## Tarefas\n\n- **Dev:** deploy"
+                .to_string(),
+        )
+        .await
+        .expect("generated note");
+
+    assert_eq!(generated.title, "Credencial da Azul");
+}
+
+#[tokio::test]
 async fn generated_note_appends_to_existing_generated_content() {
     let repos = repos().await;
     let note = repos.create_note("default", None).await.expect("note");

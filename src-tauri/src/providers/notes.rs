@@ -16,6 +16,17 @@ pub struct GenerationRequest {
     pub transcript_source_labels: bool,
     pub manual_notes: Option<String>,
     pub language: Option<String>,
+    /// Local calendar day the note was recorded (`YYYY-MM-DD`), see [`recording_date`].
+    pub recorded_on: Option<String>,
+}
+
+/// The local calendar day of a stored RFC 3339 timestamp, as `YYYY-MM-DD`.
+pub fn recording_date(stored: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(stored).ok().map(|at| {
+        at.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string()
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,8 +174,13 @@ pub(super) fn note_transcript_cleanup_user_message(text: &str, context: Option<&
 
 pub(super) fn local_note_user_message(request: &GenerationRequest) -> String {
     let title_hint = request.title.trim();
+    let recorded_on = request
+        .recorded_on
+        .as_deref()
+        .map(|day| format!("Recorded on: {day}\n"))
+        .unwrap_or_default();
     format!(
-        "Current title: {}\nDetected language: {}\n\n{}",
+        "Current title: {}\n{recorded_on}Detected language: {}\n\n{}",
         if title_hint.is_empty() {
             "New note"
         } else {
@@ -708,6 +724,7 @@ Microphone: Great. Let's ship the feed fix this week, then review the onboarding
             transcript_source_labels: true,
             manual_notes: None,
             language: Some("en".to_string()),
+            recorded_on: None,
         })
         .await
         .expect("live local note generation should succeed");

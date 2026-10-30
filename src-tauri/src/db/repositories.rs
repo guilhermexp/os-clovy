@@ -3364,6 +3364,17 @@ impl Repositories {
         Ok(row.map(|row| RecordingSourceMode::from(row.get::<String, _>("source_mode").as_str())))
     }
 
+    pub async fn recording_session_started_at(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, sqlx::error::Error> {
+        let row = query("SELECT started_at FROM recording_sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| row.get::<String, _>("started_at")))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn update_recording_session(
         &self,
@@ -5252,9 +5263,23 @@ fn generated_title_from_content(content: &str) -> Option<String> {
         .map(|line| truncate_title(&line, 72))
 }
 
+/// Note headings joined into a title. Generated notes nest the meeting's
+/// subjects under fixed sections (summary, discussion, tasks): `## Subject`
+/// under `#` sections, or `### Subject` in a continuation block. When more than
+/// one heading level exists, only the deepest level names the note; notes with
+/// a single level (one `#` heading per subject) keep using every heading.
 fn title_from_generated_headings(content: &str) -> Option<String> {
+    let levels = || content.lines().filter_map(markdown_heading_level);
+    let subject_level = match (levels().min(), levels().max()) {
+        (Some(top), Some(deepest)) if deepest > top => Some(deepest),
+        _ => None,
+    };
     let mut headings = Vec::new();
-    for heading in content.lines().filter_map(markdown_heading_text) {
+    for heading in content
+        .lines()
+        .filter(|line| subject_level.is_none() || markdown_heading_level(line) == subject_level)
+        .filter_map(markdown_heading_text)
+    {
         let heading = clean_generated_title_line(heading);
         if heading.is_empty()
             || is_replaceable_generated_title(&heading)
@@ -5398,6 +5423,16 @@ fn strip_duplicate_generated_heading<'a>(
     } else {
         content
     }
+}
+
+fn markdown_heading_level(line: &str) -> Option<usize> {
+    markdown_heading_text(line)?;
+    Some(
+        line.trim_start()
+            .chars()
+            .take_while(|character| *character == '#')
+            .count(),
+    )
 }
 
 fn markdown_heading_text(line: &str) -> Option<&str> {

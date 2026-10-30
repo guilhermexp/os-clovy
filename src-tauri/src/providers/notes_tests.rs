@@ -36,6 +36,7 @@ fn generation_request() -> GenerationRequest {
         transcript_source_labels: true,
         manual_notes: None,
         language: Some("en".to_string()),
+        recorded_on: None,
     }
 }
 
@@ -562,6 +563,30 @@ async fn note_generation_with_an_openrouter_key_goes_straight_to_openrouter() {
     assert_eq!(body["messages"][2]["content"], expected_user_message);
     assert!(body.get("temperature").is_none(), "{body}");
     assert!(heads(&hosts.clovy).is_empty());
+}
+
+#[test]
+fn note_message_carries_the_recording_date_only_when_known() {
+    let dated = GenerationRequest {
+        recorded_on: Some("2026-10-28".to_string()),
+        ..generation_request()
+    };
+    assert!(local_note_user_message(&dated).contains("\nRecorded on: 2026-10-28\n"));
+    assert!(!local_note_user_message(&generation_request()).contains("Recorded on:"));
+}
+
+#[test]
+fn recording_date_is_the_local_calendar_day_of_the_note() {
+    use chrono::TimeZone;
+    // 23:30 local time is already the next day in UTC east of Greenwich and
+    // the same day west of it; the note must show the day the user lived.
+    let late = chrono::Local
+        .with_ymd_and_hms(2026, 10, 28, 23, 30, 0)
+        .single()
+        .unwrap();
+    let stored = late.with_timezone(&chrono::Utc).to_rfc3339();
+    assert_eq!(recording_date(&stored).as_deref(), Some("2026-10-28"));
+    assert_eq!(recording_date("not a date"), None);
 }
 
 #[tokio::test]

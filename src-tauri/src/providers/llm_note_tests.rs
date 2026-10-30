@@ -61,6 +61,7 @@ async fn llm_note_generated_by_fake_cli_is_persisted_like_a_clovy_note() {
         transcript_source_labels: false,
         manual_notes: None,
         language: Some("en".to_string()),
+        recorded_on: None,
     })
     .await
     .unwrap();
@@ -200,6 +201,7 @@ async fn live_claude_cli_generates_a_note() {
         transcript_source_labels: false,
         manual_notes: None,
         language: Some("en".to_string()),
+        recorded_on: None,
     })
     .await
     .expect("claude should generate the note");

@@ -97,6 +97,7 @@ async fn generation_rejects_empty_transcript() {
             transcript_source_labels: false,
             manual_notes: None,
             language: None,
+            recorded_on: None,
         },
     )
     .await

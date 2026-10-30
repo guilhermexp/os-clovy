@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
@@ -120,6 +120,9 @@ if (!reusable) {
   );
   writeFileSync(stamp, `${fingerprint}\n${identifier}\n`);
 }
+// build.rs leaves this note for plain cargo runs; it must not ship in the signed
+// helper, built or reused. Removing it breaks a stale seal, which is re-signed below.
+rmSync(path.join(contents, "Resources/PLACEHOLDER.md"), { force: true });
 // As with the Computer use helper, an unspecified identity preserves a valid seal.
 const signatureValid = identity
   ? signatureSatisfies(bundle, identity)

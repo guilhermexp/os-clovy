@@ -33,6 +33,7 @@ fn main() {
     build_system_audio_helper();
     build_dictation_helper();
     prepare_computer_use_driver();
+    ensure_local_transcriber_resource();
     build_windows_dictation_helper();
     ensure_bundled_extension_dir();
     ensure_nm_shim_placeholder();
@@ -153,6 +154,48 @@ fn ensure_bundled_extension_dir() {
     if let Err(error) = std::fs::create_dir_all(&extension_dir) {
         println!("cargo:warning=could not create extension resource directory: {error}");
     }
+}
+
+/// Keep the `Clovy Local Transcriber.app` resource source present for
+/// ordinary `cargo test` and rust-analyzer runs. `scripts/prepare-local-transcriber.mjs`
+/// (run by the dev and packaging entry points) builds the real helper into the
+/// same bundle; without it the app reports `local_transcriber_failed`.
+fn ensure_local_transcriber_resource() {
+    if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
+        return;
+    }
+    let app_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
+    )
+    .parent()
+    .expect("src-tauri should have a repository parent")
+    .join(".tauri-helper")
+    .join("Clovy Local Transcriber.app");
+    let contents = app_dir.join("Contents");
+    // Watch `Contents`, which exists from here on: a missing watched path makes
+    // Cargo rerun this script on every build. Deleting the bundle removes it
+    // and brings the placeholder back on the next build.
+    if !contents
+        .join("MacOS")
+        .join("clovy-local-transcriber")
+        .exists()
+    {
+        let placeholder = contents.join("Resources").join("PLACEHOLDER.md");
+        // Write it once: Cargo scans the watched directory recursively, so
+        // rewriting it on every run would rerun this script on every build.
+        if !placeholder.exists() {
+            if let Some(parent) = placeholder.parent() {
+                std::fs::create_dir_all(parent)
+                    .expect("local transcriber placeholder directory should be created");
+            }
+            std::fs::write(
+                placeholder,
+                "No local transcriber in this build. Run pnpm local-transcriber:prepare on macOS.\n",
+            )
+            .expect("local transcriber placeholder should be written");
+        }
+    }
+    println!("cargo:rerun-if-changed={}", contents.display());
 }
 
 /// Keep the Tauri resource source present for ordinary `cargo test` and
