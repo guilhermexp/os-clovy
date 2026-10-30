@@ -92,7 +92,7 @@ Com o motor Local escolhido, toda transcrição (ditado, turnos e trechos de not
 
 #### Scenario: Ditado sem chave Groq
 - **WHEN** o motor é Local, não há chave Groq salva e o usuário dita
-- **THEN** o texto transcrito localmente é colado e nenhuma requisição sai da máquina
+- **THEN** o texto transcrito localmente é colado e nenhuma requisição de transcrição sai da máquina
 
 #### Scenario: Nota longa
 - **WHEN** o motor é Local e uma gravação de 40 minutos termina

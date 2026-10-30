@@ -564,7 +564,7 @@ export default defineMessages({
 
     "settings.liveTranscription.title": "Transcrição ao vivo",
     "settings.liveTranscription.description":
-      "Mostra a transcrição ao vivo com o motor escolhido. Com Groq, isso transcreve o áudio duas vezes e pode aumentar o uso do provedor. Local processa ambas no dispositivo. Se desativar, a transcrição aparece depois que a gravação termina.",
+      "Mostra a transcrição ao vivo com o motor escolhido. Com Groq, isso transcreve o áudio duas vezes e pode aumentar o uso do provedor. Com Local, as duas transcrições acontecem no dispositivo. Se desativar, a transcrição aparece depois que a gravação termina.",
     "settings.liveTranscription.aria": "Mostrar uma transcrição ao vivo durante a gravação",
     "settings.liveTranscription.on":
       "Transcrição ao vivo ativada: a transcrição aparece enquanto você grava.",
