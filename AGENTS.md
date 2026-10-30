@@ -16,7 +16,8 @@ notes, and hosts CLI chat over the user's notes. The frontend is **React**
 (`src/`), and the native shell is **Rust** (`src-tauri/`). Chat uses installed
 CLI engines, with Claude Code as default and Codex as the existing local
 fallback. The desktop calls **Groq**, **OpenRouter**, and **fal** directly with
-the user's own keys. CLI and endpoint note routes remain separate. There is
+the user's own keys; transcription may instead use the user-installed local
+Parakeet engine (macOS Apple Silicon only, ADR-0074). CLI and endpoint note routes remain separate. There is
 no Clovy inference server, native agent sidecar, local bearer token, sign-in,
 sharing service, or credit balance. Clovy tools remain available through MCP.
 
@@ -36,7 +37,7 @@ os-clovy/
 ├── src-tauri/               # Rust native shell (Cargo package `clovy`)
 │   ├── src/audio/           # recording, source separation, turn detection, live preview
 │   ├── src/agent_sessions/  # engine-neutral sessions, events, persistence, and migration
-│   ├── src/providers/       # model settings, direct Groq/OpenRouter/fal clients and catalogs
+│   ├── src/providers/       # model settings, direct Groq/OpenRouter/fal clients and catalogs; `transcription.rs` resolves Groq vs Local, `local_transcriber.rs` drives the helper (docs/audio-pipeline.md)
 │   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
@@ -44,7 +45,7 @@ os-clovy/
 │   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated local socket, read-only tools/resources (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
 │   ├── src/chat_engine/     # agent CLIs as a chat session's engine (Home included, ADR-0064): resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface; every command invoked from `src/` must be in `lib.rs` `generate_handler!` (guard: `src/test/tauri-command-registry.test.ts`)
-│   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060)
+│   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060) + `mac-local-transcriber/` (SwiftPM + FluidAudio, pinned model manifest in `resources/local-transcriber-model.json`, built by `scripts/prepare-local-transcriber.mjs`)
 ├── docs/                    # see docs/index.md — ADRs, subsystem docs, runbooks, PRDs, QA
 ├── specs/                   # Spec Kit feature specs (001-003)
 ├── spec/                    # enforceable coding rules (see spec/index.md) — distinct from specs/
@@ -228,8 +229,12 @@ build scripts in `pnpm-workspace.yaml` — live in
   superseding ADR-0055).
 - **The app never calls a Clovy inference server.** Groq transcription,
   OpenRouter text, and fal media use the user's own provider key directly.
-  Missing or unreadable keys fail clearly before a request; never substitute
-  a service key, another provider, a local bearer token, or a retired route.
+  Transcription has one user-chosen engine for dictation, notes and live
+  preview: Groq, or the Local Parakeet model installed from Settings; with
+  Local chosen no audio leaves the machine and a missing model is an error,
+  never a switch to Groq. Missing or unreadable keys fail clearly before a
+  request; never substitute a service key, another provider, a local bearer
+  token, or a retired route.
   Keys remain in the credential store and go only to their own provider;
   media downloads carry none. Chat stays on CLI engines. Notes may use a CLI,
   an explicitly configured endpoint, or OpenRouter. Keep `llm::generate`
