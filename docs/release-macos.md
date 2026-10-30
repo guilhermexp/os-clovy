@@ -100,6 +100,14 @@ key and an ad hoc signature unless Apple variables are set:
 PATH="$HOME/.local/share/node-official/node24/bin:$PATH" pnpm tauri:build:release-mac
 ```
 
+Release builds are universal, so the `rustc` first on `PATH` must have the
+`x86_64-apple-darwin` standard library. Homebrew's `rustc` does not; put the
+rustup toolchain first (`PATH="$(dirname "$(rustup which rustc)"):$PATH"`) after
+`rustup target add x86_64-apple-darwin`.
+
+With Finder's "Show all filename extensions" on, macOS displays every app as
+`<name>.app`; `verify-macos-app-name.mjs` then expects `Clovy.app`.
+
 ## Validating a built app
 
 Run these against the built app (an ad hoc build fails the `spctl` and

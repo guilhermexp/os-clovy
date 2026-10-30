@@ -23,7 +23,13 @@ const displayedName = run("/usr/bin/swift", [
   "import Foundation; print(FileManager.default.displayName(atPath: CommandLine.arguments[1]))",
   appPath,
 ]);
-expectValue("macOS display name", displayedName, "Clovy");
+// With Finder's "Show all filename extensions" on, macOS displays every app
+// with its ".app" suffix; the name must still be Clovy.
+const showsAllExtensions =
+  spawnSync("/usr/bin/defaults", ["read", "-g", "AppleShowAllExtensions"], {
+    encoding: "utf8",
+  }).stdout.trim() === "1";
+expectValue("macOS display name", displayedName, showsAllExtensions ? "Clovy.app" : "Clovy");
 
 console.log(`Verified ${appPath} presents as Clovy.`);
 
