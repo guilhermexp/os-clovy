@@ -21,7 +21,7 @@ export function LocalTranscriptionSettings({
   supported: boolean;
   provider: string;
   onSelect: (model: string) => Promise<void>;
-  onRemoved: () => Promise<void>;
+  onRemoved: (result?: { switched_to_groq: boolean }) => Promise<void>;
   readOnly?: boolean;
 }) {
   const t = useT();
@@ -195,17 +195,21 @@ export function LocalTranscriptionSettings({
               onClick={() =>
                 void action(async () => {
                   // The backend switches engines before filesystem removal, which can fail.
-                  const result = await removeLocalTranscriptionModel()
-                    .finally(onRemoved)
-                    .catch(async (error) => {
-                      const snapshot = await localTranscriptionModelState().catch(() => ({
-                        state: "absent" as const,
-                      }));
-                      setState(snapshot);
-                      throw error;
-                    });
+                  let result: { switched_to_groq: boolean };
+                  try {
+                    result = await removeLocalTranscriptionModel();
+                  } catch (error) {
+                    await onRemoved().catch(() => undefined);
+                    const snapshot = await localTranscriptionModelState().catch(() => ({
+                      state: "absent" as const,
+                    }));
+                    setState(snapshot);
+                    throw error;
+                  }
                   setState({ state: "absent" });
                   if (result.switched_to_groq) setMessage(t("settings.localTranscription.removed"));
+                  // The command's committed result remains authoritative if the refresh fails.
+                  await onRemoved(result).catch(() => undefined);
                 })
               }
             >

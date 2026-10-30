@@ -36,6 +36,17 @@ describe("userFacingFailureMessage", () => {
 describe("missing provider keys", () => {
   afterEach(() => applyInterfaceLocale("en"));
 
+  it("explains an engine switch without blaming the local model", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(
+      userFacingFailureMessage(
+        "Microphone: The transcription engine changed during processing. Retry to transcribe with the current engine.",
+      ),
+    ).toBe(
+      "Microfone: O motor de transcrição mudou durante o processamento. Tente de novo para transcrever com o motor atual.",
+    );
+  });
+
   const groqMissing =
     "Add your Groq API key in Settings > Models > More options > Provider API keys to transcribe recordings.";
   const openRouterMissing =

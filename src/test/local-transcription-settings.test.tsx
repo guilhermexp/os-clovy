@@ -79,6 +79,30 @@ it("selects ready Local and warns when removing the active model", async () => {
   expect(await screen.findByText(/mudou para Groq/)).toBeVisible();
   expect(p.onRemoved).toHaveBeenCalledOnce();
 });
+it("keeps successful removal visible when refreshing provider settings fails", async () => {
+  api.state.mockResolvedValue({ state: "ready", bytes: 632162964 });
+  api.remove.mockResolvedValue({ switched_to_groq: true });
+  const p = props();
+  p.onRemoved.mockRejectedValue(new Error("Provider refresh failed"));
+  render(<LocalTranscriptionSettings {...p} provider="local" />);
+  await userEvent.click(await screen.findByRole("button", { name: "Remover" }));
+  expect(await screen.findByText(/mudou para Groq/)).toBeVisible();
+  expect(screen.getByRole("radio", { name: /Local/ })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /Instalar modelo/ })).toBeEnabled();
+  expect(api.state).toHaveBeenCalledOnce();
+  expect(p.onRemoved).toHaveBeenCalledWith({ switched_to_groq: true });
+});
+it("preserves the removal error if refreshing provider settings also fails", async () => {
+  api.state.mockResolvedValueOnce({ state: "ready", bytes: 632162964 });
+  api.state.mockResolvedValue({ state: "absent" });
+  api.remove.mockRejectedValue(new Error("Files could not be removed"));
+  const p = props();
+  p.onRemoved.mockRejectedValue(new Error("Provider refresh failed"));
+  render(<LocalTranscriptionSettings {...p} provider="local" />);
+  await userEvent.click(await screen.findByRole("button", { name: "Remover" }));
+  expect(await screen.findByText("Files could not be removed")).toBeVisible();
+  expect(screen.getByRole("radio", { name: /Local/ })).toBeDisabled();
+});
 it("shows the failed file and retries installation", async () => {
   api.state.mockResolvedValue({ state: "failed", reason: "Encoder hash mismatch" });
   render(<LocalTranscriptionSettings {...props()} />);

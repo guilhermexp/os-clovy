@@ -1835,14 +1835,39 @@ export function AppSettings({
                       closeModelPicker();
                       await selectProviderModel("transcription", modelId);
                     }}
-                    onRemoved={async () => {
+                    onRemoved={async (result) => {
+                      if (result?.switched_to_groq) {
+                        // Removal already committed this choice; a failed read must not leave Local selected.
+                        setProviderSettings(
+                          (settings) =>
+                            settings && {
+                              ...settings,
+                              transcriptionProvider: "groq",
+                              transcriptionModel: "whisper-large-v3-turbo",
+                            },
+                        );
+                        setEffectiveProviderSettings(
+                          (settings) =>
+                            settings && {
+                              ...settings,
+                              transcriptionProvider: "groq",
+                              transcriptionModel: "whisper-large-v3-turbo",
+                            },
+                        );
+                        dispatchProviderModelSettingsChanged({
+                          mode: "transcription",
+                          modelId: "whisper-large-v3-turbo",
+                        });
+                      }
                       const snapshot = providerModelSettingsSnapshot(await providerModelSettings());
                       setProviderSettings(snapshot.settings);
                       setEffectiveProviderSettings(snapshot.effectiveSettings);
-                      dispatchProviderModelSettingsChanged({
-                        mode: "transcription",
-                        modelId: snapshot.settings.transcriptionModel,
-                      });
+                      if (!result?.switched_to_groq) {
+                        dispatchProviderModelSettingsChanged({
+                          mode: "transcription",
+                          modelId: snapshot.settings.transcriptionModel,
+                        });
+                      }
                       await requestProviderModels("transcription");
                     }}
                   />

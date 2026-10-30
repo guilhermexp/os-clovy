@@ -6,7 +6,7 @@ O dono aceitou a prova nativa observada na própria sessão e determinou **não 
 
 Verificação automatizada final após a aceitação: `logs/final-owner-accepted-verify.log`, `make -k verify` exit 2 **somente** pelos dois erros de formatação preexistentes autorizados (`.mcp.json`, `opencode.json`). Frontend: 204 suítes/1.916 testes verdes; Rust desktop: 2.187 testes verdes/21 ignorados; crates companion: 33 testes verdes; typecheck, fmt, Clippy all-targets e guardiões de referências passaram. Não houve novo teste ou controle do app nativo. O hash do WIP protegido permanece `18a1176bd467b6ad1741ce303f1e51415a15778614291e165f005eb0557682c5`.
 
-Estado atual da revisão: rodada 14 concluiu OpenQodex sem achados, mas CodeRabbit recusou por quota de um minuto (exit 4). Esse prazo já passou; a rodada 15 revisará a mesma implementação validada. Gate 6.3 permanece aberto até exit 0.
+Estado atual da revisão: rodada 15 concluiu ambos os revisores, OpenQodex sem achados e quatro achados menores do CodeRabbit (exit 6). As correções e evidências estão abaixo para a rodada 16. Gate 6.3 permanece aberto até exit 0.
 
 Atualização do dono para a rodada 8: o patch externo do agente **não foi autorizado e não foi aplicado**. O dono corrigiu o harness no commit `5fb88a257d1593914908f5214875eba80d385b8b` e informou 32 testes verdes; a versão ativa exclui binários detectados pelo Git do escopo textual esperado pelo CodeRabbit. A licença no proposal foi explicitamente autorizada e corrigida para Apache-2.0.
 
@@ -314,3 +314,17 @@ Confirmado: `logs/review-14-install-guidance-red.log`, exit 1, duas falhas reais
 ### Revisão pareada, rodada 14: espera curta de quota
 
 `/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/14/summary.md`, exit **4**. OpenQodex concluiu sem achados; CodeRabbit não revisou por quota de um minuto. Prazo conservador **2026-10-30 02:00:17 UTC**, registrado em `review-14-quota-wait.json`, já ultrapassado antes da rodada seguinte. Sem créditos extras, troca de conta/seat/API key. `review-14-wip-preservation.json` confirma stash/pop 0 e hash protegido idêntico. A revisão incompleta não libera commit final.
+
+
+### Revisão pareada, rodada 15: quatro ajustes confirmados
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/15/summary.md`, exit **6**. OpenQodex sem achados; quatro achados menores do CodeRabbit:
+
+- Design D4/D8: alinhados à alternativa de um turno Local por requisição já aceita pelo dono, pelo cenário e pelo adendo ADR-0074. Não se escolheu arquitetura nova nem se alterou a regra de 500 ms dos pacotes Groq.
+- Remoção na UI: o resultado do comando agora é separado do refresh de configuração. Sucesso conserva o estado Ausente e o aviso; AppSettings aplica a escolha Groq confirmada antes da leitura posterior. Se remoção e refresh falham, o erro original da remoção é preservado. `logs/review-16-ui-red.log`, exit 1, reproduziu duas falhas de remoção e uma de tradução; `logs/review-16-ui-green.log`, exit 0, 42 testes e typecheck verdes. Biome aplicou só formatação e manteve avisos preexistentes dos hooks fora das linhas alteradas.
+- Teste de turnos individuais: passou a segurar `GLOBAL_SETTINGS_TEST_LOCK`, pois pós-processamento lê configuração global e testes vizinhos instalam servidores falsos sob esse lock. Correção de isolamento do teste, sem inventar uma reprodução determinística da corrida intermitente.
+- Nota iniciada na Groq após troca para Local: o guard continua bloqueando a mudança de fingerprint/engine, mas devolve `transcription_engine_changed`, com mensagem de retry usando o motor atual, sem acusar falha do modelo Local. A agregação preserva o novo código e a frase armazenada é traduzida pelo banner en/pt-BR. `logs/review-16-route-red.log`, exit 101, falha real por receber `local_transcriber_failed`; `logs/review-16-persisted-route-red-fixed.log`, exit 101, reproduz o mesmo erro na nota persistida. A primeira tentativa do novo teste (`review-16-persisted-route-red.log`) teve erro de namespace SQLx, corrigido antes de reproduzir a falha funcional. A regressão de integração também exige áudio preservado e zero conexões à sentinela.
+
+`review-15-wip-preservation.json` confirma restauração exata do WIP. Nenhuma nova prova nativa ou interação com o app.
+
+Validação da rodada 16: `logs/review-16-rust-full.log`, exit 0, **2191 testes Rust verdes**, 21 ignorados, 28 suítes, fmt e Clippy all-targets com `-D warnings` verdes. `logs/review-16-frontend-full.log`, exit 0, **204 arquivos/1.923 testes frontend verdes**. `logs/review-16-preflight.log`, exit 0: Biome sem erros novos e OpenSpec estrito válido. `logs/review-16-trail-check.log`, exit 1: mesmas sobreposições lexicais já refutadas, sem mudança de tooling, credenciais, MCP, caches, permissões ou app.

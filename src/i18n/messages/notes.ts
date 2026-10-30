@@ -2,6 +2,8 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
+    "notes.failure.transcriptionEngineChanged":
+      "The transcription engine changed during processing. Retry to transcribe with the current engine.",
     "notes.failure.localTranscriberFailed":
       "The local transcription model failed. Try again or reinstall it in Settings > Models.",
     "notes.editor.tabs.notes": "Notes",
@@ -299,6 +301,8 @@ export default defineMessages({
     "notes.projects.relative.days": "{count}d ago",
   },
   "pt-BR": {
+    "notes.failure.transcriptionEngineChanged":
+      "O motor de transcrição mudou durante o processamento. Tente de novo para transcrever com o motor atual.",
     "notes.failure.localTranscriberFailed":
       "O modelo local de transcrição falhou. Tente de novo ou reinstale-o em Configurações > Modelos.",
     "notes.editor.tabs.notes": "Notas",

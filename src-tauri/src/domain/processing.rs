@@ -1792,6 +1792,10 @@ async fn process_saved_source_audio_pipeline(
                 == Some(crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE)
         }) {
             error.code = "local_transcriber_failed".into();
+        } else if visible_failures.iter().any(|failure| {
+            failure.input.warning.as_deref() == Some(TRANSCRIPTION_ENGINE_CHANGED_MESSAGE)
+        }) {
+            error.code = "transcription_engine_changed".into();
         }
         error
     });
@@ -2637,6 +2641,8 @@ pub(crate) fn groq_direct_pacer(fingerprint: &str) -> Arc<RequestPacer> {
 }
 
 /// The saved Groq key and its account's pacer, resolved once per request.
+const TRANSCRIPTION_ENGINE_CHANGED_MESSAGE: &str = "The transcription engine changed during processing. Retry to transcribe with the current engine.";
+
 fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
     note_route_for_backend(model, crate::providers::transcription::current_backend()?)
 }
@@ -2662,8 +2668,8 @@ fn note_route_for_backend(
         {
             // Keep the admitted model/fingerprint consistent across every request.
             Err(AppError::new(
-                "local_transcriber_failed",
-                crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE,
+                "transcription_engine_changed",
+                TRANSCRIPTION_ENGINE_CHANGED_MESSAGE,
             ))
         }
         backend @ TranscriptionBackend::Local { .. } => Ok(TranscriptionRoute {
@@ -11400,6 +11406,7 @@ mod tests {
 
     #[tokio::test]
     async fn parakeet_review_imprecise_pack_tokens_use_individual_local_turns() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         use crate::providers::local_transcriber::{
             FakeLocalTranscriber, LocalTranscription, NetworkSentinel, Token, TEST_LOCAL,
         };
@@ -11523,8 +11530,9 @@ mod tests {
         crate::providers::transcription::TEST_BACKEND.scope(
             TranscriptionBackend::Local { model_dir: "/fixture/model".into() },
             async {
-                assert!(note_route("whisper-large-v3".into()).is_err(),
-                    "a saved Whisper run must not acquire Parakeet output under its old fingerprint");
+                let error = note_route("whisper-large-v3".into()).unwrap_err();
+                assert_eq!(error.code, "transcription_engine_changed");
+                assert_eq!(error.message, "The transcription engine changed during processing. Retry to transcribe with the current engine.");
             },
         ).await;
     }
@@ -11668,6 +11676,50 @@ mod tests {
                 }),
             )
             .await;
+        sentinel.assert_unused();
+    }
+
+    #[tokio::test]
+    async fn groq_engine_switch_persists_actionable_note_error_without_network() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let note_id: String =
+            sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
+                .bind(&session_id)
+                .fetch_one(&repos.pool)
+                .await
+                .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let microphone = directory.path().join("microphone.wav");
+        write_three_turn_microphone(&microphone);
+        let artifact = repos
+            .create_audio_artifact(
+                &note_id,
+                &session_id,
+                &microphone.to_string_lossy(),
+                22_000,
+                0,
+                "checksum",
+            )
+            .await
+            .unwrap();
+        let sentinel = crate::providers::local_transcriber::NetworkSentinel::start().await;
+        crate::providers::TEST_ORIGIN.scope(sentinel.origin.clone(), async {
+            let transcriber = routed(note_provider_call(), Arc::new(|| note_route_for_backend(
+                "whisper-large-v3".into(),
+                TranscriptionBackend::Local { model_dir: "/fixture/model".into() },
+            )));
+            let error = rate_limited_run(
+                &repos, &note_id, &session_id,
+                vec![(artifact.id, "microphone".into(), microphone.clone(), false)],
+                transcriber,
+            ).await.unwrap_err();
+            assert_eq!(error.code, "transcription_engine_changed");
+            let note = repos.get_note(&note_id).await.unwrap();
+            assert_eq!(note.processing_status, ProcessingStatus::Failed);
+            assert_eq!(note.last_error.as_deref(), Some("Microphone: The transcription engine changed during processing. Retry to transcribe with the current engine."));
+            assert!(microphone.is_file(), "retry must retain the recording");
+        }).await;
         sentinel.assert_unused();
     }
 
