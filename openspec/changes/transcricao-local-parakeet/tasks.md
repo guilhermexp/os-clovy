@@ -6,7 +6,7 @@ O dono aceitou a prova nativa observada na própria sessão e determinou **não 
 
 Verificação automatizada final após a aceitação: `logs/final-owner-accepted-verify.log`, `make -k verify` exit 2 **somente** pelos dois erros de formatação preexistentes autorizados (`.mcp.json`, `opencode.json`). Frontend: 204 suítes/1.916 testes verdes; Rust desktop: 2.187 testes verdes/21 ignorados; crates companion: 33 testes verdes; typecheck, fmt, Clippy all-targets e guardiões de referências passaram. Não houve novo teste ou controle do app nativo. O hash do WIP protegido permanece `18a1176bd467b6ad1741ce303f1e51415a15778614291e165f005eb0557682c5`.
 
-Estado atual da revisão: rodada 11 concluiu com ambos os revisores, OpenQodex sem achados e um achado do CodeRabbit na captura da seleção antes do acknowledgement do helper (exit 6). A regressão reproduziu a troca Local→Groq e a correção está registrada abaixo para a rodada 12. Gate 6.3 permanece aberto até exit 0.
+Estado atual da revisão: rodada 12 concluiu OpenQodex sem achados, mas CodeRabbit não revisou por quota (exit 4). A correção da admissão tem 203 testes de ditado e 2.190 testes Rust verdes. Próxima tentativa após o prazo de 20 minutos registrado abaixo; gate 6.3 permanece aberto até exit 0.
 
 Atualização do dono para a rodada 8: o patch externo do agente **não foi autorizado e não foi aplicado**. O dono corrigiu o harness no commit `5fb88a257d1593914908f5214875eba80d385b8b` e informou 32 testes verdes; a versão ativa exclui binários detectados pelo Git do escopo textual esperado pelo CodeRabbit. A licença no proposal foi explicitamente autorizada e corrigida para Apache-2.0.
 
@@ -291,3 +291,12 @@ A admissão não substitui nem cancela a tomada anterior antes do acknowledgemen
 `logs/review-12-admission-green.log`, exit 0: 202 testes de ditado passaram, incluindo a regressão de admissão. Cobertura adicional protege a tomada anterior até acknowledgement e a limpeza seletiva de envio recusado. `logs/review-12-openspec.log`, exit 0: change válida. `logs/review-12-trail-check.log`, exit 1: mesmas 20 sobreposições lexicais já refutadas; não houve ação sobre config, chaves, MCP, caches ou app.
 
 `logs/review-12-rust-full.log`, exit 0: 2190 testes passaram, 21 ignorados em 28 suítes; fmt e Clippy all-targets com `-D warnings` verdes. Inclui 203 testes de ditado e todos os testes Groq existentes.
+
+
+### Revisão pareada, rodada 12: quota
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/12/summary.md`, exit **4**. OpenQodex concluiu sem achados no snapshot `4f481e870b0fe780b1cca50588868c35030089c1`; CodeRabbit recusou por quota e não revisou. Informou espera de 20 minutos. Deadline conservador calculado a partir da observação do erro: **2026-10-30 01:47:54 UTC** (22:47:54 local), em `review-12-quota-wait.json`. A próxima rodada só será iniciada depois desse instante; sem `--use-credits`, mudança de conta, seat ou API key.
+
+Stash/pop exit 0 e hash protegido idêntico em `review-12-wip-preservation.json`. A rodada incompleta não libera commit final nem é tratada como revisão integral aprovada.
+
+`logs/closure-frontend-full.log`, exit 0: suíte frontend completa da árvore corrigida, 204 arquivos e **1.918 testes verdes**. Mensagens `Chunk unavailable` são fixtures dos testes de lazy loading; nenhuma falha. Rust final permanece **2.190 testes verdes**, 21 ignorados, fmt e Clippy verdes (`logs/review-12-rust-full.log`). Não houve repetição da prova nativa.
