@@ -98,9 +98,11 @@ Com o motor Local escolhido, toda transcrição (ditado, turnos e trechos de not
 - **WHEN** o motor é Local e uma gravação de 40 minutos termina
 - **THEN** todos os trechos são transcritos localmente, sem pausa por limite de taxa, e a nota é gerada
 
-#### Scenario: Pacote de turnos
-- **WHEN** o motor é Local e a transcrição final usa pacotes de turnos
-- **THEN** cada turno recebe seu texto pelos tempos devolvidos pelo modelo, como com a Groq
+#### Scenario: Turnos locais sem mistura entre turnos
+- **WHEN** o motor é Local e a transcrição final processa turnos de uma nota
+- **THEN** cada turno é enviado numa requisição local individual e recebe somente o texto dessa requisição
+- **AND** o caminho Local não agrega turnos em pacotes, evitando que tempos imprecisos e a agregação de tokens por pausa de 400 ms atribuam texto a outro turno
+- **AND** o caminho Groq mantém seus pacotes com intervalo fixo de 500 ms entre turnos e divisão pelos tempos dos segmentos; essa regra não é alterada pelo motor Local
 
 #### Scenario: Prévia ao vivo
 - **WHEN** o motor é Local, a prévia ao vivo está ligada e um trecho fica pronto
@@ -110,7 +112,7 @@ Com o motor Local escolhido, toda transcrição (ditado, turnos e trechos de not
 - **WHEN** o idioma do ditado está configurado como português
 - **THEN** o modelo local recebe a dica de idioma e devolve o texto em português
 
-Test: integration (Rust) — transcritor local falso nos caminhos de ditado, nota, pacote e prévia, com servidor sentinela de rede recebendo zero requisições; unit — pacer não é consultado com motor Local.
+Test: integration (Rust) — transcritor local falso nos caminhos de ditado, nota, turnos individuais e prévia, com servidor sentinela de rede recebendo zero requisições; regressão com três turnos e tempos imprecisos confere atribuição individual e preserva o intervalo de 500 ms dos pacotes Groq; unit — pacer não é consultado com motor Local.
 
 ### Requirement: Falha do motor local é erro claro
 Quando o helper local não inicia, o modelo não carrega ou a transcrição falha, a nota ou o ditado SHALL falhar com `local_transcriber_failed` e uma mensagem na língua da interface dizendo que o modelo local falhou e sugerindo reinstalar ou trocar para a Groq. O áudio da nota fica salvo e "Tentar de novo" continua disponível. A falha MUST NOT redirecionar para a Groq.

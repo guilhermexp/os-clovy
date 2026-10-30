@@ -115,3 +115,26 @@ it("refreshes the selected engine even if deleting model files fails", async () 
   expect(await screen.findByText("Files could not be removed")).toBeVisible();
   expect(p.onRemoved).toHaveBeenCalledOnce();
 });
+
+it.each([
+  false,
+  true,
+])("disables stale ready Local after removal fails (snapshot unavailable: %s)", async (snapshotUnavailable) => {
+  api.state.mockResolvedValueOnce({ state: "ready", bytes: 632162964 });
+  if (snapshotUnavailable) api.state.mockRejectedValue(new Error("Snapshot unavailable"));
+  else api.state.mockResolvedValue({ state: "failed", reason: "Files could not be removed" });
+  api.remove.mockRejectedValue(new Error("Files could not be removed"));
+  const p = props();
+  render(<LocalTranscriptionSettings {...p} provider="local" />);
+  await userEvent.click(await screen.findByRole("button", { name: "Remover" }));
+  expect(await screen.findByText("Files could not be removed")).toBeVisible();
+  await waitFor(() => expect(screen.getByRole("radio", { name: /Local/ })).toBeDisabled());
+  expect(screen.queryByText(/Pronto/)).toBeNull();
+  expect(api.state).toHaveBeenCalledTimes(2);
+  expect(p.onRemoved).toHaveBeenCalledOnce();
+  expect(
+    screen.getByRole("button", {
+      name: snapshotUnavailable ? /Instalar modelo/ : "Tentar de novo",
+    }),
+  ).toBeEnabled();
+});

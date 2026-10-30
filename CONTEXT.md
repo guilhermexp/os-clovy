@@ -193,10 +193,11 @@ is required to select Local. The model id is `parakeet-ultra`.
 _Avoid_: downloaded provider, local Groq, embedded model (it is optional).
 
 **Turn pack** (OpenSpec: _pacote de turnos_):
-Consecutive Turns of one Source sent to the selected engine as one final-transcription
+Consecutive Turns of one Source sent to Groq as one final-transcription
 request of up to 600 s, 0.5 s apart, and split back per Turn by the
 provider's segment times. Each Turn keeps its own durable job; only the
-Groq route with the user's key and the Local engine both support packs (ADR-0074).
+Groq route with the user's key supports packs. Local sends one request per Turn
+to avoid assigning text across imprecise token boundaries (ADR-0074 addendum).
 _Avoid_: batch, chunk (a chunk is a fixed split of one long audio file).
 
 **Speaker bleed (echo)**:
