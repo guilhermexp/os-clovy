@@ -385,3 +385,73 @@ async fn parakeet_review_download_progress_is_throttled_but_finishes_at_total() 
     assert_eq!(downloading.last(), Some(&17));
     assert_eq!(events.last(), Some(&ModelState::Ready { bytes: 17 }));
 }
+
+#[tokio::test]
+async fn cancellation_holds_operation_until_pending_output_is_flushed() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = server(false, false).await;
+    let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    TEST_BEFORE_FLUSH
+        .scope((entered.clone(), resume.clone()), async {
+            let mut install = Box::pin(model.install(&server.url, |_| {}));
+            tokio::select! {
+                _ = entered.notified() => {},
+                result = &mut install => panic!("install ended before flush: {result:?}"),
+            }
+            model.cancel();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut install)
+                    .await
+                    .is_err(),
+                "cancellation must settle the pending output before returning"
+            );
+            assert!(model.operation.try_lock().is_err());
+            resume.notify_one();
+            install.await.unwrap();
+        })
+        .await;
+    assert_eq!(model.state(), ModelState::Absent);
+    assert!(!model.dir.join("installed.json").exists());
+    model.install(&server.url, |_| {}).await.unwrap();
+    assert_eq!(model.state(), ModelState::Ready { bytes: 17 });
+    assert_eq!(
+        std::fs::read(model.dir.join("Encoder.mlmodelc/model.mil")).unwrap(),
+        b"encoder"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_interrupts_stalled_response_headers_and_body() {
+    for send_headers in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let connected = Arc::new(tokio::sync::Notify::new());
+        let signal = connected.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            if send_headers {
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+            signal.notify_one();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let model = TranscriptionModel::new(temp.path().join("model"), manifest());
+        let mut install = Box::pin(model.install(&url, |_| {}));
+        tokio::select! {
+            _ = connected.notified() => {},
+            result = &mut install => panic!("unexpected install result: {result:?}"),
+        }
+        model.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), &mut install).await;
+        server.abort();
+        result.expect("network cancellation timed out").unwrap();
+        assert_eq!(model.state(), ModelState::Absent);
+    }
+}

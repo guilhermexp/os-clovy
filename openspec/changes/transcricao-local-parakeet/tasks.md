@@ -6,7 +6,7 @@ O dono aceitou a prova nativa observada na própria sessão e determinou **não 
 
 Verificação automatizada final após a aceitação: `logs/final-owner-accepted-verify.log`, `make -k verify` exit 2 **somente** pelos dois erros de formatação preexistentes autorizados (`.mcp.json`, `opencode.json`). Frontend: 204 suítes/1.916 testes verdes; Rust desktop: 2.187 testes verdes/21 ignorados; crates companion: 33 testes verdes; typecheck, fmt, Clippy all-targets e guardiões de referências passaram. Não houve novo teste ou controle do app nativo. O hash do WIP protegido permanece `18a1176bd467b6ad1741ce303f1e51415a15778614291e165f005eb0557682c5`.
 
-Estado atual da revisão: rodada 16 concluiu ambos os revisores, OpenQodex sem achados e três achados do CodeRabbit (exit 6). As correções e evidências estão abaixo para a rodada 17. Gate 6.3 permanece aberto até exit 0.
+Estado atual da revisão: rodada 17 terminou em exit 4 por quota do CodeRabbit (espera de um minuto respeitada); OpenQodex concluiu com uma corrida de cancelamento corrigida abaixo para a rodada 18. Gate 6.3 permanece aberto até exit 0.
 
 Atualização do dono para a rodada 8: o patch externo do agente **não foi autorizado e não foi aplicado**. O dono corrigiu o harness no commit `5fb88a257d1593914908f5214875eba80d385b8b` e informou 32 testes verdes; a versão ativa exclui binários detectados pelo Git do escopo textual esperado pelo CodeRabbit. A licença no proposal foi explicitamente autorizada e corrigida para Apache-2.0.
 
@@ -338,3 +338,12 @@ Validação da rodada 16: `logs/review-16-rust-full.log`, exit 0, **2191 testes 
 - `LocalTranscriptionSettings.tsx:103`: aceito. O parent fornece o modelo ativo; a tela memoriza a última escolha Groq e a restaura ao voltar de Local. `logs/review-17-ui-red.log`: recebeu turbo em vez de large-v3. D6 mantém somente o modelo ativo persistido; ao reabrir a tela já em Local, sem escolha Groq anterior disponível, permanece o default turbo. Não se adicionou armazenamento ou migração.
 
 Validação das três correções: `logs/review-17-frontend-green.log`, exit 0, 205 suítes/1.926 testes frontend, typecheck e Biome dos arquivos alterados; `logs/review-17-rust-green.log`, exit 0, 130 testes de processamento, fmt e Clippy all-targets com -D warnings; `logs/review-17-openspec.log`, exit 0. A suíte Rust completa anterior tem 2.191 testes verdes (`review-16-rust-full.log`); a única mudança Rust posterior é o código/mensagem de troca, coberto pelo vermelho→verde e pela suíte de processamento. `logs/review-17-trail-check.log`, exit 1: os mesmos 20 falsos positivos lexicais já refutados (configuração protegida e documentação herdada; nenhuma mudança de MCP, chave, permissão, perfil ou prova nativa). Não se altera o WIP do dono para silenciar esse checker.
+
+
+### Rodada 17: cancelamento e quota
+
+Summary: `/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/17/summary.md`, exit 4. CodeRabbit: quota, espera informada de um minuto respeitada enquanto OpenQodex concluía; nenhum crédito pago ou mudança de conta/assento/chave. `review-17-wip-preservation.json` confirma restauração exata do WIP.
+
+OpenQodex `transcription_model.rs:167`: aceito. O select externo descartava a future inteira, mas escrita Tokio em thread bloqueante podia continuar depois da liberação do lock; retry/removal concorreria com essa escrita. Cancelamento agora é cooperativo nos waits de request e body; operações de disco são aguardadas e o lock só é liberado depois. `logs/review-18-cancel-red.log`, exit 101: teste determinístico pausa antes do flush, cancela e demonstra retorno prematuro; teste de rede travada já passava. Não há novo teste nativo nem acesso ao perfil do dono.
+
+Verde: `logs/review-18-rust-green.log`, exit 0, suíte Rust completa com 2.193 testes verdes/21 ignorados, Clippy all-targets -D warnings e formato. Os dois testes novos passaram (flush pendente e headers/corpo travados), assim como cancel/resume por Range e `.part` completo. `logs/review-18-openspec.log`, exit 0. `logs/review-18-trail-check.log`, exit 1 pelos mesmos 20 falsos positivos lexicais refutados acima; nenhuma mudança de tooling, credenciais, permissão, MCP ou prova nativa. Frontend segue em 1.926 testes verdes, sem alteração desde a rodada 17.

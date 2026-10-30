@@ -2,6 +2,11 @@
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Mutex};
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_BEFORE_FLUSH: (std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>);
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ModelState {
@@ -161,11 +166,13 @@ impl TranscriptionModel {
             },
             &progress,
         );
-        // Cancellation interrupts both an unresponsive server and a stalled body.
-        let result = tokio::select! {
-            biased;
-            _ = token.cancelled() => Ok(false),
-            result = self.download(base, &progress, &token) => result.map(|()| true),
+        // Only network waits are interrupted. Dropping Tokio filesystem operations
+        // can leave blocking writes running after the operation lock is released.
+        let result = self.download(base, &progress, &token).await;
+        let result = if token.is_cancelled() {
+            Ok(false)
+        } else {
+            result.map(|()| true)
         };
         let final_state = match &result {
             Ok(true) if !token.is_cancelled() => ModelState::Ready {
@@ -202,6 +209,9 @@ impl TranscriptionModel {
             .map_err(|e| e.to_string())?;
         let mut completed = 0;
         for file in &self.manifest.files {
+            if token.is_cancelled() {
+                return Ok(());
+            }
             let destination = self.dir.join(&file.path);
             if verified_during_install(&destination, file, token).await? {
                 completed += file.bytes;
@@ -248,11 +258,13 @@ impl TranscriptionModel {
             if offset > 0 {
                 request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
             }
-            let response = request
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                .map_err(|_| format!("network: {}", file.path))?;
+            let response = tokio::select! {
+                biased;
+                _ = token.cancelled() => return Ok(()),
+                response = request.send() => response,
+            }
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|_| format!("network: {}", file.path))?;
             if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
                 let expected = format!("bytes {offset}-{}/{}", file.bytes - 1, file.bytes);
                 if response
@@ -281,13 +293,24 @@ impl TranscriptionModel {
             let mut received = offset;
             let mut last_progress = None;
             let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
+            loop {
+                let chunk = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Ok(()),
+                    chunk = stream.next() => chunk,
+                };
+                let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|_| format!("network: {}", file.path))?;
                 received += chunk.len() as u64;
                 if received > file.bytes {
                     return Err(format!("size: {}", file.path));
                 }
                 output.write_all(&chunk).await.map_err(|e| e.to_string())?;
+                #[cfg(test)]
+                if let Ok((entered, resume)) = TEST_BEFORE_FLUSH.try_with(Clone::clone) {
+                    entered.notify_one();
+                    resume.notified().await;
+                }
                 // Make progress a durable watermark: cancel/restart resumes these bytes.
                 output.flush().await.map_err(|e| e.to_string())?;
                 hash.update(&chunk);
