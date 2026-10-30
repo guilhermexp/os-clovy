@@ -6,7 +6,7 @@ O dono aceitou a prova nativa observada na própria sessão e determinou **não 
 
 Verificação automatizada final após a aceitação: `logs/final-owner-accepted-verify.log`, `make -k verify` exit 2 **somente** pelos dois erros de formatação preexistentes autorizados (`.mcp.json`, `opencode.json`). Frontend: 204 suítes/1.916 testes verdes; Rust desktop: 2.187 testes verdes/21 ignorados; crates companion: 33 testes verdes; typecheck, fmt, Clippy all-targets e guardiões de referências passaram. Não houve novo teste ou controle do app nativo. O hash do WIP protegido permanece `18a1176bd467b6ad1741ce303f1e51415a15778614291e165f005eb0557682c5`.
 
-Estado atual da revisão: rodada 8 concluiu com ambos os revisores e exit 6, por dois achados menores do CodeRabbit. Ambos foram corrigidos para a rodada 9 abaixo. O gate 6.3 permanece aberto até exit 0; nenhum commit final foi liberado.
+Estado atual da revisão: rodada 9 concluiu com ambos os revisores, OpenQodex sem achados e CodeRabbit com um achado menor de inicialização (exit 6). Os dois achados da rodada 8 foram encerrados. A correção da rodada 9 e suas evidências estão abaixo; gate 6.3 permanece aberto até exit 0.
 
 Atualização do dono para a rodada 8: o patch externo do agente **não foi autorizado e não foi aplicado**. O dono corrigiu o harness no commit `5fb88a257d1593914908f5214875eba80d385b8b` e informou 32 testes verdes; a versão ativa exclui binários detectados pelo Git do escopo textual esperado pelo CodeRabbit. A licença no proposal foi explicitamente autorizada e corrigida para Apache-2.0.
 
@@ -255,3 +255,16 @@ Rodada 6, correção concluída: `logs/review-6-launcher-red.log` exit 1, uma fa
 Nenhum novo teste ou interação com o app nativo foi executado. A prova aceita e seus limites permanecem os registrados no início deste arquivo.
 
 `logs/review-9-preflight.log`: typecheck passou; Biome apontou só a formatação do novo teste. `logs/review-9-preflight-fixed.log`: Biome corrigido e limpo, OpenSpec estrito válido; exit 1 veio exclusivamente de `trail check`, que comparou 500 arquivos e sinalizou 20 sobreposições lexicais em WIP protegido, texto herdado do glossário e `.gitignore`. Refutadas: estes fixes não alteram esses arquivos/configurações, chaves, MCP, grants ou isolamento; o staging contém somente os cinco paths da entrega. A justificativa acompanha o commit e uma nova nota pessoal, sem editar aprendizados anteriores.
+
+
+### Revisão pareada, rodada 9: inicialização pelo recibo
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/9/summary.md`, exit **6**. OpenQodex concluiu sem achados; CodeRabbit trouxe um achado menor novo em `transcription_model.rs:474`. Os dois achados da rodada 8 não retornaram. Stash/pop restaurou o WIP protegido exatamente em `review-9-wip-preservation.json`.
+
+Confirmado: o construtor iniciava em Ausente mesmo com recibo verificado e arquivos do tamanho correto, e dependia do worker para admitir Local. `logs/review-10-startup-receipt-red.log`, exit 101, reproduziu Ausente em vez de Pronto antes do worker. A correção consulta somente o pequeno recibo e metadados dos arquivos no construtor, reutilizando a mesma função de D5 usada pelo worker. Não faz hash dos pesos na thread da janela. Arquivos ausentes, tamanho divergente ou recibo ausente continuam sem admissão até a verificação assíncrona: D5 exige conferência antes de Pronto e D6 exige erro local enquanto não está pronto, sem fallback. O teste cobre também invalidação por remoção e recibo obsoleto.
+
+Repowise não possui índice deste worktree e sugeriu consultar o checkout principal; essa alternativa foi recusada por estar expressamente proibida pelo dono. O grafo Trail e os callers locais foram consultados. Nenhum processo do app ou dado de prova foi tocado.
+
+`logs/review-10-startup-receipt-green.log`, exit 0: todos os 12 testes do instalador passaram. `logs/review-10-trail-check.log`, exit 1: a base explícita reduziu a comparação a 64 paths, mas retornou 20 sobreposições lexicais em `.cursor` protegido, glossário, README, ADR e documentação. Refutadas: texto sobre provider, chaves, cache Swift, wrappers e prova não executa essas ações; não se copiou perfil/chave, abriu app, alterou tooling, reinstalou dependência, compartilhou cache por symlink ou contornou quota/permissão. A nova suíte Rust se justifica pela alteração de prontidão no startup. A nota pessoal anterior registra o limite; esta justificativa acompanha o commit.
+
+`logs/review-10-rust-full.log`, exit 0: fmt, Clippy all-targets com `-D warnings` e suíte Rust completa verdes, 2188 testes passaram, 21 ignorados, 28 suítes. Todos os testes Groq permanecem verdes.

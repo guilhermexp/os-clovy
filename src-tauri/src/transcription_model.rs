@@ -66,10 +66,19 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl TranscriptionModel {
     pub fn new(dir: PathBuf, manifest: Manifest) -> Self {
+        // The receipt check is metadata-only, so persisted Local selection is usable
+        // before the startup worker runs. Missing/stale receipts still need its hash check.
+        let state = if marker_matches(&dir, &manifest) {
+            ModelState::Ready {
+                bytes: manifest.total_bytes,
+            }
+        } else {
+            ModelState::Absent
+        };
         Self {
             dir,
             manifest,
-            state: Mutex::new(ModelState::Absent),
+            state: Mutex::new(state),
             cancellation: Mutex::new(None),
             operation: tokio::sync::Mutex::new(()),
             removals: std::sync::atomic::AtomicUsize::new(0),
@@ -409,7 +418,7 @@ fn write_marker(dir: &std::path::Path, manifest: &Manifest) -> std::io::Result<(
         .map_err(|e| e.error)?;
     Ok(())
 }
-fn installed(dir: &std::path::Path, manifest: &Manifest) -> bool {
+fn marker_matches(dir: &std::path::Path, manifest: &Manifest) -> bool {
     // D5 intentionally treats this marker as the receipt for verified installation bytes.
     // A matching pinned manifest and file sizes avoid rehashing 632 MB at each startup.
     // Missing receipts or size changes rehash below; same-size external edits are outside
@@ -417,12 +426,14 @@ fn installed(dir: &std::path::Path, manifest: &Manifest) -> bool {
     let marker = std::fs::read(dir.join("installed.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok());
-    if marker.as_ref() == Some(manifest)
+    marker.as_ref() == Some(manifest)
         && manifest.files.iter().all(|file| {
             std::fs::symlink_metadata(dir.join(&file.path))
                 .is_ok_and(|m| m.is_file() && m.len() == file.bytes)
         })
-    {
+}
+fn installed(dir: &std::path::Path, manifest: &Manifest) -> bool {
+    if marker_matches(dir, manifest) {
         return true;
     }
     if manifest

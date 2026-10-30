@@ -290,6 +290,35 @@ async fn startup_registration_does_not_hash_files_or_write_the_install_marker() 
     assert!(dir.join("installed.json").exists());
 }
 
+#[test]
+fn parakeet_review_verified_receipt_is_ready_before_startup_worker_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("model");
+    std::fs::create_dir_all(dir.join("Encoder.mlmodelc")).unwrap();
+    std::fs::write(dir.join("Encoder.mlmodelc/model.mil"), b"encoder").unwrap();
+    std::fs::write(dir.join("parakeet_vocab.json"), b"vocabulary").unwrap();
+    write_marker(&dir, &manifest()).unwrap();
+
+    // No async refresh has run: a previously verified installation is immediately usable.
+    let model = TranscriptionModel::new(dir.clone(), manifest());
+    assert_eq!(model.state(), ModelState::Ready { bytes: 17 });
+    let removing = model.begin_removal();
+    assert_eq!(model.state(), ModelState::Absent);
+    drop(removing);
+
+    // A stale receipt cannot admit changed or missing files before worker verification.
+    std::fs::write(dir.join("parakeet_vocab.json"), b"short").unwrap();
+    assert_eq!(
+        TranscriptionModel::new(dir.clone(), manifest()).state(),
+        ModelState::Absent
+    );
+    std::fs::remove_file(dir.join("Encoder.mlmodelc/model.mil")).unwrap();
+    assert_eq!(
+        TranscriptionModel::new(dir, manifest()).state(),
+        ModelState::Absent
+    );
+}
+
 async fn reopened_state(dir: PathBuf) -> ModelState {
     let model = TranscriptionModel::new(dir, manifest());
     model.refresh_from_disk(|_| {}, || {}).await;
