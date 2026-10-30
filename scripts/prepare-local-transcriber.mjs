@@ -117,13 +117,14 @@ const signatureValid = identity
   : spawnSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle], {
       encoding: "utf8",
     }).status === 0;
-if (!reusable || !signatureValid) {
+// Refresh signed release output even when cached: older seals may lack notarization options.
+if (!reusable || !signatureValid || (release && identity)) {
   run("/usr/bin/codesign", [
     "--force",
     "--deep",
     "--sign",
     identity ?? "-",
-    "--timestamp=none",
+    ...(release && identity ? ["--options", "runtime", "--timestamp"] : ["--timestamp=none"]),
     bundle,
   ]);
 }

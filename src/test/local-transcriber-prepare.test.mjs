@@ -12,7 +12,7 @@ afterEach(() => {
   for (const root of sandboxes.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function sandbox() {
+function sandbox({ release = false } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "clovy-local-build-"));
   sandboxes.push(root);
   const source = path.join(root, "src-tauri/native/mac-local-transcriber");
@@ -42,6 +42,7 @@ function sandbox() {
     ".tauri-helper/Clovy Local Transcriber.app/Contents/MacOS/clovy-local-transcriber",
   );
   let builds = 0;
+  const signatures = [];
   function run() {
     // Run the real packaging logic, with filesystem fixtures and system tools isolated.
     vm.runInNewContext(
@@ -52,7 +53,13 @@ function sandbox() {
         path,
         fileURLToPath,
         scriptUrl: pathToFileURL(path.join(root, "scripts/prepare-local-transcriber.mjs")).href,
-        process: { platform: "darwin", env: {}, argv: [] },
+        process: {
+          platform: "darwin",
+          env: release ? { APPLE_SIGNING_IDENTITY: "Developer ID fixture" } : {},
+          argv: release ? ["--release"] : [],
+        },
+        DEV_SIGNING_IDENTITY_ENV: "CLOVY_DEV_SIGNING_IDENTITY",
+        resolveDevSigningIdentity: () => ({ identity: "fixture-certificate" }),
         console: { error() {} },
         computerUseBundleIdentifier: () => "test.local.helper",
         signatureSatisfies: () => true,
@@ -62,6 +69,7 @@ function sandbox() {
             builds += 1;
             fs.writeFileSync(path.join(bin, "clovy-local-transcriber"), "trusted-build");
           } else if (command === "/usr/bin/codesign" && args.includes("--force")) {
+            signatures.push(args);
             fs.appendFileSync(executable, "-signed");
           }
           return { status: 0 };
@@ -69,7 +77,7 @@ function sandbox() {
       },
     );
   }
-  return { run, executable, builds: () => builds };
+  return { run, executable, signatures, builds: () => builds };
 }
 
 it("reuses unchanged signed output without invoking Swift again", () => {
@@ -89,4 +97,16 @@ it("rebuilds modified executable bytes instead of blessing them with a new signa
   expect(fs.readFileSync(build.executable, "utf8")).toBe("trusted-build-signed");
   build.run();
   expect(build.builds()).toBe(2);
+});
+
+it("timestamps and hardens Developer ID release signatures, including reused output", () => {
+  const build = sandbox({ release: true });
+  build.run();
+  build.run();
+  expect(build.builds()).toBe(1);
+  expect(build.signatures).toHaveLength(2);
+  for (const args of build.signatures) {
+    expect(args).toEqual(expect.arrayContaining(["--options", "runtime", "--timestamp"]));
+    expect(args).not.toContain("--timestamp=none");
+  }
 });

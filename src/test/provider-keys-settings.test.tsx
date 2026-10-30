@@ -85,6 +85,41 @@ describe("Provider API keys settings", () => {
     );
   }
 
+  it("keeps the global Groq model when only a Local override was removed and refresh fails", async () => {
+    const fallback = invokeMock.getMockImplementation();
+    let removed = false;
+    const globalSettings = {
+      ...baseSettings,
+      transcriptionModel: "whisper-large-v3",
+      localTranscriptionSupported: true,
+    };
+    invokeMock.mockImplementation((command: string, args?: unknown) => {
+      if (command === "dictation_settings")
+        return Promise.resolve({ settings: { microphone: {} } });
+      if (command === "dictation_hotkey_status")
+        return Promise.resolve({ type: "ready", payload: {} });
+      if (command === "provider_model_settings") {
+        if (removed) return Promise.reject(new Error("settings offline"));
+        return Promise.resolve({ settings: globalSettings, effectiveSettings: globalSettings });
+      }
+      if (command === "local_transcription_model_state")
+        return Promise.resolve({ state: "ready", bytes: 632162964 });
+      if (command === "remove_local_transcription_model") {
+        removed = true;
+        return Promise.resolve({ switched_to_groq: true });
+      }
+      return fallback?.(command, args);
+    });
+    renderAppSettings();
+    const rowButton = await screen.findByRole("button", { name: /change transcription model/i });
+    const originalRow = rowButton.closest(".settings-row");
+    expect(originalRow).not.toBeNull();
+    const originalText = originalRow?.textContent;
+    await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
+    await screen.findByText(/switched to Groq/i);
+    expect(rowButton.closest(".settings-row")?.textContent).toBe(originalText);
+  });
+
   it("saves a key with set_provider_api_key and shows configured state", async () => {
     const user = userEvent.setup();
     const updatedSettings: ProviderModelSettingsDto = {

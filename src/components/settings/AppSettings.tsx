@@ -1839,25 +1839,30 @@ export function AppSettings({
                     onRemoved={async (result) => {
                       if (result?.switched_to_groq) {
                         // Removal already committed this choice; a failed read must not leave Local selected.
-                        setProviderSettings(
-                          (settings) =>
-                            settings && {
-                              ...settings,
-                              transcriptionProvider: "groq",
-                              transcriptionModel: "whisper-large-v3-turbo",
-                            },
+                        setProviderSettings((settings) =>
+                          settings.transcriptionProvider === "local"
+                            ? {
+                                ...settings,
+                                transcriptionProvider: "groq",
+                                transcriptionModel: "whisper-large-v3-turbo",
+                              }
+                            : settings,
                         );
-                        setEffectiveProviderSettings(
-                          (settings) =>
-                            settings && {
-                              ...settings,
-                              transcriptionProvider: "groq",
-                              transcriptionModel: "whisper-large-v3-turbo",
-                            },
+                        setEffectiveProviderSettings((settings) =>
+                          settings.transcriptionProvider === "local"
+                            ? {
+                                ...settings,
+                                transcriptionProvider: "groq",
+                                transcriptionModel: "whisper-large-v3-turbo",
+                              }
+                            : settings,
                         );
                         dispatchProviderModelSettingsChanged({
                           mode: "transcription",
-                          modelId: "whisper-large-v3-turbo",
+                          modelId:
+                            providerSettings.transcriptionProvider === "local"
+                              ? "whisper-large-v3-turbo"
+                              : providerSettings.transcriptionModel,
                         });
                       }
                       const snapshot = providerModelSettingsSnapshot(await providerModelSettings());
