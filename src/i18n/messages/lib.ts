@@ -44,6 +44,7 @@ export default defineMessages({
     // Errors.
 
     "lib.errors.emptyResponse": "Clovy returned no data.",
+    "lib.errors.localModelNotInstalled": "Install the local model in Settings > Models.",
     "lib.errors.unreachable": "Couldn't reach the provider. Check your connection and try again.",
     "lib.errors.requestFailed": "Clovy couldn't complete this request. Try again.",
     "lib.errors.streamInvalid": "The processing service returned an invalid response.",
@@ -453,6 +454,7 @@ export default defineMessages({
     "lib.brand.plum": "Ameixa",
 
     "lib.errors.emptyResponse": "O Clovy não retornou dados.",
+    "lib.errors.localModelNotInstalled": "Instale o modelo local em Configurações > Modelos.",
     "lib.errors.unreachable":
       "Não foi possível conectar ao provedor. Verifique sua conexão e tente de novo.",
     "lib.errors.requestFailed": "O Clovy não conseguiu concluir este pedido. Tente de novo.",

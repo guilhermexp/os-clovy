@@ -104,6 +104,22 @@ describe("interface language owns every date and time", () => {
 describe("native error codes", () => {
   afterEach(() => applyInterfaceLocale("en"));
 
+  it.each([
+    ["en", /local model.*Settings > Models/],
+    ["pt-BR", /modelo local.*Configurações > Modelos/],
+  ] as const)("locates model installation outside Settings in %s", (locale, location) => {
+    applyInterfaceLocale(locale);
+    expect(
+      messageForErrorCode(
+        "local_model_not_installed",
+        "Install the local model in Settings > Models.",
+      ),
+    ).toMatch(location);
+    expect(
+      messageFromError({ code: "local_model_not_installed", message: "native fallback" }),
+    ).toMatch(location);
+  });
+
   it("words a known code in the interface language and falls back to the native message", () => {
     applyInterfaceLocale("pt-BR");
     expect(messageForErrorCode("accessibility_permission_missing", "English text")).toBe(

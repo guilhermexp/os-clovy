@@ -6,7 +6,7 @@ O dono aceitou a prova nativa observada na própria sessão e determinou **não 
 
 Verificação automatizada final após a aceitação: `logs/final-owner-accepted-verify.log`, `make -k verify` exit 2 **somente** pelos dois erros de formatação preexistentes autorizados (`.mcp.json`, `opencode.json`). Frontend: 204 suítes/1.916 testes verdes; Rust desktop: 2.187 testes verdes/21 ignorados; crates companion: 33 testes verdes; typecheck, fmt, Clippy all-targets e guardiões de referências passaram. Não houve novo teste ou controle do app nativo. O hash do WIP protegido permanece `18a1176bd467b6ad1741ce303f1e51415a15778614291e165f005eb0557682c5`.
 
-Estado atual da revisão: rodada 12 concluiu OpenQodex sem achados, mas CodeRabbit não revisou por quota (exit 4). A correção da admissão tem 203 testes de ditado e 2.190 testes Rust verdes. Próxima tentativa após o prazo de 20 minutos registrado abaixo; gate 6.3 permanece aberto até exit 0.
+Estado atual da revisão: após a espera de quota, rodada 13 concluiu ambos os revisores, OpenQodex sem achados e um ajuste menor de mensagem do CodeRabbit (exit 6). A mensagem de instalação fora de Configurações foi corrigida com dois testes vermelho→verde para a rodada 14; gate 6.3 permanece aberto até exit 0.
 
 Atualização do dono para a rodada 8: o patch externo do agente **não foi autorizado e não foi aplicado**. O dono corrigiu o harness no commit `5fb88a257d1593914908f5214875eba80d385b8b` e informou 32 testes verdes; a versão ativa exclui binários detectados pelo Git do escopo textual esperado pelo CodeRabbit. A licença no proposal foi explicitamente autorizada e corrigida para Apache-2.0.
 
@@ -300,3 +300,12 @@ A admissão não substitui nem cancela a tomada anterior antes do acknowledgemen
 Stash/pop exit 0 e hash protegido idêntico em `review-12-wip-preservation.json`. A rodada incompleta não libera commit final nem é tratada como revisão integral aprovada.
 
 `logs/closure-frontend-full.log`, exit 0: suíte frontend completa da árvore corrigida, 204 arquivos e **1.918 testes verdes**. Mensagens `Chunk unavailable` são fixtures dos testes de lazy loading; nenhuma falha. Rust final permanece **2.190 testes verdes**, 21 ignorados, fmt e Clippy verdes (`logs/review-12-rust-full.log`). Não houve repetição da prova nativa.
+
+
+### Revisão pareada, rodada 13: orientação para instalar
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/13/summary.md`, exit **6**. Iniciada às 2026-10-30 01:48:12 UTC, depois do prazo conservador 01:47:54; a quota não retornou. OpenQodex sem achados; CodeRabbit apontou que o erro de modelo ausente reutilizava o texto curto do cartão de Configurações e não dizia onde instalar no HUD/outros contextos.
+
+Confirmado: `logs/review-14-install-guidance-red.log`, exit 1, duas falhas reais en/pt-BR. O código agora mapeia para `lib.errors.localModelNotInstalled`, com orientação explícita Settings > Models / Configurações > Modelos; a frase curta da opção desabilitada em Settings permanece intacta. `logs/review-14-install-guidance-green.log`: 23 testes verdes e typecheck verde; exit 1 somente por formatação do teste, corrigida na preflight. WIP restaurado exatamente em `review-13-wip-preservation.json`; nenhuma nova prova nativa.
+
+`logs/review-14-preflight.log`, exit 0: Biome corrigido/limpo e OpenSpec estrito válido. `logs/review-14-trail-check.log`, exit 1: mesmas sobreposições lexicais em tooling protegido e documentação; refutação já registrada permanece aplicável, também na mensagem do commit.
