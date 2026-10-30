@@ -188,13 +188,13 @@ struct DictationTakeTokenInner {
 }
 
 impl DictationTakeToken {
-    fn new(id: String) -> Self {
+    fn new(id: String, transcription_settings: crate::providers::ProviderModelSettings) -> Self {
         let (cancellation, _) = tokio::sync::watch::channel(false);
         Self {
             inner: Arc::new(DictationTakeTokenInner {
                 id,
-                // Snapshot at capture start; credentials are resolved only at transcription.
-                transcription_settings: crate::providers::effective_current_settings(),
+                // Reuse admission's selection; credentials are resolved only at transcription.
+                transcription_settings,
                 state: AtomicU8::new(DICTATION_TAKE_CAPTURING),
                 cancellation,
             }),
@@ -286,10 +286,47 @@ enum DictationFinalizedTake {
 #[derive(Default)]
 pub struct DictationTakeState {
     current: Mutex<Option<DictationTakeToken>>,
+    admitted_settings:
+        Mutex<std::collections::HashMap<String, crate::providers::ProviderModelSettings>>,
     helper_command_generation: Mutex<u64>,
 }
 
 impl DictationTakeState {
+    fn remember_admitted_settings(
+        &self,
+        id: &str,
+        settings: crate::providers::ProviderModelSettings,
+    ) {
+        self.admitted_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(id.to_string())
+            .or_insert(settings);
+    }
+
+    fn take_admitted_settings(&self, id: &str) -> crate::providers::ProviderModelSettings {
+        let mut admitted = self
+            .admitted_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admitted
+            .remove(id)
+            .or_else(|| admitted.remove(UNTAGGED_DICTATION_TAKE))
+            .unwrap_or_else(crate::providers::effective_current_settings)
+    }
+
+    fn forget_admitted_settings(&self, id: Option<&str>) {
+        let mut admitted = self
+            .admitted_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(id) = id {
+            admitted.remove(id);
+        } else {
+            admitted.clear();
+        }
+    }
+
     fn begin(&self, id: String) -> DictationTakeToken {
         let mut current = self
             .current
@@ -304,7 +341,8 @@ impl DictationTakeState {
         if let Some(previous) = current.take() {
             previous.cancel();
         }
-        let token = DictationTakeToken::new(id);
+        let settings = self.take_admitted_settings(&id);
+        let token = DictationTakeToken::new(id, settings);
         *current = Some(token.clone());
         token
     }
@@ -337,7 +375,8 @@ impl DictationTakeState {
         let id = id
             .map(str::to_string)
             .unwrap_or_else(|| format!("legacy-{}", uuid::Uuid::new_v4()));
-        let token = DictationTakeToken::new(id);
+        let settings = self.take_admitted_settings(&id);
+        let token = DictationTakeToken::new(id, settings);
         let processing_started = token.try_begin_processing();
         debug_assert!(processing_started);
         *current = Some(token.clone());
@@ -2116,7 +2155,7 @@ pub fn dictation_helper_command(
                 }
                 send_helper_command(&state, command).inspect_err(|_| {
                     if starts_recording {
-                        release_unsent_dictation_take(take_id.as_deref());
+                        release_unsent_dictation_take(&app, take_id.as_deref());
                     }
                 })
             });
@@ -3686,7 +3725,7 @@ fn forward_dictation_command(
     }
     let Some(state) = app.try_state::<HelperState>() else {
         if starts_recording {
-            release_unsent_dictation_take(command_take_id);
+            release_unsent_dictation_take(app, command_take_id);
         }
         emit_dictation_event_value(
             app,
@@ -3747,7 +3786,7 @@ fn forward_dictation_command(
     }
     if let Err(error) = send_helper_command(&state, helper_command) {
         if starts_recording {
-            release_unsent_dictation_take(command_take_id);
+            release_unsent_dictation_take(app, command_take_id);
         }
         if let Some(request_id) = composer_request_id.as_deref() {
             clear_shortcut_composer_request(app, request_id);
@@ -5120,6 +5159,7 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
     // lifecycle; the update gate still has to see a take end.
     if let Some(event) = event.as_ref() {
         end_gate_take_for_helper_event(&crate::update_gate::UPDATE_GATE, event);
+        forget_admission_for_terminal_event(app, event);
     }
     note_helper_take_protocol(app, event.as_ref());
 
@@ -7344,6 +7384,7 @@ fn gate_take_transition<'a>(
 /// path it takes. A take the helper starts while an update installs is
 /// discarded at once.
 fn sync_update_gate_take(app: &AppHandle, event: &serde_json::Value) {
+    forget_admission_for_terminal_event(app, event);
     let event_type = event.get("type").and_then(serde_json::Value::as_str);
     let gate = &crate::update_gate::UPDATE_GATE;
     match gate_take_transition(event_type, dictation_take_id_from_event(event)) {
@@ -7393,16 +7434,49 @@ fn stop_take_during_update(app: &AppHandle, take_id: String) {
 /// Lets a take start unless an update is installing; a refused start clears
 /// the shortcut state it prepared.
 fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), AppError> {
-    crate::providers::transcription::current_backend()
-        .inspect_err(|_| reset_shortcut_activation(app))?;
+    let state = app.try_state::<DictationTakeState>().ok_or_else(|| {
+        reset_shortcut_activation(app);
+        AppError::new(
+            "dictation_helper_unavailable",
+            "Dictation state is not initialized.",
+        )
+    })?;
+    let settings = crate::providers::effective_current_settings();
+    crate::providers::transcription::effective_transcription_backend(
+        &settings,
+        crate::providers::transcription::ready_directory(),
+        crate::providers::local_transcription_supported(),
+        || crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
+    )
+    .inspect_err(|_| reset_shortcut_activation(app))?;
+    let id = take_id.unwrap_or(UNTAGGED_DICTATION_TAKE);
     crate::update_gate::UPDATE_GATE
-        .begin_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE))
-        .inspect_err(|_| reset_shortcut_activation(app))
+        .begin_dictation_take(id)
+        .inspect_err(|_| reset_shortcut_activation(app))?;
+    state.remember_admitted_settings(id, settings);
+    Ok(())
 }
 
 /// An admitted start never reached the helper, so no event will end it.
-fn release_unsent_dictation_take(take_id: Option<&str>) {
+fn release_unsent_dictation_take(app: &AppHandle, take_id: Option<&str>) {
+    if let Some(state) = app.try_state::<DictationTakeState>() {
+        state.forget_admitted_settings(Some(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE)));
+    }
     crate::update_gate::UPDATE_GATE.end_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE));
+}
+
+fn forget_admission_for_terminal_event(app: &AppHandle, event: &serde_json::Value) {
+    let Some(state) = app.try_state::<DictationTakeState>() else {
+        return;
+    };
+    match gate_take_transition(
+        event.get("type").and_then(serde_json::Value::as_str),
+        dictation_take_id_from_event(event),
+    ) {
+        Some(GateTakeTransition::Ended(id)) => state.forget_admitted_settings(Some(id)),
+        Some(GateTakeTransition::AllEnded) => state.forget_admitted_settings(None),
+        _ => {}
+    }
 }
 
 /// The gate's key for a take whose start or events carry no take id.
@@ -12587,6 +12661,80 @@ mod tests {
             .expect_err("dictation should only accept supported transcripts");
 
         assert_eq!(err.code, "dictation_provider_not_configured");
+    }
+
+    #[test]
+    fn parakeet_review_admission_selection_survives_helper_acknowledgement() {
+        for (id, missing_started) in [
+            ("admitted-local", false),
+            ("admitted-local", true),
+            (UNTAGGED_DICTATION_TAKE, false),
+        ] {
+            let state = DictationTakeState::default();
+            let mut settings = crate::providers::default_settings_for_tests();
+            settings.transcription_provider = "local".into();
+            settings.transcription_model = "parakeet-ultra".into();
+            state.remember_admitted_settings(id, settings);
+            // The helper acknowledges later, while the current selection is Groq.
+            let take = if missing_started {
+                match state.claim_finalized(Some("admitted-local")) {
+                    DictationFinalizedTake::Start(take) => take,
+                    _ => panic!("admitted take must be claimed"),
+                }
+            } else {
+                state.begin("admitted-local".into())
+            };
+            assert_eq!(
+                take.inner.transcription_settings.transcription_provider,
+                "local"
+            );
+            assert_eq!(
+                take.inner.transcription_settings.transcription_model,
+                "parakeet-ultra"
+            );
+            let backend = crate::providers::transcription::effective_transcription_backend(
+                &take.inner.transcription_settings,
+                Some("/fixture/model".into()),
+                true,
+                || panic!("Local admission must not consult Groq credentials"),
+            )
+            .unwrap();
+            assert!(matches!(
+                backend,
+                crate::providers::transcription::TranscriptionBackend::Local { .. }
+            ));
+            assert!(state.admitted_settings.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn parakeet_review_admission_does_not_replace_current_take_before_acknowledgement() {
+        let state = DictationTakeState::default();
+        let current = state.begin("current".into());
+        let mut local = crate::providers::default_settings_for_tests();
+        local.transcription_provider = "local".into();
+        local.transcription_model = "parakeet-ultra".into();
+        state.remember_admitted_settings("replacement", local.clone());
+        assert_eq!(state.current_take_id().as_deref(), Some("current"));
+        assert_eq!(current.state(), DICTATION_TAKE_CAPTURING);
+        // A rejected send forgets only its admission, without cancelling the running take.
+        state.remember_admitted_settings("unsent", local);
+        state.forget_admitted_settings(Some("unsent"));
+        assert_eq!(state.admitted_settings.lock().unwrap().len(), 1);
+        assert_eq!(current.state(), DICTATION_TAKE_CAPTURING);
+        let replacement = state.begin("replacement".into());
+        assert_eq!(current.state(), DICTATION_TAKE_CANCELLED);
+        assert_eq!(
+            replacement
+                .inner
+                .transcription_settings
+                .transcription_provider,
+            "local"
+        );
+        assert!(state.admitted_settings.lock().unwrap().is_empty());
+        state.remember_admitted_settings("pending", crate::providers::default_settings_for_tests());
+        state.forget_admitted_settings(None);
+        assert!(state.admitted_settings.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

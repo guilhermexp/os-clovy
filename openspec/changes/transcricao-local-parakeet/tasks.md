@@ -6,7 +6,7 @@ O dono aceitou a prova nativa observada na própria sessão e determinou **não 
 
 Verificação automatizada final após a aceitação: `logs/final-owner-accepted-verify.log`, `make -k verify` exit 2 **somente** pelos dois erros de formatação preexistentes autorizados (`.mcp.json`, `opencode.json`). Frontend: 204 suítes/1.916 testes verdes; Rust desktop: 2.187 testes verdes/21 ignorados; crates companion: 33 testes verdes; typecheck, fmt, Clippy all-targets e guardiões de referências passaram. Não houve novo teste ou controle do app nativo. O hash do WIP protegido permanece `18a1176bd467b6ad1741ce303f1e51415a15778614291e165f005eb0557682c5`.
 
-Estado atual da revisão: rodada 10 concluiu com ambos os revisores, OpenQodex sem achados e dois ajustes menores de redação do CodeRabbit (exit 6). Corrigidos abaixo para a rodada 11; a regressão de inicialização da rodada 9 não retornou. Gate 6.3 permanece aberto até exit 0.
+Estado atual da revisão: rodada 11 concluiu com ambos os revisores, OpenQodex sem achados e um achado do CodeRabbit na captura da seleção antes do acknowledgement do helper (exit 6). A regressão reproduziu a troca Local→Groq e a correção está registrada abaixo para a rodada 12. Gate 6.3 permanece aberto até exit 0.
 
 Atualização do dono para a rodada 8: o patch externo do agente **não foi autorizado e não foi aplicado**. O dono corrigiu o harness no commit `5fb88a257d1593914908f5214875eba80d385b8b` e informou 32 testes verdes; a versão ativa exclui binários detectados pelo Git do escopo textual esperado pelo CodeRabbit. A licença no proposal foi explicitamente autorizada e corrigida para Apache-2.0.
 
@@ -278,3 +278,16 @@ Repowise não possui índice deste worktree e sugeriu consultar o checkout princ
 - Descrição pt-BR da prévia: “ambas” foi substituído por “as duas transcrições”, explicitando a referência sem mudar o comportamento.
 
 `logs/review-11-copy-validation.log`, exit 0: Biome no arquivo de mensagens e OpenSpec estrito passaram. São alterações de redação sem lógica nova; não se criou teste que apenas repete o literal. As regressões de comportamento UI (10 testes), instalador (12 testes) e suíte Rust completa (2.188 testes) continuam as evidências anteriores. WIP protegido restaurado exatamente em `review-10-wip-preservation.json`; nenhum controle do app.
+
+
+### Revisão pareada, rodada 11: seleção na admissão do ditado
+
+`/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/11/summary.md`, exit **6**. OpenQodex sem achados; CodeRabbit confirmou uma janela entre admissão e `listening_started`, anterior à proteção da rodada 5. A seleção era capturada somente no acknowledgement, podendo usar Groq após uma tomada admitida como Local.
+
+`logs/review-12-admission-red.log`, exit 101: com o armazenamento de admissão preparado e o consumidor antigo, o teste recebeu provider `groq` em vez de `local`. A correção registra a seleção efetiva validada uma única vez por ID na admissão e a consome ao criar o token na confirmação ou na finalização sem confirmação inicial. O caso legado sem ID usa a admissão sem tag. Credenciais não são guardadas no token; o backend de transcrição é resolvido pela seleção capturada. Admissão Groq conserva sua validação existente; Local não consulta credenciais Groq.
+
+A admissão não substitui nem cancela a tomada anterior antes do acknowledgement. Comandos não enviados e eventos terminais limpam as seleções pendentes. A regressão cobre os três caminhos e faz a leitura de chave Groq falhar se consultada para Local. WIP restaurado exatamente em `review-11-wip-preservation.json`. Nenhuma interação com o app nativo.
+
+`logs/review-12-admission-green.log`, exit 0: 202 testes de ditado passaram, incluindo a regressão de admissão. Cobertura adicional protege a tomada anterior até acknowledgement e a limpeza seletiva de envio recusado. `logs/review-12-openspec.log`, exit 0: change válida. `logs/review-12-trail-check.log`, exit 1: mesmas 20 sobreposições lexicais já refutadas; não houve ação sobre config, chaves, MCP, caches ou app.
+
+`logs/review-12-rust-full.log`, exit 0: 2190 testes passaram, 21 ignorados em 28 suítes; fmt e Clippy all-targets com `-D warnings` verdes. Inclui 203 testes de ditado e todos os testes Groq existentes.
