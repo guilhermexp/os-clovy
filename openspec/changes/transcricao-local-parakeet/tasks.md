@@ -6,7 +6,7 @@ O dono aceitou a prova nativa observada na própria sessão e determinou **não 
 
 Verificação automatizada final após a aceitação: `logs/final-owner-accepted-verify.log`, `make -k verify` exit 2 **somente** pelos dois erros de formatação preexistentes autorizados (`.mcp.json`, `opencode.json`). Frontend: 204 suítes/1.916 testes verdes; Rust desktop: 2.187 testes verdes/21 ignorados; crates companion: 33 testes verdes; typecheck, fmt, Clippy all-targets e guardiões de referências passaram. Não houve novo teste ou controle do app nativo. O hash do WIP protegido permanece `18a1176bd467b6ad1741ce303f1e51415a15778614291e165f005eb0557682c5`.
 
-Estado atual da revisão: rodada 18 concluiu ambos os revisores, exit 6, com um major de assinatura e um minor de estado visível após remoção de override; ambos corrigidos para a rodada 19. Pela instrução do dono de 2026-10-30, a próxima rodada encerra a entrega se restarem apenas minors sem efeito visível nem quebra de cenário, refutados em 6.3 e no corpo do commit final.
+Estado atual da revisão: rodada 19 concluiu ambos, CodeRabbit sem achados e OpenQodex com um major de toolchain Swift, corrigido de forma pontual para a rodada 20. Permanece a regra de convergência do dono: somente majors e minors funcionais são corrigidos; demais minors podem ser refutados em 6.3 e no commit final.
 
 Atualização do dono para a rodada 8: o patch externo do agente **não foi autorizado e não foi aplicado**. O dono corrigiu o harness no commit `5fb88a257d1593914908f5214875eba80d385b8b` e informou 32 testes verdes; a versão ativa exclui binários detectados pelo Git do escopo textual esperado pelo CodeRabbit. A licença no proposal foi explicitamente autorizada e corrigida para Apache-2.0.
 
@@ -359,3 +359,10 @@ Summary: `/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436
 - Minor OpenQodex `AppSettings.tsx:1847`, aceito por efeito visível: o fallback otimista agora troca somente seleções que eram Local; remoção de override não substitui o modelo global Groq intacto. `logs/review-19-override-red-loaded.log` reproduziu a linha passando de large-v3 a turbo após falha de refresh. As três tentativas anteriores foram ajustes de fixture/seletores, não evidência de regressão. Sem refatoração adicional.
 
 `logs/review-19-override-green.log`, exit 0: 30 testes de configurações/catálogo, typecheck e Biome dos arquivos alterados. Com os 17 testes de assinatura/build/launcher, são 47 testes direcionados verdes após a última suíte frontend completa de 1.926; Rust permanece no resultado completo de 2.193 testes da rodada 18, sem mudança posterior. `logs/review-19-trail-check.log`: os mesmos 20 falsos positivos lexicais, refutados pelo escopo e preservação do WIP acima.
+
+
+### 6.3 Rodada 19: major de toolchain
+
+Summary: `/Users/guilhermevarela/.zeron/worktrees/guilhermexp-os-clovy-da19cb436b9df051/feat-transcricao-local-parakeet/.tmp/verify/transcricao-local-parakeet/review-pair/19/summary.md`, exit 6, ambos concluídos; CodeRabbit sem achados; WIP restaurado exatamente (`review-19-wip-preservation.json`). OpenQodex `scripts/prepare-local-transcriber.mjs:75`, major aceito: os dois comandos Swift agora recebem o mesmo `DEVELOPER_DIR` do padrão existente em `tauri-dev.mjs`, preferindo Xcode instalado ao CLT antigo, sem mudar a seleção global da máquina. `logs/review-20-toolchain-red.log`: ambos os subprocessos não tinham esse ambiente; nenhuma build real ou mudança global foi executada. A nova rodada é necessária por ser major, conforme a regra do dono; nenhuma refatoração fora desse achado.
+
+`logs/review-20-toolchain-green.log`, exit 0: 18 testes dos scripts/build/launcher, Biome e OpenSpec estrito. `logs/review-20-trail-check.log`, exit 1: mesmos 20 falsos positivos lexicais já refutados, sem alteração de tooling, seleção global de Xcode, chaves, permissões ou prova nativa.

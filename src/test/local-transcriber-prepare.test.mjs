@@ -43,12 +43,15 @@ function sandbox({ release = false } = {}) {
   );
   let builds = 0;
   const signatures = [];
+  const swiftEnvironments = [];
   function run() {
     // Run the real packaging logic, with filesystem fixtures and system tools isolated.
     vm.runInNewContext(
       script.replace(/^import[\s\S]*?;\n/gm, "").replaceAll("import.meta.url", "scriptUrl"),
       {
         ...fs,
+        existsSync: (file) =>
+          file === "/Applications/Xcode.app/Contents/Developer" || fs.existsSync(file),
         createHash,
         path,
         fileURLToPath,
@@ -63,8 +66,9 @@ function sandbox({ release = false } = {}) {
         console: { error() {} },
         computerUseBundleIdentifier: () => "test.local.helper",
         signatureSatisfies: () => true,
-        spawnSync(command, args) {
+        spawnSync(command, args, options) {
           if (command === "swift") {
+            swiftEnvironments.push(options.env);
             if (args.includes("--show-bin-path")) return { status: 0, stdout: bin };
             builds += 1;
             fs.writeFileSync(path.join(bin, "clovy-local-transcriber"), "trusted-build");
@@ -77,7 +81,7 @@ function sandbox({ release = false } = {}) {
       },
     );
   }
-  return { run, executable, signatures, builds: () => builds };
+  return { run, executable, signatures, swiftEnvironments, builds: () => builds };
 }
 
 it("reuses unchanged signed output without invoking Swift again", () => {
@@ -108,5 +112,14 @@ it("timestamps and hardens Developer ID release signatures, including reused out
   for (const args of build.signatures) {
     expect(args).toEqual(expect.arrayContaining(["--options", "runtime", "--timestamp"]));
     expect(args).not.toContain("--timestamp=none");
+  }
+});
+
+it("uses installed Xcode for both the build and Swift output lookup", () => {
+  const build = sandbox({ release: true });
+  build.run();
+  expect(build.swiftEnvironments).toHaveLength(2);
+  for (const env of build.swiftEnvironments) {
+    expect(env).toMatchObject({ DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer" });
   }
 });

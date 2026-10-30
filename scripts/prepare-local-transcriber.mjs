@@ -19,6 +19,11 @@ if (
   console.error("Skipping Local transcription helper: macOS only.");
   process.exit(0);
 }
+// Match tauri-dev: installed Xcode supplies SwiftPM even when xcode-select points at older CLT.
+const developerDir = existsSync("/Applications/Xcode.app/Contents/Developer")
+  ? "/Applications/Xcode.app/Contents/Developer"
+  : process.env.DEVELOPER_DIR;
+const swiftEnv = { ...process.env, ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}) };
 const source = path.join(root, "src-tauri/native/mac-local-transcriber");
 const pin = JSON.parse(readFileSync(path.join(source, "pin.json"), "utf8"));
 // Package.resolved is versioned with Package.swift; fail closed if the pinned lockfile is missing.
@@ -72,22 +77,26 @@ const reusable =
   existsSync(outputDigest) &&
   readFileSync(outputDigest, "utf8").trim() === executableDigest();
 if (!reusable) {
-  run("swift", [
-    "build",
-    "--package-path",
-    source,
-    "-c",
-    "release",
-    "--arch",
-    "arm64",
-    "--disable-automatic-resolution",
-  ]);
+  run(
+    "swift",
+    [
+      "build",
+      "--package-path",
+      source,
+      "-c",
+      "release",
+      "--arch",
+      "arm64",
+      "--disable-automatic-resolution",
+    ],
+    { env: swiftEnv },
+  );
   mkdirSync(path.dirname(executable), { recursive: true });
   mkdirSync(path.dirname(stamp), { recursive: true });
   const location = spawnSync(
     "swift",
     ["build", "--package-path", source, "-c", "release", "--arch", "arm64", "--show-bin-path"],
-    { cwd: root, encoding: "utf8" },
+    { cwd: root, encoding: "utf8", env: swiftEnv },
   );
   if (location.status !== 0) throw new Error("Swift could not resolve its build output");
   copyFileSync(path.join(location.stdout.trim(), "clovy-local-transcriber"), executable);
