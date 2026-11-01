@@ -822,6 +822,49 @@ describe("NoteEditor", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
+  it("preserves authoritative recording order when a later session restarts its turn counter", () => {
+    const { container } = render(
+      <NoteEditor
+        {...props}
+        note={note({
+          activeTab: "transcription",
+          sourceTranscripts: [
+            {
+              id: "session-a-turn-3",
+              recordingSessionId: "session-a",
+              text: "Earlier recording",
+              source: "microphone",
+              startMs: 3000,
+              endMs: 4000,
+              turnIndex: 3,
+              status: "succeeded",
+            },
+            {
+              id: "session-b-turn-0",
+              recordingSessionId: "session-b",
+              text: "Later recording",
+              source: "system",
+              startMs: 0,
+              endMs: 1000,
+              turnIndex: 0,
+              status: "succeeded",
+            },
+            { id: "legacy-one", text: "Repeated legacy text", status: "succeeded" },
+            { id: "legacy-two", text: "Repeated legacy text", status: "succeeded" },
+          ],
+        })}
+      />,
+    );
+    expect(
+      Array.from(container.querySelectorAll(".transcript-turn-text"), (turn) => turn.textContent),
+    ).toEqual([
+      "Earlier recording",
+      "Later recording",
+      "Repeated legacy text",
+      "Repeated legacy text",
+    ]);
+  });
+
   it("orders source transcript turns by persisted turn metadata", () => {
     const { container } = render(
       <NoteEditor
@@ -832,6 +875,7 @@ describe("NoteEditor", () => {
             {
               id: "turn-3",
               text: "Second microphone turn",
+              recordingSessionId: "recording-a",
               source: "microphone",
               startMs: 5000,
               endMs: 6500,
@@ -841,6 +885,7 @@ describe("NoteEditor", () => {
             {
               id: "turn-1",
               text: "First microphone turn",
+              recordingSessionId: "recording-a",
               source: "microphone",
               startMs: 1000,
               endMs: 2000,
@@ -850,6 +895,7 @@ describe("NoteEditor", () => {
             {
               id: "turn-2",
               text: "System reply",
+              recordingSessionId: "recording-a",
               source: "system",
               startMs: 3000,
               endMs: 4000,
@@ -1063,6 +1109,64 @@ describe("NoteEditor", () => {
 
     expect(onContentChange).not.toHaveBeenCalled();
     expect(onFlushNote).toHaveBeenCalledWith("note-1");
+  });
+
+  it("keeps an external replacement on clean focused blur without saving the old snapshot", async () => {
+    const user = userEvent.setup();
+    const onContentChange = vi.fn();
+    const onFlushNote = vi.fn();
+    const { rerender } = render(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Old ready body" })}
+        onContentChange={onContentChange}
+        onFlushNote={onFlushNote}
+      />,
+    );
+    const editor = screen.getByRole("textbox", { name: "Generated note" });
+    await user.click(editor);
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Approved replacement" })}
+        onContentChange={onContentChange}
+        onFlushNote={onFlushNote}
+      />,
+    );
+    fireEvent.blur(editor);
+    await waitFor(() => expect(editor).toHaveTextContent("Approved replacement"));
+    expect(onContentChange).not.toHaveBeenCalled();
+    expect(onFlushNote).toHaveBeenCalledWith("note-1");
+  });
+
+  it("preserves local typing and a concurrent external replacement on blur", async () => {
+    const user = userEvent.setup();
+    const onContentChange = vi.fn();
+    const { rerender } = render(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Old ready body" })}
+        onContentChange={onContentChange}
+      />,
+    );
+    const editor = screen.getByRole("textbox", { name: "Generated note" });
+    await user.click(editor);
+    const tiptap = (editor as HTMLElement & { editor?: Editor }).editor;
+    if (!tiptap) throw new Error("Expected mounted editor");
+    tiptap.commands.focus("end");
+    await user.keyboard(" local addition");
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Approved replacement" })}
+        onContentChange={onContentChange}
+      />,
+    );
+    fireEvent.blur(editor);
+    expect(onContentChange).toHaveBeenLastCalledWith(
+      "note-1",
+      "Old ready body local addition\n\nApproved replacement",
+    );
   });
 
   it("keeps saved markdown stable for nested lists, code blocks, and Unicode", () => {

@@ -298,7 +298,10 @@ async fn tick_generation(
         return;
     };
     let today = local_day(&zone, now);
-    let sources = AppSources { app: app.clone() };
+    let sources = AppSources {
+        app: app.clone(),
+        profile: None,
+    };
     let deps = Deps {
         store,
         settings,
@@ -416,8 +419,12 @@ async fn read_dto(
     store: &ActivityStore,
     settings: &crate::activity::settings::ActivitySettings,
     day: NaiveDate,
+    profile: Option<&str>,
 ) -> Result<DayIntelligenceDto, AppError> {
-    let sources = AppSources { app: app.clone() };
+    let sources = AppSources {
+        app: app.clone(),
+        profile: profile.map(str::to_owned),
+    };
     let context = ReadContext {
         store,
         settings,
@@ -480,7 +487,56 @@ pub async fn day_intelligence_day(
             ))
         }
     };
-    read_dto(&app, &state, &store, &settings, day).await
+    read_dto(&app, &state, &store, &settings, day, None).await
+}
+
+/// Typed on-demand port; preserves the UI service's provider, empty-day,
+/// closed-store and pending-hour errors and its publication events.
+pub(crate) async fn tool_generate(
+    app: &AppHandle,
+    day: String,
+    binding: &crate::mcp_server::turns::TurnBinding,
+    profile: &str,
+    dispatched: &AtomicBool,
+) -> Result<DayIntelligenceDto, AppError> {
+    generate_day(
+        app.clone(),
+        app.state::<DayIntelligenceState>(),
+        app.state::<ActivityState>(),
+        DayRequest { day },
+        Some((binding, profile, dispatched)),
+    )
+    .await
+}
+
+struct TrackedActivityProvider<'a> {
+    dispatched: Option<&'a AtomicBool>,
+}
+impl pipeline::Generator for TrackedActivityProvider<'_> {
+    fn generate(
+        &self,
+        request: crate::llm::GenerateRequest,
+    ) -> futures_util::future::BoxFuture<'_, Result<crate::llm::GenerateOutput, crate::llm::LlmError>>
+    {
+        Box::pin(async move {
+            if let Some(dispatched) = self.dispatched {
+                dispatched.store(true, Ordering::SeqCst);
+            }
+            pipeline::Generator::generate(&ActivityProvider, request).await
+        })
+    }
+}
+
+struct OnDemandPublication<'a> {
+    app: AppHandle,
+    day: String,
+    running: &'a AtomicBool,
+}
+impl Drop for OnDemandPublication<'_> {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        emit(&self.app, &self.day, false);
+    }
 }
 
 /// "Generate summary": reports the day's pending hours (retrying failed ones
@@ -491,6 +547,16 @@ pub async fn day_intelligence_generate(
     state: State<'_, DayIntelligenceState>,
     activity: State<'_, ActivityState>,
     request: DayRequest,
+) -> Result<DayIntelligenceDto, AppError> {
+    generate_day(app, state, activity, request, None).await
+}
+
+async fn generate_day(
+    app: AppHandle,
+    state: State<'_, DayIntelligenceState>,
+    activity: State<'_, ActivityState>,
+    request: DayRequest,
+    authorization: Option<(&crate::mcp_server::turns::TurnBinding, &str, &AtomicBool)>,
 ) -> Result<DayIntelligenceDto, AppError> {
     let day = parse_request_day(&request.day)?;
     match provider_state() {
@@ -516,15 +582,38 @@ pub async fn day_intelligence_generate(
         tauri::async_runtime::spawn(async move { embedder.ensure_ready().await });
     }
     let _guard = state.run.lock().await;
+    let repos = if let Some((binding, profile, _)) = authorization {
+        let repos = crate::commands::repositories(&app).await?;
+        crate::mcp_server::tools::revalidate_binding(Some(&app), &repos.pool, binding, profile)
+            .await?;
+        Some(repos)
+    } else {
+        None
+    };
     state.running.store(true, Ordering::SeqCst);
     emit(&app, &request.day, true);
+    let publication = OnDemandPublication {
+        app: app.clone(),
+        day: request.day.clone(),
+        running: &state.running,
+    };
     timeline::refresh_before_read(&app, &store).await;
-    let sources = AppSources { app: app.clone() };
+    if let (Some((binding, profile, _)), Some(repos)) = (authorization, repos.as_ref()) {
+        crate::mcp_server::tools::revalidate_binding(Some(&app), &repos.pool, binding, profile)
+            .await?;
+    }
+    let sources = AppSources {
+        app: app.clone(),
+        profile: authorization.map(|(_, profile, _)| profile.to_owned()),
+    };
     let zone = SystemZone;
+    let provider = TrackedActivityProvider {
+        dispatched: authorization.map(|(_, _, dispatched)| dispatched),
+    };
     let deps = Deps {
         store: &store,
         settings: &settings,
-        generator: &ActivityProvider,
+        generator: &provider,
         embedder: state.embedder.as_ref(),
         sources: &sources,
         zone: &zone,
@@ -544,10 +633,17 @@ pub async fn day_intelligence_generate(
         Err(pipeline::PipelineError::Llm(error)) => Err(error.0.into()),
         Err(error) => Err(AppError::new("day_intelligence_failed", error.to_string())),
     };
-    state.running.store(false, Ordering::SeqCst);
-    emit(&app, &request.day, false);
+    drop(publication);
     result?;
-    read_dto(&app, &state, &store, &settings, day).await
+    read_dto(
+        &app,
+        &state,
+        &store,
+        &settings,
+        day,
+        authorization.map(|(_, profile, _)| profile),
+    )
+    .await
 }
 
 #[cfg(test)]

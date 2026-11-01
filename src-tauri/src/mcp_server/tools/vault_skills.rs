@@ -1,26 +1,43 @@
 //! Vault discovery and skill loading for bound CLI turns. Skills follow global
 //! enablement; routine skill calls also recheck the saved toolset policy.
 use super::{ToolCtx, ToolGroup};
-use crate::agent_sessions::skill_identity::{canonical_skill_id, read_skill_ids};
+use crate::agent_sessions::skill_identity::canonical_skill_id;
 use crate::agent_sessions::AgentRepository;
+use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
 use crate::domain::types::AppError;
 use crate::mcp_server::turns::TURN_REQUIRED;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf};
 use tauri::AppHandle;
+use tauri::Emitter;
 
 pub struct VaultSkillTools;
 impl ToolGroup for VaultSkillTools {
     fn owns(&self, name: &str) -> bool {
-        matches!(name, "get_obsidian_vault" | "list_skills" | "load_skill")
+        matches!(
+            name,
+            "get_obsidian_vault"
+                | "list_skills"
+                | "load_skill"
+                | "list_skill_settings"
+                | "read_skill"
+                | "update_skill"
+                | "enable_skill"
+                | "disable_skill"
+        )
     }
     fn descriptors(&self, _ctx: &ToolCtx<'_>) -> Vec<Value> {
         [
             ("get_obsidian_vault","Discover the currently selected Obsidian vault for each distinct task. Discovery does not authorize writes; never infer an unavailable vault's path.",json!({}),vec![]),
             ("list_skills","List globally enabled Clovy skills.",json!({}),vec![]),
+            ("list_skill_settings","List active and disabled skills with source and editability.",json!({}),vec![]),
+            ("read_skill","Read skill instructions without executing them, including disabled skills.",json!({"name":{"type":"string"}}),vec!["name"]),
+            ("update_skill","Replace instructions of an existing managed skill. Global skills are read-only.",json!({"name":{"type":"string"},"content":{"type":"string","maxLength":524288}}),vec!["name","content"]),
+            ("enable_skill","Enable an existing managed skill for future discovery.",json!({"name":{"type":"string"}}),vec!["name"]),
+            ("disable_skill","Disable an existing managed skill for future discovery.",json!({"name":{"type":"string"}}),vec!["name"]),
             ("load_skill","Load instructions for one globally enabled Clovy skill.",json!({"name":{"type":"string"}}),vec!["name"]),
-        ].into_iter().map(|(name,description,properties,required)| json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false,"idempotentHint":true}})).collect()
+        ].into_iter().map(|(name,description,properties,required)| json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":{"readOnlyHint":!is_mutation(name),"openWorldHint":false,"idempotentHint":true}})).collect()
     }
     fn call<'a>(
         &'a self,
@@ -38,6 +55,15 @@ impl ToolGroup for VaultSkillTools {
             })?;
             if name == "get_obsidian_vault" {
                 return vault_result(crate::obsidian::discovery_for_app(app));
+            }
+            let roots = crate::agent_sessions::skills::skill_roots(app);
+            // Dropping the managed root after a path-resolution failure must
+            // never promote the remaining global root to editable storage.
+            if roots.first().is_none_or(|(_, managed)| !managed) {
+                return Err(AppError::new(
+                    "agent_skill_write_failed",
+                    "Managed skill storage is unavailable.",
+                ));
             }
             call_with_roots(ctx, name, arguments, &skill_roots(app)).await
         })
@@ -71,7 +97,8 @@ pub(super) async fn call_with_roots(
     roots: &[PathBuf],
 ) -> Result<Value, AppError> {
     require_tool(ctx, name).await?;
-    let requested = if name == "load_skill" {
+    ctx.revalidate().await?;
+    let requested = if !matches!(name, "list_skills" | "list_skill_settings") {
         let requested = arguments
             .get("name")
             .and_then(Value::as_str)
@@ -81,26 +108,149 @@ pub(super) async fn call_with_roots(
     } else {
         None
     };
-    let enabled: HashMap<String, bool> = AgentRepository::new(ctx.data.notes.clone())
-        .skills()
-        .await?
-        .into_iter()
-        .map(|skill| (canonical_skill_id(&skill.id).to_string(), skill.enabled))
-        .collect();
-    let catalog = list_skills_from_roots(roots, &enabled, true).await?;
+    let enabled = crate::agent_sessions::skill_identity::skill_enabled_overrides(
+        AgentRepository::new(ctx.data.notes.clone())
+            .skills()
+            .await?
+            .into_iter()
+            .map(|skill| (skill.id, skill.enabled)),
+    );
+    let typed_roots = roots
+        .iter()
+        .enumerate()
+        .map(|(index, root)| (root.clone(), index == 0))
+        .collect::<Vec<_>>();
+    let catalog =
+        crate::agent_sessions::skills::catalog_from_roots(typed_roots.clone(), &enabled).await?;
     match name {
-        "list_skills" => Ok(catalog),
+        "list_skill_settings" => Ok(json!({"skills":catalog})),
+        "list_skills" => list_skills_from_roots(roots, &enabled, true).await,
+        "read_skill" => {
+            crate::agent_sessions::skills::read_from_roots(
+                &typed_roots,
+                requested.unwrap_or_default(),
+            )
+            .await
+        }
         "load_skill" => {
-            // Only discovered, enabled names are admitted, as with the native
-            // run snapshot. An arbitrary name is never an implicit file grant.
-            let allowed = catalog["skills"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|skill| skill["name"].as_str())
-                .map(|name| (name.to_string(), true))
+            let allowed = catalog
+                .iter()
+                .filter(|skill| skill["enabled"] == true)
+                .filter_map(|skill| skill["id"].as_str())
+                .map(|id| (id.to_string(), true))
                 .collect();
-            load_skill_from_roots(roots, &allowed, requested.unwrap_or_default()).await
+            let id = requested.unwrap_or_default();
+            if catalog.iter().any(|skill| {
+                skill["id"] == id
+                    && skill["configuredEnabled"] == true
+                    && skill["readable"] == false
+            }) {
+                return crate::agent_sessions::skills::read_from_roots(&typed_roots, id).await;
+            }
+            load_skill_from_roots(roots, &allowed, id).await
+        }
+        "update_skill" | "enable_skill" | "disable_skill" => {
+            let id = requested.unwrap_or_default();
+            let editable = |catalog: &[Value]| {
+                catalog
+                    .iter()
+                    .find(|skill| skill["id"] == id)
+                    .is_some_and(|skill| skill["editable"] == true)
+            };
+            if !editable(&catalog) {
+                return Err(AppError::new(
+                    "agent_skill_read_only",
+                    "Only existing managed skills can be changed.",
+                ));
+            }
+            let binding = ctx.binding.ok_or_else(|| {
+                AppError::new(TURN_REQUIRED, "Skill changes require a Clovy turn.")
+            })?;
+            ctx.broker()?
+                .request(
+                    &ApprovalTurn::from(binding),
+                    ApprovalRequest {
+                        tool: name.into(),
+                        call_id: Some(uuid::Uuid::new_v4().to_string()),
+                        kind: ApprovalKind::Approval {
+                            title: "Change a skill".into(),
+                            description: "Change the selected managed skill in Clovy.".into(),
+                            arguments: arguments.clone(),
+                            preview: None,
+                        },
+                    },
+                )
+                .await
+                .map_err(|denial| AppError::new(denial.code(), denial.message()))?;
+            ctx.revalidate().await?;
+            require_tool(ctx, name).await?;
+            // Resolve again after approval; neither an old catalog nor an id is
+            // a grant to write a replaced global file or an escaped symlink.
+            let catalog =
+                crate::agent_sessions::skills::catalog_from_roots(typed_roots.clone(), &enabled)
+                    .await?;
+            if !editable(&catalog) {
+                return Err(AppError::new(
+                    "agent_skill_read_only",
+                    "Only existing managed skills can be changed.",
+                ));
+            }
+            if name == "update_skill" {
+                let content = arguments
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AppError::new("invalid_arguments", "content is required."))?;
+                crate::agent_sessions::skills::update_for_turn(
+                    &ctx.data.notes,
+                    &typed_roots,
+                    id,
+                    content,
+                    (
+                        &ctx.data.profile,
+                        &binding.session_id,
+                        &binding.run_id,
+                        &binding.authority,
+                    ),
+                )
+                .await?;
+            } else {
+                crate::agent_sessions::skills::set_enabled_from_roots(
+                    &ctx.data.notes,
+                    &typed_roots,
+                    id,
+                    name == "enable_skill",
+                    Some((
+                        &ctx.data.profile,
+                        &binding.session_id,
+                        &binding.run_id,
+                        &binding.authority,
+                    )),
+                )
+                .await?;
+            }
+            if let Some(app) = ctx.app {
+                let _ = app.emit(
+                    "clovy-data-changed",
+                    json!({"profile":ctx.data.profile,"kind":"skills","id":id}),
+                );
+            }
+            let overrides = crate::agent_sessions::skill_identity::skill_enabled_overrides(
+                AgentRepository::new(ctx.data.notes.clone())
+                    .skills()
+                    .await?
+                    .into_iter()
+                    .map(|skill| (skill.id, skill.enabled)),
+            );
+            crate::agent_sessions::skills::catalog_from_roots(typed_roots, &overrides)
+                .await?
+                .into_iter()
+                .find(|skill| skill["id"] == id)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "agent_skill_not_found",
+                        "Skill was not found after the change.",
+                    )
+                })
         }
         _ => Err(AppError::new(
             "mcp_tool_unknown",
@@ -108,13 +258,33 @@ pub(super) async fn call_with_roots(
         )),
     }
 }
+
+fn is_mutation(name: &str) -> bool {
+    matches!(name, "update_skill" | "enable_skill" | "disable_skill")
+}
+
 async fn require_tool(ctx: &ToolCtx<'_>, name: &str) -> Result<(), AppError> {
     let binding = ctx.binding.ok_or_else(|| {
         AppError::new(TURN_REQUIRED, "Vault and skill reads require a Clovy turn.")
     })?;
+    if !binding.attended
+        && matches!(
+            name,
+            "list_skill_settings"
+                | "read_skill"
+                | "update_skill"
+                | "enable_skill"
+                | "disable_skill"
+        )
+    {
+        return Err(AppError::new(
+            "routine_tool_not_enabled",
+            "Skill administration requires an attended Clovy turn.",
+        ));
+    }
     // Vault discovery keeps its existing bound-turn contract. The routine
     // skill toolset controls instructions, not discovery of the chosen vault.
-    if matches!(name, "list_skills" | "load_skill")
+    if name != "get_obsidian_vault"
         && !super::routine_tool_allowed(&ctx.data.notes, binding, name).await?
     {
         return Err(AppError::new(
@@ -126,15 +296,10 @@ async fn require_tool(ctx: &ToolCtx<'_>, name: &str) -> Result<(), AppError> {
 }
 
 pub(crate) fn skill_roots(app: &AppHandle) -> Vec<PathBuf> {
-    let mut roots = crate::app_paths::app_data_dir(app)
-        .ok()
-        .map(|path| path.join("agents").join("skills"))
+    crate::agent_sessions::skills::skill_roots(app)
         .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join(".agents").join("skills"));
-    }
-    roots
+        .map(|(root, _)| root)
+        .collect()
 }
 
 pub(crate) async fn list_skills_from_roots(
@@ -142,33 +307,26 @@ pub(crate) async fn list_skills_from_roots(
     enabled: &HashMap<String, bool>,
     default_enabled: bool,
 ) -> Result<Value, AppError> {
-    let mut skills = Vec::new();
-    for root in roots {
-        let Ok(mut entries) = tokio::fs::read_dir(root).await else {
-            continue;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let stored_name = entry.file_name().to_string_lossy().into_owned();
-            let name = canonical_skill_id(&stored_name).to_string();
-            if stored_name != name && root.join(&name).join("SKILL.md").is_file() {
-                continue;
-            }
-            if enabled.get(&name).copied().unwrap_or(default_enabled)
-                && entry.path().join("SKILL.md").is_file()
-                && !skills.iter().any(|skill: &Value| {
-                    skill.get("name").and_then(Value::as_str) == Some(name.as_str())
-                })
-            {
-                skills.push(json!({"name":name,"root":root}));
-            }
-        }
-    }
+    let typed_roots = roots
+        .iter()
+        .enumerate()
+        .map(|(index, root)| (root.clone(), index == 0))
+        .collect::<Vec<_>>();
+    let catalog = crate::agent_sessions::skills::catalog_from_roots(typed_roots, enabled).await?;
+    let skills = catalog
+        .into_iter()
+        .filter(|skill| {
+            skill["readable"] == true
+                && skill["id"]
+                    .as_str()
+                    .is_some_and(|id| enabled.get(id).copied().unwrap_or(default_enabled))
+        })
+        .collect::<Vec<_>>();
     Ok(json!({"skills":skills}))
 }
 
 pub(crate) fn validate_skill_name(requested: &str) -> Result<&str, AppError> {
-    if requested.contains('/') || requested.contains('\\') || requested == "." || requested == ".."
-    {
+    if !crate::agent_sessions::skill_identity::valid_skill_id(requested) {
         return Err(AppError::new(
             "agent_skill_invalid",
             "Skill name is invalid.",
@@ -189,19 +347,10 @@ pub(crate) async fn load_skill_from_roots(
             "This skill is not enabled for the current run.",
         ));
     }
-    for root in roots {
-        for read_id in read_skill_ids(name) {
-            let path = root.join(read_id).join("SKILL.md");
-            if path.is_file() {
-                let content = tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|error| AppError::new("agent_tool_io_failed", error.to_string()))?;
-                return Ok(json!({"name":name,"content":content,"path":path}));
-            }
-        }
-    }
-    Err(AppError::new(
-        "agent_skill_not_found",
-        "Skill was not found.",
-    ))
+    let typed_roots = roots
+        .iter()
+        .enumerate()
+        .map(|(index, root)| (root.clone(), index == 0))
+        .collect::<Vec<_>>();
+    crate::agent_sessions::skills::read_from_roots(&typed_roots, name).await
 }

@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconFontStyle } from "central-icons/IconFontStyle";
@@ -97,6 +98,17 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
   const [pendingDelete, setPendingDelete] = useState<DictationHistoryItemDto | null>(null);
   const capabilities = useDictationCapabilities();
   const dictationAvailable = capabilities.available;
+  useClovyDataChanged("dictations", async (_change, isCurrent) => {
+    try {
+      const response = await listDictationHistory();
+      if (!isCurrent()) return;
+      setItems(response.items);
+      setRetentionDays(response.retentionDays);
+      setError(null);
+    } catch (caught) {
+      if (isCurrent()) setError(messageFromError(caught));
+    }
+  });
 
   const loadHistory = useCallback(async () => {
     try {

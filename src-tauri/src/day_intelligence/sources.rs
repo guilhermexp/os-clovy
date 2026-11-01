@@ -283,6 +283,11 @@ pub fn meetings_from_rows(
 /// The app's sources: the main database and the activity database.
 pub struct AppSources {
     pub app: AppHandle,
+    /// Host-bound note partition. Activity and coding-agent stores stay installation-wide.
+    pub profile: Option<String>,
+}
+pub(crate) fn profile_for_notes(pinned: Option<&str>, current: impl FnOnce() -> String) -> String {
+    pinned.map(str::to_owned).unwrap_or_else(current)
 }
 
 impl DaySources for AppSources {
@@ -300,7 +305,9 @@ impl DaySources for AppSources {
                     return Vec::new();
                 }
             };
-            let profile = crate::commands::active_profile(&self.app);
+            let profile = profile_for_notes(self.profile.as_deref(), || {
+                crate::commands::active_profile(&self.app)
+            });
             let cutoff = crate::db::repositories::dictation_history_cutoff_timestamp();
             dictations_between(&repositories.pool, &profile, from, to, zone, &cutoff).await
         })
@@ -316,7 +323,9 @@ impl DaySources for AppSources {
             let Ok(repositories) = crate::commands::repositories(&self.app).await else {
                 return Vec::new();
             };
-            let profile = crate::commands::active_profile(&self.app);
+            let profile = profile_for_notes(self.profile.as_deref(), || {
+                crate::commands::active_profile(&self.app)
+            });
             meetings_between(&repositories.pool, &profile, from, to, zone, Utc::now()).await
         })
     }
@@ -802,5 +811,44 @@ pub(crate) mod tests {
             ),
             until
         ));
+    }
+}
+
+#[cfg(test)]
+mod bound_note_profile_tests {
+    use super::*;
+    #[tokio::test]
+    async fn bound_note_context_ignores_later_ui_partition_selection() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        query("CREATE TABLE notes(id TEXT PRIMARY KEY,title TEXT,edited_content TEXT,generated_content TEXT,created_at TEXT,profile TEXT)").execute(&pool).await.unwrap();
+        query("CREATE TABLE recording_sessions(id TEXT PRIMARY KEY,note_id TEXT,started_at TEXT,ended_at TEXT)").execute(&pool).await.unwrap();
+        query("INSERT INTO notes VALUES('bound','Bound note','Bound transcript',NULL,'2026-11-01T12:00:00Z','bound-profile'),('foreign','Foreign note','Foreign transcript',NULL,'2026-11-01T12:00:00Z','foreign-profile')").execute(&pool).await.unwrap();
+        let profile = profile_for_notes(Some("bound-profile"), || "foreign-profile".into());
+        let from = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = from + chrono::Duration::days(1);
+        let notes = meetings_between(
+            &pool,
+            &profile,
+            from,
+            to,
+            &crate::day_intelligence::schedule::SystemZone,
+            to,
+        )
+        .await;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].note_id, "bound");
+        assert_eq!(
+            profile_for_notes(None, || "foreign-profile".into()),
+            "foreign-profile"
+        );
+    }
+    #[test]
+    fn a_pinned_partition_does_not_consult_mutable_ui_selection() {
+        let selected = profile_for_notes(Some("bound-profile"), || {
+            panic!("bound read consulted UI selection")
+        });
+        assert_eq!(selected, "bound-profile");
     }
 }

@@ -4,6 +4,7 @@ import { reconcileLiveTranscriptEvents } from "../lib/live-transcript-preview";
 import { messageFromError } from "../lib/errors";
 import {
   getNote,
+  listNotes,
   NOTE_PROCESSING_PROGRESS_EVENT,
   type DiscardedTranscriptSpanDto,
   type TranscriptDto,
@@ -13,6 +14,7 @@ import {
 } from "../lib/tauri";
 import { PROCESSING_DEMO_NOTE_ID } from "./processing-demo-ids";
 import type { UseNoteProcessingEventsDependencies } from "./use-note-processing-events-types";
+import { getCurrentDataPartitionName } from "../lib/data-partition";
 
 export const NOTE_PROCESSING_RECONCILE_INTERVAL_MS = 12_000;
 
@@ -46,11 +48,15 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
   const [discardRevision, setDiscardRevision] = useState(0);
   const selectedNoteRef = useRef(selectedNote);
   selectedNoteRef.current = selectedNote;
+  const { dispatch, noteSaveController, notes, setError } = dependencies;
+  const visibleNotesRef = useRef(notes);
+  visibleNotesRef.current = notes;
   const activeNotesRef = useRef(new Map<string, NoteListItemDto>());
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
   const pendingTerminalHydrationsRef = useRef(new Map<string, NoteProcessingProgressDto>());
   const terminalHydrationInFlightRef = useRef(new Map<string, Promise<void>>());
   const terminalHydrationRetryRef = useRef(new Map<string, number>());
+  const deletedNoteIdsRef = useRef(new Set<string>());
   const refreshCompletedNoteRef = useRef<(progress: NoteProcessingProgressDto) => Promise<void>>(
     async () => undefined,
   );
@@ -62,7 +68,106 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
     .join("\0");
 
   useEffect(() => {
-    activeNotesRef.current = new Map(activeProcessingNotes(notes).map((note) => [note.id, note]));
+    let disposed = false;
+    let latestRequest = 0;
+    const noteRequests = new Map<string, number>();
+    let unlisten: (() => void) | undefined;
+    void listen<{ profile: string; kind: string; id?: string; deleted?: boolean }>(
+      "clovy-data-changed",
+      ({ payload }) => {
+        if (
+          !["notes", "projects"].includes(payload.kind) ||
+          payload.profile !== getCurrentDataPartitionName()
+        )
+          return;
+        const noteId = payload.kind === "notes" ? payload.id : undefined;
+        const request = ++latestRequest;
+        if (noteId) noteRequests.set(noteId, request);
+        const isCurrent = () => !disposed && payload.profile === getCurrentDataPartitionName();
+        if (noteId && payload.deleted) {
+          deletedNoteIdsRef.current.add(noteId);
+          pendingTerminalHydrationsRef.current.delete(noteId);
+          activeNotesRef.current.delete(noteId);
+          const retry = terminalHydrationRetryRef.current.get(noteId);
+          if (retry !== undefined) window.clearTimeout(retry);
+          terminalHydrationRetryRef.current.delete(noteId);
+          noteSaveController.discard(noteId);
+          dispatch({ type: "noteDeleted", noteId });
+        }
+        void (async () => {
+          try {
+            if (noteId && !payload.deleted && !deletedNoteIdsRef.current.has(noteId)) {
+              await noteSaveController.flush(noteId);
+              if (!isCurrent() || noteRequests.get(noteId) !== request) return;
+              const editVersion = noteSaveController.getEditVersion(noteId);
+              const note = await getNote(noteId);
+              if (
+                isCurrent() &&
+                noteRequests.get(noteId) === request &&
+                !deletedNoteIdsRef.current.has(noteId) &&
+                editVersion === noteSaveController.getEditVersion(noteId) &&
+                !noteSaveController.hasPending(noteId)
+              )
+                dispatch({ type: "noteUpdated", note });
+            }
+            const editVersions = new Map(
+              visibleNotesRef.current.map((note) => [
+                note.id,
+                noteSaveController.getEditVersion(note.id),
+              ]),
+            );
+            const pendingAtRead = new Set(
+              visibleNotesRef.current
+                .filter((note) => noteSaveController.hasPending(note.id))
+                .map((note) => note.id),
+            );
+            const response = await listNotes();
+            if (isCurrent() && request === latestRequest) {
+              dispatch({
+                type: "notesInvalidated",
+                notes: response.items,
+                preserveIds: response.items
+                  .filter(
+                    (note) =>
+                      pendingAtRead.has(note.id) ||
+                      noteSaveController.hasPending(note.id) ||
+                      (editVersions.get(note.id) ?? 0) !==
+                        noteSaveController.getEditVersion(note.id),
+                  )
+                  .map((note) => note.id),
+                deletedId: payload.deleted ? noteId : undefined,
+              });
+            }
+          } catch (error) {
+            if (
+              isCurrent() &&
+              (!noteId ||
+                (!deletedNoteIdsRef.current.has(noteId) && noteRequests.get(noteId) === request))
+            )
+              setError(messageFromError(error));
+          }
+        })();
+      },
+    )
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => {
+        if (!disposed) console.warn("Clovy note refresh subscription is unavailable.");
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dispatch, noteSaveController, setError]);
+
+  useEffect(() => {
+    activeNotesRef.current = new Map(
+      activeProcessingNotes(notes)
+        .filter((note) => !deletedNoteIdsRef.current.has(note.id))
+        .map((note) => [note.id, note]),
+    );
   }, [notes]);
 
   useEffect(() => {
@@ -143,23 +248,40 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
 
   const refreshCompletedNote = useCallback(
     (progress: NoteProcessingProgressDto) => {
+      if (deletedNoteIdsRef.current.has(progress.noteId)) return Promise.resolve();
       const pending = terminalHydrationInFlightRef.current.get(progress.noteId);
       if (pending) return pending;
 
       let shouldRetry = false;
       const hydration = (async () => {
+        const profile = getCurrentDataPartitionName();
         try {
           // PR #917 made editor persistence asynchronous. Drain that note's
           // optimistic edits before hydrating the generated result so the done
           // snapshot cannot replace a newer local title or body.
           await noteSaveController.flush(progress.noteId);
+          if (
+            deletedNoteIdsRef.current.has(progress.noteId) ||
+            profile !== getCurrentDataPartitionName()
+          )
+            return;
+          const editVersion = noteSaveController.getEditVersion(progress.noteId);
           const note = await getNote(progress.noteId);
           const latest = pendingTerminalHydrationsRef.current.get(progress.noteId);
           if (
             disposedRef.current ||
+            deletedNoteIdsRef.current.has(progress.noteId) ||
+            profile !== getCurrentDataPartitionName() ||
             !latest ||
             progressIdentity(latest) !== progressIdentity(progress)
           ) {
+            return;
+          }
+          if (
+            editVersion !== noteSaveController.getEditVersion(progress.noteId) ||
+            noteSaveController.hasPending(progress.noteId)
+          ) {
+            shouldRetry = true;
             return;
           }
           if (note.updatedAt < progress.revision) {
@@ -170,6 +292,11 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
           dispatch({ type: "noteUpdated", note });
           clearTerminalHydration(progress);
         } catch (error) {
+          if (
+            deletedNoteIdsRef.current.has(progress.noteId) ||
+            profile !== getCurrentDataPartitionName()
+          )
+            return;
           shouldRetry = true;
           if (!disposedRef.current) setError(messageFromError(error));
         }
@@ -206,17 +333,30 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
 
   const reconcileNote = useCallback(
     (noteId: string) => {
+      if (deletedNoteIdsRef.current.has(noteId)) return Promise.resolve();
       const pending = reconcileInFlightRef.current.get(noteId);
       if (pending) return pending;
 
       const reconciliation = (async () => {
+        const profile = getCurrentDataPartitionName();
         try {
           // The safety path can race an editor save just like the done event.
           // Flush first so recovery never replaces a newer optimistic edit.
           await noteSaveController.flush(noteId);
+          if (deletedNoteIdsRef.current.has(noteId) || profile !== getCurrentDataPartitionName())
+            return;
+          const editVersion = noteSaveController.getEditVersion(noteId);
           const note = await getNote(noteId);
           const activeSnapshot = activeNotesRef.current.get(noteId);
-          if (disposedRef.current || !activeSnapshot) return;
+          if (
+            disposedRef.current ||
+            !activeSnapshot ||
+            deletedNoteIdsRef.current.has(noteId) ||
+            profile !== getCurrentDataPartitionName() ||
+            editVersion !== noteSaveController.getEditVersion(noteId) ||
+            noteSaveController.hasPending(noteId)
+          )
+            return;
           // The backstop detects a missed terminal event; it deliberately does
           // not restore progressive full-note hydration while processing.
           if (isActiveProcessingStatus(note.processingStatus)) return;
@@ -224,7 +364,12 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
           reconcilePreview(note.id, note.sourceTranscripts ?? []);
           dispatch({ type: "noteUpdated", note });
         } catch (error) {
-          if (!disposedRef.current) setError(messageFromError(error));
+          if (
+            !disposedRef.current &&
+            !deletedNoteIdsRef.current.has(noteId) &&
+            profile === getCurrentDataPartitionName()
+          )
+            setError(messageFromError(error));
         }
       })();
 
@@ -257,6 +402,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
 
     void listen<NoteProcessingProgressDto>(NOTE_PROCESSING_PROGRESS_EVENT, (event) => {
       const progress = event.payload;
+      if (deletedNoteIdsRef.current.has(progress.noteId)) return;
       dispatch({
         type: "noteProcessingStageChanged",
         noteId: progress.noteId,
@@ -288,10 +434,17 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
         const pending = pendingTerminalHydrationsRef.current.get(progress.noteId);
         if (pending) clearTerminalHydration(pending);
       }
-    }).then((cleanup) => {
-      if (disposed) cleanup();
-      else unlisten = cleanup;
-    });
+    })
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => {
+        if (!disposed)
+          console.warn(
+            "Clovy note processing subscription is unavailable; reconciliation remains active.",
+          );
+      });
 
     return () => {
       disposed = true;

@@ -14,6 +14,7 @@ import { IconMicrophone } from "central-icons-filled/IconMicrophone";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { CSSProperties, RefObject } from "react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { orderTranscriptTurns } from "../../lib/transcript-order";
 import { Switch } from "../ui/Switch";
 import { clockTimeOptions, formatDate, t as translate, useT } from "../../i18n";
 import type {
@@ -303,11 +304,7 @@ export function NoteEditor({
     [reconciledLiveTranscript],
   );
   const transcriptTurns = useMemo(
-    () =>
-      [...sourceTranscripts, ...liveTranscriptTurns]
-        .map((turn, index) => ({ turn, index }))
-        .sort(compareSourceTranscriptOrder)
-        .map(({ turn }) => turn),
+    () => orderTranscriptTurns([...sourceTranscripts, ...liveTranscriptTurns]),
     [sourceTranscripts, liveTranscriptTurns],
   );
   const recordingForNote = recordingStatus;
@@ -1153,12 +1150,7 @@ function turnsToText(turns: RenderedTranscriptTurn[]): string {
 function transcriptToText(note: NoteDto, liveTurns: RenderedTranscriptTurn[] = []): string {
   const sourceTurns = orderedVisibleSourceTranscripts(note);
   if (sourceTurns.length || liveTurns.length) {
-    return turnsToText(
-      [...sourceTurns, ...liveTurns]
-        .map((turn, index) => ({ turn, index }))
-        .sort(compareSourceTranscriptOrder)
-        .map(({ turn }) => turn),
-    );
+    return turnsToText(orderTranscriptTurns([...sourceTurns, ...liveTurns]));
   }
   return note.transcript?.text ?? "";
 }
@@ -1188,14 +1180,12 @@ function silentSourceNoticeText(note: NoteDto): string | null {
 }
 
 function orderedVisibleSourceTranscripts(note: NoteDto): RenderedTranscriptTurn[] {
-  return (note.sourceTranscripts ?? [])
-    .filter((turn) => {
+  return orderTranscriptTurns(
+    (note.sourceTranscripts ?? []).filter((turn) => {
       if (turn.text.trim()) return true;
       return Boolean(turn.lastError);
-    })
-    .map((turn, index) => ({ turn, index }))
-    .sort(compareSourceTranscriptOrder)
-    .map(({ turn }) => turn);
+    }),
+  );
 }
 
 function liveTranscriptEventToTurn(event: LiveTranscriptEventDto): RenderedTranscriptTurn {
@@ -1213,29 +1203,6 @@ function liveTranscriptEventToTurn(event: LiveTranscriptEventDto): RenderedTrans
     preview: true,
     stability: event.stability,
   };
-}
-
-function compareSourceTranscriptOrder(
-  left: { turn: RenderedTranscriptTurn; index: number },
-  right: { turn: RenderedTranscriptTurn; index: number },
-) {
-  const turnIndexOrder = compareOptionalNumber(left.turn.turnIndex, right.turn.turnIndex);
-  if (turnIndexOrder !== 0) return turnIndexOrder;
-
-  const startOrder = compareOptionalNumber(left.turn.startMs, right.turn.startMs);
-  if (startOrder !== 0) return startOrder;
-
-  const endOrder = compareOptionalNumber(left.turn.endMs, right.turn.endMs);
-  if (endOrder !== 0) return endOrder;
-
-  return left.index - right.index;
-}
-
-function compareOptionalNumber(left?: number, right?: number) {
-  if (left === undefined && right === undefined) return 0;
-  if (left === undefined) return 1;
-  if (right === undefined) return -1;
-  return left - right;
 }
 
 function useCopyFeedback() {

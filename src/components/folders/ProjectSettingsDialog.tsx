@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { t as translate, useT } from "../../i18n";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import {
   listMemories,
   memorySettings,
@@ -55,6 +56,21 @@ export function ProjectSettingsDialog({
   const [memoryCount, setMemoryCount] = useState<number>();
   const [memoryEnabled, setMemoryEnabled] = useState(false);
   const [memoryError, setMemoryError] = useState<string>();
+  useClovyDataChanged("memories", async (_change, isCurrent) => {
+    if (!open) return;
+    try {
+      const [nextMemories, settings] = await Promise.all([
+        listMemories(folder.id, false),
+        memorySettings(),
+      ]);
+      if (!isCurrent()) return;
+      setMemoryCount(nextMemories.length);
+      setMemoryEnabled(settings.enabled);
+      setMemoryError(undefined);
+    } catch (caught) {
+      if (isCurrent()) setMemoryError(messageFromCaught(caught));
+    }
+  });
 
   useEffect(() => {
     if (!open) return;

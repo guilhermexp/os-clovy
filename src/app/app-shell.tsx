@@ -63,6 +63,10 @@ export type AgentRecorderRequestPayload = {
   requestId?: unknown;
   action?: unknown;
   sourceMode?: unknown;
+  profile?: unknown;
+  noteId?: unknown;
+  sessionId?: unknown;
+  recoveryAction?: unknown;
 };
 
 export function agentSessionTabTitle(session?: AgentSessionDto): string | undefined {

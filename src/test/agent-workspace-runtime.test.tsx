@@ -1,7 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRuntimeEvent, AgentSessionDto } from "../lib/agent-runtime-contract";
+import type {
+  AgentRuntimeEvent,
+  AgentSessionDto,
+  AgentSkillDto,
+} from "../lib/agent-runtime-contract";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -150,6 +154,9 @@ describe("AgentWorkspace runtime wiring", () => {
             description: "Work with Clovy notes.",
             source: "managed",
             enabled: true,
+            configuredEnabled: true,
+            readable: true,
+            error: null,
             editable: true,
           },
           {
@@ -158,9 +165,12 @@ describe("AgentWorkspace runtime wiring", () => {
             description: "Disabled skill.",
             source: "managed",
             enabled: false,
+            configuredEnabled: false,
+            readable: true,
+            error: null,
             editable: true,
           },
-        ]);
+        ] satisfies AgentSkillDto[]);
       }
       if (command === "list_provider_models") {
         return Promise.resolve({
@@ -531,6 +541,72 @@ describe("AgentWorkspace runtime wiring", () => {
     view.unmount();
     await new Promise((resolve) => window.setTimeout(resolve, 100));
     expect(readAgentSessionDraft(session.id)).toBeUndefined();
+  });
+
+  it("leaves an externally deleted workspace and rejects its late hydration", async () => {
+    let finishSession: ((value: AgentSessionDto) => void) | undefined;
+    const late = new Promise<AgentSessionDto>((resolve) => {
+      finishSession = resolve;
+    });
+    const fallback = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "get_agent_session" ? late : fallback?.(command, args),
+    );
+    const selected = vi.fn();
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={session} onSessionSelected={selected} />);
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("get_agent_session", { sessionId: session.id }),
+    );
+    act(() =>
+      window.dispatchEvent(
+        new CustomEvent(AGENT_DELETE_SESSION_EVENT, { detail: { sessionId: session.id } }),
+      ),
+    );
+    await act(async () => finishSession?.(session));
+    expect(screen.queryByRole("button", { name: "Session actions" })).not.toBeInTheDocument();
+    expect(selected).toHaveBeenCalledWith(undefined);
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "New conversation");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", expect.anything()),
+    );
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "start_agent_run",
+        expect.objectContaining({ request: expect.objectContaining({ sessionId: newSession.id }) }),
+      ),
+    );
+    const starts = mocks.invoke.mock.calls.filter(([name]) => name === "start_agent_run");
+    expect(
+      starts.every(
+        ([, args]) => (args as { request: { sessionId: string } }).request.sessionId !== session.id,
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores a hydration error returned after that conversation was deleted", async () => {
+    let rejectSession: ((reason: Error) => void) | undefined;
+    const late = new Promise<AgentSessionDto>((_, reject) => {
+      rejectSession = reject;
+    });
+    const fallback = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "get_agent_session" ? late : fallback?.(command, args),
+    );
+    render(<AgentWorkspace initialSession={session} />);
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("get_agent_session", { sessionId: session.id }),
+    );
+    act(() =>
+      window.dispatchEvent(
+        new CustomEvent(AGENT_DELETE_SESSION_EVENT, { detail: { sessionId: session.id } }),
+      ),
+    );
+    await act(async () => rejectSession?.(new Error("Deleted conversation hydration failed")));
+    expect(screen.queryByText("Deleted conversation hydration failed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Session actions" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toBeInTheDocument();
   });
 
   it("does not let a late failed send recreate an externally deleted draft", async () => {

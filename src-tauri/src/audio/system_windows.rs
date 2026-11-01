@@ -47,6 +47,7 @@ impl SystemAudioCapture {
         partial_path: PathBuf,
         final_path: PathBuf,
         _timeline_offset: Duration,
+        authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
     ) -> Result<Self, AppError> {
         let stop_requested = Arc::new(AtomicBool::new(false));
         let pause_state = Arc::new(PauseState::default());
@@ -66,6 +67,7 @@ impl SystemAudioCapture {
                         pause_state,
                         stats,
                         startup_sender,
+                        authorization,
                     )
                 })
                 .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?
@@ -207,6 +209,7 @@ fn capture_loop(
     pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     startup_sender: Sender<Result<(), AppError>>,
+    authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
 ) -> Result<(), AppError> {
     let result = run_capture_loop(
         partial_path,
@@ -214,6 +217,7 @@ fn capture_loop(
         pause_state,
         Arc::clone(&stats),
         startup_sender,
+        authorization,
     );
     if let Err(error) = result.as_ref() {
         latch_error(&stats, error);
@@ -227,8 +231,9 @@ fn run_capture_loop(
     pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     startup_sender: Sender<Result<(), AppError>>,
+    authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
 ) -> Result<(), AppError> {
-    let mut backend = match WasapiLoopbackBackend::new() {
+    let mut backend = match WasapiLoopbackBackend::new(authorization) {
         Ok(backend) => backend,
         Err(error) => {
             let _ = startup_sender.send(Err(error.clone()));
@@ -353,12 +358,14 @@ impl Drop for MixFormatPtr {
 #[cfg(target_os = "windows")]
 impl WasapiLoopbackBackend {
     fn probe_default_endpoint() -> Result<(), AppError> {
-        let backend = Self::new()?;
+        let backend = Self::new(None)?;
         drop(backend);
         Ok(())
     }
 
-    fn new() -> Result<Self, AppError> {
+    fn new(
+        authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
+    ) -> Result<Self, AppError> {
         use windows::Win32::Media::Audio::{
             IAudioCaptureClient, IAudioClient, AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -397,8 +404,10 @@ impl WasapiLoopbackBackend {
         .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
         let capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }
             .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
-        unsafe { audio_client.Start() }
-            .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
+        crate::audio::system_audio::admit_system_audio_start(authorization.as_ref(), || {
+            unsafe { audio_client.Start() }
+                .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))
+        })?;
         Ok(Self {
             audio_client,
             capture_client,
@@ -557,7 +566,9 @@ impl WasapiLoopbackBackend {
         ))
     }
 
-    fn new() -> Result<Self, AppError> {
+    fn new(
+        _authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
+    ) -> Result<Self, AppError> {
         Self::probe_default_endpoint()?;
         Ok(Self {
             channels: 2,

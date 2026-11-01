@@ -10,6 +10,10 @@ async fn fixture() -> (McpData, TurnBinding) {
     let broker = TestBroker::new([]).await;
     let binding = broker.turn(CliKind::Claude, false).await;
     let pool = notes_pool().await;
+    query("INSERT INTO agent_sessions (id,title,model,status,created_at,updated_at) VALUES (?, 'Routine read fixture', 'test', 'running', 'now','now')")
+        .bind(&binding.session_id).execute(&pool).await.unwrap();
+    query("INSERT INTO agent_runs (id,session_id,model,status,started_at,updated_at) VALUES (?,?,'test','running','now','now')")
+        .bind(&binding.run_id).bind(&binding.session_id).execute(&pool).await.unwrap();
     let now = "2026-10-28T00:00:00Z";
     query("INSERT INTO routines (id, name, prompt, schedule, created_at, updated_at, metadata_json, tool_catalog_version) VALUES ('read-routine', 'Daily', 'Summarise', 'every 1d', ?, ?, '{\"enabledToolsets\":[]}', 1)")
         .bind(now).bind(now).execute(&pool).await.unwrap();
@@ -42,7 +46,7 @@ async fn routine_read_catalog_obeys_each_context_toolset_and_rechecks_revocation
         ..ToolCtx::unbound(&data)
     };
     let expected = names(&ctx);
-    assert_eq!(expected.len(), 14);
+    assert_eq!(expected.len(), 15);
     assert!(ReadTools.catalog(&ctx).await.is_empty());
     set_toolsets(&data, &["web", "file"]).await;
     assert!(ReadTools.catalog(&ctx).await.is_empty());
@@ -90,7 +94,7 @@ async fn routine_read_dispatch_denies_before_arguments_or_data_and_after_revocat
     for after_catalog in [false, true] {
         if after_catalog {
             set_toolsets(&data, &["context_engine"]).await;
-            assert_eq!(ReadTools.catalog(&ctx).await.len(), 14);
+            assert_eq!(ReadTools.catalog(&ctx).await.len(), 15);
             set_toolsets(&data, &[]).await;
         }
         for name in &tools {
@@ -111,7 +115,7 @@ async fn deleted_routine_loses_read_catalog_and_dispatch_before_arguments() {
         binding: Some(&binding),
         ..ToolCtx::unbound(&data)
     };
-    assert_eq!(ReadTools.catalog(&ctx).await.len(), 14);
+    assert_eq!(ReadTools.catalog(&ctx).await.len(), 15);
     query("DELETE FROM routines WHERE id = 'read-routine'")
         .execute(&data.notes)
         .await
@@ -166,7 +170,7 @@ async fn routine_read_policy_preserves_unbound_and_attended_chat_reads() {
             binding,
             ..ToolCtx::unbound(&data)
         };
-        assert_eq!(ReadTools.catalog(&ctx).await.len(), 14);
+        assert_eq!(ReadTools.catalog(&ctx).await.len(), 15);
         assert_eq!(
             call(&ctx, "get_note", &json!({"id":"note-roadmap"}))
                 .await

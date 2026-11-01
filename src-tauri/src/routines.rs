@@ -23,6 +23,13 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
+type BoundRoutineTurn<'a> = Option<(
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a crate::domain::turn_authority::TurnAuthority,
+)>;
+
 const CLAIM_STALE_AFTER_MINUTES: i64 = 10;
 const SCHEDULER_TICK_SECONDS: u64 = 30;
 const ROUTINE_SELECT_BY_ID_SQL: &str = "SELECT id, legacy_job_id, name, prompt, schedule, timezone, repeat, deliver, model, safety_mode, state, enabled, created_at, updated_at, next_run_at, last_run_at, last_status, last_error, last_delivery_error, metadata_json FROM routines WHERE id = ?";
@@ -176,12 +183,36 @@ fn resolve_routine_model(
     crate::chat_engine::engine_model_id(kind)
 }
 
+async fn guard_routine_turn(
+    transaction: &mut Transaction<'_, Sqlite>,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<(), AppError> {
+    if let Some((profile, session, run, authority)) = turn {
+        crate::db::repositories::guard_bound_turn(transaction, profile, session, run, authority)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Create a durable Routine. The first next run is derived before insertion so
 /// the scheduler can claim it without re-parsing creation data.
 pub async fn create(
     pool: &SqlitePool,
     request: CreateAgentRoutineRequest,
 ) -> Result<AgentRoutineDto, AppError> {
+    create_for_turn(pool, request, None).await
+}
+
+pub(crate) async fn create_for_turn(
+    pool: &SqlitePool,
+    request: CreateAgentRoutineRequest,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let name = request
         .name
         .as_deref()
@@ -202,8 +233,9 @@ pub async fn create(
     let safety_mode = request.safety_mode.unwrap_or(AgentSafetyMode::Sandboxed);
     let timezone = nonempty(request.timezone, "UTC");
     let timestamp = crate::db::repositories::timestamp();
+    let next = next_run_after(schedule, &timezone, Utc::now())?;
     let next_run_at = if enabled && state == "scheduled" {
-        next_run_after(schedule, &timezone, Utc::now())?.map(format_time)
+        next.map(format_time)
     } else {
         None
     };
@@ -218,8 +250,10 @@ pub async fn create(
         .bind(timezone).bind(request.repeat.unwrap_or_else(|| "forever".into()))
         .bind(request.deliver.unwrap_or_else(|| "local".into())).bind(nonempty(request.model, "auto"))
         .bind(safety_mode.as_db()).bind(&state).bind(enabled).bind(&timestamp).bind(&timestamp)
-        .bind(next_run_at).bind(metadata_json(metadata)).execute(pool).await.map_err(app_error)?;
-    get(pool, &id).await
+        .bind(next_run_at).bind(metadata_json(metadata)).execute(&mut *transaction).await.map_err(app_error)?;
+    let result = get_in_transaction(&mut transaction, &id).await?;
+    transaction.commit().await.map_err(app_error)?;
+    Ok(result)
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<AgentRoutineDto>, AppError> {
@@ -264,6 +298,14 @@ pub async fn update(
     pool: &SqlitePool,
     request: UpdateAgentRoutineRequest,
 ) -> Result<AgentRoutineDto, AppError> {
+    update_for_turn(pool, request, None).await
+}
+
+pub(crate) async fn update_for_turn(
+    pool: &SqlitePool,
+    request: UpdateAgentRoutineRequest,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
     // Routine edits derive state and metadata from the stored row. Serialize
     // that read with terminal claim release so a stale edit cannot overwrite
     // finite-repeat progress or re-enable a just-completed routine.
@@ -271,6 +313,7 @@ pub async fn update(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let current = get_in_transaction(&mut transaction, &request.routine_id).await?;
     let routine_id = request.routine_id;
     let state = request.state.unwrap_or(current.state);
@@ -290,8 +333,23 @@ pub async fn update(
             "A routine schedule is required.",
         ));
     }
+    let next = next_run_after(&schedule, &timezone, Utc::now())?;
+    if request
+        .prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.trim().is_empty())
+        || request
+            .name
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(AppError::new(
+            "invalid_arguments",
+            "Routine name and instructions must not be empty.",
+        ));
+    }
     let next_run_at = if enabled && state == "scheduled" {
-        next_run_after(&schedule, &timezone, Utc::now())?.map(format_time)
+        next.map(format_time)
     } else {
         None
     };
@@ -311,22 +369,46 @@ pub async fn update(
 }
 
 pub async fn pause(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
-    // Pausing stops future scheduling but does not cancel a claimed run. Keep
-    // its claim association until terminal projection records status and
-    // repeat progress, then releases the claim transactionally.
-    let changed = query("UPDATE routines SET state = 'paused', enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?")
-        .bind(crate::db::repositories::timestamp()).bind(id).execute(pool).await.map_err(app_error)?;
-    if changed.rows_affected() == 0 {
-        return Err(AppError::new("routine_not_found", "Routine was not found."));
-    }
-    get(pool, id).await
+    pause_for_turn(pool, id, None).await
 }
 
-pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
+pub(crate) async fn pause_for_turn(
+    pool: &SqlitePool,
+    id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
+    // Pausing stops future scheduling but does not cancel a claimed run. Keep
+    // its claim association until terminal projection records status and
+    // repeat progress, then releases the claim transactionally.
+    let changed = query("UPDATE routines SET state = 'paused', enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?")
+        .bind(crate::db::repositories::timestamp()).bind(id).execute(&mut *transaction).await.map_err(app_error)?;
+    if changed.rows_affected() == 0 {
+        return Err(AppError::new("routine_not_found", "Routine was not found."));
+    }
+    let result = get_in_transaction(&mut transaction, id).await?;
+    transaction.commit().await.map_err(app_error)?;
+    Ok(result)
+}
+
+pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
+    resume_for_turn(pool, id, None).await
+}
+
+pub(crate) async fn resume_for_turn(
+    pool: &SqlitePool,
+    id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let current = get_in_transaction(&mut transaction, id).await?;
     if requires_legacy_execution_review(&current.metadata) {
         return Err(AppError::new(
@@ -342,14 +424,28 @@ pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppE
 }
 
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
+    delete_for_turn(pool, id, None).await
+}
+
+pub(crate) async fn delete_for_turn(
+    pool: &SqlitePool,
+    id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<(), AppError> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let deleted = query("DELETE FROM routines WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(app_error)?;
     if deleted.rows_affected() == 0 {
         Err(AppError::new("routine_not_found", "Routine was not found."))
     } else {
+        transaction.commit().await.map_err(app_error)?;
         Ok(())
     }
 }
@@ -366,6 +462,37 @@ pub async fn list_runs(
             .fetch_all(pool).await.map_err(app_error)?
     };
     Ok(rows.into_iter().map(run_from_row).collect())
+}
+
+/// Bounded execution history with a deterministic total order across ties.
+pub async fn list_runs_page(
+    pool: &SqlitePool,
+    routine_id: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AgentRoutineRunDto>, AppError> {
+    let rows = query("SELECT id, routine_id, agent_session_id, agent_run_id, trigger_kind, status, scheduled_for, started_at, completed_at, model, safety_mode, error_code, error_message, created_at, updated_at FROM routine_runs WHERE (? IS NULL OR routine_id = ?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+        .bind(routine_id).bind(routine_id).bind(limit.clamp(1, 101)).bind(offset.max(0)).fetch_all(pool).await.map_err(app_error)?;
+    Ok(rows.into_iter().map(run_from_row).collect())
+}
+
+/// A failed claim is never represented as a successful run. Eligibility is
+/// re-read because a scheduler may win between approval and manual dispatch.
+pub async fn trigger_blocked_error(pool: &SqlitePool, id: &str) -> Result<AppError, AppError> {
+    let routine = get(pool, id).await?;
+    let active: i64 = query_scalar("SELECT EXISTS (SELECT 1 FROM routines WHERE id = ? AND claim_token IS NOT NULL) OR EXISTS (SELECT 1 FROM routine_runs WHERE routine_id = ? AND status IN ('queued','running','waiting_for_user'))")
+        .bind(id).bind(id).fetch_one(pool).await.map_err(app_error)?;
+    Ok(if active != 0 {
+        AppError::new("routine_busy", "This routine already has an active run.")
+    } else {
+        AppError::new(
+            "routine_blocked",
+            format!(
+                "This routine cannot start in state {} (enabled: {}).",
+                routine.state, routine.enabled
+            ),
+        )
+    })
 }
 
 /// Atomically claim an immediate or due execution. It deliberately does not
@@ -394,6 +521,25 @@ async fn claim_with_connector_guard(
     require_due: bool,
     connector: Option<ConnectorClaimGuard<'_>>,
 ) -> Result<Option<Claim>, AppError> {
+    claim_with_connector_guard_for_turn(
+        pool,
+        routine_id,
+        trigger_kind,
+        require_due,
+        connector,
+        None,
+    )
+    .await
+}
+
+async fn claim_with_connector_guard_for_turn(
+    pool: &SqlitePool,
+    routine_id: &str,
+    trigger_kind: &str,
+    require_due: bool,
+    connector: Option<ConnectorClaimGuard<'_>>,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<Option<Claim>, AppError> {
     // Serialize the eligibility read with the claim write. A deferred
     // transaction can fail with SQLITE_BUSY_SNAPSHOT when a scheduler,
     // connector, and manual trigger race after reading the same free row.
@@ -401,6 +547,7 @@ async fn claim_with_connector_guard(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let trigger_id = connector.as_ref().map(|guard| guard.trigger_id);
     let trigger_guard_kind = connector.as_ref().map(|guard| guard.kind);
     let trigger_account_id = connector.as_ref().map(|guard| guard.account_id);
@@ -459,6 +606,52 @@ async fn claim_with_connector_guard(
         token,
         routine_run_id: run_id,
     }))
+}
+
+#[cfg(test)]
+mod bound_claim_tests {
+    use super::*;
+    use crate::{approval_broker::testing::TestBroker, llm::cli::CliKind};
+    #[tokio::test]
+    async fn manual_claim_rechecks_stopped_caller_before_admission() {
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Claude, true).await;
+        let routine = create(
+            broker.pool(),
+            serde_json::from_value(json!({"prompt":"Keep", "schedule":"every 1d"})).unwrap(),
+        )
+        .await
+        .unwrap();
+        query("UPDATE agent_runs SET status='cancelled' WHERE id=?")
+            .bind(&binding.run_id)
+            .execute(broker.pool())
+            .await
+            .unwrap();
+        let result = claim_with_connector_guard_for_turn(
+            broker.pool(),
+            &routine.id,
+            "manual",
+            false,
+            None,
+            Some((
+                "default",
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority,
+            )),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "turn_expired");
+        assert!(list_runs(broker.pool(), Some(&routine.id))
+            .await
+            .unwrap()
+            .is_empty());
+        // The refused admission leaves the claim available to the scheduler.
+        assert!(claim(broker.pool(), &routine.id, "schedule", false)
+            .await
+            .unwrap()
+            .is_some());
+    }
 }
 
 /// Claim every due routine. The caller should then call `start_claim` for each
@@ -814,8 +1007,18 @@ pub async fn trigger_and_start(
     pool: &SqlitePool,
     routine_id: &str,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
+    trigger_and_start_for_turn(app, pool, routine_id, None).await
+}
+
+pub(crate) async fn trigger_and_start_for_turn(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    routine_id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<Option<AgentRoutineRunDto>, AppError> {
     reconcile(pool).await?;
-    match claim(pool, routine_id, "manual", false).await? {
+    match claim_with_connector_guard_for_turn(pool, routine_id, "manual", false, None, turn).await?
+    {
         Some(claim) => start_claim(app, pool, claim).await.map(Some),
         None => Ok(None),
     }
@@ -1293,14 +1496,20 @@ async fn routine_trust(pool: &SqlitePool, routine_id: &str) -> (Vec<String>, Opt
 fn routine_base_tool_allowed(name: &str, enabled_toolsets: &[String]) -> bool {
     let has = |toolset: &str| enabled_toolsets.iter().any(|value| value == toolset);
     match name {
-        name if matches!(name, "search_june" | "get_dictation")
-            || crate::mcp_server::tools::is_read_tool(name) =>
+        name if matches!(
+            name,
+            "search_june" | "get_dictation" | "list_notes" | "list_note_transcripts"
+        ) || crate::mcp_server::tools::is_read_tool(name)
+            || crate::mcp_server::tools::is_conversation_read_tool(name) =>
         {
             has("context_engine") || has("memory") || has("session_search")
         }
+        "get_obsidian_vault" | "approve_action" => true,
         "web_search" | "web_fetch" => has("web"),
         "list_files" | "read_file" | "preview_file" | "search_files" => has("file"),
         "list_skills" | "load_skill" => has("skills"),
+        "search_memories" => has("memory") || has("context_engine"),
+        "list_routines" | "list_routine_runs" => has("routines"),
         _ => false,
     }
 }
@@ -1401,6 +1610,12 @@ fn next_run_after(
     timezone: &str,
     after: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, AppError> {
+    let timezone = timezone.parse::<Tz>().map_err(|_| {
+        AppError::new(
+            "routine_timezone_invalid",
+            "Routine timezone must be a valid IANA timezone.",
+        )
+    })?;
     let normalized = schedule.trim().to_ascii_lowercase();
     let source = match normalized.as_str() {
         "@hourly" => "0 * * * *".to_string(),
@@ -1422,12 +1637,6 @@ fn next_run_after(
             "Routine schedules must be RFC 3339, every <n>m/h/d, or five-field cron.",
         ));
     }
-    let timezone = timezone.parse::<Tz>().map_err(|_| {
-        AppError::new(
-            "routine_timezone_invalid",
-            "Routine timezone must be a valid IANA timezone.",
-        )
-    })?;
     let mut candidate = after + Duration::minutes(1);
     candidate = candidate
         .with_second(0)

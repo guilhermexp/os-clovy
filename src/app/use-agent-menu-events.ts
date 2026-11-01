@@ -1,3 +1,4 @@
+import { isAgentSessionDeleted } from "../lib/agent-session-drafts";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import {
@@ -54,6 +55,7 @@ export function useAgentMenuEvents(dependencies: UseAgentMenuEventsDependencies)
     });
 
     void installMenuBarListener<string>(AGENT_MENU_BAR_OPEN_SESSION_EVENT, (sessionId) => {
+      if (sessionId && isAgentSessionDeleted(sessionId)) return;
       setAgentOrigin(undefined);
       if (!sessionId) {
         setActiveAgentSession(undefined);
@@ -72,6 +74,7 @@ export function useAgentMenuEvents(dependencies: UseAgentMenuEventsDependencies)
       }
       void Promise.all([listAgentSessions(), refreshSessionPartitions()])
         .then(([sessions, partitions]) => {
+          if (aborted || isAgentSessionDeleted(sessionId)) return;
           const scopedSessions = dataPartitionScopedAgentSessions(sessions, partitions);
           agentMenuBarSessionsRef.current = scopedSessions;
           const session = scopedSessions.find((item) => item.id === sessionId);
@@ -80,6 +83,7 @@ export function useAgentMenuEvents(dependencies: UseAgentMenuEventsDependencies)
           publishAgentMenuBarState();
         })
         .catch(() => {
+          if (aborted || isAgentSessionDeleted(sessionId)) return;
           setActiveView("agent");
         });
     });

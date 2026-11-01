@@ -34,7 +34,7 @@ pub fn descriptors(capture_enabled: bool) -> Vec<Value> {
     vec![
         json!({
             "name": GET_ACTIVITY_TIMELINE,
-            "description": "Read the user's activity timeline (app sessions with browser domain or editor workspace, category, and gaps for idle, sleep, or paused capture) and its totals for a period. Use it for questions like \"what did I do this morning?\". Times are RFC 3339; omit both bounds for today so far. Long periods are truncated (see `truncated`, `totalSessions`, `totalGaps`); ask for a shorter period to see everything.",
+            "description": "Read the user's activity timeline (app sessions with browser domain or editor workspace, category, and gaps for idle, sleep, or paused capture) and its totals for a period. Sessions and gaps are complete records overlapping [from, to); totals count only time within the requested period. Active state comes from the materialized timeline, updated by the activity ETL approximately every 30 seconds. Times are RFC 3339; omit both bounds for today so far. Long periods are truncated (see `truncated`, `totalSessions`, `totalGaps`); ask for a shorter period to see everything.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -93,7 +93,7 @@ export function NotePreview({
         serializationState.editorDirty = true;
         onChange(noteId, editorMarkdown);
       },
-      onBlur: () => {
+      onBlur: ({ editor }) => {
         // ProseMirror flushes an active IME composition through onUpdate
         // before invoking onBlur, so this cache includes its final text.
         // `noteId` here is the value at editor-creation time — the
@@ -102,16 +102,23 @@ export function NotePreview({
         // to, even when blur fires during teardown.
         const pendingExternalMarkdown = serializationState.focusedExternalMarkdown;
         serializationState.focusedExternalMarkdown = null;
-        if (serializationState.editorDirty || pendingExternalMarkdown) {
-          if (pendingExternalMarkdown) {
+        if (pendingExternalMarkdown) {
+          if (serializationState.editorDirty) {
             const mergedMarkdown = mergeFocusedExternalMarkdown(
               serializationState.lastSerializedMarkdown,
               pendingExternalMarkdown,
             );
             onChange(noteId, mergedMarkdown);
+          } else {
+            // An external replacement is already persisted. A clean editor
+            // must adopt it without writing its old focused snapshot back.
+            editor.commands.setContent(markdownToHtml(pendingExternalMarkdown.externalMarkdown), {
+              emitUpdate: false,
+            });
+            serializationState.lastSerializedMarkdown = pendingExternalMarkdown.externalMarkdown;
           }
-          serializationState.editorDirty = false;
         }
+        serializationState.editorDirty = false;
         // onUpdate already queued the exact latest user edit. Blur only
         // reconciles a focused external append, then flushes that queue.
         onBlur?.(noteId);
@@ -169,6 +176,9 @@ export function NotePreview({
     try {
       const current = serializationState.lastSerializedMarkdown.trim();
       if (current === markdown.trim()) return;
+      // Keep the focused document and selection stable, including when an
+      // external append arrives just before the first keystroke. Clean blur
+      // adopts the persisted text; dirty blur reconciles the local edit.
       if (editor.isFocused) {
         serializationState.focusedExternalMarkdown = {
           editorMarkdown: serializationState.lastSerializedMarkdown,
@@ -265,7 +275,9 @@ function mergeFocusedExternalMarkdown(
       ? appendMarkdown(editorMarkdown, external)
       : pending.externalMarkdown;
   }
-  if (!external.startsWith(base)) return editorMarkdown;
+  // A replacement cannot be reduced to an appended suffix. Retain the local
+  // edit and the external text rather than silently losing the user's work.
+  if (!external.startsWith(base)) return appendMarkdown(editorMarkdown, external);
 
   const appended = external.slice(base.length).trim();
   if (!appended || editorMarkdown.trimEnd().endsWith(appended)) {

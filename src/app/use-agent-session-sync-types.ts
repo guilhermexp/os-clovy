@@ -5,6 +5,9 @@ import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type * as React from "react";
 
 export type UseAgentSessionSyncDependencies = {
+  activeAgentSessionIdRef: React.MutableRefObject<string | undefined>;
+  tabsRef: React.MutableRefObject<import("./tabs/tabs").Tab[]>;
+  setTabs: React.Dispatch<React.SetStateAction<import("./tabs/tabs").Tab[]>>;
   activeViewRef: React.MutableRefObject<SidebarView>;
   agentMenuBarLastStatusRef: React.MutableRefObject<AgentSessionStatusDetail | undefined>;
   agentMenuBarSessionsRef: React.MutableRefObject<AgentSessionDto[]>;

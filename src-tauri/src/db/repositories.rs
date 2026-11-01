@@ -20,6 +20,9 @@ use crate::note_audio_export::{NoteAudioExportSelection, NoteAudioExportSource};
 
 pub(crate) const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
 const NOTE_PREVIEW_CHAR_LIMIT: usize = 140;
+/// For one session/source, source turns supersede its aggregate; legacy rows
+/// without a session remain independent records.
+pub(crate) const AUTHORITATIVE_TRANSCRIPT: &str = "(t.recording_session_id IS NULL OR t.turn_index IS NOT NULL OR NOT EXISTS (SELECT 1 FROM transcripts turn WHERE turn.note_id = t.note_id AND turn.recording_session_id = t.recording_session_id AND turn.source IS t.source AND turn.turn_index IS NOT NULL))";
 const LIST_NOTES_CURSOR_VERSION: u8 = 1;
 const LIST_NOTES_CURSOR_MAX_ENCODED_LEN: usize = 1_024;
 
@@ -33,6 +36,20 @@ struct ListNotesCursor {
 #[derive(Clone)]
 pub struct Repositories {
     pub pool: SqlitePool,
+    #[cfg(test)]
+    memory_write_observer: Option<MemoryWriteObserver>,
+}
+
+#[cfg(test)]
+type MemoryWriteObserver = std::sync::Arc<
+    dyn Fn(MemoryWriteBoundary) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryWriteBoundary {
+    BeforeDeleteTransaction,
+    BeforeDeleteCommit,
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +205,30 @@ pub struct BrowserOutcomeCounts {
 
 impl Repositories {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            #[cfg(test)]
+            memory_write_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_memory_writes(
+        mut self,
+        observer: impl Fn(MemoryWriteBoundary) -> futures_util::future::BoxFuture<'static, ()>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.memory_write_observer = Some(std::sync::Arc::new(observer));
+        self
+    }
+
+    #[cfg(test)]
+    async fn memory_write_boundary(&self, boundary: MemoryWriteBoundary) {
+        if let Some(observer) = &self.memory_write_observer {
+            observer(boundary).await;
+        }
     }
 
     pub async fn declare_browser_action(
@@ -1467,6 +1507,22 @@ impl Repositories {
         content: &str,
         source: &str,
     ) -> Result<MemoryDto, AppError> {
+        self.create_memory_for_turn(profile, folder_id, content, source, None)
+            .await
+    }
+
+    pub(crate) async fn create_memory_for_turn(
+        &self,
+        profile: &str,
+        folder_id: Option<&str>,
+        content: &str,
+        source: &str,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+    ) -> Result<MemoryDto, AppError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some((session, run, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
+        }
         let now = timestamp();
         let memory = MemoryDto {
             id: Uuid::new_v4().to_string(),
@@ -1498,7 +1554,7 @@ impl Repositories {
             .bind(&memory.updated_at)
             .bind(folder_id)
             .bind(profile)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
         } else {
             query(
@@ -1513,14 +1569,15 @@ impl Repositories {
             .bind(&memory.source)
             .bind(&memory.created_at)
             .bind(&memory.updated_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
         };
         if result.rows_affected() == 0 {
             return Err(self
-                .memory_scope_write_error(profile, folder_id.expect("scoped insert"))
+                .memory_scope_write_error(&mut tx, profile, folder_id.expect("scoped insert"))
                 .await?);
         }
+        tx.commit().await?;
         Ok(memory)
     }
 
@@ -1530,6 +1587,21 @@ impl Repositories {
         id: &str,
         content: &str,
     ) -> Result<MemoryDto, AppError> {
+        self.update_memory_for_turn(profile, id, content, None)
+            .await
+    }
+
+    pub(crate) async fn update_memory_for_turn(
+        &self,
+        profile: &str,
+        id: &str,
+        content: &str,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+    ) -> Result<MemoryDto, AppError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some((session, run, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
+        }
         let result = query(
             "UPDATE memories
              SET content = ?, updated_at = ?
@@ -1551,18 +1623,20 @@ impl Repositories {
         .bind(id)
         .bind(profile)
         .bind(profile)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() == 0 {
             let folder_id = query("SELECT folder_id FROM memories WHERE id = ? AND profile = ?")
                 .bind(id)
                 .bind(profile)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?
                 .get::<Option<String>, _>("folder_id");
             if let Some(folder_id) = folder_id {
-                return Err(self.memory_scope_write_error(profile, &folder_id).await?);
+                return Err(self
+                    .memory_scope_write_error(&mut tx, profile, &folder_id)
+                    .await?);
             }
             return Err(AppError::new("memory_not_found", "Memory was not found."));
         }
@@ -1573,13 +1647,16 @@ impl Repositories {
         )
         .bind(id)
         .bind(profile)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
-        Ok(memory_from_row(row))
+        let memory = memory_from_row(row);
+        tx.commit().await?;
+        Ok(memory)
     }
 
     async fn memory_scope_write_error(
         &self,
+        tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
         profile: &str,
         folder_id: &str,
     ) -> Result<AppError, sqlx::error::Error> {
@@ -1590,7 +1667,7 @@ impl Repositories {
         )
         .bind(folder_id)
         .bind(profile)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await?
         .map(|row| row.get::<i64, _>("memory_disabled") != 0);
         Ok(if memory_disabled == Some(true) {
@@ -1604,13 +1681,22 @@ impl Repositories {
     }
 
     pub async fn delete_memory(&self, profile: &str, id: &str) -> Result<(), AppError> {
-        self.delete_memory_inner(profile, id, false).await
+        self.delete_memory_inner(profile, id, false, None).await
     }
 
     /// Agent deletion honors the project's memory gate at the write boundary.
     /// Explicit user deletion remains unconditional through `delete_memory`.
     pub(crate) async fn forget_memory(&self, profile: &str, id: &str) -> Result<(), AppError> {
-        self.delete_memory_inner(profile, id, true).await
+        self.delete_memory_inner(profile, id, true, None).await
+    }
+
+    pub(crate) async fn forget_memory_for_turn(
+        &self,
+        profile: &str,
+        id: &str,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+    ) -> Result<(), AppError> {
+        self.delete_memory_inner(profile, id, true, turn).await
     }
 
     async fn delete_memory_inner(
@@ -1618,7 +1704,11 @@ impl Repositories {
         profile: &str,
         id: &str,
         enforce_project_gate: bool,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteTransaction)
+            .await;
         let mut tx = if enforce_project_gate {
             // Reserve the writer before reading the project. No concurrent
             // toggle can commit between this validation and the DELETE.
@@ -1626,6 +1716,9 @@ impl Repositories {
         } else {
             self.pool.begin().await?
         };
+        if let Some((session, run, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
+        }
         if enforce_project_gate {
             let row = query(
                 "SELECT m.folder_id, f.id AS project_id, f.memory_disabled
@@ -1666,6 +1759,9 @@ impl Repositories {
             .bind(timestamp())
             .execute(&mut *tx)
             .await?;
+        #[cfg(test)]
+        self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteCommit)
+            .await;
         tx.commit().await?;
         Ok(())
     }
@@ -1677,6 +1773,47 @@ impl Repositories {
     ) -> Result<NoteDto, sqlx::error::Error> {
         let id = Uuid::new_v4().to_string();
         self.create_note_with_id(profile, folder_id, &id).await
+    }
+
+    /// Create a note only if an explicitly requested project is still present
+    /// in the same partition. The write lock covers the check and insertion.
+    pub(crate) async fn create_note_checked(
+        &self,
+        profile: &str,
+        folder_id: Option<&str>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+    ) -> Result<NoteDto, AppError> {
+        let id = Uuid::new_v4().to_string();
+        let now = timestamp();
+        let mut tx = self.pool.begin().await?;
+        if let Some((session_id, run_id, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
+        }
+        if let Some(folder_id) = folder_id {
+            let claimed = query(
+                "UPDATE folders SET id = id WHERE id = ? AND profile = ? AND deleted_at IS NULL",
+            )
+            .bind(folder_id)
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if claimed == 0 {
+                return Err(AppError::new("folder_not_found", "Project was not found."));
+            }
+        }
+        query("INSERT INTO notes (id, title, processing_status, profile, created_at, updated_at) VALUES (?, '', 'draft', ?, ?, ?)")
+            .bind(&id).bind(profile).bind(&now).bind(&now).execute(&mut *tx).await?;
+        if let Some(folder_id) = folder_id {
+            query("INSERT INTO note_folders (note_id, folder_id, assigned_at) VALUES (?, ?, ?)")
+                .bind(&id)
+                .bind(folder_id)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(self.get_note_with_profile(&id, Some(profile)).await?)
     }
 
     pub async fn create_note_with_id(
@@ -1726,7 +1863,7 @@ impl Repositories {
         self.get_note_with_profile(note_id, None).await
     }
 
-    async fn get_note_with_profile(
+    pub(crate) async fn get_note_with_profile(
         &self,
         note_id: &str,
         profile: Option<&str>,
@@ -2070,7 +2207,8 @@ impl Repositories {
         let matches_active_profile = query(
             "SELECT 1
              FROM folders f
-             LEFT JOIN session_profiles sp ON sp.session_id = ?
+             JOIN agent_sessions s ON s.id = ?
+             LEFT JOIN session_profiles sp ON sp.session_id = s.id
              WHERE f.id = ?
                AND f.profile = ?
                AND f.deleted_at IS NULL
@@ -2617,6 +2755,44 @@ impl Repositories {
         })
     }
 
+    /// Compare and update in one SQLite statement, scoped to the caller's partition.
+    pub(crate) async fn update_note_if_revision(
+        &self,
+        profile: &str,
+        note_id: &str,
+        expected_revision: i64,
+        title: Option<&str>,
+        content: Option<&str>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+    ) -> Result<NoteDto, AppError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some((session_id, run_id, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
+        }
+        let updated = query("UPDATE notes SET title = COALESCE(?, title), edited_content = COALESCE(?, edited_content), updated_at = ?, revision = revision + 1 WHERE id = ? AND profile = ? AND revision = ?")
+            .bind(title).bind(content).bind(timestamp()).bind(note_id).bind(profile).bind(expected_revision)
+            .execute(&mut *tx).await?.rows_affected();
+        if updated == 0 {
+            let exists: i64 = sqlx::query_scalar::query_scalar(
+                "SELECT COUNT(*) FROM notes WHERE id = ? AND profile = ?",
+            )
+            .bind(note_id)
+            .bind(profile)
+            .fetch_one(&mut *tx)
+            .await?;
+            return Err(if exists == 0 {
+                AppError::new("note_not_found", "Note was not found.")
+            } else {
+                AppError::new(
+                    "note_conflict",
+                    "The note changed; read it again before updating.",
+                )
+            });
+        }
+        tx.commit().await?;
+        Ok(self.get_note_with_profile(note_id, Some(profile)).await?)
+    }
+
     pub async fn audio_artifact_paths_for_note(
         &self,
         note_id: &str,
@@ -2726,6 +2902,49 @@ impl Repositories {
         let mut tx = self.pool.begin().await?;
         delete_note_records(&mut tx, note_id).await?;
         tx.commit().await
+    }
+
+    pub(crate) async fn delete_note_in_profile(
+        &self,
+        profile: &str,
+        note_id: &str,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+    ) -> Result<Vec<String>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some((session_id, run_id, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
+        }
+        // Acquire the write lock before checking ownership and collecting paths.
+        let claimed = query("UPDATE notes SET id = id WHERE id = ? AND profile = ?")
+            .bind(note_id)
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if claimed == 0 {
+            return Err(AppError::new("note_not_found", "Note was not found."));
+        }
+        let active: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions WHERE note_id = ? AND status IN ('recording', 'paused')")
+            .bind(note_id).fetch_one(&mut *tx).await?;
+        if active != 0 {
+            return Err(AppError::new(
+                "note_recording_active",
+                "Stop the recording before deleting its note.",
+            ));
+        }
+        let paths = query("SELECT path FROM audio_artifacts WHERE note_id = ? UNION SELECT partial_path AS path FROM audio_artifacts WHERE note_id = ? AND partial_path IS NOT NULL UNION SELECT final_path AS path FROM recording_sessions WHERE note_id = ? AND final_path IS NOT NULL UNION SELECT partial_path AS path FROM recording_sessions WHERE note_id = ? AND partial_path IS NOT NULL")
+            .bind(note_id)
+            .bind(note_id)
+            .bind(note_id)
+            .bind(note_id)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .map(|row| row.get("path"))
+            .collect();
+        delete_note_records(&mut tx, note_id).await?;
+        tx.commit().await?;
+        Ok(paths)
     }
 
     /// Deletes a deterministic meeting-start draft only while it is still the
@@ -3925,26 +4144,24 @@ impl Repositories {
         }))
     }
 
-    async fn source_transcripts(
+    pub(crate) async fn source_transcripts(
         &self,
         note_id: &str,
     ) -> Result<Vec<TranscriptDto>, sqlx::error::Error> {
-        let rows = query(
+        let rows = query(&format!(
             "SELECT t.id, t.recording_session_id, t.span_id, t.text, t.source_mode, t.source, t.start_ms, t.end_ms, t.turn_index, t.language, t.status, t.last_error,
                     aa.validation_summary
              FROM transcripts t
              LEFT JOIN audio_artifacts aa ON aa.id = t.audio_artifact_id
              LEFT JOIN recording_sessions rs ON rs.id = t.recording_session_id
-             WHERE t.note_id = ?
-               AND t.recording_session_id IS NOT NULL
-               AND t.turn_index IS NOT NULL
+             WHERE t.note_id = ? AND {AUTHORITATIVE_TRANSCRIPT}
              ORDER BY COALESCE(rs.started_at, t.created_at) ASC,
-                      COALESCE(rs.rowid, 9223372036854775807) ASC,
-                      COALESCE(t.turn_index, 999999),
-                      COALESCE(t.start_ms, 999999999),
+                      COALESCE(t.recording_session_id, t.id) ASC,
+                      COALESCE(t.start_ms, 0),
+                      COALESCE(t.turn_index, -1),
                       t.created_at ASC,
-                      t.rowid ASC",
-        )
+                      t.id ASC"
+        ))
         .bind(note_id)
         .fetch_all(&self.pool)
         .await?;
@@ -5192,7 +5409,31 @@ impl Repositories {
     }
 }
 
-async fn delete_note_records(
+pub(crate) async fn guard_bound_turn(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    session_id: &str,
+    run_id: &str,
+    authority: &crate::domain::turn_authority::TurnAuthority,
+) -> Result<(), AppError> {
+    // A write statement acquires SQLite's write lock before the effect. Stop,
+    // partition reassignment, and this mutation therefore have a serial order.
+    let claimed = query("UPDATE agent_runs SET id = id WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user') AND EXISTS (SELECT 1 FROM agent_sessions s LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ? AND COALESCE(p.profile, 'default') = ?)")
+        .bind(run_id).bind(session_id).bind(session_id).bind(profile).execute(&mut **tx).await?.rows_affected();
+    // The database may still say running while natural turn teardown has
+    // already revoked its token. Check the live host capability only after
+    // the writer wait, before any domain mutation is admitted.
+    authority.check_live()?;
+    if claimed == 0 {
+        return Err(AppError::new(
+            "turn_expired",
+            "The bound run or data partition changed.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn delete_note_records(
     tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
     note_id: &str,
 ) -> Result<(), sqlx::error::Error> {

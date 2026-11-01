@@ -1,3 +1,4 @@
+import { useAgentDictationDelivery } from "./use-agent-dictation-delivery";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -45,7 +46,9 @@ import {
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSION_RENAMED_EVENT,
   AGENT_SESSIONS_HYDRATED_EVENT,
+  AGENT_SESSIONS_CHANGED_EVENT,
   emitAgentSessionsChanged,
+  readAgentSessionSnapshotEpoch,
   type AgentSessionRenamedDetail,
   type AgentSessionsHydratedDetail,
 } from "../lib/agent-events";
@@ -122,6 +125,7 @@ import { useAgentAttentionNotifications } from "./use-agent-attention-notificati
 import { startAgentRunSettlementRelay } from "../lib/agent-run-settlement";
 
 import { useAgentSessionSync } from "./use-agent-session-sync";
+import { isAgentSessionDeleted } from "../lib/agent-session-drafts";
 
 import { useAgentMenuEvents } from "./use-agent-menu-events";
 
@@ -165,6 +169,7 @@ import { useAppState } from "./use-app-state";
 import { renderAppOnboarding } from "./app-onboarding";
 
 export function App() {
+  useAgentDictationDelivery();
   // Subscribes the shell to the interface language: the render helpers and
   // tab titles below read `t` at render time.
   const locale = useLocale();
@@ -408,7 +413,9 @@ export function App() {
     (sessions: readonly AgentSessionDto[], partitions = sessionPartitionsRef.current) => {
       if (partitions === null) return [];
       const currentDataPartition = getCurrentDataPartitionName().trim() || currentDataPartitionName;
-      return filterAgentSessionsForDataPartition(sessions, partitions, currentDataPartition);
+      return filterAgentSessionsForDataPartition(sessions, partitions, currentDataPartition).filter(
+        (session) => !isAgentSessionDeleted(session.id),
+      );
     },
     [currentDataPartitionName],
   );
@@ -798,17 +805,35 @@ export function App() {
     if (appBlocked || !bootstrapped) return;
     let cancelled = false;
     let retryTimeout: number | undefined;
+    let startupSnapshotInvalidated = false;
+    const invalidateStartupSnapshot = () => {
+      startupSnapshotInvalidated = true;
+    };
+    const observeAuthoritativeSnapshot = (event: Event) => {
+      if ((event as CustomEvent<AgentSessionsHydratedDetail>).detail?.replaceExisting) {
+        invalidateStartupSnapshot();
+      }
+    };
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, invalidateStartupSnapshot);
+    window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, observeAuthoritativeSnapshot);
 
     // The one startup load of the session list: the menu bar, the sidebar
     // (through AGENT_SESSIONS_HYDRATED_EVENT) and the Agent HUD window all
     // start from it.
     function loadStartupAgentSessions(attempt: number) {
+      const nativeEpoch = readAgentSessionSnapshotEpoch();
       // Defer host access so partial test hosts and transient startup failures
       // enter the normal retry path instead of escaping the effect synchronously.
       Promise.resolve()
         .then(() => Promise.all([listAgentSessions(), refreshSessionPartitions()]))
-        .then(([sessions, partitions]) => {
-          if (cancelled) return;
+        .then(([loadedSessions, partitions]) => {
+          if (
+            cancelled ||
+            startupSnapshotInvalidated ||
+            nativeEpoch !== readAgentSessionSnapshotEpoch()
+          )
+            return;
+          const sessions = loadedSessions.filter((session) => !isAgentSessionDeleted(session.id));
           commitAgentSessions(sessions, partitions);
           window.dispatchEvent(
             new CustomEvent<AgentSessionsHydratedDetail>(AGENT_SESSIONS_HYDRATED_EVENT, {
@@ -831,6 +856,8 @@ export function App() {
 
     return () => {
       cancelled = true;
+      window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, invalidateStartupSnapshot);
+      window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, observeAuthoritativeSnapshot);
       if (retryTimeout != null) {
         window.clearTimeout(retryTimeout);
       }
@@ -859,6 +886,9 @@ export function App() {
 
   useAgentSessionSync({
     activeViewRef,
+    activeAgentSessionIdRef,
+    tabsRef,
+    setTabs,
     agentMenuBarLastStatusRef,
     agentMenuBarSessionsRef,
     agentMenuBarWaitingSessionIdsRef,
@@ -1517,6 +1547,7 @@ export function App() {
     bootstrapped,
     calendarContextNotePartitionsRef,
     calendarContextNoteUpdatesRef,
+    crossPartitionRecordingNoteIdRef,
     dispatch,
     handleEmptyNotesAfterDelete,
     pendingCalendarContextAdoptionsRef,

@@ -11,7 +11,12 @@ import {
   MEETING_END_STATE_EVENT,
   MEETING_START_TRANSCRIPTION_EVENT,
 } from "../lib/events";
-import type { BootstrapResponse, NoteDto, RecordingSessionDto } from "../lib/tauri";
+import type {
+  BootstrapResponse,
+  NoteDto,
+  RecordingSessionDto,
+  RecordingStatusDto,
+} from "../lib/tauri";
 
 type TauriListener = (event: { payload: unknown }) => unknown;
 
@@ -73,6 +78,7 @@ const mocks = vi.hoisted(() => ({
   retryProcessing: vi.fn(),
   recoverRecording: vi.fn(),
   resolveAgentRecorderRequest: vi.fn(),
+  validateAgentRecorderRequest: vi.fn(async () => undefined),
   dictationHelperCommand: vi.fn(),
   listDictationHistory: vi.fn(),
   agentHudShow: vi.fn(),
@@ -166,6 +172,7 @@ vi.mock("../lib/tauri", () => ({
   retryProcessing: mocks.retryProcessing,
   recoverRecording: mocks.recoverRecording,
   resolveAgentRecorderRequest: mocks.resolveAgentRecorderRequest,
+  validateAgentRecorderRequest: mocks.validateAgentRecorderRequest,
   dictationHelperCommand: mocks.dictationHelperCommand,
   listDictationHistory: mocks.listDictationHistory,
   agentHudShow: mocks.agentHudShow,
@@ -1131,6 +1138,7 @@ describe("meeting start transcription event", () => {
 describe("agent recorder request event", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.validateAgentRecorderRequest.mockResolvedValue(undefined);
     mocks.listeners.clear();
     mocks.pendingMeetingStartRequest = undefined;
     mocks.pendingMeetingEndStatus = null;
@@ -1225,6 +1233,129 @@ describe("agent recorder request event", () => {
     });
   });
 
+  it("preserves a published recording when its successful start ACK arrives after chat Stop", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.resolveAgentRecorderRequest.mockRejectedValue({
+      code: "agent_recorder_request_not_found",
+    });
+    try {
+      await renderUntilAgentRecorderListener();
+      mocks.getNote.mockResolvedValue(note({ id: "note-agent" }));
+      await act(async () => {
+        await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+          payload: {
+            requestId: "req-published",
+            action: "start",
+            sourceMode: "microphonePlusSystem",
+            profile: "default",
+            noteId: "note-agent",
+          },
+        });
+      });
+      await waitForLoaded(() =>
+        expect(warning).toHaveBeenCalledWith(
+          "Failed to resolve agent recorder request",
+          expect.objectContaining({ code: "agent_recorder_request_not_found" }),
+        ),
+      );
+      expect(mocks.startRecording).toHaveBeenCalledWith(
+        "note-agent",
+        "microphonePlusSystem",
+        "default",
+        "req-published",
+      );
+      expect(mocks.startRecording).toHaveBeenCalledOnce();
+      expect(mocks.finishRecording).not.toHaveBeenCalled();
+      expect(document.querySelector(".recorder-bar")).toHaveAttribute("data-state", "recording");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("starts a live bound request once with its exact host target", async () => {
+    await renderUntilAgentRecorderListener();
+    mocks.getNote.mockResolvedValue(note({ id: "note-agent" }));
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "req-bound-live",
+          action: "start",
+          sourceMode: "microphonePlusSystem",
+          profile: "default",
+          noteId: "note-agent",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.startRecording).toHaveBeenCalledWith(
+        "note-agent",
+        "microphonePlusSystem",
+        "default",
+        "req-bound-live",
+      ),
+    );
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: "req-bound-live",
+          ok: true,
+          noteId: "note-agent",
+          sessionId: "rec-agent",
+        }),
+      ),
+    );
+    expect(mocks.startRecording).toHaveBeenCalledOnce();
+    expect(mocks.finishRecording).not.toHaveBeenCalled();
+  });
+
+  it("refuses a bound start revoked while source readiness is pending", async () => {
+    let release!: (value: Awaited<ReturnType<typeof mocks.checkRecordingSourceReadiness>>) => void;
+    const readiness = new Promise<Awaited<ReturnType<typeof mocks.checkRecordingSourceReadiness>>>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    await renderUntilAgentRecorderListener();
+    mocks.checkRecordingSourceReadiness.mockClear();
+    mocks.checkRecordingSourceReadiness.mockReturnValueOnce(readiness);
+    mocks.getNote.mockResolvedValue(note({ id: "note-agent" }));
+    let delivery: unknown;
+    await act(async () => {
+      delivery = mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "req-revoked",
+          action: "start",
+          sourceMode: "microphonePlusSystem",
+          profile: "default",
+          noteId: "note-agent",
+        },
+      });
+    });
+    await waitForLoaded(() => expect(mocks.checkRecordingSourceReadiness).toHaveBeenCalled());
+    mocks.validateAgentRecorderRequest.mockRejectedValue({
+      code: "turn_expired",
+      message: "Stopped",
+    });
+    await act(async () => {
+      release({
+        sourceMode: "microphonePlusSystem",
+        sources: [
+          { source: "microphone", ready: true },
+          { source: "system", ready: true, permissionState: "granted" },
+        ],
+      });
+      await delivery;
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: "req-revoked", ok: false }),
+      ),
+    );
+    expect(mocks.startRecording).not.toHaveBeenCalled();
+    expect(mocks.finishRecording).not.toHaveBeenCalled();
+    expect(document.querySelector('.recorder-bar[data-state="recording"]')).toBeNull();
+  });
+
   it("acks start with an error when recording is already running", async () => {
     await renderUntilAgentRecorderListener();
     await act(async () => {
@@ -1291,5 +1422,254 @@ describe("agent recorder request event", () => {
         noteTitle: "Agent recording",
       });
     });
+  });
+  it("keeps the authorized note and profile when another UI partition is selected", async () => {
+    await renderUntilAgentRecorderListener();
+    mocks.getNote.mockImplementation(async (id: string) => note({ id, title: "Bound recording" }));
+    mocks.startRecording.mockResolvedValue(recording({ id: "bound-take", noteId: "host-note" }));
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "partition-race",
+          action: "start",
+          profile: "other-partition",
+          noteId: "host-note",
+          sourceMode: "microphonePlusSystem",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: "partition-race",
+          ok: true,
+          noteId: "host-note",
+          sessionId: "bound-take",
+        }),
+      ),
+    );
+    expect(mocks.startRecording).toHaveBeenCalledWith(
+      "host-note",
+      "microphonePlusSystem",
+      "other-partition",
+      "partition-race",
+    );
+    expect(mocks.createNote).not.toHaveBeenCalled();
+  });
+
+  it("refuses stopping a replacement take and preserves the active recording", async () => {
+    await renderUntilAgentRecorderListener();
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: { requestId: "start-owner", action: "start" },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: "start-owner", ok: true }),
+      ),
+    );
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "stale-stop",
+          action: "stop",
+          profile: "default",
+          noteId: "note-agent",
+          sessionId: "stale-take",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: "stale-stop",
+          ok: false,
+          errorCode: "recording_target_mismatch",
+        }),
+      ),
+    );
+    expect(mocks.finishRecording).not.toHaveBeenCalled();
+  });
+
+  it("applies pause and resume responses to the authorized recording with source and duration metadata", async () => {
+    await renderUntilAgentRecorderListener();
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: { requestId: "start-pausable", action: "start" },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: "start-pausable", ok: true }),
+      ),
+    );
+    const status: RecordingStatusDto = {
+      sessionId: "rec-agent",
+      noteId: "note-agent",
+      sourceMode: "microphonePlusSystem",
+      state: "paused",
+      elapsedMs: 1200,
+      level: { peak: 0, rms: 0, recentPeaks: [] },
+      silenceWarning: false,
+      bytesWritten: 4000,
+      sources: [],
+    };
+    mocks.pauseRecording.mockResolvedValue(status);
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "pause-owned",
+          action: "pause",
+          profile: "default",
+          noteId: "note-agent",
+          sessionId: "rec-agent",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: "pause-owned",
+          ok: true,
+          sessionId: "rec-agent",
+          status: expect.objectContaining({
+            elapsedMs: 1200,
+            state: "paused",
+            sourceMode: "microphonePlusSystem",
+          }),
+        }),
+      ),
+    );
+    mocks.resumeRecording.mockResolvedValue({ ...status, state: "recording", elapsedMs: 1300 });
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "resume-owned",
+          action: "resume",
+          profile: "default",
+          noteId: "note-agent",
+          sessionId: "rec-agent",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: "resume-owned",
+          ok: true,
+          status: expect.objectContaining({ elapsedMs: 1300, state: "recording" }),
+        }),
+      ),
+    );
+    expect(mocks.pauseRecording).toHaveBeenCalledWith("rec-agent", "default", "pause-owned");
+    expect(mocks.resumeRecording).toHaveBeenCalledWith("rec-agent", "default", "resume-owned");
+  });
+  it("forwards explicit recovery actions and durable retry with the same note, take and approval lease", async () => {
+    await renderUntilAgentRecorderListener();
+    mocks.recoverRecording.mockResolvedValue(note({ processingStatus: "ready" }));
+    mocks.retryProcessing.mockResolvedValue(note({ processingStatus: "transcribing" }));
+    for (const action of ["validate", "discard"] as const) {
+      await act(async () => {
+        await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+          payload: {
+            requestId: `recover-${action}`,
+            action: "recover",
+            profile: "default",
+            noteId: "note-1",
+            sessionId: "saved-take",
+            recoveryAction: action,
+          },
+        });
+      });
+      await waitForLoaded(() =>
+        expect(mocks.recoverRecording).toHaveBeenCalledWith(
+          "saved-take",
+          action,
+          "default",
+          `recover-${action}`,
+        ),
+      );
+      await waitForLoaded(() =>
+        expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+          expect.objectContaining({
+            requestId: `recover-${action}`,
+            ok: true,
+            noteId: "note-1",
+            sessionId: "saved-take",
+          }),
+        ),
+      );
+    }
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "retry-saved",
+          action: "retry",
+          profile: "default",
+          noteId: "note-1",
+          sessionId: "saved-take",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.retryProcessing).toHaveBeenCalledWith(
+        "note-1",
+        "saved-take",
+        "default",
+        "retry-saved",
+      ),
+    );
+    expect(mocks.startRecording).not.toHaveBeenCalled();
+  });
+  it("acknowledges bound stop with final native source and duration rather than the active snapshot", async () => {
+    await renderUntilAgentRecorderListener();
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: { requestId: "start-final", action: "start" },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: "start-final", ok: true }),
+      ),
+    );
+    mocks.finishRecording.mockResolvedValue({
+      note: note({ id: "note-agent", processingStatus: "transcribing" }),
+      recording: recording({
+        id: "rec-agent",
+        noteId: "note-agent",
+        state: "ready",
+        elapsedMs: 9876,
+      }),
+      validation: {},
+      processingStarted: true,
+    });
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "stop-final",
+          action: "stop",
+          profile: "default",
+          noteId: "note-agent",
+          sessionId: "rec-agent",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: "stop-final",
+          ok: true,
+          sessionId: "rec-agent",
+          status: expect.objectContaining({
+            state: "ready",
+            elapsedMs: 9876,
+            sourceMode: "microphonePlusSystem",
+          }),
+        }),
+      ),
+    );
+    expect(mocks.finishRecording).toHaveBeenCalledWith("rec-agent", "default", "stop-final");
   });
 });

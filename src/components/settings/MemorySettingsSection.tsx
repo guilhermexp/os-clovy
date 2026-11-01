@@ -6,8 +6,10 @@ import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconTrashCanSimple } from "central-icons/IconTrashCanSimple";
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatDate, useT } from "../../i18n";
+import { getCurrentDataPartitionName } from "../../lib/data-partition";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import { useProjectMemoryDemo } from "../../lib/project-memory-demo";
 import {
   createMemory,
@@ -49,8 +51,52 @@ export function MemorySettingsSection({
   const [savingEnabled, setSavingEnabled] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [error, setError] = useState<string>();
+  const [mutationError, setMutationError] = useState<string>();
+  const [memoryDialogOpen, setMemoryDialogOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<string>(initialFolderFilter ?? SCOPE_ALL);
+  const refreshVersion = useRef(0);
+  const mounted = useRef(true);
+  const refresh = useCallback(
+    async (eventIsCurrent: () => boolean = () => true, reconcileSetting = false) => {
+      const version = ++refreshVersion.current;
+      const profile = getCurrentDataPartitionName();
+      const isCurrent = () =>
+        mounted.current &&
+        version === refreshVersion.current &&
+        profile === getCurrentDataPartitionName() &&
+        eventIsCurrent();
+      try {
+        // Every memory — global and per-project — so this page is the one place
+        // to browse and prune all of them.
+        const settingsRead = memorySettings();
+        if (reconcileSetting) {
+          // A failed runtime toggle may already have persisted. Publish that
+          // setting even if the separate list read waits or fails.
+          void settingsRead.then(
+            (settings) => {
+              if (isCurrent()) setEnabled(settings.enabled);
+            },
+            () => undefined,
+          );
+        }
+        const [nextMemories, settings] = await Promise.all([
+          listMemories(undefined, true),
+          settingsRead,
+        ]);
+        if (!isCurrent()) return;
+        setMemories(sortNewestFirst(nextMemories));
+        setEnabled(settings.enabled);
+        setError(undefined);
+      } catch (caught) {
+        if (isCurrent()) setError(messageFromError(caught));
+      } finally {
+        if (isCurrent()) setLoaded(true);
+      }
+    },
+    [],
+  );
+  useClovyDataChanged("memories", (_change, isCurrent) => refresh(isCurrent));
 
   // __projectMemoryDemo() (dev console): populate the manager with sample
   // memories, spread across real projects, to design the list at scale.
@@ -61,8 +107,13 @@ export function MemorySettingsSection({
   );
 
   useEffect(() => {
+    mounted.current = true;
     void refresh();
-  }, []);
+    return () => {
+      mounted.current = false;
+      refreshVersion.current += 1;
+    };
+  }, [refresh]);
 
   // Follow the deep-link: opening Memory from a project scopes to it; opening
   // it from the settings nav (filter cleared upstream) resets to all.
@@ -70,69 +121,91 @@ export function MemorySettingsSection({
     setScope(initialFolderFilter ?? SCOPE_ALL);
   }, [initialFolderFilter]);
 
-  async function refresh() {
-    try {
-      // Every memory — global and per-project — so this page is the one place
-      // to browse and prune all of them.
-      const [nextMemories, settings] = await Promise.all([
-        listMemories(undefined, true),
-        memorySettings(),
-      ]);
-      setMemories(sortNewestFirst(nextMemories));
-      setEnabled(settings.enabled);
-      setError(undefined);
-    } catch (caught) {
-      setError(messageFromError(caught));
-    } finally {
-      setLoaded(true);
-    }
+  function beginMutation() {
+    refreshVersion.current += 1;
+    const profile = getCurrentDataPartitionName();
+    return () => mounted.current && profile === getCurrentDataPartitionName();
+  }
+
+  function applyMutation(isCurrent: () => boolean, apply: () => void) {
+    if (!isCurrent()) return;
+    // Invalidate reads that began both before and during persistence.
+    refreshVersion.current += 1;
+    apply();
+    setMutationError(undefined);
+    // One authoritative reload after the accepted transition also retains
+    // unrelated native changes whose earlier snapshots were invalidated.
+    void refresh();
   }
 
   async function toggleEnabled(next: boolean) {
     if (savingEnabled) return;
     setSavingEnabled(true);
+    const isCurrent = beginMutation();
     try {
       const settings = await setMemoryEnabled(next);
-      setEnabled(settings.enabled);
-      setError(undefined);
-    } catch (caught) {
-      // The Tauri command deliberately does not roll back the authoritative setting
-      // when native-runtime enforcement or restart fails. Re-read it so the
-      // switch and write controls never keep showing the pre-toggle state while
-      // the persisted write gate already enforces the opposite choice.
-      try {
-        const settings = await memorySettings();
+      applyMutation(isCurrent, () => {
         setEnabled(settings.enabled);
-      } catch {
-        // Keep the last confirmed state if even the authoritative read fails;
-        // the original enforcement error remains the actionable message.
+        setError(undefined);
+      });
+    } catch {
+      // The setting may already be persisted even if runtime enforcement failed.
+      // Reconcile the whole visible store without losing the mutation error.
+      if (isCurrent()) {
+        setMutationError(t("settingsPanels.memory.toggleError"));
+        void refresh(isCurrent, true);
       }
-      console.warn("Failed to finish applying the Memory setting", caught);
-      setError(t("settingsPanels.memory.toggleError"));
     } finally {
-      setSavingEnabled(false);
+      if (isCurrent()) setSavingEnabled(false);
     }
   }
 
+  function reconcileFailedMutation(isCurrent: () => boolean, caught: unknown) {
+    if (!isCurrent()) return;
+    setMutationError(messageFromError(caught));
+    // Failure also invalidated the pending native snapshot. Read authoritative
+    // state again; read errors cannot replace the useful mutation failure.
+    void refresh();
+  }
+
   async function addMemory(content: string, folderId?: string) {
-    const created = await createMemory({ content, folderId, source: "user" });
-    setMemories((current) => sortNewestFirst([created, ...current]));
+    const isCurrent = beginMutation();
+    try {
+      const created = await createMemory({ content, folderId, source: "user" });
+      applyMutation(isCurrent, () =>
+        setMemories((current) => sortNewestFirst([created, ...current])),
+      );
+    } catch (caught) {
+      reconcileFailedMutation(isCurrent, caught);
+      throw caught;
+    }
   }
 
   async function editMemory(id: string, content: string) {
-    const updated = await updateMemory(id, content);
-    setMemories((current) =>
-      sortNewestFirst(current.map((memory) => (memory.id === updated.id ? updated : memory))),
-    );
+    const isCurrent = beginMutation();
+    try {
+      const updated = await updateMemory(id, content);
+      applyMutation(isCurrent, () =>
+        setMemories((current) =>
+          sortNewestFirst(current.map((memory) => (memory.id === updated.id ? updated : memory))),
+        ),
+      );
+    } catch (caught) {
+      reconcileFailedMutation(isCurrent, caught);
+      throw caught;
+    }
   }
 
   async function removeMemory(id: string) {
+    const isCurrent = beginMutation();
     try {
       await deleteMemory(id);
-      setMemories((current) => current.filter((memory) => memory.id !== id));
-      setError(undefined);
+      applyMutation(isCurrent, () => {
+        setMemories((current) => current.filter((memory) => memory.id !== id));
+        setError(undefined);
+      });
     } catch (caught) {
-      setError(messageFromError(caught));
+      reconcileFailedMutation(isCurrent, caught);
       throw caught;
     }
   }
@@ -220,7 +293,7 @@ export function MemorySettingsSection({
         <p className="memory-settings-hint">{t("settingsPanels.memory.offHint")}</p>
       ) : null}
 
-      {loaded && allMemories.length === 0 ? (
+      {loaded && allMemories.length === 0 && !memoryDialogOpen ? (
         <EmptyState
           className="memory-empty-state"
           label={t("settingsPanels.memory.savedMemories")}
@@ -267,7 +340,7 @@ export function MemorySettingsSection({
               />
               {addMemoryButton}
             </div>
-            {filtered.length > 0 ? (
+            {filtered.length > 0 || memoryDialogOpen ? (
               <MemoryRows
                 memories={filtered}
                 folders={folders}
@@ -275,6 +348,7 @@ export function MemorySettingsSection({
                 onUpdate={editMemory}
                 onDelete={removeMemory}
                 onOpenProject={onOpenProject}
+                onDialogOpenChange={setMemoryDialogOpen}
               />
             ) : (
               <p className="memory-manager-noresults">{t("settingsPanels.memory.noResults")}</p>
@@ -282,9 +356,9 @@ export function MemorySettingsSection({
           </div>
         </>
       )}
-      {error ? (
+      {mutationError || error ? (
         <p className="settings-row-error" role="alert">
-          {error}
+          {mutationError ?? error}
         </p>
       ) : null}
 
@@ -311,6 +385,7 @@ export function MemoryRows({
   onUpdate,
   onDelete,
   onOpenProject,
+  onDialogOpenChange,
 }: {
   memories: MemoryDto[];
   /** Present in the manager so each row can show its project tag. */
@@ -320,12 +395,16 @@ export function MemoryRows({
   onDelete: (id: string) => Promise<unknown>;
   /** Drill from a memory's project into that project. */
   onOpenProject?: (folderId: string) => void;
+  onDialogOpenChange?: (open: boolean) => void;
 }) {
   const t = useT();
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [editing, setEditing] = useState<MemoryDto>();
   const [deleting, setDeleting] = useState<MemoryDto>();
   const [error, setError] = useState<string>();
+  useEffect(() => {
+    onDialogOpenChange?.(editing !== undefined || deleting !== undefined);
+  }, [editing, deleting, onDialogOpenChange]);
 
   const folderName = useMemo(() => {
     const byId = new Map((folders ?? []).map((folder) => [folder.id, folder.name]));

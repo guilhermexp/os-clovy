@@ -194,6 +194,7 @@ async fn ask_permission(
         .request(&ApprovalTurn::from(binding), request)
         .await
         .map_err(|denial| AppError::new(denial.code(), denial.message()))?;
+    ctx.revalidate().await?;
     Ok(input)
 }
 

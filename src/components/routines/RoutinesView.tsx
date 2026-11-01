@@ -16,6 +16,7 @@ import { IconZap } from "central-icons/IconZap";
 import { IconPause } from "central-icons/IconPause";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { messageFromError } from "../../lib/errors";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import type { AgentRuntimeEvent } from "../../lib/agent-runtime-contract";
 import {
   TRUST_MODE_META,
@@ -220,6 +221,14 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
   const refreshSilently = useCallback(
     () => Promise.all([loadRoutines({ silent: true }), loadRuns()]),
     [loadRoutines, loadRuns],
+  );
+
+  useClovyDataChanged(
+    "routines",
+    () => {
+      void refreshSilently();
+    },
+    true,
   );
 
   useEffect(() => {

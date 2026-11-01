@@ -4,6 +4,7 @@ import type { SettingsTab } from "../components/settings/AppSettings";
 import type { SidebarView } from "../components/sidebar/Sidebar";
 import type { TabNav } from "./tabs/tabs";
 import type {
+  FinishRecordingResponse,
   FolderDto,
   LiveTranscriptEventDto,
   NoteDto,
@@ -45,7 +46,10 @@ export type RenderAppWorkspaceDependencies = {
   handleEnableAccessibility: () => void;
   handleEnableMicrophone: () => void;
   handleEnableSystemAudio: () => void;
-  handleFinishRecording: (sessionId: string, options?: { rethrow?: boolean }) => Promise<void>;
+  handleFinishRecording: (
+    sessionId: string,
+    options?: { rethrow?: boolean },
+  ) => Promise<FinishRecordingResponse | undefined>;
   handleKeepRecordingAfterMeetingEnd: (sessionId: string) => void;
   handleFlushNote: (noteId: string) => Promise<void>;
   handleFoldersImported: (folders: FolderDto[]) => void;

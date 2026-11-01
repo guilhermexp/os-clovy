@@ -1,3 +1,4 @@
+import { invalidateAgentSessionDraft, isAgentSessionDeleted } from "../../lib/agent-session-drafts";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconRobot2 } from "central-icons/IconRobot2";
@@ -795,8 +796,14 @@ export function Sidebar({
     function handleSessionsHydrated(event: Event) {
       const detail = (event as CustomEvent<AgentSessionsHydratedDetail>).detail;
       if (!detail) return;
+      if (!detail.replaceExisting && sessionsChangedRequestRef.current > 0) return;
+      if (detail.replaceExisting) sessionsChangedRequestRef.current += 1;
       setSessionPartitions(detail.partitions);
-      setAgentSessions((current) => (current.length > 0 ? current : detail.sessions));
+      setAgentSessions((current) =>
+        !detail.replaceExisting && current.length > 0
+          ? current
+          : detail.sessions.filter((session) => !isAgentSessionDeleted(session.id)),
+      );
     }
     window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
     return () => window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
@@ -815,11 +822,21 @@ export function Sidebar({
       void fetchSessionPartitionMap().then((partitions) => {
         if (request !== sessionsChangedRequestRef.current) return;
         if (partitions) setSessionPartitions(partitions);
-        setAgentSessions(detail.sessions.slice(0, AGENT_SIDEBAR_SESSION_FETCH_LIMIT));
+        setAgentSessions(
+          detail.sessions
+            .filter((session) => !isAgentSessionDeleted(session.id))
+            .slice(0, AGENT_SIDEBAR_SESSION_FETCH_LIMIT),
+        );
       });
-      setSelectedAgentSessionId(detail.selectedSessionId);
-      const nextWorking = new Set(detail.workingSessionIds);
-      const nextWaiting = new Set(detail.waitingSessionIds ?? []);
+      if (!detail.selectedSessionId || !isAgentSessionDeleted(detail.selectedSessionId)) {
+        setSelectedAgentSessionId(detail.selectedSessionId);
+      }
+      const nextWorking = new Set(
+        detail.workingSessionIds.filter((id) => !isAgentSessionDeleted(id)),
+      );
+      const nextWaiting = new Set(
+        (detail.waitingSessionIds ?? []).filter((id) => !isAgentSessionDeleted(id)),
+      );
       // A session that left the working set without pausing for input just
       // finished a turn — mark it unread unless it's open in front of the
       // user.
@@ -862,9 +879,23 @@ export function Sidebar({
       );
     }
 
+    function handleSessionDeleted(event: Event) {
+      const id = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+      if (!id) return;
+      invalidateAgentSessionDraft(id);
+      sessionsChangedRequestRef.current += 1;
+      setAgentSessions((current) => current.filter((session) => session.id !== id));
+      setSelectedAgentSessionId((current) => (current === id ? undefined : current));
+      workingAgentSessionIdsRef.current.delete(id);
+      setWorkingAgentSessionIds((current) => new Set([...current].filter((item) => item !== id)));
+      setWaitingAgentSessionIds((current) => new Set([...current].filter((item) => item !== id)));
+      setUnreadAgentSessionIds((current) => new Set([...current].filter((item) => item !== id)));
+    }
+    window.addEventListener(AGENT_DELETE_SESSION_EVENT, handleSessionDeleted);
     window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, handleSessionsChanged);
     window.addEventListener(AGENT_SESSION_RENAMED_EVENT, handleSessionRenamed);
     return () => {
+      window.removeEventListener(AGENT_DELETE_SESSION_EVENT, handleSessionDeleted);
       window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, handleSessionsChanged);
       window.removeEventListener(AGENT_SESSION_RENAMED_EVENT, handleSessionRenamed);
     };

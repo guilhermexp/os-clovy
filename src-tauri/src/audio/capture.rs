@@ -46,6 +46,36 @@ pub enum CaptureStartState {
 
 pub type CaptureStartHandshake = Mutex<CaptureStartState>;
 
+/// Host-owned admission, checked after preparation and final publication locks.
+pub(crate) type CaptureStartAuthorization = Arc<dyn Fn() -> Result<(), AppError> + Send + Sync>;
+
+fn check_capture_authorization(
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<(), AppError> {
+    if let Some(authorization) = authorization {
+        authorization()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn admit_capture_start(
+    state: &mut CaptureStartState,
+    already_active: bool,
+    authorization: Option<&CaptureStartAuthorization>,
+    start: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if *state == CaptureStartState::Abandoned {
+        return Err(capture_start_timeout_error());
+    }
+    if already_active {
+        return Err(recording_already_active_error());
+    }
+    check_capture_authorization(authorization)?;
+    start()?;
+    *state = CaptureStartState::Published;
+    Ok(())
+}
+
 fn capture_start_abandoned(handshake: &CaptureStartHandshake) -> bool {
     handshake
         .lock()
@@ -308,6 +338,7 @@ pub fn start_capture(
         note_id,
         source_mode,
         Arc::new(Mutex::new(CaptureStartState::Pending)),
+        None,
     )
 }
 
@@ -317,6 +348,7 @@ pub fn start_capture_with_cancel(
     note_id: String,
     source_mode: RecordingSourceMode,
     handshake: Arc<CaptureStartHandshake>,
+    authorization: Option<CaptureStartAuthorization>,
 ) -> Result<StartedRecording, AppError> {
     // Holds an update install back until this recording is published in
     // `ACTIVE_RECORDING` (or fails); refused while an update installs.
@@ -331,6 +363,7 @@ pub fn start_capture_with_cancel(
         if active.is_some() {
             return Err(recording_already_active_error());
         }
+        check_capture_authorization(authorization.as_ref())?;
     }
 
     let host = cpal::default_host();
@@ -494,12 +527,37 @@ pub fn start_capture_with_cancel(
     let system_capture = if let (Some(system_partial_path), Some(system_final_path)) =
         (system_partial_path.clone(), system_final_path.clone())
     {
+        if let Err(error) = check_capture_authorization(authorization.as_ref()) {
+            cleanup_abandoned_capture(
+                writer,
+                partial_path,
+                Some(system_partial_path),
+                live_preview,
+                None,
+                None,
+                None,
+            );
+            return Err(error);
+        }
         match SystemAudioCapture::start(
             system_partial_path.clone(),
             system_final_path.clone(),
             Duration::ZERO,
+            authorization.clone(),
         ) {
             Ok(capture) => {
+                if let Err(error) = check_capture_authorization(authorization.as_ref()) {
+                    cleanup_abandoned_capture(
+                        writer,
+                        partial_path,
+                        Some(system_partial_path),
+                        live_preview,
+                        None,
+                        Some(capture),
+                        None,
+                    );
+                    return Err(error);
+                }
                 if live_preview_available {
                     system_live_preview = Some(start_system_live_transcript_preview(
                         app.clone(),
@@ -533,22 +591,7 @@ pub fn start_capture_with_cancel(
         );
         return Err(capture_start_timeout_error());
     }
-    stream
-        .play()
-        .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
-    if capture_start_abandoned(&handshake) {
-        cleanup_abandoned_capture(
-            writer,
-            partial_path,
-            system_partial_path,
-            live_preview,
-            system_live_preview,
-            system_capture,
-            Some(stream),
-        );
-        return Err(capture_start_timeout_error());
-    }
-    let started = Instant::now();
+    let mut started = Instant::now();
     let status = RecordingStatusDto {
         session_id: session_id.clone(),
         note_id: Some(note_id.clone()),
@@ -601,8 +644,17 @@ pub fn start_capture_with_cancel(
                 "Recording state is unavailable.",
             ));
         };
-        if *state == CaptureStartState::Abandoned {
+        if let Err(error) =
+            admit_capture_start(&mut state, active.is_some(), authorization.as_ref(), || {
+                stream
+                    .play()
+                    .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
+                started = Instant::now();
+                Ok(())
+            })
+        {
             drop(state);
+            drop(active);
             cleanup_abandoned_capture(
                 writer,
                 partial_path,
@@ -612,22 +664,8 @@ pub fn start_capture_with_cancel(
                 system_capture,
                 Some(stream),
             );
-            return Err(capture_start_timeout_error());
+            return Err(error);
         }
-        if active.is_some() {
-            drop(state);
-            cleanup_abandoned_capture(
-                writer,
-                partial_path,
-                system_partial_path,
-                live_preview,
-                system_live_preview,
-                system_capture,
-                Some(stream),
-            );
-            return Err(recording_already_active_error());
-        }
-        *state = CaptureStartState::Published;
     }
 
     *active = Some(ActiveRecording {
@@ -1683,5 +1721,71 @@ mod avfoundation_link_tests {
     #[test]
     fn avcapturedevice_class_resolves() {
         assert!(super::macos_microphone_authorization_status().is_some());
+    }
+}
+
+#[cfg(test)]
+mod host_admission_tests {
+    use super::*;
+    use crate::domain::turn_authority::TurnAuthority;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn revoked_start_waiting_for_final_lock_never_starts_or_publishes() {
+        let authority = TurnAuthority::new();
+        let authority_for_gate = authority.clone();
+        let gate: CaptureStartAuthorization = Arc::new(move || authority_for_gate.check_live());
+        let effects = Arc::new(AtomicUsize::new(0));
+        let final_lock = Arc::new(Mutex::new(()));
+        let held = final_lock.lock().unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let final_lock = final_lock.clone();
+            let effects = effects.clone();
+            std::thread::spawn(move || {
+                entered_tx.send(()).unwrap();
+                let _final_lock = final_lock.lock().unwrap();
+                let mut state = CaptureStartState::Pending;
+                let result = admit_capture_start(&mut state, false, Some(&gate), || {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                });
+                (state, result)
+            })
+        };
+        entered_rx.recv().unwrap();
+        authority.revoke();
+        drop(held);
+        let (state, result) = worker.join().unwrap();
+        assert_eq!(result.unwrap_err().code, "turn_expired");
+        assert_eq!(state, CaptureStartState::Pending);
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn live_start_publishes_once_and_later_revocation_does_not_undo_the_effect() {
+        let authority = TurnAuthority::new();
+        let copy = authority.clone();
+        let gate: CaptureStartAuthorization = Arc::new(move || copy.check_live());
+        let effects = AtomicUsize::new(0);
+        let mut state = CaptureStartState::Pending;
+        admit_capture_start(&mut state, false, Some(&gate), || {
+            effects.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        authority.revoke();
+        assert_eq!(state, CaptureStartState::Published);
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn watchdog_abandonment_cannot_cross_the_same_effect_gate() {
+        let mut state = CaptureStartState::Abandoned;
+        let mut effects = 0;
+        let result = admit_capture_start(&mut state, false, None, || {
+            effects += 1;
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().code, "capture_start_timeout");
+        assert_eq!(effects, 0);
     }
 }

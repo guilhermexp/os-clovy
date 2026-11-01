@@ -234,6 +234,7 @@ async fn driver_failure_is_a_tool_error() {
 
 fn binding(run_id: &str, attended: bool) -> TurnBinding {
     TurnBinding {
+        authority: crate::domain::turn_authority::TurnAuthority::new(),
         session_id: "session-1".into(),
         run_id: run_id.into(),
         cli: CliKind::Claude,

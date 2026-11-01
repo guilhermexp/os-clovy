@@ -230,6 +230,7 @@ async fn activity_tools_are_listed_only_while_capture_is_on() {
         vec![
             "search_notes",
             "get_note",
+            "list_note_transcripts",
             "list_dictations",
             "list_memories"
         ]
@@ -240,6 +241,7 @@ async fn activity_tools_are_listed_only_while_capture_is_on() {
         vec![
             "search_notes",
             "get_note",
+            "list_note_transcripts",
             "list_dictations",
             "list_memories",
             "get_activity_timeline",
@@ -485,6 +487,27 @@ async fn context_uses_bound_session_and_hides_it_from_external_clients() {
     assert_eq!(bound["session"]["runId"], binding.run_id);
     assert_eq!(bound["session"]["surface"], "home");
     assert_eq!(bound["session"]["effectiveApprovalMode"], "approvals");
+}
+
+#[test]
+fn tool_failure_preserves_delivery_details_for_structured_and_text_clients() {
+    let mut error = crate::domain::types::AppError::new("turn_expired", "The turn expired.");
+    error.details = Some(json!({"effect":"completed_before_turn_revalidation","retrySafe":false}));
+    let result = protocol::tool_error_for(&error);
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["content"][0]["text"],
+        "The turn expired. (turn_expired)"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["details"]["retrySafe"],
+        false
+    );
+    let text: Value = serde_json::from_str(result["content"][1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        text["details"]["effect"],
+        "completed_before_turn_revalidation"
+    );
 }
 
 #[test]

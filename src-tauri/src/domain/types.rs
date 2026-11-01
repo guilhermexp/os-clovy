@@ -446,6 +446,11 @@ pub struct StartRecordingRequest {
     pub note_id: String,
     #[serde(default)]
     pub source_mode: Option<RecordingSourceMode>,
+    /// Pinned by the host for agent requests; interactive callers may omit it.
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,6 +496,10 @@ impl Default for RecordingOriginMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRequest {
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
     pub session_id: String,
 }
 
@@ -510,6 +519,10 @@ pub struct FinishRecordingResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryProcessingRequest {
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
     pub note_id: String,
     pub step: Option<String>,
     #[serde(default)]
@@ -519,6 +532,10 @@ pub struct RetryProcessingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoverRecordingRequest {
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
     pub session_id: String,
     pub action: String,
 }

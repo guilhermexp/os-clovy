@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { markAgentNewSessionPending } from "../components/agent/session-persistence";
+import { isAgentSessionDeleted } from "../lib/agent-session-drafts";
 import type { AgentSessionsListHandle } from "../components/agent/AgentSessionsList";
 import type { NotesListHandle } from "../components/notes-list/NotesList";
 import type { SettingsTab } from "../components/settings/AppSettings";
@@ -76,6 +77,8 @@ export function useAppState() {
   activeAgentSessionIdRef.current = activeAgentSessionId;
   const [activeAgentSessionSeed, setActiveAgentSessionSeed] = useState<AgentSessionDto>();
   const setActiveAgentSession = useCallback((session: AgentSessionDto | undefined) => {
+    if (session && isAgentSessionDeleted(session.id)) return;
+    activeAgentSessionIdRef.current = session?.id;
     setActiveAgentSessionId(session?.id);
     setActiveAgentSessionSeed(session);
   }, []);

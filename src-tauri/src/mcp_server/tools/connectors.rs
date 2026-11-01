@@ -82,6 +82,7 @@ pub(crate) fn bound<'a>(ctx: &ToolCtx<'a>) -> Result<&'a TurnBinding, AppError> 
         .ok_or_else(|| AppError::new(TURN_REQUIRED, "This tool requires a Clovy turn."))
 }
 pub(crate) async fn ensure_active(ctx: &ToolCtx<'_>) -> Result<(), AppError> {
+    ctx.revalidate().await?;
     let binding = bound(ctx)?;
     let row = query("SELECT status FROM agent_runs WHERE id = ? AND session_id = ?")
         .bind(&binding.run_id)

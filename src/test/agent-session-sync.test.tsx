@@ -3,7 +3,11 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { useAgentSessionSync } from "../app/use-agent-session-sync";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
-import { AGENT_SESSIONS_CHANGED_EVENT, dispatchAgentSessionStatus } from "../lib/agent-events";
+import {
+  AGENT_DELETE_SESSION_EVENT,
+  AGENT_SESSIONS_CHANGED_EVENT,
+  dispatchAgentSessionStatus,
+} from "../lib/agent-events";
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn(async () => undefined),
@@ -16,6 +20,9 @@ function useSyncedSessionIds(overrides: Partial<Parameters<typeof useAgentSessio
   const ref = <T,>(current: T) => ({ current });
   useAgentSessionSync({
     activeViewRef: ref("home"),
+    activeAgentSessionIdRef: ref(undefined),
+    tabsRef: ref([]),
+    setTabs: vi.fn(),
     agentMenuBarLastStatusRef: ref(undefined),
     agentMenuBarSessionsRef: ref([]),
     agentMenuBarWaitingSessionIdsRef: useState(() => ref(new Set<string>()))[0],
@@ -38,6 +45,33 @@ function useSyncedSessionIds(overrides: Partial<Parameters<typeof useAgentSessio
 }
 
 describe("agent session sync", () => {
+  it("does not consume a new project handoff from a deleted session's stale selection", () => {
+    const pending = {
+      folderId: "project-after-delete",
+      partition: "default",
+      knownSessionIds: new Set<string>(),
+    };
+    const pendingSessionProjectRef = { current: pending };
+    renderHook(() => useSyncedSessionIds({ pendingSessionProjectRef }));
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_DELETE_SESSION_EVENT, {
+          detail: { sessionId: "deleted-project-selection" },
+        }),
+      );
+      window.dispatchEvent(
+        new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
+          detail: {
+            sessions: [],
+            selectedSessionId: "deleted-project-selection",
+            workingSessionIds: [],
+          },
+        }),
+      );
+    });
+    expect(pendingSessionProjectRef.current).toBe(pending);
+  });
+
   it("keeps the same working set while a run keeps reporting the same status", () => {
     const { result } = renderHook(() => useSyncedSessionIds());
 

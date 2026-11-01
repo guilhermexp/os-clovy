@@ -214,6 +214,15 @@ async fn turn_bound_table_is_the_bound_catalog_for_each_kind_of_turn() {
         )
         .await
         .unwrap();
+    let chat_session = clovy_lib::agent_sessions::AgentRepository::new(notes.clone())
+        .create_session(
+            "Attended catalog",
+            "__clovy_cli_engine__:claude",
+            AgentSafetyMode::Sandboxed,
+            None,
+        )
+        .await
+        .unwrap();
     let now = "2026-10-29T00:00:00Z";
     sqlx::query::query("INSERT INTO routines (id, name, prompt, schedule, created_at, updated_at, metadata_json, tool_catalog_version) VALUES ('doc-routine', 'Catalog', 'List', 'every 1d', ?, ?, '{\"enabledToolsets\":[\"context_engine\",\"skills\"]}', 1)")
         .bind(now).bind(now).execute(&notes).await.unwrap();
@@ -226,7 +235,11 @@ async fn turn_bound_table_is_the_bound_catalog_for_each_kind_of_turn() {
         binding(CliKind::Codex, false),
         binding(CliKind::Copilot, true),
     ] {
-        turn.session_id = session.id.clone();
+        turn.session_id = if turn.attended {
+            chat_session.id.clone()
+        } else {
+            session.id.clone()
+        };
         let mut expected = every_client.clone();
         expected.extend(
             bound
@@ -234,6 +247,32 @@ async fn turn_bound_table_is_the_bound_catalog_for_each_kind_of_turn() {
                 .filter(|row| listed_to(&row.cells[audience], &turn))
                 .map(|row| row.tool.clone()),
         );
+        if !turn.attended {
+            // This fixture has context_engine + skills, not mutation grants
+            // or the routines history toolset. The table describes the
+            // available surface; saved policy narrows the routine catalog.
+            expected.retain(|name| {
+                every_client.contains(name)
+                    || matches!(
+                        name.as_str(),
+                        "get_dictation"
+                            | "list_notes"
+                            | "search_memories"
+                            | "list_conversations"
+                            | "get_conversation"
+                            | "get_conversation_run"
+                            | "list_conversation_messages"
+                            | "search_conversation_messages"
+                            | "list_conversation_artifacts"
+                            | "read_conversation_artifact"
+                            | "list_skills"
+                            | "load_skill"
+                            | "get_obsidian_vault"
+                            | "request_clarification"
+                            | "approve_action"
+                    )
+            });
+        }
         assert_eq!(
             listed(&notes, Some(&turn)).await,
             expected,

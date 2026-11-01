@@ -337,7 +337,7 @@ fn app_handler(app: AppHandle) -> channel::TurnHandler {
     std::sync::Arc::new(move |message: Value, binding| {
         let app = app.clone();
         Box::pin(async move {
-            match app_data(&app, &message).await {
+            match app_data(&app, &message, binding.as_deref()).await {
                 Ok(data) => {
                     let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
                     let ctx = ToolCtx {
@@ -356,11 +356,18 @@ fn app_handler(app: AppHandle) -> channel::TurnHandler {
     })
 }
 
-/// What `message` may read: the current data partition's main database, the memory
-/// switch, and the activity store when the message calls an activity tool.
-async fn app_data(app: &AppHandle, message: &Value) -> Result<McpData, AppError> {
+/// Resolve bound requests from the host-owned session, not the currently visible view.
+async fn app_data(
+    app: &AppHandle,
+    message: &Value,
+    binding: Option<&turns::TurnBinding>,
+) -> Result<McpData, AppError> {
     let notes = crate::commands::repositories(app).await?.pool;
-    let profile = crate::commands::active_profile(app);
+    let profile = if let Some(binding) = binding {
+        bound_profile(&notes, binding).await?
+    } else {
+        crate::commands::active_profile(app)
+    };
     let memory_enabled = crate::commands::memory_settings_path(app)
         .map(|path| crate::commands::load_memory_settings(&path).enabled)
         .unwrap_or(false);
@@ -381,4 +388,65 @@ async fn app_data(app: &AppHandle, message: &Value) -> Result<McpData, AppError>
         activity,
         now: Utc::now(),
     })
+}
+
+async fn bound_profile(
+    pool: &sqlx_sqlite::SqlitePool,
+    binding: &turns::TurnBinding,
+) -> Result<String, AppError> {
+    sqlx::query_scalar::query_scalar::<_, String>(
+        "SELECT COALESCE(p.profile, 'default') FROM agent_sessions s
+         JOIN agent_runs r ON r.session_id = s.id AND r.id = ?
+         LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ?",
+    )
+    .bind(&binding.run_id)
+    .bind(&binding.session_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        AppError::new(
+            "turn_expired",
+            "The bound conversation or run no longer exists.",
+        )
+    })
+}
+
+#[cfg(test)]
+mod bound_profile_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn profile_follows_bound_session_and_rejects_mismatched_run() {
+        let pool = sqlx_sqlite::SqlitePool::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for sql in [
+            "CREATE TABLE agent_sessions (id TEXT PRIMARY KEY)",
+            "CREATE TABLE agent_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL)",
+            "CREATE TABLE session_profiles (session_id TEXT PRIMARY KEY, profile TEXT NOT NULL)",
+            "INSERT INTO agent_sessions VALUES ('a'), ('b'), ('legacy')",
+            "INSERT INTO agent_runs VALUES ('ra', 'a'), ('rb', 'b'), ('rl', 'legacy')",
+            "INSERT INTO session_profiles VALUES ('a', 'one'), ('b', 'two')",
+        ] {
+            sqlx::query::query(sql).execute(&pool).await.unwrap();
+        }
+        let mut binding = turns::TurnBinding {
+            authority: crate::domain::turn_authority::TurnAuthority::new(),
+            session_id: "a".into(),
+            run_id: "ra".into(),
+            cli: crate::llm::cli::CliKind::Claude,
+            safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
+            attended: true,
+            surface: "chat".into(),
+        };
+        assert_eq!(bound_profile(&pool, &binding).await.unwrap(), "one");
+        binding.run_id = "rb".into();
+        assert_eq!(
+            bound_profile(&pool, &binding).await.unwrap_err().code,
+            "turn_expired"
+        );
+        binding.session_id = "legacy".into();
+        binding.run_id = "rl".into();
+        assert_eq!(bound_profile(&pool, &binding).await.unwrap(), "default");
+    }
 }
