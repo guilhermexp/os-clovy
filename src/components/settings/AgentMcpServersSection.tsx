@@ -140,10 +140,7 @@ function hasOauthConnectCleanup(server: AgentMcpServerDto): boolean {
     }
     ids.add(entry.id);
     references.add(entry.secretRef);
-    return (
-      entry.superseded !== true &&
-      (entry.phase === "revocation_failed" || entry.phase === "revoked_but_local_cleanup_pending")
-    );
+    return entry.superseded !== true;
   });
 }
 
@@ -591,6 +588,7 @@ export function AgentMcpServersSection() {
             </div>
           ) : (
             servers.map((server) => {
+              const connectCleanup = connectingId !== server.id && hasOauthConnectCleanup(server);
               const diagnostic =
                 server.id in diagnostics ? diagnostics[server.id] : server.diagnostic;
               const observedHealth = health[server.id] ?? diagnostic?.state;
@@ -626,7 +624,7 @@ export function AgentMcpServersSection() {
                         {t("settingsPanels.mcp.revocationHistoryWarning")}
                       </p>
                     ) : null}
-                    {hasOauthConnectCleanup(server) ? (
+                    {connectCleanup ? (
                       <p className="settings-row-description" role="note">
                         {t("settingsPanels.mcp.connectCleanupWarning")}
                       </p>
@@ -663,7 +661,7 @@ export function AgentMcpServersSection() {
                     {(server.metadata.legacyAuth === "oauth" || server.metadata.auth === "oauth") &&
                     (server.metadata.oauthConnected === true ||
                       server.metadata.oauthCleanupPending === true ||
-                      hasOauthConnectCleanup(server) ||
+                      connectCleanup ||
                       typeof server.metadata.oauthPendingSecretRef === "string" ||
                       typeof server.metadata.oauthRetiredSecretRef === "string") ? (
                       <button

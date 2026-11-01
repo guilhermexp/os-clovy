@@ -444,6 +444,10 @@ one saved superseded token clears only its matching obligation, never an older
 unknown rotation or exchange associated with the same reference.
 
 Connect reserves an operation-owned credential reference before authorization.
+Admission is serialized before publishing the new operation identity or
+invalidating previous authority. A rejected overlapping Connect leaves the
+running operation's epoch, identity and useful diagnostic intact. Explicit
+Cancel, Disconnect and Delete retain their cancellation boundaries.
 Before the actual code-exchange request, its journal records that a grant may
 be issued. The returned bundle enters the reserved secure-store reference
 before catalog discovery awaits; this temporary custody does not enable the
@@ -456,6 +460,16 @@ Recovery distinguishes live operations, possible issuance and stored candidate
 credentials; it never blindly deletes a received grant. Delete retains the
 definition while live issuance or recoverable candidate custody still needs
 cleanup. Failed attempts preserve the previous primary configuration.
+
+A persisted attempt phase alone does not prove that its process owner is still
+alive. After restart, a temporary credential-store failure can leave an
+authorizing, exchange-pending or received attempt awaiting recovery. Settings
+keeps the storage diagnostic and offers Disconnect to retry cleanup without
+new authorization or deleting the configuration. It does not report an unknown
+exchange as remotely revoked. During an active Connect, the current local
+operation continues to expose correlated Cancel and the existing busy controls;
+rendering this metadata adds no cleanup or authorization request. Existing host
+recovery remains responsible for reconciling the interrupted attempt.
 
 Custom dispatch also checks the host configuration fingerprint and the epoch
 captured during discovery, so an earlier approval cannot adopt a replacement

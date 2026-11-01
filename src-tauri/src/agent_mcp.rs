@@ -142,12 +142,13 @@ impl Drop for OAuthConnectGuard {
                 .expect("OAuth completion lock poisoned")
                 .insert(id.clone());
         }
+        let mut active_operation = self
+            .lifecycle
+            .operation_id
+            .lock()
+            .expect("OAuth operation lock poisoned");
         if self.lifecycle.epoch.load(Ordering::SeqCst) == self.epoch {
-            *self
-                .lifecycle
-                .operation_id
-                .lock()
-                .expect("OAuth operation lock poisoned") = None;
+            *active_operation = None;
         }
     }
 }
@@ -3710,14 +3711,19 @@ pub async fn list_agent_mcp_servers(
     app: AppHandle,
 ) -> Result<Vec<McpServerDefinition>, crate::domain::types::AppError> {
     let repository = command_repository(&app).await.map_err(app_error)?;
+    list_mcp_definitions(&repository, &KeychainMcpSecretStore).await
+}
+
+async fn list_mcp_definitions<S: McpSecretStore>(
+    repository: &AgentMcpRepository,
+    store: &S,
+) -> Result<Vec<McpServerDefinition>, crate::domain::types::AppError> {
     let mut servers = repository.list().await.map_err(app_error)?;
     for server in &mut servers {
         let lifecycle = oauth_lifecycle(&server.id);
         let _guard = lifecycle.gate.lock().await;
         *server = repository.get(&server.id).await.map_err(app_error)?;
-        if let Err(error) =
-            recover_pending_oauth(&repository, &KeychainMcpSecretStore, server).await
-        {
+        if let Err(error) = recover_pending_oauth(repository, store, server).await {
             let _ = command_mcp_error(server, "connect", error);
         }
         server.diagnostic = last_mcp_diagnostic(&server.id).or_else(|| {
@@ -4549,27 +4555,10 @@ where
     A: FnOnce(McpServerDefinition, McpSecretBundle) -> F,
 {
     let lifecycle = oauth_lifecycle(server_id);
-    if operation_id.is_some_and(|id| {
-        lifecycle
-            .cancelled_operations
-            .lock()
-            .expect("OAuth cancellation lock poisoned")
-            .remove(id)
-    }) {
-        return Err(AgentMcpError::OauthCancelled
-            .diagnostic(server_id, None, "connect")
-            .into_app_error());
-    }
-    invalidate_oauth(&lifecycle);
-    let epoch = lifecycle.epoch.load(Ordering::SeqCst);
-    *lifecycle
-        .operation_id
-        .lock()
-        .map_err(|_| app_error(AgentMcpError::Storage))? = operation_id.map(str::to_owned);
-    let _operation_guard = OAuthConnectGuard {
-        lifecycle: lifecycle.clone(),
-        epoch,
-        operation_id: operation_id.map(str::to_owned),
+    let arrival_epoch = lifecycle.epoch.load(Ordering::SeqCst);
+    // A rejected caller does not own the active operation's diagnostic cache.
+    let rejected = |server: &str, error: AgentMcpError| {
+        error.diagnostic(server, None, "connect").into_app_error()
     };
     if operation_id.is_some_and(|id| {
         lifecycle
@@ -4578,31 +4567,76 @@ where
             .expect("OAuth cancellation lock poisoned")
             .remove(id)
     }) {
-        return Err(AgentMcpError::OauthCancelled
-            .diagnostic(server_id, None, "connect")
-            .into_app_error());
+        return Err(rejected(server_id, AgentMcpError::OauthCancelled));
     }
-    let (existing, old_bundle, context, _attempt_owner) = {
+    let (existing, old_bundle, context, _attempt_owner, epoch, _operation_guard) = {
         let _guard = lifecycle.gate.lock().await;
-        check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
-        let mut existing = repository.get(server_id).await.map_err(app_error)?;
+        if operation_id.is_some_and(|id| {
+            lifecycle
+                .cancelled_operations
+                .lock()
+                .expect("OAuth cancellation lock poisoned")
+                .remove(id)
+        }) || lifecycle.epoch.load(Ordering::SeqCst) != arrival_epoch
+        {
+            return Err(rejected(server_id, AgentMcpError::OauthCancelled));
+        }
+        let mut existing = repository
+            .get(server_id)
+            .await
+            .map_err(|error| rejected(server_id, error))?;
+        if lifecycle.epoch.load(Ordering::SeqCst) != arrival_epoch {
+            return Err(rejected(&existing.name, AgentMcpError::OauthCancelled));
+        }
         if !existing.metadata.is_object() {
-            return Err(command_mcp_error(
-                &existing,
-                "connect",
+            return Err(rejected(
+                &existing.name,
                 AgentMcpError::InvalidDefinition("metadata must be an object".into()),
             ));
         }
         recover_pending_oauth(repository, store, &mut existing)
             .await
-            .map_err(|e| command_mcp_error(&existing, "connect", e))?;
-        if oauth_cleanup_pending(&existing) || oauth_has_pending_connect_attempts(&existing) {
-            return Err(command_mcp_error(
-                &existing,
-                "connect",
-                AgentMcpError::OauthCleanupPending,
-            ));
+            .map_err(|error| rejected(&existing.name, error))?;
+        if lifecycle.epoch.load(Ordering::SeqCst) != arrival_epoch {
+            return Err(rejected(&existing.name, AgentMcpError::OauthCancelled));
         }
+        if oauth_cleanup_pending(&existing) || oauth_has_pending_connect_attempts(&existing) {
+            return Err(rejected(&existing.name, AgentMcpError::OauthCleanupPending));
+        }
+        let bundle = match existing.secret_ref.as_deref() {
+            Some(reference) => store
+                .get(reference)
+                .map_err(|error| rejected(&existing.name, error))?
+                .unwrap_or_default(),
+            None => McpSecretBundle::default(),
+        };
+        // Eligibility and recovery have succeeded. Linearize publication with
+        // explicit invalidation, without holding a synchronous lock on await.
+        let epoch = {
+            let _admission = lifecycle
+                .admission
+                .lock()
+                .map_err(|_| rejected(&existing.name, AgentMcpError::Storage))?;
+            let mut active_operation = lifecycle
+                .operation_id
+                .lock()
+                .map_err(|_| rejected(&existing.name, AgentMcpError::Storage))?;
+            if lifecycle.epoch.load(Ordering::SeqCst) != arrival_epoch {
+                return Err(rejected(&existing.name, AgentMcpError::OauthCancelled));
+            }
+            let epoch = lifecycle
+                .epoch
+                .fetch_add(1, Ordering::SeqCst)
+                .wrapping_add(1);
+            *active_operation = operation_id.map(str::to_owned);
+            lifecycle.changed.notify_waiters();
+            epoch
+        };
+        let operation_guard = OAuthConnectGuard {
+            lifecycle: lifecycle.clone(),
+            epoch,
+            operation_id: operation_id.map(str::to_owned),
+        };
         if existing.secret_ref.is_some() && existing.metadata.get("oauthGrantRevision").is_none() {
             if let Some(revision) = existing.metadata.get("oauthRevision").cloned() {
                 existing.metadata["oauthGrantRevision"] = revision;
@@ -4610,18 +4644,11 @@ where
         }
         existing.metadata["oauthRevision"] = json!(Uuid::new_v4().to_string());
         repository.replace(&existing).await.map_err(app_error)?;
-        let bundle = match existing.secret_ref.as_deref() {
-            Some(reference) => store
-                .get(reference)
-                .map_err(|e| command_mcp_error(&existing, "connect", e))?
-                .unwrap_or_default(),
-            None => McpSecretBundle::default(),
-        };
         let (context, owner) =
             reserve_oauth_attempt(repository, &existing, lifecycle.clone(), epoch)
                 .await
                 .map_err(app_error)?;
-        (existing, bundle, context, owner)
+        (existing, bundle, context, owner, epoch, operation_guard)
     };
     let expires = tokio::time::Instant::now() + deadline;
     let authorization = in_oauth_attempt(context.clone(), authorize(existing.clone(), old_bundle));

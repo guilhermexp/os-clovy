@@ -869,7 +869,7 @@ describe("AgentMcpServersSection", () => {
     expect(screen.queryByText("malformed-connect-fixture")).not.toBeInTheDocument();
   });
 
-  it("does not invent OAuth connect cleanup for live or superseded attempts", async () => {
+  it("does not invent OAuth connect cleanup for absent, empty or superseded attempts", async () => {
     const phases = [
       "authorizing",
       "exchange_pending",
@@ -887,8 +887,8 @@ describe("AgentMcpServersSection", () => {
       },
       ...phases.map((phase, index) => ({
         ...server,
-        id: `live-attempt-${index}`,
-        name: `Live attempt ${index}`,
+        id: `superseded-attempt-${index}`,
+        name: `Superseded attempt ${index}`,
         metadata: {
           oauthConnectAttempts: [
             {
@@ -897,14 +897,14 @@ describe("AgentMcpServersSection", () => {
               revision: null,
               epoch: 0,
               phase,
-              superseded: index >= 3,
+              superseded: true,
             },
           ],
         },
       })),
     ]);
     render(<AgentMcpServersSection />);
-    expect(await screen.findByText("Live attempt 4")).toBeInTheDocument();
+    expect(await screen.findByText("Superseded attempt 4")).toBeInTheDocument();
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
@@ -1016,5 +1016,279 @@ describe("AgentMcpServersSection", () => {
     expect(screen.queryByText(/Last check: connected/)).not.toBeInTheDocument();
     expect(mocks.connectOauth).toHaveBeenCalledTimes(1);
     expect(mocks.cancelOauth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "authorizing",
+    "exchange_pending",
+    "received",
+  ])("preserves draft/error and exposes persisted OAuth recovery after restart (%s)", async (phase) => {
+    const originalName = "Recoverable tools";
+    const originalUrl = "https://example.test/mcp";
+    const diagnostic = {
+      origin: "clovy_managed" as const,
+      server: originalName,
+      phase: "connect",
+      code: "agent_mcp_secure_storage_failed",
+      state: "unavailable",
+      action: "check_local_storage",
+      message: "MCP secure storage operation failed",
+    };
+    const attempt = {
+      id: "orphan-attempt-fixture",
+      secretRef: "orphan-candidate-fixture",
+      revision: "orphan-policy-fixture",
+      epoch: 1,
+      phase,
+      superseded: false,
+    };
+    let persisted: AgentMcpServerDto = {
+      ...server,
+      id: `restored-${phase}`,
+      name: originalName,
+      enabled: false,
+      transport: "streamable_http",
+      command: undefined,
+      args: [],
+      url: originalUrl,
+      metadata: { auth: "oauth", oauthConnectAttempts: [attempt] },
+      diagnostic,
+    };
+    let storageAvailable = false;
+    mocks.list.mockImplementation(async () => [persisted]);
+    mocks.update.mockRejectedValue({
+      code: diagnostic.code,
+      message: "Synthetic secure storage save failed",
+      details: { ...diagnostic, phase: "disconnect" },
+    });
+    mocks.disconnectOauth.mockImplementation(async () => {
+      if (!storageAvailable) {
+        throw { code: diagnostic.code, message: diagnostic.message, details: diagnostic };
+      }
+      persisted = {
+        ...persisted,
+        diagnostic:
+          phase === "exchange_pending"
+            ? {
+                origin: "clovy_managed",
+                server: originalName,
+                phase: "disconnect",
+                code: "agent_mcp_oauth_revoke_failed",
+                state: "unavailable",
+                action: "revoke_at_provider",
+                message:
+                  "Local OAuth credentials were removed, but remote revocation failed. Revoke the grant at the provider.",
+              }
+            : undefined,
+        metadata: {
+          auth: "oauth",
+          oauthConnected: false,
+          ...(phase === "exchange_pending"
+            ? {
+                oauthRevocationHistory: [
+                  {
+                    id: "unknown-exchange-fixture",
+                    affectedSecretRef: attempt.secretRef,
+                    affectedRevision: attempt.revision,
+                    reason: "connect_exchange_unconfirmed",
+                  },
+                ],
+              }
+            : {}),
+        },
+      };
+      return {
+        server: persisted,
+        localCleared: true,
+        remoteRevoked: phase === "received" ? true : phase === "exchange_pending" ? false : null,
+      };
+    });
+    const user = userEvent.setup();
+    const view = render(<AgentMcpServersSection />);
+    expect(await screen.findByText(originalName)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(diagnostic.code);
+    expect(screen.getByRole("status")).toHaveTextContent(/secure storage access/);
+    expect(screen.getByText(diagnostic.message, { exact: false })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Disconnect$/ })).toBeEnabled();
+    expect(screen.getByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    expect(screen.getByRole("switch", { name: `${originalName} enabled` })).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: `Configure ${originalName}` }));
+    const dialog = screen.getByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Name"));
+    await user.type(within(dialog).getByLabelText("Name"), "Unsaved recovery draft");
+    await user.clear(within(dialog).getByLabelText("URL"));
+    await user.type(within(dialog).getByLabelText("URL"), "https://example.test/unsaved");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    expect(
+      await within(dialog).findByText("Synthetic secure storage save failed"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    expect(within(dialog).getByLabelText("Name")).toHaveValue("Unsaved recovery draft");
+    expect(within(dialog).getByLabelText("URL")).toHaveValue("https://example.test/unsaved");
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: persisted.id,
+        name: "Unsaved recovery draft",
+        url: "https://example.test/unsaved",
+      }),
+    );
+    expect(persisted.name).toBe(originalName);
+    expect(persisted.url).toBe(originalUrl);
+    expect(mocks.connectOauth).not.toHaveBeenCalled();
+    expect(mocks.disconnectOauth).not.toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByText(originalName)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(diagnostic.code);
+    expect(screen.getByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    storageAvailable = true;
+    await user.click(screen.getByRole("button", { name: /^Disconnect$/ }));
+    await waitFor(() => expect(mocks.disconnectOauth).toHaveBeenCalledWith(persisted.id));
+    expect(mocks.disconnectOauth).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Local credentials cleared/)).toBeInTheDocument();
+    expect(screen.queryByText(/incomplete OAuth connection/)).not.toBeInTheDocument();
+    expect(screen.queryByText(diagnostic.message, { exact: false })).not.toBeInTheDocument();
+    if (phase === "exchange_pending") {
+      expect(screen.getByRole("status")).toHaveTextContent("agent_mcp_oauth_revoke_failed");
+      expect(screen.getByRole("status")).toHaveTextContent(/Revoke the grant at the provider/);
+      expect(persisted.diagnostic).toEqual(
+        expect.objectContaining({
+          code: "agent_mcp_oauth_revoke_failed",
+          phase: "disconnect",
+          state: "unavailable",
+          action: "revoke_at_provider",
+          message:
+            "Local OAuth credentials were removed, but remote revocation failed. Revoke the grant at the provider.",
+        }),
+      );
+      expect(screen.getByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+      expect(screen.getByText(/Remote revocation failed/)).toBeInTheDocument();
+      expect(screen.queryByText(/Provider accepted revocation/)).not.toBeInTheDocument();
+    } else if (phase === "authorizing") {
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.getByText(/Remote revocation unavailable/)).toBeInTheDocument();
+      expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    } else {
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(screen.getByText(/Provider accepted revocation/)).toBeInTheDocument();
+      expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    }
+    expect(persisted.name).toBe(originalName);
+    expect(persisted.url).toBe(originalUrl);
+    expect(persisted.metadata.oauthConnectAttempts).toBeUndefined();
+    expect(mocks.connectOauth).not.toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+    view.unmount();
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByText(originalName)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Connect$/ })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: `${originalName} enabled` })).not.toBeChecked();
+    expect(screen.queryByText(/incomplete OAuth connection/)).not.toBeInTheDocument();
+    if (phase === "exchange_pending") {
+      expect(screen.getByRole("status")).toHaveTextContent("agent_mcp_oauth_revoke_failed");
+      expect(screen.getByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    } else {
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    "authorizing",
+    "exchange_pending",
+    "received",
+  ])("keeps live OAuth Connect quiet and preserves correlated Cancel controls (%s)", async (phase) => {
+    const live = {
+      ...server,
+      id: `pending-${phase}`,
+      name: "Pending tools",
+      transport: "streamable_http" as const,
+      command: undefined,
+      url: "https://example.test/mcp",
+      secretRef: "existing-primary-fixture",
+      metadata: {
+        auth: "oauth",
+        oauthConnected: true,
+        oauthConnectAttempts: [
+          {
+            id: "pending-attempt-fixture",
+            secretRef: "pending-candidate-fixture",
+            revision: null,
+            epoch: 0,
+            phase,
+            superseded: false,
+          },
+        ],
+        oauthRevocationHistory: [
+          {
+            id: "history-fixture",
+            affectedSecretRef: "old-ref-fixture",
+            affectedRevision: null,
+            reason: "rotation_unconfirmed",
+          },
+        ],
+      },
+    };
+    const other = {
+      ...server,
+      id: "other-orphan",
+      name: "Other recoverable tools",
+      enabled: false,
+      transport: "streamable_http" as const,
+      command: undefined,
+      url: "https://example.test/other",
+      metadata: {
+        auth: "oauth",
+        oauthConnectAttempts: [
+          {
+            id: "other-attempt-fixture",
+            secretRef: "other-candidate-fixture",
+            revision: null,
+            epoch: 0,
+            phase: "received",
+            superseded: false,
+          },
+        ],
+      },
+    };
+    mocks.list.mockResolvedValue([live, other]);
+    let rejectConnect: (reason: Error) => void = () => {};
+    mocks.connectOauth.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectConnect = reject;
+        }),
+    );
+    mocks.cancelOauth.mockImplementation(async () => {
+      rejectConnect(new Error("Synthetic pending connection cancelled"));
+    });
+    const user = userEvent.setup();
+    render(<AgentMcpServersSection />);
+    await user.click(await screen.findByRole("button", { name: "Reconnect" }));
+    const liveRow = screen.getByText(live.name).closest(".settings-row") as HTMLElement;
+    const otherRow = screen.getByText(other.name).closest(".settings-row") as HTMLElement;
+    expect(within(liveRow).getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(within(liveRow).queryByText(/incomplete OAuth connection/)).not.toBeInTheDocument();
+    expect(within(liveRow).getByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    expect(within(liveRow).getByRole("button", { name: "Disconnect" })).toBeDisabled();
+    expect(within(otherRow).getByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    expect(within(otherRow).getByRole("button", { name: "Disconnect" })).toBeDisabled();
+    for (const name of [live.name, other.name]) {
+      expect(screen.getByRole("button", { name: `Configure ${name}` })).toBeDisabled();
+      expect(screen.getByRole("button", { name: `Test ${name}` })).toBeDisabled();
+      expect(screen.getByRole("button", { name: `Delete ${name}` })).toBeDisabled();
+      expect(screen.getByRole("switch", { name: `${name} enabled` })).toBeDisabled();
+    }
+    const operationId = mocks.connectOauth.mock.calls[0]?.[1];
+    expect(operationId).toEqual(expect.any(String));
+    await user.click(within(liveRow).getByRole("button", { name: "Cancel" }));
+    expect(mocks.cancelOauth).toHaveBeenCalledWith(live.id, operationId);
+    expect(await screen.findByText(/Synthetic pending connection cancelled/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeEnabled();
+    expect(mocks.connectOauth).toHaveBeenCalledTimes(1);
+    expect(mocks.disconnectOauth).not.toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
   });
 });

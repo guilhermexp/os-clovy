@@ -13,6 +13,7 @@ struct CustodyStore(
     Arc<Mutex<Option<CustodyRequests>>>,
     Arc<std::sync::atomic::AtomicBool>,
     Arc<tokio::sync::Notify>,
+    Arc<std::sync::atomic::AtomicBool>,
 );
 impl McpSecretStore for CustodyStore {
     fn put(&self, key: &str, value: &McpSecretBundle) -> Result<(), AgentMcpError> {
@@ -26,6 +27,9 @@ impl McpSecretStore for CustodyStore {
         Ok(())
     }
     fn get(&self, key: &str) -> Result<Option<McpSecretBundle>, AgentMcpError> {
+        if self.5.load(Ordering::SeqCst) {
+            return Err(AgentMcpError::SecureStorage);
+        }
         Ok(self.0.lock().unwrap().get(key).cloned())
     }
     fn delete(&self, key: &str) -> Result<(), AgentMcpError> {
@@ -66,6 +70,7 @@ struct CustodyWire {
     fresh_revoke_count: Arc<std::sync::atomic::AtomicUsize>,
     omit_revocation: Arc<std::sync::atomic::AtomicBool>,
     token_failure: Arc<Mutex<Option<(u16, Value)>>>,
+    catalog_failure: Arc<std::sync::atomic::AtomicBool>,
 }
 struct CustodyHttp {
     origin: String,
@@ -194,6 +199,10 @@ impl CustodyHttp {
                             seen.bearers.lock().unwrap().push(bearer.clone());
                             let req: Value = serde_json::from_str(&body).unwrap();
                             let method = req["method"].as_str().unwrap();
+                            if method == "tools/list" && seen.catalog_failure.load(Ordering::SeqCst) {
+                                custody_reply(&mut stream, 500, json!({"error":"synthetic_catalog_failure"})).await;
+                                return;
+                            }
                             let result = match method {
                                 "initialize" => {
                                     json!({"protocolVersion":MCP_PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"custody-fixture","version":"1"}})
@@ -303,11 +312,20 @@ async fn custody_connect(
     server: &McpServerDefinition,
     deadline: Duration,
 ) -> Result<McpServerDefinition, crate::domain::types::AppError> {
+    custody_connect_with_operation(repository, store, server, deadline, None).await
+}
+async fn custody_connect_with_operation(
+    repository: &AgentMcpRepository,
+    store: &CustodyStore,
+    server: &McpServerDefinition,
+    deadline: Duration,
+    operation_id: Option<&str>,
+) -> Result<McpServerDefinition, crate::domain::types::AppError> {
     connect_oauth_with(
         repository,
         store,
         &server.id,
-        None,
+        operation_id,
         deadline,
         |definition, bundle| async move {
             authorize_oauth_server_with(&definition, &bundle, |authorization| {
@@ -1197,6 +1215,505 @@ async fn c5_legacy_retired_oauth_is_deferred_and_reconciled_without_losing_old_o
         assert_eq!(old_revocations, usize::from(!old_custody_missing));
         assert!(fixture.fresh_revokes() >= 1);
         assert!(store.0.lock().unwrap().is_empty());
+        retire_server_sessions(&server.id).await;
+    }
+}
+
+async fn competing_connect_preserves_owner(pre_cancel_b: bool) {
+    let fixture = CustodyHttp::start(false, true, false, false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let (repository, store, server, _) =
+        custody_setup(&fixture, &temp.path().join("admission.sqlite")).await;
+    // Preserve a useful diagnosis produced by a real failed command, rather
+    // than populating the diagnostic cache directly in the test.
+    fixture.wire.catalog_failure.store(true, Ordering::SeqCst);
+    let previous_error = test_mcp_definition(&repository, &store, &server.id)
+        .await
+        .unwrap_err();
+    assert_eq!(previous_error.code, "agent_mcp_http_error");
+    let prior_diagnostic = serde_json::to_value(last_mcp_diagnostic(&server.id)).unwrap();
+    fixture.wire.catalog_failure.store(false, Ordering::SeqCst);
+    let a = custody_connect_with_operation(
+        &repository,
+        &store,
+        &server,
+        Duration::from_secs(10),
+        Some("c6-operation-A"),
+    );
+    let competitor = async {
+        fixture.wire.catalog_seen.notified().await;
+        let lifecycle = oauth_lifecycle(&server.id);
+        let epoch_before = lifecycle.epoch.load(Ordering::SeqCst);
+        let before = repository.get(&server.id).await.unwrap();
+        let candidate_reference = before.metadata["oauthConnectAttempts"][0]["secretRef"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let wire_before = fixture.wire.requests.lock().unwrap().len();
+        if pre_cancel_b {
+            cancel_oauth_operation(server.id.clone(), Some("c6-operation-B".into())).await;
+            assert_eq!(lifecycle.epoch.load(Ordering::SeqCst), epoch_before);
+        }
+        let rejected = custody_connect_with_operation(
+            &repository,
+            &store,
+            &server,
+            Duration::from_secs(10),
+            Some("c6-operation-B"),
+        )
+        .await
+        .unwrap_err();
+        let epoch_after = lifecycle.epoch.load(Ordering::SeqCst);
+        let owner_after = lifecycle.operation_id.lock().unwrap().clone();
+        let diagnostic_after = serde_json::to_value(last_mcp_diagnostic(&server.id)).unwrap();
+        let after = repository.get(&server.id).await.unwrap();
+        let wire_after = fixture.wire.requests.lock().unwrap().len();
+        fixture.wire.catalog_release.notify_one();
+        (
+            rejected,
+            epoch_before,
+            epoch_after,
+            owner_after,
+            diagnostic_after,
+            before.metadata,
+            after.metadata,
+            wire_before,
+            wire_after,
+            candidate_reference,
+        )
+    };
+    let (activated, observed) = tokio::join!(a, competitor);
+    let connected = activated
+        .expect("an ineligible competing Connect cannot cancel the admitted catalog owner");
+    let (
+        rejected,
+        epoch_before,
+        epoch_after,
+        owner_after,
+        diagnostic_after,
+        metadata_before,
+        metadata_after,
+        wire_before,
+        wire_after,
+        candidate_reference,
+    ) = observed;
+    assert_eq!(
+        rejected.code,
+        if pre_cancel_b {
+            "agent_mcp_oauth_cancelled"
+        } else {
+            "agent_mcp_oauth_cleanup_pending"
+        }
+    );
+    assert_eq!(epoch_after, epoch_before);
+    assert_eq!(owner_after.as_deref(), Some("c6-operation-A"));
+    assert_eq!(diagnostic_after, prior_diagnostic);
+    assert_eq!(metadata_after, metadata_before);
+    assert_eq!(wire_after, wire_before);
+    assert_eq!(
+        connected.secret_ref.as_deref(),
+        Some(candidate_reference.as_str())
+    );
+    assert_eq!(
+        store.get(&candidate_reference).unwrap().unwrap().oauth["access_token"],
+        "candidate-R1-access"
+    );
+    assert_eq!(fixture.token_posts(), 1);
+    assert_eq!(fixture.fresh_revokes(), 0);
+    assert!(fixture
+        .wire
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(path, _)| path != "/revoke"));
+    fixture.wire.catalog_release.notify_one();
+    assert!(!test_mcp_definition(&repository, &store, &server.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(fixture.token_posts(), 1);
+    retire_server_sessions(&server.id).await;
+}
+
+#[tokio::test]
+async fn c6_rejected_competing_connect_preserves_admitted_catalog_owner() {
+    competing_connect_preserves_owner(false).await;
+}
+#[tokio::test]
+async fn c6_precancelled_competitor_preserves_admitted_catalog_owner() {
+    competing_connect_preserves_owner(true).await;
+}
+
+#[tokio::test]
+async fn c6_explicit_cancel_disconnect_and_delete_still_retire_the_admitted_owner() {
+    for action in ["cancel", "disconnect", "delete"] {
+        let fixture = CustodyHttp::start(false, true, false, false).await;
+        let temp = tempfile::tempdir().unwrap();
+        let (repository, store, server, _) =
+            custody_setup(&fixture, &temp.path().join("withdraw.sqlite")).await;
+        let connect = custody_connect_with_operation(
+            &repository,
+            &store,
+            &server,
+            Duration::from_secs(10),
+            Some("c6-explicit-owner"),
+        );
+        let withdraw = async {
+            fixture.wire.catalog_seen.notified().await;
+            match action {
+                "cancel" => {
+                    cancel_oauth_operation(server.id.clone(), Some("c6-explicit-owner".into()))
+                        .await
+                }
+                "disconnect" => {
+                    let result = disconnect_oauth(&repository, &store, &server.id)
+                        .await
+                        .unwrap();
+                    assert!(result.local_cleared);
+                }
+                "delete" => {
+                    let result = delete_mcp_definition(&repository, &store, &server.id)
+                        .await
+                        .unwrap();
+                    assert!(result.local_deleted);
+                }
+                _ => unreachable!(),
+            }
+            fixture.wire.catalog_release.notify_one();
+        };
+        let (result, ()) = tokio::join!(connect, withdraw);
+        assert!(result.is_err());
+        assert_eq!(fixture.token_posts(), 1);
+        assert_eq!(fixture.fresh_revokes(), 1);
+        assert!(store.0.lock().unwrap().values().all(|bundle| bundle
+            .oauth
+            .get("refresh_token")
+            .map(String::as_str)
+            != Some("candidate-R1-refresh")));
+        if action == "delete" {
+            assert!(matches!(
+                repository.get(&server.id).await,
+                Err(AgentMcpError::NotFound)
+            ));
+        } else {
+            assert!(repository.get(&server.id).await.is_ok());
+        }
+        retire_server_sessions(&server.id).await;
+    }
+}
+
+#[tokio::test]
+async fn c6_connect_waiting_for_gate_honors_intervening_disconnect() {
+    let fixture = CustodyHttp::start(false, false, false, false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let (repository, store, server, _) =
+        custody_setup(&fixture, &temp.path().join("wait.sqlite")).await;
+    let lifecycle = oauth_lifecycle(&server.id);
+    let gate = lifecycle.gate.lock().await;
+    let waiting = custody_connect_with_operation(
+        &repository,
+        &store,
+        &server,
+        Duration::from_secs(10),
+        Some("c6-waiter"),
+    );
+    tokio::pin!(waiting);
+    std::future::poll_fn(|cx| match waiting.as_mut().poll(cx) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(_) => panic!("Connect must wait on the real lifecycle gate"),
+    })
+    .await;
+    let disconnect = disconnect_oauth(&repository, &store, &server.id);
+    tokio::pin!(disconnect);
+    std::future::poll_fn(|cx| match disconnect.as_mut().poll(cx) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(_) => {
+            panic!("Disconnect must wait on the held gate after invalidation")
+        }
+    })
+    .await;
+    drop(gate);
+    let (result, disconnected) = tokio::join!(waiting, disconnect);
+    assert!(result.is_err());
+    assert!(disconnected.unwrap().local_cleared);
+    assert_eq!(fixture.token_posts(), 0);
+    assert!(store.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn c6_error_owner_cannot_hide_a_later_admitted_operation_from_cancel() {
+    let fixture = CustodyHttp::start(false, true, true, false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let (repository, store, server, _) =
+        custody_setup(&fixture, &temp.path().join("completion.sqlite")).await;
+    let worker_repository = repository.clone();
+    let worker_store = store.clone();
+    let worker_server = server.clone();
+    let a = tokio::spawn(async move {
+        custody_connect_with_operation(
+            &worker_repository,
+            &worker_store,
+            &worker_server,
+            Duration::from_secs(10),
+            Some("c6-failed-A"),
+        )
+        .await
+    });
+    fixture.wire.catalog_seen.notified().await;
+    // Pause actual transport retirement after A's real catalog error and
+    // compensation. B can still authorize, but cannot dispatch a catalog.
+    let sessions = MCP_SESSIONS.get().unwrap().lock().await;
+    fixture.wire.catalog_release.notify_one();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let current = repository.get(&server.id).await.unwrap();
+            if current
+                .metadata
+                .get("oauthConnectAttempts")
+                .and_then(Value::as_array)
+                .map_or(true, |entries| entries.is_empty())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.fresh_revokes(), 1);
+    assert!(!a.is_finished());
+    let worker_repository = repository.clone();
+    let worker_store = store.clone();
+    let worker_server = server.clone();
+    let b = tokio::spawn(async move {
+        custody_connect_with_operation(
+            &worker_repository,
+            &worker_store,
+            &worker_server,
+            Duration::from_secs(10),
+            Some("c6-admitted-B"),
+        )
+        .await
+    });
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let current = repository.get(&server.id).await.unwrap();
+            if current
+                .metadata
+                .get("oauthConnectAttempts")
+                .and_then(Value::as_array)
+                .is_some_and(|entries| entries.iter().any(|entry| entry["phase"] == "received"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let lifecycle = oauth_lifecycle(&server.id);
+    assert_eq!(
+        lifecycle.operation_id.lock().unwrap().as_deref(),
+        Some("c6-admitted-B")
+    );
+    let epoch_before_cancel = lifecycle.epoch.load(Ordering::SeqCst);
+    cancel_oauth_operation(server.id.clone(), Some("c6-admitted-B".into())).await;
+    assert_ne!(lifecycle.epoch.load(Ordering::SeqCst), epoch_before_cancel);
+    drop(sessions);
+    assert!(a.await.unwrap().is_err());
+    assert!(b.await.unwrap().is_err());
+    assert_eq!(fixture.token_posts(), 2);
+    assert_eq!(fixture.fresh_revokes(), 2);
+    let current = repository.get(&server.id).await.unwrap();
+    assert!(current.metadata.get("oauthConnectAttempts").is_none());
+    assert_eq!(current.secret_ref.as_deref(), Some("primary-R0-ref"));
+    let completed_epoch = lifecycle.epoch.load(Ordering::SeqCst);
+    cancel_oauth_operation(server.id.clone(), Some("c6-admitted-B".into())).await;
+    assert_eq!(lifecycle.epoch.load(Ordering::SeqCst), completed_epoch);
+    retire_server_sessions(&server.id).await;
+}
+
+async fn custody_first_grant_setup(
+    fixture: &CustodyHttp,
+    path: &std::path::Path,
+) -> (AgentMcpRepository, CustodyStore, McpServerDefinition) {
+    let repository = custody_repository(path).await;
+    let store = CustodyStore::default();
+    *store.2.lock().unwrap() = Some(fixture.wire.requests.clone());
+    let mut server = McpServerDefinition::new("custody-first-grant", McpTransport::StreamableHttp);
+    server.enabled = false;
+    server.url = Some(format!("{}/mcp", fixture.origin));
+    server.metadata = json!({"auth":"oauth"});
+    repository.create(&server).await.unwrap();
+    (repository, store, server)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OrphanBoundary {
+    Received,
+    PendingStored,
+    PendingUnknown,
+    Authorizing,
+}
+
+#[tokio::test]
+async fn v1_orphan_recovery_dto_preserves_storage_diagnosis_and_disconnect_cleans_without_reauth_or_delete(
+) {
+    for boundary in [
+        OrphanBoundary::Received,
+        OrphanBoundary::PendingStored,
+        OrphanBoundary::PendingUnknown,
+        OrphanBoundary::Authorizing,
+    ] {
+        let pending = matches!(
+            boundary,
+            OrphanBoundary::PendingStored | OrphanBoundary::PendingUnknown
+        );
+        let fixture = CustodyHttp::start(
+            pending,
+            true,
+            false,
+            matches!(boundary, OrphanBoundary::PendingUnknown),
+        )
+        .await;
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("orphan.sqlite");
+        let (repository, store, server) = custody_first_grant_setup(&fixture, &path).await;
+        let browser_opened = Arc::new(tokio::sync::Notify::new());
+        let worker_opened = browser_opened.clone();
+        let worker_repository = repository.clone();
+        let worker_store = store.clone();
+        let worker_server = server.clone();
+        let worker = tokio::spawn(async move {
+            if matches!(boundary, OrphanBoundary::Authorizing) {
+                connect_oauth_with(
+                    &worker_repository,
+                    &worker_store,
+                    &worker_server.id,
+                    Some("v1-interrupted-first-grant"),
+                    Duration::from_secs(10),
+                    |definition, bundle| async move {
+                        authorize_oauth_server_with(&definition, &bundle, |_| {
+                            worker_opened.notify_one();
+                            Ok(())
+                        })
+                        .await
+                    },
+                )
+                .await
+            } else {
+                custody_connect_with_operation(
+                    &worker_repository,
+                    &worker_store,
+                    &worker_server,
+                    Duration::from_secs(10),
+                    Some("v1-interrupted-first-grant"),
+                )
+                .await
+            }
+        });
+        let lifecycle = oauth_lifecycle(&server.id);
+        let mut receipt_gate = None;
+        match boundary {
+            OrphanBoundary::Received => fixture.wire.catalog_seen.notified().await,
+            OrphanBoundary::PendingStored => {
+                fixture.wire.token_seen.notified().await;
+                receipt_gate = Some(lifecycle.gate.lock().await);
+                fixture.wire.token_release.notify_one();
+                timeout(Duration::from_secs(2), store.4.notified())
+                    .await
+                    .unwrap();
+            }
+            OrphanBoundary::PendingUnknown => fixture.wire.token_seen.notified().await,
+            OrphanBoundary::Authorizing => browser_opened.notified().await,
+        }
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        drop(receipt_gate);
+        if matches!(boundary, OrphanBoundary::PendingUnknown) {
+            fixture.wire.token_release.notify_one();
+        }
+        retire_server_sessions(&server.id).await;
+        let phase = match boundary {
+            OrphanBoundary::Received => "received",
+            OrphanBoundary::Authorizing => "authorizing",
+            _ => "exchange_pending",
+        };
+        let before = repository.get(&server.id).await.unwrap();
+        assert_eq!(before.metadata["oauthConnectAttempts"][0]["phase"], phase);
+        assert!(before.secret_ref.is_none());
+        assert!(!before.enabled);
+        let token_posts = fixture.token_posts();
+        assert_eq!(
+            token_posts,
+            usize::from(!matches!(boundary, OrphanBoundary::Authorizing))
+        );
+        repository.pool.close().await;
+        custody_forget_runtime(&server.id);
+        let restarted = custody_repository(&path).await;
+        store.5.store(true, Ordering::SeqCst);
+        let wire_before_list = fixture.wire.requests.lock().unwrap().len();
+        let mut listed = list_mcp_definitions(&restarted, &store).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let dto = listed.pop().unwrap();
+        assert_eq!(dto.id, server.id);
+        assert!(!dto.enabled);
+        assert!(dto.secret_ref.is_none());
+        assert_eq!(dto.metadata, before.metadata);
+        assert_ne!(dto.metadata.get("oauthConnected"), Some(&json!(true)));
+        assert_ne!(dto.metadata.get("oauthCleanupPending"), Some(&json!(true)));
+        let diagnostic = dto
+            .diagnostic
+            .as_ref()
+            .expect("the actual list DTO must retain its secure-store failure");
+        assert_eq!(diagnostic.code, "agent_mcp_secure_storage_failed");
+        assert_eq!(diagnostic.phase, "connect");
+        assert_eq!(
+            fixture.wire.requests.lock().unwrap().len(),
+            wire_before_list
+        );
+        // Restoring the store and choosing cleanup does not authorize again,
+        // remove the definition, or invent confirmation for an unknown grant.
+        store.5.store(false, Ordering::SeqCst);
+        let result = disconnect_oauth(&restarted, &store, &server.id)
+            .await
+            .unwrap();
+        assert!(result.local_cleared);
+        assert_eq!(fixture.token_posts(), token_posts);
+        assert!(restarted.get(&server.id).await.is_ok());
+        assert!(result.server.metadata.get("oauthConnectAttempts").is_none());
+        assert!(store.0.lock().unwrap().is_empty());
+        match boundary {
+            OrphanBoundary::Received | OrphanBoundary::PendingStored => {
+                assert_eq!(result.remote_revoked, Some(true));
+                assert!(result.server.diagnostic.is_none());
+                assert_eq!(fixture.fresh_revokes(), 1);
+            }
+            OrphanBoundary::PendingUnknown => {
+                assert_eq!(result.remote_revoked, Some(false));
+                let unknown_diagnostic = result
+                    .server
+                    .diagnostic
+                    .as_ref()
+                    .expect("unknown remote cleanup remains actionable in the actual DTO");
+                assert_eq!(unknown_diagnostic.code, "agent_mcp_oauth_revoke_failed");
+                assert_eq!(unknown_diagnostic.phase, "disconnect");
+                assert_eq!(unknown_diagnostic.action, "revoke_at_provider");
+                assert_eq!(unknown_diagnostic.remote_code, None);
+                assert_eq!(fixture.fresh_revokes(), 0);
+                assert!(result.server.metadata["oauthRevocationHistory"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["reason"] == "connect_exchange_unconfirmed"));
+            }
+            OrphanBoundary::Authorizing => {
+                assert_eq!(result.remote_revoked, None);
+                assert!(result.server.diagnostic.is_none());
+                assert_eq!(fixture.fresh_revokes(), 0);
+            }
+        }
         retire_server_sessions(&server.id).await;
     }
 }
