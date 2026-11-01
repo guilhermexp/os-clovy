@@ -327,6 +327,7 @@ export type DictationSettingsResponse = {
 };
 
 export type DictationHistoryItemDto = {
+  appBundleId?: string | null;
   id: string;
   text: string;
   language?: string;
@@ -1993,4 +1994,14 @@ export async function onLocalTranscriptionModelState(
   return listen<LocalTranscriptionModelState>("local-transcription-model-state", ({ payload }) =>
     onState(payload),
   );
+}
+
+export type AppPreferences = { hideFromDock: boolean };
+
+export function appPreferencesGet() {
+  return invoke<AppPreferences>("app_preferences_get");
+}
+
+export function appPreferencesSet(request: AppPreferences) {
+  return invoke<AppPreferences>("app_preferences_set", { request });
 }

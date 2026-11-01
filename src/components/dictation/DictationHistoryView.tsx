@@ -19,6 +19,7 @@ import {
 } from "react";
 import { clockTimeOptions, formatDate, t as translate, useLocale, useT } from "../../i18n";
 import { isSameLocalDay } from "../../lib/date-format";
+import { AppIcon } from "../activity-timeline/AppIcon";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
 import { Dialog } from "../ui/Dialog";
@@ -390,7 +391,11 @@ function DictationHistoryRow({
   return (
     <li className="dictation-history-item" data-truncated={truncated || undefined}>
       <span className="dictation-history-icon" aria-hidden>
-        <IconMicrophoneSparkle size={14} />
+        <AppIcon
+          bundleId={item.appBundleId ?? null}
+          size={20}
+          fallback={<IconMicrophoneSparkle size={14} />}
+        />
       </span>
       <div className="dictation-history-body">
         <p
@@ -440,7 +445,13 @@ function DictationHistoryRow({
       <Dialog
         open={open}
         onClose={() => setOpen(false)}
-        leading={<IconMicrophoneSparkle size={15} />}
+        leading={
+          <AppIcon
+            bundleId={item.appBundleId ?? null}
+            size={20}
+            fallback={<IconMicrophoneSparkle size={15} />}
+          />
+        }
         title={formatTranscriptTimestamp(item.createdAt)}
         width={540}
         className="transcript-dialog"

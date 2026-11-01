@@ -2380,8 +2380,20 @@ impl Repositories {
         language: Option<String>,
         provider: &str,
     ) -> Result<Option<DictationHistoryItemDto>, sqlx::error::Error> {
+        self.create_dictation_history_item_with_app(profile, text, language, provider, None)
+            .await
+    }
+
+    pub async fn create_dictation_history_item_with_app(
+        &self,
+        profile: &str,
+        text: &str,
+        language: Option<String>,
+        provider: &str,
+        app_bundle_id: Option<&str>,
+    ) -> Result<Option<DictationHistoryItemDto>, sqlx::error::Error> {
         let pending = self
-            .stage_dictation_history_item(profile, text, language, provider)
+            .stage_dictation_history_item_with_app(profile, text, language, provider, app_bundle_id)
             .await?;
         match pending {
             Some(pending) => pending.commit().await.map(Some),
@@ -2396,11 +2408,27 @@ impl Repositories {
         language: Option<String>,
         provider: &str,
     ) -> Result<Option<PendingDictationHistoryItem>, sqlx::error::Error> {
+        self.stage_dictation_history_item_with_app(data_partition, text, language, provider, None)
+            .await
+    }
+
+    pub async fn stage_dictation_history_item_with_app(
+        &self,
+        data_partition: &str,
+        text: &str,
+        language: Option<String>,
+        provider: &str,
+        app_bundle_id: Option<&str>,
+    ) -> Result<Option<PendingDictationHistoryItem>, sqlx::error::Error> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(None);
         }
         let item = DictationHistoryItemDto {
+            app_bundle_id: app_bundle_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned),
             id: Uuid::new_v4().to_string(),
             text: text.to_string(),
             language,
@@ -2409,8 +2437,8 @@ impl Repositories {
         };
         let mut transaction = self.pool.begin().await?;
         query(
-            "INSERT INTO dictation_history (id, text, language, provider, profile, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO dictation_history (id, text, language, provider, profile, created_at, app_bundle_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&item.id)
         .bind(&item.text)
@@ -2418,6 +2446,7 @@ impl Repositories {
         .bind(&item.provider)
         .bind(data_partition)
         .bind(&item.created_at)
+        .bind(&item.app_bundle_id)
         .execute(&mut *transaction)
         .await?;
         Ok(Some(PendingDictationHistoryItem { transaction, item }))
@@ -2430,7 +2459,7 @@ impl Repositories {
     ) -> Result<ListDictationHistoryResponse, sqlx::error::Error> {
         self.prune_old_dictation_history().await?;
         let rows = query(
-            "SELECT id, text, language, provider, created_at
+            "SELECT id, text, language, provider, created_at, app_bundle_id
              FROM dictation_history
              WHERE profile = ? AND created_at >= ?
              ORDER BY created_at DESC, rowid DESC
@@ -5820,6 +5849,7 @@ fn dictionary_entry_from_row(row: sqlx_sqlite::SqliteRow) -> DictionaryEntryDto 
 
 fn dictation_history_item_from_row(row: sqlx_sqlite::SqliteRow) -> DictationHistoryItemDto {
     DictationHistoryItemDto {
+        app_bundle_id: row.get("app_bundle_id"),
         id: row.get("id"),
         text: row.get("text"),
         language: row.get("language"),
@@ -5919,6 +5949,53 @@ mod tests {
 
     fn scopes(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn dictation_history_saves_target_and_normalizes_empty_id() {
+        let repos = test_repositories().await;
+        repos
+            .create_dictation_history_item_with_app(
+                "default",
+                "target",
+                None,
+                "test",
+                Some("org.example.app"),
+            )
+            .await
+            .unwrap();
+        repos
+            .create_dictation_history_item_with_app(
+                "default",
+                "no target",
+                None,
+                "test",
+                Some("  "),
+            )
+            .await
+            .unwrap();
+        let items = repos
+            .list_dictation_history("default", 20)
+            .await
+            .unwrap()
+            .items;
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.text == "target")
+                .unwrap()
+                .app_bundle_id
+                .as_deref(),
+            Some("org.example.app")
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.text == "no target")
+                .unwrap()
+                .app_bundle_id,
+            None
+        );
     }
 
     #[tokio::test]

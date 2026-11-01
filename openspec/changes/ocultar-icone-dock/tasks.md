@@ -11,7 +11,7 @@
 
 ## 3. Configurações
 
-- [ ] 3.1 Adicionar tipo e wrappers em `src/lib/tauri.ts`, a linha "Ocultar do Dock" em Configurações → Geral (só macOS, independente do autostart) e as strings en/pt-BR em `settings.ts` seguindo `spec/sentence-case.md` e `spec/no-typographic-dashes.md`; verificar com teste de componente da linha (ligar chama o comando, erro aparece) e `src/test/tauri-command-registry.test.ts`.
+- [x] 3.1 Adicionar tipo e wrappers em `src/lib/tauri.ts`, a linha "Ocultar do Dock" em Configurações → Geral (só macOS, independente do autostart) e as strings en/pt-BR em `settings.ts` seguindo `spec/sentence-case.md` e `spec/no-typographic-dashes.md`; verificar com teste de componente da linha (ligar chama o comando, erro aparece) e `src/test/tauri-command-registry.test.ts`.
 
 ## 4. Integração
 

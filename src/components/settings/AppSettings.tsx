@@ -23,6 +23,8 @@ import {
   useT,
 } from "../../i18n";
 import {
+  appPreferencesGet,
+  appPreferencesSet,
   dictationHotkeyStatus,
   dictationHelperCommand,
   dictationSettings,
@@ -2364,11 +2366,43 @@ function UpdatesSettingsSection({ onCheck, checking }: { onCheck: () => void; ch
   );
 }
 
-function StartupSettingsSection() {
+export function StartupSettingsSection() {
   const t = useT();
   const [enabled, setEnabled] = useState<boolean>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [hideDock, setHideDock] = useState<boolean>();
+  const [dockSaving, setDockSaving] = useState(false);
+  const [dockError, setDockError] = useState<string>();
+  const mac = isMacLikePlatform();
+
+  useEffect(() => {
+    if (!mac) return;
+    let active = true;
+    appPreferencesGet()
+      .then((value) => {
+        if (active) setHideDock(value.hideFromDock);
+      })
+      .catch(() => {
+        if (active) setDockError(translate("settings.startup.dockReadError"));
+      });
+    return () => {
+      active = false;
+    };
+  }, [mac]);
+
+  async function toggleDock(next: boolean) {
+    setDockSaving(true);
+    setDockError(undefined);
+    try {
+      const value = await appPreferencesSet({ hideFromDock: next });
+      setHideDock(value.hideFromDock);
+    } catch {
+      setDockError(translate("settings.startup.dockUpdateError"));
+    } finally {
+      setDockSaving(false);
+    }
+  }
 
   useEffect(() => {
     if (!autostartSupported()) return;
@@ -2398,7 +2432,7 @@ function StartupSettingsSection() {
     }
   }
 
-  if (!autostartSupported() || (enabled === undefined && !error)) return null;
+  if (!mac && (!autostartSupported() || (enabled === undefined && !error))) return null;
 
   return (
     <section className="settings-group" aria-labelledby="startup-heading">
@@ -2408,23 +2442,48 @@ function StartupSettingsSection() {
       <p className="settings-group-description">{t("settings.startup.description")}</p>
       <div className="settings-card">
         <div className="settings-rows">
-          <div className="settings-row">
-            <div className="settings-row-info">
-              <h3 className="settings-row-title">{t("settings.startup.openAtLogin")}</h3>
-              <p className="settings-row-description">
-                {t("settings.startup.openAtLoginDescription")}
-              </p>
+          {autostartSupported() ? (
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">{t("settings.startup.openAtLogin")}</h3>
+                <p className="settings-row-description">
+                  {t("settings.startup.openAtLoginDescription")}
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <Switch
+                  checked={enabled === true}
+                  disabled={saving || enabled === undefined}
+                  aria-label={t("settings.startup.openAtLogin")}
+                  onCheckedChange={(next) => void toggle(next)}
+                />
+              </div>
             </div>
-            <div className="settings-row-control">
-              <Switch
-                checked={enabled === true}
-                disabled={saving || enabled === undefined}
-                aria-label={t("settings.startup.openAtLogin")}
-                onCheckedChange={(next) => void toggle(next)}
-              />
-            </div>
-          </div>
+          ) : null}
           {error ? <p className="settings-row-description">{error}</p> : null}
+          {mac ? (
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">{t("settings.startup.hideDock")}</h3>
+                <p className="settings-row-description">
+                  {t("settings.startup.hideDockDescription")}
+                </p>
+                {dockError ? (
+                  <p className="settings-row-error" role="alert">
+                    {dockError}
+                  </p>
+                ) : null}
+              </div>
+              <div className="settings-row-control">
+                <Switch
+                  checked={hideDock === true}
+                  disabled={dockSaving || hideDock === undefined}
+                  aria-label={t("settings.startup.hideDock")}
+                  onCheckedChange={(next) => void toggleDock(next)}
+                />
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

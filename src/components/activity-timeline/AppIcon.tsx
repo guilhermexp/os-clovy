@@ -1,11 +1,12 @@
 import { IconApps } from "central-icons/IconApps";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { activityAppIcon } from "../../lib/activity-timeline";
 
 type AppIconProps = {
   /** Identity of the app; without one there is nothing to look up. */
   bundleId: string | null;
   size?: number;
+  fallback?: ReactNode;
 };
 
 /**
@@ -13,7 +14,7 @@ type AppIconProps = {
  * glyph stands in while it loads and when the app or its icon is gone, never
  * another app's icon. Decorative: the app's name is always written next to it.
  */
-export function AppIcon({ bundleId, size = 20 }: AppIconProps) {
+export function AppIcon({ bundleId, size = 20, fallback }: AppIconProps) {
   const [resolved, setResolved] = useState<{ bundleId: string; src: string | null } | null>(null);
 
   useEffect(() => {
@@ -28,8 +29,21 @@ export function AppIcon({ bundleId, size = 20 }: AppIconProps) {
   }, [bundleId]);
 
   const src = bundleId && resolved?.bundleId === bundleId ? resolved.src : null;
-  if (src) {
-    return <img className="app-icon" src={src} alt="" width={size} height={size} />;
+  if (src && bundleId) {
+    return (
+      <img
+        className="app-icon"
+        src={src}
+        alt=""
+        width={size}
+        height={size}
+        onError={() =>
+          setResolved((current) =>
+            current?.bundleId === bundleId ? { bundleId, src: null } : current,
+          )
+        }
+      />
+    );
   }
   return (
     <span
@@ -38,7 +52,7 @@ export function AppIcon({ bundleId, size = 20 }: AppIconProps) {
       aria-hidden="true"
       style={{ width: size, height: size }}
     >
-      <IconApps size={Math.round(size * 0.7)} />
+      {fallback ?? <IconApps size={Math.round(size * 0.7)} />}
     </span>
   );
 }

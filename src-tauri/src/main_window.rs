@@ -4,7 +4,8 @@
 //! in the tray (Windows) or menu bar (macOS). Everything that brings the
 //! window back (tray icon and "Open Clovy", a second launch, the Dock,
 //! notifications, HUDs, menus) calls [`show`], which rebuilds the window
-//! from the app configuration if it no longer exists.
+//! from the app configuration if it no longer exists. On macOS the Dock
+//! presence follows the preference while the window is hidden.
 
 use tauri::{AppHandle, Manager, WebviewWindow};
 
@@ -22,6 +23,33 @@ pub enum CloseAction {
 /// What a close request on the main window does: hide, on every system.
 pub fn close_action() -> CloseAction {
     CloseAction::Hide
+}
+
+#[path = "dock_policy.rs"]
+mod dock_policy;
+pub use dock_policy::{desired_policy, DockPolicy};
+
+#[cfg(target_os = "macos")]
+fn apply_policy(app: &AppHandle, visible: bool) {
+    let policy = match desired_policy(crate::app_preferences::hide_from_dock(app), visible) {
+        DockPolicy::Regular => tauri::ActivationPolicy::Regular,
+        DockPolicy::Accessory => tauri::ActivationPolicy::Accessory,
+    };
+    if let Err(error) = app.set_activation_policy(policy) {
+        tracing::warn!(%error, "could not update Dock presence");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_policy(_app: &AppHandle, _visible: bool) {}
+
+pub fn hide(app: &AppHandle) {
+    if app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .is_some_and(|window| window.hide().is_ok())
+    {
+        apply_policy(app, false);
+    }
 }
 
 /// Where the main window lives; tests substitute it.
@@ -64,16 +92,12 @@ pub fn setup(app: &tauri::App) {
 pub fn register_lifecycle(app: &AppHandle, window: &WebviewWindow) {
     #[cfg(target_os = "macos")]
     crate::install_main_window_first_mouse_bridge(app, window);
-    #[cfg(not(target_os = "macos"))]
-    let _ = app;
-    #[cfg(target_os = "macos")]
     let lifecycle_app = app.clone();
-    let close_window = window.clone();
     window.on_window_event(move |event| match event {
         tauri::WindowEvent::CloseRequested { api, .. } => {
             if close_action() == CloseAction::Hide {
                 api.prevent_close();
-                let _ = close_window.hide();
+                hide(&lifecycle_app);
             }
         }
         #[cfg(target_os = "macos")]
@@ -110,6 +134,7 @@ impl MainWindowSlot for AppSlot<'_> {
     }
 
     fn reveal(&self, window: &WebviewWindow) {
+        apply_policy(self.0, true);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();

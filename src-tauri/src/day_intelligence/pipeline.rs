@@ -13,7 +13,7 @@ use super::embedder::{Embedder, EmbedderStatus};
 use super::hour::{self, HourInput, SessionLine};
 use super::prompts;
 use super::schedule::{self, day_key, HourWindow, LocalZone, RunOutcome};
-use super::sources::{hhmm, whole_minutes, DaySources};
+use super::sources::{hhmm, whole_minutes, DaySources, DictationNote};
 use super::summary::{
     self, DayInput, DayPanelsDto, DaySummaryDto, HourFocusDto, HourReportDto, SummaryTrigger,
 };
@@ -129,6 +129,19 @@ fn session_line(
     }
 }
 
+/// Enrich dictations from the timeline already read for the same period.
+fn resolve_dictation_apps(dictations: &mut [DictationNote], sessions: &[TimelineSessionDto]) {
+    for note in dictations {
+        if let Some(session) = note.app_bundle_id.as_ref().and_then(|id| {
+            sessions
+                .iter()
+                .find(|session| session.bundle_id.as_ref() == Some(id))
+        }) {
+            note.app_name = Some(session.app_name.clone());
+        }
+    }
+}
+
 /// Generates the report of one completed hour and stores it.
 pub async fn report_hour(
     deps: &Deps<'_>,
@@ -200,12 +213,18 @@ pub async fn report_hour(
         .sources
         .meetings(window.start, window.end, deps.zone)
         .await;
+    let mut dictations = deps
+        .sources
+        .dictations(window.start, window.end, deps.zone)
+        .await;
+    resolve_dictation_apps(&mut dictations, &view.sessions);
     let prompt = hour::prompt(&HourInput {
         label: &label,
         active_minutes,
         sessions: &lines,
         coding_blocks: &blocks,
         meetings: &meetings,
+        dictations: &dictations,
         distilled: &distilled.body,
     });
     let output = call(
@@ -596,6 +615,13 @@ pub async fn run_scheduled_summary(
     }
 }
 
+#[derive(Default)]
+struct DayMeasures {
+    stats: timeline::stats::TimelineStatsDto,
+    hours: Vec<HourFocusDto>,
+    sessions: Vec<TimelineSessionDto>,
+}
+
 /// The day's measured statistics and per-hour focus from the timeline.
 async fn day_measures(
     deps_store: &ActivityStore,
@@ -603,7 +629,7 @@ async fn day_measures(
     zone: &dyn LocalZone,
     day: NaiveDate,
     now: DateTime<Utc>,
-) -> Result<(timeline::stats::TimelineStatsDto, Vec<HourFocusDto>), StoreError> {
+) -> Result<DayMeasures, StoreError> {
     let Some((from, to)) = schedule::day_bounds(zone, day) else {
         return Ok(Default::default());
     };
@@ -615,7 +641,11 @@ async fn day_measures(
             hour: window.hour,
         })
         .collect();
-    Ok((view.stats, hours))
+    Ok(DayMeasures {
+        stats: view.stats,
+        hours,
+        sessions: view.sessions,
+    })
 }
 
 /// Generates (or regenerates) the summary of `day` from what is stored.
@@ -628,7 +658,9 @@ pub async fn generate_summary(
         return Ok(None);
     };
     let key = day_key(day);
-    let (stats, _) = day_measures(deps.store, deps.settings, deps.zone, day, deps.now).await?;
+    let DayMeasures {
+        stats, sessions, ..
+    } = day_measures(deps.store, deps.settings, deps.zone, day, deps.now).await?;
     let workstreams = db::workstreams_of_day(deps.store, &key).await?;
     let reports = db::hour_reports_of_day(deps.store, &key).await?;
     let meetings = deps.sources.meetings(from, to, deps.zone).await;
@@ -645,6 +677,8 @@ pub async fn generate_summary(
     if reports.is_empty() && meetings.is_empty() && blocks.is_empty() {
         return Ok(None);
     }
+    let mut dictations = deps.sources.dictations(from, to, deps.zone).await;
+    resolve_dictation_apps(&mut dictations, &sessions);
     let prompt = summary::prompt(&DayInput {
         day: &key,
         stats: &stats,
@@ -652,6 +686,7 @@ pub async fn generate_summary(
         hour_reports: &reports,
         meetings: &meetings,
         coding_blocks: &blocks,
+        dictations: &dictations,
     });
     let output = call(
         deps,
@@ -729,7 +764,7 @@ pub async fn day_view(
     StoreError,
 > {
     let key = day_key(day);
-    let (stats, hours) = day_measures(
+    let DayMeasures { stats, hours, .. } = day_measures(
         context.store,
         context.settings,
         context.zone,

@@ -107,7 +107,51 @@ impl CodingBlock {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DictationNote {
+    pub local_time: String,
+    pub app_bundle_id: Option<String>,
+    pub app_name: Option<String>,
+    pub text: String,
+}
+
+impl DictationNote {
+    pub fn prompt_line(&self, limit: usize) -> String {
+        let app = self.app_name.as_deref().or(self.app_bundle_id.as_deref());
+        let text: String = self
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(limit)
+            .collect();
+        match app {
+            Some(app) => format!("{} · {}: {}", self.local_time, app, text),
+            None => format!("{}: {}", self.local_time, text),
+        }
+    }
+}
+
+pub fn append_dictations(data: &mut String, notes: &[DictationNote], count: usize, chars: usize) {
+    for note in notes.iter().take(count) {
+        data.push_str(&format!("- {}\n", note.prompt_line(chars)));
+    }
+    if notes.len() > count {
+        data.push_str(&format!("(+{} more)\n", notes.len() - count));
+    }
+}
+
 pub trait DaySources: Send + Sync {
+    fn dictations<'a>(
+        &'a self,
+        _from: DateTime<Utc>,
+        _to: DateTime<Utc>,
+        _zone: &'a dyn LocalZone,
+    ) -> BoxFuture<'a, Vec<DictationNote>> {
+        Box::pin(async { Vec::new() })
+    }
+
     /// Notes recorded or created in `[from, to)`, oldest first.
     fn meetings<'a>(
         &'a self,
@@ -242,6 +286,26 @@ pub struct AppSources {
 }
 
 impl DaySources for AppSources {
+    fn dictations<'a>(
+        &'a self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        zone: &'a dyn LocalZone,
+    ) -> BoxFuture<'a, Vec<DictationNote>> {
+        Box::pin(async move {
+            let repositories = match crate::commands::repositories(&self.app).await {
+                Ok(repositories) => repositories,
+                Err(error) => {
+                    tracing::warn!(code = %error.code, "day summary: dictations repository unavailable");
+                    return Vec::new();
+                }
+            };
+            let profile = crate::commands::active_profile(&self.app);
+            let cutoff = crate::db::repositories::dictation_history_cutoff_timestamp();
+            dictations_between(&repositories.pool, &profile, from, to, zone, &cutoff).await
+        })
+    }
+
     fn meetings<'a>(
         &'a self,
         from: DateTime<Utc>,
@@ -333,6 +397,35 @@ pub(crate) async fn meetings_between(
     meetings_from_rows(rows, from, to, zone, now)
 }
 
+pub(crate) async fn dictations_between(
+    pool: &SqlitePool,
+    profile: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    zone: &dyn LocalZone,
+    cutoff: &str,
+) -> Vec<DictationNote> {
+    let rows = query("SELECT created_at, app_bundle_id, text FROM dictation_history WHERE profile = ? AND julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?) AND julianday(created_at) >= julianday(?) ORDER BY julianday(created_at), rowid")
+        .bind(profile).bind(from.to_rfc3339()).bind(to.to_rfc3339()).bind(cutoff).fetch_all(pool).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "day summary: dictations could not be read"); Vec::new()
+        });
+    rows.into_iter()
+        .filter_map(|row| {
+            let created_at = row.get::<String, _>(0);
+            let Some(at) = parse_time(&created_at) else {
+                tracing::warn!("day intelligence: dictation timestamp is invalid");
+                return None;
+            };
+            Some(DictationNote {
+                local_time: hhmm(zone, at),
+                app_bundle_id: row.get(1),
+                app_name: None,
+                text: row.get(2),
+            })
+        })
+        .collect()
+}
+
 /// Coding-agent blocks from the activity database
 /// (`ActivityStore::enabled_coding_agent_blocks_between`, docs/coding-agent-sessions.md)
 /// of the sources still turned on: turning a source off removes its blocks
@@ -403,11 +496,80 @@ pub(crate) mod tests {
     use super::super::schedule::FixedZone;
     use super::*;
 
+    #[tokio::test]
+    async fn dictations_query_is_partitioned_ordered_and_half_open() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        query("CREATE TABLE dictation_history (profile TEXT, created_at TEXT, app_bundle_id TEXT, text TEXT)").execute(&pool).await.unwrap();
+        for (profile, at, text) in [
+            ("a", "2026-01-01T14:30:00Z", "second"),
+            ("b", "2026-01-01T14:15:00Z", "other"),
+            ("a", "2026-01-01T15:00:00Z", "outside"),
+            ("a", "2026-01-01T14:00:00Z", "first"),
+        ] {
+            query("INSERT INTO dictation_history VALUES (?, ?, ?, ?)")
+                .bind(profile)
+                .bind(at)
+                .bind("org.example.app")
+                .bind(text)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let from = parse_time("2026-01-01T14:00:00Z").unwrap();
+        let to = parse_time("2026-01-01T15:00:00Z").unwrap();
+        let zone = FixedZone(chrono::FixedOffset::east_opt(0).unwrap());
+        let notes = dictations_between(&pool, "a", from, to, &zone, "2025-12-25T00:00:00Z").await;
+        assert_eq!(
+            notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(notes[0].local_time, "14:00");
+        assert_eq!(notes[0].app_bundle_id.as_deref(), Some("org.example.app"));
+    }
+
+    #[tokio::test]
+    async fn dictations_exclude_expired_rows_without_deleting_them() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        query("CREATE TABLE dictation_history (profile TEXT, created_at TEXT, app_bundle_id TEXT, text TEXT)").execute(&pool).await.unwrap();
+        for (profile, at, text) in [
+            ("a", "2026-10-24T11:59:59.999Z", "expired"),
+            ("a", "2026-10-24T12:00:00.000Z", "at cutoff"),
+            ("a", "2026-10-25T09:30:00-03:00", "recent"),
+            ("b", "2026-10-25T12:30:00Z", "other profile"),
+            ("a", "2026-10-26T00:00:00Z", "outside"),
+        ] {
+            query("INSERT INTO dictation_history VALUES (?, ?, NULL, ?)")
+                .bind(profile)
+                .bind(at)
+                .bind(text)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let from = parse_time("2026-10-24T00:00:00Z").unwrap();
+        let to = parse_time("2026-10-26T00:00:00Z").unwrap();
+        let zone = FixedZone(chrono::FixedOffset::east_opt(0).unwrap());
+        let notes =
+            dictations_between(&pool, "a", from, to, &zone, "2026-10-24T12:00:00.000Z").await;
+        assert_eq!(
+            notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+            ["at cutoff", "recent"]
+        );
+        assert_eq!(notes[1].local_time, "12:30");
+        let count: i64 = query("SELECT COUNT(*) FROM dictation_history WHERE text = 'expired'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 1, "expired row remains physically present");
+    }
+
     /// Fixed meetings and blocks, filtered by overlap like the real sources.
     /// `ingestion_scanned_at`: the last coding-agent scan (`None`: up to date).
     #[derive(Default)]
     pub(crate) struct FixedSources {
         pub meetings: Vec<MeetingNote>,
+        pub dictations: Vec<(DateTime<Utc>, DictationNote)>,
         pub blocks: Vec<CodingBlock>,
         pub ingestion_scanned_at: std::sync::Mutex<Option<DateTime<Utc>>>,
     }
@@ -454,6 +616,20 @@ pub(crate) mod tests {
     }
 
     impl DaySources for FixedSources {
+        fn dictations<'a>(
+            &'a self,
+            from: DateTime<Utc>,
+            to: DateTime<Utc>,
+            _zone: &'a dyn LocalZone,
+        ) -> BoxFuture<'a, Vec<DictationNote>> {
+            let found = self
+                .dictations
+                .iter()
+                .filter(|(at, _)| *at >= from && *at < to)
+                .map(|(_, note)| note.clone())
+                .collect();
+            Box::pin(async move { found })
+        }
         fn meetings<'a>(
             &'a self,
             from: DateTime<Utc>,

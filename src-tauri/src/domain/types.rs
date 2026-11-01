@@ -395,6 +395,7 @@ pub struct DictionaryEntryDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationHistoryItemDto {
+    pub app_bundle_id: Option<String>,
     pub id: String,
     pub text: String,
     pub language: Option<String>,

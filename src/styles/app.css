@@ -21733,6 +21733,13 @@ button.memory-project:hover {
   color: var(--muted-foreground);
 }
 
+.dictation-history-icon .app-icon-fallback,
+.transcript-dialog .dialog-leading .app-icon-fallback {
+  background: transparent;
+  border: 0;
+  color: inherit;
+}
+
 .dictation-history-body {
   display: flex;
   flex-direction: column;

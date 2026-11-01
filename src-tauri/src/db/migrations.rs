@@ -140,6 +140,10 @@ const P3A_REPORTING_COLUMNS: &[ColumnDefinition] = &[
         definition: "TEXT",
     },
 ];
+const DICTATION_APP_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
+    name: "app_bundle_id",
+    definition: "TEXT",
+}];
 const PROFILE_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
     name: "profile",
     definition: "TEXT NOT NULL DEFAULT 'default'",
@@ -1372,6 +1376,18 @@ const MIGRATIONS: &[Migration] = &[
             "../../migrations/037_retire_sharing_keys.sql"
         ))],
     },
+    Migration {
+        version: 54,
+        name: "dictation_app_bundle_id",
+        requirements: &[SchemaRequirement::Column {
+            table: "dictation_history",
+            column: "app_bundle_id",
+        }],
+        steps: &[MigrationStep::EnsureColumns {
+            table: "dictation_history",
+            columns: DICTATION_APP_COLUMN,
+        }],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2319,9 +2335,26 @@ mod tests {
                 (51, "note_transcription_chunks".to_string()),
                 (52, "retire_native_chat".to_string()),
                 (53, "retire_sharing_keys".to_string()),
+                (54, "dictation_app_bundle_id".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
+    }
+
+    #[tokio::test]
+    async fn dictation_app_migration_preserves_legacy_rows() {
+        let pool = test_pool().await;
+        run_migration_catalog(&pool, &MIGRATIONS[..53])
+            .await
+            .unwrap();
+        query("INSERT INTO dictation_history (id, text, language, provider, profile, created_at) VALUES ('legacy', 'old', NULL, 'test', 'default', '2026-01-01T00:00:00Z')").execute(&pool).await.unwrap();
+        run_migration_catalog(&pool, MIGRATIONS).await.unwrap();
+        let row = query("SELECT text, app_bundle_id FROM dictation_history WHERE id = 'legacy'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("text"), "old");
+        assert_eq!(row.get::<Option<String>, _>("app_bundle_id"), None);
     }
 
     #[tokio::test]
@@ -2683,6 +2716,7 @@ mod tests {
                 (51, "note_transcription_chunks".to_string()),
                 (52, "retire_native_chat".to_string()),
                 (53, "retire_sharing_keys".to_string()),
+                (54, "dictation_app_bundle_id".to_string()),
             ]
         );
 

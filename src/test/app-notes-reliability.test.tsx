@@ -104,6 +104,8 @@ vi.mock("../components/ui/Toaster", () => ({
 }));
 
 vi.mock("../lib/tauri", () => ({
+  appPreferencesGet: vi.fn().mockResolvedValue({ hideFromDock: false }),
+  appPreferencesSet: vi.fn(async (request: { hideFromDock: boolean }) => request),
   dictationCapabilities: vi.fn().mockResolvedValue({
     capabilities: {
       available: true,
