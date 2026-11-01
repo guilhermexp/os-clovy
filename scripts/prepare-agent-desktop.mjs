@@ -18,6 +18,7 @@ const target = index < 0 ? hostTriple() : args[index + 1];
 const supported = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
+  "universal-apple-darwin",
   "x86_64-pc-windows-msvc",
   "aarch64-pc-windows-msvc",
   "x86_64-unknown-linux-gnu",
@@ -66,17 +67,34 @@ if (run("git", ["rev-parse", "HEAD"], source, true).trim() !== pin.sourceCommit)
 verifyHash(join(source, "Cargo.lock"), pin.cargoLockSha256);
 verifyHash(join(root, "src-tauri", "agent-desktop", "Cargo.lock"), pin.cargoLockSha256);
 verifyHash(join(source, "LICENSE"), pin.licenseSha256);
-run(
-  process.env.CARGO || "cargo",
-  ["build", "--locked", "--release", "--package", "agent-desktop", "--target", target],
-  source,
-  false,
-  { ...process.env, CARGO_TARGET_DIR: targetDir },
-);
+const buildTargets =
+  target === "universal-apple-darwin" ? ["aarch64-apple-darwin", "x86_64-apple-darwin"] : [target];
+for (const buildTarget of buildTargets) {
+  run(
+    process.env.CARGO || "cargo",
+    ["build", "--locked", "--release", "--package", "agent-desktop", "--target", buildTarget],
+    source,
+    false,
+    { ...process.env, CARGO_TARGET_DIR: targetDir },
+  );
+}
 const executableName = target.includes("windows") ? "agent-desktop.exe" : "agent-desktop";
 mkdirSync(output, { recursive: true });
 const executable = join(output, executableName);
-copyFileSync(join(targetDir, target, "release", executableName), executable);
+if (buildTargets.length === 1) {
+  copyFileSync(join(targetDir, target, "release", executableName), executable);
+} else {
+  run(
+    "/usr/bin/lipo",
+    [
+      "-create",
+      ...buildTargets.map((triple) => join(targetDir, triple, "release", executableName)),
+      "-output",
+      executable,
+    ],
+    root,
+  );
+}
 if (target.includes("apple-darwin")) {
   run(
     "/usr/bin/codesign",
@@ -104,6 +122,7 @@ const manifest = {
   version: pin.version,
   protocolVersion: pin.protocolVersion,
   target,
+  buildTargets,
   executable: executableName,
   executableSha256: hash(executable),
   cargoLockSha256: pin.cargoLockSha256,
