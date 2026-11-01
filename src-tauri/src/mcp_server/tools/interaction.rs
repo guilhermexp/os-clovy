@@ -178,14 +178,9 @@ async fn ask_permission(
             ))
         }
     };
-    let call_id = arguments
-        .get("tool_use_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string);
     let request = ApprovalRequest {
         tool: tool_name.clone(),
-        call_id,
+        call_id: None,
         kind: ApprovalKind::Approval {
             title: format!("Allow Claude Code to use {tool_name}"),
             description: format!(

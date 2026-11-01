@@ -39,6 +39,7 @@ import {
 } from "../../lib/agent-runtime-adapter";
 import type {
   AgentArtifactDto,
+  AgentApprovalMode,
   AgentItemDto,
   AgentRuntimeEvent,
   AgentSafetyMode,
@@ -460,6 +461,16 @@ export function AgentWorkspace({
   const [stoppingRunId, setStoppingRunId] = useState<string>();
   const stoppingRunIdRef = useRef<string>();
   const [error, setError] = useState<string>();
+  const [approvalSaving, setApprovalSaving] = useState(false);
+  const approvalSavingRef = useRef(false);
+  const [draftApprovalMode, setDraftApprovalMode] = useState<AgentApprovalMode>("approvals");
+  const [draftApprovalTouched, setDraftApprovalTouched] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState<{
+    sessionId: string;
+    mode: AgentApprovalMode;
+  }>();
+  const pendingApprovalRef = useRef(pendingApproval);
+  pendingApprovalRef.current = pendingApproval;
   const [approvalSubmitting, setApprovalSubmitting] = useState<
     Partial<Record<string, "once" | "session" | "always" | "deny">>
   >({});
@@ -512,6 +523,10 @@ export function AgentWorkspace({
       setSelectedId(undefined);
       selectedIdRef.current = undefined;
       setNewSessionMode(true);
+      setDraftApprovalMode("approvals");
+      setDraftApprovalTouched(false);
+      pendingApprovalRef.current = undefined;
+      setPendingApproval(undefined);
       setProjection(createAgentRuntimeProjection());
       setArtifacts([]);
       setComposerDraft(request?.prompt ?? "");
@@ -690,6 +705,10 @@ export function AgentWorkspace({
         selectedIdRef.current = undefined;
         setSelectedId(undefined);
         setNewSessionMode(true);
+        setDraftApprovalMode("approvals");
+        setDraftApprovalTouched(false);
+        pendingApprovalRef.current = undefined;
+        setPendingApproval(undefined);
         setProjection(createAgentRuntimeProjection());
         setArtifacts([]);
         setError(undefined);
@@ -1008,12 +1027,20 @@ export function AgentWorkspace({
       recoveredSubmission?.prompt ??
       draftRef.current
     ).trim();
-    if (!prompt || waiting || submitting) {
+    if (
+      !prompt ||
+      waiting ||
+      submitting ||
+      submissionOwnerRef.current ||
+      approvalSavingRef.current
+    ) {
       clearQueuedSubmissionAttempt();
       return;
     }
     const submittedStoredSessionId = selectedIdRef.current;
-    const submittedDraftRevision =
+    const submittedDraftApprovalMode = draftApprovalMode;
+    const submittedDraftApprovalTouched = draftApprovalTouched;
+    let submittedDraftRevision =
       !queuedSubmission &&
       !recoveredSubmission &&
       submittedStoredSessionId &&
@@ -1091,10 +1118,14 @@ export function AgentWorkspace({
         setComposerAttachments([]);
       }
     }
+    let approvalSaveFailed = false;
     try {
       let session = selectedSession;
       if (homeMode) {
         session = await ensureHomeSession();
+        if (!submittedStoredSessionId && readAgentSessionDraft(session.id)?.trim() === prompt) {
+          submittedDraftRevision = readAgentSessionDraftRevision(session.id);
+        }
       } else if (!session || newSessionMode) {
         const createdSession = await agentRuntimeBindings.createSession({
           title: titleFromPrompt(prompt),
@@ -1134,7 +1165,34 @@ export function AgentWorkspace({
           writeLastOpenSessionId(createdSession.id);
         }
       }
-      const activeSession = session;
+      let activeSession = session;
+      const pendingMode =
+        pendingApprovalRef.current?.sessionId === activeSession.id
+          ? pendingApprovalRef.current.mode
+          : !submittedStoredSessionId && submittedDraftApprovalTouched
+            ? submittedDraftApprovalMode
+            : undefined;
+      if (pendingMode) {
+        const pending = { sessionId: activeSession.id, mode: pendingMode };
+        pendingApprovalRef.current = pending;
+        setPendingApproval(pending);
+        try {
+          activeSession = await agentRuntimeBindings.setApprovalMode(activeSession.id, pendingMode);
+        } catch (cause) {
+          approvalSaveFailed = true;
+          throw cause;
+        }
+        if (pendingApprovalRef.current === pending) {
+          pendingApprovalRef.current = undefined;
+          setPendingApproval(undefined);
+        }
+        setSessions((current) =>
+          current.map((item) => (item.id === activeSession.id ? activeSession : item)),
+        );
+        if (selectedIdRef.current === activeSession.id) {
+          setProjection((current) => ({ ...current, session: activeSession }));
+        }
+      }
       const optimistic: AgentItemDto = {
         id: optimisticId,
         sessionId: activeSession.id,
@@ -1185,6 +1243,7 @@ export function AgentWorkspace({
         prompt: preparedPrompt.text,
         model: runModel,
         safetyMode: homeMode ? "sandboxed" : safetyMode,
+        surface: homeMode ? "home" : "chat",
         workspacePath: activeSession.workspacePath,
         enabledSkillIds,
         attachments: attachedPaths,
@@ -1269,12 +1328,19 @@ export function AgentWorkspace({
         if (pendingSessionCreationRef.current === creationRequestId) {
           pendingSessionCreationRef.current = undefined;
         }
+        if (approvalSaveFailed || !selectedIdRef.current) setPendingInitialTurn(undefined);
         if (!selectedIdRef.current) {
-          setPendingInitialTurn(undefined);
           setNewSessionMode(true);
         }
       }
-      if (!queuedSnapshot) {
+      const originalDraftStillVisible =
+        approvalSaveFailed &&
+        homeMode &&
+        !creatingSession &&
+        draftRef.current.trim() === prompt &&
+        attachedPaths.length === attachmentsRef.current.length &&
+        attachedPaths.every((path, index) => path === attachmentsRef.current[index]);
+      if (!queuedSnapshot && !originalDraftStillVisible) {
         const failedSubmission = {
           id: recoveredSnapshot?.id ?? crypto.randomUUID(),
           prompt,
@@ -1319,7 +1385,10 @@ export function AgentWorkspace({
       )
       .then((createdSession) => {
         creationDraftDestinationsRef.current.set(draftOwnerId, createdSession.id);
-        transferPendingAgentSessionDraft(draftOwnerId, createdSession.id);
+        const transferred = transferPendingAgentSessionDraft(draftOwnerId, createdSession.id);
+        if (!transferred) {
+          writeAgentSessionDraft(createdSession.id, draftRef.current);
+        }
         setSelectedId(createdSession.id);
         selectedIdRef.current = createdSession.id;
         setNewSessionMode(false);
@@ -1598,6 +1667,10 @@ export function AgentWorkspace({
     setProjection(createAgentRuntimeProjection());
     setArtifacts([]);
     setNewSessionMode(true);
+    setDraftApprovalMode("approvals");
+    setDraftApprovalTouched(false);
+    pendingApprovalRef.current = undefined;
+    setPendingApproval(undefined);
     onSessionSelected?.(undefined);
     await refreshSessions();
   }
@@ -1782,6 +1855,48 @@ export function AgentWorkspace({
       }}
       safetyMode={safetyMode}
       setSafetyMode={setSafetyMode}
+      approvalMode={
+        selectedSession
+          ? pendingApproval?.sessionId === selectedSession.id
+            ? pendingApproval.mode
+            : selectedSession.approvalMode
+          : draftApprovalMode
+      }
+      effectiveApprovalMode={projection.run?.approvalMode}
+      approvalUnsaved={Boolean(
+        selectedSession && pendingApproval?.sessionId === selectedSession.id,
+      )}
+      approvalSaving={
+        approvalSaving ||
+        submitting ||
+        homeSessionCreating ||
+        Boolean(selectedId && !selectedSession)
+      }
+      onApprovalModeChange={async (mode) => {
+        if (!selectedSession) {
+          setDraftApprovalMode(mode);
+          setDraftApprovalTouched(true);
+          return;
+        }
+        if (approvalSavingRef.current) return;
+        approvalSavingRef.current = true;
+        setApprovalSaving(true);
+        try {
+          const updated = await agentRuntimeBindings.setApprovalMode(selectedSession.id, mode);
+          setSessions((current) =>
+            current.map((item) => (item.id === updated.id ? updated : item)),
+          );
+          if (pendingApprovalRef.current?.sessionId === updated.id) {
+            pendingApprovalRef.current = undefined;
+            setPendingApproval(undefined);
+          }
+        } catch (cause) {
+          setError(messageFromError(cause));
+        } finally {
+          approvalSavingRef.current = false;
+          setApprovalSaving(false);
+        }
+      }}
       attachments={attachments}
       onDropAttachments={addDroppedAttachments}
       onRemoveAttachment={removeAttachment}
@@ -1792,7 +1907,7 @@ export function AgentWorkspace({
       running={running}
       waiting={waiting}
       stopping={stoppingRunId === projection.run?.id}
-      submitting={submitting || (homeMode && homeSessionCreating)}
+      submitting={submitting || approvalSaving || (homeMode && homeSessionCreating)}
       attaching={attaching}
       notice={!heroMode ? error : undefined}
       hero={heroMode}
@@ -2231,6 +2346,11 @@ function AgentComposer({
   setModel,
   safetyMode,
   setSafetyMode,
+  approvalMode,
+  effectiveApprovalMode,
+  approvalUnsaved,
+  approvalSaving,
+  onApprovalModeChange,
   attachments,
   onDropAttachments,
   onRemoveAttachment,
@@ -2266,6 +2386,11 @@ function AgentComposer({
   setModel: (value: string) => void;
   safetyMode: AgentSafetyMode;
   setSafetyMode: (value: AgentSafetyMode) => void;
+  approvalMode?: AgentApprovalMode;
+  effectiveApprovalMode?: AgentApprovalMode;
+  approvalUnsaved: boolean;
+  approvalSaving: boolean;
+  onApprovalModeChange?: (value: AgentApprovalMode) => Promise<void>;
   attachments: string[];
   onDropAttachments: (files: File[]) => Promise<void>;
   onRemoveAttachment: (path: string) => void;
@@ -2414,6 +2539,30 @@ function AgentComposer({
       {notice ? (
         <div className="agent-composer-notice" role="alert">
           {notice}
+        </div>
+      ) : null}
+      {onApprovalModeChange ? (
+        <div className="agent-approval-control">
+          <label>
+            {t("agent.approval.label")}{" "}
+            <select
+              value={approvalMode ?? "approvals"}
+              disabled={approvalSaving}
+              onChange={(event) =>
+                void onApprovalModeChange(event.currentTarget.value as AgentApprovalMode)
+              }
+            >
+              <option value="approvals">{t("agent.approval.approvals")}</option>
+              <option value="bypass">{t("agent.approval.bypass")}</option>
+            </select>
+          </label>
+          <span>
+            {approvalUnsaved
+              ? t("agent.approval.unsaved")
+              : running || waiting
+                ? `${t("agent.approval.current")} ${t(effectiveApprovalMode === "bypass" ? "agent.approval.bypass" : effectiveApprovalMode === "approvals" ? "agent.approval.approvals" : "agent.approval.loading")} ${t("agent.approval.next")}`
+                : t("agent.approval.description")}
+          </span>
         </div>
       ) : null}
       <div className="agent-composer-box" data-stacked={attachments.length ? "true" : undefined}>

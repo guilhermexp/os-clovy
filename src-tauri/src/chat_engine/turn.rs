@@ -57,6 +57,7 @@ pub struct TurnContext {
     pub safety_mode: AgentSafetyMode,
     /// A person watches the turn (`false` for routines).
     pub attended: bool,
+    pub surface: String,
     pub routine_tools: Option<super::policy::RoutineBuiltinTools>,
     /// Image attachments of the message (absolute paths in the workspace).
     pub images: Vec<PathBuf>,
@@ -79,7 +80,7 @@ impl TurnContext {
             cli: self.kind,
             safety_mode: self.safety_mode,
             attended: self.attended,
-            surface: if self.attended { "chat" } else { "routine" }.into(),
+            surface: self.surface.clone(),
         }
     }
 }

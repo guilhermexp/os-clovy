@@ -1388,6 +1388,21 @@ const MIGRATIONS: &[Migration] = &[
             columns: DICTATION_APP_COLUMN,
         }],
     },
+    Migration {
+        version: 55,
+        name: "agent_session_approval_mode",
+        requirements: &[SchemaRequirement::Column {
+            table: "agent_sessions",
+            column: "approval_mode",
+        }],
+        steps: &[MigrationStep::EnsureColumns {
+            table: "agent_sessions",
+            columns: &[ColumnDefinition {
+                name: "approval_mode",
+                definition: "TEXT NOT NULL DEFAULT 'approvals'",
+            }],
+        }],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2206,6 +2221,22 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("in-memory SQLite")
+    }
+
+    #[tokio::test]
+    async fn approval_mode_migration_defaults_existing_sessions_to_approvals() {
+        let pool = test_pool().await;
+        run_migration_catalog(&pool, &MIGRATIONS[..53])
+            .await
+            .unwrap();
+        query("INSERT INTO agent_sessions (id, created_at, updated_at) VALUES ('old-session', 'now', 'now')")
+            .execute(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let row = query("SELECT approval_mode FROM agent_sessions WHERE id = 'old-session'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("approval_mode"), "approvals");
     }
 
     async fn table_exists(pool: &SqlitePool, table: &str) -> bool {

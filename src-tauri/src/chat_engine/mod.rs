@@ -210,10 +210,9 @@ impl ChatEngineHost {
     }
 }
 
-/// Cancels a CLI run (`cancel_agent_run`): settles the run's pending
-/// approval requests as `run_cancelled` (their cards turn cancelled and the
-/// waiting tools answer the CLI), revokes the run's turn token so its MCP
-/// connections close, and stops the CLI's process group. The turn then
+/// Cancels a CLI run (`cancel_agent_run`): revokes the turn token and its
+/// in-flight MCP handlers, settles pending approvals as `run_cancelled`, and
+/// stops the CLI's process group. The turn then
 /// publishes `run.cancelled`. `false` when no CLI turn runs under `run_id`.
 pub async fn cancel_cli_run(
     host: &ChatEngineHost,
@@ -221,11 +220,11 @@ pub async fn cancel_cli_run(
     turns: Option<&crate::mcp_server::turns::TurnRegistry>,
     run_id: &str,
 ) -> bool {
-    if let Some(broker) = broker {
-        broker.cancel_run(run_id).await;
-    }
     if let Some(turns) = turns {
         turns.revoke_run(run_id);
+    }
+    if let Some(broker) = broker {
+        broker.cancel_run(run_id).await;
     }
     host.cancel(run_id)
 }
@@ -247,6 +246,7 @@ pub struct CliTurnRequest {
     /// A person watches the turn: `true` for chat, `false` for routines
     /// (read-only tools, and every approval is refused).
     pub attended: bool,
+    pub surface: String,
     /// Saved routine file/web capabilities for Claude's built-in tool policy.
     pub routine_tools: Option<policy::RoutineBuiltinTools>,
 }
@@ -307,6 +307,7 @@ pub async fn start_cli_turn(
         turns,
         safety_mode: request.safety_mode,
         attended: request.attended,
+        surface: request.surface,
         routine_tools: request.routine_tools,
         images: request.images,
     };

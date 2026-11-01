@@ -3,7 +3,8 @@ use super::skill_identity::{
     write_skill_ids,
 };
 use super::{
-    AgentItemDto, AgentItemPayload, AgentRepository, AgentSafetyMode, MessageAttachmentPayload,
+    AgentApprovalMode, AgentItemDto, AgentItemPayload, AgentRepository, AgentSafetyMode,
+    MessageAttachmentPayload,
 };
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -57,6 +58,8 @@ pub struct StartRunRequest {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub safety_mode: AgentSafetyMode,
+    #[serde(default)]
+    pub surface: Option<String>,
     pub workspace_path: String,
     #[serde(default)]
     pub enabled_skill_ids: Vec<String>,
@@ -292,6 +295,20 @@ pub async fn rename_agent_session(
             .rename_session(&request.session_id, &request.title)
             .await?,
     ))
+}
+
+#[tauri::command]
+pub async fn set_agent_session_approval_mode(
+    app: AppHandle,
+    session_id: String,
+    approval_mode: AgentApprovalMode,
+) -> Result<Value, AppError> {
+    let profile = crate::commands::active_profile(&app);
+    let session = repository(&app)
+        .await?
+        .set_approval_mode_in_profile(&session_id, &profile, approval_mode)
+        .await?;
+    Ok(session_json(session))
 }
 
 #[tauri::command]
@@ -679,6 +696,22 @@ pub async fn start_agent_run(app: AppHandle, request: StartRunRequest) -> Result
             })
             .collect::<Vec<_>>();
     let run = repository.create_run(&session.id, &model, None).await?;
+    let surface = if request.surface.as_deref() == Some("home") {
+        "home"
+    } else {
+        "chat"
+    };
+    if let Err(error) = repository
+        .set_run_config(
+            &run.id,
+            &json!({"surface": surface, "workspace": workspace}),
+        )
+        .await
+    {
+        let error = AppError::from(error);
+        mark_dispatch_failed(&repository, &run.id, &error).await;
+        return Err(error);
+    }
     if let Err(error) = repository
         .set_run_enabled_skills(&run.id, &requested_skills)
         .await
@@ -701,6 +734,7 @@ pub async fn start_agent_run(app: AppHandle, request: StartRunRequest) -> Result
             attachments: &prepared_attachments,
             original_paths: Some(&request.attachments),
             safety_mode: request.safety_mode,
+            surface,
         },
     )
     .await
@@ -717,6 +751,7 @@ struct CliRunStart<'a> {
     /// The picked paths of a new message (absent on retry).
     original_paths: Option<&'a [String]>,
     safety_mode: AgentSafetyMode,
+    surface: &'a str,
 }
 
 /// Persists the user message of a run on a CLI chat engine and starts the
@@ -783,6 +818,7 @@ async fn start_cli_run(
                 images: cli_image_attachments(start.attachments),
                 safety_mode: start.safety_mode,
                 attended: true,
+                surface: start.surface.into(),
                 routine_tools: None,
             },
             ticket,
@@ -886,6 +922,7 @@ pub async fn retry_agent_run(app: AppHandle, run_id: String) -> Result<Value, Ap
         .map_err(io_error)?;
     let model = persist_retry_session(&repository, &session, &workspace).await?;
     let enabled_skill_ids = repository.run_enabled_skills(&previous.id).await?;
+    let prior_config = repository.run_config(&previous.id).await?;
     let run = repository.create_run(&session.id, &model, None).await?;
     if let Err(error) = repository.set_run_retry_parent(&run.id, &previous.id).await {
         let error = AppError::from(error);
@@ -901,6 +938,27 @@ pub async fn retry_agent_run(app: AppHandle, run_id: String) -> Result<Value, Ap
         return Err(error);
     }
     let kind = crate::chat_engine::cli_for_model(&model).expect("normalized CLI model");
+    let surface = if prior_config
+        .as_ref()
+        .and_then(|v| v.get("surface"))
+        .and_then(Value::as_str)
+        == Some("home")
+    {
+        "home"
+    } else {
+        "chat"
+    };
+    if let Err(error) = repository
+        .set_run_config(
+            &run.id,
+            &json!({"surface": surface, "workspace": workspace}),
+        )
+        .await
+    {
+        let error = AppError::from(error);
+        mark_dispatch_failed(&repository, &run.id, &error).await;
+        return Err(error);
+    }
     start_cli_run(
         &app,
         &repository,
@@ -914,6 +972,7 @@ pub async fn retry_agent_run(app: AppHandle, run_id: String) -> Result<Value, Ap
             attachments: &attachments,
             original_paths: None,
             safety_mode: session.safety_mode,
+            surface,
         },
     )
     .await
@@ -1432,10 +1491,10 @@ fn normalize_agent_model(model: &str) -> String {
 }
 
 fn session_json(session: super::AgentSessionDto) -> Value {
-    json!({ "id": session.id, "title": session.title, "status": session.status, "model": session.model, "safetyMode": session.safety_mode, "workspacePath": session.workspace_path.unwrap_or_default(), "source": match session.source.as_str() { "legacy_routine" => "legacy_routine", "routine" => "routine", "user" => "user", _ => "legacy_task" }, "createdAt": session.created_at, "updatedAt": session.updated_at, "error": session.last_error })
+    json!({ "id": session.id, "title": session.title, "status": session.status, "model": session.model, "safetyMode": session.safety_mode, "approvalMode": session.approval_mode, "workspacePath": session.workspace_path.unwrap_or_default(), "source": match session.source.as_str() { "legacy_routine" => "legacy_routine", "routine" => "routine", "user" => "user", _ => "legacy_task" }, "createdAt": session.created_at, "updatedAt": session.updated_at, "error": session.last_error })
 }
 fn run_json(run: super::AgentRunDto) -> Value {
-    json!({ "id": run.id, "sessionId": run.session_id, "status": run.status, "model": run.model, "reasoningEffort": run.reasoning_effort, "startedAt": run.started_at, "completedAt": run.completed_at, "usage": run.usage, "error": run.error_message })
+    json!({ "id": run.id, "sessionId": run.session_id, "status": run.status, "model": run.model, "approvalMode": run.approval_mode, "reasoningEffort": run.reasoning_effort, "startedAt": run.started_at, "completedAt": run.completed_at, "usage": run.usage, "error": run.error_message })
 }
 
 fn item_json_with_active_run(
@@ -2334,6 +2393,10 @@ mod tests {
             )
             .await
             .expect("source");
+        repository
+            .set_approval_mode_in_profile(&source.id, "private", AgentApprovalMode::Bypass)
+            .await
+            .unwrap();
         let branch = repository
             .create_session("Branch", "auto", AgentSafetyMode::Sandboxed, None)
             .await
@@ -2351,6 +2414,14 @@ mod tests {
             .expect("branch profile")
             .get("profile");
         assert_eq!(profile, "private");
+        assert_eq!(
+            repository
+                .get_session(&branch.id)
+                .await
+                .unwrap()
+                .approval_mode,
+            AgentApprovalMode::Approvals
+        );
     }
 
     #[tokio::test]

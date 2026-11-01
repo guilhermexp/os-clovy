@@ -59,8 +59,8 @@ pub(crate) async fn resolve(
 }
 
 /// Validates a resolution against the pending item, like the native path:
-/// the kinds must match, an approval is `once`, `session`, `always`
-/// (all approve once) or `deny`, and a clarification carries `answer`.
+/// the kinds must match, an approval is `once` or `deny`, and a
+/// clarification carries `answer`. Standing scopes are not supported.
 fn decision_for(item: &Value, resolution: &Value) -> Result<Decision, AppError> {
     let item_kind = item
         .get("kind")
@@ -83,7 +83,7 @@ fn decision_for(item: &Value, resolution: &Value) -> Result<Decision, AppError> 
     }
     match item_kind {
         "approval" => match resolution.get("choice").and_then(Value::as_str) {
-            Some("once" | "session" | "always") => Ok(Decision::Approve),
+            Some("once") => Ok(Decision::Approve),
             Some("deny") => Ok(Decision::Deny),
             _ => Err(invalid()),
         },

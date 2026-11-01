@@ -1,6 +1,6 @@
 use super::domain::{
-    AgentArtifactDto, AgentItemDto, AgentItemPayload, AgentRunDto, AgentSafetyMode,
-    AgentSessionDto, AgentSkillDto,
+    AgentApprovalMode, AgentArtifactDto, AgentItemDto, AgentItemPayload, AgentRunDto,
+    AgentSafetyMode, AgentSessionDto, AgentSkillDto,
 };
 use super::skill_identity::{
     canonical_skill_id, canonical_skill_ids, write_skill_ids, CLOVY_OBSIDIAN_SKILL_ID,
@@ -99,7 +99,7 @@ impl AgentRepository {
 
     pub async fn get_session(&self, id: &str) -> Result<AgentSessionDto, sqlx::Error> {
         query(
-            "SELECT id, title, status, model, safety_mode, workspace_path, source,
+            "SELECT id, title, status, model, safety_mode, approval_mode, workspace_path, source,
                     created_at, updated_at, completed_at, last_error
              FROM agent_sessions WHERE id = ?",
         )
@@ -111,7 +111,7 @@ impl AgentRepository {
 
     pub async fn list_sessions(&self) -> Result<Vec<AgentSessionDto>, sqlx::Error> {
         query(
-            "SELECT id, title, status, model, safety_mode, workspace_path, source,
+            "SELECT id, title, status, model, safety_mode, approval_mode, workspace_path, source,
                     created_at, updated_at, completed_at, last_error
              FROM agent_sessions ORDER BY updated_at DESC, id ASC",
         )
@@ -134,6 +134,21 @@ impl AgentRepository {
         self.get_session(id).await
     }
 
+    pub async fn set_approval_mode_in_profile(
+        &self,
+        id: &str,
+        profile: &str,
+        mode: AgentApprovalMode,
+    ) -> Result<AgentSessionDto, sqlx::Error> {
+        let updated = query("UPDATE agent_sessions SET approval_mode = ?, updated_at = ? WHERE id = ? AND COALESCE((SELECT profile FROM session_profiles WHERE session_id = agent_sessions.id), 'default') = ?")
+            .bind(mode.as_db()).bind(crate::db::repositories::timestamp()).bind(id).bind(profile)
+            .execute(&self.pool).await?;
+        if updated.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        self.get_session(id).await
+    }
+
     pub async fn delete_session(&self, id: &str) -> Result<(), sqlx::Error> {
         let deleted = query("DELETE FROM agent_sessions WHERE id = ?")
             .bind(id)
@@ -148,7 +163,7 @@ impl AgentRepository {
     pub async fn latest_run(&self, session_id: &str) -> Result<AgentRunDto, sqlx::Error> {
         query(
             "SELECT id, session_id, status, model, reasoning_effort, started_at, updated_at, completed_at,
-                      usage_json, interrupted_state_json, last_sequence, error_code, error_message
+                      usage_json, interrupted_state_json, last_sequence, error_code, error_message, json_extract(run_config_json, '$.approvalMode') AS approval_mode
                FROM agent_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT 1",
         )
         .bind(session_id)
@@ -168,15 +183,16 @@ impl AgentRepository {
         let mut transaction = self.pool.begin().await?;
         query(
             "INSERT INTO agent_runs
-             (id, session_id, status, model, reasoning_effort, started_at, updated_at)
-             VALUES (?, ?, 'running', ?, ?, ?, ?)",
+             (id, session_id, status, model, reasoning_effort, started_at, updated_at, run_config_json)
+             SELECT ?, id, 'running', ?, ?, ?, ?, json_object('approvalMode', approval_mode)
+             FROM agent_sessions WHERE id = ?",
         )
         .bind(&id)
-        .bind(session_id)
         .bind(model)
         .bind(reasoning_effort)
         .bind(&now)
         .bind(&now)
+        .bind(session_id)
         .execute(&mut *transaction)
         .await?;
         query("UPDATE agent_sessions SET status = 'running', updated_at = ? WHERE id = ?")
@@ -191,7 +207,7 @@ impl AgentRepository {
     pub async fn get_run(&self, id: &str) -> Result<AgentRunDto, sqlx::Error> {
         let row = query(
             "SELECT id, session_id, status, model, reasoning_effort, started_at, updated_at, completed_at,
-                    usage_json, interrupted_state_json, last_sequence, error_code, error_message
+                    usage_json, interrupted_state_json, last_sequence, error_code, error_message, json_extract(run_config_json, '$.approvalMode') AS approval_mode
              FROM agent_runs WHERE id = ?",
         )
         .bind(id)
@@ -276,8 +292,8 @@ impl AgentRepository {
         config: &serde_json::Value,
     ) -> Result<(), sqlx::Error> {
         query(
-            "UPDATE agent_runs SET run_config_json = ?, updated_at = ?
-             WHERE id = ? AND run_config_json IS NULL",
+            "UPDATE agent_runs SET run_config_json = json_patch(?, COALESCE(run_config_json, '{}')), updated_at = ?
+             WHERE id = ?",
         )
         .bind(config.to_string())
         .bind(crate::db::repositories::timestamp())
@@ -1102,6 +1118,7 @@ fn session_from_row(row: SqliteRow) -> AgentSessionDto {
         status: row.get("status"),
         model: row.get("model"),
         safety_mode: AgentSafetyMode::from(row.get::<String, _>("safety_mode").as_str()),
+        approval_mode: AgentApprovalMode::from(row.get::<String, _>("approval_mode").as_str()),
         workspace_path: row.get("workspace_path"),
         source: row.get("source"),
         created_at: row.get("created_at"),
@@ -1117,6 +1134,11 @@ fn run_from_row(row: SqliteRow) -> AgentRunDto {
         session_id: row.get("session_id"),
         status: row.get("status"),
         model: row.get("model"),
+        approval_mode: AgentApprovalMode::from(
+            row.get::<Option<String>, _>("approval_mode")
+                .as_deref()
+                .unwrap_or("approvals"),
+        ),
         reasoning_effort: row.get("reasoning_effort"),
         started_at: row.get("started_at"),
         updated_at: row.get("updated_at"),
@@ -1186,6 +1208,55 @@ mod tests {
     use super::*;
     use crate::agent_sessions::domain::MessagePayload;
     use sqlx_sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn approval_mode_is_per_session_and_snapshotted_per_run() {
+        let repo = repository().await;
+        let a = repo
+            .create_session_in_profile("A", "auto", AgentSafetyMode::Sandboxed, None, "work")
+            .await
+            .unwrap();
+        let b = repo
+            .create_session("B", "auto", AgentSafetyMode::Sandboxed, None)
+            .await
+            .unwrap();
+        assert_eq!(a.approval_mode, AgentApprovalMode::Approvals);
+        assert!(repo
+            .set_approval_mode_in_profile(&a.id, "default", AgentApprovalMode::Bypass)
+            .await
+            .is_err());
+        repo.set_approval_mode_in_profile(&a.id, "work", AgentApprovalMode::Bypass)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_session(&a.id).await.unwrap().approval_mode,
+            AgentApprovalMode::Bypass
+        );
+        assert_eq!(
+            repo.get_session(&b.id).await.unwrap().approval_mode,
+            AgentApprovalMode::Approvals
+        );
+        let run = repo.create_run(&a.id, "auto", None).await.unwrap();
+        repo.set_approval_mode_in_profile(&a.id, "work", AgentApprovalMode::Approvals)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().approval_mode,
+            AgentApprovalMode::Bypass
+        );
+        let next = repo.create_run(&a.id, "auto", None).await.unwrap();
+        assert_eq!(next.approval_mode, AgentApprovalMode::Approvals);
+        repo.set_run_config(
+            &next.id,
+            &serde_json::json!({"approvalMode":"bypass", "surface":"chat"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.get_run(&next.id).await.unwrap().approval_mode,
+            AgentApprovalMode::Approvals
+        );
+    }
 
     async fn repository() -> AgentRepository {
         let pool = SqlitePoolOptions::new()

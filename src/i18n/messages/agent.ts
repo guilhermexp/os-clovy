@@ -2,6 +2,15 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
+    "agent.approval.label": "Tool approval",
+    "agent.approval.approvals": "Approvals",
+    "agent.approval.bypass": "Bypass",
+    "agent.approval.current": "Current run:",
+    "agent.approval.loading": "Checking",
+    "agent.approval.unsaved": "Not saved. Retry before starting the run.",
+    "agent.approval.next": "Changes apply to the next run. Stop ends the current run.",
+    "agent.approval.description":
+      "Bypass authorizes approval requests for this conversation. Other permissions still apply.",
     // Hero
     "agent.hero.greeting1": "What can Clovy do for you?",
     "agent.hero.greeting2": "What should we work on?",
@@ -196,6 +205,15 @@ export default defineMessages({
     "agent.sessions.deleteSession": "Delete session",
   },
   "pt-BR": {
+    "agent.approval.label": "Aprovação de ferramentas",
+    "agent.approval.approvals": "Aprovações",
+    "agent.approval.bypass": "Dispensar aprovações",
+    "agent.approval.current": "Execução atual:",
+    "agent.approval.loading": "Verificando",
+    "agent.approval.unsaved": "Não foi salvo. Tente novamente antes de iniciar a execução.",
+    "agent.approval.next": "Alterações valem na próxima execução. Parar encerra a execução atual.",
+    "agent.approval.description":
+      "Dispensar aprovações autoriza pedidos nesta conversa. Outras permissões continuam valendo.",
     // Hero
     "agent.hero.greeting1": "O que o Clovy pode fazer por você?",
     "agent.hero.greeting2": "No que vamos trabalhar?",

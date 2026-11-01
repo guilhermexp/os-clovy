@@ -60,6 +60,182 @@ struct Harness {
     run_id: String,
 }
 
+#[tokio::test]
+async fn bypass_uses_run_snapshot_and_records_a_receipt() {
+    let harness = Harness::new().await;
+    harness
+        .repository
+        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Bypass)
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .broker
+            .effective_policy(&harness.turn())
+            .await
+            .unwrap()
+            .mode,
+        AgentApprovalMode::Approvals
+    );
+    let run = harness
+        .repository
+        .create_run(&harness.session_id, "__clovy_cli_engine__:claude", None)
+        .await
+        .unwrap();
+    let mut turn = harness.turn();
+    turn.run_id = run.id.clone();
+    harness
+        .repository
+        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Approvals)
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.broker.effective_policy(&turn).await.unwrap().mode,
+        AgentApprovalMode::Bypass
+    );
+    assert_eq!(
+        harness
+            .broker
+            .request(&turn, approval("save_memory", json!({})))
+            .await,
+        Ok(ApprovalOutcome::Approved)
+    );
+    let receipt = harness.interruptions().await.pop().unwrap();
+    assert_eq!(receipt["authorizationOrigin"], "session_bypass");
+    assert_eq!(receipt["authorizationPolicyRunId"], run.id);
+    assert_eq!(receipt["resolvedBy"], "policy");
+    assert!(receipt["toolCallId"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    turn.attended = false;
+    assert_eq!(
+        harness.broker.effective_policy(&turn).await.unwrap().mode,
+        AgentApprovalMode::Approvals
+    );
+    assert_eq!(
+        harness
+            .broker
+            .request(&turn, approval("save_memory", json!({})))
+            .await,
+        Err(ApprovalDenial::UnattendedRequiresApproval)
+    );
+    turn.session_id = "other".into();
+    assert_eq!(
+        harness.broker.effective_policy(&turn).await,
+        Err(ApprovalDenial::RunCancelled)
+    );
+}
+
+#[tokio::test]
+async fn bypass_does_not_authorize_when_receipt_cannot_be_written() {
+    let harness = Harness::new().await;
+    harness
+        .repository
+        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Bypass)
+        .await
+        .unwrap();
+    let run = harness
+        .repository
+        .create_run(&harness.session_id, "__clovy_cli_engine__:claude", None)
+        .await
+        .unwrap();
+    sqlx::query::query("CREATE TRIGGER deny_receipt BEFORE INSERT ON agent_items BEGIN SELECT RAISE(FAIL, 'receipt unavailable'); END")
+        .execute(&harness.io.pool).await.unwrap();
+    let mut turn = harness.turn();
+    turn.run_id = run.id;
+    assert!(matches!(
+        harness
+            .broker
+            .request(&turn, approval("save_memory", json!({})))
+            .await,
+        Err(ApprovalDenial::Unavailable(_))
+    ));
+    assert!(harness.interruptions().await.is_empty());
+}
+
+#[tokio::test]
+async fn bypass_still_waits_for_clarification() {
+    let harness = Harness::new().await;
+    sqlx::query::query("UPDATE agent_runs SET run_config_json = json_set(run_config_json, '$.approvalMode', 'bypass') WHERE id = ?")
+        .bind(&harness.run_id).execute(&harness.io.pool).await.unwrap();
+    let (task, id) = harness
+        .ask(ApprovalRequest {
+            tool: "request_clarification".into(),
+            call_id: None,
+            kind: ApprovalKind::Clarification {
+                question: "Which day?".into(),
+                choices: vec![],
+            },
+        })
+        .await;
+    assert_eq!(harness.item(&id).await["status"], "pending");
+    harness
+        .resolve(&id, json!({"kind":"clarification", "answer":"Tuesday"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        task.await.unwrap(),
+        Ok(ApprovalOutcome::Answered("Tuesday".into()))
+    );
+}
+
+#[tokio::test]
+async fn legacy_or_cancelled_run_never_inherits_bypass() {
+    let harness = Harness::new().await;
+    sqlx::query::query("UPDATE agent_runs SET run_config_json = NULL WHERE id = ?")
+        .bind(&harness.run_id)
+        .execute(&harness.io.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .broker
+            .effective_policy(&harness.turn())
+            .await
+            .unwrap()
+            .mode,
+        AgentApprovalMode::Approvals
+    );
+    harness
+        .repository
+        .update_run_status(&harness.run_id, "cancelled", None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.broker.effective_policy(&harness.turn()).await,
+        Err(ApprovalDenial::RunCancelled)
+    );
+}
+
+#[tokio::test]
+async fn changing_preference_does_not_settle_a_pending_request() {
+    let harness = Harness::new().await;
+    let (task, id) = harness.ask(approval("save_memory", json!({}))).await;
+    harness
+        .repository
+        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Bypass)
+        .await
+        .unwrap();
+    assert_eq!(harness.item(&id).await["status"], "pending");
+    assert!(!task.is_finished());
+    harness
+        .resolve(&id, json!({"kind":"approval", "choice":"deny"}))
+        .await
+        .unwrap();
+    assert_eq!(task.await.unwrap(), Err(ApprovalDenial::UserDenied));
+    let next = harness
+        .repository
+        .create_run(&harness.session_id, "__clovy_cli_engine__:claude", None)
+        .await
+        .unwrap();
+    let mut turn = harness.turn();
+    turn.run_id = next.id;
+    assert_eq!(
+        harness.broker.effective_policy(&turn).await.unwrap().mode,
+        AgentApprovalMode::Bypass
+    );
+}
+
 impl Harness {
     async fn new() -> Self {
         let pool = sqlx_sqlite::SqlitePoolOptions::new()
@@ -276,6 +452,9 @@ async fn pending_request_records_the_card_the_native_engine_records() {
     assert_eq!(item["status"], "resolved");
     assert_eq!(item["resolution"], "once");
     assert_eq!(item["approved"], true);
+    assert_eq!(item["authorizationOrigin"], "user_once");
+    assert_eq!(item["authorizationPolicyRunId"], harness.run_id);
+    assert_eq!(item["resolvedBy"], "desktop");
     assert_eq!(harness.run_status().await, "running");
     assert_eq!(
         harness.methods(),
@@ -300,18 +479,15 @@ async fn deny_returns_user_denied() {
 }
 
 #[tokio::test]
-async fn session_and_always_count_as_one_approval() {
+async fn session_and_always_are_rejected_without_settling() {
     for choice in ["session", "always"] {
         let harness = Harness::new().await;
         let (task, id) = harness.ask(approval("save_memory", json!({}))).await;
-        harness
+        let error = harness
             .resolve(&id, json!({ "kind": "approval", "choice": choice }))
             .await
-            .unwrap();
-        assert_eq!(task.await.unwrap(), Ok(ApprovalOutcome::Approved));
-        assert_eq!(harness.item(&id).await["resolution"], "once", "{choice}");
-        // A later request asks again: nothing was granted for the session.
-        let (task, id) = harness.ask(approval("save_memory", json!({}))).await;
+            .unwrap_err();
+        assert_eq!(error.code, "agent_interruption_resolution_invalid");
         assert_eq!(harness.item(&id).await["status"], "pending");
         harness
             .resolve(&id, json!({ "kind": "approval", "choice": "deny" }))

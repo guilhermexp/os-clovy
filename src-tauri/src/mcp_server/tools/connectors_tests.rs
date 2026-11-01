@@ -422,6 +422,53 @@ async fn notion_broker_receipt_is_bound_to_tool_turn_and_consumed_once() {
 }
 
 #[tokio::test]
+async fn notion_bypass_receipt_is_still_bound_and_consumed_once() {
+    use crate::connectors::notion::BrokerAction;
+    let broker = TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let other = broker.turn(CliKind::Claude, true).await;
+    sqlx::query::query("UPDATE agent_runs SET run_config_json = json_set(run_config_json, '$.approvalMode', 'bypass') WHERE id = ?")
+        .bind(&binding.run_id).execute(broker.pool()).await.unwrap();
+    let data = data(&broker);
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+    };
+    let args = json!({"page_id":"fake-page", "command":"update_properties", "properties":{"title":"Fixture"}});
+    let action = BrokerAction::prepare("notion-update-page", &args).unwrap();
+    let (title, description, preview) = action.presentation();
+    let id = super::connectors::approve(
+        &ctx,
+        "notion-update-page",
+        &args,
+        title,
+        description,
+        preview,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        action
+            .claim(broker.pool(), &other, &id)
+            .await
+            .unwrap_err()
+            .code,
+        "notion_action_binding_missing"
+    );
+    action.claim(broker.pool(), &binding, &id).await.unwrap();
+    assert_eq!(
+        action
+            .claim(broker.pool(), &binding, &id)
+            .await
+            .unwrap_err()
+            .code,
+        "notion_action_binding_missing"
+    );
+}
+
+#[tokio::test]
 async fn every_connector_mutation_is_denied_before_external_dispatch() {
     let names = [
         "create_draft",

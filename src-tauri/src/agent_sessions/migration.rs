@@ -656,6 +656,7 @@ pub async fn import_legacy_agent_state(
                  VALUES (?, ?, ?, ?, 'sandboxed', ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title, status = excluded.status, model = excluded.model,
+                   approval_mode = 'approvals',
                    source = excluded.source, created_at = excluded.created_at,
                    updated_at = excluded.updated_at, completed_at = excluded.completed_at,
                    last_error = excluded.last_error",

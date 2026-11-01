@@ -23,6 +23,7 @@ pub const SERVER_UNAVAILABLE: i64 = -32000;
 const RESOURCE_NOT_FOUND: i64 = -32002;
 
 const INSTRUCTIONS: &str = "Read-only access to the user's Clovy notes, dictations, and memories (from the data set open in Clovy) and, when activity capture is on, their activity timeline, day summaries, and coding-agent work on this Mac. Read clovy://context for the current date, time, and time zone before resolving words like \"today\"; clovy://guide explains which tool answers which question.";
+const BOUND_INSTRUCTIONS: &str = "Clovy tools include reads and turn-bound actions. Actions may require approval and remain subject to their own capabilities, authentication and operating-system permissions. Read clovy://context for the host-bound turn and current time; clovy://guide explains tool use.";
 
 pub fn result_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -210,13 +211,20 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
     };
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     let outcome = match method {
-        "initialize" => Ok(initialize_result(&params, INSTRUCTIONS)),
+        "initialize" => Ok(initialize_result(
+            &params,
+            if ctx.binding.is_some() {
+                BOUND_INSTRUCTIONS
+            } else {
+                INSTRUCTIONS
+            },
+        )),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx).await })),
         "tools/call" => call_tool(ctx, &params).await,
         "resources/list" => Ok(json!({ "resources": resources() })),
         "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
-        "resources/read" => read_resource(&params, ctx.data.now),
+        "resources/read" => read_resource(ctx, &params, ctx.data.now).await,
         other => Err((METHOD_NOT_FOUND, format!("Method not found: {other}"))),
     };
     Some(match outcome {
@@ -263,16 +271,49 @@ fn resources() -> Value {
     ])
 }
 
-fn read_resource(params: &Value, now: DateTime<Utc>) -> Result<Value, (i64, String)> {
+async fn read_resource(
+    ctx: &ToolCtx<'_>,
+    params: &Value,
+    now: DateTime<Utc>,
+) -> Result<Value, (i64, String)> {
     let uri = params
         .get("uri")
         .and_then(Value::as_str)
         .ok_or((INVALID_PARAMS, "`uri` is required".to_string()))?;
     let (mime_type, text) = match uri {
-        CONTEXT_URI => (
-            "application/json",
-            context_json(now.with_timezone(&Local), local_time_zone_name()).to_string(),
-        ),
+        CONTEXT_URI => {
+            let mut context = context_json(now.with_timezone(&Local), local_time_zone_name());
+            if let Some(binding) = ctx.binding {
+                use sqlx::row::Row;
+                let policy = ctx
+                    .broker()
+                    .map_err(|_| (SERVER_UNAVAILABLE, "Approval policy unavailable".into()))?
+                    .effective_policy(&crate::approval_broker::ApprovalTurn::from(binding))
+                    .await
+                    .map_err(|e| {
+                        (
+                            SERVER_UNAVAILABLE,
+                            format!("{} ({})", e.message(), e.code()),
+                        )
+                    })?;
+                let row = sqlx::query::query("SELECT COALESCE(json_extract(r.run_config_json, '$.workspace'), s.workspace_path) AS workspace_path, s.safety_mode, s.approval_mode, COALESCE(p.profile, 'default') AS profile FROM agent_sessions s JOIN agent_runs r ON r.session_id = s.id LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ? AND r.id = ?")
+                    .bind(&binding.session_id).bind(&binding.run_id).fetch_optional(&ctx.data.notes).await
+                    .map_err(|_| (SERVER_UNAVAILABLE, "Session context unavailable".into()))?
+                    .ok_or((SERVER_UNAVAILABLE, "Session context unavailable".into()))?;
+                let folders = sqlx::query::query(
+                    "SELECT folder_id FROM session_folders WHERE session_id = ? ORDER BY folder_id",
+                )
+                .bind(&binding.session_id)
+                .fetch_all(&ctx.data.notes)
+                .await
+                .map_err(|_| (SERVER_UNAVAILABLE, "Project context unavailable".into()))?
+                .into_iter()
+                .map(|r| r.get::<String, _>("folder_id"))
+                .collect::<Vec<_>>();
+                context["session"] = json!({"id": binding.session_id, "runId": binding.run_id, "engine": binding.cli.id(), "surface": binding.surface, "partition": row.get::<String, _>("profile"), "projectIds": folders, "workspace": row.get::<Option<String>, _>("workspace_path"), "executionPolicy": binding.safety_mode, "configuredExecutionPolicy": row.get::<String, _>("safety_mode"), "approvalMode": row.get::<String, _>("approval_mode"), "effectiveApprovalMode": policy.mode});
+            }
+            ("application/json", context.to_string())
+        }
         GUIDE_URI => ("text/markdown", GUIDE.to_string()),
         _ => return Err((RESOURCE_NOT_FOUND, format!("Resource not found: {uri}"))),
     };

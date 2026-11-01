@@ -40,6 +40,32 @@ pub fn external_id(run_id: &str, interruption_id: &str) -> String {
     format!("interruption:{run_id}:{interruption_id}")
 }
 
+/// Record an automatic authorization only while the stored run still carries
+/// the bypass snapshot and remains active.
+pub async fn insert_bypass_receipt(
+    pool: &SqlitePool,
+    turn: &ApprovalTurn,
+    payload: &Value,
+) -> Result<(), InsertError> {
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let run = sqlx::query::query("SELECT 1 FROM agent_runs WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user') AND json_extract(run_config_json, '$.approvalMode') = 'bypass'")
+        .bind(&turn.run_id).bind(&turn.session_id).fetch_optional(&mut *transaction).await?;
+    if run.is_none() {
+        transaction.rollback().await?;
+        return Err(InsertError::RunNotActive);
+    }
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    sqlx::query::query("INSERT INTO agent_items (id, session_id, run_id, sequence, kind, payload_json, external_id, created_at) SELECT ?, ?, ?, COALESCE(MAX(sequence), -1) + 1, 'interruption', ?, ?, ? FROM agent_items WHERE session_id = ?")
+        .bind(Uuid::new_v4().to_string()).bind(&turn.session_id).bind(&turn.run_id).bind(payload.to_string())
+        .bind(external_id(&turn.run_id, id)).bind(crate::db::repositories::timestamp()).bind(&turn.session_id)
+        .execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 /// Records a pending request and moves its run and session to
 /// `waiting_for_user`, in one transaction.
 pub async fn insert_pending(
@@ -182,11 +208,16 @@ pub async fn settle(
            AND json_extract(i.payload_json, '$.id') = ?
            AND json_extract(i.payload_json, '$.engine') = ?
            AND json_extract(i.payload_json, '$.status') = 'pending'
+           AND (? = 0 OR r.status IN ('queued', 'running', 'waiting_for_user'))
          LIMIT 1",
     )
     .bind(run_id)
     .bind(interruption_id)
     .bind(CLI_ENGINE)
+    .bind(matches!(
+        settlement,
+        Settlement::Approved | Settlement::Answered(_)
+    ))
     .fetch_optional(&mut *transaction)
     .await?;
     let Some(row) = row else {
@@ -254,13 +285,13 @@ pub async fn settle(
 fn apply_settlement(payload: &mut Value, settlement: &Settlement, now: &str) {
     payload["resolvedAt"] = json!(now);
     match settlement {
-        // `session` and `always` were answered as `once`: the broker never
-        // stores a standing grant, so the card says what actually happened.
         Settlement::Approved => {
             payload["status"] = json!("resolved");
             payload["resolution"] = json!("once");
             payload["approved"] = json!(true);
             payload["resolvedBy"] = json!("desktop");
+            payload["authorizationOrigin"] = json!("user_once");
+            payload["authorizationPolicyRunId"] = payload["runId"].clone();
         }
         Settlement::Denied => {
             payload["status"] = json!("resolved");

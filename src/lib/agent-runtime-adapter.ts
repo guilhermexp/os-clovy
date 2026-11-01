@@ -180,6 +180,7 @@ export function applyAgentRuntimeEvent(
   switch (event.method) {
     case "run.started":
       next.run = {
+        ...(next.run?.id === event.runId ? next.run : {}),
         id: event.runId,
         sessionId: event.sessionId,
         status: "running",

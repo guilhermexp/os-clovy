@@ -61,6 +61,8 @@ export const agentRuntimeBindings: AgentRuntimeBindings = {
   createSession: (input) => invoke<AgentSessionDto>("create_agent_session", { request: input }),
   renameSession: (sessionId, title) =>
     invoke<AgentSessionDto>("rename_agent_session", { request: { sessionId, title } }),
+  setApprovalMode: (sessionId, approvalMode) =>
+    invoke<AgentSessionDto>("set_agent_session_approval_mode", { sessionId, approvalMode }),
   branchSession: (sessionId, itemId) =>
     invoke<AgentSessionDto>("branch_agent_session", { sessionId, itemId }),
   deleteSession: (sessionId) => invoke<void>("delete_agent_session", { sessionId }),

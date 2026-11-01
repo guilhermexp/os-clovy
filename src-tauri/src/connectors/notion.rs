@@ -2913,6 +2913,55 @@ pub fn notion_account_email() -> &'static str {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn bypass_receipt_cannot_be_claimed_after_connection_revision_changes() {
+        use crate::approval_broker::{
+            testing::TestBroker, ApprovalKind, ApprovalRequest, ApprovalTurn,
+        };
+        use crate::llm::cli::CliKind;
+        use sqlx::row::Row;
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Claude, true).await;
+        sqlx::query::query("UPDATE agent_runs SET run_config_json = json_set(run_config_json, '$.approvalMode', 'bypass') WHERE id = ?")
+            .bind(&binding.run_id).execute(broker.pool()).await.unwrap();
+        let args = serde_json::json!({"page_id":"fixture", "command":"update_properties", "properties":{"title":"Fixture"}});
+        let mut action = BrokerAction::prepare("notion-update-page", &args).unwrap();
+        broker
+            .broker()
+            .request(
+                &ApprovalTurn::from(&binding),
+                ApprovalRequest {
+                    tool: "notion-update-page".into(),
+                    call_id: Some(uuid::Uuid::new_v4().to_string()),
+                    kind: ApprovalKind::Approval {
+                        title: "Update".into(),
+                        description: "Update".into(),
+                        arguments: args,
+                        preview: None,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let row = sqlx::query::query("SELECT json_extract(payload_json, '$.id') AS receipt FROM agent_items WHERE run_id = ? AND kind = 'interruption'")
+            .bind(&binding.run_id).fetch_one(broker.pool()).await.unwrap();
+        let receipt: String = row.get("receipt");
+        // Simulate a previously captured epoch without changing the global
+        // connection state shared with other tests.
+        action.revision = connection_revision().wrapping_add(1);
+        assert_eq!(
+            action
+                .claim(broker.pool(), &binding, &receipt)
+                .await
+                .unwrap_err()
+                .code,
+            "notion_connection_changed"
+        );
+        let row = sqlx::query::query("SELECT json_extract(payload_json, '$.executionState') AS state FROM agent_items WHERE run_id = ? AND kind = 'interruption'")
+            .bind(&binding.run_id).fetch_one(broker.pool()).await.unwrap();
+        assert_eq!(row.get::<Option<String>, _>("state"), None);
+    }
+
     #[test]
     fn auth_url_carries_hosted_mcp_oauth_params() {
         let metadata = AuthorizationServerMetadata {

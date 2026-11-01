@@ -196,6 +196,7 @@ pub fn run() {
             agent_sessions::api::get_latest_agent_run,
             agent_sessions::api::create_agent_session,
             agent_sessions::api::rename_agent_session,
+            agent_sessions::api::set_agent_session_approval_mode,
             agent_sessions::api::branch_agent_session,
             agent_sessions::api::delete_agent_session,
             agent_sessions::api::list_agent_items,

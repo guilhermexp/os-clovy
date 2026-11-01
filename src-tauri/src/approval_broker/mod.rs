@@ -27,7 +27,7 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
 
-use crate::agent_sessions::AgentSafetyMode;
+use crate::agent_sessions::{AgentApprovalMode, AgentSafetyMode};
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Map, Value};
@@ -58,6 +58,13 @@ pub struct ApprovalTurn {
     pub safety_mode: AgentSafetyMode,
     /// `false` for turns no person is watching (routines).
     pub attended: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveApprovalPolicy {
+    pub mode: AgentApprovalMode,
+    pub session_id: String,
+    pub run_id: String,
 }
 
 impl From<&crate::mcp_server::turns::TurnBinding> for ApprovalTurn {
@@ -105,7 +112,7 @@ pub enum ApprovalKind {
 /// A decision that lets the tool continue.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApprovalOutcome {
-    /// Approved once (`session` and `always` count as once).
+    /// Approved once.
     Approved,
     /// The user's answer to a clarification, exactly as given.
     Answered(String),
@@ -215,12 +222,51 @@ impl ApprovalBroker {
         }
     }
 
+    pub async fn effective_policy(
+        &self,
+        turn: &ApprovalTurn,
+    ) -> Result<EffectiveApprovalPolicy, ApprovalDenial> {
+        use sqlx::row::Row;
+        if self.inner.closing.load(Ordering::Acquire) {
+            return Err(ApprovalDenial::RunCancelled);
+        }
+        let pool = self
+            .inner
+            .io
+            .pool()
+            .await
+            .map_err(|e| ApprovalDenial::Unavailable(e.message))?;
+        let row = sqlx::query::query("SELECT status, json_extract(run_config_json, '$.approvalMode') AS approval_mode FROM agent_runs WHERE id = ? AND session_id = ?")
+            .bind(&turn.run_id).bind(&turn.session_id).fetch_optional(&pool).await
+            .map_err(|e| ApprovalDenial::Unavailable(e.to_string()))?
+            .ok_or(ApprovalDenial::RunCancelled)?;
+        let status: String = row.get("status");
+        if !matches!(status.as_str(), "queued" | "running" | "waiting_for_user") {
+            return Err(ApprovalDenial::RunCancelled);
+        }
+        let mode = if turn.attended {
+            AgentApprovalMode::from(
+                row.get::<Option<String>, _>("approval_mode")
+                    .as_deref()
+                    .unwrap_or("approvals"),
+            )
+        } else {
+            AgentApprovalMode::Approvals
+        };
+        Ok(EffectiveApprovalPolicy {
+            mode,
+            session_id: turn.session_id.clone(),
+            run_id: turn.run_id.clone(),
+        })
+    }
+
     /// Asks the user and waits for the decision (see the module docs).
     pub async fn request(
         &self,
         turn: &ApprovalTurn,
-        request: ApprovalRequest,
+        mut request: ApprovalRequest,
     ) -> Result<ApprovalOutcome, ApprovalDenial> {
+        let policy = self.effective_policy(turn).await?;
         if !turn.attended {
             tracing::info!(
                 run_id = %turn.run_id,
@@ -238,9 +284,31 @@ impl ApprovalBroker {
             .pool()
             .await
             .map_err(|error| ApprovalDenial::Unavailable(error.message))?;
+        if request.call_id.is_none() {
+            request.call_id = Some(Uuid::new_v4().to_string());
+        }
         let interruption_id = Uuid::new_v4().to_string();
-        let interruption = interruption_payload(turn, &request, &interruption_id);
+        let mut interruption = interruption_payload(turn, &request, &interruption_id);
         let clarification = matches!(request.kind, ApprovalKind::Clarification { .. });
+        if policy.mode == AgentApprovalMode::Bypass && !clarification {
+            interruption["title"] = json!("Authorized by conversation policy");
+            interruption["description"] =
+                json!("This action was authorized by the run's bypass policy.");
+            interruption["status"] = json!("resolved");
+            interruption["resolution"] = json!("once");
+            interruption["approved"] = json!(true);
+            interruption["resolvedBy"] = json!("policy");
+            interruption["authorizationOrigin"] = json!("session_bypass");
+            interruption["authorizationPolicyRunId"] = json!(turn.run_id);
+            interruption["resolvedAt"] = json!(crate::db::repositories::timestamp());
+            store::insert_bypass_receipt(&pool, turn, &interruption)
+                .await
+                .map_err(|e| match e {
+                    store::InsertError::RunNotActive => ApprovalDenial::RunCancelled,
+                    store::InsertError::Database(e) => ApprovalDenial::Unavailable(e.to_string()),
+                })?;
+            return Ok(ApprovalOutcome::Approved);
+        }
 
         // The waiter exists before the card does, so a decision can never
         // arrive for a request nobody is waiting on.
