@@ -3063,6 +3063,7 @@ async fn join_target_to_clovy_stage(
     set_clovy_stage_companion(app, true).await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
     ensure_task_generation_current(state, task_generation)?;
+    let action_id = random_id();
     let stage_join_result = driver_call(
         app,
         state,
@@ -3070,37 +3071,42 @@ async fn join_target_to_clovy_stage(
         json!({ "pid": target.pid, "window_id": target.window_id }),
         Some(epoch),
     )
-    .await?;
-    // The driver activates the target while Clovy's main window is an AppKit
-    // Stage Manager companion. WindowManager can therefore show both apps in
-    // the active set without a cursor-moving shelf click. Keep the wait bounded
-    // while WindowServer finishes the transition and verify the exact window.
-    let native_verified = native_stage_join_verified(&stage_join_result);
-    let mut last_seen = target.clone();
-    for _ in 0..if native_verified { 2 } else { 4 } {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        ensure_task_generation_current(state, task_generation)?;
-        let restored = refresh_window_target(app, state, target, epoch).await?;
-        if !window_needs_restore(&restored) {
-            return Ok(restored);
+    .await
+    .map_err(|error| action_delivery_unknown(error, &action_id))?;
+    async {
+        // The driver activates the target while Clovy's main window is an AppKit
+        // Stage Manager companion. WindowManager can therefore show both apps in
+        // the active set without a cursor-moving shelf click. Keep the wait bounded
+        // while WindowServer finishes the transition and verify the exact window.
+        let native_verified = native_stage_join_verified(&stage_join_result);
+        let mut last_seen = target.clone();
+        for _ in 0..if native_verified { 2 } else { 4 } {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            ensure_task_generation_current(state, task_generation)?;
+            let restored = refresh_window_target(app, state, target, epoch).await?;
+            if !window_needs_restore(&restored) {
+                return Ok(restored);
+            }
+            last_seen = restored;
         }
-        last_seen = restored;
+        // Screen-sharing privacy overlays can make WindowServer keep reporting the
+        // exact window as off-screen after AppKit accepted application activation.
+        // Treat that activation as authoritative; if it is unavailable, require
+        // both exact-window SkyLight focus and Accessibility raise. Combined with
+        // Clovy's companion collection behavior, either proof avoids turning a
+        // successful stage change into a slow false failure.
+        if native_verified {
+            last_seen.is_on_screen = true;
+            last_seen.on_current_space = Some(true);
+            return Ok(last_seen);
+        }
+        Err(AppError::new(
+            "computer_use_window_restore_failed",
+            "Clovy could not add that app window to the current Stage Manager group. Do not retry this window during the current task.",
+        ))
     }
-    // Screen-sharing privacy overlays can make WindowServer keep reporting the
-    // exact window as off-screen after AppKit accepted application activation.
-    // Treat that activation as authoritative; if it is unavailable, require
-    // both exact-window SkyLight focus and Accessibility raise. Combined with
-    // Clovy's companion collection behavior, either proof avoids turning a
-    // successful stage change into a slow false failure.
-    if native_verified {
-        last_seen.is_on_screen = true;
-        last_seen.on_current_space = Some(true);
-        return Ok(last_seen);
-    }
-    Err(AppError::new(
-        "computer_use_window_restore_failed",
-        "Clovy could not add that app window to the current Stage Manager group. Do not retry this window during the current task.",
-    ))
+    .await
+    .map_err(|error| action_delivered_unverified(error, &action_id))
 }
 
 #[cfg(target_os = "macos")]
@@ -3495,12 +3501,19 @@ async fn ensure_app_authorized(
     Ok(true)
 }
 
-fn store_target_selection(state: &ComputerUseState, target: &WindowTarget) -> Result<(), AppError> {
+fn store_target_selection(
+    state: &ComputerUseState,
+    target: &WindowTarget,
+    epoch: u64,
+    task_generation: u64,
+) -> Result<(), AppError> {
     let previous_capture = {
         let mut current = state
             .target
             .lock()
             .map_err(|_| AppError::new("computer_use_unavailable", "Target lock failed."))?;
+        ensure_epoch_current(state, Some(epoch))?;
+        ensure_task_generation_current(state, task_generation)?;
         current
             .replace(TargetContext {
                 pid: target.pid,
@@ -3557,6 +3570,7 @@ async fn open_app(
         true
     };
     ensure_task_generation_current(state, task_generation)?;
+    let action_id = random_id();
     let result = driver_call(
         app,
         state,
@@ -3564,117 +3578,124 @@ async fn open_app(
         json!({ "name": requested_name }),
         Some(epoch),
     )
-    .await?;
-    let launched = structured(&result).ok_or_else(|| {
-        AppError::new(
-            "computer_use_driver_invalid_response",
-            "The Computer use driver did not identify the opened app.",
-        )
-    })?;
-    let pid = launched.get("pid").and_then(Value::as_i64).ok_or_else(|| {
-        AppError::new(
-            "computer_use_driver_invalid_response",
-            "The Computer use driver did not identify the opened app process.",
-        )
-    })?;
-    let identity = app_identity(pid).ok_or_else(|| {
-        AppError::new(
-            "computer_use_target_unverified",
-            "Clovy could not verify the opened app identity.",
-        )
-    })?;
-    let reported_name = launched
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.trim().is_empty() && *name != "?")
-        .unwrap_or(&requested_name);
-    if blocked_target(reported_name, &identity) {
-        return Err(AppError::new(
-            "computer_use_target_blocked",
-            format!("Clovy cannot operate {reported_name} with Computer use."),
-        ));
-    }
-    ensure_task_generation_current(state, task_generation)?;
-    let identity_key = identity_app_authorization(&identity);
-    if !app_is_authorized(state, &identity_key)? {
-        if authorized_by_name || requested_name_authorized {
-            remember_app_authorization(state, identity_key.clone())?;
-        } else {
-            // A previously approved running app was expected, but LaunchServices
-            // resolved the display name to a different identity. Do not let the
-            // display-name alias widen the user's approval to that other app.
-            ensure_app_authorized(
-                app,
-                state,
-                identity_key.clone(),
-                reported_name,
-                epoch,
-                task_generation,
+    .await
+    .map_err(|error| action_delivery_unknown(error, &action_id))?;
+    async {
+        let launched = structured(&result).ok_or_else(|| {
+            AppError::new(
+                "computer_use_driver_invalid_response",
+                "The Computer use driver did not identify the opened app.",
             )
-            .await?;
+        })?;
+        let pid = launched.get("pid").and_then(Value::as_i64).ok_or_else(|| {
+            AppError::new(
+                "computer_use_driver_invalid_response",
+                "The Computer use driver did not identify the opened app process.",
+            )
+        })?;
+        let identity = app_identity(pid).ok_or_else(|| {
+            AppError::new(
+                "computer_use_target_unverified",
+                "Clovy could not verify the opened app identity.",
+            )
+        })?;
+        let reported_name = launched
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty() && *name != "?")
+            .unwrap_or(&requested_name);
+        if blocked_target(reported_name, &identity) {
+            return Err(AppError::new(
+                "computer_use_target_blocked",
+                format!("Clovy cannot operate {reported_name} with Computer use."),
+            ));
         }
-    }
-    if let Err(error) = ensure_task_generation_current(state, task_generation) {
-        if let Ok(mut authorized_apps) = state.authorized_apps.lock() {
-            authorized_apps.remove(&identity_key);
+        ensure_task_generation_current(state, task_generation)?;
+        let identity_key = identity_app_authorization(&identity);
+        if !app_is_authorized(state, &identity_key)? {
+            if authorized_by_name || requested_name_authorized {
+                remember_app_authorization(state, identity_key.clone())?;
+            } else {
+                // A previously approved running app was expected, but LaunchServices
+                // resolved the display name to a different identity. Do not let the
+                // display-name alias widen the user's approval to that other app.
+                ensure_app_authorized(
+                    app,
+                    state,
+                    identity_key.clone(),
+                    reported_name,
+                    epoch,
+                    task_generation,
+                )
+                .await?;
+            }
         }
-        return Err(error);
-    }
+        if let Err(error) = ensure_task_generation_current(state, task_generation) {
+            if let Ok(mut authorized_apps) = state.authorized_apps.lock() {
+                authorized_apps.remove(&identity_key);
+            }
+            return Err(error);
+        }
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let matching: Vec<_> = windows(app, state, Some(epoch))
-        .await?
-        .into_iter()
-        .filter(|window| window.pid == pid && window.identity == identity)
-        .collect();
-    let selected = matching
-        .iter()
-        .find(|window| !window_needs_restore(window))
-        .or_else(|| matching.first())
-        .cloned();
-    let selected = match selected {
-        Some(target) if window_needs_restore(&target) => {
-            Some(join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?)
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let matching: Vec<_> = windows(app, state, Some(epoch))
+            .await?
+            .into_iter()
+            .filter(|window| window.pid == pid && window.identity == identity)
+            .collect();
+        let selected = matching
+            .iter()
+            .find(|window| !window_needs_restore(window))
+            .or_else(|| matching.first())
+            .cloned();
+        let selected = match selected {
+            Some(target) if window_needs_restore(&target) => {
+                Some(join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?)
+            }
+            selected => selected,
+        };
+        if let Some(target) = selected.as_ref() {
+            store_target_selection(state, target, epoch, task_generation)?;
         }
-        selected => selected,
-    };
-    if let Some(target) = selected.as_ref() {
-        store_target_selection(state, target)?;
-    }
-    let available_windows: Vec<_> = matching
-        .iter()
-        .map(|window| {
-            let window = selected
-                .as_ref()
-                .filter(|selected| selected.window_id == window.window_id)
-                .unwrap_or(window);
-            json!({
-                "window_id": window.window_id,
-                "title": sanitize_line(&window.title),
-                "bounds": {
-                    "x": window.x,
-                    "y": window.y,
-                    "width": window.width,
-                    "height": window.height,
-                },
-                "is_on_screen": window.is_on_screen,
-                "needs_restore": window_needs_restore(window),
+        let available_windows: Vec<_> = matching
+            .iter()
+            .map(|window| {
+                let window = selected
+                    .as_ref()
+                    .filter(|selected| selected.window_id == window.window_id)
+                    .unwrap_or(window);
+                json!({
+                    "window_id": window.window_id,
+                    "title": sanitize_line(&window.title),
+                    "bounds": {
+                        "x": window.x,
+                        "y": window.y,
+                        "width": window.width,
+                        "height": window.height,
+                    },
+                    "is_on_screen": window.is_on_screen,
+                    "needs_restore": window_needs_restore(window),
+                })
             })
-        })
-        .collect();
-    Ok(mcp_text(json!({
-        "ok": true,
-        "action": "open_app",
-        "target_app": selected.as_ref().map(|window| window.app_name.as_str()).unwrap_or(reported_name),
-        "pid": pid,
-        "window_id": selected.as_ref().map(|window| window.window_id),
-        "windows": available_windows,
-        "message": if selected.is_some() {
-            "The app is ready in Clovy's current Stage Manager group. Capture the returned window before acting."
-        } else {
-            "The app opened, but no operable window appeared yet. Wait, then call list_apps."
-        },
-    })))
+            .collect();
+        Ok(mcp_text(json!({
+            "ok": true,
+            "action": "open_app",
+            "action_id": action_id,
+            "disposition": { "delivery": "delivered_unverified", "retry": "unsafe" },
+            "target_app": selected.as_ref().map(|window| window.app_name.as_str()).unwrap_or(reported_name),
+            "pid": pid,
+            "window_id": selected.as_ref().map(|window| window.window_id),
+            "windows": available_windows,
+            "message": if selected.is_some() {
+                "The app is ready in Clovy's current Stage Manager group. Capture the returned window before acting."
+            } else {
+                "The app opened, but no operable window appeared yet. Wait, then call list_apps."
+            },
+        })))
+    }
+    .await
+    .map_err(|error| action_delivered_unverified(error, &action_id))
 }
 
 async fn focus_app(
@@ -3715,15 +3736,25 @@ async fn focus_app(
         target = refresh_window_target(app, state, &target, epoch).await?;
     }
     let joined_current_stage = raise_window || window_needs_restore(&target);
+    let action_id = random_id();
     if joined_current_stage {
         target = join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?;
     }
-    ensure_epoch_current(state, Some(epoch))?;
-    ensure_task_generation_current(state, task_generation)?;
-    store_target_selection(state, &target)?;
+    let selection = (|| {
+        ensure_epoch_current(state, Some(epoch))?;
+        ensure_task_generation_current(state, task_generation)?;
+        store_target_selection(state, &target, epoch, task_generation)
+    })();
+    if joined_current_stage {
+        selection.map_err(|error| action_delivered_unverified(error, &action_id))?;
+    } else {
+        selection?;
+    }
     Ok(mcp_text(json!({
         "ok": true,
         "action": "focus_app",
+        "action_id": action_id,
+        "disposition": if joined_current_stage { Some(json!({ "delivery": "delivered_unverified", "retry": "unsafe" })) } else { None },
         "target_app": target.app_name,
         "window_id": target.window_id,
         "raised": joined_current_stage,
@@ -3814,6 +3845,23 @@ fn action_delivery_unknown(mut error: AppError, action_id: &str) -> AppError {
     if details.get("disposition").is_none() {
         details["disposition"] = json!({ "delivery": "unknown", "retry": "unknown" });
     }
+    details["actionId"] = json!(action_id);
+    error.details = Some(details);
+    error
+}
+
+fn action_delivered_unverified(mut error: AppError, action_id: &str) -> AppError {
+    let mut details = error.details.take().unwrap_or_else(|| json!({}));
+    if !details.is_object() {
+        details = json!({ "cause": details });
+    }
+    if let Some(prior) = details.get("disposition").cloned() {
+        details["subsequentDisposition"] = prior;
+    }
+    if let Some(prior) = details.get("actionId").cloned() {
+        details["subsequentActionId"] = prior;
+    }
+    details["disposition"] = json!({ "delivery": "delivered_unverified", "retry": "unsafe" });
     details["actionId"] = json!(action_id);
     error.details = Some(details);
     error
@@ -5055,6 +5103,17 @@ mod tests {
     }
 
     #[test]
+    fn failure_after_a_successful_action_keeps_both_delivery_dispositions() {
+        let subsequent = action_delivery_unknown(AppError::new("timeout", "Timed out."), "stage");
+        let error = action_delivered_unverified(subsequent, "launch");
+        let details = error.details.unwrap();
+        assert_eq!(details["disposition"]["retry"], "unsafe");
+        assert_eq!(details["subsequentDisposition"]["delivery"], "unknown");
+        assert_eq!(details["subsequentActionId"], "stage");
+        assert_eq!(details["actionId"], "launch");
+    }
+
+    #[test]
     fn interleaved_turns_cannot_inherit_the_other_turns_target_or_authorization() {
         let state = ComputerUseState::default();
         begin_run_lease(&state, turn_lease_key("a")).unwrap();
@@ -5094,6 +5153,33 @@ mod tests {
         assert!(select_turn_owner(&state, "b").is_err());
         select_turn_owner(&state, "a").unwrap();
         assert!(ensure_attended_run(&state).is_ok());
+    }
+
+    #[test]
+    fn a_stopped_action_cannot_publish_a_new_target() {
+        let state = ComputerUseState::default();
+        let epoch = state.current_epoch();
+        let generation = state.attended_generation.load(Ordering::SeqCst);
+        let target = WindowTarget {
+            pid: 1,
+            window_id: 2,
+            app_name: "Fixture".into(),
+            identity: AppIdentity {
+                bundle_id: "org.example.fixture".into(),
+                executable_path: PathBuf::from("/fixture"),
+            },
+            title: "Fixture".into(),
+            z_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            is_on_screen: true,
+            on_current_space: Some(true),
+        };
+        state.epoch.fetch_add(1, Ordering::SeqCst);
+        assert!(store_target_selection(&state, &target, epoch, generation).is_err());
+        assert!(state.target.lock().unwrap().is_none());
     }
 
     #[test]
