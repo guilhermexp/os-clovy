@@ -162,6 +162,15 @@ pub enum NoteProcessingStage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct DiscardedTranscriptSpanDto {
+    pub session_id: String,
+    pub source: RecordingSource,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NoteProcessingProgressDto {
     pub note_id: String,
     pub recording_session_id: String,
@@ -169,6 +178,8 @@ pub struct NoteProcessingProgressDto {
     pub processing_status: ProcessingStatus,
     /// The note row's `updated_at` value after this transition.
     pub revision: String,
+    #[serde(default)]
+    pub discarded_spans: Vec<DiscardedTranscriptSpanDto>,
 }
 
 /// The note-row fields returned by the single-statement `update_note` path.

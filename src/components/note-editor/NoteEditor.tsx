@@ -34,7 +34,7 @@ import { HoverTip } from "../ui/HoverTip";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { RecorderBar } from "../recorder/RecorderBar";
 import { NoteRecoveryPrompt } from "../recorder/NoteRecoveryPrompt";
-import { isMacLikePlatform } from "../../lib/platform";
+import { isMacLikePlatform, isWindowsPlatform } from "../../lib/platform";
 import { useDismiss } from "../../lib/use-dismiss";
 import { systemAudioAvailability } from "../../lib/source-readiness";
 import {
@@ -344,7 +344,7 @@ export function NoteEditor({
   // Denied and granted-but-uncapturable both mean the switch must not be
   // offered; only the recovery copy differs.
   const systemLocked = systemAvailability === "denied" || systemAvailability === "unavailable";
-  const showRecordingOptions = isMacLikePlatform();
+  const showRecordingOptions = isMacLikePlatform() || (isWindowsPlatform() && !systemUnsupported);
   // Mic denial is sourced from App, which combines the dictation helper's
   // grant with the Rust readiness probe of the main app's own TCC grant —
   // recording uses the latter, so either denial blocks the record button.
@@ -782,7 +782,7 @@ export function NoteEditor({
                         <span id="record-options-system" className="record-options-label">
                           {t("notes.editor.captureSystemAudio")}
                         </span>
-                        {systemAvailability === "denied" ? (
+                        {systemAvailability === "denied" && isMacLikePlatform() ? (
                           <button
                             type="button"
                             className="btn btn-ghost record-options-enable"

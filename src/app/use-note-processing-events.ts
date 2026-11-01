@@ -1,9 +1,12 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { reconcileLiveTranscriptEvents } from "../lib/live-transcript-preview";
 import { messageFromError } from "../lib/errors";
 import {
   getNote,
   NOTE_PROCESSING_PROGRESS_EVENT,
+  type DiscardedTranscriptSpanDto,
+  type TranscriptDto,
   type NoteListItemDto,
   type NoteProcessingProgressDto,
   type ProcessingStatus,
@@ -30,7 +33,19 @@ function activeProcessingNotes(notes: NoteListItemDto[]) {
 }
 
 export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDependencies) {
-  const { dispatch, noteSaveController, notes, setError } = dependencies;
+  const {
+    dispatch,
+    noteSaveController,
+    notes,
+    selectedNote,
+    liveTranscriptEvents,
+    setError,
+    setLiveTranscriptEvents,
+  } = dependencies;
+  const discardedByNoteRef = useRef(new Map<string, DiscardedTranscriptSpanDto[]>());
+  const [discardRevision, setDiscardRevision] = useState(0);
+  const selectedNoteRef = useRef(selectedNote);
+  selectedNoteRef.current = selectedNote;
   const activeNotesRef = useRef(new Map<string, NoteListItemDto>());
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
   const pendingTerminalHydrationsRef = useRef(new Map<string, NoteProcessingProgressDto>());
@@ -60,6 +75,43 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
       terminalHydrationRetryRef.current.clear();
     };
   }, []);
+
+  const reconcilePreview = useCallback(
+    (noteId: string, persisted: TranscriptDto[]) => {
+      const discarded = discardedByNoteRef.current.get(noteId) ?? [];
+      setLiveTranscriptEvents((current) => {
+        const relevant = current.filter((event) => event.noteId === noteId);
+        const retained = reconcileLiveTranscriptEvents(relevant, persisted, discarded);
+        if (retained === relevant) return current;
+        const kept = new Set(retained);
+        return current.filter((event) => event.noteId !== noteId || kept.has(event));
+      });
+    },
+    [setLiveTranscriptEvents],
+  );
+
+  useEffect(() => {
+    // A terminal event can add spans without changing the preview array.
+    void discardRevision;
+    for (const [noteId, spans] of discardedByNoteRef.current) {
+      const retained = spans.filter((span) =>
+        liveTranscriptEvents.some(
+          (event) =>
+            event.noteId === noteId &&
+            event.sessionId === span.sessionId &&
+            event.source === span.source &&
+            event.startMs < span.endMs &&
+            span.startMs < event.endMs,
+        ),
+      );
+      if (retained.length) discardedByNoteRef.current.set(noteId, retained);
+      else discardedByNoteRef.current.delete(noteId);
+    }
+  }, [liveTranscriptEvents, discardRevision]);
+
+  useEffect(() => {
+    if (selectedNote) reconcilePreview(selectedNote.id, selectedNote.sourceTranscripts ?? []);
+  }, [selectedNote, reconcilePreview]);
 
   const clearTerminalHydration = useCallback((progress: NoteProcessingProgressDto) => {
     const pending = pendingTerminalHydrationsRef.current.get(progress.noteId);
@@ -114,6 +166,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
             shouldRetry = true;
             return;
           }
+          reconcilePreview(note.id, note.sourceTranscripts ?? []);
           dispatch({ type: "noteUpdated", note });
           clearTerminalHydration(progress);
         } catch (error) {
@@ -146,6 +199,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
       noteSaveController,
       scheduleTerminalHydrationRetry,
       setError,
+      reconcilePreview,
     ],
   );
   refreshCompletedNoteRef.current = refreshCompletedNote;
@@ -167,6 +221,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
           // not restore progressive full-note hydration while processing.
           if (isActiveProcessingStatus(note.processingStatus)) return;
           if (note.updatedAt < activeSnapshot.updatedAt) return;
+          reconcilePreview(note.id, note.sourceTranscripts ?? []);
           dispatch({ type: "noteUpdated", note });
         } catch (error) {
           if (!disposedRef.current) setError(messageFromError(error));
@@ -181,7 +236,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
       });
       return reconciliation;
     },
-    [dispatch, noteSaveController, setError],
+    [dispatch, noteSaveController, setError, reconcilePreview],
   );
 
   const reconcileActiveNotes = useCallback(() => {
@@ -208,6 +263,25 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
         processingStatus: progress.processingStatus,
       });
       if (progress.stage === "done") {
+        const discarded = (progress.discardedSpans ?? []).filter(
+          (span) => span.sessionId === progress.recordingSessionId,
+        );
+        if (discarded.length) {
+          const previous = discardedByNoteRef.current.get(progress.noteId) ?? [];
+          const unique = new Map(
+            [...previous, ...discarded].map((span) => [
+              JSON.stringify([span.sessionId, span.source, span.startMs, span.endMs]),
+              span,
+            ]),
+          );
+          discardedByNoteRef.current.set(progress.noteId, [...unique.values()]);
+          setDiscardRevision((revision) => revision + 1);
+          const note = selectedNoteRef.current;
+          reconcilePreview(
+            progress.noteId,
+            note?.id === progress.noteId ? (note.sourceTranscripts ?? []) : [],
+          );
+        }
         pendingTerminalHydrationsRef.current.set(progress.noteId, progress);
         void refreshCompletedNote(progress);
       } else {
@@ -223,7 +297,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
       disposed = true;
       unlisten?.();
     };
-  }, [clearTerminalHydration, dispatch, refreshCompletedNote]);
+  }, [clearTerminalHydration, dispatch, refreshCompletedNote, reconcilePreview]);
 
   useEffect(() => {
     const reconcileProcessing = () => {

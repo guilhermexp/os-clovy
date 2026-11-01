@@ -131,6 +131,23 @@ events and hydrates the full Note once on `done`; it drains any debounced
 editor save for that Note before the hydration. `get_note` remains available
 for navigation and compatibility, but is no longer polled during processing.
 
+The terminal progress event also carries explicit microphone echo-discard spans
+from this processing run, identified by recording session, Source and time.
+The renderer removes a preview only when those spans cover its entire interval;
+a partial interval or failed transcription without a discard remains visible.
+These decisions describe detection, not an inference from missing final text.
+Preview events and the terminal discard payload are ephemeral; saved WAVs and
+transcription jobs remain the retry source of truth. Discard spans remain scoped
+to the note and recording while a corresponding preview exists, including when
+a later recording supersedes the first terminal hydration.
+
+On Windows, loopback capture pads the active idle tail before pausing and starts
+another active interval on resume. Stopping while paused adds no paused wall
+time. Its pause state and timestamp are read as one synchronized snapshot
+before the WASAPI call, so a concurrent resume cannot change the interval being
+closed. The loopback still chooses the default render Console endpoint at startup;
+selection and device changes require separate native investigation.
+
 ## Key files
 
 - `src-tauri/src/audio/capture.rs` — mic capture lifecycle and the single

@@ -12,9 +12,10 @@ use crate::{
     },
     db::repositories::{NoteTranscriptionChunk, Repositories},
     domain::types::{
-        AppError, DictionaryEntryDto, NoteDto, NoteProcessingProgressDto, NoteProcessingStage,
-        NoteTranscriptionJobKind, NoteTranscriptionJobPlan, NoteTranscriptionJobRecord,
-        NoteTranscriptionJobStatus, ProcessingStatus, RecordingSourceMode, TranscriptDto,
+        AppError, DictionaryEntryDto, DiscardedTranscriptSpanDto, NoteDto,
+        NoteProcessingProgressDto, NoteProcessingStage, NoteTranscriptionJobKind,
+        NoteTranscriptionJobPlan, NoteTranscriptionJobRecord, NoteTranscriptionJobStatus,
+        ProcessingStatus, RecordingSource, RecordingSourceMode, TranscriptDto,
     },
     providers::{
         groq::{
@@ -32,7 +33,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -92,12 +93,21 @@ type NoteProcessingProgressSink = Arc<dyn Fn(NoteProcessingProgressDto) + Send +
 #[derive(Clone, Default)]
 pub(crate) struct NoteProcessingProgressReporter {
     sink: Option<NoteProcessingProgressSink>,
+    discarded_spans: Arc<Mutex<Vec<DiscardedTranscriptSpanDto>>>,
 }
 
 impl NoteProcessingProgressReporter {
     pub(crate) fn new(sink: impl Fn(NoteProcessingProgressDto) + Send + Sync + 'static) -> Self {
         Self {
             sink: Some(Arc::new(sink)),
+            discarded_spans: Arc::default(),
+        }
+    }
+
+    fn scoped(&self) -> Self {
+        Self {
+            sink: self.sink.clone(),
+            discarded_spans: Arc::default(),
         }
     }
 
@@ -118,6 +128,14 @@ impl NoteProcessingProgressReporter {
             stage,
             processing_status,
             revision,
+            discarded_spans: if stage == NoteProcessingStage::Done {
+                self.discarded_spans
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            } else {
+                Vec::new()
+            },
         });
     }
 }
@@ -1158,6 +1176,7 @@ pub(crate) async fn process_saved_source_audio_with_progress(
     timing: ProcessingTiming,
     progress: NoteProcessingProgressReporter,
 ) -> Result<NoteDto, AppError> {
+    let progress = progress.scoped();
     let result = process_saved_source_audio_pipeline(
         repos,
         note_id,
@@ -1307,6 +1326,19 @@ async fn process_saved_source_audio_pipeline(
                 tracing::warn!(%session_id, %error, "failed to persist echo_rejection checkpoint");
             }
         }
+        *progress
+            .discarded_spans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = echo_rejection
+            .discarded_microphone_spans
+            .iter()
+            .map(|&(start_ms, end_ms)| DiscardedTranscriptSpanDto {
+                session_id: session_id.to_string(),
+                source: RecordingSource::Microphone,
+                start_ms,
+                end_ms,
+            })
+            .collect();
         let turns = add_full_source_turns_for_missing_sources(&sources, turns, &echo_rejection);
         let done_span_ids = repos
             .certified_source_turn_transcripts_for_session(session_id)
