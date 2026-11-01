@@ -601,6 +601,12 @@ impl DriverClient {
                 "The Computer use driver returned no result.",
             )
         })?;
+        if !result.is_object() {
+            return Err(AppError::new(
+                "computer_use_driver_invalid_response",
+                "The Computer use driver returned an invalid result.",
+            ));
+        }
         if result
             .get("isError")
             .or_else(|| result.get("is_error"))
@@ -3886,6 +3892,9 @@ fn combine_action_and_capture(mut action: Value, capture: Result<Value, AppError
                 "capture_after_error": { "code": error.code, "message": error.message },
                 "message": "The action returned a result, but the follow-up capture failed. Do not repeat the action; inspect the target first."
             });
+            if !action.get("content").is_some_and(Value::is_array) {
+                action["content"] = json!([]);
+            }
             if let Some(parts) = action.get_mut("content").and_then(Value::as_array_mut) {
                 parts.push(json!({ "type": "text", "text": warning.to_string() }));
             }
@@ -5195,6 +5204,13 @@ mod tests {
             "capture_failed"
         );
         assert!(failed["content"].to_string().contains("Do not repeat"));
+        let missing_content = combine_action_and_capture(
+            json!({ "structuredContent": { "action_id": "two" } }),
+            Err(AppError::new("capture_failed", "Capture failed.")),
+        );
+        assert!(missing_content["content"]
+            .to_string()
+            .contains("Do not repeat"));
 
         let observed =
             combine_action_and_capture(action.clone(), Ok(mcp_text(json!({ "tree": "button" }))));
