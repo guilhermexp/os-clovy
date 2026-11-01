@@ -3,6 +3,31 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentApprovalMode {
+    Approvals,
+    Bypass,
+}
+
+impl AgentApprovalMode {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Approvals => "approvals",
+            Self::Bypass => "bypass",
+        }
+    }
+}
+
+impl From<&str> for AgentApprovalMode {
+    fn from(value: &str) -> Self {
+        match value {
+            "bypass" => Self::Bypass,
+            _ => Self::Approvals,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentSafetyMode {
     Sandboxed,
     Unrestricted,
@@ -34,6 +59,7 @@ pub struct AgentSessionDto {
     pub status: String,
     pub model: String,
     pub safety_mode: AgentSafetyMode,
+    pub approval_mode: AgentApprovalMode,
     pub workspace_path: Option<String>,
     pub source: String,
     pub created_at: String,
@@ -49,6 +75,7 @@ pub struct AgentRunDto {
     pub session_id: String,
     pub status: String,
     pub model: String,
+    pub approval_mode: AgentApprovalMode,
     pub reasoning_effort: Option<String>,
     pub started_at: String,
     pub updated_at: String,

@@ -913,6 +913,12 @@ async fn start_cli_claim(
     run_id: &str,
     workspace: &std::path::Path,
 ) -> Result<(), AppError> {
+    repository
+        .set_run_config(
+            run_id,
+            &serde_json::json!({"workspace": workspace.to_string_lossy(), "surface": "routine"}),
+        )
+        .await?;
     let engines = app.state::<crate::chat_engine::ChatEngineHost>();
     let ticket = engines.register(run_id)?;
     let started = crate::chat_engine::start_cli_turn(
@@ -928,6 +934,7 @@ async fn start_cli_claim(
             images: Vec::new(),
             safety_mode: claim.safety_mode,
             attended: false,
+            surface: "routine".into(),
             routine_tools: Some(
                 crate::chat_engine::policy::RoutineBuiltinTools::from_toolsets(
                     &claim.enabled_toolsets,

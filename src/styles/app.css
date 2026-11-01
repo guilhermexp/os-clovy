@@ -5431,6 +5431,24 @@ button.agent-user-attachment:hover {
   pointer-events: none;
 }
 
+.agent-approval-control {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  max-width: min(var(--chat-max), var(--content-max));
+  padding: var(--sp-2);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  background: var(--card);
+  pointer-events: auto;
+}
+
+.agent-approval-control select {
+  font: inherit;
+  color: inherit;
+}
+
 /* Docked-chat bottom dissolve. It cannot live as .agent-scroll::after
  * (generated flex content participates in the scroll column and can show up
  * as a clipped patch at the content edge), so it hangs off the fixed composer

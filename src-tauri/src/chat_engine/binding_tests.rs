@@ -492,11 +492,24 @@ async fn tool_call_through_the_turn_binding(answer: Answer) {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let item =
-        crate::approval_broker::store::find_cli_interruption(rig.pool(), &run_id, &interruption_id)
+    let item = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let item = crate::approval_broker::store::find_cli_interruption(
+                rig.pool(),
+                &run_id,
+                &interruption_id,
+            )
             .await
             .unwrap()
             .expect("the card was recorded");
+            if !matches!(answer, Answer::Cancel) || item.payload["status"] != "pending" {
+                break item;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the card settles");
     match answer {
         Answer::Approve | Answer::ApproveNearDeadline => {
             assert_eq!(result["result"]["isError"], false, "{text}");
@@ -649,24 +662,34 @@ async fn chat_engine_write_group_runs_against_a_scripted_broker() {
     assert_eq!(outcome.unwrap_err().code, "run_cancelled");
 }
 
-/// A revoked turn still answers the calls it was serving before it closes:
-/// the CLI reads that answer, not a dropped connection.
+/// Revocation cancels a handler before it can continue, while the CLI still
+/// receives a cancellation result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_engine_revoked_turn_answers_its_pending_call_before_closing() {
     let turns = TurnRegistry::default();
     let dir = tempfile::tempdir().unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
     let entered = Arc::new(tokio::sync::Notify::new());
+    let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handler: channel::TurnHandler = {
-        let (release, entered) = (Arc::clone(&release), Arc::clone(&entered));
+        let (release, entered, effects) = (
+            Arc::clone(&release),
+            Arc::clone(&entered),
+            Arc::clone(&effects),
+        );
         Arc::new(move |message: Value, _binding: Option<Arc<TurnBinding>>| {
-            let (release, entered) = (Arc::clone(&release), Arc::clone(&entered));
+            let (release, entered, effects) = (
+                Arc::clone(&release),
+                Arc::clone(&entered),
+                Arc::clone(&effects),
+            );
             Box::pin(async move {
                 if message["method"] != "tools/call" {
                     return Some(json!({ "jsonrpc": "2.0", "id": message["id"], "result": {} }));
                 }
                 entered.notify_one();
                 release.notified().await;
+                effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Some(json!({
                     "jsonrpc": "2.0",
                     "id": message["id"],
@@ -708,12 +731,13 @@ async fn chat_engine_revoked_turn_answers_its_pending_call_before_closing() {
         .expect("the call reached the app");
     // The run is cancelled: the token goes first, the answer right after.
     assert_eq!(turns.revoke_run("run-1"), 1);
-    release.notify_one();
     let answered = output.clone();
     wait_for("the call's answer", move || {
         answered.messages().iter().any(|message| message["id"] == 2)
     })
     .await;
+    release.notify_one();
+    assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 0);
     let _ = gate.send(());
     relay.await.unwrap();
     let answer = output

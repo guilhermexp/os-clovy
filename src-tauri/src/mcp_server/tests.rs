@@ -458,6 +458,35 @@ async fn resources_give_the_current_context_and_the_guide() {
         .is_some_and(|zone| !zone.is_empty()));
 }
 
+#[tokio::test]
+async fn context_uses_bound_session_and_hides_it_from_external_clients() {
+    use super::tools::ToolCtx;
+    use crate::approval_broker::testing::TestBroker;
+    use crate::llm::cli::CliKind;
+    let broker = TestBroker::new([]).await;
+    let mut binding = broker.turn(CliKind::Claude, true).await;
+    binding.surface = "home".into();
+    let data = data(broker.pool().clone(), ActivityAccess::Off);
+    let message = json!({"jsonrpc":"2.0", "id":1, "method":"resources/read", "params":{"uri":"clovy://context"}});
+    let external = protocol::handle(&data, &message).await.unwrap();
+    let external: Value =
+        serde_json::from_str(external["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(external.get("session").is_none());
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+    };
+    let bound = protocol::handle_in(&ctx, &message).await.unwrap();
+    let bound: Value =
+        serde_json::from_str(bound["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(bound["session"]["id"], binding.session_id);
+    assert_eq!(bound["session"]["runId"], binding.run_id);
+    assert_eq!(bound["session"]["surface"], "home");
+    assert_eq!(bound["session"]["effectiveApprovalMode"], "approvals");
+}
+
 #[test]
 fn context_reports_date_time_and_zone() {
     let now = chrono::FixedOffset::west_opt(3 * 3600)

@@ -377,8 +377,11 @@ mod unix {
             let _ = write.shutdown().await;
         });
         let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT_PER_CONNECTION));
+        let mut calls = tokio::task::JoinSet::new();
+        let (cancel_calls, call_cancelled) = watch::channel(false);
         let mut cut = false;
         loop {
+            while calls.try_join_next().is_some() {}
             // Backpressure: the next line is read only once a request slot
             // is free, so a fast client waits in its own socket buffer.
             let permit = tokio::select! {
@@ -401,9 +404,22 @@ mod unix {
                     let responses = responses.clone();
                     let handler = Arc::clone(&handler);
                     let binding = binding.clone();
-                    tokio::spawn(async move {
+                    let mut call_cancelled = call_cancelled.clone();
+                    calls.spawn(async move {
                         let response = match serde_json::from_slice::<Value>(&line) {
-                            Ok(message) => handler(message, binding).await,
+                            Ok(message) => {
+                                let id = crate::mcp_server::protocol::request_id(&message);
+                                let is_tool = crate::mcp_server::protocol::method(&message) == Some("tools/call");
+                                tokio::select! {
+                                    biased;
+                                    _ = call_cancelled.changed() => id.map(|id| if is_tool {
+                                        crate::mcp_server::protocol::result_response(id, crate::mcp_server::protocol::tool_error("The run was cancelled. (run_cancelled)"))
+                                    } else {
+                                        crate::mcp_server::protocol::error_response(id, crate::mcp_server::protocol::SERVER_UNAVAILABLE, "The run was cancelled. (run_cancelled)")
+                                    }),
+                                    response = handler(message, binding) => response,
+                                }
+                            },
                             Err(error) => Some(crate::mcp_server::protocol::error_response(
                                 Value::Null,
                                 crate::mcp_server::protocol::PARSE_ERROR,
@@ -426,12 +442,12 @@ mod unix {
         }
         if *shutdown.borrow() {
             // App shutdown: pending answers are dropped.
+            calls.abort_all();
             writer.abort();
         } else if cut {
-            // Revocation: no new request is read, but the calls already in
-            // flight still answer (a cancelled run settles its approvals
-            // first, so a waiting tool returns `run_cancelled`), for at most
-            // REVOKE_GRACE; then the connection closes.
+            // Stop in-flight handlers as well as rejecting new requests.
+            // A remote dispatch already sent may still have an uncertain result.
+            let _ = cancel_calls.send(true);
             drop(responses);
             let mut writer = writer;
             if tokio::time::timeout(REVOKE_GRACE, &mut writer)

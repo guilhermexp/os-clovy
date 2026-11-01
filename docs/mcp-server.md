@@ -137,6 +137,19 @@ routines `false`), and the surface (`chat` or `routine`).
 
 ## Approval broker
 
+Each conversation has an approval mode, initially `approvals`. The desktop
+can set `bypass` for that conversation; the host snapshots the mode at the
+start of each run, so a change during a run applies to the next one. Bypass
+authorizes approval requests for that run, while clarifications still require
+a person. It does not change the CLI's execution policy, connector grants,
+authentication, or operating-system permissions. Unattended turns do not
+inherit bypass. Automatic authorizations are recorded before the tool may
+continue, with `authorizationOrigin: "session_bypass"`; one-shot decisions
+have `authorizationOrigin: "user_once"`. Both identify the policy run.
+For a bound turn, `clovy://context` includes the host-bound session and run,
+engine, surface, data partition, project assignments, workspace and execution
+and approval policies. An external client receives temporal context only.
+
 Every turn-bound tool that writes asks the approval broker
 (`crate::approval_broker`) before any effect. The broker writes an
 `interruption` item in the bound session (the same item the legacy Clovy

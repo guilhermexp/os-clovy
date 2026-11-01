@@ -121,6 +121,7 @@ impl Harness {
             turns: None,
             safety_mode: AgentSafetyMode::Sandboxed,
             attended: true,
+            surface: "chat".into(),
             routine_tools: None,
             images: Vec::new(),
         }

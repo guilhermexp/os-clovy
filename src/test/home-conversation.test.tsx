@@ -128,6 +128,21 @@ describe("Home conversation on the default CLI engine", () => {
     mockInvoke();
   });
 
+  it("updates the approval mode of the Home conversation", async () => {
+    const user = userEvent.setup();
+    mockInvoke({
+      set_agent_session_approval_mode: () => ({ ...homeSession, approvalMode: "bypass" }),
+    });
+    render(<AgentWorkspace homeMode initialSession={homeSession} />);
+    const control = await screen.findByRole("combobox", { name: "Tool approval" });
+    await user.selectOptions(control, "bypass");
+    await waitFor(() => expect(control).toHaveValue("bypass"));
+    expect(calls("set_agent_session_approval_mode")[0][1]).toEqual({
+      sessionId: homeSession.id,
+      approvalMode: "bypass",
+    });
+  });
+
   it("runs a message from an old Home session as a turn of the default CLI", async () => {
     render(<AgentWorkspace homeMode initialSession={homeSession} />);
     await send("eae");

@@ -39,6 +39,7 @@ import {
 } from "../../lib/agent-runtime-adapter";
 import type {
   AgentArtifactDto,
+  AgentApprovalMode,
   AgentItemDto,
   AgentRuntimeEvent,
   AgentSafetyMode,
@@ -460,6 +461,7 @@ export function AgentWorkspace({
   const [stoppingRunId, setStoppingRunId] = useState<string>();
   const stoppingRunIdRef = useRef<string>();
   const [error, setError] = useState<string>();
+  const [approvalSaving, setApprovalSaving] = useState(false);
   const [approvalSubmitting, setApprovalSubmitting] = useState<
     Partial<Record<string, "once" | "session" | "always" | "deny">>
   >({});
@@ -1185,6 +1187,7 @@ export function AgentWorkspace({
         prompt: preparedPrompt.text,
         model: runModel,
         safetyMode: homeMode ? "sandboxed" : safetyMode,
+        surface: homeMode ? "home" : "chat",
         workspacePath: activeSession.workspacePath,
         enabledSkillIds,
         attachments: attachedPaths,
@@ -1782,6 +1785,29 @@ export function AgentWorkspace({
       }}
       safetyMode={safetyMode}
       setSafetyMode={setSafetyMode}
+      approvalMode={selectedSession?.approvalMode}
+      effectiveApprovalMode={projection.run?.approvalMode}
+      approvalSaving={approvalSaving}
+      onApprovalModeChange={
+        selectedSession
+          ? async (mode) => {
+              setApprovalSaving(true);
+              try {
+                const updated = await agentRuntimeBindings.setApprovalMode(
+                  selectedSession.id,
+                  mode,
+                );
+                setSessions((current) =>
+                  current.map((item) => (item.id === updated.id ? updated : item)),
+                );
+              } catch (cause) {
+                setError(messageFromError(cause));
+              } finally {
+                setApprovalSaving(false);
+              }
+            }
+          : undefined
+      }
       attachments={attachments}
       onDropAttachments={addDroppedAttachments}
       onRemoveAttachment={removeAttachment}
@@ -2231,6 +2257,10 @@ function AgentComposer({
   setModel,
   safetyMode,
   setSafetyMode,
+  approvalMode,
+  effectiveApprovalMode,
+  approvalSaving,
+  onApprovalModeChange,
   attachments,
   onDropAttachments,
   onRemoveAttachment,
@@ -2266,6 +2296,10 @@ function AgentComposer({
   setModel: (value: string) => void;
   safetyMode: AgentSafetyMode;
   setSafetyMode: (value: AgentSafetyMode) => void;
+  approvalMode?: AgentApprovalMode;
+  effectiveApprovalMode?: AgentApprovalMode;
+  approvalSaving: boolean;
+  onApprovalModeChange?: (value: AgentApprovalMode) => Promise<void>;
   attachments: string[];
   onDropAttachments: (files: File[]) => Promise<void>;
   onRemoveAttachment: (path: string) => void;
@@ -2414,6 +2448,28 @@ function AgentComposer({
       {notice ? (
         <div className="agent-composer-notice" role="alert">
           {notice}
+        </div>
+      ) : null}
+      {onApprovalModeChange && !hero ? (
+        <div className="agent-approval-control">
+          <label>
+            {t("agent.approval.label")}{" "}
+            <select
+              value={approvalMode ?? "approvals"}
+              disabled={approvalSaving}
+              onChange={(event) =>
+                void onApprovalModeChange(event.currentTarget.value as AgentApprovalMode)
+              }
+            >
+              <option value="approvals">{t("agent.approval.approvals")}</option>
+              <option value="bypass">{t("agent.approval.bypass")}</option>
+            </select>
+          </label>
+          <span>
+            {running || waiting
+              ? `${t("agent.approval.current")} ${t(effectiveApprovalMode === "bypass" ? "agent.approval.bypass" : effectiveApprovalMode === "approvals" ? "agent.approval.approvals" : "agent.approval.loading")} ${t("agent.approval.next")}`
+              : t("agent.approval.description")}
+          </span>
         </div>
       ) : null}
       <div className="agent-composer-box" data-stacked={attachments.length ? "true" : undefined}>

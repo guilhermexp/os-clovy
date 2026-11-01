@@ -157,7 +157,7 @@ async fn interaction_approve_action_is_claude_only_and_answers_allow_or_deny() {
     let cards = broker.requests();
     assert_eq!(cards.len(), 2);
     assert_eq!(cards[0]["toolName"], "Bash");
-    assert_eq!(cards[0]["toolCallId"], "toolu_01");
+    assert!(uuid::Uuid::parse_str(cards[0]["toolCallId"].as_str().unwrap()).is_ok());
     assert_eq!(cards[0]["title"], "Allow Claude Code to use Bash");
     assert!(cards[0]["command"]
         .as_str()

@@ -18,6 +18,25 @@ const frame = {
 };
 
 describe("agent runtime adapter", () => {
+  it("retains the effective approval snapshot when a start event arrives", () => {
+    const projection = createAgentRuntimeProjection({
+      run: {
+        id: "run-1",
+        sessionId: "session-1",
+        status: "running",
+        model: "auto",
+        approvalMode: "bypass",
+      },
+    });
+    const next = applyAgentRuntimeEvent(projection, {
+      ...frame,
+      eventId: "start-approval",
+      sequence: 1,
+      method: "run.started",
+      data: { startedAt: "2026-07-22T12:00:00Z", model: "auto" },
+    });
+    expect(next.run?.approvalMode).toBe("bypass");
+  });
   it("keeps historical funding failures as inert runtime notices", () => {
     const turns = agentItemsToChatTurns([
       {
