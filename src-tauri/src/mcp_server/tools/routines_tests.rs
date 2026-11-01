@@ -243,6 +243,7 @@ async fn stopped_turn_cannot_mutate_routines_or_admit_a_claim() {
         "default",
         binding.session_id.as_str(),
         binding.run_id.as_str(),
+        &binding.authority,
     ));
     assert_eq!(
         crate::routines::create_for_turn(

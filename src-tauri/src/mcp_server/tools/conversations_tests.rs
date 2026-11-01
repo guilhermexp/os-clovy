@@ -7,6 +7,73 @@ use serde_json::json;
 use sqlx::query::query;
 
 #[tokio::test]
+async fn routine_artifact_read_rechecks_policy_at_publication_after_io() {
+    use super::ToolGroup;
+    for change in ["keep", "remove_toolset", "delete_policy"] {
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Claude, false).await;
+        let pool = broker.pool().clone();
+        query("INSERT INTO routines (id,name,prompt,schedule,created_at,updated_at,metadata_json,tool_catalog_version) VALUES ('read-policy','Read','Read','every 1d','now','now','{\"enabledToolsets\":[\"session_search\"]}',1)").execute(&pool).await.unwrap();
+        query("INSERT INTO routine_runs (id,routine_id,agent_session_id,claim_token,trigger_kind,status,model,safety_mode,created_at,updated_at) VALUES ('read-run','read-policy',?,'claim','schedule','running','claude','sandboxed','now','now')").bind(&binding.session_id).execute(&pool).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("fixture.txt");
+        std::fs::write(&file, "Authorized file content").unwrap();
+        query("INSERT INTO agent_artifacts (id,session_id,run_id,provenance,action,path,available,created_at) VALUES ('policy-artifact',?,?,'user','attachment',?,1,'now')").bind(&binding.session_id).bind(&binding.run_id).bind(file.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        let data = data(pool.clone(), ActivityAccess::Off);
+        let ctx = ToolCtx {
+            data: &data,
+            app: None,
+            binding: Some(&binding),
+            broker: None,
+        };
+        assert!(
+            super::routine_tool_allowed(&pool, &binding, "read_conversation_artifact")
+                .await
+                .unwrap()
+        );
+        let (read_done, observed_read) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let read = async {
+            let value = super::conversations::ConversationTools
+                .call(
+                    &ctx,
+                    "read_conversation_artifact",
+                    &json!({"conversationId":binding.session_id,"artifactId":"policy-artifact"}),
+                )
+                .await?;
+            read_done.send(()).unwrap();
+            released.await.unwrap();
+            Ok(value)
+        };
+        let mutate = async {
+            observed_read.await.unwrap();
+            match change {
+                "remove_toolset" => {
+                    query("UPDATE routines SET metadata_json='{\"enabledToolsets\":[]}' WHERE id='read-policy'").execute(&pool).await.unwrap();
+                }
+                "delete_policy" => {
+                    query("DELETE FROM routines WHERE id='read-policy'")
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            release.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            super::authorized_native_read(&ctx, "read_conversation_artifact", read),
+            mutate
+        );
+        if change == "keep" {
+            assert_eq!(result.unwrap()["text"], "Authorized file content");
+        } else {
+            assert_eq!(result.unwrap_err().code, "routine_tool_not_enabled");
+        }
+    }
+}
+
+#[tokio::test]
 async fn conversation_pages_hide_other_partitions_and_tool_payloads() {
     let broker = TestBroker::new([]).await;
     let binding = broker.turn(CliKind::Claude, true).await;
@@ -297,7 +364,8 @@ async fn conversation_run_cancellation_targets_the_exact_session_and_rejects_sel
             &binding.session_id,
             &binding.run_id,
             &binding.session_id,
-            &binding.run_id
+            &binding.run_id,
+            &binding.authority,
         )
         .await
         .unwrap_err()
@@ -311,7 +379,8 @@ async fn conversation_run_cancellation_targets_the_exact_session_and_rejects_sel
             &binding.session_id,
             &binding.run_id,
             &binding.session_id,
-            &run.id
+            &run.id,
+            &binding.authority,
         )
         .await
         .unwrap_err()
@@ -325,7 +394,8 @@ async fn conversation_run_cancellation_targets_the_exact_session_and_rejects_sel
             &binding.session_id,
             &binding.run_id,
             &foreign.id,
-            &foreign_run.id
+            &foreign_run.id,
+            &binding.authority,
         )
         .await
         .unwrap_err()
@@ -345,7 +415,8 @@ async fn conversation_run_cancellation_targets_the_exact_session_and_rejects_sel
         &binding.session_id,
         &binding.run_id,
         &target.id,
-        &run.id
+        &run.id,
+        &binding.authority,
     )
     .await
     .unwrap());
@@ -371,7 +442,8 @@ async fn conversation_run_cancellation_targets_the_exact_session_and_rejects_sel
         &binding.session_id,
         &binding.run_id,
         &target.id,
-        &run.id
+        &run.id,
+        &binding.authority,
     )
     .await
     .unwrap());
@@ -387,7 +459,8 @@ async fn conversation_run_cancellation_targets_the_exact_session_and_rejects_sel
             &binding.session_id,
             &binding.run_id,
             &foreign.id,
-            &foreign_run.id
+            &foreign_run.id,
+            &binding.authority,
         )
         .await
         .unwrap_err()
@@ -468,7 +541,7 @@ async fn ui_stop_is_durable_before_host_teardown_and_blocks_a_stale_bound_write(
         repo.create_note_checked(
             "default",
             None,
-            Some((&binding.session_id, &binding.run_id))
+            Some((&binding.session_id, &binding.run_id, &binding.authority))
         )
         .await
         .unwrap_err()
@@ -551,7 +624,12 @@ async fn ui_session_delete_checks_actual_runs_and_cleans_metadata_atomically() {
     assert_eq!(
         repo.delete_session_for_turn(
             &binding.session_id,
-            Some(("default", &binding.session_id, &binding.run_id))
+            Some((
+                "default",
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority
+            ))
         )
         .await
         .unwrap_err()
@@ -565,7 +643,12 @@ async fn ui_session_delete_checks_actual_runs_and_cleans_metadata_atomically() {
     assert_eq!(
         repo.delete_session_for_turn(
             &foreign.id,
-            Some(("default", &binding.session_id, &binding.run_id))
+            Some((
+                "default",
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority
+            ))
         )
         .await
         .unwrap_err()

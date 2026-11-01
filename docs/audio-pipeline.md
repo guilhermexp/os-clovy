@@ -304,3 +304,42 @@ network boundaries. See [ADR-0074](adr/0074-local-transcription-uses-a-pinned-of
 Switching from Local to Groq terminates the helper. A Local note run already in
 progress fails locally and retains its audio; an explicit retry uses the new
 selection. Remaining Local audio is never silently forwarded to Groq.
+
+
+## 2026-11-01: Bound audio admission after preparation
+
+Agent starts carry a cloned host turn authority through native preparation.
+After microphone device preparation, the final capture and watchdog locks are
+held while the host checks authority and the exact pending request, calls
+`stream.play()`, and publishes the recording. A revoked or abandoned start
+cannot cross this boundary. Normal recorder controls retain their existing
+unbound path.
+
+System capture has its own effective boundary. Windows checks the host grant
+after COM/device initialization immediately before `IAudioClient::Start`.
+The macOS helper accepts `--admission <session-path>` for bound starts. It
+prepares its graph, emits `prepared`, and waits for an exclusive host-created
+grant file before `AudioDeviceStart`. The host rechecks its authority after
+`prepared`; failure stops the prepared helper without granting capture. A
+stale grant must be removed successfully (absence is allowed), and publication
+uses `create_new` so it never overwrites an unexpected grant. A missing or old
+helper fails closed through the side-effect-free `--admission-protocol` probe,
+which runs without `--output`. Probing does not start a second capture.
+The grant wait is bounded to 30 seconds. Existing abort escalation can kill a
+prepared helper if it does not respond to termination while waiting.
+
+A recording already admitted and published belongs to the recorder. Late ACK
+failure or subsequent chat Stop does not end that meeting or require a new
+grant for helper graph recovery. Admission cancellation and stopping an active
+recording are separate operations. The wire decision is recorded in the dated
+[system helper ADR addendum](adr/0004-out-of-process-system-audio-helper.md).
+
+Agent retry and recovery preserve the live turn authority across the per-note
+processing queue. At dequeue they check the bound run, profile, note and exact
+saved recording before polling the processing future. A consumed UI request
+is not reused as the lifetime of a queued retry. Rejection leaves prior note
+results unchanged. Dictation checks the same host authority after command
+generation/process serialization and immediately before writing its helper
+command. Portable tests exercise the production admission gates, SQLite queue
+checks, filesystem grant and IPC write; macOS Swift/CoreAudio and Windows COM
+runtime acceptance still require a supported native host.

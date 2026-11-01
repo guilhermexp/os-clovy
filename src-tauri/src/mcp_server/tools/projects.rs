@@ -338,6 +338,7 @@ struct ProjectTurn<'a> {
     profile: &'a str,
     session_id: &'a str,
     run_id: &'a str,
+    authority: &'a crate::domain::turn_authority::TurnAuthority,
 }
 fn project_turn<'a>(ctx: &'a ToolCtx<'_>) -> Result<ProjectTurn<'a>, AppError> {
     let binding = ctx
@@ -348,6 +349,7 @@ fn project_turn<'a>(ctx: &'a ToolCtx<'_>) -> Result<ProjectTurn<'a>, AppError> {
         profile: &ctx.data.profile,
         session_id: &binding.session_id,
         run_id: &binding.run_id,
+        authority: &binding.authority,
     })
 }
 
@@ -361,8 +363,14 @@ async fn apply(
 ) -> Result<(Value, Vec<String>), AppError> {
     let profile = turn.profile;
     let mut tx = turn.pool.begin().await?;
-    crate::db::repositories::guard_bound_turn(&mut tx, profile, turn.session_id, turn.run_id)
-        .await?;
+    crate::db::repositories::guard_bound_turn(
+        &mut tx,
+        profile,
+        turn.session_id,
+        turn.run_id,
+        turn.authority,
+    )
+    .await?;
     let old = if name != "create_project" {
         Some(ensure_project(&mut tx, profile, id).await?)
     } else {

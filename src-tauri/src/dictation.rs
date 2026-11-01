@@ -421,11 +421,22 @@ pub(crate) async fn agent_dictation_control(
         AgentDictationAction::Stop => "stop_and_paste",
         AgentDictationAction::Cancel => "discard_recording",
     };
-    if let Err(error) = dictation_helper_command(
+    let authority = target
+        .binding
+        .as_ref()
+        .map(|binding| &binding.authority)
+        .ok_or_else(|| {
+            AppError::new(
+                "turn_expired",
+                "The dictation command has no host authority.",
+            )
+        })?;
+    if let Err(error) = dictation_helper_command_with_authority(
         app.clone(),
         window,
         app.state::<HelperState>(),
         serde_json::json!({"type":kind,"takeId":target.take_id}),
+        Some(authority),
     ) {
         set_agent_dictation_phase(
             &state,
@@ -652,6 +663,7 @@ pub(crate) async fn delete_history_for_turn(
         profile,
         &binding.session_id,
         &binding.run_id,
+        &binding.authority,
     )
     .await?;
     let result = sqlx::query::query("DELETE FROM dictation_history WHERE id=? AND profile=?")
@@ -2492,6 +2504,16 @@ pub fn dictation_helper_command(
     state: State<'_, HelperState>,
     command: serde_json::Value,
 ) -> Result<(), AppError> {
+    dictation_helper_command_with_authority(app, window, state, command, None)
+}
+
+fn dictation_helper_command_with_authority(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, HelperState>,
+    command: serde_json::Value,
+    authority: Option<&crate::domain::turn_authority::TurnAuthority>,
+) -> Result<(), AppError> {
     if command.get("type").and_then(serde_json::Value::as_str) == Some("agent_composer_delivered") {
         if window.label() != "main" {
             return Err(AppError::new(
@@ -2664,6 +2686,9 @@ pub fn dictation_helper_command(
     ) {
         if let Some(take_state) = app.try_state::<DictationTakeState>() {
             let (_, result) = take_state.run_new_helper_command(|_| {
+                if let Some(authority) = authority {
+                    authority.check_live()?;
+                }
                 let current_take_id = take_state.current_take_id();
                 let requested_take_id = command
                     .get("takeId")
@@ -2704,7 +2729,7 @@ pub fn dictation_helper_command(
                 if command_type == "discard_recording" {
                     cancel_dictation_take(&app, take_id.as_deref());
                 }
-                send_helper_command(&state, command).inspect_err(|_| {
+                send_helper_command_checked(&state, command, authority).inspect_err(|_| {
                     if starts_recording {
                         release_unsent_dictation_take(&app, take_id.as_deref());
                     }
@@ -2712,10 +2737,10 @@ pub fn dictation_helper_command(
             });
             return result;
         }
-        return send_helper_command(&state, command);
+        return send_helper_command_checked(&state, command, authority);
     }
 
-    send_helper_command(&state, command)
+    send_helper_command_checked(&state, command, authority)
 }
 
 #[cfg(target_os = "windows")]
@@ -3670,7 +3695,33 @@ pub(crate) fn dictation_helper_pid(app: &AppHandle) -> Option<u32> {
     })
 }
 
+fn write_helper_command(
+    writer: &mut impl Write,
+    command: &serde_json::Value,
+    authority: Option<&crate::domain::turn_authority::TurnAuthority>,
+) -> Result<(), AppError> {
+    let mut line = serde_json::to_string(command)
+        .map_err(|error| AppError::new("dictation_helper_command_invalid", error.to_string()))?;
+    line.push('\n');
+    if let Some(authority) = authority {
+        authority.check_live()?;
+    }
+    writer
+        .write_all(line.as_bytes())
+        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))?;
+    writer
+        .flush()
+        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))
+}
+
 fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Result<(), AppError> {
+    send_helper_command_checked(state, command, None)
+}
+fn send_helper_command_checked(
+    state: &HelperState,
+    command: serde_json::Value,
+    authority: Option<&crate::domain::turn_authority::TurnAuthority>,
+) -> Result<(), AppError> {
     let mut guard = state
         .process
         .lock()
@@ -3681,17 +3732,7 @@ fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Resul
             "Dictation helper process is not running.",
         )
     })?;
-    let mut line = serde_json::to_string(&command)
-        .map_err(|error| AppError::new("dictation_helper_command_invalid", error.to_string()))?;
-    line.push('\n');
-    process
-        .stdin
-        .write_all(line.as_bytes())
-        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))?;
-    process
-        .stdin
-        .flush()
-        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))
+    write_helper_command(&mut process.stdin, &command, authority)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -8141,6 +8182,15 @@ fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), A
 fn release_unsent_dictation_take(app: &AppHandle, take_id: Option<&str>) {
     if let Some(state) = app.try_state::<DictationTakeState>() {
         state.forget_admitted_settings(Some(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE)));
+    }
+    let current = app
+        .try_state::<DictationTakeState>()
+        .and_then(|state| state.current_take_id());
+    if let (Some(take_id), Some(activation)) = (take_id, app.try_state::<ShortcutActivationState>())
+    {
+        if let Ok(mut controller) = activation.controller.lock() {
+            controller.finish_helper_take(take_id, current.as_deref());
+        }
     }
     crate::update_gate::UPDATE_GATE.end_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE));
 }
@@ -14023,5 +14073,80 @@ mod agent_management_tests {
         assert_eq!(current.phase, "cancelled");
         assert_eq!(current.composer_request_id, target.composer_request_id);
         assert_eq!(current.conversation_id, "conversation-a");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod serialized_agent_write_tests {
+    use super::*;
+    use crate::domain::turn_authority::TurnAuthority;
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    fn denied_after_serialization(wait_for_generation: bool) {
+        let authority = TurnAuthority::new();
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let process = Arc::new(Mutex::new(writer));
+        let generation = Arc::new(Mutex::new(0_u64));
+        let generation_held = wait_for_generation.then(|| generation.lock().unwrap());
+        let process_held = (!wait_for_generation).then(|| process.lock().unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let process = process.clone();
+            let generation = generation.clone();
+            let authority = authority.clone();
+            std::thread::spawn(move || {
+                let mut entered_tx = Some(entered_tx);
+                if wait_for_generation {
+                    entered_tx.take().unwrap().send(()).unwrap();
+                }
+                let _generation = generation.lock().unwrap();
+                if let Some(entered_tx) = entered_tx {
+                    entered_tx.send(()).unwrap();
+                }
+                let mut process = process.lock().unwrap();
+                write_helper_command(
+                    &mut *process,
+                    &serde_json::json!({"type":"start_listening","takeId":"serialized-proof"}),
+                    Some(&authority),
+                )
+            })
+        };
+        entered_rx.recv().unwrap();
+        authority.revoke();
+        drop(generation_held);
+        drop(process_held);
+        assert_eq!(worker.join().unwrap().unwrap_err().code, "turn_expired");
+        let mut byte = [0_u8];
+        assert_eq!(
+            reader.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    #[test]
+    fn revoked_while_waiting_for_process_lock_writes_no_start_command() {
+        denied_after_serialization(false);
+    }
+    #[test]
+    fn revoked_while_waiting_for_generation_lock_writes_no_start_command() {
+        denied_after_serialization(true);
+    }
+    #[test]
+    fn live_authority_writes_one_real_ipc_command() {
+        let authority = TurnAuthority::new();
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        write_helper_command(
+            &mut writer,
+            &serde_json::json!({"type":"start_listening","takeId":"live-proof"}),
+            Some(&authority),
+        )
+        .unwrap();
+        let mut bytes = [0_u8; 256];
+        let count = reader.read(&mut bytes).unwrap();
+        let command: serde_json::Value = serde_json::from_slice(&bytes[..count]).unwrap();
+        assert_eq!(command["type"], "start_listening");
+        assert_eq!(command["takeId"], "live-proof");
+        assert_eq!(bytes[count - 1], b'\n');
     }
 }

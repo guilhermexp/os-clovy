@@ -7,7 +7,11 @@ import { useNoteProcessingEvents } from "../app/use-note-processing-events";
 import { useSessionMetadata } from "../app/use-session-metadata";
 import type { ClovyDataChange } from "../lib/clovy-data-events";
 import { resetCurrentDataPartitionForTests } from "../lib/data-partition";
-import type { NoteDto } from "../lib/tauri";
+import {
+  NOTE_PROCESSING_PROGRESS_EVENT,
+  type NoteDto,
+  type NoteProcessingProgressDto,
+} from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
@@ -23,7 +27,7 @@ vi.mock("../lib/tauri", async (original) => ({
 }));
 const listeners = new Set<{
   name: string;
-  callback: (event: { payload: ClovyDataChange }) => void;
+  callback: (event: { payload: ClovyDataChange | NoteProcessingProgressDto }) => void;
 }>();
 function deferred<T>() {
   let resolve: (value: T) => void = () => {
@@ -92,6 +96,39 @@ beforeEach(() => {
 });
 
 describe("native mutation invalidation", () => {
+  it("does not resurrect deleted notes from a delayed terminal hydration or its retry", async () => {
+    const old = deferred<NoteDto>();
+    mocks.getNote.mockReturnValueOnce(old.promise);
+    const { result } = renderHook(useNotes);
+    const progress = {
+      noteId: "note",
+      recordingSessionId: "take",
+      stage: "done",
+      revision: stamp,
+      processingStatus: "ready",
+    } as NoteProcessingProgressDto;
+    await act(async () => {
+      for (const listener of listeners)
+        if (listener.name === NOTE_PROCESSING_PROGRESS_EVENT)
+          listener.callback({ payload: progress });
+    });
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledTimes(1));
+    mocks.listNotes.mockResolvedValue({ items: [], hasMore: false });
+    await emit({ profile: "default", kind: "notes", id: "note", deleted: true });
+    await act(async () => {
+      old.resolve(note("stale completed result"));
+    });
+    expect(result.current.state.notes).toEqual([]);
+    expect(result.current.state.selectedNote).toBeUndefined();
+    await act(async () => {
+      for (const listener of listeners)
+        if (listener.name === NOTE_PROCESSING_PROGRESS_EVENT)
+          listener.callback({ payload: progress });
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(mocks.getNote).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+  });
   it("does not resurrect a deleted note from an older hydration response", async () => {
     const old = deferred<NoteDto>();
     mocks.getNote.mockReturnValueOnce(old.promise);

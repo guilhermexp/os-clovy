@@ -210,69 +210,48 @@ async fn memory_denied_unattended_and_disabled_scopes_do_not_write() {
 }
 
 struct DeletePause {
-    armed: std::sync::atomic::AtomicBool,
-    acquisitions: std::sync::atomic::AtomicUsize,
     reached: tokio::sync::Notify,
     resume: tokio::sync::Notify,
 }
 
-async fn paused_memory_pool(
-    path: &std::path::Path,
-    boundary: usize,
-) -> (sqlx_sqlite::SqlitePool, std::sync::Arc<DeletePause>) {
-    use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    };
-    let pause = Arc::new(DeletePause {
-        armed: AtomicBool::new(false),
-        acquisitions: AtomicUsize::new(0),
+fn paused_memory_repositories(
+    pool: sqlx_sqlite::SqlitePool,
+    boundary: crate::db::repositories::MemoryWriteBoundary,
+) -> (Repositories, std::sync::Arc<DeletePause>) {
+    let pause = std::sync::Arc::new(DeletePause {
         reached: tokio::sync::Notify::new(),
         resume: tokio::sync::Notify::new(),
     });
     let observer = pause.clone();
-    let options = sqlx_sqlite::SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true)
-        .journal_mode(sqlx_sqlite::SqliteJournalMode::Wal);
-    let pool = sqlx_sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .before_acquire(move |_, _| {
-            let pause = observer.clone();
-            Box::pin(async move {
-                if pause.armed.load(Ordering::SeqCst)
-                    && pause.acquisitions.fetch_add(1, Ordering::SeqCst) + 1 == boundary
-                {
-                    pause.reached.notify_one();
-                    pause.resume.notified().await;
-                }
-                Ok(true)
-            })
+    let repos = Repositories::new(pool).observe_memory_writes(move |observed| {
+        let pause = observer.clone();
+        Box::pin(async move {
+            if observed == boundary {
+                pause.reached.notify_one();
+                pause.resume.notified().await;
+            }
         })
-        .connect_with(options)
-        .await
-        .unwrap();
-    crate::db::migrations::run_migrations(&pool).await.unwrap();
-    (pool, pause)
+    });
+    (repos, pause)
 }
 
 #[tokio::test]
 async fn forget_memory_serializes_global_toggle_until_delete_commit() {
-    use std::sync::atomic::Ordering;
     let broker = TestBroker::new([Scripted::Approve]).await;
     let binding = broker.turn(CliKind::Claude, true).await;
     let dir = tempfile::tempdir().unwrap();
     let settings = dir.path().join("memory.json");
     std::fs::write(&settings, r#"{"enabled":true}"#).unwrap();
-    // Two scope reads precede acquisition of the deletion transaction.
-    let (pool, pause) = paused_memory_pool(&dir.path().join("notes.sqlite3"), 3).await;
-    let repos = Repositories::new(pool.clone());
+    let (repos, pause) = paused_memory_repositories(
+        broker.pool().clone(),
+        crate::db::repositories::MemoryWriteBoundary::BeforeDeleteCommit,
+    );
     let memory = repos
-        .create_memory("default", None, "Keep until approved", "user")
+        .create_memory("default", None, "Keep until admitted", "user")
         .await
         .unwrap();
     let data = McpData {
-        notes: pool,
+        notes: broker.pool().clone(),
         profile: "default".into(),
         memory_enabled: true,
         activity: ActivityAccess::Off,
@@ -284,20 +263,20 @@ async fn forget_memory_serializes_global_toggle_until_delete_commit() {
         binding: Some(&binding),
         broker: Some(broker.broker()),
     };
-    pause.armed.store(true, Ordering::SeqCst);
-    let args = json!({"id":memory.id});
-    let delete = super::memory::call_with_settings(&ctx, "forget_memory", &args, &settings);
+    let arguments = json!({"id": memory.id});
+    let delete =
+        super::memory::call_with_repositories(&ctx, "forget_memory", &arguments, &settings, &repos);
     let toggle = async {
         pause.reached.notified().await;
+        // The semantic probe is inside the delete transaction, immediately
+        // before commit; the settings lock must still span that boundary.
         let mut toggle = Box::pin(crate::commands::set_memory_enabled_with_settings(
             &settings, false,
         ));
         let blocked = futures_util::poll!(toggle.as_mut()).is_pending();
         let enabled_before_commit = crate::commands::load_memory_settings(&settings).enabled;
         pause.resume.notify_one();
-        if blocked {
-            toggle.await.unwrap();
-        }
+        toggle.await.unwrap();
         (blocked, enabled_before_commit)
     };
     let (result, (blocked, enabled_before_commit)) =
@@ -305,16 +284,11 @@ async fn forget_memory_serializes_global_toggle_until_delete_commit() {
             tokio::join!(delete, toggle)
         })
         .await
-        .expect("both concurrent operations finish");
-    result.unwrap();
-    assert!(
-        blocked,
-        "the settings toggle must wait for the deletion transaction"
-    );
-    assert!(
-        enabled_before_commit,
-        "memory cannot turn off before an authorized delete commits"
-    );
+        .expect("concurrent operations finish");
+    assert_eq!(result.unwrap()["forgotten"], true);
+    assert_eq!(broker.requests().len(), 1);
+    assert!(blocked, "settings toggle waits for delete commit");
+    assert!(enabled_before_commit);
     assert!(!crate::commands::load_memory_settings(&settings).enabled);
     assert!(repos
         .list_memories("default", None, false)
@@ -324,7 +298,7 @@ async fn forget_memory_serializes_global_toggle_until_delete_commit() {
     let count: i64 =
         sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM memory_tombstones WHERE id = ?")
             .bind(&memory.id)
-            .fetch_one(&data.notes)
+            .fetch_one(broker.pool())
             .await
             .unwrap();
     assert_eq!(count, 1);
@@ -332,16 +306,15 @@ async fn forget_memory_serializes_global_toggle_until_delete_commit() {
 
 #[tokio::test]
 async fn forget_memory_revalidates_concurrent_project_toggle_in_delete_transaction() {
-    use std::sync::atomic::Ordering;
     let broker = TestBroker::new([Scripted::Approve]).await;
     let binding = broker.turn(CliKind::Codex, true).await;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("notes.sqlite3");
     let settings = dir.path().join("memory.json");
     std::fs::write(&settings, r#"{"enabled":true}"#).unwrap();
-    // Each scoped check reads the memory and its project: deletion acquires fifth.
-    let (pool, pause) = paused_memory_pool(&path, 5).await;
-    let repos = Repositories::new(pool.clone());
+    let (repos, pause) = paused_memory_repositories(
+        broker.pool().clone(),
+        crate::db::repositories::MemoryWriteBoundary::BeforeDeleteTransaction,
+    );
     let project = repos
         .create_folder("default", "Project", None)
         .await
@@ -350,18 +323,9 @@ async fn forget_memory_revalidates_concurrent_project_toggle_in_delete_transacti
         .create_memory("default", Some(&project.id), "Preserve this fact", "user")
         .await
         .unwrap();
-    let writer = sqlx_sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx_sqlite::SqliteConnectOptions::new()
-                .filename(&path)
-                .journal_mode(sqlx_sqlite::SqliteJournalMode::Wal),
-        )
-        .await
-        .unwrap();
-    let writer = Repositories::new(writer);
+    let writer = Repositories::new(broker.pool().clone());
     let data = McpData {
-        notes: pool,
+        notes: broker.pool().clone(),
         profile: "default".into(),
         memory_enabled: true,
         activity: ActivityAccess::Off,
@@ -373,11 +337,13 @@ async fn forget_memory_revalidates_concurrent_project_toggle_in_delete_transacti
         binding: Some(&binding),
         broker: Some(broker.broker()),
     };
-    pause.armed.store(true, Ordering::SeqCst);
-    let args = json!({"id":memory.id});
-    let delete = super::memory::call_with_settings(&ctx, "forget_memory", &args, &settings);
+    let arguments = json!({"id": memory.id});
+    let delete =
+        super::memory::call_with_repositories(&ctx, "forget_memory", &arguments, &settings, &repos);
     let toggle = async {
         pause.reached.notified().await;
+        // Settings admission has happened, but transaction/project validation
+        // has not. Commit the project disable before releasing that boundary.
         writer
             .set_folder_memory_disabled(&project.id, true)
             .await
@@ -388,8 +354,9 @@ async fn forget_memory_revalidates_concurrent_project_toggle_in_delete_transacti
         tokio::join!(delete, toggle)
     })
     .await
-    .expect("both concurrent operations finish");
+    .expect("concurrent operations finish");
     assert_eq!(result.unwrap_err().code, "memory_disabled");
+    assert_eq!(broker.requests().len(), 1);
     assert_eq!(
         repos
             .list_memories("default", Some(&project.id), false)
@@ -401,12 +368,11 @@ async fn forget_memory_revalidates_concurrent_project_toggle_in_delete_transacti
     let count: i64 =
         sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM memory_tombstones WHERE id = ?")
             .bind(&memory.id)
-            .fetch_one(&data.notes)
+            .fetch_one(broker.pool())
             .await
             .unwrap();
     assert_eq!(count, 0);
-    // Explicit user deletion retains its existing ability to remove disabled memories.
-    repos.delete_memory("default", &memory.id).await.unwrap();
+    writer.delete_memory("default", &memory.id).await.unwrap();
     assert!(repos
         .list_memories("default", Some(&project.id), false)
         .await

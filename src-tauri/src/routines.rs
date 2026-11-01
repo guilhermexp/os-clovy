@@ -23,7 +23,12 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-type BoundRoutineTurn<'a> = Option<(&'a str, &'a str, &'a str)>;
+type BoundRoutineTurn<'a> = Option<(
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a crate::domain::turn_authority::TurnAuthority,
+)>;
 
 const CLAIM_STALE_AFTER_MINUTES: i64 = 10;
 const SCHEDULER_TICK_SECONDS: u64 = 30;
@@ -182,8 +187,9 @@ async fn guard_routine_turn(
     transaction: &mut Transaction<'_, Sqlite>,
     turn: BoundRoutineTurn<'_>,
 ) -> Result<(), AppError> {
-    if let Some((profile, session, run)) = turn {
-        crate::db::repositories::guard_bound_turn(transaction, profile, session, run).await?;
+    if let Some((profile, session, run, authority)) = turn {
+        crate::db::repositories::guard_bound_turn(transaction, profile, session, run, authority)
+            .await?;
     }
     Ok(())
 }
@@ -627,7 +633,12 @@ mod bound_claim_tests {
             "manual",
             false,
             None,
-            Some(("default", &binding.session_id, &binding.run_id)),
+            Some((
+                "default",
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority,
+            )),
         )
         .await;
         assert_eq!(result.unwrap_err().code, "turn_expired");

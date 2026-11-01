@@ -55,29 +55,47 @@ const memories: MemoryDto[] = [
   },
 ];
 
+let persistedMemories: MemoryDto[] = [];
+let persistedEnabled = true;
+
 beforeEach(() => {
   vi.clearAllMocks();
   setCurrentDataPartitionName("default");
   mocks.listen.mockResolvedValue(() => {});
-  mocks.listMemories.mockResolvedValue(memories);
-  mocks.memorySettings.mockResolvedValue({ enabled: true });
-  mocks.setMemoryEnabled.mockImplementation(async (enabled: boolean) => ({ enabled }));
+  persistedMemories = memories.map((memory) => ({ ...memory }));
+  persistedEnabled = true;
+  mocks.listMemories.mockImplementation(async () => persistedMemories);
+  mocks.memorySettings.mockImplementation(async () => ({ enabled: persistedEnabled }));
+  mocks.setMemoryEnabled.mockImplementation(async (enabled: boolean) => {
+    persistedEnabled = enabled;
+    return { enabled };
+  });
   mocks.createMemory.mockImplementation(
-    async ({ folderId, content }: { folderId?: string; content: string }) => ({
-      id: "created",
-      folderId,
-      content,
-      source: "user",
-      createdAt: "2026-07-06T00:00:00Z",
-      updatedAt: "2026-07-06T00:00:00Z",
-    }),
+    async ({ folderId, content }: { folderId?: string; content: string }) => {
+      const created: MemoryDto = {
+        id: "created",
+        folderId,
+        content,
+        source: "user",
+        createdAt: "2026-07-06T00:00:00Z",
+        updatedAt: "2026-07-06T00:00:00Z",
+      };
+      persistedMemories = [created, ...persistedMemories];
+      return created;
+    },
   );
   mocks.updateMemory.mockImplementation(async (id: string, content: string) => {
-    const memory = memories.find((candidate) => candidate.id === id);
+    const memory = persistedMemories.find((candidate) => candidate.id === id);
     if (!memory) throw new Error("Missing test memory");
-    return { ...memory, content };
+    const updated = { ...memory, content };
+    persistedMemories = persistedMemories.map((candidate) =>
+      candidate.id === id ? updated : candidate,
+    );
+    return updated;
   });
-  mocks.deleteMemory.mockResolvedValue(undefined);
+  mocks.deleteMemory.mockImplementation(async (id: string) => {
+    persistedMemories = persistedMemories.filter((memory) => memory.id !== id);
+  });
 });
 
 describe("MemorySettingsSection", () => {
@@ -120,6 +138,108 @@ describe("MemorySettingsSection", () => {
       finish?.([{ ...memories[0], content: "Must not cross the partition switch" }]);
     });
     expect(screen.queryByText("Must not cross the partition switch")).not.toBeInTheDocument();
+  });
+
+  it("keeps a newer event snapshot when the initial memory read resolves late", async () => {
+    const initial = deferred<MemoryDto[]>();
+    mocks.listMemories
+      .mockReturnValueOnce(initial.promise)
+      .mockResolvedValue([{ ...memories[0], content: "Current persisted fact" }]);
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_name, callback) => {
+      changed = callback;
+      return () => {};
+    });
+    render(<MemorySettingsSection folders={folders} />);
+    act(() => changed?.({ payload: { profile: "default", kind: "memories" } }));
+    await screen.findByText("Current persisted fact");
+    await act(async () => initial.resolve(memories));
+    expect(screen.getByText("Current persisted fact")).toBeInTheDocument();
+    expect(screen.queryByText("Use concise answers")).not.toBeInTheDocument();
+  });
+
+  it("does not restore on from an older event after the local setting is saved off", async () => {
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_name, callback) => {
+      changed = callback;
+      return () => {};
+    });
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} />);
+    await screen.findByText("Use concise answers");
+    const oldSettings = deferred<{ enabled: boolean }>();
+    mocks.memorySettings.mockReturnValueOnce(oldSettings.promise);
+    act(() => changed?.({ payload: { profile: "default", kind: "memories" } }));
+    await user.click(screen.getByRole("switch", { name: "Let Clovy remember things" }));
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "Let Clovy remember things" })).not.toBeChecked(),
+    );
+    await act(async () => oldSettings.resolve({ enabled: true }));
+    expect(screen.getByRole("switch", { name: "Let Clovy remember things" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Add memory" })).toBeDisabled();
+    expect(persistedEnabled).toBe(false);
+  });
+
+  it.each([
+    "delete",
+    "edit",
+    "create",
+  ] as const)("keeps a successful local %s after an older native refresh completes", async (operation) => {
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_name, callback) => {
+      changed = callback;
+      return () => {};
+    });
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} />);
+    await screen.findByText("Use concise answers");
+    const oldSettings = deferred<{ enabled: boolean }>();
+    mocks.memorySettings.mockReturnValueOnce(oldSettings.promise);
+    act(() => changed?.({ payload: { profile: "default", kind: "memories" } }));
+    if (operation === "create") {
+      await user.click(screen.getByRole("button", { name: "Add memory" }));
+      const dialog = screen.getByRole("dialog", { name: "Add memory" });
+      await user.type(within(dialog).getByRole("textbox", { name: "Memory" }), "New local fact");
+      await user.click(within(dialog).getByRole("button", { name: "Add memory" }));
+      await screen.findByText("New local fact");
+    } else {
+      const row = screen.getByText("Use concise answers").closest(".memory-row") as HTMLElement;
+      await user.click(
+        within(row).getByRole("button", {
+          name: operation === "edit" ? "Edit memory" : "Delete memory",
+        }),
+      );
+      const dialog = screen.getByRole("dialog", {
+        name: operation === "edit" ? "Edit memory" : "Delete memory?",
+      });
+      if (operation === "edit") {
+        const input = within(dialog).getByRole("textbox", { name: "Memory" });
+        await user.clear(input);
+        await user.type(input, "New local wording");
+      }
+      await user.click(
+        within(dialog).getByRole("button", {
+          name: operation === "edit" ? "Save changes" : "Delete",
+        }),
+      );
+      await waitFor(() =>
+        expect(screen.queryByText("Use concise answers")).not.toBeInTheDocument(),
+      );
+    }
+    await act(async () => oldSettings.resolve({ enabled: true }));
+    if (operation === "create") expect(screen.getByText("New local fact")).toBeInTheDocument();
+    else {
+      expect(screen.queryByText("Use concise answers")).not.toBeInTheDocument();
+      if (operation === "edit") expect(screen.getByText("New local wording")).toBeInTheDocument();
+    }
+    if (operation === "create")
+      expect(persistedMemories.find((memory) => memory.id === "created")?.content).toBe(
+        "New local fact",
+      );
+    else
+      expect(persistedMemories.find((memory) => memory.id === "global-user")?.content).toBe(
+        operation === "edit" ? "New local wording" : undefined,
+      );
   });
 
   it("allows the user to add the first memory from the empty state", async () => {
@@ -334,3 +454,11 @@ describe("MemorySettingsSection", () => {
     expect(toggle).not.toBeChecked();
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}

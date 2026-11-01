@@ -40,6 +40,7 @@ impl SystemAudioCapture {
         partial_path: PathBuf,
         final_path: PathBuf,
         timeline_offset: Duration,
+        authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
     ) -> Result<Self, AppError> {
         let helper_app = helper_app_path();
         if !helper_app.exists() {
@@ -48,10 +49,33 @@ impl SystemAudioCapture {
                 "System audio helper is not built. Run pnpm tauri:dev again.",
             ));
         }
+        if let Some(authorization) = authorization.as_ref() {
+            authorization()?;
+            let protocol = crate::hide_console::command(
+                helper_app.join("Contents/MacOS/clovy-system-audio-recorder"),
+            )
+            .arg("--admission-protocol")
+            .output()
+            .map_err(|error| {
+                AppError::new("system_audio_admission_unavailable", error.to_string())
+            })?;
+            if !protocol.status.success() || protocol.stdout != b"1\n" {
+                return Err(AppError::new("system_audio_admission_unavailable","The system audio helper does not support guarded starts. Rebuild or update Clovy before starting an agent recording."));
+            }
+        }
+        if let Some(authorization) = authorization.as_ref() {
+            authorization()?;
+        }
         terminate_existing_helpers();
         let status_path = partial_path.with_extension("status.json");
         let pid_path = partial_path.with_extension("pid");
         let log_path = partial_path.with_extension("helper.log");
+        let admission_path = authorization
+            .as_ref()
+            .map(|_| partial_path.with_extension("admission"));
+        if let Some(path) = admission_path.as_ref() {
+            clear_system_audio_admission(path)?;
+        }
         let _ = std::fs::remove_file(&status_path);
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(&log_path);
@@ -63,7 +87,8 @@ impl SystemAudioCapture {
             pid_path.display(),
             log_path.display()
         ));
-        let open_status = crate::hide_console::command("/usr/bin/open")
+        let mut launch = crate::hide_console::command("/usr/bin/open");
+        launch
             .arg("-n")
             .arg(&helper_app)
             .arg("--args")
@@ -76,7 +101,14 @@ impl SystemAudioCapture {
             .arg("--log")
             .arg(&log_path)
             .arg("--timeline-offset-ms")
-            .arg(timeline_offset.as_millis().to_string())
+            .arg(timeline_offset.as_millis().to_string());
+        if let Some(path) = admission_path.as_ref() {
+            launch.arg("--admission").arg(path);
+        }
+        if let Some(authorization) = authorization.as_ref() {
+            authorization()?;
+        }
+        let open_status = launch
             .status()
             .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
         dev_log(format!("open returned status={open_status}"));
@@ -86,7 +118,7 @@ impl SystemAudioCapture {
             &status_path,
             Some(&log_path),
             Duration::from_secs(30),
-            &["ready", "level", "error"],
+            if admission_path.is_some(){&["prepared","error"]}else{&["ready", "level", "error"]},
             "System audio helper did not become ready. See the terminal helper log for the last CoreAudio step.",
         ) {
             Ok(ready) => ready,
@@ -103,6 +135,40 @@ impl SystemAudioCapture {
                 .unwrap_or_else(|| "System audio capture failed.".to_string());
             return Err(AppError::new(helper_error_code(&message), message));
         }
+        let ready = if let Some(path) = admission_path.as_ref() {
+            if let Err(error) =
+                crate::audio::system_audio::admit_system_audio_start(authorization.as_ref(), || {
+                    publish_system_audio_admission(path)
+                })
+            {
+                abort_failed_helper_start(&partial_path, &status_path, &pid_path);
+                return Err(error);
+            }
+            let outcome = wait_for_status(
+                &status_path,
+                Some(&log_path),
+                Duration::from_secs(30),
+                &["ready", "level", "error"],
+                "System audio helper did not start after host admission.",
+            );
+            let _ = std::fs::remove_file(path);
+            match outcome {
+                Ok(status) if status.event != "error" => status,
+                Ok(status) => {
+                    abort_failed_helper_start(&partial_path, &status_path, &pid_path);
+                    let message = status
+                        .message
+                        .unwrap_or_else(|| "System audio capture failed.".into());
+                    return Err(AppError::new(helper_error_code(&message), message));
+                }
+                Err(error) => {
+                    abort_failed_helper_start(&partial_path, &status_path, &pid_path);
+                    return Err(error);
+                }
+            }
+        } else {
+            ready
+        };
         let Some(pid) = read_pid(&pid_path) else {
             abort_failed_helper_start(&partial_path, &status_path, &pid_path);
             return Err(AppError::new(
@@ -717,5 +783,55 @@ mod tests {
         assert!(stats.level.recent_peaks.is_empty());
         assert_eq!(stats.max_level, 0.8);
         assert_eq!(stats.last_error, Some("System audio stalled.".to_string()));
+    }
+}
+
+fn clear_system_audio_admission(path: &Path) -> Result<(), AppError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::new(
+            "system_audio_admission_unavailable",
+            error.to_string(),
+        )),
+    }
+}
+
+fn publish_system_audio_admission(path: &Path) -> Result<(), AppError> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|error| AppError::new("system_audio_admission_unavailable", error.to_string()))
+}
+
+#[cfg(test)]
+mod admission_file_tests {
+    use super::*;
+
+    #[test]
+    fn stale_grant_removal_failure_is_fatal_and_exclusive_publication_never_overwrites() {
+        let directory =
+            std::env::temp_dir().join(format!("clovy-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("grant");
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(
+            clear_system_audio_admission(&path).unwrap_err().code,
+            "system_audio_admission_unavailable"
+        );
+        std::fs::remove_dir(&path).unwrap();
+        clear_system_audio_admission(&path).unwrap();
+        publish_system_audio_admission(&path).unwrap();
+        std::fs::write(&path, b"existing-grant").unwrap();
+        assert_eq!(
+            publish_system_audio_admission(&path).unwrap_err().code,
+            "system_audio_admission_unavailable"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing-grant");
+        clear_system_audio_admission(&path).unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir(&directory).unwrap();
     }
 }

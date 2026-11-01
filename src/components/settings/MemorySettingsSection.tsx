@@ -6,8 +6,9 @@ import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconTrashCanSimple } from "central-icons/IconTrashCanSimple";
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatDate, useT } from "../../i18n";
+import { getCurrentDataPartitionName } from "../../lib/data-partition";
 import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import { useProjectMemoryDemo } from "../../lib/project-memory-demo";
 import {
@@ -52,8 +53,19 @@ export function MemorySettingsSection({
   const [error, setError] = useState<string>();
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<string>(initialFolderFilter ?? SCOPE_ALL);
-  useClovyDataChanged("memories", async (_change, isCurrent) => {
+  const refreshVersion = useRef(0);
+  const mounted = useRef(true);
+  const refresh = useCallback(async (eventIsCurrent: () => boolean = () => true) => {
+    const version = ++refreshVersion.current;
+    const profile = getCurrentDataPartitionName();
+    const isCurrent = () =>
+      mounted.current &&
+      version === refreshVersion.current &&
+      profile === getCurrentDataPartitionName() &&
+      eventIsCurrent();
     try {
+      // Every memory — global and per-project — so this page is the one place
+      // to browse and prune all of them.
       const [nextMemories, settings] = await Promise.all([
         listMemories(undefined, true),
         memorySettings(),
@@ -64,8 +76,11 @@ export function MemorySettingsSection({
       setError(undefined);
     } catch (caught) {
       if (isCurrent()) setError(messageFromError(caught));
+    } finally {
+      if (isCurrent()) setLoaded(true);
     }
-  });
+  }, []);
+  useClovyDataChanged("memories", (_change, isCurrent) => refresh(isCurrent));
 
   // __projectMemoryDemo() (dev console): populate the manager with sample
   // memories, spread across real projects, to design the list at scale.
@@ -76,8 +91,13 @@ export function MemorySettingsSection({
   );
 
   useEffect(() => {
+    mounted.current = true;
     void refresh();
-  }, []);
+    return () => {
+      mounted.current = false;
+      refreshVersion.current += 1;
+    };
+  }, [refresh]);
 
   // Follow the deep-link: opening Memory from a project scopes to it; opening
   // it from the settings nav (filter cleared upstream) resets to all.
@@ -85,31 +105,32 @@ export function MemorySettingsSection({
     setScope(initialFolderFilter ?? SCOPE_ALL);
   }, [initialFolderFilter]);
 
-  async function refresh() {
-    try {
-      // Every memory — global and per-project — so this page is the one place
-      // to browse and prune all of them.
-      const [nextMemories, settings] = await Promise.all([
-        listMemories(undefined, true),
-        memorySettings(),
-      ]);
-      setMemories(sortNewestFirst(nextMemories));
-      setEnabled(settings.enabled);
-      setError(undefined);
-    } catch (caught) {
-      setError(messageFromError(caught));
-    } finally {
-      setLoaded(true);
-    }
+  function beginMutation() {
+    refreshVersion.current += 1;
+    const profile = getCurrentDataPartitionName();
+    return () => mounted.current && profile === getCurrentDataPartitionName();
+  }
+
+  function applyMutation(isCurrent: () => boolean, apply: () => void, reload = true) {
+    if (!isCurrent()) return;
+    // Invalidate reads that began both before and during persistence.
+    refreshVersion.current += 1;
+    apply();
+    // One authoritative reload after the accepted transition also retains
+    // unrelated native changes whose earlier snapshots were invalidated.
+    if (reload) void refresh();
   }
 
   async function toggleEnabled(next: boolean) {
     if (savingEnabled) return;
     setSavingEnabled(true);
+    const isCurrent = beginMutation();
     try {
       const settings = await setMemoryEnabled(next);
-      setEnabled(settings.enabled);
-      setError(undefined);
+      applyMutation(isCurrent, () => {
+        setEnabled(settings.enabled);
+        setError(undefined);
+      });
     } catch (caught) {
       // The Tauri command deliberately does not roll back the authoritative setting
       // when native-runtime enforcement or restart fails. Re-read it so the
@@ -117,37 +138,46 @@ export function MemorySettingsSection({
       // the persisted write gate already enforces the opposite choice.
       try {
         const settings = await memorySettings();
-        setEnabled(settings.enabled);
+        applyMutation(isCurrent, () => setEnabled(settings.enabled), false);
       } catch {
         // Keep the last confirmed state if even the authoritative read fails;
         // the original enforcement error remains the actionable message.
       }
       console.warn("Failed to finish applying the Memory setting", caught);
-      setError(t("settingsPanels.memory.toggleError"));
+      if (isCurrent()) setError(t("settingsPanels.memory.toggleError"));
     } finally {
-      setSavingEnabled(false);
+      if (isCurrent()) setSavingEnabled(false);
     }
   }
 
   async function addMemory(content: string, folderId?: string) {
+    const isCurrent = beginMutation();
     const created = await createMemory({ content, folderId, source: "user" });
-    setMemories((current) => sortNewestFirst([created, ...current]));
+    applyMutation(isCurrent, () =>
+      setMemories((current) => sortNewestFirst([created, ...current])),
+    );
   }
 
   async function editMemory(id: string, content: string) {
+    const isCurrent = beginMutation();
     const updated = await updateMemory(id, content);
-    setMemories((current) =>
-      sortNewestFirst(current.map((memory) => (memory.id === updated.id ? updated : memory))),
+    applyMutation(isCurrent, () =>
+      setMemories((current) =>
+        sortNewestFirst(current.map((memory) => (memory.id === updated.id ? updated : memory))),
+      ),
     );
   }
 
   async function removeMemory(id: string) {
+    const isCurrent = beginMutation();
     try {
       await deleteMemory(id);
-      setMemories((current) => current.filter((memory) => memory.id !== id));
-      setError(undefined);
+      applyMutation(isCurrent, () => {
+        setMemories((current) => current.filter((memory) => memory.id !== id));
+        setError(undefined);
+      });
     } catch (caught) {
-      setError(messageFromError(caught));
+      if (isCurrent()) setError(messageFromError(caught));
       throw caught;
     }
   }

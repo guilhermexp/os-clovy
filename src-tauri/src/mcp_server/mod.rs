@@ -431,6 +431,7 @@ mod bound_profile_tests {
             sqlx::query::query(sql).execute(&pool).await.unwrap();
         }
         let mut binding = turns::TurnBinding {
+            authority: crate::domain::turn_authority::TurnAuthority::new(),
             session_id: "a".into(),
             run_id: "ra".into(),
             cli: crate::llm::cli::CliKind::Claude,

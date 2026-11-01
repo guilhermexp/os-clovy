@@ -36,6 +36,20 @@ struct ListNotesCursor {
 #[derive(Clone)]
 pub struct Repositories {
     pub pool: SqlitePool,
+    #[cfg(test)]
+    memory_write_observer: Option<MemoryWriteObserver>,
+}
+
+#[cfg(test)]
+type MemoryWriteObserver = std::sync::Arc<
+    dyn Fn(MemoryWriteBoundary) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryWriteBoundary {
+    BeforeDeleteTransaction,
+    BeforeDeleteCommit,
 }
 
 #[derive(Debug, Clone)]
@@ -191,7 +205,30 @@ pub struct BrowserOutcomeCounts {
 
 impl Repositories {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            #[cfg(test)]
+            memory_write_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_memory_writes(
+        mut self,
+        observer: impl Fn(MemoryWriteBoundary) -> futures_util::future::BoxFuture<'static, ()>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.memory_write_observer = Some(std::sync::Arc::new(observer));
+        self
+    }
+
+    #[cfg(test)]
+    async fn memory_write_boundary(&self, boundary: MemoryWriteBoundary) {
+        if let Some(observer) = &self.memory_write_observer {
+            observer(boundary).await;
+        }
     }
 
     pub async fn declare_browser_action(
@@ -1480,11 +1517,11 @@ impl Repositories {
         folder_id: Option<&str>,
         content: &str,
         source: &str,
-        turn: Option<(&str, &str)>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<MemoryDto, AppError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some((session, run)) = turn {
-            guard_bound_turn(&mut tx, profile, session, run).await?;
+        if let Some((session, run, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
         }
         let now = timestamp();
         let memory = MemoryDto {
@@ -1559,11 +1596,11 @@ impl Repositories {
         profile: &str,
         id: &str,
         content: &str,
-        turn: Option<(&str, &str)>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<MemoryDto, AppError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some((session, run)) = turn {
-            guard_bound_turn(&mut tx, profile, session, run).await?;
+        if let Some((session, run, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
         }
         let result = query(
             "UPDATE memories
@@ -1657,7 +1694,7 @@ impl Repositories {
         &self,
         profile: &str,
         id: &str,
-        turn: Option<(&str, &str)>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<(), AppError> {
         self.delete_memory_inner(profile, id, true, turn).await
     }
@@ -1667,8 +1704,11 @@ impl Repositories {
         profile: &str,
         id: &str,
         enforce_project_gate: bool,
-        turn: Option<(&str, &str)>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteTransaction)
+            .await;
         let mut tx = if enforce_project_gate {
             // Reserve the writer before reading the project. No concurrent
             // toggle can commit between this validation and the DELETE.
@@ -1676,8 +1716,8 @@ impl Repositories {
         } else {
             self.pool.begin().await?
         };
-        if let Some((session, run)) = turn {
-            guard_bound_turn(&mut tx, profile, session, run).await?;
+        if let Some((session, run, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
         }
         if enforce_project_gate {
             let row = query(
@@ -1719,6 +1759,9 @@ impl Repositories {
             .bind(timestamp())
             .execute(&mut *tx)
             .await?;
+        #[cfg(test)]
+        self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteCommit)
+            .await;
         tx.commit().await?;
         Ok(())
     }
@@ -1738,13 +1781,13 @@ impl Repositories {
         &self,
         profile: &str,
         folder_id: Option<&str>,
-        turn: Option<(&str, &str)>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<NoteDto, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = timestamp();
         let mut tx = self.pool.begin().await?;
-        if let Some((session_id, run_id)) = turn {
-            guard_bound_turn(&mut tx, profile, session_id, run_id).await?;
+        if let Some((session_id, run_id, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
         }
         if let Some(folder_id) = folder_id {
             let claimed = query(
@@ -2691,11 +2734,11 @@ impl Repositories {
         expected_revision: i64,
         title: Option<&str>,
         content: Option<&str>,
-        turn: Option<(&str, &str)>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<NoteDto, AppError> {
         let mut tx = self.pool.begin().await?;
-        if let Some((session_id, run_id)) = turn {
-            guard_bound_turn(&mut tx, profile, session_id, run_id).await?;
+        if let Some((session_id, run_id, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
         }
         let updated = query("UPDATE notes SET title = COALESCE(?, title), edited_content = COALESCE(?, edited_content), updated_at = ?, revision = revision + 1 WHERE id = ? AND profile = ? AND revision = ?")
             .bind(title).bind(content).bind(timestamp()).bind(note_id).bind(profile).bind(expected_revision)
@@ -2836,11 +2879,11 @@ impl Repositories {
         &self,
         profile: &str,
         note_id: &str,
-        turn: Option<(&str, &str)>,
+        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
     ) -> Result<Vec<String>, AppError> {
         let mut tx = self.pool.begin().await?;
-        if let Some((session_id, run_id)) = turn {
-            guard_bound_turn(&mut tx, profile, session_id, run_id).await?;
+        if let Some((session_id, run_id, authority)) = turn {
+            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
         }
         // Acquire the write lock before checking ownership and collecting paths.
         let claimed = query("UPDATE notes SET id = id WHERE id = ? AND profile = ?")
@@ -5342,11 +5385,16 @@ pub(crate) async fn guard_bound_turn(
     profile: &str,
     session_id: &str,
     run_id: &str,
+    authority: &crate::domain::turn_authority::TurnAuthority,
 ) -> Result<(), AppError> {
     // A write statement acquires SQLite's write lock before the effect. Stop,
     // partition reassignment, and this mutation therefore have a serial order.
     let claimed = query("UPDATE agent_runs SET id = id WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user') AND EXISTS (SELECT 1 FROM agent_sessions s LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ? AND COALESCE(p.profile, 'default') = ?)")
         .bind(run_id).bind(session_id).bind(session_id).bind(profile).execute(&mut **tx).await?.rows_affected();
+    // The database may still say running while natural turn teardown has
+    // already revoked its token. Check the live host capability only after
+    // the writer wait, before any domain mutation is admitted.
+    authority.check_live()?;
     if claimed == 0 {
         return Err(AppError::new(
             "turn_expired",

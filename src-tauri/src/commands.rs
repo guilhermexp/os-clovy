@@ -769,7 +769,7 @@ pub(crate) async fn create_memory_with_settings_for_turn(
     folder_id: Option<&str>,
     content: &str,
     source: &str,
-    turn: Option<(&str, &str)>,
+    turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<MemoryDto, AppError> {
     // Every write path (Tauri command AND the loopback proxy) takes the
     // settings lock across the enabled check and the insert, so a save that
@@ -807,7 +807,7 @@ pub(crate) async fn forget_memory_with_settings_for_turn(
     settings_path: &Path,
     profile: &str,
     id: &str,
-    turn: Option<(&str, &str)>,
+    turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<(), AppError> {
     if turn.is_none() {
         return forget_memory_with_settings(repos, settings_path, profile, id).await;
@@ -833,7 +833,7 @@ pub(crate) async fn update_memory_with_settings_for_turn(
     profile: &str,
     id: &str,
     content: &str,
-    turn: Option<(&str, &str)>,
+    turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<MemoryDto, AppError> {
     // Same lock discipline as create: check + write under the settings lock.
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
@@ -868,7 +868,7 @@ mod memory_bound_write_tests {
             "default",
             &memory.id,
             "Changed",
-            Some((&binding.session_id, &binding.run_id)),
+            Some((&binding.session_id, &binding.run_id, &binding.authority)),
         );
         tokio::pin!(write);
         assert!(futures_util::poll!(write.as_mut()).is_pending());
@@ -891,7 +891,7 @@ mod memory_bound_write_tests {
                 None,
                 "Denied",
                 "agent",
-                Some((&binding.session_id, &binding.run_id))
+                Some((&binding.session_id, &binding.run_id, &binding.authority))
             )
             .await
             .unwrap_err()
@@ -904,7 +904,7 @@ mod memory_bound_write_tests {
                 &path,
                 "default",
                 &memory.id,
-                Some((&binding.session_id, &binding.run_id))
+                Some((&binding.session_id, &binding.run_id, &binding.authority))
             )
             .await
             .unwrap_err()
@@ -1654,26 +1654,32 @@ async fn start_recording_inner(
     let capture_request_id = request.agent_request_id.clone();
     let capture_profile = request.expected_profile.clone();
     let calendar_app = app.clone();
+    let authorization: Option<crate::audio::capture::CaptureStartAuthorization> =
+        authorized_start.as_ref().map(|binding| {
+            let authority = binding.authority.clone();
+            let app = app.clone();
+            let request_id = capture_request_id.clone();
+            let profile = capture_profile.clone();
+            let note_id = capture_note_id.clone();
+            Arc::new(move || {
+                authority.check_live()?;
+                app.state::<crate::agent_recorder::AgentRecorderBroker>()
+                    .validate_target(
+                        request_id.as_deref().unwrap_or_default(),
+                        profile.as_deref().unwrap_or_default(),
+                        &note_id,
+                    )
+            }) as crate::audio::capture::CaptureStartAuthorization
+        });
     let started = start_capture_with_timeout(move |abandoned| {
-        if let Some(binding) = authorized_start.as_ref() {
-            if !app
-                .state::<crate::mcp_server::McpServerState>()
-                .turns()
-                .contains_binding(binding)
-            {
-                return Err(AppError::new(
-                    "turn_expired",
-                    "The recording's chat turn was revoked.",
-                ));
-            }
-            app.state::<crate::agent_recorder::AgentRecorderBroker>()
-                .validate_target(
-                    capture_request_id.as_deref().unwrap_or_default(),
-                    capture_profile.as_deref().unwrap_or_default(),
-                    &capture_note_id,
-                )?;
-        }
-        start_capture_with_cancel(app, &capture_paths, capture_note_id, source_mode, abandoned)
+        start_capture_with_cancel(
+            app,
+            &capture_paths,
+            capture_note_id,
+            source_mode,
+            abandoned,
+            authorization,
+        )
     })
     .await?;
     let mut startup_guard = CaptureStartupGuard::new(&paths, &started);
@@ -2896,10 +2902,26 @@ async fn retry_processing_from(
         )
         .await?;
     }
+    let accepted_binding = if let Some(request_id) = request.agent_request_id.as_deref() {
+        Some(
+            app.state::<crate::agent_recorder::AgentRecorderBroker>()
+                .saved_authorization(
+                    request_id,
+                    request.expected_profile.as_deref().unwrap_or_default(),
+                    &request.note_id,
+                    request.recording_session_id.as_deref().unwrap_or_default(),
+                    crate::agent_recorder::AgentRecorderAction::Retry,
+                    None,
+                )?,
+        )
+    } else {
+        None
+    };
     let (ticket, _depth) = processing_queue::enqueue(&request.note_id);
     // Show the retry at once, but only on a note that is still failed: never
     // over a ready note, and a resume's claim already did it for the resume.
-    let marked_by_this_run = origin == RetryOrigin::Manual
+    let marked_by_this_run = accepted_binding.is_none()
+        && origin == RetryOrigin::Manual
         && repos
             .mark_failed_note_transcribing(&request.note_id)
             .await?;
@@ -2921,19 +2943,48 @@ async fn retry_processing_from(
         .recording_session_source_mode(&task_recording_session_id)
         .await?
         .unwrap_or(RecordingSourceMode::MicrophoneOnly);
+    if let Some(binding) = accepted_binding.as_ref() {
+        authorize_queued_audio(
+            &repos.pool,
+            binding,
+            request.expected_profile.as_deref().unwrap_or_default(),
+            &task_note_id,
+            &task_recording_session_id,
+        )
+        .await?;
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_request(request.agent_request_id.as_deref().unwrap_or_default())?;
+    }
     let progress = note_processing_progress_reporter(&app);
     let task_profile = request.expected_profile.clone();
     tokio::spawn(async move {
         let queue_lock = ticket.lock();
         let _guard = queue_lock.lock().await;
+        if let Some(binding) = accepted_binding.as_ref() {
+            if authorize_queued_audio(
+                &task_repos.pool,
+                binding,
+                task_profile.as_deref().unwrap_or_default(),
+                &task_note_id,
+                &task_recording_session_id,
+            )
+            .await
+            .is_err()
+            {
+                ticket.finish();
+                return;
+            }
+        }
         let timing = ProcessingTiming::untracked();
-        add_latency_checkpoint(
-            &task_repos,
-            &task_recording_session_id,
-            "processing_dequeued",
-            timing.checkpoint_details(serde_json::json!({})),
-        )
-        .await;
+        if accepted_binding.is_none() {
+            add_latency_checkpoint(
+                &task_repos,
+                &task_recording_session_id,
+                "processing_dequeued",
+                timing.checkpoint_details(serde_json::json!({})),
+            )
+            .await;
+        }
         let note = match task_repos
             .get_note_with_profile(&task_note_id, task_profile.as_deref())
             .await
@@ -2980,7 +3031,7 @@ async fn retry_processing_from(
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
-        let result = process_saved_source_audio_with_progress(
+        let effect = process_saved_source_audio_with_progress(
             &task_repos,
             &task_note_id,
             &task_recording_session_id,
@@ -2996,14 +3047,68 @@ async fn retry_processing_from(
             manual_notes,
             timing,
             progress.clone(),
-        )
-        .await;
+        );
+        let result = if let Some(binding) = accepted_binding.as_ref() {
+            run_authorized_queued_audio(
+                &task_repos.pool,
+                binding,
+                task_profile.as_deref().unwrap_or_default(),
+                &task_note_id,
+                &task_recording_session_id,
+                effect,
+            )
+            .await
+        } else {
+            effect.await
+        };
         ticket.finish();
         if let Err(error) = &result {
             schedule_rate_limited_resume(&task_note_id, &task_recording_session_id, error);
         }
     });
     Ok(note)
+}
+
+/// Admission after a processing-queue wait. The cloned host authority stays
+/// meaningful after the one-shot UI request is consumed, but not after Stop.
+pub(crate) async fn run_authorized_queued_audio<T>(
+    pool: &sqlx_sqlite::SqlitePool,
+    binding: &crate::mcp_server::turns::TurnBinding,
+    profile: &str,
+    note_id: &str,
+    session_id: &str,
+    effect: impl std::future::Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    authorize_queued_audio(pool, binding, profile, note_id, session_id).await?;
+    effect.await
+}
+
+pub(crate) async fn authorize_queued_audio(
+    pool: &sqlx_sqlite::SqlitePool,
+    binding: &crate::mcp_server::turns::TurnBinding,
+    profile: &str,
+    note_id: &str,
+    session_id: &str,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    crate::db::repositories::guard_bound_turn(
+        &mut tx,
+        profile,
+        &binding.session_id,
+        &binding.run_id,
+        &binding.authority,
+    )
+    .await?;
+    let owns:i64=sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions r JOIN notes n ON n.id=r.note_id WHERE r.id=? AND n.id=? AND n.profile=?").bind(session_id).bind(note_id).bind(profile).fetch_one(&mut *tx).await?;
+    if owns != 1 {
+        return Err(AppError::new(
+            "recording_not_found",
+            "The queued recording target no longer belongs to the authorized data partition.",
+        ));
+    }
+    binding.authority.check_live()?;
+    tx.commit().await?;
+    binding.authority.check_live()
 }
 
 pub(crate) async fn queued_retry_target_exists(
@@ -3418,32 +3523,36 @@ async fn process_recovered_source_audio(
     let (ticket, _depth) = processing_queue::enqueue(note_id);
     let queue_lock = ticket.lock();
     let _guard = queue_lock.lock().await;
-    let note = match repos.get_note(note_id).await {
+    let dequeue_binding = if let Some((request_id, profile)) = authorization {
+        let binding = app
+            .state::<crate::agent_recorder::AgentRecorderBroker>()
+            .saved_authorization(
+                request_id,
+                profile,
+                note_id,
+                session_id,
+                crate::agent_recorder::AgentRecorderAction::Recover,
+                Some(crate::agent_recorder::RecordingRecoveryAction::Validate),
+            )?;
+        authorize_queued_audio(&repos.pool, &binding, profile, note_id, session_id).await?;
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_request(request_id)?;
+        Some(binding)
+    } else {
+        None
+    };
+    let note = match repos
+        .get_note_with_profile(note_id, authorization.map(|(_, profile)| profile))
+        .await
+    {
         Ok(note) => note,
         Err(error) => {
             ticket.finish();
             return Err(error.into());
         }
     };
-    if let Some((request_id, profile)) = authorization {
-        if let Err(error) = revalidate_saved_recorder_request(
-            app,
-            repos,
-            Some(request_id),
-            Some(profile),
-            note_id,
-            session_id,
-            crate::agent_recorder::AgentRecorderAction::Recover,
-            Some(crate::agent_recorder::RecordingRecoveryAction::Validate),
-        )
-        .await
-        {
-            repos.set_note_status(note_id,ProcessingStatus::Failed,Some("The recovery request was cancelled before processing. Saved audio is available for retry.".into())).await?;
-            return Err(error);
-        }
-    }
     let result = {
-        let processing = process_saved_source_audio_with_progress(
+        let effect = process_saved_source_audio_with_progress(
             repos,
             note_id,
             session_id,
@@ -3455,6 +3564,25 @@ async fn process_recovered_source_audio(
             ProcessingTiming::untracked(),
             progress.clone(),
         );
+        let processing = async {
+            if let (Some(binding), Some((request_id, profile))) =
+                (dequeue_binding.as_ref(), authorization)
+            {
+                app.state::<crate::agent_recorder::AgentRecorderBroker>()
+                    .validate_request(request_id)?;
+                run_authorized_queued_audio(
+                    &repos.pool,
+                    binding,
+                    profile,
+                    note_id,
+                    session_id,
+                    effect,
+                )
+                .await
+            } else {
+                effect.await
+            }
+        };
         tokio::pin!(processing);
         loop {
             tokio::select! {
@@ -3467,23 +3595,6 @@ async fn process_recovered_source_audio(
             }
         }
     };
-    if let Err(error) = &result {
-        if matches!(
-            error.code.as_str(),
-            "turn_expired" | "agent_recorder_request_not_found"
-        ) {
-            repos
-                .set_note_status(
-                    note_id,
-                    ProcessingStatus::Failed,
-                    Some(
-                        "The recovery request was cancelled. Saved audio is available for retry."
-                            .into(),
-                    ),
-                )
-                .await?;
-        }
-    }
     ticket.finish();
     if let Err(error) = &result {
         schedule_rate_limited_resume(note_id, session_id, error);
@@ -4775,5 +4886,169 @@ mod agent_retry_partition_tests {
         )
         .await
         .unwrap());
+    }
+}
+
+#[cfg(test)]
+mod queued_audio_authority_tests {
+    use super::{authorize_queued_audio, run_authorized_queued_audio};
+    use crate::{
+        domain::{processing_queue, turn_authority::TurnAuthority, types::AppError},
+        mcp_server::turns::TurnBinding,
+    };
+    use sqlx::query::query;
+    use sqlx_sqlite::SqlitePool;
+
+    async fn fixture() -> (SqlitePool, TurnBinding, String) {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for statement in [
+            "CREATE TABLE agent_sessions(id TEXT PRIMARY KEY)",
+            "CREATE TABLE agent_runs(id TEXT PRIMARY KEY,session_id TEXT,status TEXT)",
+            "CREATE TABLE session_profiles(session_id TEXT,profile TEXT)",
+            "CREATE TABLE notes(id TEXT PRIMARY KEY,profile TEXT,processing_status TEXT,content TEXT,revision INTEGER,updated_at TEXT)",
+            "CREATE TABLE recording_sessions(id TEXT PRIMARY KEY,note_id TEXT)",
+            "CREATE TABLE effects(id INTEGER)",
+            "INSERT INTO agent_sessions VALUES('conversation')",
+            "INSERT INTO agent_runs VALUES('run','conversation','running')",
+            "INSERT INTO session_profiles VALUES('conversation','owner')",
+        ] { query(statement).execute(&pool).await.unwrap(); }
+        let note = uuid::Uuid::new_v4().to_string();
+        query("INSERT INTO notes VALUES(?,'owner','ready','completed by A',7,'time-A')")
+            .bind(&note)
+            .execute(&pool)
+            .await
+            .unwrap();
+        query("INSERT INTO recording_sessions VALUES('capture',?)")
+            .bind(&note)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let binding = TurnBinding {
+            authority: TurnAuthority::new(),
+            session_id: "conversation".into(),
+            run_id: "run".into(),
+            cli: crate::llm::cli::CliKind::Claude,
+            safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
+            attended: true,
+            surface: "chat".into(),
+        };
+        (pool, binding, note)
+    }
+
+    // This future performs actual SQLite effects. Production retry and recovery
+    // pass their lazy processing future through the same admission function.
+    async fn effect(pool: &SqlitePool, note: &str) -> Result<(), AppError> {
+        query("INSERT INTO effects VALUES(1)").execute(pool).await?;
+        query("UPDATE notes SET processing_status='transcribing',content='B',revision=8,updated_at='time-B' WHERE id=?").bind(note).execute(pool).await?;
+        Ok(())
+    }
+
+    async fn queued_case(revoke: bool, foreign: bool) {
+        let (pool, binding, note) = fixture().await;
+        let (first, _) = processing_queue::enqueue(&note);
+        let queue_lock = first.lock();
+        let held = queue_lock.lock().await;
+        let (second, _) = processing_queue::enqueue(&note);
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let task = {
+            let pool = pool.clone();
+            let binding = binding.clone();
+            let note = note.clone();
+            tokio::spawn(async move {
+                let lock = second.lock();
+                waiting_tx.send(()).unwrap();
+                let _held = lock.lock().await;
+                let result = run_authorized_queued_audio(
+                    &pool,
+                    &binding,
+                    "owner",
+                    &note,
+                    "capture",
+                    effect(&pool, &note),
+                )
+                .await;
+                second.finish();
+                result
+            })
+        };
+        waiting_rx.await.unwrap();
+        if foreign {
+            query("UPDATE notes SET profile='foreign' WHERE id=?")
+                .bind(&note)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        if revoke {
+            binding.authority.revoke();
+        }
+        first.finish();
+        drop(held);
+        let result = task.await.unwrap();
+        if revoke || foreign {
+            assert_eq!(
+                result.unwrap_err().code,
+                if revoke {
+                    "turn_expired"
+                } else {
+                    "recording_not_found"
+                }
+            );
+            let snapshot:(String,String,i64,String,String)=sqlx::query_as::query_as("SELECT processing_status,content,revision,updated_at,profile FROM notes WHERE id=?").bind(&note).fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                snapshot,
+                (
+                    "ready".into(),
+                    "completed by A".into(),
+                    7,
+                    "time-A".into(),
+                    if foreign { "foreign" } else { "owner" }.into()
+                )
+            );
+        } else {
+            result.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM effects")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, if revoke || foreign { 0 } else { 1 });
+        // Revocation is independent of terminal DB status: the run is still running.
+        let status: String = sqlx::query_scalar::query_scalar("SELECT status FROM agent_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+    #[tokio::test]
+    async fn stopped_retry_or_recovery_dequeues_without_effect_or_overwriting_ready_result() {
+        queued_case(true, false).await;
+    }
+    #[tokio::test]
+    async fn foreign_recovery_target_remains_untouched_after_dequeue() {
+        queued_case(false, true).await;
+    }
+    #[tokio::test]
+    async fn stopped_foreign_recovery_preserves_all_prior_result_metadata() {
+        queued_case(true, true).await;
+    }
+    #[tokio::test]
+    async fn live_retry_authority_admits_one_effect_after_queue() {
+        queued_case(false, false).await;
+    }
+    #[tokio::test]
+    async fn durable_cancelled_database_status_denies_even_with_live_capability() {
+        let (pool, binding, note) = fixture().await;
+        query("UPDATE agent_runs SET status='cancelled'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize_queued_audio(&pool, &binding, "owner", &note, "capture")
+                .await
+                .unwrap_err()
+                .code,
+            "turn_expired"
+        );
     }
 }

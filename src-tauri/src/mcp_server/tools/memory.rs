@@ -54,6 +54,19 @@ pub(super) async fn call_with_settings(
     arguments: &Value,
     settings_path: &Path,
 ) -> Result<Value, AppError> {
+    let repos = Repositories::new(ctx.data.notes.clone());
+    call_with_repositories(ctx, name, arguments, settings_path, &repos).await
+}
+
+/// The same MCP admission path with an explicit repository, so tests can pause
+/// real persistence boundaries without replacing approval or turn validation.
+pub(super) async fn call_with_repositories(
+    ctx: &ToolCtx<'_>,
+    name: &str,
+    arguments: &Value,
+    settings_path: &Path,
+    repos: &Repositories,
+) -> Result<Value, AppError> {
     let binding = ctx
         .binding
         .ok_or_else(|| AppError::new(TURN_REQUIRED, "Memory writes require a Clovy turn."))?;
@@ -117,17 +130,16 @@ pub(super) async fn call_with_settings(
     // Settings or project membership may change while the card waits.
     ensure_enabled(ctx, settings_path).await?;
     check_scope(ctx, project_id, id).await?;
-    let repos = Repositories::new(ctx.data.notes.clone());
     let result = match name {
         "save_memory" => {
             let memory = crate::commands::create_memory_with_settings_for_turn(
-                &repos,
+                repos,
                 settings_path,
                 &ctx.data.profile,
                 project_id,
                 content.unwrap_or_default(),
                 "agent",
-                Some((&binding.session_id, &binding.run_id)),
+                Some((&binding.session_id, &binding.run_id, &binding.authority)),
             )
             .await?;
             serde_json::to_value(memory)
@@ -135,12 +147,12 @@ pub(super) async fn call_with_settings(
         }
         "update_memory" => {
             let memory = crate::commands::update_memory_with_settings_for_turn(
-                &repos,
+                repos,
                 settings_path,
                 &ctx.data.profile,
                 id.unwrap_or_default(),
                 content.unwrap_or_default(),
-                Some((&binding.session_id, &binding.run_id)),
+                Some((&binding.session_id, &binding.run_id, &binding.authority)),
             )
             .await?;
             serde_json::to_value(memory)
@@ -149,11 +161,11 @@ pub(super) async fn call_with_settings(
         "forget_memory" => {
             let id = id.unwrap_or_default();
             crate::commands::forget_memory_with_settings_for_turn(
-                &repos,
+                repos,
                 settings_path,
                 &ctx.data.profile,
                 id,
-                Some((&binding.session_id, &binding.run_id)),
+                Some((&binding.session_id, &binding.run_id, &binding.authority)),
             )
             .await?;
             Ok(json!({"forgotten":true,"id":id}))

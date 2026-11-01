@@ -464,6 +464,7 @@ mod lifecycle_tests {
     fn target() -> AgentRecorderTarget {
         AgentRecorderTarget {
             binding: Some(crate::mcp_server::turns::TurnBinding {
+                authority: crate::domain::turn_authority::TurnAuthority::new(),
                 session_id: "conversation-a".into(),
                 run_id: "run-a".into(),
                 cli: crate::llm::cli::CliKind::Claude,

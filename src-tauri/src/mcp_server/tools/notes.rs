@@ -262,7 +262,7 @@ async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<V
                 .create_note_checked(
                     &profile,
                     project,
-                    Some((&binding.session_id, &binding.run_id)),
+                    Some((&binding.session_id, &binding.run_id, &binding.authority)),
                 )
                 .await?,
         )
@@ -275,7 +275,7 @@ async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<V
                     revision.unwrap_or_default(),
                     args.get("title").and_then(Value::as_str),
                     args.get("content").and_then(Value::as_str),
-                    Some((&binding.session_id, &binding.run_id)),
+                    Some((&binding.session_id, &binding.run_id, &binding.authority)),
                 )
                 .await?,
         )
@@ -292,7 +292,7 @@ async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<V
                 .delete_note_in_profile(
                     &profile,
                     id.unwrap_or_default(),
-                    Some((&binding.session_id, &binding.run_id)),
+                    Some((&binding.session_id, &binding.run_id, &binding.authority)),
                 )
                 .await?;
             let mut cleanup_failures = 0;

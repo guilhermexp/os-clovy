@@ -1109,6 +1109,64 @@ describe("NoteEditor", () => {
     expect(onFlushNote).toHaveBeenCalledWith("note-1");
   });
 
+  it("keeps an external replacement on clean focused blur without saving the old snapshot", async () => {
+    const user = userEvent.setup();
+    const onContentChange = vi.fn();
+    const onFlushNote = vi.fn();
+    const { rerender } = render(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Old ready body" })}
+        onContentChange={onContentChange}
+        onFlushNote={onFlushNote}
+      />,
+    );
+    const editor = screen.getByRole("textbox", { name: "Generated note" });
+    await user.click(editor);
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Approved replacement" })}
+        onContentChange={onContentChange}
+        onFlushNote={onFlushNote}
+      />,
+    );
+    fireEvent.blur(editor);
+    await waitFor(() => expect(editor).toHaveTextContent("Approved replacement"));
+    expect(onContentChange).not.toHaveBeenCalled();
+    expect(onFlushNote).toHaveBeenCalledWith("note-1");
+  });
+
+  it("preserves local typing and a concurrent external replacement on blur", async () => {
+    const user = userEvent.setup();
+    const onContentChange = vi.fn();
+    const { rerender } = render(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Old ready body" })}
+        onContentChange={onContentChange}
+      />,
+    );
+    const editor = screen.getByRole("textbox", { name: "Generated note" });
+    await user.click(editor);
+    const tiptap = (editor as HTMLElement & { editor?: Editor }).editor;
+    if (!tiptap) throw new Error("Expected mounted editor");
+    tiptap.commands.focus("end");
+    await user.keyboard(" local addition");
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({ generatedContent: "", editedContent: "Approved replacement" })}
+        onContentChange={onContentChange}
+      />,
+    );
+    fireEvent.blur(editor);
+    expect(onContentChange).toHaveBeenLastCalledWith(
+      "note-1",
+      "Old ready body local addition\n\nApproved replacement",
+    );
+  });
+
   it("keeps saved markdown stable for nested lists, code blocks, and Unicode", () => {
     const editorDom = document.createElement("div");
     editorDom.innerHTML = [

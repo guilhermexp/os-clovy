@@ -205,7 +205,12 @@ pub(super) async fn call_with_roots(
                     &typed_roots,
                     id,
                     content,
-                    (&ctx.data.profile, &binding.session_id, &binding.run_id),
+                    (
+                        &ctx.data.profile,
+                        &binding.session_id,
+                        &binding.run_id,
+                        &binding.authority,
+                    ),
                 )
                 .await?;
             } else {
@@ -214,7 +219,12 @@ pub(super) async fn call_with_roots(
                     &typed_roots,
                     id,
                     name == "enable_skill",
-                    Some((&ctx.data.profile, &binding.session_id, &binding.run_id)),
+                    Some((
+                        &ctx.data.profile,
+                        &binding.session_id,
+                        &binding.run_id,
+                        &binding.authority,
+                    )),
                 )
                 .await?;
             }

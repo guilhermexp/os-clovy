@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   emit: vi.fn().mockResolvedValue(undefined),
   clovyPersona: vi.fn(),
   listAgentSkills: vi.fn(),
+  setAgentSkillEnabled: vi.fn(),
+  readAgentSkill: vi.fn(),
+  updateAgentSkill: vi.fn(),
   setClovyPersona: vi.fn(),
   listen: vi.fn(),
 }));
@@ -25,10 +28,10 @@ vi.mock("../lib/tauri", () => ({
   agentHudShow: mocks.agentHudShow,
   clovyPersona: mocks.clovyPersona,
   listAgentSkills: mocks.listAgentSkills,
-  readAgentSkill: vi.fn(),
-  setAgentSkillEnabled: vi.fn(),
+  readAgentSkill: mocks.readAgentSkill,
+  setAgentSkillEnabled: mocks.setAgentSkillEnabled,
   setClovyPersona: mocks.setClovyPersona,
-  updateAgentSkill: vi.fn(),
+  updateAgentSkill: mocks.updateAgentSkill,
 }));
 
 describe("AgentSettingsSection", () => {
@@ -49,6 +52,89 @@ describe("AgentSettingsSection", () => {
       schemaVersion: 1,
       ...request,
     }));
+  });
+
+  it("keeps a native disable refresh when the initial skill load returns late", async () => {
+    const oldLoad = deferred<(typeof skillFixture)[]>();
+    mocks.listAgentSkills
+      .mockReturnValueOnce(oldLoad.promise)
+      .mockResolvedValue([{ ...skillFixture, enabled: false, configuredEnabled: false }]);
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (name, callback) => {
+      if (name === "clovy-data-changed") changed = callback;
+      return () => {};
+    });
+    render(<AgentSettingsSection />);
+    act(() => changed?.({ payload: { profile: "default", kind: "skills" } }));
+    expect(await screen.findByRole("switch", { name: "Enable Research" })).not.toBeChecked();
+    await act(async () => oldLoad.resolve([skillFixture]));
+    expect(screen.getByRole("switch", { name: "Enable Research" })).not.toBeChecked();
+  });
+
+  it("keeps a local disable when an older event skill catalog resolves late", async () => {
+    let stored = skillFixture;
+    mocks.listAgentSkills.mockImplementation(async () => [stored]);
+    mocks.setAgentSkillEnabled.mockImplementation(async () => {
+      stored = { ...stored, enabled: false, configuredEnabled: false };
+      return stored;
+    });
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (name, callback) => {
+      if (name === "clovy-data-changed") changed = callback;
+      return () => {};
+    });
+    const user = userEvent.setup();
+    render(<AgentSettingsSection />);
+    await screen.findByRole("switch", { name: "Disable Research" });
+    const staleCatalog = deferred<(typeof skillFixture)[]>();
+    mocks.listAgentSkills.mockReturnValueOnce(staleCatalog.promise);
+    act(() => changed?.({ payload: { profile: "default", kind: "skills" } }));
+    await user.click(screen.getByRole("switch", { name: "Disable Research" }));
+    await screen.findByRole("switch", { name: "Enable Research" });
+    await act(async () => staleCatalog.resolve([skillFixture]));
+    expect(screen.getByRole("switch", { name: "Enable Research" })).not.toBeChecked();
+  });
+
+  it("persists off for a configured but unavailable skill and keeps a repaired skill inactive", async () => {
+    const unavailable = {
+      ...skillFixture,
+      enabled: false,
+      configuredEnabled: true,
+      readable: false,
+      description: "Unavailable skill: Skill content exceeds 512 KiB.",
+    };
+    let stored = unavailable;
+    mocks.listAgentSkills.mockImplementation(async () => [stored]);
+    mocks.setAgentSkillEnabled.mockImplementation(async (_id, configuredEnabled) => {
+      stored = { ...stored, configuredEnabled, enabled: configuredEnabled && stored.readable };
+      return stored;
+    });
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (name, callback) => {
+      if (name === "clovy-data-changed") changed = callback;
+      return () => {};
+    });
+    const user = userEvent.setup();
+    render(<AgentSettingsSection />);
+    expect(await screen.findByText(unavailable.description)).toBeInTheDocument();
+    const toggle = screen.getByRole("switch", { name: "Disable Research" });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await waitFor(() => expect(mocks.setAgentSkillEnabled).toHaveBeenCalledWith("research", false));
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "Enable Research" })).not.toBeChecked(),
+    );
+    stored = {
+      ...stored,
+      readable: true,
+      description: "Repaired instructions",
+      enabled: stored.configuredEnabled,
+    };
+    act(() => changed?.({ payload: { profile: "default", kind: "skills" } }));
+    await screen.findByText("Repaired instructions");
+    expect(screen.getByRole("switch", { name: "Enable Research" })).not.toBeChecked();
+    expect(stored.configuredEnabled).toBe(false);
+    expect(stored.enabled).toBe(false);
   });
 
   it("loads the current native personality into the Agent settings", async () => {
@@ -192,3 +278,14 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+const skillFixture = {
+  id: "research",
+  name: "Research",
+  description: "Research instructions",
+  source: "managed" as const,
+  enabled: true,
+  configuredEnabled: true,
+  readable: true,
+  editable: true,
+};

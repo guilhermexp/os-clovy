@@ -40,6 +40,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
   const pendingTerminalHydrationsRef = useRef(new Map<string, NoteProcessingProgressDto>());
   const terminalHydrationInFlightRef = useRef(new Map<string, Promise<void>>());
   const terminalHydrationRetryRef = useRef(new Map<string, number>());
+  const deletedNoteIdsRef = useRef(new Set<string>());
   const refreshCompletedNoteRef = useRef<(progress: NoteProcessingProgressDto) => Promise<void>>(
     async () => undefined,
   );
@@ -58,26 +59,38 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
     void listen<{ profile: string; kind: string; id?: string; deleted?: boolean }>(
       "clovy-data-changed",
       ({ payload }) => {
-        if (payload.kind !== "notes" || payload.profile !== getCurrentDataPartitionName()) return;
+        if (
+          !["notes", "projects"].includes(payload.kind) ||
+          payload.profile !== getCurrentDataPartitionName()
+        )
+          return;
+        const noteId = payload.kind === "notes" ? payload.id : undefined;
         const request = ++latestRequest;
-        if (payload.id) noteRequests.set(payload.id, request);
+        if (noteId) noteRequests.set(noteId, request);
         const isCurrent = () => !disposed && payload.profile === getCurrentDataPartitionName();
-        if (payload.id && payload.deleted) {
-          noteSaveController.discard(payload.id);
-          dispatch({ type: "noteDeleted", noteId: payload.id });
+        if (noteId && payload.deleted) {
+          deletedNoteIdsRef.current.add(noteId);
+          pendingTerminalHydrationsRef.current.delete(noteId);
+          activeNotesRef.current.delete(noteId);
+          const retry = terminalHydrationRetryRef.current.get(noteId);
+          if (retry !== undefined) window.clearTimeout(retry);
+          terminalHydrationRetryRef.current.delete(noteId);
+          noteSaveController.discard(noteId);
+          dispatch({ type: "noteDeleted", noteId });
         }
         void (async () => {
           try {
-            if (payload.id && !payload.deleted) {
-              await noteSaveController.flush(payload.id);
-              if (!isCurrent() || noteRequests.get(payload.id) !== request) return;
-              const editVersion = noteSaveController.getEditVersion(payload.id);
-              const note = await getNote(payload.id);
+            if (noteId && !payload.deleted && !deletedNoteIdsRef.current.has(noteId)) {
+              await noteSaveController.flush(noteId);
+              if (!isCurrent() || noteRequests.get(noteId) !== request) return;
+              const editVersion = noteSaveController.getEditVersion(noteId);
+              const note = await getNote(noteId);
               if (
                 isCurrent() &&
-                noteRequests.get(payload.id) === request &&
-                editVersion === noteSaveController.getEditVersion(payload.id) &&
-                !noteSaveController.hasPending(payload.id)
+                noteRequests.get(noteId) === request &&
+                !deletedNoteIdsRef.current.has(noteId) &&
+                editVersion === noteSaveController.getEditVersion(noteId) &&
+                !noteSaveController.hasPending(noteId)
               )
                 dispatch({ type: "noteUpdated", note });
             }
@@ -106,11 +119,15 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
                         noteSaveController.getEditVersion(note.id),
                   )
                   .map((note) => note.id),
-                deletedId: payload.deleted ? payload.id : undefined,
+                deletedId: payload.deleted ? noteId : undefined,
               });
             }
           } catch (error) {
-            if (isCurrent() && (!payload.id || noteRequests.get(payload.id) === request))
+            if (
+              isCurrent() &&
+              (!noteId ||
+                (!deletedNoteIdsRef.current.has(noteId) && noteRequests.get(noteId) === request))
+            )
               setError(messageFromError(error));
           }
         })();
@@ -130,7 +147,11 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
   }, [dispatch, noteSaveController, setError]);
 
   useEffect(() => {
-    activeNotesRef.current = new Map(activeProcessingNotes(notes).map((note) => [note.id, note]));
+    activeNotesRef.current = new Map(
+      activeProcessingNotes(notes)
+        .filter((note) => !deletedNoteIdsRef.current.has(note.id))
+        .map((note) => [note.id, note]),
+    );
   }, [notes]);
 
   useEffect(() => {
@@ -174,23 +195,40 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
 
   const refreshCompletedNote = useCallback(
     (progress: NoteProcessingProgressDto) => {
+      if (deletedNoteIdsRef.current.has(progress.noteId)) return Promise.resolve();
       const pending = terminalHydrationInFlightRef.current.get(progress.noteId);
       if (pending) return pending;
 
       let shouldRetry = false;
       const hydration = (async () => {
+        const profile = getCurrentDataPartitionName();
         try {
           // PR #917 made editor persistence asynchronous. Drain that note's
           // optimistic edits before hydrating the generated result so the done
           // snapshot cannot replace a newer local title or body.
           await noteSaveController.flush(progress.noteId);
+          if (
+            deletedNoteIdsRef.current.has(progress.noteId) ||
+            profile !== getCurrentDataPartitionName()
+          )
+            return;
+          const editVersion = noteSaveController.getEditVersion(progress.noteId);
           const note = await getNote(progress.noteId);
           const latest = pendingTerminalHydrationsRef.current.get(progress.noteId);
           if (
             disposedRef.current ||
+            deletedNoteIdsRef.current.has(progress.noteId) ||
+            profile !== getCurrentDataPartitionName() ||
             !latest ||
             progressIdentity(latest) !== progressIdentity(progress)
           ) {
+            return;
+          }
+          if (
+            editVersion !== noteSaveController.getEditVersion(progress.noteId) ||
+            noteSaveController.hasPending(progress.noteId)
+          ) {
+            shouldRetry = true;
             return;
           }
           if (note.updatedAt < progress.revision) {
@@ -200,6 +238,11 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
           dispatch({ type: "noteUpdated", note });
           clearTerminalHydration(progress);
         } catch (error) {
+          if (
+            deletedNoteIdsRef.current.has(progress.noteId) ||
+            profile !== getCurrentDataPartitionName()
+          )
+            return;
           shouldRetry = true;
           if (!disposedRef.current) setError(messageFromError(error));
         }
@@ -235,24 +278,42 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
 
   const reconcileNote = useCallback(
     (noteId: string) => {
+      if (deletedNoteIdsRef.current.has(noteId)) return Promise.resolve();
       const pending = reconcileInFlightRef.current.get(noteId);
       if (pending) return pending;
 
       const reconciliation = (async () => {
+        const profile = getCurrentDataPartitionName();
         try {
           // The safety path can race an editor save just like the done event.
           // Flush first so recovery never replaces a newer optimistic edit.
           await noteSaveController.flush(noteId);
+          if (deletedNoteIdsRef.current.has(noteId) || profile !== getCurrentDataPartitionName())
+            return;
+          const editVersion = noteSaveController.getEditVersion(noteId);
           const note = await getNote(noteId);
           const activeSnapshot = activeNotesRef.current.get(noteId);
-          if (disposedRef.current || !activeSnapshot) return;
+          if (
+            disposedRef.current ||
+            !activeSnapshot ||
+            deletedNoteIdsRef.current.has(noteId) ||
+            profile !== getCurrentDataPartitionName() ||
+            editVersion !== noteSaveController.getEditVersion(noteId) ||
+            noteSaveController.hasPending(noteId)
+          )
+            return;
           // The backstop detects a missed terminal event; it deliberately does
           // not restore progressive full-note hydration while processing.
           if (isActiveProcessingStatus(note.processingStatus)) return;
           if (note.updatedAt < activeSnapshot.updatedAt) return;
           dispatch({ type: "noteUpdated", note });
         } catch (error) {
-          if (!disposedRef.current) setError(messageFromError(error));
+          if (
+            !disposedRef.current &&
+            !deletedNoteIdsRef.current.has(noteId) &&
+            profile === getCurrentDataPartitionName()
+          )
+            setError(messageFromError(error));
         }
       })();
 
@@ -285,6 +346,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
 
     void listen<NoteProcessingProgressDto>(NOTE_PROCESSING_PROGRESS_EVENT, (event) => {
       const progress = event.payload;
+      if (deletedNoteIdsRef.current.has(progress.noteId)) return;
       dispatch({
         type: "noteProcessingStageChanged",
         noteId: progress.noteId,

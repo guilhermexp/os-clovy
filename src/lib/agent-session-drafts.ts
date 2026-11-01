@@ -58,6 +58,11 @@ export function clearPendingAgentSessionDraft(creationRequestId: string) {
   draftsByCreationRequestId.delete(creationRequestId);
 }
 
+/** Stored ids are never reused. Fence delayed list/hydration results after deletion. */
+export function isAgentSessionDeleted(storedSessionId: string): boolean {
+  return invalidatedStoredSessionIds.has(storedSessionId);
+}
+
 export function invalidateAgentSessionDraft(storedSessionId: string) {
   invalidatedStoredSessionIds.add(storedSessionId);
   draftsByStoredSessionId.delete(storedSessionId);

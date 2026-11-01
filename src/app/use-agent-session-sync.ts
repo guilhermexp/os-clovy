@@ -8,7 +8,7 @@ import {
 import { assignSessionToFolder, listAgentSessions } from "../lib/tauri";
 import { AGENT_SESSION_STATUS_EVENT, type AgentSessionStatusDetail } from "../lib/agent-events";
 import { getCurrentDataPartitionName } from "../lib/data-partition";
-import { invalidateAgentSessionDraft } from "../lib/agent-session-drafts";
+import { invalidateAgentSessionDraft, isAgentSessionDeleted } from "../lib/agent-session-drafts";
 import { updateMenuBarSessionStatus } from "./app-effects/menu-bar-session-status";
 import type { UseAgentSessionSyncDependencies } from "./use-agent-session-sync-types";
 
@@ -23,6 +23,9 @@ function nextSessionIds(next: ReadonlySet<string>) {
 export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencies) {
   const {
     activeViewRef,
+    activeAgentSessionIdRef,
+    tabsRef,
+    setTabs,
     agentMenuBarLastStatusRef,
     agentMenuBarSessionsRef,
     agentMenuBarWaitingSessionIdsRef,
@@ -50,9 +53,20 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
     void listen<{ profile: string; kind: string; id?: string; deleted?: boolean }>(
       "clovy-data-changed",
       ({ payload }) => {
-        if (payload.kind !== "conversations" || payload.profile !== getCurrentDataPartitionName())
+        if (
+          !["conversations", "projects"].includes(payload.kind) ||
+          payload.profile !== getCurrentDataPartitionName()
+        )
           return;
-        if (payload.deleted && payload.id) {
+        if (payload.kind === "conversations" && payload.deleted && payload.id) {
+          // Clear App's owner before child workspace listeners clear their own
+          // selection; otherwise the child's callback can erase the identity
+          // needed to retire this conversation's origin.
+          if (activeAgentSessionIdRef.current === payload.id) {
+            activeAgentSessionIdRef.current = undefined;
+            setActiveAgentSession(undefined);
+            setAgentOrigin(undefined);
+          }
           window.dispatchEvent(
             new CustomEvent(AGENT_DELETE_SESSION_EVENT, { detail: { sessionId: payload.id } }),
           );
@@ -65,7 +79,10 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
               request === latestRequest &&
               payload.profile === getCurrentDataPartitionName()
             )
-              commitAgentSessions(sessions, partitions);
+              commitAgentSessions(
+                sessions.filter((session) => !isAgentSessionDeleted(session.id)),
+                partitions,
+              );
           })
           .catch(() => {});
       },
@@ -85,14 +102,25 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
       void refreshSessionPartitions()
         .then((partitions) => {
           if (cancelled || request !== latestRequest) return;
-          commitAgentSessions(detail.sessions, partitions);
+          commitAgentSessions(
+            detail.sessions.filter((session) => !isAgentSessionDeleted(session.id)),
+            partitions,
+          );
         })
         .catch(() => {
           if (cancelled || request !== latestRequest) return;
-          commitAgentSessions(detail.sessions);
+          commitAgentSessions(
+            detail.sessions.filter((session) => !isAgentSessionDeleted(session.id)),
+          );
         });
-      if (activeViewRef.current === "agent") {
-        const selectedSessionId = detail.selectedSessionId;
+      if (
+        activeViewRef.current === "agent" &&
+        (!detail.selectedSessionId || !isAgentSessionDeleted(detail.selectedSessionId))
+      ) {
+        const selectedSessionId =
+          detail.selectedSessionId && !isAgentSessionDeleted(detail.selectedSessionId)
+            ? detail.selectedSessionId
+            : undefined;
         if (selectedSessionId) {
           setActiveAgentSessionId(selectedSessionId);
           setActiveAgentSessionSeed((current) =>
@@ -106,19 +134,24 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
       // session that gets selected; switching to a known session instead
       // abandons the intent.
       const pendingProject = pendingSessionProjectRef.current;
-      if (pendingProject && detail.selectedSessionId) {
+      if (
+        pendingProject &&
+        detail.selectedSessionId &&
+        !isAgentSessionDeleted(detail.selectedSessionId)
+      ) {
         pendingSessionProjectRef.current = null;
         const sessionId = detail.selectedSessionId;
         if (pendingProject.partition !== getCurrentDataPartitionName()) {
           setAgentOrigin(undefined);
         } else if (!pendingProject.knownSessionIds.has(sessionId)) {
           void assignSessionToFolder(sessionId, pendingProject.folderId)
-            .then(() =>
+            .then(() => {
+              if (isAgentSessionDeleted(sessionId)) return;
               setSessionFolders((prev) => ({
                 ...prev,
                 [sessionId]: [pendingProject.folderId],
-              })),
-            )
+              }));
+            })
             .catch(() => {});
         } else {
           // User switched to an existing session — abandon the pending
@@ -126,8 +159,12 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
           setAgentOrigin(undefined);
         }
       }
-      const nextWorkingSessionIds = new Set(detail.workingSessionIds);
-      const nextWaitingSessionIds = new Set(detail.waitingSessionIds ?? []);
+      const nextWorkingSessionIds = new Set(
+        detail.workingSessionIds.filter((id) => !isAgentSessionDeleted(id)),
+      );
+      const nextWaitingSessionIds = new Set(
+        (detail.waitingSessionIds ?? []).filter((id) => !isAgentSessionDeleted(id)),
+      );
       agentMenuBarWorkingSessionIdsRef.current = nextWorkingSessionIds;
       agentMenuBarWaitingSessionIdsRef.current = nextWaitingSessionIds;
       setAgentWorkingSessionIds(nextSessionIds(nextWorkingSessionIds));
@@ -137,7 +174,7 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
 
     function handleAgentStatusForMenuBar(event: Event) {
       const detail = (event as CustomEvent<AgentSessionStatusDetail>).detail;
-      if (!detail) return;
+      if (!detail || (detail.sessionId && isAgentSessionDeleted(detail.sessionId))) return;
       agentMenuBarLastStatusRef.current = detail;
       if (detail.sessionId) {
         updateMenuBarSessionStatus(detail.sessionId, detail.status, {
@@ -155,6 +192,31 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
       const storedSessionId = detail?.sessionId;
       if (!storedSessionId) return;
       invalidateAgentSessionDraft(storedSessionId);
+      latestRequest += 1;
+      if (activeAgentSessionIdRef.current === storedSessionId) {
+        activeAgentSessionIdRef.current = undefined;
+        setActiveAgentSession(undefined);
+        setAgentOrigin(undefined);
+      } else {
+        setActiveAgentSessionSeed((current) =>
+          current?.id === storedSessionId ? undefined : current,
+        );
+      }
+      const nextTabs = tabsRef.current.map((tab) =>
+        tab.nav.view === "agent" && tab.nav.agentSessionId === storedSessionId
+          ? { ...tab, nav: { view: "agent" as const } }
+          : tab,
+      );
+      if (nextTabs.some((tab, index) => tab !== tabsRef.current[index])) {
+        tabsRef.current = nextTabs;
+        setTabs(nextTabs);
+      }
+      setSessionFolders((current) => {
+        if (!(storedSessionId in current)) return current;
+        const next = { ...current };
+        delete next[storedSessionId];
+        return next;
+      });
       agentMenuBarSessionsRef.current = agentMenuBarSessionsRef.current.filter(
         (session) => session.id !== storedSessionId,
       );
@@ -176,5 +238,12 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
       window.removeEventListener(AGENT_SESSION_STATUS_EVENT, handleAgentStatusForMenuBar);
       window.removeEventListener(AGENT_DELETE_SESSION_EVENT, handleAgentSessionDeleted);
     };
-  }, [commitAgentSessions, publishAgentMenuBarState, refreshSessionPartitions]);
+  }, [
+    activeAgentSessionIdRef,
+    tabsRef,
+    setTabs,
+    commitAgentSessions,
+    publishAgentMenuBarState,
+    refreshSessionPartitions,
+  ]);
 }

@@ -123,6 +123,7 @@ import { useAgentAttentionNotifications } from "./use-agent-attention-notificati
 import { startAgentRunSettlementRelay } from "../lib/agent-run-settlement";
 
 import { useAgentSessionSync } from "./use-agent-session-sync";
+import { isAgentSessionDeleted } from "../lib/agent-session-drafts";
 
 import { useAgentMenuEvents } from "./use-agent-menu-events";
 
@@ -410,7 +411,9 @@ export function App() {
     (sessions: readonly AgentSessionDto[], partitions = sessionPartitionsRef.current) => {
       if (partitions === null) return [];
       const currentDataPartition = getCurrentDataPartitionName().trim() || currentDataPartitionName;
-      return filterAgentSessionsForDataPartition(sessions, partitions, currentDataPartition);
+      return filterAgentSessionsForDataPartition(sessions, partitions, currentDataPartition).filter(
+        (session) => !isAgentSessionDeleted(session.id),
+      );
     },
     [currentDataPartitionName],
   );
@@ -809,8 +812,9 @@ export function App() {
       // enter the normal retry path instead of escaping the effect synchronously.
       Promise.resolve()
         .then(() => Promise.all([listAgentSessions(), refreshSessionPartitions()]))
-        .then(([sessions, partitions]) => {
+        .then(([loadedSessions, partitions]) => {
           if (cancelled) return;
+          const sessions = loadedSessions.filter((session) => !isAgentSessionDeleted(session.id));
           commitAgentSessions(sessions, partitions);
           window.dispatchEvent(
             new CustomEvent<AgentSessionsHydratedDetail>(AGENT_SESSIONS_HYDRATED_EVENT, {
@@ -861,6 +865,9 @@ export function App() {
 
   useAgentSessionSync({
     activeViewRef,
+    activeAgentSessionIdRef,
+    tabsRef,
+    setTabs,
     agentMenuBarLastStatusRef,
     agentMenuBarSessionsRef,
     agentMenuBarWaitingSessionIdsRef,

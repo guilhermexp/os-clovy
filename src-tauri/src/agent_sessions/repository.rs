@@ -141,7 +141,12 @@ impl AgentRepository {
     pub(crate) async fn delete_session_for_turn(
         &self,
         id: &str,
-        turn: Option<(&str, &str, &str)>,
+        turn: Option<(
+            &str,
+            &str,
+            &str,
+            &crate::domain::turn_authority::TurnAuthority,
+        )>,
     ) -> Result<(), AppError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         Self::delete_session_in_transaction(&mut tx, id, turn).await?;
@@ -154,18 +159,24 @@ impl AgentRepository {
     pub(crate) async fn delete_session_in_transaction(
         tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
         id: &str,
-        turn: Option<(&str, &str, &str)>,
+        turn: Option<(
+            &str,
+            &str,
+            &str,
+            &crate::domain::turn_authority::TurnAuthority,
+        )>,
     ) -> Result<(), AppError> {
-        if let Some((profile, session_id, run_id)) = turn {
+        if let Some((profile, session_id, run_id, authority)) = turn {
             if id == session_id {
                 return Err(AppError::new(
                     "conversation_self_delete",
                     "A turn cannot delete its own conversation.",
                 ));
             }
-            crate::db::repositories::guard_bound_turn(tx, profile, session_id, run_id).await?;
+            crate::db::repositories::guard_bound_turn(tx, profile, session_id, run_id, authority)
+                .await?;
         }
-        let profile = turn.map(|(profile, _, _)| profile);
+        let profile = turn.map(|(profile, _, _, _)| profile);
         // Acquire the writer even when the supplied transaction was deferred.
         // A concurrent run INSERT is wholly before or after this admission.
         let claimed = query("UPDATE agent_sessions SET id=id WHERE id=? AND (? IS NULL OR COALESCE((SELECT profile FROM session_profiles WHERE session_id=agent_sessions.id),'default')=?)")

@@ -679,6 +679,7 @@ async fn chat_engine_revoked_turn_answers_its_pending_call_before_closing() {
         .await
         .unwrap();
     let token = turns.issue(TurnBinding {
+        authority: crate::domain::turn_authority::TurnAuthority::new(),
         session_id: "session-1".into(),
         run_id: "run-1".into(),
         cli: CliKind::Claude,

@@ -42,16 +42,11 @@ export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDep
 
   useClovyDataChanged("projects", async (_change, isCurrent) => {
     try {
-      const [folders, notesResponse, sessions, partitions] = await Promise.all([
-        listFolders(),
-        listNotes(),
-        listAgentSessions(),
-        refreshSessionPartitions(),
-      ]);
+      const folders = await listFolders();
       if (!isCurrent()) return;
+      // Notes and conversations have their own refresh owners. A project
+      // snapshot must not replace their newer deletion/update results.
       dispatch({ type: "foldersLoaded", folders });
-      dispatch({ type: "notesInvalidated", notes: notesResponse.items });
-      commitAgentSessions(sessions, partitions);
     } catch (error) {
       if (isCurrent()) setError(messageFromError(error));
     }

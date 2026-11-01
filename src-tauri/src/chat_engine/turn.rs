@@ -74,6 +74,7 @@ impl TurnContext {
     /// The binding the turn's token stands for.
     pub fn binding(&self) -> TurnBinding {
         TurnBinding {
+            authority: crate::domain::turn_authority::TurnAuthority::new(),
             session_id: self.session_id.clone(),
             run_id: self.run_id.clone(),
             cli: self.kind,
@@ -278,16 +279,21 @@ pub async fn execute_turn<S: FrameSink>(
     }
     // A cancel may have arrived while the turn was being prepared; nothing is
     // spawned for a cancelled or already settled run.
-    let run_open = match repository.get_run(&context.run_id).await {
-        Ok(run) => matches!(run.status.as_str(), "queued" | "running"),
+    let run_status = match repository.get_run(&context.run_id).await {
+        Ok(run) => Some(run.status),
         Err(error) => {
             tracing::warn!(%error, run_id = %context.run_id, "could not read the CLI run before launch");
-            false
+            None
         }
     };
+    let run_open = run_status
+        .as_deref()
+        .is_some_and(|status| matches!(status, "queued" | "running"));
     if *cancel.borrow() || !run_open {
         drop(scratch);
-        if run_open {
+        // Remote cancellation persists first and leaves terminal publication to
+        // this registered host task. Preparation still owes the matching event.
+        if run_open || (*cancel.borrow() && run_status.as_deref() == Some("cancelled")) {
             frames.emit("run.cancelled", json!({})).await;
         }
         return;

@@ -98,6 +98,7 @@ impl ToolGroup for RoutineTools {
                 ctx.data.profile.as_str(),
                 binding.session_id.as_str(),
                 binding.run_id.as_str(),
+                &binding.authority,
             ));
             let result = match name {
                 "list_routines" => serde_json::to_value(crate::routines::list(pool).await?),

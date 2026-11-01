@@ -111,6 +111,7 @@ async fn policy_claude_interaction_tools_are_listed_to_claude_turns() {
         now: chrono::Utc::now(),
     };
     let binding = crate::mcp_server::turns::TurnBinding {
+        authority: crate::domain::turn_authority::TurnAuthority::new(),
         session_id: "session-1".into(),
         run_id: "run-1".into(),
         cli: CliKind::Claude,

@@ -30,6 +30,7 @@ pub const TURN_REQUIRED: &str = "turn_required";
 /// logged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnBinding {
+    pub authority: crate::domain::turn_authority::TurnAuthority,
     pub session_id: String,
     pub run_id: String,
     pub cli: CliKind,
@@ -131,7 +132,12 @@ impl TurnRegistry {
     /// Revokes `token` and closes its connections. `false` when it was not
     /// live.
     pub fn revoke(&self, token: &str) -> bool {
-        self.turns().remove(token).is_some()
+        if let Some(live) = self.turns().remove(token) {
+            live.binding.authority.revoke();
+            true
+        } else {
+            false
+        }
     }
 
     /// Revokes every token of `run_id` (the run ended, failed, or was
@@ -139,12 +145,23 @@ impl TurnRegistry {
     pub fn revoke_run(&self, run_id: &str) -> usize {
         let mut turns = self.turns();
         let before = turns.len();
-        turns.retain(|_, live| live.binding.run_id != run_id);
+        turns.retain(|_, live| {
+            if live.binding.run_id == run_id {
+                live.binding.authority.revoke();
+                false
+            } else {
+                true
+            }
+        });
         before - turns.len()
     }
 
     /// Revokes every token (the app is quitting).
     pub fn revoke_all(&self) {
-        self.turns().clear();
+        let mut turns = self.turns();
+        for live in turns.values() {
+            live.binding.authority.revoke();
+        }
+        turns.clear();
     }
 }

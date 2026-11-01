@@ -298,11 +298,17 @@ pub(crate) async fn update_for_turn(
     roots: &[(PathBuf, bool)],
     id: &str,
     content: &str,
-    turn: (&str, &str, &str),
+    turn: (
+        &str,
+        &str,
+        &str,
+        &crate::domain::turn_authority::TurnAuthority,
+    ),
 ) -> Result<(), crate::domain::types::AppError> {
-    let (profile, session, run) = turn;
+    let (profile, session, run, authority) = turn;
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-    crate::db::repositories::guard_bound_turn(&mut transaction, profile, session, run).await?;
+    crate::db::repositories::guard_bound_turn(&mut transaction, profile, session, run, authority)
+        .await?;
     update_from_roots(roots, id, content).await?;
     transaction.commit().await?;
     Ok(())
@@ -313,7 +319,12 @@ pub(crate) async fn set_enabled_from_roots(
     roots: &[(PathBuf, bool)],
     id: &str,
     enabled: bool,
-    turn: Option<(&str, &str, &str)>,
+    turn: Option<(
+        &str,
+        &str,
+        &str,
+        &crate::domain::turn_authority::TurnAuthority,
+    )>,
 ) -> Result<(), crate::domain::types::AppError> {
     use super::skill_identity::{canonical_skill_id, discover_skills, valid_skill_id};
     use crate::domain::types::AppError;
@@ -321,8 +332,15 @@ pub(crate) async fn set_enabled_from_roots(
         return Err(AppError::new("agent_skill_invalid", "Skill id is invalid."));
     }
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-    if let Some((profile, session, run)) = turn {
-        crate::db::repositories::guard_bound_turn(&mut transaction, profile, session, run).await?;
+    if let Some((profile, session, run, authority)) = turn {
+        crate::db::repositories::guard_bound_turn(
+            &mut transaction,
+            profile,
+            session,
+            run,
+            authority,
+        )
+        .await?;
     }
     let id = canonical_skill_id(id);
     let skill = discover_skills(roots)
@@ -363,6 +381,7 @@ mod bound_admin_tests {
             "default",
             binding.session_id.as_str(),
             binding.run_id.as_str(),
+            &binding.authority,
         );
         assert_eq!(
             update_for_turn(broker.pool(), &roots, "example", "Denied", turn)

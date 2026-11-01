@@ -19,6 +19,24 @@ function note(overrides: Partial<NoteDto> = {}): NoteDto {
 }
 
 describe("notesReducer", () => {
+  it("fences confirmed deletions across stale list and detail producers while retaining other notes", () => {
+    const deleted = note();
+    const kept = note({ id: "kept", title: "Keep me" });
+    let state = notesReducer(createInitialState(), { type: "notesLoaded", notes: [deleted, kept] });
+    state = notesReducer(state, { type: "noteDeleted", noteId: deleted.id });
+    state = notesReducer(state, { type: "notesLoaded", notes: [deleted, kept] });
+    state = notesReducer(state, { type: "notesInvalidated", notes: [deleted, kept] });
+    state = notesReducer(state, { type: "noteLoaded", note: deleted });
+    state = notesReducer(state, { type: "noteUpdated", note: deleted });
+    state = notesReducer(state, { type: "noteProcessingUpdated", note: deleted });
+    expect(state.notes).toEqual([kept]);
+    expect(state.selectedNoteId).toBe(kept.id);
+    state = notesReducer(state, {
+      type: "noteLoaded",
+      note: { ...kept, title: "Fresh kept title" },
+    });
+    expect(state.selectedNote?.title).toBe("Fresh kept title");
+  });
   it("clears a deleted selection even when a later batch refresh concerns another note", () => {
     const selected = note({ id: "deleted-first" });
     const initial = notesReducer(createInitialState(), { type: "noteLoaded", note: selected });

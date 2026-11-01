@@ -186,6 +186,7 @@ pub(crate) async fn revalidate_binding(
     binding: &TurnBinding,
     profile: &str,
 ) -> Result<(), AppError> {
+    binding.authority.check_live()?;
     let check_registry = || -> Result<(), AppError> {
         if let Some(app) = app {
             use tauri::Manager;
@@ -208,6 +209,7 @@ pub(crate) async fn revalidate_binding(
             "The bound run or data partition changed.",
         ));
     }
+    binding.authority.check_live()?;
     check_registry()
 }
 
@@ -357,11 +359,31 @@ pub async fn call(ctx: &ToolCtx<'_>, name: &str, arguments: &Value) -> Result<Va
                 .map_err(|error| AppError::new("agent_tool_arguments_invalid", error))?;
         }
     }
-    let result = group.call(ctx, name, arguments).await?;
     // Reads have no committed effect to preserve. A revoked run must not
     // receive a snapshot fetched while it was waiting on storage or IO.
-    if read_only && ctx.binding.is_some() {
+    if read_only {
+        return authorized_native_read(ctx, name, group.call(ctx, name, arguments)).await;
+    }
+    group.call(ctx, name, arguments).await
+}
+
+/// Publication boundary, after the real read/IO future has completed. A
+/// previously allowed routine configuration is not authority for this result.
+async fn authorized_native_read(
+    ctx: &ToolCtx<'_>,
+    name: &str,
+    read: impl std::future::Future<Output = Result<Value, AppError>>,
+) -> Result<Value, AppError> {
+    let result = read.await?;
+    if let Some(binding) = ctx.binding {
         ctx.revalidate().await?;
+        if !routine_tool_allowed(&ctx.data.notes, binding, name).await? {
+            return Err(AppError::new(
+                "routine_tool_not_enabled",
+                "This tool is not enabled for the routine.",
+            ));
+        }
+        binding.authority.check_live()?;
     }
     Ok(result)
 }

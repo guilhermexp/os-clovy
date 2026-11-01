@@ -137,6 +137,7 @@ impl TestBroker {
             .await
             .expect("running run");
         TurnBinding {
+            authority: crate::domain::turn_authority::TurnAuthority::new(),
             session_id: session.id,
             run_id: run.id,
             cli,

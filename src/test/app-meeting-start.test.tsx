@@ -1136,6 +1136,7 @@ describe("meeting start transcription event", () => {
 describe("agent recorder request event", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.validateAgentRecorderRequest.mockResolvedValue(undefined);
     mocks.listeners.clear();
     mocks.pendingMeetingStartRequest = undefined;
     mocks.pendingMeetingEndStatus = null;
@@ -1228,6 +1229,120 @@ describe("agent recorder request event", () => {
         noteTitle: "Agent recording",
       });
     });
+  });
+
+  it("preserves a published recording when its successful start ACK arrives after chat Stop", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.resolveAgentRecorderRequest.mockRejectedValue({
+      code: "agent_recorder_request_not_found",
+    });
+    try {
+      await renderUntilAgentRecorderListener();
+      await act(async () => {
+        await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+          payload: {
+            requestId: "req-published",
+            action: "start",
+            sourceMode: "microphonePlusSystem",
+          },
+        });
+      });
+      await waitForLoaded(() =>
+        expect(warning).toHaveBeenCalledWith(
+          "Failed to resolve agent recorder request",
+          expect.objectContaining({ code: "agent_recorder_request_not_found" }),
+        ),
+      );
+      expect(document.querySelector(".recorder-bar")).toHaveAttribute("data-state", "recording");
+      expect(mocks.startRecording).toHaveBeenCalledOnce();
+      expect(mocks.finishRecording).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("starts a live bound request once with its exact host target", async () => {
+    await renderUntilAgentRecorderListener();
+    mocks.getNote.mockResolvedValue(note({ id: "note-agent" }));
+    await act(async () => {
+      await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "req-bound-live",
+          action: "start",
+          sourceMode: "microphonePlusSystem",
+          profile: "default",
+          noteId: "note-agent",
+        },
+      });
+    });
+    await waitForLoaded(() =>
+      expect(mocks.startRecording).toHaveBeenCalledWith(
+        "note-agent",
+        "microphonePlusSystem",
+        "default",
+        "req-bound-live",
+      ),
+    );
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: "req-bound-live",
+          ok: true,
+          noteId: "note-agent",
+          sessionId: "rec-agent",
+        }),
+      ),
+    );
+    expect(mocks.startRecording).toHaveBeenCalledOnce();
+    expect(mocks.finishRecording).not.toHaveBeenCalled();
+  });
+
+  it("refuses a bound start revoked while source readiness is pending", async () => {
+    let release!: (value: Awaited<ReturnType<typeof mocks.checkRecordingSourceReadiness>>) => void;
+    const readiness = new Promise<Awaited<ReturnType<typeof mocks.checkRecordingSourceReadiness>>>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    await renderUntilAgentRecorderListener();
+    mocks.checkRecordingSourceReadiness.mockClear();
+    mocks.checkRecordingSourceReadiness.mockReturnValueOnce(readiness);
+    mocks.getNote.mockResolvedValue(note({ id: "note-agent" }));
+    let delivery: unknown;
+    await act(async () => {
+      delivery = mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
+        payload: {
+          requestId: "req-revoked",
+          action: "start",
+          sourceMode: "microphonePlusSystem",
+          profile: "default",
+          noteId: "note-agent",
+        },
+      });
+    });
+    await waitForLoaded(() => expect(mocks.checkRecordingSourceReadiness).toHaveBeenCalled());
+    mocks.validateAgentRecorderRequest.mockRejectedValue({
+      code: "turn_expired",
+      message: "Stopped",
+    });
+    await act(async () => {
+      release({
+        sourceMode: "microphonePlusSystem",
+        sources: [
+          { source: "microphone", ready: true },
+          { source: "system", ready: true, permissionState: "granted" },
+        ],
+      });
+      await delivery;
+    });
+    await waitForLoaded(() =>
+      expect(mocks.resolveAgentRecorderRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ requestId: "req-revoked", ok: false }),
+      ),
+    );
+    expect(mocks.startRecording).not.toHaveBeenCalled();
+    expect(mocks.finishRecording).not.toHaveBeenCalled();
+    expect(document.querySelector(".recorder-bar")).not.toHaveAttribute("data-state", "recording");
   });
 
   it("acks start with an error when recording is already running", async () => {

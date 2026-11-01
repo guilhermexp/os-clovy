@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import type { AgentSkillDto } from "../../lib/agent-runtime-contract";
 import {
@@ -54,24 +54,44 @@ export function AgentSettingsSection({
   const [skillDraft, setSkillDraft] = useState("");
   const [skillSaving, setSkillSaving] = useState(false);
   const [error, setError] = useState<string>();
-  useClovyDataChanged(
-    "skills",
-    async (_change, isCurrent) => {
-      try {
-        const next = await listAgentSkills();
-        if (isCurrent()) setSkills(next);
-      } catch (cause) {
-        if (isCurrent()) setError(messageFromError(cause));
+  const skillsReadVersion = useRef(0);
+  const mounted = useRef(true);
+  const refreshSkills = useCallback(async (eventIsCurrent: () => boolean = () => true) => {
+    const version = ++skillsReadVersion.current;
+    const isCurrent = () =>
+      mounted.current && version === skillsReadVersion.current && eventIsCurrent();
+    try {
+      const next = await listAgentSkills();
+      if (isCurrent()) {
+        setSkills(next);
+        setError(undefined);
       }
-    },
-    true,
-  );
+    } catch (cause) {
+      if (isCurrent()) setError(messageFromError(cause));
+    }
+  }, []);
+  useClovyDataChanged("skills", (_change, isCurrent) => refreshSkills(isCurrent), true);
 
   useEffect(() => {
-    void listAgentSkills()
-      .then(setSkills)
-      .catch((cause) => setError(messageFromError(cause)));
-  }, []);
+    mounted.current = true;
+    void refreshSkills();
+    return () => {
+      mounted.current = false;
+      skillsReadVersion.current += 1;
+    };
+  }, [refreshSkills]);
+
+  function beginSkillMutation() {
+    skillsReadVersion.current += 1;
+  }
+
+  function applySkillMutation(updated: AgentSkillDto) {
+    if (!mounted.current) return;
+    skillsReadVersion.current += 1;
+    setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
+    setError(undefined);
+    void refreshSkills();
+  }
 
   useEffect(() => {
     const handleHud = (event: Event) => {
@@ -102,9 +122,10 @@ export function AgentSettingsSection({
 
   async function changeSkill(skill: AgentSkillDto, enabled: boolean) {
     setSavingSkillId(skill.id);
+    beginSkillMutation();
     try {
       const updated = await setAgentSkillEnabled(skill.id, enabled);
-      setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
+      applySkillMutation(updated);
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
@@ -125,9 +146,10 @@ export function AgentSettingsSection({
   async function saveSkill() {
     if (!editingSkill) return;
     setSkillSaving(true);
+    beginSkillMutation();
     try {
       const updated = await updateAgentSkill(editingSkill.id, skillDraft);
-      setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
+      applySkillMutation(updated);
       setEditingSkill(undefined);
     } catch (cause) {
       setError(messageFromError(cause));
@@ -241,11 +263,11 @@ export function AgentSettingsSection({
                     </button>
                   ) : null}
                   <Switch
-                    checked={skill.enabled}
+                    checked={skill.configuredEnabled ?? skill.enabled}
                     disabled={savingSkillId === skill.id || !skill.editable}
                     onCheckedChange={(enabled) => void changeSkill(skill, enabled)}
                     aria-label={
-                      skill.enabled
+                      (skill.configuredEnabled ?? skill.enabled)
                         ? t("settingsPanels.agent.disableSkill", { name: skill.name })
                         : t("settingsPanels.agent.enableSkill", { name: skill.name })
                     }

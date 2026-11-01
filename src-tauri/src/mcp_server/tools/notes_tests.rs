@@ -13,6 +13,55 @@ async fn insert_bound_turn(pool: &sqlx_sqlite::SqlitePool, binding: &super::Turn
 }
 
 #[tokio::test]
+async fn registry_revocation_while_writer_is_held_refuses_note_write_even_if_db_is_running() {
+    let broker = TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let registry = crate::mcp_server::turns::TurnRegistry::default();
+    let token = registry.issue(binding.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let pool = sqlx_sqlite::SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            sqlx_sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("fixture.sqlite3"))
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    crate::db::migrations::run_migrations(&pool).await.unwrap();
+    insert_bound_turn(&pool, &binding).await;
+    let repos = crate::db::repositories::Repositories::new(pool.clone());
+    let note = repos.create_note("default", None).await.unwrap();
+    let writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let write = repos.update_note_if_revision(
+        "default",
+        &note.id,
+        note.revision as i64,
+        Some("Must not commit"),
+        None,
+        Some((&binding.session_id, &binding.run_id, &binding.authority)),
+    );
+    tokio::pin!(write);
+    assert!(futures_util::poll!(write.as_mut()).is_pending());
+    assert!(registry.revoke(&token));
+    writer.rollback().await.unwrap();
+    assert_eq!(write.await.unwrap_err().code, "turn_expired");
+    let status: String =
+        sqlx::query_scalar::query_scalar("SELECT status FROM agent_runs WHERE id=?")
+            .bind(&binding.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        status, "running",
+        "Natural teardown has not persisted its terminal row yet"
+    );
+    let saved = repos.get_note(&note.id).await.unwrap();
+    assert_eq!(saved.title, note.title);
+    assert_eq!(saved.revision, note.revision);
+}
+
+#[tokio::test]
 async fn bound_notes_use_approval_and_compare_revision_in_real_repository() {
     let broker = TestBroker::new([Scripted::Approve, Scripted::Approve, Scripted::Approve]).await;
     let binding = broker.turn(CliKind::Claude, true).await;
@@ -73,7 +122,7 @@ async fn note_transaction_rejects_cancelled_or_reassigned_bound_turn() {
             note.revision as i64,
             Some("unsafe"),
             None,
-            Some((&binding.session_id, &binding.run_id)),
+            Some((&binding.session_id, &binding.run_id, &binding.authority)),
         )
         .await
         .unwrap_err();
@@ -89,7 +138,7 @@ async fn note_transaction_rejects_cancelled_or_reassigned_bound_turn() {
         .delete_note_in_profile(
             "default",
             &note.id,
-            Some((&binding.session_id, &binding.run_id)),
+            Some((&binding.session_id, &binding.run_id, &binding.authority)),
         )
         .await
         .unwrap_err();

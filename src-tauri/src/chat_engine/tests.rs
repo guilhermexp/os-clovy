@@ -1750,6 +1750,120 @@ async fn chat_engine_cancel_during_launch_preparation_spawns_nothing() {
     );
 }
 
+#[tokio::test]
+async fn remote_cancellation_after_started_during_preparation_publishes_only_target_terminal() {
+    struct PreparingSink {
+        inner: TestSink,
+        started: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        session_id: String,
+        run_id: String,
+    }
+    impl FrameSink for PreparingSink {
+        async fn publish(&self, frame: RpcFrame) {
+            assert_eq!(frame.session_id, self.session_id);
+            assert_eq!(frame.run_id, self.run_id);
+            let preparing = frame.method.as_deref() == Some("run.started");
+            self.inner.publish(frame).await;
+            if preparing {
+                self.started.notify_one();
+                self.resume.notified().await;
+            }
+        }
+    }
+    let kind = CliKind::Claude;
+    let harness = Harness::new(kind).await;
+    let caller = harness
+        .repository
+        .create_session("Caller", "test", AgentSafetyMode::Sandboxed, None)
+        .await
+        .unwrap();
+    let caller_run = harness
+        .repository
+        .create_run(&caller.id, "test", None)
+        .await
+        .unwrap();
+    let run_id = harness.new_run(kind, "Do not spawn").await;
+    let host = ChatEngineHost::default();
+    let TurnTicket {
+        cancel,
+        _done: _completion,
+    } = host.register(&run_id).unwrap();
+    let sink = PreparingSink {
+        inner: TestSink {
+            repository: harness.repository.clone(),
+            emitted: StdMutex::new(Vec::new()),
+        },
+        started: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+        session_id: harness.session_id.clone(),
+        run_id: run_id.clone(),
+    };
+    let program = harness.bin.path().join("must-not-spawn");
+    let context = harness.context(kind, &program, &run_id, "Do not spawn", None);
+    let terminal_owned = std::sync::atomic::AtomicBool::new(false);
+    let remote_cancel = async {
+        sink.started.notified().await;
+        let (changed, host_owned_terminal) =
+            crate::agent_sessions::api::claim_conversation_run_cancellation_with_signal(
+                &harness.repository.pool,
+                "default",
+                &caller.id,
+                &caller_run.id,
+                &harness.session_id,
+                &run_id,
+                &crate::domain::turn_authority::TurnAuthority::new(),
+                || {
+                    // The only connection is still the claim's writer. Release
+                    // real preparation now, before commit can expose cancelled.
+                    assert!(harness.repository.pool.try_acquire().is_none());
+                    let owned = host.cancel(&run_id);
+                    sink.resume.notify_one();
+                    owned
+                },
+            )
+            .await
+            .unwrap();
+        assert!(changed);
+        assert!(host_owned_terminal);
+        terminal_owned.store(host_owned_terminal, std::sync::atomic::Ordering::SeqCst);
+    };
+    tokio::join!(
+        execute_turn(&harness.repository, &sink, context, cancel),
+        remote_cancel
+    );
+    // Cleanup can run after the task has already emitted and dropped its
+    // receiver. Its false result must not steal the original event ownership.
+    assert!(!host.cancel(&run_id));
+    assert!(terminal_owned.load(std::sync::atomic::Ordering::SeqCst));
+    let emitted = sink.inner.emitted.into_inner().unwrap();
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|(method, _)| method == "run.cancelled")
+            .count(),
+        1
+    );
+    assert!(!emitted.iter().any(|(method, _)| method == "run.failed"));
+    assert_eq!(
+        emitted.last().map(|(method, _)| method.as_str()),
+        Some("run.cancelled")
+    );
+    assert_eq!(
+        harness.repository.get_run(&run_id).await.unwrap().status,
+        "cancelled"
+    );
+    assert_eq!(
+        harness
+            .repository
+            .get_run(&caller_run.id)
+            .await
+            .unwrap()
+            .status,
+        "running"
+    );
+}
+
 /// Real CLIs, two turns each in a temporary directory. Run apart with
 /// `cargo test chat_engine_real -- --ignored --nocapture`; they use the
 /// user's own CLI login and quota.

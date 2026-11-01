@@ -217,6 +217,7 @@ async fn mutate(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, Ap
             &binding.run_id,
             target.unwrap_or_default(),
             run_id,
+            &binding.authority,
         )
         .await;
     }
@@ -226,6 +227,7 @@ async fn mutate(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, Ap
         &ctx.data.profile,
         &binding.session_id,
         &binding.run_id,
+        &binding.authority,
     )
     .await?;
     let now = crate::db::repositories::timestamp();
@@ -278,6 +280,7 @@ async fn mutate(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, Ap
                     ctx.data.profile.as_str(),
                     binding.session_id.as_str(),
                     binding.run_id.as_str(),
+                    &binding.authority,
                 )),
             )
             .await?;

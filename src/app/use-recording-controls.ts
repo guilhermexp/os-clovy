@@ -79,25 +79,9 @@ export function useRecordingControls(dependencies: UseRecordingControlsDependenc
             }
           }
         }
-        // Lease expired: the proxy already told the agent this request
-        // failed. Leaving a recording running that the agent believes never
-        // started diverges tool state from app state, so stop a successful
-        // late start. The note (and any audio it captured) is kept: it is
-        // real user data and the recorder was visibly running.
-        if (result.ok && payload.action === "start") {
-          const active = recordingStatusRef.current;
-          if (
-            active &&
-            recordingNoteIdRef.current === result.noteId &&
-            (!result.sessionId || active.sessionId === result.sessionId)
-          ) {
-            try {
-              await handleFinishRecording(active.sessionId, { rethrow: true });
-            } catch (rollbackErr) {
-              console.warn("Failed to stop expired agent recording", rollbackErr);
-            }
-          }
-        }
+        // Native admission already checked this request at the hardware boundary.
+        // A successful start belongs to the visible recorder once published;
+        // ending the chat or losing a late ACK does not stop that meeting.
       });
     };
 
