@@ -177,7 +177,7 @@ impl PrivateHelper {
     pub async fn spawn(
         path: &Path,
         capability: &str,
-        browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
+        browser_runtime: &crate::computer_use_owned_runtime::OwnedBrowserRuntime,
     ) -> Result<Self> {
         if capability.len() < 32 {
             bail!("Missing private helper capability");
@@ -1082,7 +1082,7 @@ fn same_process_account_and_session(first: HANDLE, second: HANDLE) -> Result<()>
 use crate::computer_use_policy::PrivateBrowserLaunchDenied;
 
 fn qualify_launch_image(
-    browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
+    browser_runtime: &crate::computer_use_owned_runtime::OwnedBrowserRuntime,
     path: &Path,
 ) -> Result<()> {
     match browser_runtime.owns(path) {
@@ -1093,7 +1093,7 @@ fn qualify_launch_image(
 
 pub async fn launch_app(
     name: &str,
-    browser_runtime: Arc<crate::computer_use_policy::OwnedBrowserRuntime>,
+    browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
 ) -> Result<Value> {
     let name = name.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -1109,7 +1109,7 @@ pub async fn launch_app(
 }
 fn launch_app_blocking(
     name: &str,
-    browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
+    browser_runtime: &crate::computer_use_owned_runtime::OwnedBrowserRuntime,
 ) -> Result<Value> {
     require_desktop()?;
     let _apartment = ComApartment::enter()?;
@@ -1498,7 +1498,7 @@ mod tests {
         std::fs::write(&image, b"private").unwrap();
         std::fs::write(&external, b"external").unwrap();
         let runtime =
-            crate::computer_use_policy::OwnedBrowserRuntime::new(namespace, image.clone());
+            crate::computer_use_owned_runtime::OwnedBrowserRuntime::new(namespace, image.clone());
         assert!(qualify_launch_image(&runtime, &external).is_ok());
         assert!(qualify_launch_image(&runtime, &image)
             .unwrap_err()

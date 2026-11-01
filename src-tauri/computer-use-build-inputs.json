@@ -4,6 +4,7 @@
   "src-tauri/src/browser/engine.rs",
   "src-tauri/src/browser/mod.rs",
   "src-tauri/src/computer_use.rs",
+  "src-tauri/src/computer_use_owned_runtime.rs",
   "src-tauri/src/computer_use_policy.rs",
   "src-tauri/src/computer_use_driver.rs",
   "src-tauri/src/computer_use_cancel.rs",

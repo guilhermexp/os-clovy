@@ -9,6 +9,8 @@ mod computer_use_host;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)] // Shared helper permissions and main process-group ownership.
 mod computer_use_macos;
+#[allow(dead_code)] // Shared host/helper source; the helper uses only its relevant entry points.
+mod computer_use_owned_runtime;
 #[allow(dead_code)] // Shared with the host; not every policy is used by the helper.
 mod computer_use_policy;
 #[cfg(target_os = "windows")]
@@ -253,7 +255,7 @@ where
     if !namespace.is_absolute() || !image.is_absolute() {
         anyhow::bail!("Invalid browser authority");
     }
-    let browser_runtime = Arc::new(computer_use_policy::OwnedBrowserRuntime::new(
+    let browser_runtime = Arc::new(computer_use_owned_runtime::OwnedBrowserRuntime::new(
         namespace, image,
     ));
     let connection = Arc::new(Mutex::new(Connection::default()));

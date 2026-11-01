@@ -140,10 +140,12 @@ pub(crate) fn setup(app: &tauri::AppHandle) -> Result<(), AppError> {
                 AppError::new("browser_unavailable", "Browser resources are unavailable.")
             })?;
             app.state::<crate::computer_use::ComputerUseState>()
-                .set_browser_runtime(crate::computer_use_policy::OwnedBrowserRuntime::new(
-                    namespace,
-                    config.chrome.clone(),
-                ))?;
+                .set_browser_runtime(
+                    crate::computer_use_owned_runtime::OwnedBrowserRuntime::new(
+                        namespace,
+                        config.chrome.clone(),
+                    ),
+                )?;
         }
         let engine = tauri::async_runtime::block_on(async { AgentBrowserTransport::new(config) });
         broker.configure_transport(

@@ -75,7 +75,7 @@ struct Capture {
 pub(crate) struct EngineAdapter {
     host: CommandHost,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    browser_runtime: Arc<crate::computer_use_policy::OwnedBrowserRuntime>,
+    browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
     windows: HashMap<u64, Window>,
     captures: HashMap<(i64, u64), Capture>,
     next_public_element: u32,
@@ -84,7 +84,7 @@ pub(crate) struct EngineAdapter {
 impl EngineAdapter {
     pub(crate) fn new(
         host: CommandHost,
-        browser_runtime: Arc<crate::computer_use_policy::OwnedBrowserRuntime>,
+        browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
     ) -> Self {
         Self {
             host,

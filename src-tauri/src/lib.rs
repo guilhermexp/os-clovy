@@ -24,6 +24,7 @@ mod computer_use_cursor;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)] // Permission entry points are used by the helper binary.
 mod computer_use_macos;
+mod computer_use_owned_runtime;
 mod computer_use_permission_drag;
 mod computer_use_policy;
 #[cfg(target_os = "windows")]
