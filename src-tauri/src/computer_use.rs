@@ -3684,6 +3684,8 @@ async fn open_app(
                 })
             })
             .collect();
+        ensure_epoch_current(state, Some(epoch))?;
+        ensure_task_generation_current(state, task_generation)?;
         Ok(mcp_text(json!({
             "ok": true,
             "action": "open_app",
