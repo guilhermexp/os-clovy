@@ -102,6 +102,9 @@ try {
   }
   $appExecutable = Join-Path $releaseDirectory "clovy.exe"
   Remove-Item -LiteralPath $appExecutable -Force -ErrorAction SilentlyContinue
+  # Cargo validates bundled browser resources while preparing the helper.
+  & node scripts/prepare-agent-browser.mjs --release --target $targetTriple
+  if ($LASTEXITCODE -ne 0) { throw "Browser preparation failed." }
   # Sign every nested executable before Tauri signs the host and installer.
   # A current-user certificate keeps the helper and host on one publisher.
   & node scripts/prepare-computer-use.mjs --release --target $targetTriple
