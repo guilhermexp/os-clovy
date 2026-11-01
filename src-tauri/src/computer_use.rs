@@ -2714,6 +2714,13 @@ async fn driver_call(
         driver_version(&path).await?;
         let client = DriverClient::start(&path, None).await?;
         state.driver_pid.store(client.pid(), Ordering::SeqCst);
+        if let Err(error) =
+            ensure_epoch_current(state, expected_epoch).and_then(|()| ensure_attended_run(state))
+        {
+            state.driver_pid.store(0, Ordering::SeqCst);
+            client.stop().await;
+            return Err(error);
+        }
         *driver = Some(client);
     }
     ensure_epoch_current(state, expected_epoch)?;
