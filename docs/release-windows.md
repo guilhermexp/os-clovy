@@ -8,6 +8,10 @@ installer and its `.sig`. You can also build the installer locally with
 `scripts/build-windows.ps1` (prerequisites in `AGENTS.md`) and validate it
 with the checks below.
 
+The canonical installer directory is `artifacts/windows-signed`; the desktop
+workflow uploads `clovy-windows-signed-release-nsis` from that directory. There
+is no unsigned output alias.
+
 Computer use now requires signed native artifacts. Set
 `WINDOWS_CERTIFICATE_THUMBPRINT` to an available current-user signing
 certificate and provide `signtool.exe` on PATH (or `WINDOWS_SIGNTOOL_PATH`).
@@ -17,6 +21,14 @@ valid matching publisher on the host, Computer use helper and engine, plus
 matching engine manifest, source, protocol, patch, target, binary and license
 hashes. Missing signing credentials fail the build; unsigned executables cannot
 satisfy the private helper's peer contract.
+
+`pnpm tauri:dev` uses a native development runner around Cargo. On every rebuild,
+it takes the executable paths reported by Cargo, signs the newly built host and
+CLI relays with this same certificate, verifies their publisher, and only then
+launches Clovy. Signing failure stops launch. The runner keeps the selected dev
+identity and arguments and owns its child process tree across rebuilds. It does
+not import a certificate or relax the private helper's signature checks. Native
+Windows launch, handshake and rebuild acceptance is still required.
 
 Updater minisign signing remains separate: with `TAURI_SIGNING_PRIVATE_KEY`
 (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) the installer also has a `.sig`.

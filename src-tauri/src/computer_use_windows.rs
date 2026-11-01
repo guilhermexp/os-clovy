@@ -1,6 +1,6 @@
 //! Private inherited transport, authenticated Windows peers and job ownership.
 //! Only task controllers enter a kill-on-close job. Application launch is
-//! brokered by the existing interactive Explorer process outside that job.
+//! created with the qualified Explorer token/job parent outside that job.
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
@@ -16,18 +16,18 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 mod process;
 use process::WindowsChild;
 use windows::{
-    core::{Interface, BOOL, BSTR, PCWSTR, PWSTR},
+    core::{Interface, BOOL, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM},
+        Foundation::{
+            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, FILETIME, HANDLE, HWND, LPARAM,
+        },
         Security::{
-            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
-            WinTrust::*, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+            EqualSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid,
+            TokenElevation, TokenIntegrityLevel, TokenSessionId, TokenUser, WinTrust::*,
+            TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
         },
         System::{
-            Com::{
-                CoCreateInstance, CoInitializeEx, CoUninitialize, IServiceProvider,
-                CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
-            },
+            Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
                 TH32CS_SNAPPROCESS,
@@ -40,8 +40,9 @@ use windows::{
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
             Registry::{
-                RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ,
-                RRF_RT_REG_SZ,
+                RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ,
+                REG_ROUTINE_FLAGS, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ,
+                RRF_RT_REG_SZ, RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY,
             },
             StationsAndDesktops::{
                 CloseDesktop, GetProcessWindowStation, GetUserObjectInformationW, OpenInputDesktop,
@@ -50,21 +51,13 @@ use windows::{
             },
             Threading::{
                 GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess,
-                OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-                PROCESS_QUERY_LIMITED_INFORMATION,
+                OpenProcessToken, QueryFullProcessImageNameW, PROCESS_CREATE_PROCESS,
+                PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
             },
-            Variant::VARIANT,
         },
-        UI::{
-            Shell::{
-                IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows,
-                SID_STopLevelBrowser, ShellWindows, SVGIO_BACKGROUND, SWC_DESKTOP,
-                SWFO_NEEDDISPATCH,
-            },
-            WindowsAndMessaging::{
-                EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindow, SetForegroundWindow,
-                ShowWindowAsync, SW_RESTORE, SW_SHOWNOACTIVATE,
-            },
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetShellWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
+            SetForegroundWindow, ShowWindowAsync, SW_RESTORE, SW_SHOWNOACTIVATE,
         },
     },
 };
@@ -263,12 +256,15 @@ pub fn connect_private_transport() -> Result<(ChildStdout, ChildStdin)> {
     process::connect_private_transport()
 }
 pub fn process_identity(pid: u32) -> Result<ProcessIdentity> {
+    let process = unsafe { Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?) };
+    process_identity_from_handle(process.0)
+}
+fn process_identity_from_handle(process: HANDLE) -> Result<ProcessIdentity> {
     unsafe {
-        let process = Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?);
         let mut path = vec![0u16; 32768];
         let mut len = path.len() as u32;
         QueryFullProcessImageNameW(
-            process.0,
+            process,
             PROCESS_NAME_WIN32,
             PWSTR(path.as_mut_ptr()),
             &mut len,
@@ -277,12 +273,118 @@ pub fn process_identity(pid: u32) -> Result<ProcessIdentity> {
         let mut exited = FILETIME::default();
         let mut kernel = FILETIME::default();
         let mut user = FILETIME::default();
-        GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user)?;
+        GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user)?;
         Ok(ProcessIdentity {
             path: PathBuf::from(String::from_utf16(&path[..len as usize])?),
             creation_time: ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64,
         })
     }
+}
+
+fn launch_layer_names(path: &Path) -> Result<Vec<String>> {
+    let original = path
+        .to_str()
+        .context("The executable path is not valid Unicode")?;
+    let ordinary = original
+        .strip_prefix(r"\\?\UNC\")
+        .map(|suffix| format!(r"\\{suffix}"))
+        .unwrap_or_else(|| {
+            original
+                .strip_prefix(r"\\?\")
+                .unwrap_or(original)
+                .to_owned()
+        });
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Missing executable name")?;
+    let mut names = vec![original.to_owned(), ordinary, basename.to_owned()];
+    names.dedup();
+    Ok(names)
+}
+
+fn read_compatibility_layer(
+    root: HKEY,
+    key: &str,
+    name: &str,
+    view: REG_ROUTINE_FLAGS,
+) -> Result<Option<String>> {
+    let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND | view;
+    let mut kind = REG_VALUE_TYPE::default();
+    let mut bytes = 0;
+    let status = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            flags,
+            Some(&mut kind),
+            None,
+            Some(&mut bytes),
+        )
+    };
+    if matches!(status, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
+        return Ok(None);
+    }
+    status.ok()?;
+    if !matches!(kind, REG_SZ | REG_EXPAND_SZ)
+        || !(2..=65536).contains(&bytes)
+        || !bytes.is_multiple_of(2)
+    {
+        bail!("The application compatibility policy is indeterminate");
+    }
+    let mut value = vec![0u16; bytes as usize / 2];
+    unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            flags,
+            Some(&mut kind),
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        )
+        .ok()?;
+    }
+    if !matches!(kind, REG_SZ | REG_EXPAND_SZ)
+        || bytes as usize > value.len() * 2
+        || bytes < 2
+        || !bytes.is_multiple_of(2)
+    {
+        bail!("The application compatibility policy changed while being read");
+    }
+    value.truncate(bytes as usize / 2);
+    let end = value
+        .iter()
+        .position(|unit| *unit == 0)
+        .context("The compatibility policy is unterminated")?;
+    if value[end..].iter().any(|unit| *unit != 0) {
+        bail!("The compatibility policy contains embedded data");
+    }
+    Ok(Some(String::from_utf16(&value[..end])?))
+}
+
+fn verify_launch_compatibility(path: &Path, environment_layer: Option<&str>) -> Result<()> {
+    if !crate::computer_use_policy::windows_compatibility_layers_allowed(environment_layer) {
+        bail!("The launch environment requests an elevated or unqualified compatibility layer");
+    }
+    let names = launch_layer_names(path)?;
+    const KEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        for view in [RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY] {
+            for name in &names {
+                let layer = read_compatibility_layer(root, KEY, name, view)?;
+                if !crate::computer_use_policy::windows_compatibility_layers_allowed(
+                    layer.as_deref(),
+                ) {
+                    bail!("The installed application requests an elevated or unqualified compatibility layer");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 fn same_path(left: &Path, right: &Path) -> bool {
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
@@ -521,6 +623,94 @@ fn desktop_unavailable(error: &anyhow::Error) -> bool {
     error.downcast_ref::<DesktopUnavailable>().is_some()
 }
 
+#[derive(Debug)]
+struct TargetIntegrityDenied(anyhow::Error);
+impl std::fmt::Display for TargetIntegrityDenied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+impl std::error::Error for TargetIntegrityDenied {}
+
+/// Read the token attached to this retained process handle. The caller has
+/// already qualified this same process instance's creation time.
+fn process_integrity(process: HANDLE) -> Result<crate::computer_use_policy::WindowsIntegrity> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(process, TOKEN_QUERY, &mut token)?;
+        let token = Handle(token);
+        let mut needed = 0;
+        let _ = GetTokenInformation(token.0, TokenIntegrityLevel, None, 0, &mut needed);
+        if !(size_of::<TOKEN_MANDATORY_LABEL>() as u32..=65536).contains(&needed) {
+            bail!("The process integrity token has an invalid size");
+        }
+        let mut bytes = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+        let capacity = (bytes.len() * size_of::<usize>()) as u32;
+        GetTokenInformation(
+            token.0,
+            TokenIntegrityLevel,
+            Some(bytes.as_mut_ptr().cast()),
+            capacity,
+            &mut needed,
+        )?;
+        if needed < size_of::<TOKEN_MANDATORY_LABEL>() as u32 || needed > capacity {
+            bail!("The process integrity token was truncated");
+        }
+        let label = &*(bytes.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        if !IsValidSid(label.Label.Sid).as_bool() {
+            bail!("The process integrity SID is invalid");
+        }
+        let count = *GetSidSubAuthorityCount(label.Label.Sid);
+        if count == 0 {
+            bail!("The process integrity SID has no level");
+        }
+        let rid = *GetSidSubAuthority(label.Label.Sid, u32::from(count - 1));
+        let mut elevation = TOKEN_ELEVATION::default();
+        GetTokenInformation(
+            token.0,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut needed,
+        )?;
+        if needed != size_of::<TOKEN_ELEVATION>() as u32 {
+            bail!("The process elevation token was truncated");
+        }
+        Ok(crate::computer_use_policy::WindowsIntegrity {
+            rid,
+            elevated: elevation.TokenIsElevated != 0,
+        })
+    }
+}
+
+fn verify_target_integrity(process: HANDLE) -> Result<()> {
+    let result = (|| {
+        let caller = process_integrity(unsafe { GetCurrentProcess() })
+            .context("Clovy's process token cannot be qualified")?;
+        let target = process_integrity(process)
+            .context("The authorized target's process token cannot be qualified")?;
+        if !crate::computer_use_policy::windows_target_integrity_allowed(Some(caller), Some(target))
+        {
+            bail!("The authorized target is elevated or more privileged than Clovy");
+        }
+        Ok(())
+    })();
+    result.map_err(|error| TargetIntegrityDenied(error).into())
+}
+
+fn verify_window_owner(window: HWND, expected_pid: u32) -> Result<()> {
+    let mut pid = 0;
+    unsafe {
+        if !IsWindow(Some(window)).as_bool()
+            || GetWindowThreadProcessId(window, Some(&mut pid)) == 0
+            || pid != expected_pid
+        {
+            bail!("The authorized window changed before dispatch");
+        }
+    }
+    Ok(())
+}
+
 pub fn permission_result() -> Value {
     let ready = readiness();
     let accessible = ready.is_ok();
@@ -573,7 +763,9 @@ pub fn focus_window_result(args: &Value) -> Value {
         if actual != pid || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             bail!("The authorized window identity changed");
         }
+        verify_target_integrity(process.0)?;
         require_desktop()?;
+        verify_window_owner(hwnd, pid)?;
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before window restoration");
         }
@@ -586,7 +778,9 @@ pub fn focus_window_result(args: &Value) -> Value {
         if actual != pid || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             bail!("The authorized window changed during restoration");
         }
+        verify_target_integrity(process.0)?;
         require_desktop()?;
+        verify_window_owner(hwnd, pid)?;
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before focusing the window");
         }
@@ -599,12 +793,12 @@ pub fn focus_window_result(args: &Value) -> Value {
             json!({"content":[{"type":"text","text":if raised{"Focused the authorized window."}else{"Windows refused to focus the authorized window."}}],"structuredContent":{"pid":pid,"window_id":window_id,"raised":raised,"restored":restored,"disposition":{"delivery":if dispatched{"delivered_unverified"}else{"not_delivered"},"retry":if dispatched{"unsafe"}else{"safe"}}},"isError":!raised})
         }
         Err(error) => {
-            json!({"content":[{"type":"text","text":error.to_string()}],"structuredContent":{"raised":false,"code":if desktop_unavailable(&error){json!("computer_use_desktop_unavailable")}else{Value::Null},"disposition":{"delivery":if dispatched{"delivered_unverified"}else{"not_delivered"},"retry":if dispatched{"unsafe"}else{"safe"}}},"isError":true})
+            json!({"content":[{"type":"text","text":error.to_string()}],"structuredContent":{"raised":false,"code":if desktop_unavailable(&error){json!("computer_use_desktop_unavailable")}else if error.downcast_ref::<TargetIntegrityDenied>().is_some(){json!("computer_use_target_blocked")}else{Value::Null},"disposition":{"delivery":if dispatched{"delivered_unverified"}else{"not_delivered"},"retry":if dispatched{"unsafe"}else{"safe"}}},"isError":true})
         }
     }
 }
 
-/// Resolve an installed application before handing the launch to Explorer.
+/// Resolve an installed application before qualified native process creation.
 /// Arguments and arbitrary command lines are never accepted from the model.
 fn resolve_app(name: &str) -> Result<PathBuf> {
     let name = name.trim();
@@ -757,13 +951,130 @@ impl Drop for ComApartment {
     }
 }
 
+struct QualifiedExplorer {
+    process: Handle,
+    identity: ProcessIdentity,
+    pid: u32,
+    window: HWND,
+}
+impl QualifiedExplorer {
+    fn open() -> Result<Self> {
+        let window = unsafe { GetShellWindow() };
+        let mut pid = 0;
+        if window.0.is_null()
+            || unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) } == 0
+            || pid == 0
+        {
+            bail!("The interactive Explorer process is unavailable");
+        }
+        let process = unsafe {
+            Handle(OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_CREATE_PROCESS,
+                false,
+                pid,
+            )?)
+        };
+        let identity = process_identity_from_handle(process.0)?;
+        let mut directory = [0u16; 32768];
+        let length = unsafe {
+            windows::Win32::System::SystemInformation::GetWindowsDirectoryW(Some(&mut directory))
+        } as usize;
+        if length == 0 || length >= directory.len() {
+            bail!("The Windows shell directory cannot be qualified");
+        }
+        let expected =
+            PathBuf::from(String::from_utf16(&directory[..length])?).join("explorer.exe");
+        if identity.creation_time == 0 || !same_path(&identity.path, &expected) {
+            bail!("The interactive shell is not the installed Explorer executable");
+        }
+        let parent = Self {
+            process,
+            identity,
+            pid,
+            window,
+        };
+        parent.revalidate()?;
+        Ok(parent)
+    }
+    fn revalidate(&self) -> Result<()> {
+        self.recheck_shell_window()?;
+        if process_identity_from_handle(self.process.0)? != self.identity {
+            bail!("The qualified Explorer process changed before launch");
+        }
+        verify_target_integrity(self.process.0)?;
+        same_process_account_and_session(self.process.0, unsafe { GetCurrentProcess() })
+    }
+    fn recheck_shell_window(&self) -> Result<()> {
+        let mut pid = 0;
+        if unsafe { GetShellWindow() } != self.window
+            || unsafe { GetWindowThreadProcessId(self.window, Some(&mut pid)) } == 0
+            || pid != self.pid
+        {
+            bail!("The qualified Explorer process changed before launch");
+        }
+        Ok(())
+    }
+}
+
+fn token_account_and_session(process: HANDLE) -> Result<(Vec<usize>, u32)> {
+    unsafe {
+        let mut raw = HANDLE::default();
+        OpenProcessToken(process, TOKEN_QUERY, &mut raw)?;
+        let token = Handle(raw);
+        let mut needed = 0;
+        let _ = GetTokenInformation(token.0, TokenUser, None, 0, &mut needed);
+        if !(size_of::<TOKEN_USER>() as u32..=65536).contains(&needed) {
+            bail!("The launch parent's account token is indeterminate");
+        }
+        let mut account = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+        let capacity = (account.len() * size_of::<usize>()) as u32;
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(account.as_mut_ptr().cast()),
+            capacity,
+            &mut needed,
+        )?;
+        if needed < size_of::<TOKEN_USER>() as u32 || needed > capacity {
+            bail!("The launch parent's account token was truncated");
+        }
+        let user = &*(account.as_ptr() as *const TOKEN_USER);
+        if !IsValidSid(user.User.Sid).as_bool() {
+            bail!("The launch parent's account SID is invalid");
+        }
+        let mut session = 0u32;
+        GetTokenInformation(
+            token.0,
+            TokenSessionId,
+            Some((&mut session as *mut u32).cast()),
+            size_of::<u32>() as u32,
+            &mut needed,
+        )?;
+        if needed != size_of::<u32>() as u32 {
+            bail!("The launch parent's session token was truncated");
+        }
+        Ok((account, session))
+    }
+}
+fn same_process_account_and_session(first: HANDLE, second: HANDLE) -> Result<()> {
+    let (first_account, first_session) = token_account_and_session(first)?;
+    let (second_account, second_session) = token_account_and_session(second)?;
+    let first_user = unsafe { &*(first_account.as_ptr() as *const TOKEN_USER) };
+    let second_user = unsafe { &*(second_account.as_ptr() as *const TOKEN_USER) };
+    if first_session != second_session
+        || unsafe { EqualSid(first_user.User.Sid, second_user.User.Sid) }.is_err()
+    {
+        bail!("The launch parent belongs to another user or session");
+    }
+    Ok(())
+}
+
 pub async fn launch_app(name: &str) -> Result<Value> {
     let name = name.to_owned();
     tokio::task::spawn_blocking(move || {
-        // Every ordinary Err from the worker precedes ShellExecute. Once a
-        // dispatch is attempted the worker returns an explicit uncertain
-        // receipt instead. A worker panic/join failure remains uncertain to
-        // its caller, since it can occur on either side of dispatch.
+        // Every ordinary Err precedes successful CreateProcess. Once an app
+        // exists, any post-create failure becomes an explicit unsafe receipt.
+        // A worker panic/join failure can occur on either side of creation.
         launch_app_blocking(&name).unwrap_or_else(|error|json!({"version":"2.5","ok":false,"command":"launch","error":{"code":if desktop_unavailable(&error){"computer_use_desktop_unavailable"}else{"computer_use_launch_unavailable"},"message":error.to_string(),"disposition":{"delivery":"not_delivered","retry":"safe"}}}))
     }).await.map_err(Into::into)
 }
@@ -807,78 +1118,47 @@ fn launch_app_blocking(name: &str) -> Result<Value> {
             json!({"version":"2.5","ok":false,"command":"launch","error":{"code":"ACTION_NOT_SUPPORTED","message":format!("Clovy cannot automatically open an app without a declared standard-user execution level. Open it manually, then select its window. {error}"),"disposition":{"delivery":"not_delivered","retry":"safe"}}}),
         );
     }
-    // Use the Shell.Application owned by the desktop Explorer process. A
-    // local ShellExecute/CreateProcess call would place the user's new app in
-    // the helper job and Stop would incorrectly close it.
-    unsafe {
-        let shell: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)?;
-        let empty = VARIANT::default();
-        let mut desktop_hwnd = 0;
-        let desktop = shell.FindWindowSW(
-            &empty,
-            &empty,
-            SWC_DESKTOP,
-            &mut desktop_hwnd,
-            SWFO_NEEDDISPATCH,
-        )?;
-        let services: IServiceProvider = desktop.cast()?;
-        let browser: IShellBrowser = services.QueryService(&SID_STopLevelBrowser)?;
-        let view = browser.QueryActiveShellView()?;
-        let folder: IShellFolderViewDual = view.GetItemObject(SVGIO_BACKGROUND)?;
-        let application: IShellDispatch2 = folder.Application()?.cast()?;
-        let file = BSTR::from(path.as_os_str().to_string_lossy().as_ref());
-        let operation = VARIANT::from("open");
-        let show = VARIANT::from(SW_SHOWNOACTIVATE.0);
+    let environment = process::application_environment()?;
+    verify_launch_compatibility(&path, environment.compatibility_layer.as_deref())?;
+    let explorer = QualifiedExplorer::open()?;
+    let created = process::launch_application(&path, explorer.process.0, &environment, || {
+        // Policy and Explorer identity can change during file/manifest work.
+        // These read-only failures all precede the one CreateProcess call.
+        verify_launch_compatibility(&path, environment.compatibility_layer.as_deref())?;
+        explorer.revalidate()?;
         require_desktop()?;
+        explorer.recheck_shell_window()?;
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before application launch");
         }
-        // Failure from this point cannot safely imply that no launch happened.
-        if let Err(error) = application.ShellExecute(&file, &empty, &empty, &operation, &show) {
-            return Ok(
-                json!({"version":"2.5","ok":false,"command":"launch","error":{"code":"LAUNCH_UNCERTAIN","message":format!("Explorer did not confirm launch: {error}"),"disposition":{"delivery":"delivery_uncertain","retry":"unsafe"}}}),
-            );
+        Ok(())
+    })?;
+    // CreateProcess succeeded: A is now the user's application. Keep its
+    // actual handle as authority, rather than adopting a PID found by name.
+    // No post-create failure kills that app or reports no delivery.
+    let observed = (|| -> Result<ProcessIdentity> {
+        let identity = process_identity_from_handle(created.handle.0)?;
+        if identity.creation_time == 0 || !same_path(&identity.path, &path) {
+            bail!("The created application's image could not be qualified");
         }
+        verify_target_integrity(created.handle.0)?;
+        require_desktop()?;
+        if crate::computer_use_cancel::current_run_cancelled() {
+            bail!("Computer use was stopped after the application was created");
+        }
+        Ok(identity)
+    })();
+    match observed {
+        Ok(identity) => {
+            let window = find_window(created.pid);
+            Ok(
+                json!({"version":"2.5","ok":true,"command":"launch","data":{"pid":created.pid,"app":name,"executable_path":identity.path,"process_creation_time":identity.creation_time,"window_id":window,"created":true,"disposition":{"delivery":"delivered_unverified","retry":"unsafe"}}}),
+            )
+        }
+        Err(error) => Ok(
+            json!({"version":"2.5","ok":false,"command":"launch","error":{"code":if desktop_unavailable(&error){"computer_use_desktop_unavailable"}else{"LAUNCH_UNCERTAIN"},"message":format!("The application was created, but its launch receipt could not be qualified: {error}"),"details":{"created":true,"pid":created.pid},"disposition":{"delivery":"delivery_uncertain","retry":"unsafe"}}}),
+        ),
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(8);
-    loop {
-        if let Some(pid) = find_process_for_image(&path) {
-            if let Ok(identity) = process_identity(pid) {
-                let window = find_window(pid);
-                return Ok(
-                    json!({"version":"2.5","ok":true,"command":"launch","data":{"pid":pid,"app":name,"executable_path":identity.path,"process_creation_time":identity.creation_time,"window_id":window,"disposition":{"delivery":"delivered_unverified","retry":"unsafe"}}}),
-                );
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(
-        json!({"version":"2.5","ok":false,"command":"launch","error":{"code":"LAUNCH_UNCERTAIN","message":"Explorer accepted the launch but the exact application process was not observed.","disposition":{"delivery":"delivery_uncertain","retry":"unsafe"}}}),
-    )
-}
-fn find_process_for_image(path: &Path) -> Option<u32> {
-    unsafe {
-        let snapshot = Handle(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?);
-        let mut entry = PROCESSENTRY32W {
-            dwSize: size_of::<PROCESSENTRY32W>() as u32,
-            ..zeroed()
-        };
-        Process32FirstW(snapshot.0, &mut entry).ok()?;
-        loop {
-            if process_identity(entry.th32ProcessID)
-                .is_ok_and(|identity| same_path(&identity.path, path))
-            {
-                return Some(entry.th32ProcessID);
-            }
-            if Process32NextW(snapshot.0, &mut entry).is_err() {
-                break;
-            }
-        }
-    }
-    None
 }
 fn find_window(pid: u32) -> Option<u64> {
     struct Search {
@@ -1056,6 +1336,123 @@ mod tests {
         assert!(first.creation_time > 0);
         assert!(same_path(&first.path, &std::env::current_exe().unwrap()));
         assert_eq!(first, process_identity(pid).unwrap());
+    }
+    #[test]
+    fn token_qualification_uses_the_retained_process_handle_and_refuses_unknown() {
+        let pid = unsafe { GetCurrentProcessId() };
+        let process =
+            unsafe { Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).unwrap()) };
+        let observed = process_integrity(process.0).unwrap();
+        let expected = process_integrity(unsafe { GetCurrentProcess() }).unwrap();
+        assert_eq!(observed.rid, expected.rid);
+        assert_eq!(observed.elevated, expected.elevated);
+        assert!(process_integrity(HANDLE::default()).is_err());
+        let error = verify_target_integrity(HANDLE::default()).unwrap_err();
+        assert!(error.downcast_ref::<TargetIntegrityDenied>().is_some());
+    }
+    #[test]
+    fn compatibility_reader_refuses_elevation_and_invalid_types_in_an_owned_registry_key() {
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, KEY_ALL_ACCESS,
+            REG_CREATED_NEW_KEY, REG_CREATE_KEY_DISPOSITION, REG_DWORD, REG_OPTION_VOLATILE,
+        };
+        struct Fixture {
+            name: Vec<u16>,
+            key: HKEY,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = RegCloseKey(self.key);
+                    let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(self.name.as_ptr()));
+                }
+            }
+        }
+        let key_name = format!(
+            r"Software\ClovyComputerUseReviewTests\{}",
+            uuid::Uuid::new_v4()
+        );
+        let name: Vec<u16> = key_name.encode_utf16().chain(Some(0)).collect();
+        let mut key = HKEY::default();
+        let mut disposition = REG_CREATE_KEY_DISPOSITION::default();
+        unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(name.as_ptr()),
+                None,
+                PCWSTR::null(),
+                REG_OPTION_VOLATILE,
+                KEY_ALL_ACCESS,
+                None,
+                &mut key,
+                Some(&mut disposition),
+            )
+            .ok()
+            .unwrap();
+        }
+        assert_eq!(disposition, REG_CREATED_NEW_KEY);
+        let fixture = Fixture { name, key };
+        let target = r"C:\synthetic app's folder\fixture.exe";
+        let value_name: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+        assert!(read_compatibility_layer(
+            HKEY_CURRENT_USER,
+            &key_name,
+            target,
+            RRF_SUBKEY_WOW6464KEY
+        )
+        .unwrap()
+        .is_none());
+        for (value, allowed) in [
+            ("~ RUNASADMIN", false),
+            ("RUNASINVOKER", false),
+            ("HIGHDPIAWARE", true),
+        ] {
+            let bytes: Vec<u8> = value
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            unsafe {
+                RegSetValueExW(
+                    fixture.key,
+                    PCWSTR(value_name.as_ptr()),
+                    None,
+                    REG_SZ,
+                    Some(&bytes),
+                )
+                .ok()
+                .unwrap();
+            }
+            for view in [RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY] {
+                let actual =
+                    read_compatibility_layer(HKEY_CURRENT_USER, &key_name, target, view).unwrap();
+                assert_eq!(actual.as_deref(), Some(value));
+                assert_eq!(
+                    crate::computer_use_policy::windows_compatibility_layers_allowed(
+                        actual.as_deref()
+                    ),
+                    allowed
+                );
+            }
+        }
+        unsafe {
+            RegSetValueExW(
+                fixture.key,
+                PCWSTR(value_name.as_ptr()),
+                None,
+                REG_DWORD,
+                Some(&1u32.to_le_bytes()),
+            )
+            .ok()
+            .unwrap();
+        }
+        assert!(read_compatibility_layer(
+            HKEY_CURRENT_USER,
+            &key_name,
+            target,
+            RRF_SUBKEY_WOW6464KEY
+        )
+        .is_err());
     }
     #[test]
     fn untrusted_program_arguments_cannot_be_launch_names() {

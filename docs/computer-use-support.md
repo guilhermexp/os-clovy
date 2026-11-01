@@ -199,6 +199,20 @@ expected parent process image and creation identity. Readiness requires an
 unlocked, ordinary interactive desktop and a non-elevated process. There are
 no macOS privacy buttons or UAC elevation path on Windows.
 
+Window restoration and focus also qualify the target process token, so an
+elevated or more privileged window stays unavailable even if Windows would
+allow it to be raised. Opening an app requires a standard-user manifest and
+compatible effective launch policy. Elevating, forced RunAsInvoker, unknown
+or unreadable compatibility layers are refused before creation. The native
+launch preserves the existing compatibility environment and uses Windows'
+non-elevating process-creation path, with the qualified Explorer token/job
+parent. It never retries through a UAC-capable shell operation. A successful
+creation receipt carries image and creation identity from that exact process
+handle; later failure remains unsafe to retry, and Stop does not close the
+user's application. Opening an app manually does not authorize elevated
+control. Signed native launch, integrity and job-inheritance acceptance is
+still pending on Windows.
+
 Run the deterministic self-test with the exact signed host and helper resource
 directory:
 

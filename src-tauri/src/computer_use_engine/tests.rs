@@ -137,7 +137,15 @@ fn click_double_right_drag_scroll_and_keys_retain_scope() {
     assert_eq!(scroll[0], "scroll");
     assert!(scroll.contains(&e.reference));
     let key = action_argv("press_key", &json!({"key":"escape"}), &c, None, false).unwrap();
-    assert_eq!(key, ["press", "escape", "--window-id", "w-7"]);
+    assert_eq!(&key[..4], ["press", "escape", "--window-id", "w-7"]);
+    let at = key
+        .iter()
+        .position(|argument| argument == "--clovy-target-json")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&key[at + 1]).unwrap(),
+        c.window.raw
+    );
     let hotkey = action_argv("hotkey", &json!({"keys":["ctrl","f"]}), &c, None, false).unwrap();
     assert_eq!(hotkey[1], "ctrl+f");
     assert!(hotkey.contains(&"w-7".into()));
@@ -383,4 +391,45 @@ fn linux_active_window_keys_report_visible_without_changing_dispatch_policy() {
             .contains("visible"));
         assert_eq!(error["structuredContent"]["disposition"]["retry"], "unsafe");
     }
+}
+
+#[test]
+fn window_keys_transport_expected_capture_identity_to_the_leased_consumer() {
+    let captured = capture();
+    for (name, args) in [
+        ("press_key", json!({"key":"escape"})),
+        ("hotkey", json!({"keys":["ctrl","f"]})),
+    ] {
+        for physical in [false, true] {
+            let argv = action_argv(name, &args, &captured, None, physical).unwrap();
+            let at = argv
+                .iter()
+                .position(|arg| arg == "--clovy-target-json")
+                .unwrap();
+            let expected: Value = serde_json::from_str(&argv[at + 1]).unwrap();
+            assert_eq!(expected, captured.window.raw);
+            assert_eq!(expected["pid"], 42);
+            assert_eq!(expected["process_instance"], "p42:100");
+            assert!(!argv.iter().any(|arg| arg == "--clovy-ref"));
+        }
+    }
+}
+#[test]
+fn preparatory_focus_failure_remains_unsafe_and_cannot_escalate() {
+    let native = json!({"version":"2.5","ok":false,"error":{"code":"ACTION_NOT_SUPPORTED","message":"Native input refused before Send","details":{"native_disposition":{"delivery":"not_delivered","retry":"safe"},"preparatory_effects":{"focus":{"attempted":true,"confirmed":true},"target_input":{"attempted":true}}},"disposition":{"delivery":"delivered_unverified","retry":"unsafe"}}});
+    assert!(!may_escalate(&native));
+    let envelope = normalize(native.clone(), "visible");
+    assert_eq!(
+        envelope["structuredContent"]["disposition"]["retry"],
+        "unsafe"
+    );
+    assert_eq!(
+        envelope["structuredContent"]["engine_evidence"]["error"]["details"],
+        native["error"]["details"]
+    );
+    assert_eq!(
+        envelope["structuredContent"]["engine_evidence"]["error"]["details"]["native_disposition"]
+            ["retry"],
+        "safe"
+    );
 }

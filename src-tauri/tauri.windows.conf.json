@@ -19,8 +19,10 @@
           "-NoProfile",
           "-ExecutionPolicy",
           "Bypass",
-          "-Command",
-          "$script = if (Test-Path 'scripts/windows-sign.ps1') { 'scripts/windows-sign.ps1' } elseif (Test-Path '../scripts/windows-sign.ps1') { '../scripts/windows-sign.ps1' } else { throw 'scripts/windows-sign.ps1 not found.' }; & $script $args[0]",
+          "-NonInteractive",
+          "-File",
+          "../scripts/windows-sign.ps1",
+          "-TargetPath",
           "%1"
         ]
       },

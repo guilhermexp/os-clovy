@@ -35,7 +35,8 @@ use windows::Win32::{
             WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
             EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-            STARTF_USESTDHANDLES, STARTUPINFOEXW,
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES,
+            STARTUPINFOEXW,
         },
     },
 };
@@ -235,6 +236,9 @@ fn environment(command: &std::process::Command) -> Result<Vec<u16>> {
             values.remove(&key);
         }
     }
+    encode_environment(values)
+}
+fn encode_environment(values: BTreeMap<String, (OsString, OsString)>) -> Result<Vec<u16>> {
     let mut encoded = Vec::new();
     for (_, (name, value)) in values {
         let name: Vec<u16> = name.encode_wide().collect();
@@ -252,6 +256,126 @@ fn environment(command: &std::process::Command) -> Result<Vec<u16>> {
         encoded.push(0);
     }
     Ok(encoded)
+}
+
+pub(super) struct ApplicationEnvironment {
+    encoded: Vec<u16>,
+    pub(super) compatibility_layer: Option<String>,
+}
+pub(super) fn application_environment() -> Result<ApplicationEnvironment> {
+    application_environment_from_values(std::env::vars_os())
+}
+fn application_environment_from_values(
+    values: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<ApplicationEnvironment> {
+    let mut snapshot = BTreeMap::new();
+    for (name, value) in values {
+        let key = name
+            .to_str()
+            .context("A launch environment name is invalid")?;
+        if crate::computer_use_policy::private_windows_launch_variable(key) {
+            continue;
+        }
+        if snapshot.insert(key.to_uppercase(), (name, value)).is_some() {
+            bail!("The application environment contains ambiguous duplicate names");
+        }
+    }
+    let values = snapshot;
+    let compatibility_layer = values
+        .get("__COMPAT_LAYER")
+        .map(|(_, value)| {
+            value
+                .to_str()
+                .context("The launch compatibility environment is invalid")
+                .map(str::to_owned)
+        })
+        .transpose()?;
+    let encoded = encode_environment(values)?;
+    if encoded.len() > 1024 * 1024 {
+        bail!("The application launch environment exceeds its bound");
+    }
+    Ok(ApplicationEnvironment {
+        encoded,
+        compatibility_layer,
+    })
+}
+
+pub(super) struct ApplicationProcess {
+    pub(super) handle: Handle,
+    pub(super) pid: u32,
+}
+/// Only real user applications take this path. The verified Explorer handle
+/// supplies the token/job parent; controllers retain their explicit JOB_LIST.
+/// CreateProcess itself evaluates effective AppCompat/Fusion/installer policy
+/// and refuses elevation instead of entering ShellExecute's AppInfo/UAC path.
+pub(super) fn launch_application(
+    path: &Path,
+    explorer: HANDLE,
+    environment: &ApplicationEnvironment,
+    before_dispatch: impl FnOnce() -> Result<()>,
+) -> Result<ApplicationProcess> {
+    let executable = wide(path);
+    let mut line = Vec::new();
+    quote(path.as_os_str(), &mut line)?;
+    line.push(0);
+    if !path.is_absolute() || line.len() > 32767 {
+        bail!("The application launch path is invalid");
+    }
+    let directory = wide(
+        path.parent()
+            .context("The application has no parent directory")?,
+    );
+    let mut size = 0;
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut size) };
+    if size == 0 {
+        bail!("The application launch attributes are unavailable");
+    }
+    let mut attributes = Attributes {
+        storage: vec![0usize; size.div_ceil(size_of::<usize>())],
+        initialized: false,
+    };
+    unsafe {
+        InitializeProcThreadAttributeList(Some(attributes.pointer()), 1, None, &mut size)?;
+    }
+    attributes.initialized = true;
+    unsafe {
+        UpdateProcThreadAttribute(
+            attributes.pointer(),
+            0,
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+            Some((&explorer as *const HANDLE).cast()),
+            size_of::<HANDLE>(),
+            None,
+            None,
+        )?;
+    }
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+    startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW;
+    startup.StartupInfo.wShowWindow = SW_SHOWNOACTIVATE.0 as u16;
+    startup.lpAttributeList = attributes.pointer();
+    let mut info = PROCESS_INFORMATION::default();
+    before_dispatch()?;
+    unsafe {
+        CreateProcessW(
+            PCWSTR(executable.as_ptr()),
+            Some(PWSTR(line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            Some(environment.encoded.as_ptr().cast()),
+            PCWSTR(directory.as_ptr()),
+            &startup.StartupInfo,
+            &mut info,
+        )?;
+    }
+    let process = Handle(info.hProcess);
+    let _thread = Handle(info.hThread);
+    Ok(ApplicationProcess {
+        handle: process,
+        pid: info.dwProcessId,
+    })
 }
 pub(super) fn spawn(command: Command, job: &OwnedJob) -> Result<WindowsChild> {
     spawn_inner(command, job, true)
@@ -560,6 +684,66 @@ pub(super) fn connect_private_transport() -> Result<(ChildStdout, ChildStdin)> {
 mod tests {
     use super::*;
     #[test]
+    fn application_environment_keeps_effective_layers_and_drops_private_authority() {
+        let environment = application_environment_from_values([
+            (
+                OsString::from("__COMPAT_LAYER"),
+                OsString::from("~ RUNASADMIN"),
+            ),
+            (
+                OsString::from("PATH"),
+                OsString::from("C:\\synthetic path\\😀"),
+            ),
+            (
+                OsString::from("CLOVY_COMPUTER_USE_CAPABILITY"),
+                OsString::from("synthetic"),
+            ),
+            (
+                OsString::from("CLOVY_COMPUTER_USE_RUN_DIR"),
+                OsString::from("C:\\synthetic-run"),
+            ),
+            (
+                OsString::from("AGENT_DESKTOP_HOME"),
+                OsString::from("C:\\engine-run"),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            environment.compatibility_layer.as_deref(),
+            Some("~ RUNASADMIN")
+        );
+        assert!(
+            !crate::computer_use_policy::windows_compatibility_layers_allowed(
+                environment.compatibility_layer.as_deref(),
+            )
+        );
+        assert!(environment.encoded.ends_with(&[0, 0]));
+        let entries: std::collections::BTreeSet<String> = environment
+            .encoded
+            .split(|unit| *unit == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| String::from_utf16(entry).unwrap())
+            .collect();
+        assert_eq!(
+            entries,
+            ["__COMPAT_LAYER=~ RUNASADMIN", "PATH=C:\\synthetic path\\😀"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(application_environment_from_values([
+            (
+                OsString::from("__COMPAT_LAYER"),
+                OsString::from("RUNASADMIN")
+            ),
+            (
+                OsString::from("__compat_layer"),
+                OsString::from("HIGHDPIAWARE")
+            ),
+        ])
+        .is_err());
+    }
+    #[test]
     fn typed_arguments_roundtrip_the_native_windows_parser() {
         let arguments = [
             "agent-desktop.exe",
@@ -635,5 +819,161 @@ mod tests {
             .unwrap()
             .success());
         assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_TIMEOUT);
+    }
+
+    #[test]
+    #[ignore = "private subprocess fixture for the authorized Windows parent/job test"]
+    fn application_launch_job_probe() {
+        let parent_pid: u32 = std::env::var("CLOVY_TEST_APP_PARENT_PID")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let parent = Handle(unsafe {
+            OpenProcess(
+                PROCESS_CREATE_PROCESS | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                parent_pid,
+            )
+            .unwrap()
+        });
+        let executable = PathBuf::from(std::env::var_os("CLOVY_TEST_APP_EXECUTABLE").unwrap());
+        let receipt = PathBuf::from(std::env::var_os("CLOVY_TEST_APP_RECEIPT").unwrap());
+        let environment = application_environment().unwrap();
+        assert!(
+            crate::computer_use_policy::windows_compatibility_layers_allowed(
+                environment.compatibility_layer.as_deref()
+            )
+        );
+        let created = launch_application(&executable, parent.0, &environment, || Ok(())).unwrap();
+        let identity = process_identity_from_handle(created.handle.0).unwrap();
+        let value =
+            json!({"pid":created.pid,"path":identity.path,"creation_time":identity.creation_time});
+        let pending = receipt.with_extension("pending");
+        std::fs::write(&pending, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::rename(pending, receipt).unwrap();
+        // The outer test terminates this controller job. The created fixture
+        // is bounded even if the outer fixture fails before it can clean up.
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    #[ignore = "authorized native Windows process fixture; requires the installed Rust compiler"]
+    async fn application_parent_is_outside_the_controller_job() {
+        use windows::Win32::System::{
+            JobObjects::IsProcessInJob,
+            Threading::{TerminateProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE},
+        };
+        struct FixtureProcess(Handle);
+        impl Drop for FixtureProcess {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = TerminateProcess(self.0 .0, 0);
+                    let _ = WaitForSingleObject(self.0 .0, 2000);
+                }
+            }
+        }
+        let directory = tempfile::Builder::new()
+            .prefix("clovy-owned-app-job-")
+            .tempdir()
+            .unwrap();
+        let source = directory.path().join("owned_fixture.rs");
+        let executable = directory.path().join("owned app's fixture.exe");
+        // This app performs no I/O, UI, privilege or user-data operation.
+        std::fs::write(
+            &source,
+            "#![windows_subsystem = \"windows\"]\nfn main() { std::thread::sleep(std::time::Duration::from_secs(20)); }",
+        )
+        .unwrap();
+        let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let compiled = std::process::Command::new(compiler)
+            .args([
+                "--edition",
+                "2021",
+                "--crate-name",
+                "clovy_owned_app_job_fixture",
+                "-C",
+                "debuginfo=0",
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+
+        let receipt = directory.path().join("receipt.json");
+        let job = OwnedJob::new().unwrap();
+        let mut parent_is_owned = BOOL(0);
+        unsafe {
+            IsProcessInJob(GetCurrentProcess(), Some(job.0 .0), &mut parent_is_owned).unwrap();
+        }
+        assert!(!parent_is_owned.as_bool());
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "computer_use_windows::process::tests::application_launch_job_probe",
+            ])
+            .env(
+                "CLOVY_TEST_APP_PARENT_PID",
+                unsafe { GetCurrentProcessId() }.to_string(),
+            )
+            .env("CLOVY_TEST_APP_EXECUTABLE", &executable)
+            .env("CLOVY_TEST_APP_RECEIPT", &receipt);
+        let mut controller = spawn(command, &job).unwrap();
+        let value: Value = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(bytes) = std::fs::read(&receipt) {
+                    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                        break value;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = u32::try_from(value["pid"].as_u64().unwrap()).unwrap();
+        let handle = Handle(unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                false,
+                pid,
+            )
+            .unwrap()
+        });
+        let identity = process_identity_from_handle(handle.0).unwrap();
+        assert!(same_path(&identity.path, &executable));
+        assert_eq!(
+            Some(identity.creation_time),
+            value["creation_time"].as_u64()
+        );
+        // Ownership is established before this cleanup guard can terminate it.
+        let fixture = FixtureProcess(handle);
+        let mut in_job = BOOL(0);
+        unsafe {
+            IsProcessInJob(controller.process.0, Some(job.0 .0), &mut in_job).unwrap();
+        }
+        assert!(in_job.as_bool());
+        unsafe {
+            IsProcessInJob(fixture.0 .0, Some(job.0 .0), &mut in_job).unwrap();
+        }
+        assert!(!in_job.as_bool());
+        job.terminate();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), controller.wait())
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(fixture.0 .0, 0) },
+            WAIT_TIMEOUT
+        );
     }
 }

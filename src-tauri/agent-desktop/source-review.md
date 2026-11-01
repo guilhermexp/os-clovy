@@ -62,6 +62,40 @@ write. Unsupported insertion returns not-delivered/safe with no mutation; an
 actual write failure preserves its delivery disposition and never retries via
 AXValue or the clipboard.
 
+Follow-up source qualification on 2026-11-01 covers 78 audited engine files,
+including 18 changes after the preserved e868/source6 generation. Window keys
+without an element now carry the captured window identity into the private
+consumer. The expected PID, process generation, title and geometry are checked
+inside the interaction lease before focus or input; a reused handle cannot
+become new authority. Stable targets retain their supported headed/headless
+key behavior.
+
+Preparatory focus is recorded independently from click, drag or key delivery.
+Read-only checks run before focus where possible and remain fresh afterward.
+If security, resolution or cancellation fails after focus was attempted, the
+receipt retains that effect and unsafe partial/uncertain delivery rather than
+claiming the whole operation was not delivered. The original native input or
+guard disposition is retained separately before elevating the outer result,
+so focus evidence does not erase not-delivered evidence about target input.
+No such error authorizes replay or fallback; a pre-focus refusal can still
+be not-delivered/safe.
+
+macOS launch receipts now carry executable path, bundle and native process birth
+from the retained NSRunningApplication completion object. Objective-C strings
+remain alive through the synchronous Rust callback. Native/kernel path identity,
+birth and object liveness are checked again after reads; unknown or changed
+authority fails closed with any launch effect preserved. Existing-process
+attachment retains its previously approved birth token. A fresh PID lookup is
+not adopted as launch authority. The reviewed patch includes the matching
+Objective-C bridge and Rust callback ABI, not only Rust source files.
+
+Cached consumer regressions exercise handle reuse with zero focus/input,
+post-focus failures with unsafe effect evidence, stable controls, and native
+pure filesystem/birth decisions. These checks do not establish NSWorkspace,
+libproc, signed native execution or a new engine artifact. The preserved
+source6 binary authenticates only e868; this patch requires a fresh prepared
+artifact and matching final qualification before delivery.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish

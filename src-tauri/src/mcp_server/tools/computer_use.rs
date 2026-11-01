@@ -254,3 +254,50 @@ fn content_for_cli(result: &Value) -> Value {
     }
     protocol::content_value(blocks)
 }
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    #[test]
+    fn cli_keeps_the_delivered_action_and_complete_follow_up_error() {
+        let action_receipt = json!({
+            "action_id": "action-one",
+            "disposition": { "delivery": "delivered_unverified", "retry": "unsafe" },
+            "effective_modality": "visible",
+            "engine_evidence": { "steps": [{ "mechanism": "native", "outcome": "succeeded" }] }
+        });
+        let action = json!({
+            "content": [{ "type": "text", "text": "Original action observation." }],
+            "structuredContent": action_receipt
+        });
+        let error = AppError {
+            code: "computer_use_desktop_unavailable".into(),
+            message: "The native desktop became unavailable.".into(),
+            details: Some(json!({
+                "engineReceipt": {
+                    "error": { "code": "capture_failed", "details": { "clovy_code": "computer_use_desktop_unavailable", "cause": "native desktop changed" } },
+                    "disposition": { "delivery": "not_delivered", "retry": "safe" }
+                },
+                "disposition": { "delivery": "not_delivered", "retry": "safe" },
+                "effective_modality": "background"
+            })),
+        };
+        let expected_error = serde_json::to_value(&error).unwrap();
+        let combined = crate::computer_use::combine_action_and_capture(action, Err(error));
+        // Exercise the final CLI consumer and MCP envelope, not just the helper.
+        let mcp = protocol::tool_result(&content_for_cli(&combined));
+        assert_eq!(mcp["isError"], false);
+        let blocks = mcp["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["text"], "Original action observation.");
+        let warning: Value = serde_json::from_str(blocks[1]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(warning["capture_after_error"], expected_error);
+        assert!(warning["message"]
+            .as_str()
+            .unwrap()
+            .contains("Do not repeat"));
+        let delivered: Value = serde_json::from_str(blocks[2]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(delivered, action_receipt);
+    }
+}

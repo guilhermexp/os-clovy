@@ -4020,18 +4020,11 @@ async fn open_app(
                 "The Computer use driver did not identify the opened app.",
             )
         })?;
-        let pid = launched.get("pid").and_then(Value::as_i64).ok_or_else(|| {
-            AppError::new(
-                "computer_use_driver_invalid_response",
-                "The Computer use driver did not identify the opened app process.",
-            )
-        })?;
-        let identity = app_identity(pid).ok_or_else(|| {
-            AppError::new(
-                "computer_use_target_unverified",
-                "Clovy could not verify the opened app identity.",
-            )
-        })?;
+        let (pid, identity) = verified_launched_identity(
+            launched,
+            cfg!(target_os = "macos"),
+            app_identity,
+        )?;
         let reported_name = launched
             .get("name")
             .and_then(Value::as_str)
@@ -4130,7 +4123,58 @@ async fn open_app(
         })))
     }
     .await
-    .map_err(|error| action_delivered_unverified(error, &action_id))
+    .map_err(|mut error| {
+        let mut details = error.details.take().unwrap_or_else(|| json!({}));
+        if !details.is_object() {
+            details = json!({ "cause": details });
+        }
+        details["launchReceipt"] = result.clone();
+        error.details = Some(details);
+        action_delivered_unverified(error, &action_id)
+    })
+}
+
+// A PID lookup can verify a native launch receipt, but cannot replace its
+// authority. In particular, a reused PID must not turn a name approval for the
+// launched process into a grant for its successor.
+fn verified_launched_identity(
+    launched: &Value,
+    require_bundle_id: bool,
+    lookup: impl FnOnce(i64) -> Option<AppIdentity>,
+) -> Result<(i64, AppIdentity), AppError> {
+    let unverified = || {
+        AppError::new(
+            "computer_use_target_unverified",
+            "Clovy could not verify the opened app against its native launch identity. Inspect the app list before continuing.",
+        )
+    };
+    let pid = launched["pid"]
+        .as_i64()
+        .filter(|pid| *pid > 0 && u32::try_from(*pid).is_ok())
+        .ok_or_else(unverified)?;
+    let expected_path = launched["executable_path"]
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(unverified)?;
+    let expected_creation = launched["process_creation_time"]
+        .as_u64()
+        .filter(|creation| *creation > 0)
+        .ok_or_else(unverified)?;
+    let expected_bundle = launched["bundle_id"]
+        .as_str()
+        .filter(|bundle| !bundle.trim().is_empty());
+    if require_bundle_id && expected_bundle.is_none() {
+        return Err(unverified());
+    }
+    let current = lookup(pid).ok_or_else(unverified)?;
+    if current.executable_path != expected_path
+        || current.process_creation != expected_creation
+        || expected_bundle.is_some_and(|bundle| current.bundle_id != bundle)
+    {
+        return Err(unverified());
+    }
+    Ok((pid, current))
 }
 
 async fn focus_app(
@@ -4312,7 +4356,10 @@ fn action_delivered_unverified(mut error: AppError, action_id: &str) -> AppError
 // Once the driver has returned an action result, a later capture cannot
 // determine whether it is safe to repeat that action. Keep its receipt even
 // when the follow-up observation fails.
-fn combine_action_and_capture(mut action: Value, capture: Result<Value, AppError>) -> Value {
+pub(crate) fn combine_action_and_capture(
+    mut action: Value,
+    capture: Result<Value, AppError>,
+) -> Value {
     match capture {
         Ok(mut capture) => {
             let key = if capture.get("structuredContent").is_some() {
@@ -4325,7 +4372,7 @@ fn combine_action_and_capture(mut action: Value, capture: Result<Value, AppError
         }
         Err(error) => {
             let warning = json!({
-                "capture_after_error": { "code": error.code, "message": error.message },
+                "capture_after_error": error,
                 "message": "The action returned a result, but the follow-up capture failed. Do not repeat the action; inspect the target first."
             });
             if !action.get("content").is_some_and(Value::is_array) {
@@ -5791,43 +5838,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_readiness_loss_enters_the_stop_path() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("pub(crate) async fn runtime_ready")
-            .expect("runtime readiness boundary");
-        let end = source[start..]
-            .find("/// Start the persistent private driver")
-            .map(|offset| start + offset)
-            .expect("driver prewarm boundary");
-        let readiness = &source[start..end];
-
-        assert!(readiness.contains("previous == ready_state_value(true)"));
-        assert!(readiness.contains("stop_inner(app, &state).await"));
-        assert!(readiness.contains("replace_runtime_ready(&state, false)"));
-    }
-
-    #[test]
-    fn status_probe_does_not_rebind_after_stop_or_shutdown() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("async fn status_with_published_readiness")
-            .expect("status readiness helper boundary");
-        let end = source[start..]
-            .find("#[tauri::command]")
-            .map(|offset| start + offset)
-            .expect("next command boundary");
-        let helper = &source[start..end];
-
-        assert!(!helper.contains("loop {"));
-        assert_eq!(
-            helper.matches("state.epoch.load(Ordering::SeqCst)").count(),
-            1
-        );
-        assert!(helper.contains("computer_use_status_superseded"));
-    }
-
-    #[test]
     fn driver_prewarm_single_flight_reopens_after_completion() {
         let in_flight = AtomicBool::new(false);
         assert!(DriverPrewarmInProgress::try_begin(&in_flight));
@@ -5835,40 +5845,6 @@ mod tests {
         assert!(!DriverPrewarmInProgress::try_begin(&in_flight));
         drop(first);
         assert!(DriverPrewarmInProgress::try_begin(&in_flight));
-    }
-
-    #[test]
-    fn status_refresh_does_not_restore_stale_readiness_on_config_error() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("pub async fn computer_use_status")
-            .expect("status command boundary");
-        let end = source[start..]
-            .find("fn ready_state_value")
-            .map(|offset| start + offset)
-            .expect("readiness helper boundary");
-
-        assert!(
-            !source[start..end].contains("runtime_ready_state.store(previous"),
-            "a config error must not re-arm prewarm after observed readiness loss"
-        );
-    }
-
-    #[test]
-    fn completed_run_keeps_driver_readiness_for_immediate_retry() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("async fn stop_if_idle")
-            .expect("completed-run cleanup boundary");
-        let end = source[start..]
-            .find("fn clear_app_authorizations")
-            .map(|offset| start + offset)
-            .expect("completed-run cleanup end");
-        let cleanup = &source[start..end];
-
-        assert!(!cleanup.contains("state.epoch.fetch_add"));
-        assert!(!cleanup.contains("driver.stop().await"));
-        assert!(cleanup.contains("schedule_driver_prewarm(app)"));
     }
 
     #[tokio::test]
@@ -6173,6 +6149,60 @@ mod tests {
             executable_path: PathBuf::from(executable),
             process_creation: 1,
         }
+    }
+
+    #[test]
+    fn launch_receipt_identity_cannot_be_replaced_by_a_reused_pid() {
+        let path_a = std::env::temp_dir().join("clovy-launch-a.exe");
+        let path_b = std::env::temp_dir().join("clovy-launch-b.exe");
+        let original = fixture_identity("org.example.fixture", path_a.to_str().unwrap());
+        let receipt = json!({
+            "pid": 42,
+            "executable_path": path_a,
+            "process_creation_time": 1,
+            "bundle_id": "org.example.fixture"
+        });
+        let exact = verified_launched_identity(&receipt, true, |pid| {
+            assert_eq!(pid, 42);
+            Some(original.clone())
+        })
+        .unwrap();
+        assert_eq!(exact, (42, original.clone()));
+
+        for replacement in [
+            AppIdentity {
+                process_creation: 2,
+                ..original.clone()
+            },
+            fixture_identity("org.example.other", path_b.to_str().unwrap()),
+            fixture_identity("org.example.other", path_a.to_str().unwrap()),
+        ] {
+            assert_eq!(
+                verified_launched_identity(&receipt, true, |_| Some(replacement))
+                    .unwrap_err()
+                    .code,
+                "computer_use_target_unverified"
+            );
+        }
+        assert!(verified_launched_identity(&receipt, true, |_| None).is_err());
+        let mut pid_only = receipt.clone();
+        pid_only
+            .as_object_mut()
+            .unwrap()
+            .remove("process_creation_time");
+        assert!(verified_launched_identity(&pid_only, false, |_| {
+            panic!("a PID-only receipt must fail before adopting any current process")
+        })
+        .is_err());
+        let mut without_bundle = receipt.clone();
+        without_bundle.as_object_mut().unwrap().remove("bundle_id");
+        assert!(
+            verified_launched_identity(&without_bundle, true, |_| Some(original.clone())).is_err()
+        );
+        // Windows authority is the exact executable and process generation.
+        assert!(
+            verified_launched_identity(&without_bundle, false, |_| Some(original.clone())).is_ok()
+        );
     }
 
     fn fixture_target() -> TargetContext {

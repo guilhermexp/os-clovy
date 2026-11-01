@@ -370,15 +370,15 @@ jobs:
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked activity
 
-      - name: Build and verify unsigned Windows installer
+      - name: Build and verify signed Windows installer
         shell: pwsh
         run: ./scripts/build-windows.ps1
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: clovy-windows-unsigned-release-nsis
-          path: artifacts/windows-unsigned/*-setup.exe
+          name: clovy-windows-signed-release-nsis
+          path: artifacts/windows-signed/*-setup.exe
           if-no-files-found: error
 
 # Coverage reruns of these suites live in coverage.yml (manual-only). They

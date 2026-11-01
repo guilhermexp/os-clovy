@@ -891,6 +891,8 @@ fn action_argv(
             ];
             if let Some(element) = element {
                 command.extend(["--clovy-ref".into(), element.reference.clone()]);
+            } else {
+                command.extend(["--clovy-target-json".into(), capture.window.raw.to_string()]);
             }
             command
         }

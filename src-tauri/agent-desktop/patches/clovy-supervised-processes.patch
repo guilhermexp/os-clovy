@@ -524,9 +524,9 @@
 +}
 --- a/crates/core/src/commands/clovy_targeted.rs
 +++ b/crates/core/src/commands/clovy_targeted.rs
-@@ -0,0 +1,311 @@
-+//! Exact-window guard for Clovy's private physical input argv. Window
-+//! identity, geometry, focus and event delivery share one interaction lease.
+@@ -0,0 +1,446 @@
++//! Private exact-window input. Expected capture identity is revalidated inside
++//! the interaction lease; preparatory focus is retained as a separate effect.
 +use crate::{
 +    AdapterError, AppError, Deadline, DeliverySemantics, DragParams, ErrorCode, InteractionLease,
 +    MouseEvent, MouseEventKind, PlatformAdapter, Point, WindowInfo, context::CommandContext,
@@ -538,7 +538,6 @@
 +        .with_disposition(DeliverySemantics::not_delivered())
 +        .into()
 +}
-+
 +fn checked_window(expected: &WindowInfo, live: WindowInfo) -> Result<WindowInfo, AppError> {
 +    if expected.id != live.id
 +        || expected.pid != live.pid
@@ -557,11 +556,104 @@
 +    }
 +    Ok(live)
 +}
-+
++fn decode_window(encoded: &str) -> Result<WindowInfo, AppError> {
++    serde_json::from_str(encoded).map_err(|_| unsent("The Clovy target identity is invalid"))
++}
++fn resolve(
++    expected: &WindowInfo,
++    adapter: &dyn PlatformAdapter,
++    lease: &InteractionLease,
++) -> Result<WindowInfo, AppError> {
++    checked_window(
++        expected,
++        adapter.resolve_window_strict(expected, lease.deadline())?,
++    )
++}
++#[derive(Default)]
++struct Effects {
++    focus_attempted: bool,
++    focus_confirmed: bool,
++    window: Option<WindowInfo>,
++    input_attempted: bool,
++    input_receipt: Option<Value>,
++}
++impl Effects {
++    fn focus(
++        &mut self,
++        window: &WindowInfo,
++        adapter: &dyn PlatformAdapter,
++        lease: &InteractionLease,
++    ) -> Result<(), AppError> {
++        self.window = Some(window.clone());
++        self.focus_attempted = true;
++        adapter.focus_window(window, lease)?;
++        // The focus adapter's success is evidence, even if a subsequent guard
++        // or observation fails. Never erase this by labeling all input unsent.
++        self.focus_confirmed = true;
++        Ok(())
++    }
++    fn evidence(&self) -> Value {
++        json!({"focus":{"attempted":self.focus_attempted,"confirmed":self.focus_confirmed,
++            "window_id":self.window.as_ref().map(|w|&w.id),"pid":self.window.as_ref().map(|w|w.pid),
++            "process_instance":self.window.as_ref().and_then(|w|w.process_instance.as_ref())},
++            "target_input":{"attempted":self.input_attempted,"receipt":self.input_receipt}})
++    }
++    fn finish(&self, result: Result<Value, AppError>) -> Result<Value, AppError> {
++        match result {
++            Ok(mut value) => {
++                if let Some(fields) = value.as_object_mut() {
++                    fields.insert("preparatory_effects".into(), self.evidence());
++                }
++                Ok(value)
++            }
++            Err(error) if self.focus_attempted || self.input_receipt.is_some() => {
++                let mut error = match error {
++                    AppError::Adapter(error) => error,
++                    other => AdapterError::internal(other.to_string())
++                        .with_details(json!({"cause_code":other.code()})),
++                };
++                let mut details = error.details.take().unwrap_or_else(|| json!({}));
++                if !details.is_object() {
++                    details = json!({"native_details":details});
++                }
++                let fields = details.as_object_mut().unwrap();
++                // Overall partial delivery must not erase the native target
++                // input/guard refusal that preceded this preparatory merge.
++                fields.insert("native_disposition".into(), json!(error.disposition));
++                fields.insert("preparatory_effects".into(), self.evidence());
++                error = error.with_details(details);
++                if error.disposition.retry() != crate::RetryDisposition::Unsafe {
++                    error = error.with_disposition(
++                        if self.focus_confirmed || self.input_receipt.is_some() {
++                            DeliverySemantics::delivered_unverified()
++                        } else {
++                            DeliverySemantics::uncertain()
++                        },
++                    );
++                }
++                Err(error.into())
++            }
++            Err(error) => Err(error),
++        }
++    }
++}
++fn focused(window: &WindowInfo) -> Result<(), AppError> {
++    if !window.state.is_focused
++        || window.state.visible == Some(false)
++        || window.state.minimized == Some(true)
++    {
++        return Err(unsent(
++            "The exact Clovy target did not remain visible and focused",
++        ));
++    }
++    Ok(())
++}
 +fn prepare(
-+    encoded: &str,
++    expected: &WindowInfo,
 +    adapter: &dyn PlatformAdapter,
 +    context: &CommandContext,
++    effects: &mut Effects,
++    preflight: impl FnOnce(&WindowInfo, Deadline) -> Result<(), AdapterError>,
 +) -> Result<(WindowInfo, InteractionLease), AppError> {
 +    if !context.is_headed() {
 +        return Err(unsent("Private physical input requires visible modality"));
@@ -569,30 +661,19 @@
 +    if let Some(error) = adapter.physical_pointer_refusal() {
 +        return Err(error.into());
 +    }
-+    let expected: WindowInfo = serde_json::from_str(encoded)
-+        .map_err(|_| unsent("The Clovy target identity is invalid"))?;
 +    let lease = adapter.acquire_interaction_lease(Deadline::standard()?)?;
-+    let live = checked_window(
-+        &expected,
-+        adapter.resolve_window_strict(&expected, lease.deadline())?,
-+    )?;
++    let live = resolve(expected, adapter, &lease)?;
++    preflight(&live, lease.deadline())?;
++    // Reads may block or change geometry. Repeat exact validation and Stop
++    // before the first effect, while retaining the final post-focus guard.
++    let live = resolve(expected, adapter, &lease)?;
 +    super::clovy_cancel::ensure()?;
-+    adapter.focus_window(&live, &lease)?;
-+    let live = checked_window(
-+        &expected,
-+        adapter.resolve_window_strict(&expected, lease.deadline())?,
-+    )?;
-+    if !live.state.is_focused
-+        || live.state.visible == Some(false)
-+        || live.state.minimized == Some(true)
-+    {
-+        return Err(unsent(
-+            "The exact Clovy target did not become visible and focused",
-+        ));
-+    }
++    effects.focus(&live, adapter, &lease)?;
++    super::clovy_cancel::ensure()?;
++    let live = resolve(expected, adapter, &lease)?;
++    focused(&live)?;
 +    Ok((live, lease))
 +}
-+
 +fn checked_point(window: &WindowInfo, point: &Point) -> Result<(), AppError> {
 +    point.validate()?;
 +    let b = window
@@ -604,9 +685,8 @@
 +    }
 +    Ok(())
 +}
-+
 +pub fn mouse(
-+    expected: &str,
++    encoded: &str,
 +    event: MouseEvent,
 +    adapter: &dyn PlatformAdapter,
 +    context: &CommandContext,
@@ -614,47 +694,51 @@
 +    if let MouseEventKind::Click { count } = event.kind {
 +        crate::validate_mouse_click_count(count)?;
 +    }
-+    let (window, lease) = prepare(expected, adapter, context)?;
-+    checked_point(&window, &event.point)?;
-+    let point = event.point.clone();
-+    crate::cursor_overlay::submit_travel(adapter, context, point.clone(), &lease, true);
-+    super::clovy_safety::guard_window(adapter, &window, Some(&event.point), lease.deadline())?;
-+    let live = checked_window(
-+        &window,
-+        adapter.resolve_window_strict(&window, lease.deadline())?,
-+    )?;
-+    if !live.state.is_focused
-+        || live.state.visible == Some(false)
-+        || live.state.minimized == Some(true)
-+    {
-+        return Err(unsent("The exact target stopped being visible and focused"));
-+    }
-+    super::clovy_cancel::ensure()?;
-+    let report = adapter.mouse_event(event, &lease);
-+    if crate::cursor_overlay::input_was_delivered(&report) {
-+        crate::cursor_overlay::submit(
++    let expected = decode_window(encoded)?;
++    checked_point(&expected, &event.point)?;
++    let mut effects = Effects::default();
++    let result = (|| {
++        let (window, lease) = prepare(
++            &expected,
 +            adapter,
 +            context,
-+            point,
-+            None,
-+            true,
-+            crate::CursorPhase::Effect,
-+        );
-+    }
-+    let report = report?;
-+    super::operation_response::operation_response(&report, json!({"window_id":window.id}))
++            &mut effects,
++            |window, deadline| {
++                super::clovy_safety::guard_window(adapter, window, Some(&event.point), deadline)
++            },
++        )?;
++        let point = event.point.clone();
++        crate::cursor_overlay::submit_travel(adapter, context, point.clone(), &lease, true);
++        super::clovy_safety::guard_window(adapter, &window, Some(&point), lease.deadline())?;
++        let live = resolve(&expected, adapter, &lease)?;
++        focused(&live)?;
++        super::clovy_cancel::ensure()?;
++        effects.input_attempted = true;
++        let report = adapter.mouse_event(event, &lease);
++        if crate::cursor_overlay::input_was_delivered(&report) {
++            crate::cursor_overlay::submit(
++                adapter,
++                context,
++                point,
++                None,
++                true,
++                crate::CursorPhase::Effect,
++            );
++        }
++        let report = report?;
++        effects.input_receipt = Some(serde_json::to_value(&report)?);
++        super::operation_response::operation_response(&report, json!({"window_id":window.id}))
++    })();
++    effects.finish(result)
 +}
-+
 +pub fn drag(
-+    expected: &str,
++    encoded: &str,
 +    modifiers: Vec<crate::Modifier>,
 +    from: (f64, f64),
 +    to: (f64, f64),
 +    adapter: &dyn PlatformAdapter,
 +    context: &CommandContext,
 +) -> Result<Value, AppError> {
-+    // Mac uses per-event flags; Windows uses one bounded native owner with
-+    // preheld-state checks and verified release before cancellation ACK.
 +    if !cfg!(any(target_os = "macos", target_os = "windows")) && !modifiers.is_empty() {
 +        return Err(AdapterError::new(
 +            ErrorCode::ActionNotSupported,
@@ -663,14 +747,14 @@
 +        .with_disposition(DeliverySemantics::not_delivered())
 +        .into());
 +    }
-+    let (window, lease) = prepare(expected, adapter, context)?;
++    let expected = decode_window(encoded)?;
 +    let from = Point {
 +        x: from.0,
 +        y: from.1,
 +    };
 +    let to = Point { x: to.0, y: to.1 };
-+    checked_point(&window, &from)?;
-+    checked_point(&window, &to)?;
++    checked_point(&expected, &from)?;
++    checked_point(&expected, &to)?;
 +    let params = DragParams {
 +        modifiers,
 +        from: from.clone(),
@@ -678,31 +762,78 @@
 +        duration_ms: Some(350),
 +        drop_delay_ms: Some(150),
 +    };
-+    params.validate(lease.deadline())?;
-+    let cursor = crate::cursor_overlay::hold_cursor(context, lease.deadline());
-+    crate::cursor_overlay::submit_travel(adapter, context, from.clone(), &lease, false);
-+    crate::cursor_overlay::submit_drag(adapter, context, from.clone(), to.clone(), &lease);
-+    super::clovy_safety::guard_drag(adapter, &window, &from, &to, lease.deadline())?;
-+    let live = checked_window(
-+        &window,
-+        adapter.resolve_window_strict(&window, lease.deadline())?,
-+    )?;
-+    if !live.state.is_focused
-+        || live.state.visible == Some(false)
-+        || live.state.minimized == Some(true)
-+    {
-+        return Err(unsent("The exact target stopped being visible and focused"));
-+    }
-+    super::clovy_cancel::ensure()?;
-+    super::clovy_cancel::ensure()?;
-+    let report = adapter.drag(params, &lease)?;
-+    if crate::cursor_overlay::confirms_delivery(report.disposition()) {
-+        crate::cursor_overlay::submit_drag_effect(adapter, context, from, to);
-+    }
-+    drop(cursor);
-+    super::operation_response::operation_response(&report, json!({"window_id":window.id}))
++    params.validate(Deadline::standard()?)?;
++    let mut effects = Effects::default();
++    let result = (|| {
++        let (window, lease) = prepare(
++            &expected,
++            adapter,
++            context,
++            &mut effects,
++            |window, deadline| {
++                super::clovy_safety::guard_drag(adapter, window, &from, &to, deadline)
++            },
++        )?;
++        let cursor = crate::cursor_overlay::hold_cursor(context, lease.deadline());
++        crate::cursor_overlay::submit_travel(adapter, context, from.clone(), &lease, false);
++        crate::cursor_overlay::submit_drag(adapter, context, from.clone(), to.clone(), &lease);
++        super::clovy_safety::guard_drag(adapter, &window, &from, &to, lease.deadline())?;
++        let live = resolve(&expected, adapter, &lease)?;
++        focused(&live)?;
++        super::clovy_cancel::ensure()?;
++        effects.input_attempted = true;
++        let report = adapter.drag(params, &lease)?;
++        effects.input_receipt = Some(serde_json::to_value(&report)?);
++        if crate::cursor_overlay::confirms_delivery(report.disposition()) {
++            crate::cursor_overlay::submit_drag_effect(adapter, context, from, to);
++        }
++        drop(cursor);
++        super::operation_response::operation_response(&report, json!({"window_id":window.id}))
++    })();
++    effects.finish(result)
 +}
-+
++/// Window-key identity is the capture's authority, never a new PID adopted
++/// from a reusable handle. All resolution, focus and input share this lease.
++pub fn press_window(
++    encoded: &str,
++    raw: String,
++    adapter: &dyn PlatformAdapter,
++    context: &CommandContext,
++) -> Result<Value, AppError> {
++    let expected = decode_window(encoded)?;
++    let combo = super::combo::parse_combo_normalized(&raw)?;
++    super::combo::ensure_combo_allowed(&combo, &raw, false, adapter)?;
++    let mut effects = Effects::default();
++    let result = (|| {
++        let lease = adapter.acquire_interaction_lease(Deadline::standard()?)?;
++        let live = resolve(&expected, adapter, &lease)?;
++        super::clovy_safety::guard_window(adapter, &live, None, lease.deadline())?;
++        let mut live = resolve(&expected, adapter, &lease)?;
++        super::clovy_cancel::ensure()?;
++        if context.physical_input_policy().is_headed() {
++            effects.focus(&live, adapter, &lease)?;
++            super::clovy_cancel::ensure()?;
++            live = resolve(&expected, adapter, &lease)?;
++            focused(&live)?;
++        }
++        super::clovy_safety::guard_window(adapter, &live, None, lease.deadline())?;
++        live = resolve(&expected, adapter, &lease)?;
++        super::clovy_cancel::ensure()?;
++        effects.input_attempted = true;
++        let receipt =
++            adapter.press_key_for_window(&live, &combo, context.physical_input_policy(), &lease)?;
++        effects.input_receipt = Some(serde_json::to_value(&receipt)?);
++        crate::cursor_overlay::follow_caret_after_key(adapter, context, Some(live.pid));
++        super::helpers::apply_scoped_post_action_wait(
++            serde_json::to_value(receipt)?,
++            None,
++            Some(expected.id.clone()),
++            adapter,
++            context,
++        )
++    })();
++    effects.finish(result)
++}
 +pub fn press(
 +    reference: String,
 +    raw: String,
@@ -836,6 +967,418 @@
 +        }
 +    }
 +}
++
++#[cfg(test)]
++#[path = "clovy_targeted_review_tests.rs"]
++mod review_tests;
+--- a/crates/core/src/commands/clovy_targeted_review_tests.rs
++++ b/crates/core/src/commands/clovy_targeted_review_tests.rs
+@@ -0,0 +1,405 @@
++use super::*;
++use std::sync::{
++    Arc, Mutex,
++    atomic::{AtomicBool, AtomicUsize, Ordering},
++};
++#[derive(Clone, Copy)]
++enum Change {
++    Stable,
++    ReusedAtLease,
++    ReusedBeforeResolve,
++    SecureBeforeFocus,
++    SecureAfterFocus,
++    ResolveAfterFocus,
++    CancelAfterFocus,
++    InputRefused,
++}
++struct World {
++    window: Mutex<WindowInfo>,
++    change: Change,
++    leased: Arc<AtomicBool>,
++    focuses: AtomicUsize,
++    inputs: AtomicUsize,
++    native_input_calls: AtomicUsize,
++}
++impl World {
++    fn new(change: Change) -> Self {
++        let mut initial = window();
++        if matches!(change, Change::ReusedBeforeResolve) {
++            initial.pid = crate::ProcessId::new(99);
++            initial.process_instance = Some("B:2".into());
++        }
++        Self {
++            window: Mutex::new(initial),
++            change,
++            leased: Arc::new(AtomicBool::new(false)),
++            focuses: AtomicUsize::new(0),
++            inputs: AtomicUsize::new(0),
++            native_input_calls: AtomicUsize::new(0),
++        }
++    }
++    fn in_lease(&self) {
++        assert!(
++            self.leased.load(Ordering::SeqCst),
++            "consumer accessed native authority outside lease"
++        );
++    }
++}
++struct Lease(Arc<AtomicBool>);
++impl Drop for Lease {
++    fn drop(&mut self) {
++        self.0.store(false, Ordering::SeqCst);
++    }
++}
++fn window() -> WindowInfo {
++    serde_json::from_value(json!({"id":"w-7","pid":42,"process_instance":"A:1","title":"Synthetic","app_name":"Fixture","bounds":{"x":0.0,"y":0.0,"width":100.0,"height":100.0},"is_focused":true,"visible":true})).unwrap()
++}
++impl crate::adapter::ActionOps for World {}
++impl crate::adapter::ObservationOps for World {
++    fn list_windows(
++        &self,
++        _filter: &crate::WindowFilter,
++        _deadline: Deadline,
++    ) -> Result<Vec<WindowInfo>, AdapterError> {
++        Ok(vec![self.window.lock().unwrap().clone()])
++    }
++    fn list_apps(&self, _deadline: Deadline) -> Result<Vec<crate::AppInfo>, AdapterError> {
++        let w = self.window.lock().unwrap();
++        Ok(vec![crate::AppInfo {
++            name: w.app.clone(),
++            pid: w.pid,
++            bundle_id: None,
++            process_instance: w.process_instance.clone(),
++            presentation: None,
++        }])
++    }
++    fn get_tree(
++        &self,
++        _window: &WindowInfo,
++        _options: &crate::TreeOptions,
++        _deadline: Deadline,
++    ) -> Result<crate::AccessibilityNode, AdapterError> {
++        self.in_lease();
++        let mut tree = crate::adapter::minimal_accessibility_node("window", "Synthetic");
++        if matches!(self.change, Change::SecureBeforeFocus)
++            || matches!(self.change, Change::SecureAfterFocus)
++                && self.focuses.load(Ordering::SeqCst) > 0
++        {
++            let mut child = crate::adapter::minimal_accessibility_node("textfield", "Password");
++            child.presentation.states = vec!["secure".into(), "focused".into()];
++            child.presentation.bounds = self.window.lock().unwrap().bounds;
++            tree.children.push(child);
++        }
++        Ok(tree)
++    }
++}
++impl crate::adapter::SystemOps for World {
++    fn press_key_for_app(
++        &self,
++        _process: crate::ProcessIdentity,
++        _combo: &crate::KeyCombo,
++        _policy: crate::InteractionPolicy,
++        _lease: &InteractionLease,
++    ) -> Result<crate::ActionResult, AdapterError> {
++        self.in_lease();
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::ActionResult::delivered_unverified("press_key"))
++    }
++    fn acquire_interaction_lease(
++        &self,
++        deadline: Deadline,
++    ) -> Result<InteractionLease, AdapterError> {
++        assert!(!self.leased.swap(true, Ordering::SeqCst));
++        if matches!(self.change, Change::ReusedAtLease) {
++            let mut w = self.window.lock().unwrap();
++            w.pid = crate::ProcessId::new(99);
++            w.process_instance = Some("B:2".into());
++        }
++        InteractionLease::guarded(deadline, Lease(self.leased.clone()))
++    }
++    fn resolve_window_strict(
++        &self,
++        _expected: &WindowInfo,
++        _deadline: Deadline,
++    ) -> Result<WindowInfo, AdapterError> {
++        self.in_lease();
++        if matches!(self.change, Change::ResolveAfterFocus)
++            && self.focuses.load(Ordering::SeqCst) > 0
++        {
++            return Err(
++                AdapterError::stale_ref_because("Native resolve failed after focus")
++                    .with_details(json!({"clovy_code":"fixture_resolve_lost"})),
++            );
++        }
++        Ok(self.window.lock().unwrap().clone())
++    }
++    fn focus_window(
++        &self,
++        _expected: &WindowInfo,
++        _lease: &InteractionLease,
++    ) -> Result<(), AdapterError> {
++        self.in_lease();
++        self.focuses.fetch_add(1, Ordering::SeqCst);
++        self.window.lock().unwrap().state.is_focused = true;
++        if matches!(self.change, Change::CancelAfterFocus) {
++            std::fs::write(
++                std::env::var_os("CLOVY_AGENT_DESKTOP_CANCEL_FILE").unwrap(),
++                b"stop",
++            )
++            .unwrap();
++        }
++        Ok(())
++    }
++    fn press_key_for_window(
++        &self,
++        _expected: &WindowInfo,
++        _combo: &crate::KeyCombo,
++        _policy: crate::InteractionPolicy,
++        _lease: &InteractionLease,
++    ) -> Result<crate::ActionResult, AdapterError> {
++        self.in_lease();
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::ActionResult::delivered_unverified("press_key"))
++    }
++}
++impl crate::adapter::InputOps for World {
++    fn mouse_event(
++        &self,
++        _event: MouseEvent,
++        _lease: &InteractionLease,
++    ) -> Result<crate::OperationReport, AdapterError> {
++        self.in_lease();
++        self.native_input_calls.fetch_add(1, Ordering::SeqCst);
++        if matches!(self.change, Change::InputRefused) {
++            return Err(AdapterError::new(
++                ErrorCode::ActionNotSupported,
++                "Native input refused before Send",
++            )
++            .with_details(json!({"native_reason":"preflight_not_attempted"}))
++            .with_disposition(DeliverySemantics::not_delivered()));
++        }
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::adapter::test_report())
++    }
++    fn drag(
++        &self,
++        _params: DragParams,
++        _lease: &InteractionLease,
++    ) -> Result<crate::OperationReport, AdapterError> {
++        self.in_lease();
++        self.native_input_calls.fetch_add(1, Ordering::SeqCst);
++        if matches!(self.change, Change::InputRefused) {
++            return Err(AdapterError::new(
++                ErrorCode::ActionNotSupported,
++                "Native input refused before Send",
++            )
++            .with_details(json!({"native_reason":"preflight_not_attempted"}))
++            .with_disposition(DeliverySemantics::not_delivered()));
++        }
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::adapter::test_report())
++    }
++}
++#[test]
++fn window_key_consumer_rejects_reused_handle_inside_lease_before_any_effect() {
++    for (headed, change) in [false, true].into_iter().flat_map(|headed| {
++        [Change::ReusedBeforeResolve, Change::ReusedAtLease]
++            .into_iter()
++            .map(move |change| (headed, change))
++    }) {
++        let world = World::new(change);
++        let context = CommandContext::default().with_headed(headed);
++        let result = press_window(
++            &serde_json::to_string(&window()).unwrap(),
++            "escape".into(),
++            &world,
++            &context,
++        );
++        assert_eq!(world.focuses.load(Ordering::SeqCst), 0);
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++        assert!(!world.leased.load(Ordering::SeqCst));
++        let error = result.unwrap_err();
++        assert_eq!(error.code(), "STALE_REF");
++        match error {
++            AppError::Adapter(error) => {
++                assert_eq!(error.disposition, DeliverySemantics::not_delivered())
++            }
++            other => panic!("{other}"),
++        }
++    }
++}
++#[test]
++fn window_key_consumer_preserves_stable_authority_in_both_modalities() {
++    for headed in [false, true] {
++        let world = World::new(Change::Stable);
++        let context = CommandContext::default().with_headed(headed);
++        let result = press_window(
++            &serde_json::to_string(&window()).unwrap(),
++            "ctrl+f".into(),
++            &world,
++            &context,
++        )
++        .unwrap();
++        assert_eq!(world.focuses.load(Ordering::SeqCst), usize::from(headed));
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 1);
++        assert_eq!(result["disposition"]["retry"], "unsafe");
++        assert!(!world.leased.load(Ordering::SeqCst));
++    }
++}
++fn gesture(world: &World, dragging: bool) -> Result<Value, AppError> {
++    let encoded = serde_json::to_string(&window()).unwrap();
++    let context = CommandContext::default().with_headed(true);
++    if dragging {
++        drag(
++            &encoded,
++            vec![],
++            (10.0, 10.0),
++            (20.0, 20.0),
++            world,
++            &context,
++        )
++    } else {
++        mouse(
++            &encoded,
++            MouseEvent {
++                point: Point { x: 10.0, y: 10.0 },
++                button: crate::MouseButton::Left,
++                kind: MouseEventKind::Click { count: 1 },
++                modifiers: vec![],
++            },
++            world,
++            &context,
++        )
++    }
++}
++fn assert_after_focus(change: Change, dragging: bool) {
++    let world = World::new(change);
++    let error = gesture(&world, dragging).unwrap_err();
++    assert_eq!(world.focuses.load(Ordering::SeqCst), 1);
++    assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++    match error {
++        AppError::Adapter(error) => {
++            assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++            let details = error.details.unwrap();
++            assert_eq!(
++                details["native_disposition"],
++                json!(DeliverySemantics::not_delivered())
++            );
++            let focus = &details["preparatory_effects"]["focus"];
++            assert_eq!(focus["attempted"], true);
++            assert_eq!(focus["confirmed"], true);
++            assert_eq!(focus["pid"], 42);
++            assert_eq!(
++                details["preparatory_effects"]["target_input"]["attempted"],
++                false
++            );
++            if matches!(change, Change::ResolveAfterFocus) {
++                assert_eq!(details["clovy_code"], "fixture_resolve_lost");
++            }
++        }
++        other => panic!("{other}"),
++    }
++}
++#[test]
++fn guard_or_resolve_failure_after_focus_keeps_partial_delivery_and_never_sends_mouse_or_drag() {
++    for dragging in [false, true] {
++        for change in [Change::SecureAfterFocus, Change::ResolveAfterFocus] {
++            assert_after_focus(change, dragging);
++        }
++    }
++}
++#[test]
++fn refusal_before_focus_stays_not_delivered_and_safe() {
++    for dragging in [false, true] {
++        let world = World::new(Change::SecureBeforeFocus);
++        let error = gesture(&world, dragging).unwrap_err();
++        assert_eq!(world.focuses.load(Ordering::SeqCst), 0);
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++        match error {
++            AppError::Adapter(error) => {
++                assert_eq!(error.disposition, DeliverySemantics::not_delivered())
++            }
++            other => panic!("{other}"),
++        }
++    }
++}
++#[test]
++fn cancellation_after_focus_preserves_partial_delivery_in_isolated_consumer_process() {
++    for dragging in [false, true] {
++        let root = std::env::var_os("CLOVY_A2_PROOF_ROOT")
++            .map(std::path::PathBuf::from)
++            .unwrap_or_else(std::env::temp_dir)
++            .join(format!(
++                "clovy-a2-{}-{}",
++                std::process::id(),
++                std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .unwrap()
++                    .as_nanos()
++            ));
++        std::fs::create_dir_all(&root).unwrap();
++        let output = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--ignored",
++                "--exact",
++                "commands::clovy_targeted::review_tests::cancellation_after_focus_child",
++                "--nocapture",
++            ])
++            .env("CLOVY_AGENT_DESKTOP_SUPERVISED", "1")
++            .env("CLOVY_AGENT_DESKTOP_CANCEL_FILE", root.join("cancel"))
++            .env(
++                "CLOVY_AGENT_DESKTOP_CANCEL_ACK_FILE",
++                root.join("cancel-ack"),
++            )
++            .env("CLOVY_A2_DRAG", if dragging { "1" } else { "0" })
++            .output()
++            .unwrap();
++        assert!(
++            output.status.success(),
++            "{}\n{}",
++            String::from_utf8_lossy(&output.stdout),
++            String::from_utf8_lossy(&output.stderr)
++        );
++    }
++}
++#[test]
++#[ignore = "only the isolated consumer parent sets the private cancellation namespace"]
++fn cancellation_after_focus_child() {
++    assert_eq!(
++        std::env::var("CLOVY_AGENT_DESKTOP_SUPERVISED").unwrap(),
++        "1"
++    );
++    assert_after_focus(
++        Change::CancelAfterFocus,
++        std::env::var("CLOVY_A2_DRAG").unwrap() == "1",
++    );
++}
++
++#[test]
++fn native_input_refusal_after_focus_retains_original_disposition_without_replay() {
++    for dragging in [false, true] {
++        let world = World::new(Change::InputRefused);
++        let error = gesture(&world, dragging).unwrap_err();
++        assert_eq!(world.focuses.load(Ordering::SeqCst), 1);
++        assert_eq!(world.native_input_calls.load(Ordering::SeqCst), 1);
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++        match error {
++            AppError::Adapter(error) => {
++                assert_eq!(error.code, ErrorCode::ActionNotSupported);
++                assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++                let details = error.details.unwrap();
++                assert_eq!(
++                    details["native_disposition"],
++                    json!(DeliverySemantics::not_delivered())
++                );
++                assert_eq!(details["native_reason"], "preflight_not_attempted");
++                assert_eq!(details["preparatory_effects"]["focus"]["confirmed"], true);
++                assert_eq!(
++                    details["preparatory_effects"]["target_input"]["attempted"],
++                    true
++                );
++            }
++            other => panic!("{other}"),
++        }
++    }
++}
 --- a/crates/core/src/commands/drag.rs
 +++ b/crates/core/src/commands/drag.rs
 @@ -131,6 +131,7 @@
@@ -846,6 +1389,36 @@
              from: from.point.clone(),
              to: to.point.clone(),
              duration_ms: args.duration_ms,
+--- a/crates/core/src/commands/launch_cdp_test_support.rs
++++ b/crates/core/src/commands/launch_cdp_test_support.rs
+@@ -51,6 +51,7 @@
+             serve_fake_cdp_endpoint(port);
+         }
+         Ok(crate::system::launch_result::LaunchResult {
++            launch_identity: None,
+             app: "Fixture".into(),
+             pid: ProcessId::new(42),
+             process_instance: Some("42:1".into()),
+--- a/crates/core/src/commands/launch_cdp_tests.rs
++++ b/crates/core/src/commands/launch_cdp_tests.rs
+@@ -357,6 +357,7 @@
+         _lease: &crate::InteractionLease,
+     ) -> Result<crate::system::launch_result::LaunchResult, crate::AdapterError> {
+         Ok(crate::system::launch_result::LaunchResult {
++            launch_identity: None,
+             app: "Fixture".into(),
+             pid: crate::ProcessId::new(42),
+             process_instance: None,
+--- a/crates/core/src/commands/launch_tests.rs
++++ b/crates/core/src/commands/launch_tests.rs
+@@ -35,6 +35,7 @@
+         _lease: &InteractionLease,
+     ) -> Result<crate::system::launch_result::LaunchResult, AdapterError> {
+         Ok(crate::system::launch_result::LaunchResult {
++            launch_identity: None,
+             app: "Fixture".into(),
+             pid: ProcessId::new(42),
+             process_instance: Some("42:1".into()),
 --- a/crates/core/src/commands/mod.rs
 +++ b/crates/core/src/commands/mod.rs
 @@ -36,6 +36,10 @@
@@ -1037,6 +1610,58 @@
 +    end_session("clovy").unwrap();
 +    assert!(ensure_clovy_session("clovy").is_err());
 +}
+--- a/crates/core/src/system/launch_result.rs
++++ b/crates/core/src/system/launch_result.rs
+@@ -12,6 +12,8 @@
+ /// the presentation of an application that reports no window.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct LaunchResult {
++    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
++    pub launch_identity: Option<LaunchIdentity>,
+     pub app: String,
+     pub pid: ProcessId,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -33,3 +35,40 @@
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub suggestion: Option<String>,
+ }
++
++/// Identity captured from the native launch result, never a later PID adoption.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LaunchIdentity {
++    pub executable_path: String,
++    pub process_creation_time: u64,
++    pub bundle_id: String,
++}
++#[cfg(test)]
++mod clovy_identity_tests {
++    use super::*;
++    #[test]
++    fn native_launch_authority_is_serialized_at_the_consumer_boundary() {
++        let result = LaunchResult {
++            launch_identity: Some(LaunchIdentity {
++                executable_path: "/Applications/A.app/Contents/MacOS/A".into(),
++                process_creation_time: 123456789,
++                bundle_id: "fixture.A".into(),
++            }),
++            app: "A".into(),
++            pid: ProcessId::new(42),
++            process_instance: Some("macos-proc-v1:123:456789".into()),
++            window: None,
++            cdp: None,
++            renderer: None,
++            suggestion: None,
++        };
++        let receipt = serde_json::to_value(result).unwrap();
++        assert_eq!(
++            receipt["executable_path"],
++            "/Applications/A.app/Contents/MacOS/A"
++        );
++        assert_eq!(receipt["process_creation_time"], 123456789u64);
++        assert_eq!(receipt["bundle_id"], "fixture.A");
++        assert!(receipt.get("launch_identity").is_none());
++    }
++}
 --- a/crates/core/src/system/operation_report_build_tests.rs
 +++ b/crates/core/src/system/operation_report_build_tests.rs
 @@ -54,6 +54,7 @@
@@ -1047,6 +1672,16 @@
          from: Point { x: 0.0, y: 0.0 },
          to: Point { x: 9.0, y: 9.0 },
          duration_ms: None,
+--- a/crates/ffi/src/apps/launch.rs
++++ b/crates/ffi/src/apps/launch.rs
+@@ -151,6 +151,7 @@
+                 .timeout_ms
+                 .store(options.timeout_ms, Ordering::SeqCst);
+             Ok(LaunchResult {
++                launch_identity: None,
+                 app: "Fixture".into(),
+                 pid: ProcessId::new(42),
+                 process_instance: Some("fixture-42".into()),
 --- a/crates/ffi/src/types/drag_params.rs
 +++ b/crates/ffi/src/types/drag_params.rs
 @@ -29,6 +29,7 @@
@@ -1274,6 +1909,32 @@
 +            .any(|e| matches!(e, Recorded::Move(120, 120)))
 +    );
 +}
+--- a/crates/linux/src/system/launch/mod.rs
++++ b/crates/linux/src/system/launch/mod.rs
+@@ -83,6 +83,7 @@
+         }
+     }
+     LaunchResult {
++        launch_identity: None,
+         app: owner.name.clone(),
+         pid: ProcessId::new(owner.pid),
+         process_instance: Some(owner.instance.clone()),
+@@ -237,6 +238,7 @@
+         created: bool,
+     ) -> LaunchResult {
+         LaunchResult {
++            launch_identity: None,
+             renderer: chromium_renderer(self.bus, owner.pid, self.deadline),
+             ..conclude(owner, window, self.options, created, |window| {
+                 focus_window(self.bus, window, self.lease)?;
+@@ -267,6 +269,7 @@
+     fn report_unlisted(&self, spawned: &Spawned) -> LaunchResult {
+         let facts = process_facts::read(spawned.pid);
+         LaunchResult {
++            launch_identity: None,
+             app: facts
+                 .as_ref()
+                 .map_or_else(|| self.id.to_owned(), super::listed_app_name),
 --- a/crates/linux/src/tree/live/physical_live_tests.rs
 +++ b/crates/linux/src/tree/live/physical_live_tests.rs
 @@ -139,6 +139,7 @@
@@ -1547,9 +2208,180 @@
          .stdin(Stdio::piped())
          .stdout(Stdio::null())
          .stderr(Stdio::null())
+--- a/crates/macos/src/system/launch.rs
++++ b/crates/macos/src/system/launch.rs
+@@ -34,7 +34,7 @@
+         let instance = required_instance(&app).map_err(before_launch)?;
+         let pid = super::process::process_identity::to_pid_t(app.pid).map_err(before_launch)?;
+         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
+-        return Ok(result_from_app(&app, window));
++        return result_from_app(&app, window).map_err(before_launch);
+     }
+     let target = launch_target(options, initial).map_err(before_launch)?;
+ 
+@@ -141,11 +141,27 @@
+ }
+ 
+ #[cfg(target_os = "macos")]
+-fn result_from_app(app: &AppInfo, window: Option<WindowInfo>) -> LaunchResult {
++fn result_from_app(
++    app: &AppInfo,
++    window: Option<WindowInfo>,
++) -> Result<LaunchResult, AdapterError> {
++    let pid = super::process::process_identity::to_pid_t(app.pid)?;
++    let instance = required_instance(app)?;
++    let authority = super::launch_completion::identity_for_existing(pid, &instance)?;
++    if app
++        .bundle_id
++        .as_deref()
++        .is_some_and(|expected| expected != authority.bundle_id)
++    {
++        return Err(AdapterError::stale_ref_because(
++            "The application bundle changed during attachment",
++        ));
++    }
+     let renderer = super::process::process_identity::to_pid_t(app.pid)
+         .ok()
+         .and_then(crate::system::renderer_kind::detect_chromium);
+-    LaunchResult {
++    Ok(LaunchResult {
++        launch_identity: Some(authority),
+         app: app.name.clone(),
+         pid: app.pid,
+         process_instance: app.process_instance.clone(),
+@@ -153,17 +169,18 @@
+         cdp: None,
+         renderer,
+         suggestion: None,
+-    }
++    })
+ }
+ 
+ #[cfg(target_os = "macos")]
+ fn result_from_launched(
+-    launched: &(i32, String),
++    launched: &crate::system::launch_completion::LaunchReceipt,
+     window: Option<WindowInfo>,
+     id: &str,
+ ) -> Result<LaunchResult, AdapterError> {
+     let renderer = crate::system::renderer_kind::detect_chromium(launched.0);
+     Ok(LaunchResult {
++        launch_identity: Some(launched.2.clone()),
+         app: launched_display_name(window.as_ref(), id),
+         pid: agent_desktop_core::ProcessId::try_from(launched.0)
+             .map_err(|_| AdapterError::internal("Launched process identifier is out of range"))?,
+@@ -211,7 +228,7 @@
+ #[cfg(target_os = "macos")]
+ fn validate_launched_target(
+     target: &LaunchTarget,
+-    launched: &(i32, String),
++    launched: &crate::system::launch_completion::LaunchReceipt,
+ ) -> Result<(), AdapterError> {
+     match target {
+         LaunchTarget::Existing {
+--- a/crates/macos/src/system/launch_bridge.m
++++ b/crates/macos/src/system/launch_bridge.m
+@@ -12,6 +12,10 @@
+     uint8_t errorKind;
+     const char *error;
+     size_t errorLength;
++    const char *executablePath;
++    size_t executablePathLength;
++    const char *bundleIdentifier;
++    size_t bundleIdentifierLength;
+ } AgentDesktopLaunchResult;
+ 
+ typedef void (*AgentDesktopLaunchCompletion)(void *, const AgentDesktopLaunchResult *);
+@@ -174,6 +178,10 @@
+                     return;
+                 }
+                 NSDate *launchDate = app.launchDate;
++                __attribute__((objc_precise_lifetime)) NSString *path = app.executableURL.path;
++                __attribute__((objc_precise_lifetime)) NSString *bundle = app.bundleIdentifier;
++                const char *pathBytes = path.UTF8String;
++                const char *bundleBytes = bundle.UTF8String;
+                 AgentDesktopLaunchResult result = {
+                     .application = (__bridge void *)app,
+                     .pid = app.processIdentifier,
+@@ -183,6 +191,10 @@
+                     .errorKind = 0,
+                     .error = NULL,
+                     .errorLength = 0,
++                    .executablePath = pathBytes,
++                    .executablePathLength = pathBytes == NULL ? 0 : strlen(pathBytes),
++                    .bundleIdentifier = bundleBytes,
++                    .bundleIdentifierLength = bundleBytes == NULL ? 0 : strlen(bundleBytes),
+                 };
+                 holder->_completion(holder->_releaseBox->context, &result);
+             } @catch (NSException *exception) {
+@@ -213,3 +225,39 @@
+         return 0;
+     }
+ }
++
++// Read-only attachment keeps the actual application object alive throughout
++// the synchronous callback. Rust compares its previously approved birth token.
++uint8_t agent_desktop_inspect_existing_application(
++    int32_t pid, void *context, AgentDesktopLaunchCompletion completion
++) {
++    @try {
++        __attribute__((objc_precise_lifetime)) NSRunningApplication *app =
++            [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
++        if (app == nil) { return 0; }
++        __attribute__((objc_precise_lifetime)) NSString *path = app.executableURL.path;
++        __attribute__((objc_precise_lifetime)) NSString *bundle = app.bundleIdentifier;
++        const char *pathBytes = path.UTF8String;
++        const char *bundleBytes = bundle.UTF8String;
++        NSDate *launchDate = app.launchDate;
++        AgentDesktopLaunchResult result = {
++            .application = (__bridge void *)app,
++            .pid = app.processIdentifier,
++            .launchTime = launchDate == nil ? 0.0 : launchDate.timeIntervalSince1970,
++            .terminated = app.isTerminated,
++            .deliveryStarted = 0,
++            .errorKind = 0,
++            .error = NULL,
++            .errorLength = 0,
++            .executablePath = pathBytes,
++            .executablePathLength = pathBytes == NULL ? 0 : strlen(pathBytes),
++            .bundleIdentifier = bundleBytes,
++            .bundleIdentifierLength = bundleBytes == NULL ? 0 : strlen(bundleBytes),
++        };
++        completion(context, &result);
++        return 1;
++    } @catch (NSException *exception) {
++        (void)exception;
++        return 0;
++    }
++}
+--- a/crates/macos/src/system/launch_callback_result.rs
++++ b/crates/macos/src/system/launch_callback_result.rs
+@@ -10,4 +10,8 @@
+     pub(crate) error_kind: u8,
+     pub(crate) error: *const c_char,
+     pub(crate) error_len: usize,
++    pub(crate) executable_path: *const c_char,
++    pub(crate) executable_path_len: usize,
++    pub(crate) bundle_id: *const c_char,
++    pub(crate) bundle_id_len: usize,
+ }
 --- a/crates/macos/src/system/launch_completion.rs
 +++ b/crates/macos/src/system/launch_completion.rs
-@@ -65,9 +65,16 @@
+@@ -7,7 +7,12 @@
+ const MAX_OUTSTANDING_LAUNCHES: usize = 16;
+ static OUTSTANDING_LAUNCHES: AtomicUsize = AtomicUsize::new(0);
+ 
+-type LaunchResult = Result<(i32, String), AdapterError>;
++pub(crate) type LaunchReceipt = (
++    i32,
++    String,
++    agent_desktop_core::system::launch_result::LaunchIdentity,
++);
++type LaunchResult = Result<LaunchReceipt, AdapterError>;
+ 
+ struct LaunchCompletion {
+     result: Mutex<Option<LaunchResult>>,
+@@ -65,9 +70,16 @@
              .timeout_error()
              .with_disposition(DeliverySemantics::not_delivered()));
      }
@@ -1566,6 +2398,243 @@
      let accepted = unsafe {
          agent_desktop_open_application(
              request.as_ptr(),
+@@ -171,7 +183,144 @@
+             .with_details(serde_json::json!({ "pid": result.pid, "complete": false })),
+         ));
+     }
+-    Ok((result.pid, identity.token()))
++    let authority =
++        capture_authority(result, identity).map_err(|error| callback_error(result, error))?;
++    Ok((result.pid, identity.token(), authority))
++}
++
++fn copy_identity_text(
++    pointer: *const std::ffi::c_char,
++    length: usize,
++    field: &str,
++) -> Result<String, AdapterError> {
++    if pointer.is_null() || length == 0 || length > 32 * 1024 {
++        return Err(AdapterError::internal(format!(
++            "Native launch {field} is unavailable"
++        )));
++    }
++    let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), length) };
++    if bytes.contains(&0) {
++        return Err(AdapterError::internal(format!(
++            "Native launch {field} is invalid"
++        )));
++    }
++    String::from_utf8(bytes.to_vec())
++        .map_err(|_| AdapterError::internal(format!("Native launch {field} is not UTF-8")))
++}
++fn kernel_executable(pid: i32) -> Result<String, AdapterError> {
++    let mut buffer = vec![0u8; 4096];
++    let length =
++        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
++    if length <= 0 || length as usize > buffer.len() {
++        return Err(AdapterError::internal(
++            "The launched executable path could not be verified",
++        ));
++    }
++    buffer.truncate(length as usize);
++    if buffer.last() == Some(&0) {
++        buffer.pop();
++    }
++    String::from_utf8(buffer)
++        .map_err(|_| AdapterError::internal("The launched executable path is not UTF-8"))
++}
++fn verified_executable_path(native: &str, kernel: &str) -> Result<(), AdapterError> {
++    if !std::path::Path::new(native).is_absolute()
++        || !std::path::Path::new(kernel).is_absolute()
++        || std::fs::canonicalize(native)
++            .ok()
++            .zip(std::fs::canonicalize(kernel).ok())
++            .is_none_or(|(native, kernel)| native != kernel)
++    {
++        return Err(AdapterError::new(
++            ErrorCode::AppUnresponsive,
++            "The native application and kernel executable paths do not identify the same file",
++        ));
++    }
++    Ok(())
++}
++
++fn capture_authority(
++    result: &crate::system::launch_callback_result::LaunchCallbackResult,
++    identity: crate::system::process::process_identity::ProcessIdentity,
++) -> Result<agent_desktop_core::system::launch_result::LaunchIdentity, AdapterError> {
++    let native_path = copy_identity_text(
++        result.executable_path,
++        result.executable_path_len,
++        "executable path",
++    )?;
++    let bundle = copy_identity_text(result.bundle_id, result.bundle_id_len, "bundle identifier")?;
++    if bundle.trim().is_empty() || !std::path::Path::new(&native_path).is_absolute() {
++        return Err(AdapterError::internal(
++            "Native launch authority is incomplete",
++        ));
++    }
++    // Kernel path is representation only, after the native object's authority
++    // and birth were captured. It must denote that object's executable, and
++    // the birth and object liveness must still match after all reads.
++    let kernel_path = kernel_executable(result.pid)?;
++    verified_executable_path(&native_path, &kernel_path)?;
++    if !identity.still_matches()?
++        || unsafe { agent_desktop_running_application_is_live(result.application, result.pid) } == 0
++        || !identity.still_matches()?
++    {
++        return Err(AdapterError::new(
++            ErrorCode::AppUnresponsive,
++            "The native launch authority changed before its receipt was captured",
++        ));
++    }
++    Ok(agent_desktop_core::system::launch_result::LaunchIdentity {
++        executable_path: kernel_path,
++        process_creation_time: identity.creation_micros()?,
++        bundle_id: bundle,
++    })
++}
++pub(crate) fn identity_for_existing(
++    pid: i32,
++    expected: &str,
++) -> Result<agent_desktop_core::system::launch_result::LaunchIdentity, AdapterError> {
++    let stale = || {
++        AdapterError::new(
++            ErrorCode::AppUnresponsive,
++            "The previously identified application changed before attachment",
++        )
++        .with_disposition(DeliverySemantics::not_delivered())
++    };
++    if !crate::system::process::process_identity::matches_instance(pid, expected)? {
++        return Err(stale());
++    }
++    let mut completed: Option<LaunchResult> = None;
++    unsafe extern "C" fn receive(
++        context: *mut c_void,
++        result: *const crate::system::launch_callback_result::LaunchCallbackResult,
++    ) {
++        let _ = std::panic::catch_unwind(|| unsafe {
++            let slot = &mut *(context as *mut Option<LaunchResult>);
++            *slot = Some(
++                result
++                    .as_ref()
++                    .ok_or_else(|| AdapterError::internal("Missing native attachment identity"))
++                    .and_then(validate_result),
++            );
++        });
++    }
++    let accepted = unsafe {
++        agent_desktop_inspect_existing_application(
++            pid,
++            (&mut completed as *mut Option<LaunchResult>).cast(),
++            receive,
++        )
++    };
++    if accepted == 0 {
++        return Err(stale());
++    }
++    let receipt = completed.ok_or_else(stale)??;
++    if receipt.0 != pid
++        || receipt.1 != expected
++        || !crate::system::process::process_identity::matches_instance(pid, expected)?
++    {
++        return Err(stale());
++    }
++    Ok(receipt.2)
+ }
+ 
+ fn callback_error(
+@@ -234,6 +383,14 @@
+         ),
+         release: unsafe extern "C" fn(*mut c_void),
+     ) -> bool;
++    fn agent_desktop_inspect_existing_application(
++        pid: i32,
++        context: *mut c_void,
++        completion: unsafe extern "C" fn(
++            *mut c_void,
++            *const crate::system::launch_callback_result::LaunchCallbackResult,
++        ),
++    ) -> u8;
+     fn agent_desktop_running_application_is_live(application: *mut c_void, expected_pid: i32)
+     -> u8;
+ }
+@@ -248,7 +405,15 @@
+         let timeout = state.wait(Deadline::after(1).unwrap()).unwrap_err();
+ 
+         assert_eq!(timeout.code, ErrorCode::Timeout);
+-        state.complete(Ok((7, "generation".into())));
++        state.complete(Ok((
++            7,
++            "generation".into(),
++            agent_desktop_core::system::launch_result::LaunchIdentity {
++                executable_path: "/fixture".into(),
++                process_creation_time: 1,
++                bundle_id: "fixture".into(),
++            },
++        )));
+         assert_eq!(state.wait(Deadline::after(50).unwrap()).unwrap().0, 7);
+     }
+ 
+@@ -270,3 +435,47 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod clovy_authority_tests {
++    use super::*;
++    #[cfg(unix)]
++    #[test]
++    fn native_launch_path_requires_real_same_file_and_keeps_kernel_representation() {
++        let root = std::env::var_os("CLOVY_AUTHORITY_PROOF_ROOT")
++            .map(std::path::PathBuf::from)
++            .unwrap_or_else(std::env::temp_dir)
++            .join(format!(
++                "clovy-launch-authority-{}-{}",
++                std::process::id(),
++                std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .unwrap()
++                    .as_nanos()
++            ));
++        std::fs::create_dir_all(&root).unwrap();
++        let native = root.join("A");
++        let alias = root.join("alias-A");
++        let other = root.join("B");
++        std::fs::write(&native, b"synthetic A").unwrap();
++        std::fs::write(&other, b"synthetic B").unwrap();
++        std::os::unix::fs::symlink(&native, &alias).unwrap();
++        assert!(
++            verified_executable_path(alias.to_str().unwrap(), native.to_str().unwrap()).is_ok()
++        );
++        assert!(
++            verified_executable_path(native.to_str().unwrap(), alias.to_str().unwrap()).is_ok()
++        );
++        assert!(
++            verified_executable_path(native.to_str().unwrap(), other.to_str().unwrap()).is_err()
++        );
++        assert!(
++            verified_executable_path(
++                native.to_str().unwrap(),
++                root.join("missing").to_str().unwrap()
++            )
++            .is_err()
++        );
++        assert!(verified_executable_path("relative-A", native.to_str().unwrap()).is_err());
++    }
++}
+--- a/crates/macos/src/system/launch_workspace.rs
++++ b/crates/macos/src/system/launch_workspace.rs
+@@ -4,7 +4,7 @@
+     id: &str,
+     options: &LaunchOptions,
+     deadline: Deadline,
+-) -> Result<(i32, String), AdapterError> {
++) -> Result<crate::system::launch_completion::LaunchReceipt, AdapterError> {
+     if deadline.is_expired() {
+         return Err(deadline
+             .timeout_error()
 --- a/crates/macos/src/system/permissions/permission_guide.rs
 +++ b/crates/macos/src/system/permissions/permission_guide.rs
 @@ -50,10 +50,16 @@
@@ -1621,6 +2690,52 @@
          return Ok(true);
      }
      let error = std::io::Error::last_os_error();
+--- a/crates/macos/src/system/process/process_identity.rs
++++ b/crates/macos/src/system/process/process_identity.rs
+@@ -72,6 +72,14 @@
+ 
+     pub(crate) fn pid(self) -> i32 {
+         self.pid
++    }
++
++    pub(crate) fn creation_micros(self) -> Result<u64, AdapterError> {
++        self.start_seconds
++            .checked_mul(1_000_000)
++            .and_then(|seconds| seconds.checked_add(self.start_microseconds))
++            .filter(|value| *value > 0 && self.start_microseconds < 1_000_000)
++            .ok_or_else(|| AdapterError::internal("The launched process birth time is invalid"))
+     }
+ 
+     pub(crate) fn launch_time_seconds(self) -> f64 {
+@@ -324,3 +332,28 @@
+         assert_eq!(details["retryable"], false);
+     }
+ }
++
++#[cfg(test)]
++mod clovy_birth_tests {
++    use super::*;
++    #[test]
++    fn birth_microseconds_match_native_consumer_and_reject_invalid_authority() {
++        let identity = ProcessIdentity {
++            pid: 42,
++            start_seconds: 123,
++            start_microseconds: 456789,
++        };
++        assert_eq!(identity.creation_micros().unwrap(), 123456789);
++        for (seconds, micros) in [(0, 0), (1, 1_000_000), (u64::MAX, 0)] {
++            assert!(
++                ProcessIdentity {
++                    pid: 42,
++                    start_seconds: seconds,
++                    start_microseconds: micros
++                }
++                .creation_micros()
++                .is_err()
++            );
++        }
++    }
++}
 --- a/crates/windows/src/actions/chain.rs
 +++ b/crates/windows/src/actions/chain.rs
 @@ -134,6 +134,13 @@
@@ -3115,6 +4230,16 @@
      }
  
      fn list_displays(&self, deadline: Deadline) -> Result<Vec<DisplayInfo>, AdapterError> {
+--- a/crates/windows/src/system/launch.rs
++++ b/crates/windows/src/system/launch.rs
+@@ -75,6 +75,7 @@
+ ) -> LaunchResult {
+     let renderer = window.as_ref().and_then(detect_renderer_from_window);
+     LaunchResult {
++        launch_identity: None,
+         app: window
+             .as_ref()
+             .map(|window| window.app.clone())
 --- a/crates/windows/src/system/window/window_activate.rs
 +++ b/crates/windows/src/system/window/window_activate.rs
 @@ -225,6 +225,7 @@
@@ -3143,17 +4268,20 @@
      Ok(())
 --- a/src/cli_args/actions.rs
 +++ b/src/cli_args/actions.rs
-@@ -133,6 +133,9 @@
+@@ -133,6 +133,12 @@
  #[derive(Parser, Debug, Deserialize)]
  #[serde(deny_unknown_fields)]
  pub(crate) struct PressArgs {
++    #[arg(long = "clovy-target-json", hide = true)]
++    #[serde(default)]
++    pub clovy_target_json: Option<String>,
 +    #[arg(long = "clovy-ref", hide = true)]
 +    #[serde(default)]
 +    pub clovy_ref: Option<String>,
      #[arg(
          value_name = "COMBO",
          help = "Key combo: return, escape, cmd+c, shift+tab ..."
-@@ -214,6 +217,11 @@
+@@ -214,6 +220,11 @@
  #[derive(Parser, Debug, Deserialize)]
  #[serde(deny_unknown_fields)]
  pub(crate) struct MouseClickArgs {
@@ -3206,25 +4334,27 @@
              dy,
 --- a/src/dispatch/cursor_overlay_lifecycle_tests.rs
 +++ b/src/dispatch/cursor_overlay_lifecycle_tests.rs
-@@ -173,6 +173,7 @@
+@@ -173,6 +173,8 @@
  
      dispatch(
          Commands::Press(PressArgs {
 +            clovy_ref: None,
++            clovy_target_json: None,
              combo: "a".into(),
              app: None,
              window_id: None,
-@@ -258,6 +259,7 @@
+@@ -258,6 +260,8 @@
  
      let result = dispatch(
          Commands::Press(PressArgs {
 +            clovy_ref: None,
++            clovy_target_json: None,
              combo: "cmd+q".into(),
              app: None,
              window_id: None,
 --- a/src/dispatch/keyboard_mouse.rs
 +++ b/src/dispatch/keyboard_mouse.rs
-@@ -22,6 +22,11 @@
+@@ -22,6 +22,16 @@
      adapter: &dyn PlatformAdapter,
      context: &CommandContext,
  ) -> Result<Value, AppError> {
@@ -3233,10 +4363,15 @@
 +            reference, args.combo, adapter, context,
 +        );
 +    }
++    if let Some(expected) = args.clovy_target_json {
++        return agent_desktop_core::commands::clovy_targeted::press_window(
++            &expected, args.combo, adapter, context,
++        );
++    }
      press_command::execute(
          press_command::PressArgs {
              combo: args.combo,
-@@ -79,6 +84,26 @@
+@@ -79,6 +89,26 @@
      adapter: &dyn PlatformAdapter,
      context: &CommandContext,
  ) -> Result<Value, AppError> {
@@ -3263,7 +4398,7 @@
      drag_command::execute(
          drag_command::DragArgs {
              from: drag_command::DragEndpoint {
-@@ -117,6 +142,19 @@
+@@ -117,6 +147,19 @@
      context: &CommandContext,
  ) -> Result<Value, AppError> {
      let (x, y) = parse_xy(&args.xy)?;
@@ -3283,7 +4418,7 @@
      mouse_click_command::execute(
          mouse_click_command::MouseClickArgs {
              x,
-@@ -171,6 +209,25 @@
+@@ -171,6 +214,25 @@
      adapter: &dyn PlatformAdapter,
      context: &CommandContext,
  ) -> Result<Value, AppError> {

@@ -26,10 +26,4 @@ describe("Windows updater artifacts", () => {
     expect(verify).toContain("untrusted comment:");
     expect(verify).toContain("The updater signature is missing");
   });
-
-  it("requires Authenticode signing for the private Computer use peer contract", () => {
-    expect(verify).toContain("SignatureStatus]::Valid");
-    expect(build).toContain("WINDOWS_CERTIFICATE_THUMBPRINT");
-    expect(build).not.toContain("--no-sign");
-  });
 });

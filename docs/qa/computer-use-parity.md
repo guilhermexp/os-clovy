@@ -86,6 +86,19 @@ policy where the PRD requires it.
 - It fails a delayed approval when the target image or control changed instead
   of guessing that the action is still safe.
 
+Windows launch acceptance must cover a synthetic asInvoker app with no
+compatibility setting and with RUNASADMIN, RUNASHIGHEST and forced
+RunAsInvoker. Refused cases create no new app and show no UAC prompt. Registry
+fixtures use only run-owned sandbox keys, never the owner's AppCompat Layers.
+Check both registry views and environment policy, then verify the real
+CreateProcess result against effective OS policy. Verify the exact retained
+Explorer parent, no inherited private handles/authority, and that helper Stop
+leaves a successfully created app running. The launch receipt's image and
+creation time must come from its returned process handle. Also verify that a
+minimized elevated target is neither restored nor focused, while an ordinary
+authorized target still works. These are pending native Windows acceptance,
+not outcomes of Linux decision tests or cross compilation.
+
 These differences preserve the baseline outcomes of app selection, capture,
 background control, visible progress, approval, stop/takeover, and revocation
 while honoring Clovy's accepted PRD.

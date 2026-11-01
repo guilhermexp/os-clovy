@@ -54,3 +54,42 @@ registry dependency cooldown are recorded in
 `src-tauri/agent-desktop/source-review.md`. Linux engine/supervisor tests are
 narrow proof. Signed macOS and Windows acceptance remains required in
 `docs/qa/computer-use-parity.md`.
+
+## Addendum, 2026-11-01: Windows application launch without elevation
+
+Windows application launch uses `CreateProcessW` with an exact, locked
+executable and a retained, qualified Explorer process as
+`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. The parent must be the OS shell from
+the Windows directory returned by the native API, with the same user/session,
+non-elevated compatible integrity, stable image/birth identity and a fresh
+shell-window check. This parent attribute inherits the specified parent's
+token and job, so real applications remain outside the helper's controller
+job. Controller creation retains its existing suspended `JOB_LIST` path.
+This inheritance is the documented Windows contract, with native runtime
+acceptance still required. [Parent-process attributes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute).
+
+An `asInvoker` manifest alone cannot establish effective launch policy.
+Preflight also reads per-user and machine compatibility Layers in both
+registry views, using canonical, ordinary DOS and executable-name candidates,
+and checks the actual explicit launch environment. Elevating, forced
+`RunAsInvoker`, unknown or unreadable layers are refused. The environment
+preserves `__COMPAT_LAYER` unchanged and removes only private helper/engine
+authority and run variables. Clovy never inserts an override to bypass OS
+policy. Windows then evaluates effective AppCompat, Fusion and installer
+policy in `CreateProcess` itself. A demand for elevation fails with
+`ERROR_ELEVATION_REQUIRED`; there is no `ShellExecute` or AppInfo fallback that
+could turn that failure into a UAC prompt. Manual Layer checks supplement
+this OS decision; they do not claim to reproduce every SDB rule.
+[UAC process creation](https://learn.microsoft.com/en-gb/windows-server/security/user-account-control/how-user-account-control-works),
+[CreateProcess and elevation](https://learn.microsoft.com/en-us/windows/win32/dxtecharts/user-account-control-for-game-developers).
+
+Real applications start without `CREATE_SUSPENDED`: stopping the helper must
+not strand an unstarted application outside its job between creation and
+resume. Once creation succeeds, the application belongs to the user and is
+never killed by receipt validation or helper Stop. Its returned process
+handle supplies the authoritative image and creation time; a PID found by
+image name cannot substitute another process. Any later cancellation,
+desktop loss or identity-query failure preserves the created effect and an
+unsafe receipt. The trade-off is a small native process-creation path and
+conservative refusal of indeterminate compatibility settings, while retaining
+ordinary installed app launch without elevation or new model arguments.

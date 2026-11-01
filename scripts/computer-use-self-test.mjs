@@ -334,8 +334,12 @@ function validateWindowsBundle() {
   const publisher = (file) =>
     run("powershell.exe", [
       "-NoProfile",
-      "-Command",
-      "$s = Get-AuthenticodeSignature -LiteralPath $args[0]; if ($s.Status -ne 'Valid') { throw 'Invalid Authenticode signature' }; $s.SignerCertificate.Thumbprint",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      path.join(rootDir, "scripts", "windows-authenticode.ps1"),
+      "-TargetPath",
       file,
     ]).stdout.trim();
   const helperPublisher = publisher(executable);
