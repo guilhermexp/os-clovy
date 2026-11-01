@@ -54,6 +54,7 @@ export function AgentSettingsSection({
   const [skillDraft, setSkillDraft] = useState("");
   const [skillSaving, setSkillSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [mutationError, setMutationError] = useState<string>();
   const skillsReadVersion = useRef(0);
   const mounted = useRef(true);
   const refreshSkills = useCallback(async (eventIsCurrent: () => boolean = () => true) => {
@@ -83,6 +84,15 @@ export function AgentSettingsSection({
 
   function beginSkillMutation() {
     skillsReadVersion.current += 1;
+    return () => mounted.current;
+  }
+
+  function reconcileFailedSkillMutation(isCurrent: () => boolean, cause: unknown) {
+    if (!isCurrent()) return;
+    setMutationError(messageFromError(cause));
+    // Installation-wide skills still reconcile after a refused mutation. Keep
+    // the editable draft and mutation error independent of catalog reads.
+    void refreshSkills();
   }
 
   function applySkillMutation(updated: AgentSkillDto) {
@@ -90,6 +100,7 @@ export function AgentSettingsSection({
     skillsReadVersion.current += 1;
     setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
     setError(undefined);
+    setMutationError(undefined);
     void refreshSkills();
   }
 
@@ -122,14 +133,14 @@ export function AgentSettingsSection({
 
   async function changeSkill(skill: AgentSkillDto, enabled: boolean) {
     setSavingSkillId(skill.id);
-    beginSkillMutation();
+    const isCurrent = beginSkillMutation();
     try {
       const updated = await setAgentSkillEnabled(skill.id, enabled);
       applySkillMutation(updated);
     } catch (cause) {
-      setError(messageFromError(cause));
+      reconcileFailedSkillMutation(isCurrent, cause);
     } finally {
-      setSavingSkillId(undefined);
+      if (isCurrent()) setSavingSkillId(undefined);
     }
   }
 
@@ -146,15 +157,17 @@ export function AgentSettingsSection({
   async function saveSkill() {
     if (!editingSkill) return;
     setSkillSaving(true);
-    beginSkillMutation();
+    const isCurrent = beginSkillMutation();
     try {
       const updated = await updateAgentSkill(editingSkill.id, skillDraft);
-      applySkillMutation(updated);
-      setEditingSkill(undefined);
+      if (isCurrent()) {
+        applySkillMutation(updated);
+        setEditingSkill(undefined);
+      }
     } catch (cause) {
-      setError(messageFromError(cause));
+      reconcileFailedSkillMutation(isCurrent, cause);
     } finally {
-      setSkillSaving(false);
+      if (isCurrent()) setSkillSaving(false);
     }
   }
 
@@ -280,9 +293,9 @@ export function AgentSettingsSection({
             ) : null}
           </div>
         </div>
-        {error ? (
+        {mutationError || error ? (
           <p className="settings-row-error" role="alert">
-            {error}
+            {mutationError ?? error}
           </p>
         ) : null}
       </section>
@@ -330,6 +343,7 @@ export function AgentSettingsSection({
 }
 
 function messageFromError(error: unknown) {
+  if (error && typeof error === "object" && "message" in error) return String(error.message);
   return error instanceof Error
     ? error.message
     : typeof error === "string"

@@ -46,7 +46,9 @@ import {
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSION_RENAMED_EVENT,
   AGENT_SESSIONS_HYDRATED_EVENT,
+  AGENT_SESSIONS_CHANGED_EVENT,
   emitAgentSessionsChanged,
+  readAgentSessionSnapshotEpoch,
   type AgentSessionRenamedDetail,
   type AgentSessionsHydratedDetail,
 } from "../lib/agent-events";
@@ -803,17 +805,34 @@ export function App() {
     if (appBlocked || !bootstrapped) return;
     let cancelled = false;
     let retryTimeout: number | undefined;
+    let startupSnapshotInvalidated = false;
+    const invalidateStartupSnapshot = () => {
+      startupSnapshotInvalidated = true;
+    };
+    const observeAuthoritativeSnapshot = (event: Event) => {
+      if ((event as CustomEvent<AgentSessionsHydratedDetail>).detail?.replaceExisting) {
+        invalidateStartupSnapshot();
+      }
+    };
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, invalidateStartupSnapshot);
+    window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, observeAuthoritativeSnapshot);
 
     // The one startup load of the session list: the menu bar, the sidebar
     // (through AGENT_SESSIONS_HYDRATED_EVENT) and the Agent HUD window all
     // start from it.
     function loadStartupAgentSessions(attempt: number) {
+      const nativeEpoch = readAgentSessionSnapshotEpoch();
       // Defer host access so partial test hosts and transient startup failures
       // enter the normal retry path instead of escaping the effect synchronously.
       Promise.resolve()
         .then(() => Promise.all([listAgentSessions(), refreshSessionPartitions()]))
         .then(([loadedSessions, partitions]) => {
-          if (cancelled) return;
+          if (
+            cancelled ||
+            startupSnapshotInvalidated ||
+            nativeEpoch !== readAgentSessionSnapshotEpoch()
+          )
+            return;
           const sessions = loadedSessions.filter((session) => !isAgentSessionDeleted(session.id));
           commitAgentSessions(sessions, partitions);
           window.dispatchEvent(
@@ -837,6 +856,8 @@ export function App() {
 
     return () => {
       cancelled = true;
+      window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, invalidateStartupSnapshot);
+      window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, observeAuthoritativeSnapshot);
       if (retryTimeout != null) {
         window.clearTimeout(retryTimeout);
       }

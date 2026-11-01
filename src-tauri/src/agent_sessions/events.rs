@@ -8,30 +8,35 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 pub const AGENT_RUNTIME_EVENT: &str = "clovy://agent-runtime-event";
-pub(crate) fn emit_persisted_run_cancelled(
+pub(crate) async fn emit_persisted_run_cancelled(
     app: &AppHandle,
+    repository: &AgentRepository,
     run: &AgentRunDto,
 ) -> Result<(), AppError> {
-    app.emit(
-        AGENT_RUNTIME_EVENT,
-        json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "sessionId": run.session_id,
-            "runId": run.id,
-            "sequence": run.last_sequence.saturating_add(1),
-            "eventId": Uuid::new_v4(),
-            "method": "run.cancelled",
-            "data": {
-                "completedAt": run.completed_at,
-            },
-        }),
+    persist_and_emit_event(
+        app,
+        repository,
+        &RpcFrame {
+            jsonrpc: "2.0".into(),
+            protocol_version: PROTOCOL_VERSION,
+            session_id: run.session_id.clone(),
+            run_id: run.id.clone(),
+            sequence: run.last_sequence.saturating_add(1),
+            id: None,
+            event_id: Some(Uuid::new_v4().to_string()),
+            method: Some("run.cancelled".into()),
+            params: Some(json!({})),
+            result: None,
+            error: None,
+        },
     )
-    .map_err(|error| AppError::new("agent_event_emit_failed", error.to_string()))
+    .await
 }
 /// An event persisted by [`persist_runtime_event`], ready to be emitted.
 pub(crate) struct PersistedRuntimeEvent {
     pub method: String,
     pub event_id: String,
+    pub sequence: i64,
     pub data: Value,
 }
 
@@ -44,12 +49,13 @@ pub(crate) async fn persist_and_emit_event(
     let Some(PersistedRuntimeEvent {
         method,
         event_id,
+        sequence,
         data,
     }) = persist_runtime_event(repository, frame).await?
     else {
         return Ok(());
     };
-    app.emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": frame.session_id, "runId": frame.run_id, "sequence": frame.sequence, "eventId": event_id, "method": method, "data": data })).map_err(|error| AppError::new("agent_event_emit_failed", error.to_string()))?;
+    app.emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": frame.session_id, "runId": frame.run_id, "sequence": sequence, "eventId": event_id, "method": method, "data": data })).map_err(|error| AppError::new("agent_event_emit_failed", error.to_string()))?;
     Ok(())
 }
 
@@ -61,6 +67,23 @@ pub(crate) async fn persist_runtime_event(
     frame: &RpcFrame,
 ) -> Result<Option<PersistedRuntimeEvent>, AppError> {
     let method = frame.method.as_deref().unwrap_or_default();
+    if matches!(method, "run.completed" | "run.cancelled" | "run.failed") {
+        let terminal =
+            super::terminal::persist_terminal_event(&repository.pool, frame, sanitize_log).await?;
+        if terminal.is_some() {
+            if let Err(error) =
+                crate::routines::mark_agent_run_terminal(&repository.pool, &frame.run_id).await
+            {
+                tracing::warn!(agent_run_id = %frame.run_id, error_code = %error.code, "routine terminal projection failed");
+            }
+        }
+        return Ok(terminal.map(|event| PersistedRuntimeEvent {
+            method: event.method,
+            event_id: event.event_id,
+            sequence: event.sequence,
+            data: event.data,
+        }));
+    }
     let params = frame.params.clone().unwrap_or_else(|| json!({}));
     let event_id = frame
         .event_id
@@ -276,70 +299,6 @@ pub(crate) async fn persist_runtime_event(
             }
             None
         }
-        "run.completed" => {
-            data["completedAt"] = json!(created_at);
-            repository
-                .update_run_status(&frame.run_id, "completed", None, None, None)
-                .await?;
-            if let Err(error) =
-                crate::routines::mark_agent_run_terminal(&repository.pool, &frame.run_id).await
-            {
-                tracing::warn!(agent_run_id = %frame.run_id, error_code = %error.code, "routine terminal projection failed");
-            }
-            None
-        }
-        "run.cancelled" => {
-            data["completedAt"] = json!(created_at);
-            repository
-                .update_run_status(&frame.run_id, "cancelled", None, None, None)
-                .await?;
-            if let Err(error) =
-                crate::routines::mark_agent_run_terminal(&repository.pool, &frame.run_id).await
-            {
-                tracing::warn!(agent_run_id = %frame.run_id, error_code = %error.code, "routine terminal projection failed");
-            }
-            None
-        }
-        "run.failed" => {
-            let message = params
-                .get("error")
-                .and_then(Value::as_str)
-                .map(sanitize_log)
-                .unwrap_or_else(|| "Agent run failed.".into());
-            let category = params
-                .get("category")
-                .and_then(Value::as_str)
-                .filter(|value| matches!(*value, "tool" | "provider" | "runtime" | "context"))
-                .unwrap_or("runtime");
-            let code = params
-                .get("code")
-                .and_then(Value::as_str)
-                .filter(|value| value.starts_with("agent_") || *value == "runtime_crashed")
-                .unwrap_or("agent_runtime_failed");
-            let retryable = params
-                .get("retryable")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            data = json!({ "completedAt": created_at, "message": message, "category": category, "code": code, "retryable": retryable });
-            repository
-                .update_run_status(
-                    &frame.run_id,
-                    "failed",
-                    None,
-                    None,
-                    Some((
-                        code,
-                        data["message"].as_str().unwrap_or("Agent run failed."),
-                    )),
-                )
-                .await?;
-            if let Err(error) =
-                crate::routines::mark_agent_run_terminal(&repository.pool, &frame.run_id).await
-            {
-                tracing::warn!(agent_run_id = %frame.run_id, error_code = %error.code, "routine terminal projection failed");
-            }
-            Some(AgentItemPayload::Error(data.clone()))
-        }
         _ => None,
     };
     if let Some(payload) = payload {
@@ -356,6 +315,7 @@ pub(crate) async fn persist_runtime_event(
     Ok(Some(PersistedRuntimeEvent {
         method: method.to_string(),
         event_id,
+        sequence: frame.sequence,
         data,
     }))
 }

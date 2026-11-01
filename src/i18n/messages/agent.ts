@@ -51,6 +51,9 @@ export default defineMessages({
     "agent.home.handoffInterrupted": "Session creation was interrupted. Try again.",
     "agent.home.error.starting": "Wait for Home to finish starting, then send again.",
     "agent.error.waitForAttachments": "Wait for files to finish attaching, then send again.",
+    "agent.error.conversationDeleted": "This conversation was deleted. Your message was not sent.",
+    "agent.error.createdConversationDeleted":
+      "The new conversation was deleted before it could be opened.",
     "agent.error.dropBusy":
       "Wait for the current files to finish attaching, then drop these files again.",
     "agent.error.tooManyFiles": "You can attach up to 8 files at a time.",
@@ -250,6 +253,9 @@ export default defineMessages({
     "agent.home.handoffInterrupted": "A criação da sessão foi interrompida. Tente de novo.",
     "agent.home.error.starting": "Aguarde o Início terminar de carregar e envie de novo.",
     "agent.error.waitForAttachments": "Aguarde os arquivos terminarem de anexar e envie de novo.",
+    "agent.error.conversationDeleted": "Esta conversa foi excluída. Sua mensagem não foi enviada.",
+    "agent.error.createdConversationDeleted":
+      "A nova conversa foi excluída antes de poder ser aberta.",
     "agent.error.dropBusy":
       "Aguarde os arquivos atuais terminarem de anexar e solte estes arquivos de novo.",
     "agent.error.tooManyFiles": "Você pode anexar até 8 arquivos por vez.",

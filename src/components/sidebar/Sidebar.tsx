@@ -796,9 +796,11 @@ export function Sidebar({
     function handleSessionsHydrated(event: Event) {
       const detail = (event as CustomEvent<AgentSessionsHydratedDetail>).detail;
       if (!detail) return;
+      if (!detail.replaceExisting && sessionsChangedRequestRef.current > 0) return;
+      if (detail.replaceExisting) sessionsChangedRequestRef.current += 1;
       setSessionPartitions(detail.partitions);
       setAgentSessions((current) =>
-        current.length > 0
+        !detail.replaceExisting && current.length > 0
           ? current
           : detail.sessions.filter((session) => !isAgentSessionDeleted(session.id)),
       );

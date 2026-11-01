@@ -534,8 +534,7 @@ describe("App shortcuts", () => {
       expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
 
       const firstSession = {
-        id: "session-1",
-        title: "First session",
+        ...agentSession("session-1", "First session"),
         preview: "First preview",
         last_active: "2026-06-04T12:00:00Z",
       };
@@ -568,8 +567,7 @@ describe("App shortcuts", () => {
       );
 
       const secondSession = {
-        id: "session-2",
-        title: "Second session",
+        ...agentSession("session-2", "Second session"),
         preview: "Second preview",
         last_active: "2026-06-05T12:00:00Z",
       };

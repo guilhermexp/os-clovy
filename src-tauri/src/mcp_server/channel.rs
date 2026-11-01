@@ -429,8 +429,8 @@ mod unix {
             writer.abort();
         } else if cut {
             // Revocation: no new request is read, but the calls already in
-            // flight still answer (a cancelled run settles its approvals
-            // first, so a waiting tool returns `run_cancelled`), for at most
+            // flight may answer while cancellation settles their approvals
+            // (a waiting tool returns `run_cancelled`), for at most
             // REVOKE_GRACE; then the connection closes.
             drop(responses);
             let mut writer = writer;

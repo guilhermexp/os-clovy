@@ -21,6 +21,8 @@ pub mod policy;
 #[cfg(test)]
 #[path = "red_tests.rs"]
 mod red_tests;
+#[cfg(all(test, unix))]
+mod stop_admission_tests;
 #[cfg(test)]
 mod tests;
 pub mod turn;
@@ -210,24 +212,35 @@ impl ChatEngineHost {
     }
 }
 
-/// Cancels a CLI run (`cancel_agent_run`): settles the run's pending
-/// approval requests as `run_cancelled` (their cards turn cancelled and the
-/// waiting tools answer the CLI), revokes the run's turn token so its MCP
-/// connections close, and stops the CLI's process group. The turn then
-/// publishes `run.cancelled`. `false` when no CLI turn runs under `run_id`.
+/// The synchronous Stop boundary shared by UI and remote cancellation claims.
+/// Revoke every clone of the run's authority before signaling its executor or
+/// awaiting unrelated approval receipts. No registry/host lock crosses an await.
+pub(crate) fn signal_run_cancellation(
+    host: &ChatEngineHost,
+    turns: Option<&crate::mcp_server::turns::TurnRegistry>,
+    run_id: &str,
+) -> bool {
+    if let Some(turns) = turns {
+        turns.revoke_run(run_id);
+    }
+    host.cancel(run_id)
+}
+
+/// Cancels a CLI run (`cancel_agent_run`). Live authority is revoked before
+/// pending approvals are settled as `run_cancelled`; their cancellation
+/// receipts and UI updates still finish normally. The executor stops its
+/// process group and publishes the persisted terminal winner.
 pub async fn cancel_cli_run(
     host: &ChatEngineHost,
     broker: Option<&crate::approval_broker::ApprovalBroker>,
     turns: Option<&crate::mcp_server::turns::TurnRegistry>,
     run_id: &str,
 ) -> bool {
+    let running = signal_run_cancellation(host, turns, run_id);
     if let Some(broker) = broker {
         broker.cancel_run(run_id).await;
     }
-    if let Some(turns) = turns {
-        turns.revoke_run(run_id);
-    }
-    host.cancel(run_id)
+    running
 }
 
 /// A message to run on a CLI engine.

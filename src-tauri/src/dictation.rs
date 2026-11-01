@@ -3695,7 +3695,7 @@ pub(crate) fn dictation_helper_pid(app: &AppHandle) -> Option<u32> {
     })
 }
 
-fn write_helper_command(
+pub(crate) fn write_helper_command(
     writer: &mut impl Write,
     command: &serde_json::Value,
     authority: Option<&crate::domain::turn_authority::TurnAuthority>,

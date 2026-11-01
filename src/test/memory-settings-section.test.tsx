@@ -242,6 +242,127 @@ describe("MemorySettingsSection", () => {
       );
   });
 
+  it.each([
+    "edit",
+    "create",
+    "delete",
+    "toggle",
+  ] as const)("reconciles a persisted MCP forget after local %s fails without losing its error or draft", async (operation) => {
+    persistedMemories = [{ ...memories[0] }];
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_name, callback) => {
+      changed = callback;
+      return () => {};
+    });
+    mocks.updateMemory.mockImplementation(async (id: string) => {
+      if (!persistedMemories.some((memory) => memory.id === id))
+        throw { code: "memory_not_found", message: "Memory was not found." };
+      throw new Error("Expected the persisted MCP deletion");
+    });
+    mocks.deleteMemory.mockImplementation(async (id: string) => {
+      if (!persistedMemories.some((memory) => memory.id === id))
+        throw { code: "memory_not_found", message: "Memory was not found." };
+      throw new Error("Expected the persisted MCP deletion");
+    });
+    mocks.createMemory.mockImplementation(async () => {
+      if (!persistedEnabled)
+        throw { code: "memory_disabled", message: "Memory is disabled for this scope." };
+      throw new Error("Expected the persisted MCP setting");
+    });
+    mocks.setMemoryEnabled.mockImplementation(async (enabled: boolean) => {
+      persistedEnabled = enabled;
+      throw new Error("Native runtime enforcement failed after persistence");
+    });
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} />);
+    await screen.findByText("Use concise answers");
+    if (operation === "create") {
+      await user.click(screen.getByRole("button", { name: "Add memory" }));
+      await user.type(screen.getByRole("textbox", { name: "Memory" }), "Keep this unsaved draft");
+    } else if (operation !== "toggle") {
+      await user.click(
+        screen.getByRole("button", {
+          name: operation === "edit" ? "Edit memory" : "Delete memory",
+        }),
+      );
+      if (operation === "edit") {
+        await user.clear(screen.getByRole("textbox", { name: "Memory" }));
+        await user.type(screen.getByRole("textbox", { name: "Memory" }), "Keep this unsaved draft");
+      }
+    }
+    // Native mutation commits first; only its visible invalidation response waits.
+    persistedMemories = [];
+    if (operation === "create") persistedEnabled = false;
+    const nativeResponse = deferred<MemoryDto[]>();
+    mocks.listMemories.mockReturnValueOnce(nativeResponse.promise);
+    act(() => changed?.({ payload: { profile: "default", kind: "memories" } }));
+    if (operation === "toggle")
+      await user.click(screen.getByRole("switch", { name: "Let Clovy remember things" }));
+    else
+      await user.click(
+        within(
+          screen.getByRole("dialog", {
+            name:
+              operation === "edit"
+                ? "Edit memory"
+                : operation === "create"
+                  ? "Add memory"
+                  : "Delete memory?",
+          }),
+        ).getByRole("button", {
+          name:
+            operation === "edit"
+              ? "Save changes"
+              : operation === "create"
+                ? "Add memory"
+                : "Delete",
+        }),
+      );
+    const expectedError =
+      operation === "toggle"
+        ? "Your memory setting was saved, but Clovy could not finish applying it. Quit and reopen Clovy before starting another agent run."
+        : operation === "create"
+          ? "Memory is disabled for this scope."
+          : "Memory was not found.";
+    await screen.findAllByText(expectedError);
+    await act(async () => nativeResponse.resolve([]));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Use concise answers" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getAllByText(expectedError).length).toBeGreaterThan(0);
+    expect(persistedMemories).toEqual([]);
+    if (operation === "edit" || operation === "create")
+      expect(screen.getByRole("textbox", { name: "Memory" })).toHaveValue(
+        "Keep this unsaved draft",
+      );
+    if (operation === "toggle" || operation === "create") {
+      expect(screen.getByRole("switch", { name: "Let Clovy remember things" })).not.toBeChecked();
+      expect(persistedEnabled).toBe(false);
+    }
+  });
+
+  it("keeps a persisted toggle and its error while the failed-mutation list reconciliation waits", async () => {
+    mocks.setMemoryEnabled.mockImplementationOnce(async (enabled: boolean) => {
+      persistedEnabled = enabled;
+      throw new Error("Runtime enforcement failed after persistence");
+    });
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} />);
+    await screen.findByText("Use concise answers");
+    const listing = deferred<MemoryDto[]>();
+    mocks.listMemories.mockImplementation(() => listing.promise);
+    await user.click(screen.getByRole("switch", { name: "Let Clovy remember things" }));
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "Let Clovy remember things" })).not.toBeChecked(),
+    );
+    expect(screen.getByRole("button", { name: "Add memory" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Your memory setting was saved");
+    expect(persistedEnabled).toBe(false);
+    await act(async () => listing.resolve(persistedMemories));
+    expect(screen.getByRole("switch", { name: "Let Clovy remember things" })).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("Your memory setting was saved");
+  });
+
   it("allows the user to add the first memory from the empty state", async () => {
     mocks.listMemories.mockResolvedValueOnce([]);
     const user = userEvent.setup();

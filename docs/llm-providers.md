@@ -374,10 +374,20 @@ argument: its installer ships `agy.exe`.
 - **Cancel.** The run's cancellation is registered (`ChatEngineHost::register`)
   before anything is awaited for it, and the turn checks it and the run's
   status again right before spawning, so a cancel during launch preparation
-  starts nothing. `cancel_agent_run` (`chat_engine::cancel_cli_run`) first
-  settles the run's pending approval cards as cancelled (the waiting tool
-  answers `run_cancelled`), revokes the run's turn token, then sends SIGTERM to
-  the CLI's process group, then SIGKILL after 2 s.
+  starts nothing. A winning UI or remote Stop claim synchronously revokes
+  the run's turn tokens and every cloned live authority while holding its
+  SQLite writer, then signals the host before committing. Broker settlement
+  and process teardown cannot delay that admission boundary. The shared
+  `chat_engine::cancel_cli_run` also revokes and signals before awaiting the
+  run's pending approval receipts (the waiting tool answers `run_cancelled`).
+  The executor sends SIGTERM to the CLI's process group, then SIGKILL after
+  2 s. This prevents a prepared capture or serialized dictation start after
+  Stop; a recording already admitted to the recorder remains active.
+  Terminal publication uses `persist_terminal_event` under `BEGIN IMMEDIATE`
+  to select the immutable database winner and claim its one publication in
+  `run_config_json.clovyTerminalEvent`. Host and fallback publishers share
+  this claim; emission uses the accepted sequence and winning terminal method.
+  This adds no protocol field or user configuration.
 - **End of the CLI.** The CLI's exit is watched alongside its stdout: when it
   exits, its process group is swept (MCP servers and helpers it started,
   including one still holding stdout), and output still in the pipe is read

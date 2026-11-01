@@ -55,11 +55,15 @@ import {
   pruneStagedAgentAttachments,
 } from "../../lib/tauri";
 import {
+  AGENT_SESSIONS_HYDRATED_EVENT,
+  type AgentSessionsHydratedDetail,
   type AgentSessionStatusDetail,
   type AgentSessionStatusKind,
   dispatchAgentSessionStatus,
   dispatchAgentSessionsChanged,
+  readAgentSessionSnapshotEpoch,
 } from "../../lib/agent-events";
+import { filterAgentSessionsForDataPartition } from "../../lib/session-partition-filter";
 import { messageFromError } from "../../lib/errors";
 import {
   clearQueuedAgentFollowUpSteering,
@@ -282,6 +286,9 @@ export function AgentWorkspace({
   const [sessions, setSessions] = useState<AgentSessionDto[]>(
     initialAgentSession ? [initialAgentSession] : [],
   );
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const sessionListRevisionRef = useRef(0);
   const [selectedId, setSelectedId] = useState(initialStoredSessionId);
   const [newSessionMode, setNewSessionMode] = useState(!initialStoredSessionId);
   const [projection, setProjection] = useState<AgentRuntimeProjection>(() =>
@@ -600,6 +607,7 @@ export function AgentWorkspace({
 
   const publishSessions = useCallback((loaded: AgentSessionDto[]) => {
     const next = loaded.filter((session) => !isAgentSessionDeleted(session.id));
+    sessionsRef.current = next;
     setSessions(next);
     dispatchAgentSessionsChanged({
       sessions: next,
@@ -614,12 +622,46 @@ export function AgentWorkspace({
   }, []);
 
   const refreshSessions = useCallback(async () => {
-    const next = (await agentRuntimeBindings.listSessions()).filter(
-      (session) => !isAgentSessionDeleted(session.id),
-    );
+    const revision = ++sessionListRevisionRef.current;
+    const nativeEpoch = readAgentSessionSnapshotEpoch();
+    const loaded = await agentRuntimeBindings.listSessions().catch((cause) => {
+      if (
+        revision !== sessionListRevisionRef.current ||
+        nativeEpoch !== readAgentSessionSnapshotEpoch()
+      )
+        return undefined;
+      throw cause;
+    });
+    if (
+      revision !== sessionListRevisionRef.current ||
+      nativeEpoch !== readAgentSessionSnapshotEpoch() ||
+      !loaded
+    )
+      return undefined;
+    const next = loaded.filter((session) => !isAgentSessionDeleted(session.id));
     publishSessions(next);
     return next;
   }, [publishSessions]);
+
+  useEffect(() => {
+    const acceptSessionSnapshot = (event: Event) => {
+      const detail = (event as CustomEvent<AgentSessionsHydratedDetail>).detail;
+      if (!detail?.replaceExisting) return;
+      sessionListRevisionRef.current += 1;
+      const next = filterAgentSessionsForDataPartition(
+        detail.sessions,
+        detail.partitions,
+        getCurrentDataPartitionName(),
+      ).filter((session) => !isAgentSessionDeleted(session.id));
+      sessionsRef.current = next;
+      setSessions(next);
+    };
+    window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, acceptSessionSnapshot);
+    return () => {
+      sessionListRevisionRef.current += 1;
+      window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, acceptSessionSnapshot);
+    };
+  }, []);
 
   const announceSessionStatus = useCallback((detail: AgentSessionStatusDetail) => {
     if (detail.sessionId && isAgentSessionDeleted(detail.sessionId)) return;
@@ -719,6 +761,7 @@ export function AgentWorkspace({
   useEffect(() => {
     void refreshSessions()
       .then((next) => {
+        if (!next) return;
         const selected = selectedIdRef.current;
         if (!homeMode || !selected || next.some((session) => session.id === selected)) return;
         forgetClovyHomeStoredSessionId(getCurrentDataPartitionName(), selected);
@@ -1173,15 +1216,21 @@ export function AgentWorkspace({
           safetyMode,
           profile: getCurrentDataPartitionName(),
         });
+        if (isAgentSessionDeleted(createdSession.id)) {
+          throw new Error(t("agent.error.conversationDeleted"));
+        }
         session = createdSession;
+        sessionListRevisionRef.current += 1;
         const latestModel = chatModelId(modelRef.current, engineCatalogRef.current);
         if (latestModel !== submittedModel) {
           rememberSessionModel(createdSession.id, latestModel);
         }
-        setSessions((current) => [
+        const nextSessions = [
           createdSession,
-          ...current.filter((item) => item.id !== createdSession.id),
-        ]);
+          ...sessionsRef.current.filter((item) => item.id !== createdSession.id),
+        ];
+        sessionsRef.current = nextSessions;
+        setSessions(nextSessions);
         if (creationRequestId) {
           creationDraftDestinationsRef.current.set(creationRequestId, createdSession.id);
         }
@@ -1206,6 +1255,9 @@ export function AgentWorkspace({
         }
       }
       const activeSession = session;
+      if (isAgentSessionDeleted(activeSession.id)) {
+        throw new Error(t("agent.error.conversationDeleted"));
+      }
       const optimistic: AgentItemDto = {
         id: optimisticId,
         sessionId: activeSession.id,
@@ -1251,6 +1303,9 @@ export function AgentWorkspace({
       const runModel = needsLocalDefault
         ? await defaultChatModelId()
         : chatModelId(submittedModel, engineCatalog);
+      if (isAgentSessionDeleted(activeSession.id)) {
+        throw new Error(t("agent.error.conversationDeleted"));
+      }
       const run = await agentRuntimeBindings.startRun({
         sessionId: activeSession.id,
         prompt: preparedPrompt.text,
@@ -1370,9 +1425,14 @@ export function AgentWorkspace({
   async function ensureHomeSession(): Promise<AgentSessionDto> {
     const selected = selectedIdRef.current;
     if (selected) {
-      return selectedSession?.id === selected
-        ? selectedSession
-        : await agentRuntimeBindings.getSession(selected);
+      const existing =
+        selectedSession?.id === selected
+          ? selectedSession
+          : await agentRuntimeBindings.getSession(selected);
+      if (isAgentSessionDeleted(existing.id)) {
+        throw new Error(t("agent.error.conversationDeleted"));
+      }
+      return existing;
     }
     if (homeSessionPromiseRef.current) return homeSessionPromiseRef.current;
 
@@ -1389,15 +1449,21 @@ export function AgentWorkspace({
         }),
       )
       .then((createdSession) => {
+        if (isAgentSessionDeleted(createdSession.id)) {
+          throw new Error(t("agent.error.conversationDeleted"));
+        }
+        sessionListRevisionRef.current += 1;
         creationDraftDestinationsRef.current.set(draftOwnerId, createdSession.id);
         transferPendingAgentSessionDraft(draftOwnerId, createdSession.id);
         setSelectedId(createdSession.id);
         selectedIdRef.current = createdSession.id;
         setNewSessionMode(false);
-        setSessions((current) => [
+        const nextSessions = [
           createdSession,
-          ...current.filter((session) => session.id !== createdSession.id),
-        ]);
+          ...sessionsRef.current.filter((session) => session.id !== createdSession.id),
+        ];
+        sessionsRef.current = nextSessions;
+        setSessions(nextSessions);
         setProjection(createAgentRuntimeProjection({ session: createdSession }));
         onHomeSessionCreated?.(createdSession.id);
         return createdSession;
@@ -1562,8 +1628,14 @@ export function AgentWorkspace({
     setError(undefined);
     try {
       const branch = await agentRuntimeBindings.branchSession(selectedId, itemId);
+      if (isAgentSessionDeleted(branch.id)) {
+        throw new Error(t("agent.error.createdConversationDeleted"));
+      }
+      sessionListRevisionRef.current += 1;
       abandonComposerAttachments();
-      setSessions((current) => [branch, ...current.filter((item) => item.id !== branch.id)]);
+      const nextSessions = [branch, ...sessionsRef.current.filter((item) => item.id !== branch.id)];
+      sessionsRef.current = nextSessions;
+      setSessions(nextSessions);
       setSelectedId(branch.id);
       selectedIdRef.current = branch.id;
       setNewSessionMode(false);

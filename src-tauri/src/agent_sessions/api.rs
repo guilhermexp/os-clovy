@@ -831,16 +831,19 @@ pub async fn cancel_agent_run(app: AppHandle, run_id: String) -> Result<(), AppE
     // Stop and every bound mutation share SQLite's write lock. Persist Stop
     // before releasing the writer. Signal while that writer is still held so
     // preparation cannot observe cancelled without owning its terminal event.
-    let (changed, host_owned_terminal) =
-        claim_ui_run_cancellation_with_signal(&repository.pool, &run.session_id, &run.id, || {
-            host.cancel(&run.id)
-        })
-        .await?;
+    let mcp = app.try_state::<crate::mcp_server::McpServerState>();
+    let (changed, host_owned_terminal) = claim_ui_run_cancellation_for_host(
+        &repository.pool,
+        &run.session_id,
+        &run.id,
+        &host,
+        mcp.as_ref().map(|state| state.turns()),
+    )
+    .await?;
     if !changed {
         return Ok(());
     }
     let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
-    let mcp = app.try_state::<crate::mcp_server::McpServerState>();
     let running = crate::chat_engine::cancel_cli_run(
         &host,
         broker.as_deref(),
@@ -854,9 +857,24 @@ pub async fn cancel_agent_run(app: AppHandle, run_id: String) -> Result<(), AppE
     }
     if !host_owned_terminal && !running {
         let cancelled = repository.get_run(&run.id).await?;
-        super::events::emit_persisted_run_cancelled(&app, &cancelled)?;
+        super::events::emit_persisted_run_cancelled(&app, &repository, &cancelled).await?;
     }
     Ok(())
+}
+
+/// The production UI Stop claim, including synchronous host revocation while
+/// its winning SQLite writer is still held.
+pub(crate) async fn claim_ui_run_cancellation_for_host(
+    pool: &sqlx_sqlite::SqlitePool,
+    conversation_id: &str,
+    run_id: &str,
+    host: &crate::chat_engine::ChatEngineHost,
+    turns: Option<&crate::mcp_server::turns::TurnRegistry>,
+) -> Result<(bool, bool), AppError> {
+    claim_ui_run_cancellation_with_signal(pool, conversation_id, run_id, || {
+        crate::chat_engine::signal_run_cancellation(host, turns, run_id)
+    })
+    .await
 }
 
 /// Pure admission boundary used by the UI Stop command before host teardown.
@@ -972,6 +990,33 @@ pub(crate) async fn claim_conversation_run_cancellation_with_signal(
     Ok((changed, host_owned_terminal))
 }
 
+/// The production remote Stop claim. Caller validation, the durable winner
+/// and the live capability revocation share the claim's admission boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn claim_conversation_run_cancellation_for_host(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    caller_session: &str,
+    caller_run: &str,
+    conversation_id: &str,
+    run_id: &str,
+    authority: &crate::domain::turn_authority::TurnAuthority,
+    host: &crate::chat_engine::ChatEngineHost,
+    turns: Option<&crate::mcp_server::turns::TurnRegistry>,
+) -> Result<(bool, bool), AppError> {
+    claim_conversation_run_cancellation_with_signal(
+        pool,
+        profile,
+        caller_session,
+        caller_run,
+        conversation_id,
+        run_id,
+        authority,
+        || crate::chat_engine::signal_run_cancellation(host, turns, run_id),
+    )
+    .await
+}
+
 /// Retire durable input cards only after the live approval broker has settled
 /// its waiters, preserving its cancellation receipts and UI updates.
 pub(crate) async fn retire_conversation_run_interruptions(
@@ -1003,7 +1048,8 @@ pub(crate) async fn cancel_conversation_run_in_profile(
                 "The chat engine host is unavailable.",
             )
         })?;
-    let (changed, host_owned_terminal) = claim_conversation_run_cancellation_with_signal(
+    let mcp = app.try_state::<crate::mcp_server::McpServerState>();
+    let (changed, host_owned_terminal) = claim_conversation_run_cancellation_for_host(
         pool,
         profile,
         caller_session,
@@ -1011,12 +1057,12 @@ pub(crate) async fn cancel_conversation_run_in_profile(
         conversation_id,
         run_id,
         authority,
-        || host.cancel(run_id),
+        &host,
+        mcp.as_ref().map(|state| state.turns()),
     )
     .await?;
     if changed {
         let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
-        let mcp = app.try_state::<crate::mcp_server::McpServerState>();
         let running = crate::chat_engine::cancel_cli_run(
             &host,
             broker.as_deref(),
@@ -1027,7 +1073,12 @@ pub(crate) async fn cancel_conversation_run_in_profile(
         retire_conversation_run_interruptions(pool, conversation_id, run_id).await?;
         if !host_owned_terminal && !running {
             let run = AgentRepository::new(pool.clone()).get_run(run_id).await?;
-            super::events::emit_persisted_run_cancelled(app, &run)?;
+            super::events::emit_persisted_run_cancelled(
+                app,
+                &AgentRepository::new(pool.clone()),
+                &run,
+            )
+            .await?;
         }
     }
     let run = AgentRepository::new(pool.clone()).get_run(run_id).await?;

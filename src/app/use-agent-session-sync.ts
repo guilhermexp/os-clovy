@@ -3,7 +3,10 @@ import { listen } from "@tauri-apps/api/event";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
+  AGENT_SESSIONS_HYDRATED_EVENT,
   type AgentSessionsChangedDetail,
+  type AgentSessionsHydratedDetail,
+  invalidateAgentSessionSnapshots,
 } from "../lib/agent-events";
 import { assignSessionToFolder, listAgentSessions } from "../lib/tauri";
 import { AGENT_SESSION_STATUS_EVENT, type AgentSessionStatusDetail } from "../lib/agent-events";
@@ -58,6 +61,7 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
           payload.profile !== getCurrentDataPartitionName()
         )
           return;
+        invalidateAgentSessionSnapshots();
         if (payload.kind === "conversations" && payload.deleted && payload.id) {
           // Clear App's owner before child workspace listeners clear their own
           // selection; otherwise the child's callback can erase the identity
@@ -78,11 +82,17 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
               !cancelled &&
               request === latestRequest &&
               payload.profile === getCurrentDataPartitionName()
-            )
-              commitAgentSessions(
-                sessions.filter((session) => !isAgentSessionDeleted(session.id)),
-                partitions,
+            ) {
+              const visibleSessions = sessions.filter(
+                (session) => !isAgentSessionDeleted(session.id),
               );
+              commitAgentSessions(visibleSessions, partitions);
+              window.dispatchEvent(
+                new CustomEvent<AgentSessionsHydratedDetail>(AGENT_SESSIONS_HYDRATED_EVENT, {
+                  detail: { sessions: visibleSessions, partitions, replaceExisting: true },
+                }),
+              );
+            }
           })
           .catch(() => {});
       },

@@ -11,6 +11,7 @@ pub mod repository;
 pub(crate) mod retirement;
 pub(crate) mod skill_identity;
 pub mod skills;
+pub(crate) mod terminal;
 
 pub use domain::*;
 pub use migration::{

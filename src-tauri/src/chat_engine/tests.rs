@@ -2055,3 +2055,175 @@ async fn chat_engine_home_session_runs_two_turns_on_the_cli_without_clovy_api() 
         None => std::env::remove_var(retired_origin_env),
     }
 }
+
+#[tokio::test]
+#[cfg(unix)]
+async fn remote_stop_after_cli_exit_publishes_only_the_persisted_terminal_winner() {
+    struct MessageCompletionSink {
+        inner: TestSink,
+        reached: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        session_id: String,
+        run_id: String,
+    }
+    impl FrameSink for MessageCompletionSink {
+        async fn publish(&self, frame: RpcFrame) {
+            assert_eq!(frame.session_id, self.session_id);
+            assert_eq!(frame.run_id, self.run_id);
+            if frame.method.as_deref() == Some("message.completed") {
+                self.reached.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.publish(frame).await;
+        }
+    }
+
+    // Separate controls prove both the ordinary completion and the already
+    // persisted completion that wins before a later remote Stop claim.
+    for (stop_before_terminal, stop_after_terminal) in
+        [(true, false), (false, false), (false, true)]
+    {
+        let kind = CliKind::Claude;
+        let harness = Harness::new(kind).await;
+        let program = harness.fake_cli(
+            kind,
+            r#"
+echo $$ > "$LOG/cli.pid"
+echo '{"type":"system","subtype":"init","session_id":"terminal-winner-fixture"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Finished locally"}}}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Finished locally"}'
+exit 0
+"#,
+        );
+        let run_id = harness.new_run(kind, "Finish before settlement").await;
+        let caller_session = harness
+            .repository
+            .create_session("Caller", "test", AgentSafetyMode::Sandboxed, None)
+            .await
+            .unwrap();
+        let caller_run = harness
+            .repository
+            .create_run(&caller_session.id, "test", None)
+            .await
+            .unwrap();
+        let mut caller_context =
+            harness.context(kind, &program, &caller_run.id, "Remote Stop", None);
+        caller_context.session_id = caller_session.id.clone();
+        let turns = crate::mcp_server::turns::TurnRegistry::default();
+        let caller_token = turns.issue(caller_context.binding());
+        let caller_binding = turns.binding(&caller_token).unwrap();
+        let host = ChatEngineHost::default();
+        let TurnTicket {
+            cancel,
+            _done: _completion,
+        } = host.register(&run_id).unwrap();
+        let sink = MessageCompletionSink {
+            inner: TestSink {
+                repository: harness.repository.clone(),
+                emitted: StdMutex::new(Vec::new()),
+            },
+            reached: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            session_id: harness.session_id.clone(),
+            run_id: run_id.clone(),
+        };
+        let context = harness.context(kind, &program, &run_id, "Finish before settlement", None);
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let coordinate_stop = async {
+                sink.reached.notified().await;
+                // This is the real post-exit message-publication boundary,
+                // not a timer or a simulated terminal-frame-only test.
+                assert_process_gone(read_pid(&harness.log.path().join("cli.pid"))).await;
+                if stop_before_terminal {
+                    let (changed, host_owned_terminal) =
+                        crate::agent_sessions::api::claim_conversation_run_cancellation_for_host(
+                            &harness.repository.pool,
+                            "default",
+                            &caller_binding.session_id,
+                            &caller_binding.run_id,
+                            &harness.session_id,
+                            &run_id,
+                            &caller_binding.authority,
+                            &host,
+                            Some(&turns),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(changed);
+                    assert!(host_owned_terminal);
+                    assert_eq!(
+                        harness.repository.get_run(&run_id).await.unwrap().status,
+                        "cancelled"
+                    );
+                }
+                sink.resume.notify_one();
+            };
+            tokio::join!(
+                execute_turn(&harness.repository, &sink, context, cancel),
+                coordinate_stop
+            );
+            if stop_after_terminal {
+                let (changed, host_owned_terminal) =
+                    crate::agent_sessions::api::claim_conversation_run_cancellation_for_host(
+                        &harness.repository.pool,
+                        "default",
+                        &caller_binding.session_id,
+                        &caller_binding.run_id,
+                        &harness.session_id,
+                        &run_id,
+                        &caller_binding.authority,
+                        &host,
+                        Some(&turns),
+                    )
+                    .await
+                    .unwrap();
+                assert!(!changed, "persisted completion already won");
+                assert!(!host_owned_terminal);
+            }
+            let emitted = sink.inner.emitted.lock().unwrap().clone();
+            let terminal = emitted
+                .iter()
+                .filter(|(method, _)| {
+                    matches!(
+                        method.as_str(),
+                        "run.cancelled" | "run.completed" | "run.failed"
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expected_status = if stop_before_terminal {
+                "cancelled"
+            } else {
+                "completed"
+            };
+            let expected_event = if stop_before_terminal {
+                "run.cancelled"
+            } else {
+                "run.completed"
+            };
+            assert_eq!(terminal.len(), 1, "terminal events: {terminal:?}");
+            assert_eq!(terminal[0].0, expected_event);
+            assert_eq!(
+                emitted.last().map(|(method, _)| method.as_str()),
+                Some(expected_event)
+            );
+            assert_eq!(
+                harness.repository.get_run(&run_id).await.unwrap().status,
+                expected_status
+            );
+            assert!(turns.contains_binding(&caller_binding));
+            caller_binding.authority.check_live().unwrap();
+            assert_ne!(
+                harness
+                    .repository
+                    .get_run(&caller_run.id)
+                    .await
+                    .unwrap()
+                    .status,
+                "cancelled",
+                "remote Stop must leave the caller run intact"
+            );
+        })
+        .await
+        .expect("post-exit terminal race and controls finish within their whole-scenario timeout");
+    }
+}

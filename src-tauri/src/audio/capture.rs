@@ -58,7 +58,7 @@ fn check_capture_authorization(
     Ok(())
 }
 
-fn admit_capture_start(
+pub(crate) fn admit_capture_start(
     state: &mut CaptureStartState,
     already_active: bool,
     authorization: Option<&CaptureStartAuthorization>,

@@ -1,7 +1,8 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSettingsSection } from "../components/settings/AgentSettingsSection";
+import type { AgentSkillDto } from "../lib/agent-runtime-contract";
 import { AGENT_HUD_ENABLED_KEY, AGENT_HUD_PLACEMENT_KEY } from "../lib/agent-hud-settings";
 import { onboardingArea, onboardingMood } from "../lib/onboarding";
 
@@ -135,6 +136,74 @@ describe("AgentSettingsSection", () => {
     expect(screen.getByRole("switch", { name: "Enable Research" })).not.toBeChecked();
     expect(stored.configuredEnabled).toBe(false);
     expect(stored.enabled).toBe(false);
+  });
+
+  it.each([
+    "save",
+    "toggle",
+  ] as const)("reconciles a persisted MCP skill disable after local %s rejects and preserves the error and draft", async (operation) => {
+    let stored: AgentSkillDto = { ...skillFixture };
+    mocks.listAgentSkills.mockImplementation(async () => [stored]);
+    mocks.readAgentSkill.mockImplementation(async () => ({ content: "Original instructions" }));
+    mocks.updateAgentSkill.mockImplementation(async (_id: string, content: string) => {
+      if (new TextEncoder().encode(content).byteLength > 512 * 1024)
+        throw { code: "agent_skill_too_large", message: "Skill content exceeds 512 KiB." };
+      throw new Error("Expected normal oversized-content rejection");
+    });
+    mocks.setAgentSkillEnabled.mockImplementation(async () => {
+      if (!stored.editable)
+        throw {
+          code: "agent_skill_read_only",
+          message: "User-global skills are read-only in Clovy.",
+        };
+      throw new Error("Expected a read-only skill after root discovery changed");
+    });
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (name, callback) => {
+      if (name === "clovy-data-changed") changed = callback;
+      return () => {};
+    });
+    const user = userEvent.setup();
+    render(<AgentSettingsSection />);
+    await screen.findByRole("switch", { name: "Disable Research" });
+    const draft = "x".repeat(512 * 1024 + 1);
+    if (operation === "save") {
+      await user.click(screen.getByRole("button", { name: "Edit" }));
+      const editor = await screen.findByRole("textbox", { name: "Skill instructions" });
+      fireEvent.change(editor, { target: { value: draft } });
+    }
+    stored = {
+      ...stored,
+      enabled: false,
+      configuredEnabled: false,
+      editable: operation !== "toggle",
+      source: operation === "toggle" ? "user_global" : "managed",
+    };
+    const nativeResponse = deferred<AgentSkillDto[]>();
+    mocks.listAgentSkills.mockReturnValueOnce(nativeResponse.promise);
+    act(() => changed?.({ payload: { profile: "default", kind: "skills" } }));
+    await user.click(
+      screen.getByRole(operation === "save" ? "button" : "switch", {
+        name: operation === "save" ? "Save skill" : "Disable Research",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        operation === "save" ? mocks.updateAgentSkill : mocks.setAgentSkillEnabled,
+      ).toHaveBeenCalled(),
+    );
+    await act(async () => nativeResponse.resolve([stored]));
+    expect(await screen.findByRole("switch", { name: "Enable Research" })).not.toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      operation === "save"
+        ? "Skill content exceeds 512 KiB."
+        : "User-global skills are read-only in Clovy.",
+    );
+    expect(stored.configuredEnabled).toBe(false);
+    expect(stored.enabled).toBe(false);
+    if (operation === "save")
+      expect(screen.getByRole("textbox", { name: "Skill instructions" })).toHaveValue(draft);
+    else expect(screen.getByRole("switch", { name: "Enable Research" })).toBeDisabled();
   });
 
   it("loads the current native personality into the Agent settings", async () => {
