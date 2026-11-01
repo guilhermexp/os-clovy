@@ -106,8 +106,11 @@ Tests: `cargo test --manifest-path src-tauri/Cargo.toml day_intelligence`
 - Dictation history from the current data partition and period also goes to the
   activity provider inside the same untrusted-data fence. Hour reports include
   at most 20 excerpts of 400 characters; day summaries include at most 40 of
-  240 characters. History is retained for seven days. Dictations alone do not
-  trigger a report or summary, and existing reports are not regenerated.
+  240 characters. The read excludes dictations older than the seven-day
+  history cutoff even when their rows have not yet been pruned. App names come
+  from the already loaded timeline when available, otherwise the bundle id is
+  used. Dictations alone do not trigger a report or summary, and existing
+  reports are not regenerated.
 
 ## Pipeline
 

@@ -428,6 +428,68 @@ async fn a_fold_that_keeps_failing_still_places_the_hour() {
 }
 
 #[tokio::test]
+async fn day_summary_resolves_dictation_apps_from_the_loaded_timeline() {
+    use crate::activity::store::{NewFrame, TextSource};
+    let (_dir, store) = store().await;
+    for minute in 0..=2 {
+        store
+            .insert_frame(&NewFrame {
+                captured_at: local(14, 0) + chrono::Duration::minutes(minute),
+                app_name: "Slack".into(),
+                bundle_id: Some("com.example.slack".into()),
+                window_title: Some("Work".into()),
+                browser_url: None,
+                text_source: TextSource::Accessibility,
+                text: Some(format!("Synthetic activity {minute}")),
+                input_idle_ms: None,
+            })
+            .await
+            .unwrap();
+    }
+    build_timeline(&store, local(16, 0)).await;
+    let settings = settings();
+    let zone = zone();
+    let mut sources = sources();
+    sources.dictations = vec![
+        (
+            local(14, 32),
+            super::sources::DictationNote {
+                local_time: "14:32".into(),
+                app_bundle_id: Some("com.example.slack".into()),
+                app_name: None,
+                text: "spoken".into(),
+            },
+        ),
+        (
+            local(14, 33),
+            super::sources::DictationNote {
+                local_time: "14:33".into(),
+                app_bundle_id: Some("com.example.other".into()),
+                app_name: None,
+                text: "second".into(),
+            },
+        ),
+    ];
+    let provider = FakeProvider::new(|_| Ok(summary_answer()));
+    let deps = deps_at(&store, &settings, &provider, &sources, &zone, local(19, 0));
+    pipeline::generate_summary(&deps, day(), SummaryTrigger::Manual)
+        .await
+        .unwrap()
+        .unwrap();
+    let call = provider.calls_of(prompts::DAY_SUMMARY).pop().unwrap();
+    assert!(
+        call.prompt.contains("14:32 · Slack: spoken"),
+        "{}",
+        call.prompt
+    );
+    assert!(
+        call.prompt.contains("14:33 · com.example.other: second"),
+        "{}",
+        call.prompt
+    );
+}
+
+#[tokio::test]
 async fn days_without_anything_have_no_summary_and_no_call() {
     let (_dir, store) = store().await;
     let settings = settings();

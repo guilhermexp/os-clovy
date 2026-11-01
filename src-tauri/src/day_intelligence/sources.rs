@@ -301,7 +301,8 @@ impl DaySources for AppSources {
                 }
             };
             let profile = crate::commands::active_profile(&self.app);
-            dictations_between(&repositories.pool, &profile, from, to, zone).await
+            let cutoff = crate::db::repositories::dictation_history_cutoff_timestamp();
+            dictations_between(&repositories.pool, &profile, from, to, zone, &cutoff).await
         })
     }
 
@@ -402,9 +403,10 @@ pub(crate) async fn dictations_between(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     zone: &dyn LocalZone,
+    cutoff: &str,
 ) -> Vec<DictationNote> {
-    let rows = query("SELECT created_at, app_bundle_id, text FROM dictation_history WHERE profile = ? AND julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?) ORDER BY julianday(created_at), rowid")
-        .bind(profile).bind(from.to_rfc3339()).bind(to.to_rfc3339()).fetch_all(pool).await.unwrap_or_else(|error| {
+    let rows = query("SELECT created_at, app_bundle_id, text FROM dictation_history WHERE profile = ? AND julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?) AND julianday(created_at) >= julianday(?) ORDER BY julianday(created_at), rowid")
+        .bind(profile).bind(from.to_rfc3339()).bind(to.to_rfc3339()).bind(cutoff).fetch_all(pool).await.unwrap_or_else(|error| {
             tracing::warn!(%error, "day summary: dictations could not be read"); Vec::new()
         });
     rows.into_iter()
@@ -516,13 +518,50 @@ pub(crate) mod tests {
         let from = parse_time("2026-01-01T14:00:00Z").unwrap();
         let to = parse_time("2026-01-01T15:00:00Z").unwrap();
         let zone = FixedZone(chrono::FixedOffset::east_opt(0).unwrap());
-        let notes = dictations_between(&pool, "a", from, to, &zone).await;
+        let notes = dictations_between(&pool, "a", from, to, &zone, "2025-12-25T00:00:00Z").await;
         assert_eq!(
             notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
             ["first", "second"]
         );
         assert_eq!(notes[0].local_time, "14:00");
         assert_eq!(notes[0].app_bundle_id.as_deref(), Some("org.example.app"));
+    }
+
+    #[tokio::test]
+    async fn dictations_exclude_expired_rows_without_deleting_them() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        query("CREATE TABLE dictation_history (profile TEXT, created_at TEXT, app_bundle_id TEXT, text TEXT)").execute(&pool).await.unwrap();
+        for (profile, at, text) in [
+            ("a", "2026-10-24T11:59:59.999Z", "expired"),
+            ("a", "2026-10-24T12:00:00.000Z", "at cutoff"),
+            ("a", "2026-10-25T09:30:00-03:00", "recent"),
+            ("b", "2026-10-25T12:30:00Z", "other profile"),
+            ("a", "2026-10-26T00:00:00Z", "outside"),
+        ] {
+            query("INSERT INTO dictation_history VALUES (?, ?, NULL, ?)")
+                .bind(profile)
+                .bind(at)
+                .bind(text)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let from = parse_time("2026-10-24T00:00:00Z").unwrap();
+        let to = parse_time("2026-10-26T00:00:00Z").unwrap();
+        let zone = FixedZone(chrono::FixedOffset::east_opt(0).unwrap());
+        let notes =
+            dictations_between(&pool, "a", from, to, &zone, "2026-10-24T12:00:00.000Z").await;
+        assert_eq!(
+            notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+            ["at cutoff", "recent"]
+        );
+        assert_eq!(notes[1].local_time, "12:30");
+        let count: i64 = query("SELECT COUNT(*) FROM dictation_history WHERE text = 'expired'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 1, "expired row remains physically present");
     }
 
     /// Fixed meetings and blocks, filtered by overlap like the real sources.
