@@ -240,6 +240,9 @@ async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, Str
         .unwrap_or_else(|| json!({}));
     Ok(match tools::call(ctx, name, &arguments).await {
         Ok(value) => tool_result(&value),
+        Err(error) if name == tools::computer_use::COMPUTER_USE_TOOL => {
+            tool_error(&json!({ "error": error }).to_string())
+        }
         Err(error) => tool_error(&format!("{} ({})", error.message, error.code)),
     })
 }

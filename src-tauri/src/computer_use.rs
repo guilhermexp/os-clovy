@@ -2502,7 +2502,7 @@ pub(crate) async fn handle_cli_action_for_call(
     let state = app.state::<ComputerUseState>();
     match handle_action(app, &state, &run_id, arguments).await {
         Ok(result) => result,
-        Err(error) => mcp_error(&error.message),
+        Err(error) => mcp_error(&error),
     }
 }
 
@@ -4988,10 +4988,11 @@ fn mcp_text(value: Value) -> Value {
     })
 }
 
-fn mcp_error(message: &str) -> Value {
+fn mcp_error(error: &AppError) -> Value {
     json!({
-        "content": [{ "type": "text", "text": json!({ "error": message }).to_string() }],
+        "content": [{ "type": "text", "text": json!({ "error": error.message }).to_string() }],
         "isError": true,
+        "structuredContent": { "error": error },
     })
 }
 

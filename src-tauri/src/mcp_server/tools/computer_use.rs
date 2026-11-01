@@ -111,7 +111,7 @@ impl ComputerUseTools {
             .execute(binding.run_id.clone(), arguments.clone())
             .await;
         if is_error(&result) {
-            return Err(AppError::new("computer_use_failed", error_text(&result)));
+            return Err(driver_error(&result));
         }
         Ok(content_for_cli(&result))
     }
@@ -167,6 +167,14 @@ impl ToolGroup for ComputerUseTools {
 
 fn is_error(result: &Value) -> bool {
     result.get("isError").and_then(Value::as_bool) == Some(true)
+}
+
+fn driver_error(result: &Value) -> AppError {
+    result
+        .get("structuredContent")
+        .and_then(|value| value.get("error"))
+        .and_then(|error| serde_json::from_value(error.clone()).ok())
+        .unwrap_or_else(|| AppError::new("computer_use_failed", error_text(result)))
 }
 
 /// The error text of an MCP-shaped failure (`{"error": "..."}` in text).

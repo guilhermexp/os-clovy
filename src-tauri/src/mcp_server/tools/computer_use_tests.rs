@@ -232,6 +232,28 @@ async fn driver_failure_is_a_tool_error() {
     assert!(error.message.contains("denied"), "{}", error.message);
 }
 
+#[tokio::test]
+async fn driver_error_keeps_code_and_delivery_evidence() {
+    let broker = TestBroker::new([Scripted::Approve]).await;
+    let data = data(&broker);
+    let chat = broker.turn(CliKind::Claude, true).await;
+    let host = FakeHost::new();
+    *host.driver_result.lock().unwrap() = Some(json!({
+        "isError": true,
+        "structuredContent": { "error": {
+            "code": "TIMEOUT", "message": "Action result unavailable.",
+            "details": { "disposition": { "delivery": "unknown", "retry": "unknown" } }
+        }}
+    }));
+    let group = ComputerUseTools::with_host(host);
+    let error = group
+        .call(&ctx(&data, &broker, &chat), COMPUTER_USE_TOOL, &capture())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "TIMEOUT");
+    assert_eq!(error.details.unwrap()["disposition"]["retry"], "unknown");
+}
+
 fn binding(run_id: &str, attended: bool) -> TurnBinding {
     TurnBinding {
         session_id: "session-1".into(),
