@@ -254,8 +254,6 @@ pub async fn settle(
 fn apply_settlement(payload: &mut Value, settlement: &Settlement, now: &str) {
     payload["resolvedAt"] = json!(now);
     match settlement {
-        // `session` and `always` were answered as `once`: the broker never
-        // stores a standing grant, so the card says what actually happened.
         Settlement::Approved => {
             payload["status"] = json!("resolved");
             payload["resolution"] = json!("once");

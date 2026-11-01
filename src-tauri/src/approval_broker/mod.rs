@@ -105,7 +105,7 @@ pub enum ApprovalKind {
 /// A decision that lets the tool continue.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApprovalOutcome {
-    /// Approved once (`session` and `always` count as once).
+    /// Approved once.
     Approved,
     /// The user's answer to a clarification, exactly as given.
     Answered(String),

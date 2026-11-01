@@ -145,8 +145,9 @@ the tool's code, never from the model), moves the run to
 `waiting_for_user`, emits `interruption.requested`, and waits for the
 decision. The existing approval and clarification cards render it; the
 answer goes through `resolve_agent_interruption`, which hands CLI items to
-the broker. `once`, `session`, and `always` all approve this call only
-(stored as `resolution: "once"`); `deny` denies. One decision is accepted;
+the broker. `once` approves this call only (stored as `resolution: "once"`);
+`deny` denies. The unsupported `session` and `always` choices are rejected
+without settling the request. One decision is accepted;
 a second or late answer gets `agent_interruption_expired`.
 
 | Outcome | Tool error (`isError`, `message (code)`) | Item |

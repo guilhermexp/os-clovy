@@ -300,18 +300,15 @@ async fn deny_returns_user_denied() {
 }
 
 #[tokio::test]
-async fn session_and_always_count_as_one_approval() {
+async fn session_and_always_are_rejected_without_settling() {
     for choice in ["session", "always"] {
         let harness = Harness::new().await;
         let (task, id) = harness.ask(approval("save_memory", json!({}))).await;
-        harness
+        let error = harness
             .resolve(&id, json!({ "kind": "approval", "choice": choice }))
             .await
-            .unwrap();
-        assert_eq!(task.await.unwrap(), Ok(ApprovalOutcome::Approved));
-        assert_eq!(harness.item(&id).await["resolution"], "once", "{choice}");
-        // A later request asks again: nothing was granted for the session.
-        let (task, id) = harness.ask(approval("save_memory", json!({}))).await;
+            .unwrap_err();
+        assert_eq!(error.code, "agent_interruption_resolution_invalid");
         assert_eq!(harness.item(&id).await["status"], "pending");
         harness
             .resolve(&id, json!({ "kind": "approval", "choice": "deny" }))

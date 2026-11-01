@@ -85,3 +85,10 @@ The exact quote and reduced-smoke evidence are recorded in
 the architectural decision; it does not claim that the recorded native MCP
 smoke passed. Codex turns and a copied profile are not required for that smoke
 under the orchestration instruction of the same date.
+
+## 2026-11-01 addendum: unsupported approval scopes
+
+CLI approval resolutions accept `once` or `deny`. The `session` and `always`
+choices are rejected without settling the pending request; they must not be
+silently converted into one-shot approval. This does not change CLI sandbox,
+operating-system, connector, or authentication permissions.
