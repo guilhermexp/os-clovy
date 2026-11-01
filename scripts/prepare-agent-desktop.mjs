@@ -42,7 +42,19 @@ if (newSource)
   run("git", ["-c", "core.autocrlf=false", "clone", "--no-checkout", pin.source, source], root);
 if (
   !newSource &&
-  run("git", ["status", "--porcelain", "--untracked-files=all"], source, true).trim()
+  run(
+    "git",
+    [
+      "-c",
+      "core.autocrlf=false",
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      "--ignored=matching",
+    ],
+    source,
+    true,
+  ).trim()
 ) {
   throw new Error("agent-desktop source checkout has local changes; refusing to build it");
 }
