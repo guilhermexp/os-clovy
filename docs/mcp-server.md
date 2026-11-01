@@ -407,6 +407,18 @@ provider-action warning when local removal succeeds but revocation remains
 unconfirmed. Failed local secure-store cleanup retains the disabled row for
 retry, rather than dropping its credential reference.
 
+Settings Test uses the same compensated refresh path as dispatch. Disconnect
+records the remote outcome in SQLite before deleting the local grant, so a
+failed cleanup commit or restart cannot erase an observed revocation failure.
+Before a refresh request can consume a token, SQLite records conservative
+rotation uncertainty. Saving the received grant or confirming its compensation
+restores only the previous warning state; an interrupted request keeps the
+warning across restart.
+A custom HTTP server may explicitly switch back to manual headers after a
+complete OAuth teardown. Live grants, pending cleanup and unresolved remote
+warnings block that switch; the official Vercel preset keeps OAuth. Saving a
+name or configuration edit retains the backend's effective diagnostic.
+
 The managed registry retains each discovery or refresh failure without removing
 healthy servers. Settings and relay errors carry origin, server, optional tool,
 actual phase, typed code, optional numeric remote code, state and recovery
@@ -417,6 +429,16 @@ delivery preserve that uncertainty and never cause automatic redispatch.
 Custom dispatch also checks the host configuration fingerprint and the epoch
 captured during discovery, so an earlier approval cannot adopt a replacement
 endpoint, credential or local safety policy between gateway check and I/O.
+The two host-owned revocation warning flags describe health and are excluded
+from that authority fingerprint; the credential loader checks durable rotation
+uncertainty under the lifecycle gate before permitting use.
+The custom authority follows initialization, session waits and elicitation to
+the transport write boundary. Invalidation before dispatch sends no tool call;
+an already admitted call or lost elicitation session remains delivery-uncertain
+and is never replayed. The final chat error string retains the safe numeric
+remote code. OAuth callback errors retain only allowlisted provider codes:
+denied consent, client approval and provider failure remain distinct, while
+unknown codes and free-form descriptions are sanitized.
 
 ### Content blocks
 

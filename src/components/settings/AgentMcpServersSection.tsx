@@ -454,7 +454,7 @@ export function AgentMcpServersSection() {
           delete next[editing.id];
           return next;
         });
-        setDiagnostics((current) => ({ ...current, [editing.id]: null }));
+        setDiagnostics((current) => ({ ...current, [editing.id]: saved.diagnostic ?? null }));
         setTestResults((current) => ({ ...current, [editing.id]: undefined }));
       }
       setServers((current) =>

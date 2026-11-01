@@ -517,6 +517,14 @@ pub(super) async fn exchange_oauth_code(
     Ok(tokens)
 }
 
+pub(super) fn oauth_refresh_due(oauth: &BTreeMap<String, String>, force: bool) -> bool {
+    force
+        || oauth
+            .get("expires_at_unix")
+            .and_then(|value| value.parse::<i64>().ok())
+            .is_some_and(|expires| expires <= oauth_now_unix() + OAUTH_EXPIRY_BUFFER_SECS)
+}
+
 pub(super) async fn refresh_oauth_bundle(
     oauth: &mut BTreeMap<String, String>,
     force: bool,
@@ -526,22 +534,13 @@ pub(super) async fn refresh_oauth_bundle(
         .cloned()
         .map(zeroize::Zeroizing::new)
     else {
-        let expired = oauth
-            .get("expires_at_unix")
-            .and_then(|value| value.parse::<i64>().ok())
-            .is_some_and(|value| value <= oauth_now_unix() + OAUTH_EXPIRY_BUFFER_SECS);
-        return if force || expired {
+        return if oauth_refresh_due(oauth, force) {
             Err(AgentMcpError::OauthReconnectRequired)
         } else {
             Ok(false)
         };
     };
-    let should_refresh = force
-        || oauth
-            .get("expires_at_unix")
-            .and_then(|value| value.parse::<i64>().ok())
-            .is_some_and(|expires| expires <= oauth_now_unix() + OAUTH_EXPIRY_BUFFER_SECS);
-    if !should_refresh {
+    if !oauth_refresh_due(oauth, force) {
         return Ok(false);
     }
     let token_endpoint = oauth

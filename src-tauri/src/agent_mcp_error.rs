@@ -3,6 +3,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AgentMcpError {
+    #[error("The original MCP request may have been applied. Inspect the server before retrying.")]
+    AfterDelivery {
+        #[source]
+        cause: Box<AgentMcpError>,
+    },
     #[error("{cause}")]
     Phase {
         phase: &'static str,
@@ -64,6 +69,7 @@ pub enum AgentMcpError {
 impl AgentMcpError {
     pub(crate) fn code(&self) -> &'static str {
         match self {
+            Self::AfterDelivery { cause } => cause.code(),
             Self::Phase { cause, .. } => cause.code(),
             Self::InvalidDefinition(_) => "agent_mcp_invalid_definition",
             Self::DuplicateServer => "agent_mcp_duplicate_server",

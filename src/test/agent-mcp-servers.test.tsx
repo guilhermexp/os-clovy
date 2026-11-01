@@ -549,6 +549,103 @@ describe("AgentMcpServersSection", () => {
     expect(mocks.update.mock.calls[0]?.[0]).not.toHaveProperty("secrets");
   });
 
+  it("keeps remote revocation guidance after renaming and saving a disconnected server", async () => {
+    const diagnostic = {
+      origin: "clovy_managed" as const,
+      server: "Private tools",
+      phase: "disconnect",
+      code: "agent_mcp_oauth_revoke_failed",
+      state: "unavailable",
+      action: "revoke_at_provider",
+      message: "Local credentials were cleared, but remote revocation failed.",
+    };
+    const oauth: AgentMcpServerDto = {
+      ...server,
+      id: "oauth",
+      name: "Private tools",
+      transport: "streamable_http",
+      command: undefined,
+      url: "https://example.test/mcp",
+      metadata: { auth: "oauth", oauthConnected: true },
+    };
+    const disconnected = {
+      ...oauth,
+      enabled: false,
+      metadata: { auth: "oauth", oauthConnected: false, oauthRemoteRevocationFailed: true },
+      diagnostic,
+    };
+    mocks.list.mockResolvedValue([oauth]);
+    mocks.disconnectOauth.mockResolvedValue({
+      server: disconnected,
+      localCleared: true,
+      remoteRevoked: false,
+    });
+    mocks.update.mockImplementation(async (input) => ({
+      ...disconnected,
+      ...input,
+      diagnostic: { ...diagnostic, server: input.name },
+    }));
+    const user = userEvent.setup();
+    render(<AgentMcpServersSection />);
+    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
+    expect(await screen.findByText(/Revoke the grant at the provider/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Configure Private tools" }));
+    const dialog = screen.getByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Name"));
+    await user.type(within(dialog).getByLabelText("Name"), "Renamed tools");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Renamed tools")).toBeInTheDocument();
+    expect(screen.getByText(/Revoke the grant at the provider/)).toHaveTextContent(
+      "agent_mcp_oauth_revoke_failed",
+    );
+    expect(screen.getByText(/Last check: unavailable/)).toHaveTextContent(
+      "Local credentials were cleared, but remote revocation failed.",
+    );
+    expect(screen.getByRole("switch", { name: "Renamed tools enabled" })).not.toBeChecked();
+    expect(mocks.connectOauth).not.toHaveBeenCalled();
+  });
+
+  it("requests header mode explicitly after a complete OAuth disconnect", async () => {
+    mocks.list.mockResolvedValue([
+      {
+        ...server,
+        id: "custom-http",
+        name: "Private tools",
+        enabled: false,
+        transport: "streamable_http",
+        command: undefined,
+        url: "https://example.test/mcp",
+        metadata: { auth: "oauth", oauthConnected: false },
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<AgentMcpServersSection />);
+    await user.click(await screen.findByRole("button", { name: "Configure Private tools" }));
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByLabelText("Authenticate with OAuth"));
+    fireEvent.change(within(dialog).getByLabelText("HTTP headers (JSON)"), {
+      target: { value: '{"Authorization":"Bearer synthetic-header-fixture"}' },
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "custom-http",
+        metadata: {},
+        secrets: { env: {}, headers: { Authorization: "Bearer synthetic-header-fixture" } },
+      }),
+    );
+    expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: "Private tools enabled" }));
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "Private tools enabled" })).toBeChecked(),
+    );
+    expect(mocks.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "custom-http", enabled: true, metadata: {} }),
+    );
+    expect(mocks.connectOauth).not.toHaveBeenCalled();
+  });
+
   it("reconnects migrated OAuth servers through the browser flow", async () => {
     mocks.list.mockResolvedValue([
       {

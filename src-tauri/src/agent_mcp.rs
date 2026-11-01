@@ -114,6 +114,7 @@ static MCP_SESSIONS: OnceLock<AsyncMutex<HashMap<String, SharedMcpSession>>> = O
 #[derive(Default)]
 struct OAuthLifecycle {
     gate: AsyncMutex<()>,
+    admission: Mutex<()>,
     epoch: AtomicU64,
     changed: tokio::sync::Notify,
     operation_id: Mutex<Option<String>>,
@@ -153,6 +154,10 @@ fn oauth_lifecycle(id: &str) -> Arc<OAuthLifecycle> {
     entries.entry(id.to_owned()).or_default().clone()
 }
 fn invalidate_oauth(lifecycle: &OAuthLifecycle) {
+    let _admission = lifecycle
+        .admission
+        .lock()
+        .expect("OAuth admission lock poisoned");
     lifecycle.epoch.fetch_add(1, Ordering::SeqCst);
     lifecycle.changed.notify_waiters();
 }
@@ -162,6 +167,60 @@ fn check_oauth_epoch(lifecycle: &OAuthLifecycle, epoch: u64) -> Result<(), Agent
     } else {
         Err(AgentMcpError::OauthReconnectRequired)
     }
+}
+
+#[derive(Clone)]
+struct CustomMcpDispatch {
+    lifecycle: Arc<OAuthLifecycle>,
+    epoch: u64,
+    effect_started: Arc<std::sync::atomic::AtomicBool>,
+}
+impl CustomMcpDispatch {
+    fn new(lifecycle: Arc<OAuthLifecycle>, epoch: u64, already_delivered: bool) -> Self {
+        Self {
+            lifecycle,
+            epoch,
+            effect_started: Arc::new(std::sync::atomic::AtomicBool::new(already_delivered)),
+        }
+    }
+    fn check(&self) -> Result<(), AgentMcpError> {
+        if self.lifecycle.epoch.load(Ordering::SeqCst) == self.epoch {
+            return Ok(());
+        }
+        if self.effect_started.load(Ordering::SeqCst) {
+            Err(AgentMcpError::DeliveryUncertain(None))
+        } else {
+            Err(AgentMcpError::ConnectionChanged)
+        }
+    }
+}
+
+enum McpRequestAuthority<'a> {
+    Linear(&'a crate::connectors::LinearLifecycleSnapshot),
+    Custom(CustomMcpDispatch),
+}
+
+// The request scope follows the actual transport future, including initialize
+// and elicitation. It carries host-owned authority to every wire write, with
+// no model-controlled arguments or platform credential substitutes.
+tokio::task_local! { static CUSTOM_MCP_DISPATCH: CustomMcpDispatch; }
+fn authorize_mcp_wire_write(effect: bool) -> Result<(), AgentMcpError> {
+    CUSTOM_MCP_DISPATCH
+        .try_with(|authority| {
+            // Linearize write admission with invalidation. No await occurs under
+            // this lock; an already admitted write remains delivery-uncertain.
+            let _admission = authority
+                .lifecycle
+                .admission
+                .lock()
+                .map_err(|_| AgentMcpError::Storage)?;
+            authority.check()?;
+            if effect {
+                authority.effect_started.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
 }
 
 // A CLI invocation owns its transport through every clarification. Separate
@@ -648,10 +707,14 @@ async fn authorize_oauth_server_with<F: FnOnce(&str) -> Result<(), AgentMcpError
         )
         .await
         .map_err(|_| AgentMcpError::TimedOut)?
-        .map_err(|error| match error.code.as_str() {
-            "connector_connect_cancelled" => AgentMcpError::OauthCancelled,
-            "connector_connect_denied" => AgentMcpError::OauthProviderRejected("access_denied"),
-            _ => AgentMcpError::Protocol,
+        .map_err(|error| {
+            if let Some(code) = crate::connectors::oauth::oauth_callback_error_code(&error) {
+                AgentMcpError::OauthProviderRejected(code)
+            } else if error.code == "connector_connect_canceled" {
+                AgentMcpError::OauthCancelled
+            } else {
+                AgentMcpError::Protocol
+            }
         })?,
     );
     let tokens = exchange_oauth_code(
@@ -971,6 +1034,14 @@ pub struct McpToolRegistry {
 fn custom_mcp_server_fingerprint(server: &McpServerDefinition) -> Result<String, AgentMcpError> {
     // A receipt applies to this exact host configuration, including the
     // destination and secret reference. Observed health is not authority.
+    let mut metadata = server.metadata.clone();
+    if let Some(values) = metadata.as_object_mut() {
+        // These host-owned observations also serve as the refresh write-ahead
+        // journal. They are checked under the credential gate, not authority
+        // changes that can invalidate a catalog during a healthy refresh.
+        values.remove("oauthRemoteRevocationFailed");
+        values.remove("oauthRotatedRevocationUnconfirmed");
+    }
     let snapshot = json!({
         "id": server.id,
         "name": server.name,
@@ -980,7 +1051,7 @@ fn custom_mcp_server_fingerprint(server: &McpServerDefinition) -> Result<String,
         "args": server.args,
         "url": server.url,
         "secretRef": server.secret_ref,
-        "metadata": server.metadata,
+        "metadata": metadata,
         "toolVisibility": server.tool_visibility,
         "safety": server.safety,
     });
@@ -1232,6 +1303,108 @@ pub struct AgentMcpSubsystem<S: McpSecretStore> {
     diagnostics: Mutex<BTreeMap<String, AgentMcpDiagnostic>>,
 }
 
+struct OAuthRefreshJournal {
+    remote_failure: Option<Value>,
+    rotation_unconfirmed: Option<Value>,
+    runtime_unconfirmed: bool,
+}
+
+// Internal refresh bookkeeping must not change the policy timestamp or other
+// configuration fields. The gate owns this write; the JSON/ref CAS also fails
+// closed if the stored connection changed unexpectedly.
+async fn write_oauth_refresh_metadata(
+    repository: &AgentMcpRepository,
+    before: &McpServerDefinition,
+    metadata: &Value,
+) -> Result<(), AgentMcpError> {
+    let stored =
+        query("SELECT metadata_json FROM agent_mcp_servers WHERE id = ? AND secret_ref IS ?")
+            .bind(&before.id)
+            .bind(&before.secret_ref)
+            .fetch_optional(&repository.pool)
+            .await
+            .map_err(|_| AgentMcpError::Storage)?
+            .ok_or(AgentMcpError::ConnectionChanged)?;
+    let raw_metadata: String = stored.get("metadata_json");
+    if serde_json::from_str::<Value>(&raw_metadata).map_err(|_| AgentMcpError::Storage)?
+        != before.metadata
+    {
+        return Err(AgentMcpError::ConnectionChanged);
+    }
+    let result = query("UPDATE agent_mcp_servers SET metadata_json = ? WHERE id = ? AND metadata_json = ? AND secret_ref IS ?")
+        .bind(json_text(metadata)?)
+        .bind(&before.id)
+        .bind(raw_metadata)
+        .bind(&before.secret_ref)
+        .execute(&repository.pool).await.map_err(|_| AgentMcpError::Storage)?;
+    if result.rows_affected() != 1 {
+        return Err(AgentMcpError::ConnectionChanged);
+    }
+    Ok(())
+}
+
+fn oauth_rotation_uncertainty(metadata: &Value) -> Result<Value, AgentMcpError> {
+    let mut metadata = metadata.clone();
+    let values = metadata.as_object_mut().ok_or(AgentMcpError::Storage)?;
+    values.insert("oauthRemoteRevocationFailed".into(), json!(true));
+    values.insert("oauthRotatedRevocationUnconfirmed".into(), json!(true));
+    Ok(metadata)
+}
+
+async fn begin_oauth_refresh_journal(
+    repository: &AgentMcpRepository,
+    lifecycle: &OAuthLifecycle,
+    current: &McpServerDefinition,
+) -> Result<OAuthRefreshJournal, AgentMcpError> {
+    let journal = OAuthRefreshJournal {
+        remote_failure: current.metadata.get("oauthRemoteRevocationFailed").cloned(),
+        rotation_unconfirmed: current
+            .metadata
+            .get("oauthRotatedRevocationUnconfirmed")
+            .cloned(),
+        runtime_unconfirmed: lifecycle.unconfirmed_revocation.load(Ordering::SeqCst),
+    };
+    let metadata = oauth_rotation_uncertainty(&current.metadata)?;
+    // No /token request may begin unless the possible rotation is durable.
+    write_oauth_refresh_metadata(repository, current, &metadata).await?;
+    lifecycle
+        .unconfirmed_revocation
+        .store(true, Ordering::SeqCst);
+    Ok(journal)
+}
+
+async fn restore_oauth_refresh_journal(
+    repository: &AgentMcpRepository,
+    lifecycle: &OAuthLifecycle,
+    server_id: &str,
+    journal: &OAuthRefreshJournal,
+) -> Result<(), AgentMcpError> {
+    let current = repository.get(server_id).await?;
+    let mut metadata = current.metadata.clone();
+    let values = metadata.as_object_mut().ok_or(AgentMcpError::Storage)?;
+    for (key, before) in [
+        ("oauthRemoteRevocationFailed", &journal.remote_failure),
+        (
+            "oauthRotatedRevocationUnconfirmed",
+            &journal.rotation_unconfirmed,
+        ),
+    ] {
+        if journal.runtime_unconfirmed {
+            values.insert(key.into(), json!(true));
+        } else if let Some(value) = before {
+            values.insert(key.into(), value.clone());
+        } else {
+            values.remove(key);
+        }
+    }
+    // Keep both the durable marker and atomic fallback on a failed restore.
+    write_oauth_refresh_metadata(repository, &current, &metadata).await?;
+    lifecycle
+        .unconfirmed_revocation
+        .store(journal.runtime_unconfirmed, Ordering::SeqCst);
+    Ok(())
+}
+
 async fn load_oauth_secrets<S: McpSecretStore>(
     repository: &AgentMcpRepository,
     store: &S,
@@ -1262,19 +1435,53 @@ async fn load_oauth_secrets<S: McpSecretStore>(
     {
         return Err(AgentMcpError::OauthReconnectRequired);
     }
+    if lifecycle.unconfirmed_revocation.load(Ordering::SeqCst)
+        || current
+            .metadata
+            .get("oauthRotatedRevocationUnconfirmed")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Err(AgentMcpError::OauthRevokeUnconfirmed);
+    }
     let mut bundle = store
         .get(reference)?
         .ok_or(AgentMcpError::OauthReconnectRequired)?;
-    let refreshed = refresh_oauth_bundle(&mut bundle.oauth, force).await?;
+    // Freeze eligibility before any await. A clock crossing during a second
+    // eligibility check must never create a token POST without its journal.
+    if !oauth_refresh_due(&bundle.oauth, force) {
+        return Ok((bundle, false));
+    }
+    if !bundle.oauth.contains_key("refresh_token") {
+        return Err(AgentMcpError::OauthReconnectRequired);
+    }
+    let journal = begin_oauth_refresh_journal(repository, &lifecycle, &current).await?;
+    if check_oauth_epoch(&lifecycle, epoch).is_err() {
+        restore_oauth_refresh_journal(repository, &lifecycle, &server.id, &journal).await?;
+        return Err(AgentMcpError::ConnectionChanged);
+    }
+    let refreshed = match refresh_oauth_bundle(&mut bundle.oauth, true).await {
+        Ok(refreshed) => refreshed,
+        Err(AgentMcpError::OauthReconnectRequired) => {
+            // An explicit invalid_grant did not mint a fresh grant. Preserve
+            // older warnings, but do not strand a new uncertainty marker.
+            restore_oauth_refresh_journal(repository, &lifecycle, &server.id, &journal).await?;
+            return Err(AgentMcpError::OauthReconnectRequired);
+        }
+        Err(error) => return Err(error),
+    };
     if refreshed {
         if let Err(error) = check_oauth_epoch(&lifecycle, epoch) {
-            retire_unsaved_oauth_rotation(repository, &lifecycle, &server.id, &bundle).await?;
+            retire_unsaved_oauth_rotation(repository, &lifecycle, &server.id, &bundle, &journal)
+                .await?;
             return Err(error);
         }
         if let Err(error) = store.put(reference, &bundle) {
-            retire_unsaved_oauth_rotation(repository, &lifecycle, &server.id, &bundle).await?;
+            retire_unsaved_oauth_rotation(repository, &lifecycle, &server.id, &bundle, &journal)
+                .await?;
             return Err(error);
         }
+        restore_oauth_refresh_journal(repository, &lifecycle, &server.id, &journal).await?;
     }
     Ok((bundle, refreshed))
 }
@@ -1287,19 +1494,16 @@ async fn retire_unsaved_oauth_rotation(
     lifecycle: &OAuthLifecycle,
     server_id: &str,
     bundle: &McpSecretBundle,
+    journal: &OAuthRefreshJournal,
 ) -> Result<(), AgentMcpError> {
-    if revoke_oauth_bundle(&bundle.oauth).await != Some(true) {
-        lifecycle
-            .unconfirmed_revocation
-            .store(true, Ordering::SeqCst);
-        let mut server = repository.get(server_id).await?;
-        let metadata = server
-            .metadata
-            .as_object_mut()
-            .ok_or(AgentMcpError::Storage)?;
-        metadata.insert("oauthRemoteRevocationFailed".into(), json!(true));
-        metadata.insert("oauthRotatedRevocationUnconfirmed".into(), json!(true));
-        repository.replace(&server).await?;
+    if revoke_oauth_bundle(&bundle.oauth).await == Some(true) {
+        restore_oauth_refresh_journal(repository, lifecycle, server_id, journal).await?;
+    } else {
+        // The intent was already durable before /token. Reasserting it records
+        // the observed failed compensation too; failure cannot erase intent.
+        let current = repository.get(server_id).await?;
+        let metadata = oauth_rotation_uncertainty(&current.metadata)?;
+        write_oauth_refresh_metadata(repository, &current, &metadata).await?;
     }
     Ok(())
 }
@@ -1372,7 +1576,10 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
         if !current.enabled || current.secret_ref != server.secret_ref {
             return Err(AgentMcpError::OauthReconnectRequired);
         }
-        let result = discover_server(server, secrets, workspace).await;
+        let authority = CustomMcpDispatch::new(oauth_lifecycle(&server.id), epoch, false);
+        let result = CUSTOM_MCP_DISPATCH
+            .scope(authority, discover_server(server, secrets, workspace))
+            .await;
         check_oauth_epoch(lifecycle, epoch)?;
         result
     }
@@ -1631,7 +1838,7 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
                 arguments,
                 sandboxed.then_some(workspace).flatten(),
                 elicitation_answer,
-                Some(&lifecycle),
+                Some(McpRequestAuthority::Linear(&lifecycle)),
             )
             .await;
         }
@@ -1685,67 +1892,105 @@ async fn invoke_custom_mcp<S: McpSecretStore>(
     workspace: Option<&std::path::Path>,
     elicitation_answer: Option<&str>,
 ) -> Result<Value, AgentMcpError> {
-    let lifecycle = oauth_lifecycle(&registered.server_id);
-    let epoch = registered.lifecycle_epoch;
-    if check_oauth_epoch(&lifecycle, epoch).is_err() {
-        return Err(AgentMcpError::ConnectionChanged);
+    let result = async {
+        let lifecycle = oauth_lifecycle(&registered.server_id);
+        let epoch = registered.lifecycle_epoch;
+        let stale = || {
+            if elicitation_answer.is_some() {
+                AgentMcpError::DeliveryUncertain(None)
+            } else {
+                AgentMcpError::ConnectionChanged
+            }
+        };
+        if check_oauth_epoch(&lifecycle, epoch).is_err() {
+            return Err(stale());
+        }
+        let server = repository.get(&registered.server_id).await?;
+        if check_oauth_epoch(&lifecycle, epoch).is_err()
+            || custom_mcp_server_fingerprint(&server)? != registered.server_fingerprint
+        {
+            return Err(stale());
+        }
+        if !server_available(&server, sandboxed, workspace) {
+            return Err(AgentMcpError::ToolUnavailable);
+        }
+        let (secret, refreshed) = load_oauth_secrets(repository, store, &server, false)
+            .await
+            .map_err(|cause| AgentMcpError::Phase {
+                phase: "refresh",
+                cause: Box::new(cause),
+            })?;
+        if refreshed {
+            retire_server_sessions(&server.id).await;
+        }
+        // A 401 or transport failure can follow a successfully applied mutation.
+        // Never automatically dispatch tools/call a second time.
+        let _guard = lifecycle.gate.lock().await;
+        if check_oauth_epoch(&lifecycle, epoch).is_err() {
+            return Err(stale());
+        }
+        let current = repository.get(&server.id).await?;
+        if check_oauth_epoch(&lifecycle, epoch).is_err()
+            || custom_mcp_server_fingerprint(&current)? != registered.server_fingerprint
+        {
+            return Err(stale());
+        }
+        let dispatch =
+            CustomMcpDispatch::new(lifecycle.clone(), epoch, elicitation_answer.is_some());
+        let result = call_server(
+            &server,
+            &secret,
+            &registered.remote_name,
+            arguments,
+            sandboxed.then_some(workspace).flatten(),
+            elicitation_answer,
+            Some(McpRequestAuthority::Custom(dispatch.clone())),
+        )
+        .await;
+        match result {
+            _ if check_oauth_epoch(&lifecycle, epoch).is_err() => {
+                if dispatch.effect_started.load(Ordering::SeqCst) {
+                    Err(AgentMcpError::DeliveryUncertain(None))
+                } else {
+                    Err(AgentMcpError::ConnectionChanged)
+                }
+            }
+            Ok(value) => Ok(value),
+            Err(AgentMcpError::Unauthorized) if dispatch.effect_started.load(Ordering::SeqCst) => {
+                Err(AgentMcpError::DeliveryUncertain(Some(401)))
+            }
+            Err(AgentMcpError::HttpStatus(code))
+                if dispatch.effect_started.load(Ordering::SeqCst) =>
+            {
+                Err(AgentMcpError::DeliveryUncertain(Some(i64::from(code))))
+            }
+            Err(
+                AgentMcpError::ToolUnavailable
+                | AgentMcpError::Transport
+                | AgentMcpError::TimedOut
+                | AgentMcpError::Protocol
+                | AgentMcpError::OutputTooLarge,
+            ) if dispatch.effect_started.load(Ordering::SeqCst) => {
+                Err(AgentMcpError::DeliveryUncertain(None))
+            }
+            Err(error) => Err(error),
+        }
     }
-    let server = repository.get(&registered.server_id).await?;
-    if check_oauth_epoch(&lifecycle, epoch).is_err()
-        || custom_mcp_server_fingerprint(&server)? != registered.server_fingerprint
-    {
-        return Err(AgentMcpError::ConnectionChanged);
-    }
-    if !server_available(&server, sandboxed, workspace) {
-        return Err(AgentMcpError::ToolUnavailable);
-    }
-    let (secret, refreshed) = load_oauth_secrets(repository, store, &server, false)
-        .await
-        .map_err(|cause| AgentMcpError::Phase {
-            phase: "refresh",
-            cause: Box::new(cause),
-        })?;
-    if refreshed {
-        retire_server_sessions(&server.id).await;
-    }
-    // A 401 or transport failure can follow a successfully applied mutation.
-    // Never automatically dispatch tools/call a second time.
-    let _guard = lifecycle.gate.lock().await;
-    if check_oauth_epoch(&lifecycle, epoch).is_err() {
-        return Err(AgentMcpError::ConnectionChanged);
-    }
-    let current = repository.get(&server.id).await?;
-    if check_oauth_epoch(&lifecycle, epoch).is_err()
-        || custom_mcp_server_fingerprint(&current)? != registered.server_fingerprint
-    {
-        return Err(AgentMcpError::ConnectionChanged);
-    }
-    let result = call_server(
-        &server,
-        &secret,
-        &registered.remote_name,
-        arguments,
-        sandboxed.then_some(workspace).flatten(),
-        elicitation_answer,
-        None,
-    )
     .await;
-    match result {
-        _ if check_oauth_epoch(&lifecycle, epoch).is_err() => {
-            Err(AgentMcpError::DeliveryUncertain(None))
+    if elicitation_answer.is_some() {
+        match result {
+            Err(
+                error @ (AgentMcpError::ElicitationRequired(_)
+                | AgentMcpError::DeliveryUncertain(_)
+                | AgentMcpError::AfterDelivery { .. }),
+            ) => Err(error),
+            Err(cause) => Err(AgentMcpError::AfterDelivery {
+                cause: Box::new(cause),
+            }),
+            result => result,
         }
-        Ok(value) => Ok(value),
-        Err(AgentMcpError::Unauthorized) => Err(AgentMcpError::DeliveryUncertain(Some(401))),
-        Err(AgentMcpError::HttpStatus(code)) => {
-            Err(AgentMcpError::DeliveryUncertain(Some(i64::from(code))))
-        }
-        Err(
-            AgentMcpError::Transport
-            | AgentMcpError::TimedOut
-            | AgentMcpError::Protocol
-            | AgentMcpError::OutputTooLarge,
-        ) => Err(AgentMcpError::DeliveryUncertain(None)),
-        Err(error) => Err(error),
+    } else {
+        result
     }
 }
 
@@ -2128,7 +2373,7 @@ async fn discover_managed_server(
             params,
             sandbox_workspace,
             None,
-            Some(lifecycle),
+            Some(McpRequestAuthority::Linear(lifecycle)),
         )
     })
     .await
@@ -2200,7 +2445,7 @@ async fn call_server(
     arguments: Value,
     sandbox_workspace: Option<&std::path::Path>,
     elicitation_answer: Option<&str>,
-    linear_lifecycle: Option<&crate::connectors::LinearLifecycleSnapshot>,
+    authority: Option<McpRequestAuthority<'_>>,
 ) -> Result<Value, AgentMcpError> {
     let value = session_request(
         server,
@@ -2209,7 +2454,7 @@ async fn call_server(
         json!({"name":tool_name,"arguments":arguments}),
         sandbox_workspace,
         elicitation_answer,
-        linear_lifecycle,
+        authority,
     )
     .await?;
     let result = value
@@ -2230,14 +2475,69 @@ async fn session_request(
     params: Value,
     sandbox_workspace: Option<&std::path::Path>,
     elicitation_answer: Option<&str>,
+    authority: Option<McpRequestAuthority<'_>>,
+) -> Result<Value, AgentMcpError> {
+    match authority {
+        Some(McpRequestAuthority::Custom(authority)) => {
+            CUSTOM_MCP_DISPATCH
+                .scope(
+                    authority,
+                    session_request_guarded(
+                        server,
+                        secrets,
+                        method,
+                        params,
+                        sandbox_workspace,
+                        elicitation_answer,
+                        None,
+                    ),
+                )
+                .await
+        }
+        Some(McpRequestAuthority::Linear(authority)) => {
+            session_request_guarded(
+                server,
+                secrets,
+                method,
+                params,
+                sandbox_workspace,
+                elicitation_answer,
+                Some(authority),
+            )
+            .await
+        }
+        None => {
+            session_request_guarded(
+                server,
+                secrets,
+                method,
+                params,
+                sandbox_workspace,
+                elicitation_answer,
+                None,
+            )
+            .await
+        }
+    }
+}
+
+async fn session_request_guarded(
+    server: &McpServerDefinition,
+    secrets: &McpSecretBundle,
+    method: &str,
+    params: Value,
+    sandbox_workspace: Option<&std::path::Path>,
+    elicitation_answer: Option<&str>,
     linear_lifecycle: Option<&crate::connectors::LinearLifecycleSnapshot>,
 ) -> Result<Value, AgentMcpError> {
+    authorize_mcp_wire_write(false)?;
     if linear_lifecycle.is_some_and(|snapshot| !snapshot.is_current()) {
         return Err(AgentMcpError::ToolUnavailable);
     }
     let deadline = Duration::from_millis(server.safety.timeout_ms);
     let result = timeout(deadline, async move {
         let shared = persistent_session(server, secrets, sandbox_workspace).await;
+        authorize_mcp_wire_write(false)?;
         // Linearize eligibility before taking the persistent-session slot and
         // keep it through the remote request. Disconnect and reconnect take
         // the same lifecycle gate before retiring the slot, so the global
@@ -2253,6 +2553,10 @@ async fn session_request(
             None => None,
         };
         let mut slot = shared.lock().await;
+        if let Err(error) = authorize_mcp_wire_write(false) {
+            slot.close().await;
+            return Err(error);
+        }
         if linear_lifecycle.is_some_and(|snapshot| !snapshot.is_current()) {
             slot.close().await;
             return Err(AgentMcpError::ToolUnavailable);
@@ -2300,12 +2604,20 @@ async fn session_request(
             slot.discovery_pages.clear();
         }
         for attempt in 0..2 {
+            if let Err(error) = authorize_mcp_wire_write(false) {
+                slot.close().await;
+                return Err(error);
+            }
             if linear_lifecycle.is_some_and(|snapshot| !snapshot.is_current()) {
                 slot.close().await;
                 return Err(AgentMcpError::ToolUnavailable);
             }
             if slot.transport.is_none() {
                 slot.transport = Some(start_transport(server, secrets, sandbox_workspace).await?);
+                if let Err(error) = authorize_mcp_wire_write(false) {
+                    slot.close().await;
+                    return Err(error);
+                }
                 // Initialization performs network I/O while this session slot
                 // is held. Disconnect can advance the lifecycle epoch while
                 // waiting to retire the slot, so recheck before the first
@@ -2506,6 +2818,7 @@ async fn start_stdio_session(
     for (key, value) in &secrets.env {
         command.env(key, value);
     }
+    authorize_mcp_wire_write(false)?;
     let mut child = command.spawn().map_err(|_| AgentMcpError::Transport)?;
     let mut stdin = child.stdin.take().ok_or(AgentMcpError::Transport)?;
     let stdout = child.stdout.take().ok_or(AgentMcpError::Transport)?;
@@ -2596,19 +2909,7 @@ async fn write_stdio_frame(
     params: Value,
 ) -> Result<(), AgentMcpError> {
     let frame = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
-    stdin
-        .write_all(
-            serde_json::to_string(&frame)
-                .map_err(|_| AgentMcpError::Protocol)?
-                .as_bytes(),
-        )
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
-    stdin
-        .write_all(b"\n")
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
-    stdin.flush().await.map_err(|_| AgentMcpError::Transport)
+    write_stdio_value(stdin, &frame, method == "tools/call").await
 }
 
 async fn write_stdio_notification(
@@ -2617,16 +2918,19 @@ async fn write_stdio_notification(
     params: Value,
 ) -> Result<(), AgentMcpError> {
     let frame = json!({"jsonrpc":"2.0","method":method,"params":params});
+    write_stdio_value(stdin, &frame, false).await
+}
+
+async fn write_stdio_value(
+    stdin: &mut tokio::process::ChildStdin,
+    frame: &Value,
+    effect: bool,
+) -> Result<(), AgentMcpError> {
+    let mut bytes = serde_json::to_vec(frame).map_err(|_| AgentMcpError::Protocol)?;
+    bytes.push(b'\n');
+    authorize_mcp_wire_write(effect)?;
     stdin
-        .write_all(
-            serde_json::to_string(&frame)
-                .map_err(|_| AgentMcpError::Protocol)?
-                .as_bytes(),
-        )
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
-    stdin
-        .write_all(b"\n")
+        .write_all(&bytes)
         .await
         .map_err(|_| AgentMcpError::Transport)?;
     stdin.flush().await.map_err(|_| AgentMcpError::Transport)
@@ -2714,19 +3018,7 @@ async fn write_stdio_elicitation_response(
             "content": elicitation_content(request, answer)
         }
     });
-    stdin
-        .write_all(
-            serde_json::to_string(&frame)
-                .map_err(|_| AgentMcpError::Protocol)?
-                .as_bytes(),
-        )
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
-    stdin
-        .write_all(b"\n")
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
-    stdin.flush().await.map_err(|_| AgentMcpError::Transport)
+    write_stdio_value(stdin, &frame, true).await
 }
 
 async fn read_bounded_line<R: tokio::io::AsyncRead + Unpin>(
@@ -2989,11 +3281,9 @@ async fn http_notify(
     if let Some(session_id) = session_id {
         request = request.header("mcp-session-id", session_id);
     }
-    let response = request
-        .json(&json!({"jsonrpc":"2.0","method":method,"params":params}))
-        .send()
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
+    let request = request.json(&json!({"jsonrpc":"2.0","method":method,"params":params}));
+    authorize_mcp_wire_write(false)?;
+    let response = request.send().await.map_err(|_| AgentMcpError::Transport)?;
     if response.status().is_success() {
         Ok(())
     } else if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -3056,11 +3346,9 @@ async fn begin_http_request(
     if let Some(session_id) = session_id {
         request = request.header("mcp-session-id", session_id);
     }
-    let response = request
-        .json(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-        .send()
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
+    let request = request.json(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+    authorize_mcp_wire_write(method == "tools/call")?;
+    let response = request.send().await.map_err(|_| AgentMcpError::Transport)?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(AgentMcpError::Unauthorized);
     }
@@ -3156,18 +3444,16 @@ async fn http_respond_elicitation(
     if let Some(session_id) = session_id {
         request = request.header("mcp-session-id", session_id);
     }
-    let response = request
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": elicitation.get("id").cloned().ok_or(AgentMcpError::Protocol)?,
-            "result": {
-                "action": "accept",
-                "content": elicitation_content(elicitation, answer)
-            }
-        }))
-        .send()
-        .await
-        .map_err(|_| AgentMcpError::Transport)?;
+    let request = request.json(&json!({
+        "jsonrpc": "2.0",
+        "id": elicitation.get("id").cloned().ok_or(AgentMcpError::Protocol)?,
+        "result": {
+            "action": "accept",
+            "content": elicitation_content(elicitation, answer)
+        }
+    }));
+    authorize_mcp_wire_write(true)?;
+    let response = request.send().await.map_err(|_| AgentMcpError::Transport)?;
     if response.status().is_success() {
         Ok(())
     } else if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -3530,12 +3816,35 @@ pub async fn update_agent_mcp_server(
     app: AppHandle,
     input: AgentMcpServerInput,
 ) -> Result<McpServerDefinition, crate::domain::types::AppError> {
+    let repository = command_repository(&app).await.map_err(app_error)?;
+    update_mcp_definition(&repository, &KeychainMcpSecretStore, input).await
+}
+
+async fn update_mcp_definition<S: McpSecretStore>(
+    repository: &AgentMcpRepository,
+    store: &S,
+    input: AgentMcpServerInput,
+) -> Result<McpServerDefinition, crate::domain::types::AppError> {
     let id = input.id.clone().ok_or_else(|| {
         crate::domain::types::AppError::new("invalid_arguments", "An MCP server id is required.")
     })?;
-    let repository = command_repository(&app).await.map_err(app_error)?;
+    if !input.metadata.is_object() {
+        return Err(app_error(AgentMcpError::InvalidDefinition(
+            "metadata must be an object".into(),
+        )));
+    }
+    let oauth_mode = |metadata: &Value| {
+        metadata.get("auth").and_then(Value::as_str) == Some("oauth")
+            || metadata.get("legacyAuth").and_then(Value::as_str) == Some("oauth")
+    };
+    let requested_oauth = oauth_mode(&input.metadata);
+    // Settings sends the whole metadata object. Unchecking OAuth explicitly
+    // removes both markers; a stale toggle retains the current auth mode.
+    let explicitly_removes_oauth =
+        input.metadata.get("auth").is_none() && input.metadata.get("legacyAuth").is_none();
     let before = repository.get(&id).await.map_err(app_error)?;
-    if before.metadata.get("auth").and_then(Value::as_str) == Some("oauth")
+    if oauth_mode(&before.metadata)
+        && !explicitly_removes_oauth
         && before.secret_ref.is_some()
         && (input.url != before.url || input.transport != before.transport)
     {
@@ -3547,10 +3856,14 @@ pub async fn update_agent_mcp_server(
             ),
         ));
     }
-    if input.enabled == Some(false)
-        && before.metadata.get("auth").and_then(Value::as_str) == Some("oauth")
-    {
-        let outcome = disconnect_agent_mcp_oauth(app.clone(), id.clone()).await?;
+    if input.enabled == Some(false) && oauth_mode(&before.metadata) && !explicitly_removes_oauth {
+        let outcome = disconnect_oauth(repository, store, &id).await;
+        retire_server_sessions(&id).await;
+        let outcome = outcome.map_err(|error| {
+            let diagnostic = error.diagnostic(&id, None, "disconnect");
+            record_mcp_diagnostic(&id, Some(diagnostic.clone()));
+            diagnostic.into_app_error()
+        })?;
         if !outcome.local_cleared {
             return Err(crate::domain::types::AppError::new("agent_mcp_disconnect_incomplete", "The server was disabled, but remote revocation or local credential cleanup did not complete. Retry disconnect."));
         }
@@ -3559,11 +3872,71 @@ pub async fn update_agent_mcp_server(
     invalidate_oauth(&lifecycle);
     let _guard = lifecycle.gate.lock().await;
     let existing = repository.get(&id).await.map_err(app_error)?;
+    let previous_bundle = match existing.secret_ref.as_deref() {
+        Some(secret_ref) => store
+            .get(secret_ref)
+            .map_err(|error| command_mcp_error(&existing, "connect", error))?,
+        None => None,
+    };
+    let has_oauth_bundle = previous_bundle
+        .as_ref()
+        .is_some_and(|bundle| !bundle.oauth.is_empty());
+    let removes_oauth =
+        explicitly_removes_oauth && (oauth_mode(&existing.metadata) || has_oauth_bundle);
+    if removes_oauth {
+        if existing.metadata.get("preset").and_then(Value::as_str) == Some("vercel") {
+            return Err(command_mcp_error(
+                &existing,
+                "connect",
+                AgentMcpError::InvalidDefinition(
+                    "The official Vercel preset requires OAuth.".into(),
+                ),
+            ));
+        }
+        if existing
+            .metadata
+            .get("oauthRemoteRevocationFailed")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Err(command_mcp_error(
+                &existing,
+                "disconnect",
+                AgentMcpError::OauthRevokeFailed,
+            ));
+        }
+        if existing
+            .metadata
+            .get("oauthRotatedRevocationUnconfirmed")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Err(command_mcp_error(
+                &existing,
+                "disconnect",
+                AgentMcpError::OauthRevokeUnconfirmed,
+            ));
+        }
+        if has_oauth_bundle
+            || oauth_cleanup_pending(&existing)
+            || existing
+                .metadata
+                .get("oauthConnected")
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            return Err(command_mcp_error(
+                &existing,
+                "disconnect",
+                AgentMcpError::OauthCleanupPending,
+            ));
+        }
+    }
     if input.enabled == Some(false)
-        && existing.metadata.get("auth").and_then(Value::as_str) == Some("oauth")
+        && oauth_mode(&existing.metadata)
+        && !removes_oauth
         && existing.secret_ref.is_some()
-        && (before.metadata.get("auth").and_then(Value::as_str) != Some("oauth")
-            || before.secret_ref != existing.secret_ref)
+        && (!oauth_mode(&before.metadata) || before.secret_ref != existing.secret_ref)
     {
         return Err(command_mcp_error(
             &existing,
@@ -3571,7 +3944,8 @@ pub async fn update_agent_mcp_server(
             AgentMcpError::ConnectionChanged,
         ));
     }
-    if existing.metadata.get("auth").and_then(Value::as_str) == Some("oauth")
+    if oauth_mode(&existing.metadata)
+        && !removes_oauth
         && existing.secret_ref.is_some()
         && (input.url != existing.url || input.transport != existing.transport)
     {
@@ -3590,7 +3964,7 @@ pub async fn update_agent_mcp_server(
         ));
     }
     if input.enabled == Some(true)
-        && existing.metadata.get("auth").and_then(Value::as_str) == Some("oauth")
+        && (requested_oauth || (oauth_mode(&existing.metadata) && !removes_oauth))
         && existing
             .metadata
             .get("oauthConnected")
@@ -3617,14 +3991,12 @@ pub async fn update_agent_mcp_server(
         ));
     }
     let mut definition = input.into_definition(Some(&existing));
-    if !definition.metadata.is_object() {
-        return Err(app_error(AgentMcpError::InvalidDefinition(
-            "metadata must be an object".into(),
-        )));
-    }
     if let Some(metadata) = definition.metadata.as_object_mut() {
-        if existing.metadata.get("auth").and_then(Value::as_str) == Some("oauth") {
+        if oauth_mode(&existing.metadata) && !removes_oauth {
             metadata.insert("auth".into(), json!("oauth"));
+        }
+        if existing.metadata.get("preset").and_then(Value::as_str) == Some("vercel") {
+            metadata.insert("preset".into(), json!("vercel"));
         }
         for key in [
             "oauthCleanupPending",
@@ -3677,12 +4049,7 @@ pub async fn update_agent_mcp_server(
             metadata.remove("migrationWarning");
         }
     }
-    let store = KeychainMcpSecretStore;
-    let previous_bundle = match existing.secret_ref.as_deref() {
-        Some(secret_ref) => store.get(secret_ref).map_err(app_error)?,
-        None => None,
-    };
-    if existing.metadata.get("auth").and_then(Value::as_str) == Some("oauth") {
+    if oauth_mode(&existing.metadata) && !removes_oauth {
         if let (Some(bundle), Some(previous)) =
             (replacement_secrets.as_mut(), previous_bundle.as_ref())
         {
@@ -3717,7 +4084,10 @@ pub async fn update_agent_mcp_server(
         return Err(app_error(error));
     }
     retire_server_sessions(&id).await;
-    definition.diagnostic = last_mcp_diagnostic(&id);
+    definition.diagnostic = last_mcp_diagnostic(&id).map(|mut diagnostic| {
+        diagnostic.server = definition.name.clone();
+        diagnostic
+    });
     Ok(definition)
 }
 
@@ -3777,44 +4147,87 @@ pub async fn test_agent_mcp_server(
     app: AppHandle,
     server_id: String,
 ) -> Result<Vec<McpDiscoveredTool>, crate::domain::types::AppError> {
-    let lifecycle = oauth_lifecycle(&server_id);
+    let repository = command_repository(&app).await.map_err(app_error)?;
+    test_mcp_definition(&repository, &KeychainMcpSecretStore, &server_id).await
+}
+
+async fn test_mcp_definition<S: McpSecretStore>(
+    repository: &AgentMcpRepository,
+    store: &S,
+    server_id: &str,
+) -> Result<Vec<McpDiscoveredTool>, crate::domain::types::AppError> {
+    let lifecycle = oauth_lifecycle(server_id);
     let epoch = lifecycle.epoch.load(Ordering::SeqCst);
+    let server = repository.get(server_id).await.map_err(app_error)?;
+    let (secrets, refreshed) = if server.enabled {
+        // This is the same compensated rotation path used by dispatch. Its
+        // gate is acquired here once, never recursively by Settings Test.
+        load_oauth_secrets(repository, store, &server, false)
+            .await
+            .map_err(|error| command_mcp_error(&server, "refresh", error))?
+    } else {
+        // A disabled custom server may still be tested with manual headers.
+        // An OAuth teardown/legacy grant cannot acquire new token authority.
+        let _guard = lifecycle.gate.lock().await;
+        check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
+        let current = repository.get(server_id).await.map_err(app_error)?;
+        check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
+        if custom_mcp_server_fingerprint(&current).map_err(app_error)?
+            != custom_mcp_server_fingerprint(&server).map_err(app_error)?
+        {
+            return Err(command_mcp_error(
+                &server,
+                "refresh",
+                AgentMcpError::ConnectionChanged,
+            ));
+        }
+        if oauth_cleanup_pending(&current) {
+            return Err(command_mcp_error(
+                &server,
+                "refresh",
+                AgentMcpError::OauthCleanupPending,
+            ));
+        }
+        let bundle = match current.secret_ref.as_deref() {
+            Some(reference) => store
+                .get(reference)
+                .map_err(|error| command_mcp_error(&server, "refresh", error))?
+                .unwrap_or_default(),
+            None => McpSecretBundle::default(),
+        };
+        if !bundle.oauth.is_empty() {
+            return Err(command_mcp_error(
+                &server,
+                "refresh",
+                AgentMcpError::OauthReconnectRequired,
+            ));
+        }
+        (bundle, false)
+    };
+    if refreshed {
+        retire_server_sessions(server_id).await;
+    }
     let _guard = lifecycle.gate.lock().await;
     check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
-    let repository = command_repository(&app).await.map_err(app_error)?;
-    let server = repository.get(&server_id).await.map_err(app_error)?;
-    if oauth_cleanup_pending(&server) {
+    let current = repository.get(server_id).await.map_err(app_error)?;
+    check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
+    if custom_mcp_server_fingerprint(&current).map_err(app_error)?
+        != custom_mcp_server_fingerprint(&server).map_err(app_error)?
+    {
         return Err(command_mcp_error(
             &server,
-            "refresh",
-            AgentMcpError::OauthCleanupPending,
+            "discover",
+            AgentMcpError::ConnectionChanged,
         ));
     }
-    let mut secrets = match server.secret_ref.as_deref() {
-        Some(reference) => KeychainMcpSecretStore
-            .get(reference)
-            .map_err(|e| command_mcp_error(&server, "refresh", e))?
-            .unwrap_or_default(),
-        None => McpSecretBundle::default(),
-    };
-    if refresh_oauth_bundle(&mut secrets.oauth, false)
+    let authority = CustomMcpDispatch::new(lifecycle.clone(), epoch, false);
+    let result = CUSTOM_MCP_DISPATCH
+        .scope(authority, discover_server(&server, &secrets, None))
         .await
-        .map_err(|e| command_mcp_error(&server, "refresh", e))?
-    {
-        check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
-        if let Some(reference) = server.secret_ref.as_deref() {
-            KeychainMcpSecretStore
-                .put(reference, &secrets)
-                .map_err(app_error)?;
-            retire_server_sessions(&server.id).await;
-        }
-    }
-    let result = discover_server(&server, &secrets, None)
-        .await
-        .map_err(|e| command_mcp_error(&server, "discover", e));
+        .map_err(|error| command_mcp_error(&server, "discover", error));
     check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
     if result.is_ok() {
-        record_mcp_diagnostic(&server_id, None);
+        record_mcp_diagnostic(server_id, None);
     }
     result
 }
@@ -3923,13 +4336,26 @@ async fn disconnect_oauth<S: McpSecretStore>(
             .then_some(false)
         })
     };
-    if let Some(metadata) = server.metadata.as_object_mut() {
-        if remote_revoked == Some(false) {
-            metadata.insert("oauthRemoteRevocationFailed".into(), json!(true));
-        } else {
-            metadata.remove("oauthRemoteRevocationFailed");
-        }
+    let metadata = server
+        .metadata
+        .as_object_mut()
+        .ok_or(AgentMcpError::Storage)?;
+    if remote_revoked == Some(false) {
+        metadata.insert("oauthRemoteRevocationFailed".into(), json!(true));
+    } else {
+        metadata.remove("oauthRemoteRevocationFailed");
     }
+    if rotation_unconfirmed {
+        // The in-memory fallback may be the only surviving record if the
+        // original rotation journal failed. Carry it into durable recovery
+        // before either losing the old token or retrying its revocation.
+        metadata.insert("oauthRotatedRevocationUnconfirmed".into(), json!(true));
+    }
+    // Record the observed remote outcome before losing custody of the grant.
+    // A crash or failed cleanup commit after secure deletion must not turn an
+    // observed revocation failure into an unknown outcome on the next retry.
+    // If this write fails, retain the credential so the operation can retry.
+    repository.replace(&server).await?;
     for value in bundle.oauth.values_mut() {
         value.zeroize();
     }
@@ -4096,7 +4522,9 @@ where
         let bundle = authorize(existing.clone(), old_bundle)
             .await
             .map_err(|e| command_mcp_error(&existing, "connect", e))?;
-        discover_server(&existing, &bundle, None)
+        let authority = CustomMcpDispatch::new(lifecycle.clone(), epoch, false);
+        CUSTOM_MCP_DISPATCH
+            .scope(authority, discover_server(&existing, &bundle, None))
             .await
             .map_err(|e| command_mcp_error(&existing, "discover", e))?;
         Ok::<_, crate::domain::types::AppError>(bundle)
@@ -5706,7 +6134,7 @@ done
             json!({}),
             None,
             None,
-            Some(&lifecycle),
+            Some(McpRequestAuthority::Linear(&lifecycle)),
         )
         .await;
         assert!(matches!(first, Err(AgentMcpError::ElicitationRequired(_))));
@@ -5730,7 +6158,7 @@ done
             json!({}),
             None,
             Some("Alpha"),
-            Some(&lifecycle),
+            Some(McpRequestAuthority::Linear(&lifecycle)),
         )
         .await
         .unwrap();
@@ -6143,7 +6571,7 @@ done
             json!({}),
             None,
             None,
-            Some(&stale),
+            Some(McpRequestAuthority::Linear(&stale)),
         )
         .await;
 
@@ -6300,7 +6728,7 @@ done
                 json!({"name": "create_issue", "arguments": {}}),
                 None,
                 None,
-                Some(&request_snapshot),
+                Some(McpRequestAuthority::Linear(&request_snapshot)),
             )
             .await
         });
@@ -6596,3 +7024,23 @@ mod dispatch_tests;
 #[cfg(test)]
 #[path = "agent_mcp_rotation_tests.rs"]
 mod rotation_tests;
+
+#[cfg(test)]
+#[path = "agent_mcp_test_command_tests.rs"]
+mod test_command_tests;
+
+#[cfg(test)]
+#[path = "agent_mcp_mode_update_tests.rs"]
+mod mode_update_tests;
+
+#[cfg(test)]
+#[path = "agent_mcp_revocation_journal_tests.rs"]
+mod revocation_journal_tests;
+
+#[cfg(test)]
+#[path = "agent_mcp_stdio_authority_tests.rs"]
+mod stdio_authority_tests;
+
+#[cfg(test)]
+#[path = "agent_mcp_dispatch_authority_tests.rs"]
+mod dispatch_authority_tests;

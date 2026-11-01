@@ -433,7 +433,12 @@ async fn gateway_lost_parked_session_fails_without_replaying_the_tool() {
             .unwrap();
     };
     let (result, ()) = tokio::join!(call, retire);
-    assert_eq!(result.unwrap_err().code, "agent_mcp_tool_unavailable");
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "agent_mcp_delivery_uncertain");
+    assert_eq!(
+        error.details.unwrap()["action"],
+        "inspect_server_before_retry"
+    );
     assert_eq!(http.tool_calls(), 1);
 }
 

@@ -22,13 +22,17 @@ pub struct AgentMcpDiagnostic {
 
 impl AgentMcpDiagnostic {
     pub(crate) fn into_app_error(self) -> AppError {
+        let remote_code = self
+            .remote_code
+            .map_or_else(String::new, |code| format!("; remote code: {code}"));
         let context = format!(
-            "MCP origin: {}; server: {}; tool: {}; phase: {}; code: {}; state: {}; action: {}. {}",
+            "MCP origin: {}; server: {}; tool: {}; phase: {}; code: {}{}; state: {}; action: {}. {}",
             self.origin,
             self.server,
             self.tool.as_deref().unwrap_or("none"),
             self.phase,
             self.code,
+            remote_code,
             self.state,
             self.action,
             self.message
@@ -46,6 +50,14 @@ impl AgentMcpError {
         tool: Option<&str>,
         phase: &str,
     ) -> AgentMcpDiagnostic {
+        if let Self::AfterDelivery { cause } = self {
+            let mut diagnostic = cause.diagnostic(server, tool, phase);
+            diagnostic.action = "inspect_server_before_retry".into();
+            diagnostic.message.push_str(
+                " The original MCP request may have been applied. Inspect the server before retrying.",
+            );
+            return diagnostic;
+        }
         if let Self::Phase { phase, cause } = self {
             return cause.diagnostic(server, tool, phase);
         }
@@ -146,6 +158,11 @@ mod tests {
         for error in [
             AgentMcpError::InvalidDefinition("fixture-private-payload".into()),
             AgentMcpError::ElicitationRequired("fixture-private-payload".into()),
+            AgentMcpError::AfterDelivery {
+                cause: Box::new(AgentMcpError::InvalidDefinition(
+                    "fixture-private-payload".into(),
+                )),
+            },
         ] {
             let diagnostic = error.diagnostic("private", None, "discover");
             let encoded = serde_json::to_string(&diagnostic).unwrap();

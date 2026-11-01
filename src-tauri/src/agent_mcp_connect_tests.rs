@@ -224,6 +224,7 @@ impl HttpFixture {
 enum Callback {
     Success,
     Denied,
+    ProviderError(&'static str),
     InvalidThenSuccess,
     InvalidOnly,
     Wait,
@@ -242,6 +243,23 @@ async fn callback_request(redirect: &str, state: &str, denied: bool) -> u16 {
                 "connect-fixture-code"
             },
         );
+    reqwest::Client::new()
+        .get(callback)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+async fn callback_error_request(redirect: &str, state: &str, error: &str) -> u16 {
+    let mut callback = reqwest::Url::parse(redirect).unwrap();
+    callback
+        .query_pairs_mut()
+        .append_pair("state", state)
+        .append_pair("error", error)
+        .append_pair("error_description", "fixture-private-description")
+        .append_pair("code", "fixture-private-code");
     reqwest::Client::new()
         .get(callback)
         .send()
@@ -308,9 +326,19 @@ async fn connect_fixture_with_operation(
                                 return;
                             }
                         }
-                        let status =
-                            callback_request(redirect, state, matches!(callback, Callback::Denied))
-                                .await;
+                        let status = match callback {
+                            Callback::ProviderError(error) => {
+                                callback_error_request(redirect, state, error).await
+                            }
+                            _ => {
+                                callback_request(
+                                    redirect,
+                                    state,
+                                    matches!(callback, Callback::Denied),
+                                )
+                                .await
+                            }
+                        };
                         seen.lock().unwrap().callback_statuses.push(status);
                     });
                 }
@@ -421,6 +449,151 @@ async fn denied_consent_never_exchanges_code_or_persists_grant() {
     assert_eq!(failure.details.unwrap()["phase"], "connect");
     assert!(fixture.observed.lock().unwrap().exchange.is_none());
     assert_no_grant(&repository, &store, &definition).await;
+}
+
+#[tokio::test]
+async fn settings_invalid_grant_restores_prior_warning_and_real_reconnect_can_be_tested() {
+    for previous_remote_failure in [false, true] {
+        let fixture = HttpFixture::start(true).await;
+        let (repository, store, definition) = setup_connect(&fixture).await;
+        let mut connected = connect_fixture(
+            &repository,
+            &store,
+            &definition,
+            &fixture,
+            Callback::Success,
+            Duration::from_secs(10),
+            Arc::default(),
+        )
+        .await
+        .unwrap();
+        if previous_remote_failure {
+            connected.metadata["oauthRemoteRevocationFailed"] = json!(true);
+            repository.replace(&connected).await.unwrap();
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let token_endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let rejected = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (path, _, body) = read_fixture_request(&mut stream).await;
+            assert_eq!(path, "/token");
+            let form: BTreeMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+                .into_owned()
+                .collect();
+            assert_eq!(form["grant_type"], "refresh_token");
+            reply_fixture(
+                &mut stream,
+                "400 Bad Request",
+                json!({"error":"invalid_grant"}),
+            )
+            .await;
+        });
+        let reference = connected.secret_ref.as_deref().unwrap();
+        let mut expired = store.get(reference).unwrap().unwrap();
+        expired.oauth.insert("expires_at_unix".into(), "0".into());
+        expired
+            .oauth
+            .insert("token_endpoint".into(), token_endpoint);
+        store.put(reference, &expired).unwrap();
+        let error = test_mcp_definition(&repository, &store, &connected.id)
+            .await
+            .unwrap_err();
+        rejected.await.unwrap();
+        assert_eq!(error.code, "agent_mcp_reconnect_required");
+        let persisted = repository.get(&connected.id).await.unwrap();
+        assert!(persisted
+            .metadata
+            .get("oauthRotatedRevocationUnconfirmed")
+            .is_none());
+        assert_eq!(
+            persisted
+                .metadata
+                .get("oauthRemoteRevocationFailed")
+                .and_then(Value::as_bool),
+            previous_remote_failure.then_some(true)
+        );
+        assert!(!oauth_lifecycle(&connected.id)
+            .unconfirmed_revocation
+            .load(Ordering::SeqCst));
+        assert_eq!(store.get(reference).unwrap(), Some(expired));
+        let reconnected = connect_fixture(
+            &repository,
+            &store,
+            &persisted,
+            &fixture,
+            Callback::Success,
+            Duration::from_secs(10),
+            Arc::default(),
+        )
+        .await
+        .unwrap();
+        assert!(reconnected.enabled);
+        let tools = test_mcp_definition(&repository, &store, &connected.id)
+            .await
+            .unwrap();
+        assert!(tools.iter().any(|tool| tool.name == "list_projects"));
+        retire_server_sessions(&connected.id).await;
+    }
+}
+
+#[tokio::test]
+async fn callback_client_and_provider_failures_keep_their_actual_cause_and_action() {
+    for (callback_error, expected_code, expected_action) in [
+        ("access_denied", "access_denied", "review_provider_consent"),
+        (
+            "unauthorized_client",
+            "unauthorized_client",
+            "check_provider_client_approval",
+        ),
+        ("server_error", "server_error", "configure"),
+        (
+            "temporarily_unavailable",
+            "temporarily_unavailable",
+            "configure",
+        ),
+        (
+            "fixture-private-error-word",
+            "unknown_oauth_error",
+            "configure",
+        ),
+    ] {
+        let fixture = HttpFixture::start(true).await;
+        let (repository, store, definition) = setup_connect(&fixture).await;
+        let failure = connect_fixture(
+            &repository,
+            &store,
+            &definition,
+            &fixture,
+            Callback::ProviderError(callback_error),
+            Duration::from_secs(10),
+            Arc::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure.code, "agent_mcp_oauth_provider_rejected");
+        let diagnostic = failure.details.as_ref().unwrap();
+        assert_eq!(diagnostic["phase"], "connect");
+        assert_eq!(diagnostic["action"], expected_action);
+        assert!(diagnostic["message"]
+            .as_str()
+            .unwrap()
+            .contains(expected_code));
+        assert!(failure.message.contains(expected_code));
+        assert!(failure.message.contains(expected_action));
+        let encoded = serde_json::to_string(&failure).unwrap();
+        for private in [
+            "fixture-private-error-word",
+            "fixture-private-description",
+            "fixture-private-code",
+        ] {
+            assert!(!encoded.contains(private), "{encoded}");
+        }
+        if expected_code != "access_denied" {
+            assert_ne!(diagnostic["action"], "review_provider_consent");
+        }
+        assert!(fixture.observed.lock().unwrap().exchange.is_none());
+        assert_no_grant(&repository, &store, &definition).await;
+    }
 }
 
 #[tokio::test]

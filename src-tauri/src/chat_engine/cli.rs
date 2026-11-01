@@ -1276,6 +1276,45 @@ mod mcp_origin_tests {
     }
 
     #[test]
+    fn managed_remote_http_status_survives_the_final_tool_failure() {
+        let diagnostic = crate::agent_mcp::AgentMcpError::DeliveryUncertain(Some(403)).diagnostic(
+            "vercel",
+            Some("mcp_vercel_update_project"),
+            "call",
+        );
+        let mut translator = StreamTranslator::new(CliKind::Codex);
+        let events = translator.translate_line(
+            &json!({"type":"item.completed","item":{
+                "id":"forbidden", "type":"mcp_tool_call", "server":SERVER_KEY,
+                "tool":"mcp_vercel_update_project", "status":"completed",
+                "result":{"isError":true,"content":[{"type":"text","text":"fixture-private-provider-body"}],
+                    "_meta":{"clovy":{"diagnostic":diagnostic}}}
+            }}).to_string(),
+        );
+        let error = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::ToolFinished {
+                    error: Some(error), ..
+                } => Some(error),
+                _ => None,
+            })
+            .unwrap();
+        for part in [
+            "origin: clovy_managed",
+            "server: vercel",
+            "tool: mcp_vercel_update_project",
+            "phase: call",
+            "code: agent_mcp_delivery_uncertain",
+            "remote code: 403",
+            "inspect_server_before_retry",
+        ] {
+            assert!(error.contains(part), "{error}");
+        }
+        assert!(!error.contains("fixture-private-provider-body"));
+    }
+
+    #[test]
     fn codex_completed_mcp_error_result_is_a_failed_tool_with_host_cause() {
         let diagnostic = crate::agent_mcp::AgentMcpError::OauthReconnectRequired.diagnostic(
             "Vercel",
