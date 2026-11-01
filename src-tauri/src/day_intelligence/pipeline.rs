@@ -200,12 +200,25 @@ pub async fn report_hour(
         .sources
         .meetings(window.start, window.end, deps.zone)
         .await;
+    let mut dictations = deps
+        .sources
+        .dictations(window.start, window.end, deps.zone)
+        .await;
+    for note in &mut dictations {
+        note.app_name = note.app_bundle_id.as_ref().and_then(|id| {
+            view.sessions
+                .iter()
+                .find(|session| session.bundle_id.as_ref() == Some(id))
+                .map(|session| session.app_name.clone())
+        });
+    }
     let prompt = hour::prompt(&HourInput {
         label: &label,
         active_minutes,
         sessions: &lines,
         coding_blocks: &blocks,
         meetings: &meetings,
+        dictations: &dictations,
         distilled: &distilled.body,
     });
     let output = call(
@@ -645,6 +658,7 @@ pub async fn generate_summary(
     if reports.is_empty() && meetings.is_empty() && blocks.is_empty() {
         return Ok(None);
     }
+    let dictations = deps.sources.dictations(from, to, deps.zone).await;
     let prompt = summary::prompt(&DayInput {
         day: &key,
         stats: &stats,
@@ -652,6 +666,7 @@ pub async fn generate_summary(
         hour_reports: &reports,
         meetings: &meetings,
         coding_blocks: &blocks,
+        dictations: &dictations,
     });
     let output = call(
         deps,

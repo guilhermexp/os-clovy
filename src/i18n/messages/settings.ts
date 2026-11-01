@@ -265,6 +265,10 @@ export default defineMessages({
     "settings.experiments.unpacking": "Unpacking...",
     "settings.experiments.unpack": "Unpack and reveal folder",
 
+    "settings.startup.hideDock": "Hide from Dock",
+    "settings.startup.hideDockDescription": "Hide the Dock icon when the main window is closed.",
+    "settings.startup.dockReadError": "Could not read the Dock preference.",
+    "settings.startup.dockUpdateError": "Could not update the Dock preference. Try again.",
     "settings.startup.readError": "Could not read the login item state.",
     "settings.startup.updateError": "Could not update the login item. Try again.",
     "settings.startup.title": "Startup",
@@ -624,6 +628,12 @@ export default defineMessages({
     "settings.experiments.unpacking": "Descompactando...",
     "settings.experiments.unpack": "Descompactar e mostrar a pasta",
 
+    "settings.startup.hideDock": "Ocultar do Dock",
+    "settings.startup.hideDockDescription":
+      "Ocultar o ícone do Dock quando a janela principal estiver fechada.",
+    "settings.startup.dockReadError": "Não foi possível ler a preferência do Dock.",
+    "settings.startup.dockUpdateError":
+      "Não foi possível atualizar a preferência do Dock. Tente de novo.",
     "settings.startup.readError": "Não foi possível ler o estado do item de login.",
     "settings.startup.updateError": "Não foi possível atualizar o item de login. Tente de novo.",
     "settings.startup.title": "Inicialização",

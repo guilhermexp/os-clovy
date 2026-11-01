@@ -5521,6 +5521,14 @@ fn remove_cancelled_dictation_audio(
     let _ = fs::remove_file(recording_path);
 }
 
+/// Preserve the target captured by the helper before asynchronous transcription.
+fn history_target(recording: &RecordingReadyInfo) -> Option<String> {
+    recording
+        .target_bundle_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+}
+
 async fn transcribe_recording_ready_inner(
     app: &AppHandle,
     recording: RecordingReadyInfo,
@@ -5542,6 +5550,7 @@ async fn transcribe_recording_ready_inner(
     // processing can take seconds, and a profile switch mid-flight must not
     // relabel this dictation's history row to the new profile.
     let history_profile = crate::commands::active_profile(app);
+    let history_app = history_target(&recording);
     let low_speech_evidence = recording_has_low_speech_evidence(&recording);
     if low_speech_evidence {
         tracing::info!(
@@ -5661,7 +5670,12 @@ async fn transcribe_recording_ready_inner(
         if let Some(transcript) = recovery_transcript {
             let staged = run_dictation_take_step(
                 take,
-                stage_dictation_history_item(app, transcript, &history_profile),
+                stage_dictation_history_item(
+                    app,
+                    transcript,
+                    &history_profile,
+                    history_app.as_deref(),
+                ),
             )
             .await;
             let Some(staged) = staged else {
@@ -5729,7 +5743,7 @@ async fn transcribe_recording_ready_inner(
         &audio_path,
         outcome,
         history_already_persisted,
-        &history_profile,
+        (&history_profile, history_app.as_deref()),
         recording.composer_request_id.as_deref(),
     );
 }
@@ -5741,7 +5755,7 @@ fn deliver_dictation_outcome(
     audio_path: &std::path::Path,
     outcome: DictationTranscriptionOutcome,
     history_already_persisted: bool,
-    history_profile: &str,
+    history: (&str, Option<&str>),
     composer_request_id: Option<&str>,
 ) {
     let mut helper_command = outcome.helper_command;
@@ -5758,7 +5772,8 @@ fn deliver_dictation_outcome(
             spawn_dictation_history_write(
                 app.clone(),
                 transcript.clone(),
-                history_profile.to_string(),
+                history.0.to_string(),
+                history.1.map(str::to_owned),
             );
         }
     }
@@ -6539,9 +6554,10 @@ fn spawn_dictation_history_write(
     app: AppHandle,
     transcript: TranscriptionProviderResult,
     profile: String,
+    app_bundle_id: Option<String>,
 ) {
     tauri::async_runtime::spawn(async move {
-        store_dictation_history_item(&app, &transcript, &profile).await;
+        store_dictation_history_item(&app, &transcript, &profile, app_bundle_id.as_deref()).await;
     });
 }
 
@@ -7226,8 +7242,11 @@ async fn store_dictation_history_item(
     app: &AppHandle,
     transcript: &TranscriptionProviderResult,
     profile: &str,
+    app_bundle_id: Option<&str>,
 ) {
-    if let Err(error) = persist_dictation_history_item(app, transcript, profile).await {
+    if let Err(error) =
+        persist_dictation_history_item(app, transcript, profile, app_bundle_id).await
+    {
         tracing::error!(
             code = %error.code,
             "dictation history save failed after transcript delivery"
@@ -7239,6 +7258,7 @@ async fn persist_dictation_history_item(
     app: &AppHandle,
     transcript: &TranscriptionProviderResult,
     profile: &str,
+    app_bundle_id: Option<&str>,
 ) -> Result<(), AppError> {
     let repos = crate::commands::repositories(app).await.map_err(|error| {
         tracing::error!(code = %error.code, "dictation history repository unavailable");
@@ -7247,12 +7267,22 @@ async fn persist_dictation_history_item(
             "Dictation history could not save this transcript.",
         )
     })?;
+    persist_history_with_repositories(&repos, transcript, profile, app_bundle_id).await
+}
+
+async fn persist_history_with_repositories(
+    repos: &crate::db::repositories::Repositories,
+    transcript: &TranscriptionProviderResult,
+    profile: &str,
+    app_bundle_id: Option<&str>,
+) -> Result<(), AppError> {
     repos
-        .create_dictation_history_item(
+        .create_dictation_history_item_with_app(
             profile,
             &transcript.text,
             transcript.language.clone(),
             &transcript.provider,
+            app_bundle_id,
         )
         .await
         .map_err(dictation_history_save_error)?;
@@ -7263,6 +7293,7 @@ async fn stage_dictation_history_item(
     app: &AppHandle,
     transcript: &TranscriptionProviderResult,
     data_partition: &str,
+    app_bundle_id: Option<&str>,
 ) -> Result<Option<crate::db::repositories::PendingDictationHistoryItem>, AppError> {
     let repos = crate::commands::repositories(app).await.map_err(|error| {
         tracing::error!(code = %error.code, "dictation history repository unavailable");
@@ -7271,12 +7302,22 @@ async fn stage_dictation_history_item(
             "Dictation history could not save this transcript.",
         )
     })?;
+    stage_history_with_repositories(&repos, transcript, data_partition, app_bundle_id).await
+}
+
+async fn stage_history_with_repositories(
+    repos: &crate::db::repositories::Repositories,
+    transcript: &TranscriptionProviderResult,
+    data_partition: &str,
+    app_bundle_id: Option<&str>,
+) -> Result<Option<crate::db::repositories::PendingDictationHistoryItem>, AppError> {
     repos
-        .stage_dictation_history_item(
+        .stage_dictation_history_item_with_app(
             data_partition,
             &transcript.text,
             transcript.language.clone(),
             &transcript.provider,
+            app_bundle_id,
         )
         .await
         .map_err(dictation_history_save_error)
@@ -11770,6 +11811,58 @@ mod tests {
         );
         assert!(helper_event_serializes_with_commands(Some("focus_target")));
         assert_eq!(indicator_action_for_event(Some("focus_target")), None);
+    }
+
+    #[tokio::test]
+    async fn history_uses_recording_ready_target_for_staged_and_normal_writes() {
+        let event = serde_json::json!({ "type": "recording_ready", "payload": {
+            "path": "/tmp/fixture.m4a", "targetBundleIdentifier": "org.example.first"
+        }});
+        let recording = recording_ready_info_from_event(&event).unwrap();
+        let pinned = history_target(&recording);
+        // A later event from another app must not change the pinned target.
+        let later = serde_json::json!({ "type": "recording_ready", "payload": {
+            "path": "/tmp/fixture.m4a", "targetBundleIdentifier": "org.example.second"
+        }});
+        assert_ne!(
+            history_target(&recording_ready_info_from_event(&later).unwrap()),
+            pinned
+        );
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrations::run_migrations(&pool).await.unwrap();
+        let repos = crate::db::repositories::Repositories::new(pool);
+        let transcript = TranscriptionProviderResult {
+            text: "short".into(),
+            language: None,
+            provider: "test".into(),
+        };
+        stage_history_with_repositories(&repos, &transcript, "default", pinned.as_deref())
+            .await
+            .unwrap()
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        let transcript = TranscriptionProviderResult {
+            text: "normal".into(),
+            ..transcript
+        };
+        persist_history_with_repositories(&repos, &transcript, "default", pinned.as_deref())
+            .await
+            .unwrap();
+        let rows = repos
+            .list_dictation_history("default", 10)
+            .await
+            .unwrap()
+            .items;
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| row.app_bundle_id.as_deref() == Some("org.example.first")));
     }
 
     #[test]

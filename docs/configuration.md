@@ -22,6 +22,12 @@ or verification. See [development.md](development.md) for isolated native proofs
 and the signed dev launcher. The current `.env.example` and code are the
 source of truth for supported variables.
 
+On macOS, Settings > General > Hide from Dock controls the local
+`app-preferences.json` preference `hideFromDock`, off by default. When enabled,
+the app switches to accessory activation only while the main window is hidden;
+it restores regular activation before revealing the window. The menu-bar app
+continues running. Other platforms do not expose this setting.
+
 ## Provider keys and routes
 
 | Capability | Provider and credential |

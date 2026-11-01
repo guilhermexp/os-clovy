@@ -52,6 +52,13 @@ takes never deliver), and
    otherwise it activates the target, polls every 20 ms for up to 1 s, and
    waits a short settle delay after activation lands.
 
+The seven-day dictation history stores the target bundle identifier captured at
+`recording_ready`, when available, with both ordinary and low-speech recovery
+entries. Older entries and platforms without a target identifier keep it null.
+History displays the installed app icon when available and the microphone
+otherwise. Dictation excerpts can also be sent to the activity provider as
+bounded, fenced context; see [day intelligence](day-intelligence.md#gating-and-privacy).
+
 ## Settings
 
 `dictation-settings.json` holds `cleanupEnabled` (default `false`),

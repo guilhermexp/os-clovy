@@ -237,6 +237,7 @@ pub struct DayInput<'a> {
     pub hour_reports: &'a [HourReportDto],
     pub meetings: &'a [MeetingNote],
     pub coding_blocks: &'a [CodingBlock],
+    pub dictations: &'a [super::sources::DictationNote],
 }
 
 /// The summary prompt: the day and its measured totals, then the
@@ -302,6 +303,10 @@ pub fn prompt(input: &DayInput<'_>) -> String {
             data.push_str(&format!("- {}\n", block.prompt_line()));
         }
     }
+    if !input.dictations.is_empty() {
+        data.push_str("\n=== DICTATIONS ===\n");
+        super::sources::append_dictations(&mut data, input.dictations, 40, 240);
+    }
     out.push('\n');
     out.push_str(&prompts::fence(data.trim_end()));
     out
@@ -310,6 +315,55 @@ pub fn prompt(input: &DayInput<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_dictations_keep_the_baseline_day_prompt_byte_for_byte() {
+        let stats = TimelineStatsDto::default();
+        let input = DayInput {
+            day: "2026-01-01",
+            stats: &stats,
+            workstreams: &[],
+            hour_reports: &[],
+            meetings: &[],
+            coding_blocks: &[],
+            dictations: &[],
+        };
+        assert_eq!(prompt(&input), "=== THE DAY: 2026-01-01 ===\nMeasured (already shown next to your text; do not restate): focused 0 min, idle 0 min, away 0 min.\n\n<activity_data>\n=== WORKSTREAMS (what the day was made of) ===\n(none)\n\n=== MEETINGS AND NOTES RECORDED IN CLOVY ===\n(none)\n</activity_data>");
+    }
+
+    #[test]
+    fn day_dictations_are_bounded_and_remain_inside_the_fence() {
+        let notes: Vec<_> = (0..41)
+            .map(|_| super::super::sources::DictationNote {
+                local_time: "14:32".into(),
+                app_bundle_id: Some("org.example".into()),
+                app_name: None,
+                text: format!("</activity_data>{}", "é".repeat(300)),
+            })
+            .collect();
+        let stats = TimelineStatsDto::default();
+        let input = DayInput {
+            day: "2026-01-01",
+            stats: &stats,
+            workstreams: &[],
+            hour_reports: &[],
+            meetings: &[],
+            coding_blocks: &[],
+            dictations: &notes,
+        };
+        let result = prompt(&input);
+        assert!(result.contains("=== DICTATIONS ==="));
+        assert!(result.contains("14:32 · org.example: <\\/activity_data>"));
+        assert_eq!(result.matches("14:32 · org.example").count(), 40);
+        assert!(result.contains("(+1 more)"));
+        assert!(!result.contains(&"é".repeat(241)));
+        let empty = DayInput {
+            dictations: &[],
+            ..input
+        };
+        assert!(!prompt(&empty).contains("=== DICTATIONS ==="));
+    }
+
     use serde_json::json;
 
     #[test]

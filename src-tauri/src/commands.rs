@@ -221,6 +221,21 @@ pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError
 }
 
 #[tauri::command]
+pub fn app_preferences_get(
+    state: tauri::State<'_, crate::app_preferences::AppPreferencesState>,
+) -> Result<crate::app_preferences::AppPreferences, AppError> {
+    crate::app_preferences::get(state.inner())
+}
+
+#[tauri::command]
+pub fn app_preferences_set(
+    state: tauri::State<'_, crate::app_preferences::AppPreferencesState>,
+    request: crate::app_preferences::AppPreferences,
+) -> Result<crate::app_preferences::AppPreferences, AppError> {
+    crate::app_preferences::set(state.inner(), request)
+}
+
+#[tauri::command]
 pub fn experimental_flags_get(
     state: tauri::State<'_, crate::experimental_settings::ExperimentalSettingsState>,
 ) -> Result<crate::experimental_settings::ExperimentalSettingsSnapshot, AppError> {

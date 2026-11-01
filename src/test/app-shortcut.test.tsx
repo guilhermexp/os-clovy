@@ -153,6 +153,8 @@ vi.mock("../lib/agent-sounds", () => ({
 }));
 
 vi.mock("../lib/tauri", () => ({
+  appPreferencesGet: vi.fn().mockResolvedValue({ hideFromDock: false }),
+  appPreferencesSet: vi.fn(async (request: { hideFromDock: boolean }) => request),
   agentRuntimeBindings: {
     listSessions: mocks.listAgentSessions,
     getSession: mocks.getAgentSession,

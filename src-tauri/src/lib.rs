@@ -7,6 +7,7 @@ pub mod agent_recorder;
 pub mod agent_sessions;
 pub mod app_identity;
 pub mod app_paths;
+pub mod app_preferences;
 pub mod approval_broker;
 pub mod audio;
 mod background_image;
@@ -235,6 +236,8 @@ pub fn run() {
             routines::list_agent_routine_runs,
             routines::routine_browser_access_get,
             routines::routine_browser_access_set,
+            commands::app_preferences_get,
+            commands::app_preferences_set,
             commands::experimental_flags_get,
             commands::experimental_flags_set,
             commands::create_note,
@@ -457,6 +460,7 @@ pub fn run() {
             day_intelligence::setup(app);
             setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
+            app_preferences::setup(app)?;
             providers::setup(app);
             #[cfg(target_os = "macos")]
             transcription_model::setup(app)?;
@@ -751,9 +755,7 @@ fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 fn close_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    main_window::hide(app);
 }
 
 fn emit_close_tab_if_main_window_focused(app: &tauri::AppHandle) {
