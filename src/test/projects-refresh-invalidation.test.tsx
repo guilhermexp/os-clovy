@@ -38,6 +38,7 @@ const a: AgentSessionDto = {
   model: "test",
   safetyMode: "sandboxed",
   source: "user",
+  workspacePath: "/tmp/clovy-t4-synthetic-workspace",
   createdAt: stamp,
   updatedAt: stamp,
 };

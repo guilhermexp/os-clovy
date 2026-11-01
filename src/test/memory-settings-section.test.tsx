@@ -436,7 +436,10 @@ describe("MemorySettingsSection", () => {
     mocks.setMemoryEnabled.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          resolveToggle = resolve;
+          resolveToggle = (settings) => {
+            persistedEnabled = settings.enabled;
+            resolve(settings);
+          };
         }),
     );
     const user = userEvent.setup();

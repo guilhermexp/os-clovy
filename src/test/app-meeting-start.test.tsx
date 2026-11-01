@@ -1238,12 +1238,15 @@ describe("agent recorder request event", () => {
     });
     try {
       await renderUntilAgentRecorderListener();
+      mocks.getNote.mockResolvedValue(note({ id: "note-agent" }));
       await act(async () => {
         await mocks.listeners.get(AGENT_RECORDER_REQUEST_EVENT)?.({
           payload: {
             requestId: "req-published",
             action: "start",
             sourceMode: "microphonePlusSystem",
+            profile: "default",
+            noteId: "note-agent",
           },
         });
       });
@@ -1253,9 +1256,15 @@ describe("agent recorder request event", () => {
           expect.objectContaining({ code: "agent_recorder_request_not_found" }),
         ),
       );
-      expect(document.querySelector(".recorder-bar")).toHaveAttribute("data-state", "recording");
+      expect(mocks.startRecording).toHaveBeenCalledWith(
+        "note-agent",
+        "microphonePlusSystem",
+        "default",
+        "req-published",
+      );
       expect(mocks.startRecording).toHaveBeenCalledOnce();
       expect(mocks.finishRecording).not.toHaveBeenCalled();
+      expect(document.querySelector(".recorder-bar")).toHaveAttribute("data-state", "recording");
     } finally {
       warning.mockRestore();
     }
@@ -1342,7 +1351,7 @@ describe("agent recorder request event", () => {
     );
     expect(mocks.startRecording).not.toHaveBeenCalled();
     expect(mocks.finishRecording).not.toHaveBeenCalled();
-    expect(document.querySelector(".recorder-bar")).not.toHaveAttribute("data-state", "recording");
+    expect(document.querySelector('.recorder-bar[data-state="recording"]')).toBeNull();
   });
 
   it("acks start with an error when recording is already running", async () => {

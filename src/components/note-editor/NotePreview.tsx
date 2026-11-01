@@ -176,7 +176,10 @@ export function NotePreview({
     try {
       const current = serializationState.lastSerializedMarkdown.trim();
       if (current === markdown.trim()) return;
-      if (editor.isFocused && (serializationState.editorDirty || editor.view.composing)) {
+      // Keep the focused document and selection stable, including when an
+      // external append arrives just before the first keystroke. Clean blur
+      // adopts the persisted text; dirty blur reconciles the local edit.
+      if (editor.isFocused) {
         serializationState.focusedExternalMarkdown = {
           editorMarkdown: serializationState.lastSerializedMarkdown,
           externalMarkdown: markdown,
