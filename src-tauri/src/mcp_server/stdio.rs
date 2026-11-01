@@ -95,7 +95,7 @@ pub fn production_data_refusal(dir: &std::path::Path) -> Option<&'static str> {
     if !cfg!(debug_assertions) || crate::app_paths::use_prod_data_dir() {
         return None;
     }
-    let production = crate::extension_host::production_app_data_dir()?;
+    let production = crate::app_paths::production_app_data_dir()?;
     let resolve =
         |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     resolve(dir)
