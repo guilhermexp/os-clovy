@@ -1,5 +1,7 @@
 use crate::{
-    audio::{active_silence::ActiveSilence, system_audio::SystemAudioStopResult},
+    audio::{
+        active_silence::ActiveSilence, pause_state::PauseState, system_audio::SystemAudioStopResult,
+    },
     domain::types::{AppError, AudioLevelDto, RecordingSource, SourceReadinessDto},
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -33,8 +35,7 @@ struct WindowsSystemAudioStats {
 
 pub struct SystemAudioCapture {
     stop_requested: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-    paused_at: Arc<Mutex<Option<Instant>>>,
+    pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     partial_path: PathBuf,
     final_path: PathBuf,
@@ -48,14 +49,12 @@ impl SystemAudioCapture {
         _timeline_offset: Duration,
     ) -> Result<Self, AppError> {
         let stop_requested = Arc::new(AtomicBool::new(false));
-        let paused = Arc::new(AtomicBool::new(false));
-        let paused_at = Arc::new(Mutex::new(None));
+        let pause_state = Arc::new(PauseState::default());
         let stats = Arc::new(Mutex::new(WindowsSystemAudioStats::default()));
         let (startup_sender, startup_receiver) = mpsc::channel();
         let worker = {
             let stop_requested = Arc::clone(&stop_requested);
-            let paused = Arc::clone(&paused);
-            let paused_at = Arc::clone(&paused_at);
+            let pause_state = Arc::clone(&pause_state);
             let stats = Arc::clone(&stats);
             let partial_path = partial_path.clone();
             thread::Builder::new()
@@ -64,8 +63,7 @@ impl SystemAudioCapture {
                     capture_loop(
                         partial_path,
                         stop_requested,
-                        paused,
-                        paused_at,
+                        pause_state,
                         stats,
                         startup_sender,
                     )
@@ -101,8 +99,7 @@ impl SystemAudioCapture {
         }
         Ok(Self {
             stop_requested,
-            paused,
-            paused_at,
+            pause_state,
             stats,
             partial_path,
             final_path,
@@ -111,19 +108,11 @@ impl SystemAudioCapture {
     }
 
     pub fn pause(&mut self) {
-        if let Ok(mut paused_at) = self.paused_at.lock() {
-            if paused_at.is_none() {
-                *paused_at = Some(Instant::now());
-            }
-        }
-        self.paused.store(true, Ordering::Release);
+        self.pause_state.pause(Instant::now());
     }
 
     pub fn resume(&mut self) {
-        self.paused.store(false, Ordering::Release);
-        if let Ok(mut paused_at) = self.paused_at.lock() {
-            *paused_at = None;
-        }
+        self.pause_state.resume();
     }
 
     pub fn status(&self) -> (AudioLevelDto, i64, Option<String>) {
@@ -215,16 +204,14 @@ pub fn helper_permission_check() -> Result<(), AppError> {
 fn capture_loop(
     partial_path: PathBuf,
     stop_requested: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-    paused_at: Arc<Mutex<Option<Instant>>>,
+    pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     startup_sender: Sender<Result<(), AppError>>,
 ) -> Result<(), AppError> {
     let result = run_capture_loop(
         partial_path,
         stop_requested,
-        paused,
-        paused_at,
+        pause_state,
         Arc::clone(&stats),
         startup_sender,
     );
@@ -237,8 +224,7 @@ fn capture_loop(
 fn run_capture_loop(
     partial_path: PathBuf,
     stop_requested: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-    paused_at: Arc<Mutex<Option<Instant>>>,
+    pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     startup_sender: Sender<Result<(), AppError>>,
 ) -> Result<(), AppError> {
@@ -267,14 +253,9 @@ fn run_capture_loop(
     let mut silence = ActiveSilence::new(Instant::now());
     let mut was_paused = false;
     while !stop_requested.load(Ordering::Acquire) {
-        if paused.load(Ordering::Acquire) {
+        if let Some(pause_time) = pause_state.snapshot() {
             if !was_paused {
                 backend.pause()?;
-                let pause_time = paused_at
-                    .lock()
-                    .ok()
-                    .and_then(|time| *time)
-                    .unwrap_or_else(Instant::now);
                 let frames = silence.pause(pause_time, backend.sample_rate);
                 if frames > 0 {
                     write_silence(&mut writer, frames, backend.channels, &stats)?;
@@ -300,11 +281,7 @@ fn run_capture_loop(
         // trailing idle tail falls back to wall-clock padding on stop.
         thread::sleep(CAPTURE_POLL_INTERVAL);
     }
-    let end = paused_at
-        .lock()
-        .ok()
-        .and_then(|time| *time)
-        .unwrap_or_else(Instant::now);
+    let end = pause_state.snapshot().unwrap_or_else(Instant::now);
     let trailing_silence_frames = silence.finish(end, backend.sample_rate);
     if trailing_silence_frames > 0 {
         write_silence(
@@ -859,6 +836,32 @@ mod tests {
         assert_eq!(tail, 0);
         writer.finalize().unwrap();
         assert_eq!(hound::WavReader::open(path).unwrap().duration(), 2000);
+    }
+
+    #[test]
+    fn captured_pause_snapshot_survives_resume_before_wav_padding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system-stereo.wav");
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: 1000,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(&path, spec).unwrap();
+        let stats = Arc::new(Mutex::new(WindowsSystemAudioStats::default()));
+        let start = Instant::now();
+        let state = PauseState::default();
+        state.pause(start + Duration::from_secs(2));
+        let snapshot = state.snapshot().unwrap();
+        state.resume();
+        let mut silence = ActiveSilence::new(start);
+        let frames = silence.pause(snapshot, spec.sample_rate);
+        write_silence(&mut writer, frames, spec.channels, &stats).unwrap();
+        writer.finalize().unwrap();
+        let reader = hound::WavReader::open(path).unwrap();
+        assert_eq!(reader.duration(), 2000);
+        assert_eq!(reader.spec().channels, 2);
     }
 
     #[test]

@@ -941,6 +941,95 @@ describe("notes recording reliability", () => {
     expect(await screen.findByText("System final")).toBeInTheDocument();
   });
 
+  it("retains session A discard when session B supersedes its pending hydration", async () => {
+    mocks.finishRecording.mockResolvedValue({
+      note: { ...first, activeTab: "transcription", processingStatus: "transcribing" },
+      recording: recording({ state: "ready" }),
+      validation: {},
+      processingStarted: true,
+    });
+    await startRecordingDirectlyOnFirstNote();
+    await waitFor(() => expect(mocks.listeners.has("live-transcript-event")).toBe(true));
+    await act(async () => {
+      await mocks.listeners.get("live-transcript-event")?.({
+        payload: {
+          noteId: "note-1",
+          sessionId: "rec-1",
+          sourceMode: "microphonePlusSystem",
+          source: "microphone",
+          segmentId: "echo-a",
+          startMs: 0,
+          endMs: 8000,
+          text: "Queued echo preview",
+          stability: "final",
+        },
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Transcription" }));
+    expect(await screen.findByText("Queued echo preview")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalled());
+    const pendingA = deferred<NoteDto>();
+    const finalNote = {
+      ...first,
+      activeTab: "transcription" as const,
+      processingStatus: "ready" as const,
+      updatedAt: "2026-05-19T10:00:06Z",
+      sourceTranscripts: [
+        {
+          id: "final-a",
+          recordingSessionId: "rec-1",
+          source: "microphone" as const,
+          startMs: 4000,
+          endMs: 8000,
+          text: "Final words",
+          status: "succeeded" as const,
+        },
+      ],
+    };
+    mocks.getNote
+      .mockReset()
+      .mockImplementationOnce(() => pendingA.promise)
+      .mockResolvedValue(finalNote);
+    const emit = async (payload: object) => {
+      await act(async () => {
+        await mocks.listeners.get("note-processing-progress")?.({ payload });
+      });
+    };
+    await emit({
+      noteId: "note-1",
+      recordingSessionId: "rec-1",
+      stage: "done",
+      processingStatus: "ready",
+      revision: "2026-05-19T10:00:05Z",
+      discardedSpans: [{ sessionId: "rec-1", source: "microphone", startMs: 0, endMs: 4000 }],
+    });
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Queued echo preview")).toBeInTheDocument();
+    await emit({
+      noteId: "note-1",
+      recordingSessionId: "rec-2",
+      stage: "transcribing",
+      processingStatus: "transcribing",
+      revision: "2026-05-19T10:00:05Z",
+    });
+    await act(async () => {
+      pendingA.resolve(finalNote);
+      await pendingA.promise;
+    });
+    expect(screen.getByText("Queued echo preview")).toBeInTheDocument();
+    await emit({
+      noteId: "note-1",
+      recordingSessionId: "rec-2",
+      stage: "done",
+      processingStatus: "ready",
+      revision: finalNote.updatedAt,
+      discardedSpans: [],
+    });
+    expect(await screen.findByText("Final words")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Queued echo preview")).not.toBeInTheDocument());
+  });
+
   it("follows live transcription until the reader scrolls upward, then resumes at the bottom", async () => {
     await startRecordingOnFirstNote();
     await waitFor(() => expect(mocks.listeners.has("live-transcript-event")).toBe(true));
