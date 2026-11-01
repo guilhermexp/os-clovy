@@ -147,6 +147,8 @@ struct ComposerDeliveryRegistration {
 }
 
 pub struct HelperState {
+    agent_take: Mutex<Option<AgentDictationTake>>,
+    agent_changed: tokio::sync::Notify,
     process: Mutex<Option<HelperProcess>>,
     /// One composer request registered while the main-window editor owns
     /// focus. A matching helper-confirmed recording start consumes it.
@@ -162,12 +164,509 @@ pub struct HelperState {
 impl Default for HelperState {
     fn default() -> Self {
         Self {
+            agent_take: Mutex::new(None),
+            agent_changed: tokio::sync::Notify::new(),
             process: Mutex::new(None),
             composer_registration: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             respawn_failures: AtomicU32::new(0),
         }
     }
+}
+
+/// A host-owned dictation destination. No arbitrary app or window target is accepted.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentDictationTake {
+    pub take_id: String,
+    pub composer_request_id: String,
+    pub conversation_id: String,
+    pub profile: String,
+    pub window: String,
+    pub phase: String,
+    pub error: Option<String>,
+    pub error_code: Option<String>,
+    #[serde(skip)]
+    pub binding: Option<crate::mcp_server::turns::TurnBinding>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AgentDictationAction {
+    Start,
+    Stop,
+    Cancel,
+}
+
+pub(crate) fn agent_dictation_target(profile: &str, conversation_id: &str) -> AgentDictationTake {
+    AgentDictationTake {
+        take_id: uuid::Uuid::new_v4().to_string(),
+        composer_request_id: uuid::Uuid::new_v4().to_string(),
+        conversation_id: conversation_id.into(),
+        profile: profile.into(),
+        window: "main".into(),
+        phase: "starting".into(),
+        error: None,
+        error_code: None,
+        binding: None,
+    }
+}
+
+pub(crate) fn agent_dictation_status(
+    app: &AppHandle,
+    profile: &str,
+    conversation_id: &str,
+) -> Result<Option<AgentDictationTake>, AppError> {
+    let state = app.state::<HelperState>();
+    let take = state
+        .agent_take
+        .lock()
+        .map_err(|_| AppError::new("dictation_unavailable", "Dictation state is unavailable."))?;
+    Ok(take
+        .as_ref()
+        .filter(|take| take.profile == profile && take.conversation_id == conversation_id)
+        .cloned())
+}
+
+/// Cancelling a caller while waiting also revokes the take's delivery authority.
+struct AgentDictationOperationLease {
+    app: AppHandle,
+    take_id: String,
+    complete: bool,
+}
+impl Drop for AgentDictationOperationLease {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        if self
+            .app
+            .state::<HelperState>()
+            .agent_take
+            .lock()
+            .ok()
+            .is_some_and(|active| {
+                active.as_ref().is_some_and(|take| {
+                    take.take_id == self.take_id && take.phase == "deliveryClaimed"
+                })
+            })
+        {
+            return;
+        }
+        cancel_dictation_take(&self.app, Some(&self.take_id));
+        let state = self.app.state::<HelperState>();
+        set_agent_dictation_phase(
+            &state,
+            &self.take_id,
+            "failed",
+            Some("The controlling chat turn ended before dictation completed.".into()),
+        );
+        let _ = send_helper_command(
+            &state,
+            serde_json::json!({"type":"discard_recording","takeId":self.take_id}),
+        );
+    }
+}
+
+/// A main-window delivery claim validates the original host binding again
+/// immediately before text is written to a composer, even after navigation.
+#[tauri::command]
+pub async fn claim_agent_dictation_delivery(
+    app: AppHandle,
+    window: WebviewWindow,
+    take_id: String,
+    composer_request_id: String,
+) -> Result<(), AppError> {
+    if window.label() != "main" {
+        return Err(AppError::new(
+            "dictation_delivery_forbidden",
+            "Only the destination window may claim delivery.",
+        ));
+    }
+    let target = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .map_err(|_| AppError::new("dictation_unavailable", "Dictation state is unavailable."))?
+        .as_ref()
+        .filter(|target| {
+            target.take_id == take_id
+                && target.composer_request_id == composer_request_id
+                && target.phase == "delivering"
+        })
+        .cloned()
+        .ok_or_else(|| {
+            AppError::new(
+                "dictation_take_not_found",
+                "The dictation delivery expired.",
+            )
+        })?;
+    let binding = target
+        .binding
+        .as_ref()
+        .ok_or_else(|| AppError::new("turn_expired", "The dictation has no controlling turn."))?;
+    let repos = crate::commands::repositories(&app).await?;
+    crate::mcp_server::tools::revalidate_binding(Some(&app), &repos.pool, binding, &target.profile)
+        .await?;
+    let state = app.state::<HelperState>();
+    let mut active = state
+        .agent_take
+        .lock()
+        .map_err(|_| AppError::new("dictation_unavailable", "Dictation state is unavailable."))?;
+    let take = active
+        .as_mut()
+        .filter(|current| {
+            current.take_id == take_id
+                && current.composer_request_id == composer_request_id
+                && current.phase == "delivering"
+        })
+        .ok_or_else(|| {
+            AppError::new(
+                "dictation_take_not_found",
+                "The dictation delivery expired.",
+            )
+        })?;
+    // Claim commits the fixed composer insertion. Cancellation may win before
+    // this point; afterwards it must report too late rather than false success.
+    take.phase = "deliveryClaimed".into();
+    Ok(())
+}
+
+/// Dispatches a closed lifecycle operation and awaits the actual helper/UI acknowledgement.
+pub(crate) async fn agent_dictation_control(
+    app: &AppHandle,
+    action: AgentDictationAction,
+    target: AgentDictationTake,
+) -> Result<AgentDictationTake, AppError> {
+    let state = app.state::<HelperState>();
+    if matches!(action, AgentDictationAction::Start)
+        && app
+            .try_state::<ShortcutActivationState>()
+            .and_then(|state| {
+                state.controller.lock().ok().map(|controller| {
+                    controller.helper_is_listening || controller.pending_helper_take_id.is_some()
+                })
+            })
+            .unwrap_or(false)
+    {
+        return Err(AppError::new(
+            "dictation_busy",
+            "Another dictation take is starting or listening.",
+        ));
+    }
+    {
+        let mut active = state.agent_take.lock().map_err(|_| {
+            AppError::new("dictation_unavailable", "Dictation state is unavailable.")
+        })?;
+        match action {
+            AgentDictationAction::Start => {
+                if DICTATION_ACTIVE.load(Ordering::SeqCst)
+                    || active.as_ref().is_some_and(|take| {
+                        !matches!(take.phase.as_str(), "delivered" | "cancelled" | "failed")
+                    })
+                {
+                    return Err(AppError::new(
+                        "dictation_busy",
+                        "Another dictation take is active.",
+                    ));
+                }
+                *active = Some(target.clone());
+            }
+            AgentDictationAction::Stop | AgentDictationAction::Cancel => {
+                let take = active
+                    .as_mut()
+                    .filter(|take| {
+                        take.take_id == target.take_id
+                            && take.profile == target.profile
+                            && take.conversation_id == target.conversation_id
+                            && take.composer_request_id == target.composer_request_id
+                    })
+                    .ok_or_else(|| {
+                        AppError::new(
+                            "dictation_take_not_found",
+                            "The bound dictation take is no longer active.",
+                        )
+                    })?;
+                if take.phase == "deliveryClaimed" {
+                    return Err(AppError::new("dictation_delivery_in_progress","The fixed composer delivery has already been claimed and cannot be cancelled."));
+                }
+                if matches!(take.phase.as_str(), "delivered" | "cancelled" | "failed") {
+                    return Err(AppError::new(
+                        "dictation_take_finished",
+                        "The dictation take has already finished.",
+                    ));
+                }
+                take.binding = target.binding.clone();
+                take.phase = if matches!(action, AgentDictationAction::Cancel) {
+                    "cancelling"
+                } else {
+                    "finalizing"
+                }
+                .into();
+            }
+        }
+    }
+    let mut lease = AgentDictationOperationLease {
+        app: app.clone(),
+        take_id: target.take_id.clone(),
+        complete: false,
+    };
+    let window = app.get_webview_window(&target.window).ok_or_else(|| {
+        AppError::new(
+            "dictation_window_unavailable",
+            "The destination window is unavailable.",
+        )
+    })?;
+    let kind = match action {
+        AgentDictationAction::Start => "start_listening",
+        AgentDictationAction::Stop => "stop_and_paste",
+        AgentDictationAction::Cancel => "discard_recording",
+    };
+    if let Err(error) = dictation_helper_command(
+        app.clone(),
+        window,
+        app.state::<HelperState>(),
+        serde_json::json!({"type":kind,"takeId":target.take_id}),
+    ) {
+        set_agent_dictation_phase(
+            &state,
+            &target.take_id,
+            "failed",
+            Some(error.message.clone()),
+        );
+        return Err(error);
+    }
+    let completed = async {
+        loop {
+            let notified = state.agent_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let current = agent_dictation_status(app, &target.profile, &target.conversation_id)?
+                .filter(|take| take.take_id == target.take_id)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "dictation_take_replaced",
+                        "The dictation take was replaced.",
+                    )
+                })?;
+            if current.phase == "failed" {
+                return Err(AppError::new(
+                    current
+                        .error_code
+                        .unwrap_or_else(|| "dictation_failed".into()),
+                    current.error.unwrap_or_else(|| "Dictation failed.".into()),
+                ));
+            }
+            if current.phase == "cancelled" && !matches!(action, AgentDictationAction::Cancel) {
+                return Err(AppError::new(
+                    "dictation_cancelled",
+                    "The dictation take was discarded before delivery.",
+                ));
+            }
+            let done = match action {
+                AgentDictationAction::Start => current.phase == "listening",
+                AgentDictationAction::Stop => current.phase == "delivered",
+                AgentDictationAction::Cancel => current.phase == "cancelled",
+            };
+            if done {
+                return Ok(current);
+            }
+            notified.await;
+        }
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(if matches!(action, AgentDictationAction::Stop) {
+            180
+        } else {
+            20
+        }),
+        completed,
+    )
+    .await
+    {
+        Ok(result) => {
+            lease.complete = result.is_ok();
+            result
+        }
+        Err(_) => {
+            cancel_dictation_take(app, Some(&target.take_id));
+            let _ = send_helper_command(
+                &state,
+                serde_json::json!({"type":"discard_recording","takeId":target.take_id}),
+            );
+            set_agent_dictation_phase(
+                &state,
+                &target.take_id,
+                "failed",
+                Some("The dictation acknowledgement timed out.".into()),
+            );
+            let mut error=AppError::new("dictation_timeout","The dictation acknowledgement timed out; cancellation was requested. Inspect the take before retrying.");
+            error.details = Some(
+                serde_json::json!({"target":target,"delivery":"unknown","effect":"unknown","retrySafe":false}),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn set_agent_dictation_phase(state: &HelperState, id: &str, phase: &str, error: Option<String>) {
+    if let Ok(mut active) = state.agent_take.lock() {
+        if let Some(take) = active.as_mut().filter(|take| {
+            take.take_id == id
+                && !matches!(
+                    take.phase.as_str(),
+                    "delivered" | "cancelled" | "failed" | "deliveryClaimed"
+                )
+        }) {
+            take.phase = phase.into();
+            take.error = error;
+            state.agent_changed.notify_waiters();
+        }
+    }
+}
+fn fail_agent_dictation(state: &HelperState, id: &str, code: &str, message: &str) {
+    if let Ok(mut active) = state.agent_take.lock() {
+        if let Some(take) = active.as_mut().filter(|take| {
+            take.take_id == id
+                && !matches!(
+                    take.phase.as_str(),
+                    "delivered" | "cancelled" | "failed" | "deliveryClaimed"
+                )
+        }) {
+            take.phase = "failed".into();
+            take.error_code = Some(code.into());
+            take.error = Some(message.into());
+            state.agent_changed.notify_waiters();
+        }
+    }
+}
+fn observe_agent_dictation_event(app: &AppHandle, event: &serde_json::Value) {
+    let Some(state) = app.try_state::<HelperState>() else {
+        return;
+    };
+    let id = dictation_take_id_from_event(event);
+    let phase = match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("listening_started") => "listening",
+        Some("recording_discarded") => "cancelled",
+        Some("error" | "helper_unavailable") => "failed",
+        _ => return,
+    };
+    let event_error = event.get("payload");
+    if let Some(id) = id {
+        if phase == "listening" {
+            let replaced = state.agent_take.lock().ok().and_then(|active| {
+                active
+                    .as_ref()
+                    .filter(|target| target.take_id != id)
+                    .map(|target| target.take_id.clone())
+            });
+            if let Some(replaced) = replaced {
+                set_agent_dictation_phase(
+                    &state,
+                    &replaced,
+                    "failed",
+                    Some("A newer dictation take replaced this take.".into()),
+                );
+            }
+        }
+
+        // Discard after finalization is a helper cleanup, not a user cancellation:
+        // the correlated composer delivery still owns completion.
+        if phase == "cancelled"
+            && state
+                .agent_take
+                .lock()
+                .ok()
+                .and_then(|active| {
+                    active.as_ref().map(|take| {
+                        take.take_id == id
+                            && (take.phase == "deliveryClaimed"
+                                || (take.phase == "delivering"
+                                    && dictation_discard_reason_from_event(event)
+                                        != Some("escape")))
+                    })
+                })
+                .unwrap_or(false)
+        {
+            return;
+        }
+        if phase == "failed" {
+            let code = event_error
+                .and_then(|payload| payload.get("code"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("dictation_helper_failed");
+            let message = event_error
+                .and_then(|payload| payload.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("The dictation helper reported an error.");
+            fail_agent_dictation(&state, id, code, message);
+        } else {
+            set_agent_dictation_phase(&state, id, phase, None);
+        }
+    } else if phase == "failed" {
+        let id = state
+            .agent_take
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().map(|take| take.take_id.clone()));
+        if let Some(id) = id {
+            fail_agent_dictation(
+                &state,
+                &id,
+                "dictation_helper_unavailable",
+                "The dictation helper became unavailable.",
+            );
+        }
+    }
+}
+
+/// Profile-qualified deletion shared by UI and MCP; ids alone confer no access.
+pub(crate) async fn delete_history_for_profile(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    let result = sqlx::query::query("DELETE FROM dictation_history WHERE id = ? AND profile = ?")
+        .bind(id)
+        .bind(profile)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::new(
+            "dictation_not_found",
+            "The dictation was not found in this data partition.",
+        ));
+    }
+    Ok(())
+}
+
+/// Bound deletion claims the run and partition under SQLite's write lock.
+pub(crate) async fn delete_history_for_turn(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    id: &str,
+    binding: &crate::mcp_server::turns::TurnBinding,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    crate::db::repositories::guard_bound_turn(
+        &mut tx,
+        profile,
+        &binding.session_id,
+        &binding.run_id,
+    )
+    .await?;
+    let result = sqlx::query::query("DELETE FROM dictation_history WHERE id=? AND profile=?")
+        .bind(id)
+        .bind(profile)
+        .execute(&mut *tx)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::new(
+            "dictation_not_found",
+            "The dictation was not found in this data partition.",
+        ));
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 const DICTATION_TAKE_CAPTURING: u8 = 0;
@@ -1838,11 +2337,14 @@ pub async fn list_dictation_history(
 
 #[tauri::command]
 pub async fn delete_dictation_history_item(app: AppHandle, id: String) -> Result<(), AppError> {
-    crate::commands::repositories(&app)
-        .await?
-        .delete_dictation_history_item(&id)
-        .await
-        .map_err(AppError::from)
+    let profile = crate::commands::active_profile(&app);
+    let repos = crate::commands::repositories(&app).await?;
+    delete_history_for_profile(&repos.pool, &profile, &id).await?;
+    let _ = app.emit(
+        "clovy-data-changed",
+        serde_json::json!({"profile":profile,"kind":"dictations","id":id,"deleted":true}),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -1990,6 +2492,55 @@ pub fn dictation_helper_command(
     state: State<'_, HelperState>,
     command: serde_json::Value,
 ) -> Result<(), AppError> {
+    if command.get("type").and_then(serde_json::Value::as_str) == Some("agent_composer_delivered") {
+        if window.label() != "main" {
+            return Err(AppError::new(
+                "dictation_delivery_forbidden",
+                "Only the destination window can acknowledge delivery.",
+            ));
+        }
+        let mut active = state.agent_take.lock().map_err(|_| {
+            AppError::new("dictation_unavailable", "Dictation state is unavailable.")
+        })?;
+        let take = active
+            .as_mut()
+            .filter(|take| {
+                command.get("takeId").and_then(serde_json::Value::as_str)
+                    == Some(take.take_id.as_str())
+                    && command
+                        .get("composerRequestId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(take.composer_request_id.as_str())
+                    && take.phase == "deliveryClaimed"
+            })
+            .ok_or_else(|| {
+                AppError::new(
+                    "dictation_take_not_found",
+                    "The composer delivery has expired.",
+                )
+            })?;
+        take.phase = if command.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            "delivered"
+        } else {
+            "failed"
+        }
+        .into();
+        let take_id = take.take_id.clone();
+        let delivered = take.phase == "delivered";
+        if !delivered {
+            take.error_code = Some("dictation_composer_delivery_failed".into());
+            take.error=Some("The destination composer could not accept this dictation. Saved text remains in dictation history.".into());
+        }
+        drop(active);
+        state.agent_changed.notify_waiters();
+        let event = if delivered {
+            serde_json::json!({"type":"paste_completed","payload":{"composerRequestId":command.get("composerRequestId")}})
+        } else {
+            app_error_event(AppError::new("dictation_composer_delivery_failed","The destination composer could not accept the dictation. Its saved text remains in dictation history."))
+        };
+        emit_dictation_take_id_event(&app, &take_id, event);
+        return Ok(());
+    }
     if let Some(request_id) = command.get("composerRequestId") {
         let valid = request_id
             .as_str()
@@ -5541,7 +6092,18 @@ async fn transcribe_recording_ready_inner(
     // Pin the owning profile now, like the paste target above: dictation
     // processing can take seconds, and a profile switch mid-flight must not
     // relabel this dictation's history row to the new profile.
-    let history_profile = crate::commands::active_profile(app);
+    let history_profile = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .ok()
+        .and_then(|active| {
+            active
+                .as_ref()
+                .filter(|target| target.take_id == take.id())
+                .map(|target| target.profile.clone())
+        })
+        .unwrap_or_else(|| crate::commands::active_profile(app));
     let low_speech_evidence = recording_has_low_speech_evidence(&recording);
     if low_speech_evidence {
         tracing::info!(
@@ -5653,7 +6215,17 @@ async fn transcribe_recording_ready_inner(
     }
     let outcome = pipeline.outcome;
     let mut delivery_claim = None;
-    let history_already_persisted = if low_speech_evidence {
+    let agent_owned = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .ok()
+        .is_some_and(|active| {
+            active
+                .as_ref()
+                .is_some_and(|target| target.take_id == take.id())
+        });
+    let history_already_persisted = if low_speech_evidence || agent_owned {
         let recovery_transcript = outcome
             .transcript
             .as_ref()
@@ -5682,19 +6254,24 @@ async fn transcribe_recording_ready_inner(
                         return;
                     };
                     match pending.commit().await {
-                        Ok(_) => {
+                        Ok(item) => {
+                            let _=app.emit("clovy-data-changed",serde_json::json!({"profile":history_profile,"kind":"dictations","id":item.id}));
                             delivery_claim = Some(claim);
                             true
                         }
                         Err(error) => {
                             let error = dictation_history_save_error(error);
-                            retain_low_speech_evidence_recording(
-                                app,
-                                &claim,
-                                &audio_path,
-                                transcript,
-                                &error,
-                            );
+                            if agent_owned {
+                                retain_agent_history_failure(app, &claim, &error);
+                            } else {
+                                retain_low_speech_evidence_recording(
+                                    app,
+                                    &claim,
+                                    &audio_path,
+                                    transcript,
+                                    &error,
+                                );
+                            }
                             return;
                         }
                     }
@@ -5705,13 +6282,17 @@ async fn transcribe_recording_ready_inner(
                         remove_cancelled_dictation_audio(&audio_path, None);
                         return;
                     };
-                    retain_low_speech_evidence_recording(
-                        app,
-                        &claim,
-                        &audio_path,
-                        transcript,
-                        &error,
-                    );
+                    if agent_owned {
+                        retain_agent_history_failure(app, &claim, &error);
+                    } else {
+                        retain_low_speech_evidence_recording(
+                            app,
+                            &claim,
+                            &audio_path,
+                            transcript,
+                            &error,
+                        );
+                    }
                     return;
                 }
             }
@@ -5734,6 +6315,46 @@ async fn transcribe_recording_ready_inner(
     );
 }
 
+fn retain_agent_history_failure(app: &AppHandle, claim: &DictationDeliveryClaim, error: &AppError) {
+    // Keep the stopped take's audio for recovery; do not send clipboard or app
+    // insertion commands when an agent's durable history write failed.
+    set_agent_dictation_phase(
+        &app.state::<HelperState>(),
+        claim.take.id(),
+        "failed",
+        Some(error.message.clone()),
+    );
+    update_shortcut_helper_finalizing(app, false);
+    emit_dictation_take_event(app, &claim.take, app_error_event(error.clone()));
+}
+fn agent_composer_text(outcome: &DictationTranscriptionOutcome) -> Option<&str> {
+    if outcome
+        .helper_command
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        == Some("paste_text")
+    {
+        return outcome
+            .helper_command
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty());
+    }
+    if outcome
+        .event
+        .as_ref()
+        .and_then(|event| event.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("agent_session_prompt")
+    {
+        return outcome
+            .transcript
+            .as_ref()
+            .map(|transcript| transcript.text.as_str());
+    }
+    None
+}
+
 fn deliver_dictation_outcome(
     app: &AppHandle,
     take: &DictationTakeToken,
@@ -5744,7 +6365,7 @@ fn deliver_dictation_outcome(
     history_profile: &str,
     composer_request_id: Option<&str>,
 ) {
-    let mut helper_command = outcome.helper_command;
+    let mut helper_command = outcome.helper_command.clone();
     let claim = delivery_claim.or_else(|| take.try_begin_delivery());
     let Some(claim) = claim else {
         let _ = std::fs::remove_file(audio_path);
@@ -5761,6 +6382,64 @@ fn deliver_dictation_outcome(
                 history_profile.to_string(),
             );
         }
+    }
+    let agent_target = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .ok()
+        .and_then(|active| {
+            active
+                .as_ref()
+                .filter(|target| target.take_id == take.id())
+                .cloned()
+        });
+    if let Some(target) = agent_target {
+        if matches!(target.phase.as_str(), "cancelling" | "cancelled" | "failed") {
+            let _ = std::fs::remove_file(audio_path);
+            return;
+        }
+        // Never paste an agent-owned take to the foreground app. Native cleanup
+        // and composer delivery are separate, correlated operations.
+        let Some(text) = agent_composer_text(&outcome) else {
+            set_agent_dictation_phase(
+                &app.state::<HelperState>(),
+                &target.take_id,
+                "failed",
+                Some("No deliverable dictation text was produced.".into()),
+            );
+            let _ = send_claimed_dictation_take_command(
+                app,
+                &claim,
+                serde_json::json!({"type":"discard_recording","takeId":target.take_id}),
+            );
+            let _ = std::fs::remove_file(audio_path);
+            return;
+        };
+        set_agent_dictation_phase(
+            &app.state::<HelperState>(),
+            &target.take_id,
+            "delivering",
+            None,
+        );
+        let _ = send_claimed_dictation_take_command(
+            app,
+            &claim,
+            serde_json::json!({"type":"discard_recording","takeId":target.take_id}),
+        );
+
+        let result = app.get_webview_window(&target.window).ok_or_else(|| AppError::new("dictation_window_unavailable", "The destination window is unavailable.")).and_then(|window| window.emit("clovy://agent-dictation-delivery", serde_json::json!({"takeId":target.take_id,"composerRequestId":target.composer_request_id,"conversationId":target.conversation_id,"profile":target.profile,"text":text})).map_err(|error| AppError::new("dictation_delivery_failed",error.to_string())));
+        if let Err(error) = result {
+            set_agent_dictation_phase(
+                &app.state::<HelperState>(),
+                &target.take_id,
+                "failed",
+                Some(error.message),
+            );
+        }
+        update_shortcut_helper_finalizing(app, false);
+        let _ = std::fs::remove_file(audio_path);
+        return;
     }
     if helper_command
         .get("type")
@@ -7301,6 +7980,7 @@ fn app_error_event(error: AppError) -> serde_json::Value {
 }
 
 fn emit_dictation_event_value(app: &AppHandle, mut event: serde_json::Value) {
+    observe_agent_dictation_event(app, &event);
     sync_update_gate_take(app, &event);
     annotate_silent_error(&mut event);
     let event_type = event.get("type").and_then(serde_json::Value::as_str);
@@ -13264,5 +13944,84 @@ mod tests {
         });
 
         assert!(is_silent_transcription_error(&event));
+    }
+}
+
+#[cfg(test)]
+mod agent_management_tests {
+    use super::*;
+    #[tokio::test]
+    async fn deleting_history_is_atomic_and_profile_qualified() {
+        let pool = sqlx_sqlite::SqlitePool::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query::query("CREATE TABLE dictation_history(id TEXT PRIMARY KEY,profile TEXT NOT NULL,text TEXT NOT NULL)").execute(&pool).await.unwrap();
+        sqlx::query::query(
+            "INSERT INTO dictation_history VALUES('same-id','owner','Synthetic private text')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            delete_history_for_profile(&pool, "other", "same-id")
+                .await
+                .unwrap_err()
+                .code,
+            "dictation_not_found"
+        );
+        let count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM dictation_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        delete_history_for_profile(&pool, "owner", "same-id")
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM dictation_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    #[test]
+    fn composer_delivery_never_runs_wake_word_actions_or_pastes_quarantined_text() {
+        let transcript = TranscriptionProviderResult {
+            text: "Hey Clovy inspect notes".into(),
+            language: None,
+            provider: "fixture".into(),
+        };
+        let outcome = DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({"type":"discard_recording"}),
+            event: Some(
+                serde_json::json!({"type":"agent_session_prompt","payload":{"prompt":"inspect notes"}}),
+            ),
+            transcript: Some(transcript),
+            quarantine_transcript: None,
+        };
+        assert_eq!(
+            agent_composer_text(&outcome),
+            Some("Hey Clovy inspect notes")
+        );
+        let outcome = quarantine_low_speech_evidence_outcome(outcome, true);
+        assert_eq!(agent_composer_text(&outcome), None);
+    }
+    #[test]
+    fn wrong_take_and_late_confirmations_cannot_resurrect_cancelled_delivery() {
+        let state = HelperState::default();
+        let mut target = agent_dictation_target("owner", "conversation-a");
+        target.phase = "listening".into();
+        *state.agent_take.lock().unwrap() = Some(target.clone());
+        set_agent_dictation_phase(&state, "other-take", "delivering", None);
+        assert_eq!(
+            state.agent_take.lock().unwrap().as_ref().unwrap().phase,
+            "listening"
+        );
+        set_agent_dictation_phase(&state, &target.take_id, "cancelled", None);
+        set_agent_dictation_phase(&state, &target.take_id, "listening", None);
+        set_agent_dictation_phase(&state, &target.take_id, "delivering", None);
+        let current = state.agent_take.lock().unwrap().clone().unwrap();
+        assert_eq!(current.phase, "cancelled");
+        assert_eq!(current.composer_request_id, target.composer_request_id);
+        assert_eq!(current.conversation_id, "conversation-a");
     }
 }

@@ -600,26 +600,38 @@ pub fn labeled_transcript_from_sources(sources: &[SourceTranscriptInput]) -> Str
         .join("\n")
 }
 
-fn plain_transcript_from_sources(sources: &[SourceTranscriptInput]) -> String {
-    let mut sources = sources
+/// Use the same authoritative selection as note reads and search. The
+/// repository orders sessions before turns; sorting turn_index again here
+/// would interleave separate recordings whose turn counters restart at zero.
+async fn authoritative_generation_transcript(
+    repos: &Repositories,
+    note_id: &str,
+) -> Result<(String, bool), AppError> {
+    let rows = repos.source_transcripts(note_id).await?;
+    let valid = rows
         .iter()
-        .filter(|source| source.valid && !source.text.trim().is_empty())
+        .filter(|row| row.status == "succeeded" && !row.text.trim().is_empty())
         .collect::<Vec<_>>();
-    sources.sort_by(|left, right| {
-        left.turn_index
-            .unwrap_or(i64::MAX)
-            .cmp(&right.turn_index.unwrap_or(i64::MAX))
-            .then_with(|| {
-                left.start_ms
-                    .unwrap_or(i64::MAX)
-                    .cmp(&right.start_ms.unwrap_or(i64::MAX))
-            })
-    });
-    sources
+    let labels = valid
+        .iter()
+        .any(|row| row.source.as_deref() == Some("system"));
+    let text = valid
         .into_iter()
-        .map(|source| source.text.trim())
+        .map(|row| {
+            if labels {
+                let source = if row.source.as_deref() == Some("system") {
+                    "System"
+                } else {
+                    "Microphone"
+                };
+                format!("{source}: {}", row.text.trim())
+            } else {
+                row.text.trim().to_string()
+            }
+        })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    Ok((text, labels))
 }
 
 pub fn coalesce_source_transcripts(
@@ -1008,13 +1020,15 @@ pub(crate) async fn process_saved_audio(
         return Err(error);
     }
     let generation_started = Instant::now();
+    let (generation_transcript, transcript_source_labels) =
+        authoritative_generation_transcript(repos, note_id).await?;
     let generated = match generate_note_from_transcript(GenerationRequest {
         provider: crate::providers::generation_provider(),
         operation_id: Some(note_id.to_string()),
         title,
         existing_generated_note,
-        transcript: transcript.text,
-        transcript_source_labels: false,
+        transcript: generation_transcript,
+        transcript_source_labels,
         manual_notes,
         language: transcript.language,
         recorded_on: note_recorded_on(repos, session_id).await,
@@ -1837,12 +1851,8 @@ async fn process_saved_source_audio_pipeline(
             .await?;
         return Err(error);
     }
-    let transcript_source_labels = source_mode == RecordingSourceMode::MicrophonePlusSystem;
-    let generation_transcript = if transcript_source_labels {
-        labeled_transcript_from_sources(&valid_sources)
-    } else {
-        plain_transcript_from_sources(&valid_sources)
-    };
+    let (generation_transcript, transcript_source_labels) =
+        authoritative_generation_transcript(repos, note_id).await?;
     if let Err(error) = transition_note_processing_stage(
         repos,
         note_id,
@@ -5405,6 +5415,92 @@ mod tests {
     /// A transcription source the note cleanup engine does not run for, so
     /// pipeline tests never reach a real cleanup provider.
     const TEST_TRANSCRIPTION_PROVIDER: &str = "test";
+
+    #[tokio::test]
+    async fn generation_uses_authoritative_sessions_and_keeps_equal_legacy_records() {
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrations::run_migrations(&pool).await.unwrap();
+        let repos = Repositories::new(pool);
+        let note = repos.create_note("default", None).await.unwrap();
+        for (id, started) in [("one", "2026-01-01"), ("two", "2026-01-02")] {
+            sqlx::query::query("INSERT INTO recording_sessions (id,note_id,status,started_at) VALUES (?,?,'completed',?)")
+                .bind(id).bind(&note.id).bind(started).execute(&repos.pool).await.unwrap();
+        }
+        let artifact = repos
+            .create_audio_artifact(
+                &note.id,
+                "one",
+                "fixture.wav",
+                1000,
+                44,
+                "synthetic-checksum",
+            )
+            .await
+            .unwrap();
+        for (id, session, source, turn, text, status) in [
+            (
+                "old-aggregate",
+                Some("one"),
+                "microphone",
+                None,
+                "replaced",
+                "succeeded",
+            ),
+            (
+                "first-turn",
+                Some("one"),
+                "microphone",
+                Some(3),
+                "earlier recording",
+                "succeeded",
+            ),
+            (
+                "second-turn",
+                Some("two"),
+                "system",
+                Some(0),
+                "later recording",
+                "succeeded",
+            ),
+            (
+                "legacy-one",
+                None,
+                "microphone",
+                None,
+                "repeated",
+                "succeeded",
+            ),
+            (
+                "legacy-two",
+                None,
+                "microphone",
+                None,
+                "repeated",
+                "succeeded",
+            ),
+            (
+                "failed",
+                Some("two"),
+                "system",
+                Some(1),
+                "failed text",
+                "failed",
+            ),
+        ] {
+            sqlx::query::query("INSERT INTO transcripts (id,note_id,audio_artifact_id,recording_session_id,source,turn_index,text,status,provider,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'test','2026-01-03','2026-01-03')")
+                .bind(id).bind(&note.id).bind(&artifact.id).bind(session).bind(source).bind(turn).bind(text).bind(status)
+                .execute(&repos.pool).await.unwrap();
+        }
+        let (text, labels) = authoritative_generation_transcript(&repos, &note.id)
+            .await
+            .unwrap();
+        assert!(labels);
+        assert_eq!(text, "Microphone: earlier recording\nSystem: later recording\nMicrophone: repeated\nMicrophone: repeated");
+    }
 
     struct DropNotifier(Option<tokio::sync::mpsc::UnboundedSender<()>>);
 

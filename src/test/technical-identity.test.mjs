@@ -265,19 +265,12 @@ describe("Clovy technical identity", () => {
     expect(noteDrag).toContain('LEGACY_NOTE_DND_MIME = "application/x-june-note-id"');
   });
 
-  it("publishes the Obsidian skill under Clovy with a rollback-safe June alias", async () => {
-    const [bundledSkill, skillIdentity, agentApi] = await Promise.all([
-      read("src-tauri/resources/agent-skills/clovy-obsidian/SKILL.md"),
-      read("src-tauri/src/agent_sessions/skill_identity.rs"),
-      read("src-tauri/src/agent_sessions/api.rs"),
-    ]);
-
+  it("ships the Obsidian skill with canonical Clovy metadata", async () => {
+    const bundledSkill = await read("src-tauri/resources/agent-skills/clovy-obsidian/SKILL.md");
     expect(bundledSkill).toMatch(/^name: clovy-obsidian$/m);
-    expect(skillIdentity).toContain('pub const CLOVY_OBSIDIAN_SKILL_ID: &str = "clovy-obsidian"');
-    expect(skillIdentity).toContain('pub const LEGACY_OBSIDIAN_SKILL_ID: &str = "june-obsidian"');
-    expect(skillIdentity).toContain("write_skill_ids");
-    expect(agentApi).toContain("write_skill_ids(skill_id)");
-    expect(agentApi).toContain("read_skill_ids(&canonical_id)");
+    expect(bundledSkill).not.toMatch(/^name: june-obsidian$/m);
+    // Alias read/write behavior and conflicting stored settings are exercised
+    // by the production Rust identity and skill-admin regression suites.
   });
 
   it("uses Clovy for ephemeral build and dictation artifacts", async () => {

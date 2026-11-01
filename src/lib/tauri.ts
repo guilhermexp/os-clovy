@@ -1077,9 +1077,16 @@ export async function openPrivacySettings(
 export async function startRecording(
   noteId: string,
   sourceMode: RecordingSourceMode = "microphoneOnly",
+  expectedProfile?: string,
+  agentRequestId?: string,
 ) {
   return invoke<RecordingSessionDto>("start_recording", {
-    request: { noteId, sourceMode },
+    request: {
+      noteId,
+      sourceMode,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
@@ -1103,15 +1110,31 @@ export async function startMeetingRecording(
   });
 }
 
-export async function pauseRecording(sessionId: string) {
+export async function pauseRecording(
+  sessionId: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<RecordingStatusDto>("pause_recording", {
-    request: { sessionId },
+    request: {
+      sessionId,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
-export async function resumeRecording(sessionId: string) {
+export async function resumeRecording(
+  sessionId: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<RecordingStatusDto>("resume_recording", {
-    request: { sessionId },
+    request: {
+      sessionId,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
@@ -1130,14 +1153,25 @@ export async function setRecordingPresenceBounds(
   });
 }
 
-export async function finishRecording(sessionId: string) {
+export async function finishRecording(
+  sessionId: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<FinishRecordingResponse>("finish_recording", {
-    request: { sessionId },
+    request: {
+      sessionId,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
 export type ResolveAgentRecorderRequestInput = {
+  errorDetails?: unknown;
   requestId: string;
+  sessionId?: string;
+  status?: RecordingStatusDto;
   ok: boolean;
   noteId?: string;
   noteTitle?: string;
@@ -1145,21 +1179,44 @@ export type ResolveAgentRecorderRequestInput = {
   errorMessage?: string;
 };
 
+export async function validateAgentRecorderRequest(requestId: string) {
+  return invoke<void>("validate_agent_recorder_request", { requestId });
+}
+
 export async function resolveAgentRecorderRequest(request: ResolveAgentRecorderRequestInput) {
   return invoke<void>("resolve_agent_recorder_request", { request });
 }
 
-export async function retryProcessing(noteId: string, recordingSessionId?: string) {
+export async function retryProcessing(
+  noteId: string,
+  recordingSessionId?: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<NoteDto>("retry_processing", {
-    request: recordingSessionId
-      ? { noteId, step: "all", recordingSessionId }
-      : { noteId, step: "all" },
+    request: {
+      noteId,
+      step: "all",
+      ...(recordingSessionId ? { recordingSessionId } : {}),
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
-export async function recoverRecording(sessionId: string, action: "validate" | "discard") {
+export async function recoverRecording(
+  sessionId: string,
+  action: "validate" | "discard",
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<NoteDto>("recover_recording", {
-    request: { sessionId, action },
+    request: {
+      sessionId,
+      action,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
@@ -1355,6 +1412,10 @@ export async function setDictationLanguage(language?: string) {
   return invoke<DictationSettingsDto>("set_dictation_language", {
     language: language || undefined,
   });
+}
+
+export async function claimAgentDictationDelivery(takeId: string, composerRequestId: string) {
+  return invoke<void>("claim_agent_dictation_delivery", { takeId, composerRequestId });
 }
 
 export async function dictationHelperCommand(command: Record<string, unknown>) {

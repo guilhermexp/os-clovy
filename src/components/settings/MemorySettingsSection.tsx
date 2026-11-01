@@ -8,6 +8,7 @@ import { IconTrashCanSimple } from "central-icons/IconTrashCanSimple";
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { formatDate, useT } from "../../i18n";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import { useProjectMemoryDemo } from "../../lib/project-memory-demo";
 import {
   createMemory,
@@ -51,6 +52,20 @@ export function MemorySettingsSection({
   const [error, setError] = useState<string>();
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<string>(initialFolderFilter ?? SCOPE_ALL);
+  useClovyDataChanged("memories", async (_change, isCurrent) => {
+    try {
+      const [nextMemories, settings] = await Promise.all([
+        listMemories(undefined, true),
+        memorySettings(),
+      ]);
+      if (!isCurrent()) return;
+      setMemories(sortNewestFirst(nextMemories));
+      setEnabled(settings.enabled);
+      setError(undefined);
+    } catch (caught) {
+      if (isCurrent()) setError(messageFromError(caught));
+    }
+  });
 
   // __projectMemoryDemo() (dev console): populate the manager with sample
   // memories, spread across real projects, to design the list at scale.

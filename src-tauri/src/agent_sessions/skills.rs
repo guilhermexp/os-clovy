@@ -9,6 +9,12 @@ pub fn seed_bundled_skills(app: &AppHandle) {
     else {
         return;
     };
+    if !super::skill_identity::managed_root_is_writable(&managed_root, &skill_roots(app)) {
+        tracing::warn!(
+            "managed skill storage aliases read-only global skills; bundled seeding skipped"
+        );
+        return;
+    }
     let resource_root = app
         .path()
         .resource_dir()
@@ -36,6 +42,9 @@ pub fn seed_bundled_skills(app: &AppHandle) {
             continue;
         }
         let skill_id = entry.file_name().to_string_lossy().into_owned();
+        if !super::skill_identity::valid_skill_id(&skill_id) {
+            continue;
+        }
         let dest_dir = managed_root.join(&skill_id);
         let dest_file = dest_dir.join("SKILL.md");
         if dest_file.is_file() {
@@ -45,12 +54,21 @@ pub fn seed_bundled_skills(app: &AppHandle) {
             tracing::warn!(?error, skill = %skill_id, "could not create managed skill directory");
             continue;
         }
-        let temp = dest_dir.join(".SKILL.md.tmp");
+        let Ok(canonical_root) = managed_root.canonicalize() else {
+            continue;
+        };
+        let Ok(canonical_dir) = dest_dir.canonicalize() else {
+            continue;
+        };
+        if !canonical_dir.starts_with(&canonical_root) {
+            continue;
+        }
+        let temp = canonical_dir.join(format!(".SKILL.{}.tmp", uuid::Uuid::new_v4()));
         if let Err(error) = std::fs::copy(&skill_file, &temp) {
             tracing::warn!(?error, skill = %skill_id, "could not copy bundled skill");
             continue;
         }
-        if let Err(error) = std::fs::rename(&temp, &dest_file) {
+        if let Err(error) = std::fs::rename(&temp, canonical_dir.join("SKILL.md")) {
             tracing::warn!(?error, skill = %skill_id, "could not finalize bundled skill");
             let _ = std::fs::remove_file(&temp);
         }
@@ -58,6 +76,162 @@ pub fn seed_bundled_skills(app: &AppHandle) {
     if let Err(error) = reconcile_managed_obsidian_skill(&managed_root) {
         tracing::warn!(?error, "could not publish the legacy Obsidian skill alias");
     }
+}
+
+/// Shared UI, MCP and run-loader roots. The first root is managed and editable.
+pub(crate) fn skill_roots(app: &AppHandle) -> Vec<(PathBuf, bool)> {
+    let mut roots = crate::app_paths::app_data_dir(app)
+        .ok()
+        .map(|path| (path.join("agents").join("skills"), true))
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push((PathBuf::from(home).join(".agents").join("skills"), false));
+    }
+    roots
+}
+
+pub(crate) fn skill_description(text: &str) -> Option<String> {
+    let mut lines = text.lines().map(str::trim);
+    if lines.next() == Some("---") {
+        for line in &mut lines {
+            if line == "---" {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                if key.trim() == "description" {
+                    let value = value.trim().trim_matches(['"', '\'']);
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    lines
+        .find(|line| !line.is_empty() && !line.starts_with('#') && *line != "---")
+        .map(str::to_string)
+}
+
+fn skill_read_error(error: std::io::Error) -> crate::domain::types::AppError {
+    let code = if error.kind() == std::io::ErrorKind::InvalidData
+        && error.to_string() == "Skill content exceeds 512 KiB."
+    {
+        "agent_skill_too_large"
+    } else {
+        "agent_skill_read_failed"
+    };
+    crate::domain::types::AppError::new(code, error.to_string())
+}
+
+pub(crate) async fn catalog_from_roots(
+    roots: Vec<(PathBuf, bool)>,
+    overrides: &std::collections::HashMap<String, bool>,
+) -> Result<Vec<serde_json::Value>, crate::domain::types::AppError> {
+    use super::skill_identity::inspect_skills;
+    let mut result = Vec::new();
+    for inspected in inspect_skills(&roots, overrides) {
+        let enabled = inspected.enabled();
+        let readable = inspected.readable();
+        let configured_enabled = inspected.configured_enabled;
+        let skill = inspected.skill;
+        let (description, error) = match inspected.content {
+            Ok(content) => (
+                skill_description(&content).unwrap_or_else(|| "Clovy agent skill".into()),
+                None,
+            ),
+            Err(error) => {
+                let error = skill_read_error(error);
+                let message = if error.code == "agent_skill_too_large" {
+                    "Skill content exceeds 512 KiB."
+                } else {
+                    "Skill instructions could not be read as UTF-8 text."
+                };
+                (
+                    format!("Unavailable skill: {message}"),
+                    Some(serde_json::json!({"code":error.code,"message":message})),
+                )
+            }
+        };
+        result.push(serde_json::json!({"id":skill.id,"name":skill.id,"description":description,"source":if skill.managed {"managed"} else {"user_global"},"enabled":enabled,"configuredEnabled":configured_enabled,"readable":readable,"error":error,"editable":skill.managed,"root":skill.root}));
+    }
+    Ok(result)
+}
+
+pub(crate) async fn read_from_roots(
+    roots: &[(PathBuf, bool)],
+    id: &str,
+) -> Result<serde_json::Value, crate::domain::types::AppError> {
+    use super::skill_identity::{
+        canonical_skill_id, discover_skills, read_skill_content, valid_skill_id,
+    };
+    use crate::domain::types::AppError;
+    if !valid_skill_id(id) {
+        return Err(AppError::new("agent_skill_invalid", "Skill id is invalid."));
+    }
+    let skill = discover_skills(roots)
+        .into_iter()
+        .find(|skill| skill.id == canonical_skill_id(id))
+        .ok_or_else(|| AppError::new("agent_skill_not_found", "Skill was not found."))?;
+    let content = read_skill_content(&skill.path).map_err(skill_read_error)?;
+    Ok(
+        serde_json::json!({"name":skill.id,"content":content,"path":skill.path,"readOnly":!skill.managed}),
+    )
+}
+
+pub(crate) async fn update_from_roots(
+    roots: &[(PathBuf, bool)],
+    id: &str,
+    content: &str,
+) -> Result<(), crate::domain::types::AppError> {
+    use super::skill_identity::{
+        canonical_skill_id, discover_skills, update_managed_skill, valid_skill_id, MAX_SKILL_BYTES,
+    };
+    use crate::domain::types::AppError;
+    if !valid_skill_id(id) {
+        return Err(AppError::new("agent_skill_invalid", "Skill id is invalid."));
+    }
+    if content.len() > MAX_SKILL_BYTES {
+        return Err(AppError::new(
+            "agent_skill_too_large",
+            "Skill content exceeds 512 KiB.",
+        ));
+    }
+    let skill = discover_skills(roots)
+        .into_iter()
+        .find(|skill| skill.id == canonical_skill_id(id))
+        .ok_or_else(|| AppError::new("agent_skill_not_found", "Skill was not found."))?;
+    if !skill.managed {
+        return Err(AppError::new(
+            "agent_skill_read_only",
+            "User-global skills are read-only in Clovy.",
+        ));
+    }
+    let root = roots
+        .iter()
+        .find(|(root, managed)| {
+            *managed
+                && super::skill_identity::read_skill_ids(id)
+                    .iter()
+                    .any(|read_id| {
+                        super::skill_identity::contained_skill_file(root, read_id)
+                            .is_some_and(|path| path == skill.path)
+                    })
+        })
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_skill_read_only",
+                "Managed skill storage is unavailable.",
+            )
+        })?;
+    if !super::skill_identity::managed_root_is_writable(&root.0, roots) {
+        return Err(AppError::new(
+            "agent_skill_read_only",
+            "Managed skill storage overlaps read-only global skills.",
+        ));
+    }
+    update_managed_skill(&root.0, id, content)
+        .map_err(|error| AppError::new("agent_skill_write_failed", error.to_string()))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -114,5 +288,184 @@ mod tests {
         assert!(profile.contains("(deny file-write*)"));
         assert!(profile.contains("/Users/example/Clovy Workspace"));
         assert!(!profile.contains("(allow file-write*)"));
+    }
+}
+
+/// A bound skill update has one admission order with Stop. File replacement is
+/// synchronous and bounded while the database writer reserves the caller run.
+pub(crate) async fn update_for_turn(
+    pool: &sqlx_sqlite::SqlitePool,
+    roots: &[(PathBuf, bool)],
+    id: &str,
+    content: &str,
+    turn: (&str, &str, &str),
+) -> Result<(), crate::domain::types::AppError> {
+    let (profile, session, run) = turn;
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    crate::db::repositories::guard_bound_turn(&mut transaction, profile, session, run).await?;
+    update_from_roots(roots, id, content).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn set_enabled_from_roots(
+    pool: &sqlx_sqlite::SqlitePool,
+    roots: &[(PathBuf, bool)],
+    id: &str,
+    enabled: bool,
+    turn: Option<(&str, &str, &str)>,
+) -> Result<(), crate::domain::types::AppError> {
+    use super::skill_identity::{canonical_skill_id, discover_skills, valid_skill_id};
+    use crate::domain::types::AppError;
+    if !valid_skill_id(id) {
+        return Err(AppError::new("agent_skill_invalid", "Skill id is invalid."));
+    }
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if let Some((profile, session, run)) = turn {
+        crate::db::repositories::guard_bound_turn(&mut transaction, profile, session, run).await?;
+    }
+    let id = canonical_skill_id(id);
+    let skill = discover_skills(roots)
+        .into_iter()
+        .find(|skill| skill.id == id)
+        .ok_or_else(|| AppError::new("agent_skill_not_found", "Skill was not found."))?;
+    if !skill.managed {
+        return Err(AppError::new(
+            "agent_skill_read_only",
+            "User-global skills are read-only in Clovy.",
+        ));
+    }
+    sqlx::query::query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) VALUES (?, ?, 1, ?) ON CONFLICT(skill_id) DO UPDATE SET enabled = excluded.enabled, managed = excluded.managed, updated_at = excluded.updated_at")
+        .bind(id).bind(enabled).bind(crate::db::repositories::timestamp()).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod bound_admin_tests {
+    use super::*;
+    use crate::{approval_broker::testing::TestBroker, llm::cli::CliKind};
+    #[tokio::test]
+    async fn stopped_turn_cannot_replace_or_enable_managed_skill() {
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Claude, true).await;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("example")).unwrap();
+        let file = directory.path().join("example/SKILL.md");
+        std::fs::write(&file, "Original").unwrap();
+        let roots = vec![(directory.path().to_path_buf(), true)];
+        sqlx::query::query("UPDATE agent_runs SET status = 'cancelled' WHERE id = ?")
+            .bind(&binding.run_id)
+            .execute(broker.pool())
+            .await
+            .unwrap();
+        let turn = (
+            "default",
+            binding.session_id.as_str(),
+            binding.run_id.as_str(),
+        );
+        assert_eq!(
+            update_for_turn(broker.pool(), &roots, "example", "Denied", turn)
+                .await
+                .unwrap_err()
+                .code,
+            "turn_expired"
+        );
+        assert_eq!(
+            set_enabled_from_roots(broker.pool(), &roots, "example", false, Some(turn))
+                .await
+                .unwrap_err()
+                .code,
+            "turn_expired"
+        );
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "Original");
+        let count: i64 = sqlx::query_scalar::query_scalar(
+            "SELECT COUNT(*) FROM agent_skill_settings WHERE skill_id='example'",
+        )
+        .fetch_one(broker.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+mod catalog_content_regressions {
+    use super::super::skill_identity::MAX_SKILL_BYTES;
+    use super::*;
+    #[tokio::test]
+    async fn invalid_global_content_does_not_block_valid_admin_or_active_catalog() {
+        let managed = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        for (root, id) in [
+            (managed.path(), "valid"),
+            (managed.path(), "repair"),
+            (global.path(), "oversized"),
+            (global.path(), "invalid-utf8"),
+        ] {
+            std::fs::create_dir(root.join(id)).unwrap();
+        }
+        std::fs::write(managed.path().join("valid/SKILL.md"), "Valid instructions").unwrap();
+        std::fs::write(
+            managed.path().join("repair/SKILL.md"),
+            vec![b'x'; MAX_SKILL_BYTES + 1],
+        )
+        .unwrap();
+        std::fs::write(
+            global.path().join("oversized/SKILL.md"),
+            vec![b'x'; MAX_SKILL_BYTES + 1],
+        )
+        .unwrap();
+        std::fs::write(global.path().join("invalid-utf8/SKILL.md"), [0xff, 0xfe]).unwrap();
+        let roots = vec![(managed.path().into(), true), (global.path().into(), false)];
+        let overrides = std::collections::HashMap::from([("oversized".into(), false)]);
+        let catalog = catalog_from_roots(roots.clone(), &overrides).await.unwrap();
+        assert_eq!(catalog.len(), 4);
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|entry| entry["enabled"] == true)
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["valid"]
+        );
+        let invalid = catalog
+            .iter()
+            .find(|entry| entry["id"] == "invalid-utf8")
+            .unwrap();
+        assert_eq!(invalid["readable"], false);
+        assert_eq!(invalid["configuredEnabled"], true);
+        assert_eq!(invalid["error"]["code"], "agent_skill_read_failed");
+        let oversized = catalog
+            .iter()
+            .find(|entry| entry["id"] == "oversized")
+            .unwrap();
+        assert_eq!(oversized["enabled"], false);
+        assert_eq!(oversized["configuredEnabled"], false);
+        assert_eq!(oversized["error"]["code"], "agent_skill_too_large");
+        assert_eq!(
+            read_from_roots(&roots, "oversized").await.unwrap_err().code,
+            "agent_skill_too_large"
+        );
+        assert_eq!(
+            read_from_roots(&roots, "invalid-utf8")
+                .await
+                .unwrap_err()
+                .code,
+            "agent_skill_read_failed"
+        );
+        update_from_roots(&roots, "valid", "Edited valid")
+            .await
+            .unwrap();
+        update_from_roots(&roots, "repair", "Repaired managed instructions")
+            .await
+            .unwrap();
+        let repaired = catalog_from_roots(roots, &overrides).await.unwrap();
+        assert!(repaired
+            .iter()
+            .find(|entry| entry["id"] == "repair")
+            .unwrap()["enabled"]
+            .as_bool()
+            .unwrap());
     }
 }

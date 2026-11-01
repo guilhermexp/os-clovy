@@ -113,6 +113,23 @@ impl ActivityShared {
         Ok(settings)
     }
 
+    pub(crate) fn update_settings_checked(
+        &self,
+        path: &std::path::Path,
+        authorize: impl FnOnce() -> Result<(), crate::domain::types::AppError>,
+        change: impl FnOnce(&mut ActivitySettings),
+    ) -> Result<ActivitySettings, crate::domain::types::AppError> {
+        let _serialized = lock(&self.settings_update);
+        authorize()?;
+        let mut settings = self.settings();
+        change(&mut settings);
+        super::settings::save(path, &settings).map_err(|error| {
+            crate::domain::types::AppError::new("activity_settings_save_failed", error.to_string())
+        })?;
+        self.set_settings(settings.clone());
+        Ok(settings)
+    }
+
     pub fn set_settings(&self, settings: ActivitySettings) {
         let enabling = settings.needs_store() && !lock(&self.settings).needs_store();
         *lock(&self.settings) = settings;
@@ -1246,5 +1263,114 @@ pub(super) mod tests {
         harness.engine.tick().await;
         assert_eq!(harness.shared.state(), CaptureState::KeyMissing);
         assert!(harness.shared.store().is_none());
+    }
+}
+
+#[cfg(test)]
+mod agent_settings_admission_tests {
+    use super::*;
+    #[test]
+    fn revoked_authority_is_checked_after_the_settings_lock_and_does_not_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let shared = Arc::new(ActivityShared::new(ActivitySettings::default()));
+        let guard = shared.settings_update.lock().unwrap();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let shared = shared.clone();
+            let revoked = revoked.clone();
+            let path = path.clone();
+            std::thread::spawn(move || {
+                entered_tx.send(()).unwrap();
+                shared.update_settings_checked(
+                    &path,
+                    || {
+                        checked_tx.send(()).unwrap();
+                        if revoked.load(Ordering::SeqCst) {
+                            Err(crate::domain::types::AppError::new(
+                                "turn_expired",
+                                "revoked",
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |settings| settings.enabled = false,
+                )
+            })
+        };
+        entered_rx.recv().unwrap();
+        assert!(checked_rx.try_recv().is_err());
+        revoked.store(true, Ordering::SeqCst);
+        drop(guard);
+        assert_eq!(worker.join().unwrap().unwrap_err().code, "turn_expired");
+        assert!(shared.settings().enabled);
+        assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod agent_settings_durable_stop_tests {
+    use super::*;
+    #[tokio::test]
+    async fn durable_stop_blocks_a_waiting_save_even_before_registry_revocation() {
+        let broker = crate::approval_broker::testing::TestBroker::new([]).await;
+        let binding = broker.turn(crate::llm::cli::CliKind::Claude, true).await;
+        let registry = crate::mcp_server::turns::TurnRegistry::default();
+        registry.issue(binding.clone());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let shared = Arc::new(ActivityShared::new(ActivitySettings::default()));
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let _guard = shared.settings_update.lock().unwrap();
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        };
+        locked_rx.recv().unwrap();
+        let pool = broker.pool().clone();
+        let run_id = binding.run_id.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let shared = shared.clone();
+            let path = path.clone();
+            let binding = binding.clone();
+            std::thread::spawn(move || {
+                entered_tx.send(()).unwrap();
+                shared.update_settings_checked(
+                    &path,
+                    || {
+                        runtime.block_on(crate::mcp_server::tools::revalidate_binding(
+                            None, &pool, &binding, "default",
+                        ))
+                    },
+                    |settings| settings.enabled = false,
+                )
+            })
+        };
+        entered_rx.recv().unwrap();
+        sqlx::query::query("UPDATE agent_runs SET status='cancelled' WHERE id=?")
+            .bind(run_id)
+            .execute(broker.pool())
+            .await
+            .unwrap();
+        assert!(registry.contains_binding(&binding));
+        release_tx.send(()).unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            holder.join().unwrap();
+            worker.join().unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().code, "turn_expired");
+        assert!(shared.settings().enabled);
+        assert!(!path.exists());
     }
 }

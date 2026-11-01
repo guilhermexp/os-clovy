@@ -134,14 +134,68 @@ impl AgentRepository {
         self.get_session(id).await
     }
 
-    pub async fn delete_session(&self, id: &str) -> Result<(), sqlx::Error> {
-        let deleted = query("DELETE FROM agent_sessions WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if deleted.rows_affected() == 0 {
-            return Err(sqlx::Error::RowNotFound);
+    pub async fn delete_session(&self, id: &str) -> Result<(), AppError> {
+        self.delete_session_for_turn(id, None).await
+    }
+
+    pub(crate) async fn delete_session_for_turn(
+        &self,
+        id: &str,
+        turn: Option<(&str, &str, &str)>,
+    ) -> Result<(), AppError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        Self::delete_session_in_transaction(&mut tx, id, turn).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// UI and MCP deletion share one write reservation with run admission.
+    /// The optional partition and caller identity come only from the host.
+    pub(crate) async fn delete_session_in_transaction(
+        tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+        id: &str,
+        turn: Option<(&str, &str, &str)>,
+    ) -> Result<(), AppError> {
+        if let Some((profile, session_id, run_id)) = turn {
+            if id == session_id {
+                return Err(AppError::new(
+                    "conversation_self_delete",
+                    "A turn cannot delete its own conversation.",
+                ));
+            }
+            crate::db::repositories::guard_bound_turn(tx, profile, session_id, run_id).await?;
         }
+        let profile = turn.map(|(profile, _, _)| profile);
+        // Acquire the writer even when the supplied transaction was deferred.
+        // A concurrent run INSERT is wholly before or after this admission.
+        let claimed = query("UPDATE agent_sessions SET id=id WHERE id=? AND (? IS NULL OR COALESCE((SELECT profile FROM session_profiles WHERE session_id=agent_sessions.id),'default')=?)")
+            .bind(id).bind(profile).bind(profile).execute(&mut **tx).await?.rows_affected();
+        if claimed == 0 {
+            return Err(AppError::new(
+                "conversation_not_found",
+                "Conversation was not found.",
+            ));
+        }
+        let active: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM agent_runs WHERE session_id=? AND status IN ('queued','running','waiting_for_user')")
+            .bind(id).fetch_one(&mut **tx).await?;
+        if active != 0 {
+            return Err(AppError::new(
+                "agent_run_active",
+                "Stop or resolve the current run before deleting this conversation.",
+            ));
+        }
+        query("DELETE FROM completed_sessions WHERE session_id=?")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        query("DELETE FROM session_profiles WHERE session_id=?")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        query("DELETE FROM agent_sessions WHERE id=?")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
         Ok(())
     }
 

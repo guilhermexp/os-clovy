@@ -184,3 +184,29 @@ when available or an unidentified-destination description otherwise. Icon
 resolution cannot delay capture, cancel or paste. The indicator remains
 separate from the waveform/spinner and ignores late resolutions from older
 targets or takes. Older helpers and Windows retain the fallback path.
+
+## Bound agent dictation addendum (2026-11-01)
+
+The D3 management contract for `melhorias-agente-audio-automacao` adds a
+typed, explicitly requested dictation lifecycle for a bound Clovy chat turn.
+Its destination is the calling conversation's composer on the main window,
+fixed by the host before approval with take, composer-request, conversation,
+run and data-partition identities. Changing the visible conversation or data
+partition cannot redirect delivery. This extends the exact-request exception
+above to agent-owned takes on both desktop platforms; ordinary shortcut paste
+keeps its pinned native destination.
+
+Start and status reflect helper-confirmed state. Stop finalizes the same take,
+persists history in its bound partition and sends the result only to that
+composer. The main window must claim delivery through the native host, which
+revalidates the live run, take and destination, then acknowledge insertion.
+The draft store deduplicates by take/request and inserts without submission.
+No model-provided target app, helper command passthrough or wake action can
+retarget the take or start another conversation.
+
+Cancel discards the take before delivery is claimed and refuses late results.
+Once the main window has claimed insertion, cancellation reports
+`dictation_delivery_in_progress` instead of falsely promising a discard; the
+matching insertion completes its acknowledgement. Failure of this explicit
+composer route is reported with its correlation and delivery state, without
+an OS-paste fallback that could duplicate or misdirect the transcript.

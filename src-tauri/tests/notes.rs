@@ -872,7 +872,8 @@ async fn get_note_returns_transcript_and_audio_metadata() {
         loaded.transcript.expect("transcript").text,
         "Raw transcript text"
     );
-    assert!(loaded.source_transcripts.is_empty());
+    assert_eq!(loaded.source_transcripts.len(), 1);
+    assert_eq!(loaded.source_transcripts[0].text, "Raw transcript text");
 }
 
 #[tokio::test]

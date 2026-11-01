@@ -23,6 +23,7 @@ pub const SERVER_UNAVAILABLE: i64 = -32000;
 const RESOURCE_NOT_FOUND: i64 = -32002;
 
 const INSTRUCTIONS: &str = "Read-only access to the user's Clovy notes, dictations, and memories (from the data set open in Clovy) and, when activity capture is on, their activity timeline, day summaries, and coding-agent work on this Mac. Read clovy://context for the current date, time, and time zone before resolving words like \"today\"; clovy://guide explains which tool answers which question.";
+const BOUND_INSTRUCTIONS: &str = "Clovy tools for this host-bound chat turn. Notes, conversations, projects, dictations and memories use the conversation's data partition even if the app view changes. Activity belongs to the installation. Read clovy://context for dates and host context and clovy://guide for operations, pagination, effects and costs. Use only the tools actually listed for this turn. Mutations use the host's approval broker and revalidate authority after waits; tool configuration never grants extra access. Media tools can incur direct provider charges without a separate broker card. Status and reading a skill do not activate permissions or execute instructions.";
 
 pub fn result_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -192,6 +193,23 @@ pub fn tool_error(message: &str) -> Value {
     })
 }
 
+pub(crate) fn tool_error_for(error: &crate::domain::types::AppError) -> Value {
+    let mut result = tool_error(&format!("{} ({})", error.message, error.code));
+    result["structuredContent"] = json!({"error": {
+        "code": error.code, "message": error.message, "details": error.details,
+    }});
+    // Keep the familiar first text block while making delivery and retry
+    // disposition visible to clients that consume text only.
+    if let Some(details) = error.details.as_ref() {
+        if let Some(content) = result["content"].as_array_mut() {
+            content.push(text_block(
+                json!({"code":error.code,"details":details}).to_string(),
+            ));
+        }
+    }
+    result
+}
+
 /// Answers one JSON-RPC message for a client with neither app nor turn;
 /// `None` for notifications and responses.
 pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
@@ -210,13 +228,20 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
     };
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     let outcome = match method {
-        "initialize" => Ok(initialize_result(&params, INSTRUCTIONS)),
+        "initialize" => Ok(initialize_result(
+            &params,
+            if ctx.binding.is_some() {
+                BOUND_INSTRUCTIONS
+            } else {
+                INSTRUCTIONS
+            },
+        )),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx).await })),
         "tools/call" => call_tool(ctx, &params).await,
         "resources/list" => Ok(json!({ "resources": resources() })),
         "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
-        "resources/read" => read_resource(&params, ctx.data.now),
+        "resources/read" => read_resource(&params, ctx.data.now, ctx.binding.is_some()),
         other => Err((METHOD_NOT_FOUND, format!("Method not found: {other}"))),
     };
     Some(match outcome {
@@ -240,7 +265,7 @@ async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, Str
         .unwrap_or_else(|| json!({}));
     Ok(match tools::call(ctx, name, &arguments).await {
         Ok(value) => tool_result(&value),
-        Err(error) => tool_error(&format!("{} ({})", error.message, error.code)),
+        Err(error) => tool_error_for(&error),
     })
 }
 
@@ -263,7 +288,7 @@ fn resources() -> Value {
     ])
 }
 
-fn read_resource(params: &Value, now: DateTime<Utc>) -> Result<Value, (i64, String)> {
+fn read_resource(params: &Value, now: DateTime<Utc>, bound: bool) -> Result<Value, (i64, String)> {
     let uri = params
         .get("uri")
         .and_then(Value::as_str)
@@ -273,7 +298,14 @@ fn read_resource(params: &Value, now: DateTime<Utc>) -> Result<Value, (i64, Stri
             "application/json",
             context_json(now.with_timezone(&Local), local_time_zone_name()).to_string(),
         ),
-        GUIDE_URI => ("text/markdown", GUIDE.to_string()),
+        GUIDE_URI => (
+            "text/markdown",
+            if bound {
+                format!("{GUIDE}\n{BOUND_GUIDE}")
+            } else {
+                GUIDE.to_string()
+            },
+        ),
         _ => return Err((RESOURCE_NOT_FOUND, format!("Resource not found: {uri}"))),
     };
     Ok(json!({ "contents": [{ "uri": uri, "mimeType": mime_type, "text": text }] }))
@@ -329,7 +361,7 @@ fn local_time_zone_name() -> Option<String> {
 
 const GUIDE: &str = r#"# Clovy MCP guide
 
-Clovy records meetings and dictations on the user's Mac, turns them into notes, keeps memories, and (when the user turned on activity capture) a text-only timeline of the apps and sites they used, day summaries, and their work with coding agents. Everything here is read-only. Notes, dictations, and memories come from the data set open in Clovy; activity belongs to the Mac, whichever data set is open.
+Clovy records meetings and dictations, turns them into notes, keeps memories, and (when activity capture is on) a text-only timeline, day summaries, and coding-agent work. External clients receive only the read tools in this section, from the data set open in Clovy. Bound chat turns read their conversation's host-owned data partition. Activity belongs to the installation, whichever data set is open.
 
 ## Which tool
 
@@ -354,6 +386,24 @@ Clovy records meetings and dictations on the user's Mac, turns them into notes, 
 
 - Read `clovy://context` first: it has today's date, the time, and the time zone. Activity tools take RFC 3339 times with an offset (`2026-10-04T09:00:00-03:00`); omit `from`/`to` for today so far. `get_day_summary` and `get_day_panels` take a date (`YYYY-MM-DD`), default today; a date before the retention period answers `state: "past_retention"`.
 - Activity tools exist only while activity capture is on. Apps and sites the user excluded never appear, and nothing older than the retention period is returned.
+- Timeline sessions and gaps retain their full original bounds when they overlap [from,to). Totals count only the overlap. Active state comes from the materialized ETL, updated approximately every 30 seconds; it is not an instantaneous capture watermark.
 - Long results are capped: look at `truncated`, `hasMore`/`nextOffset`, or `nextTranscriptOffset`, and ask for a shorter period or the next page.
 - Clovy must be open with the MCP server turned on (Settings, Agent). Otherwise every tool answers with an error saying so.
+"#;
+
+const BOUND_GUIDE: &str = r#"## Management in this bound turn
+
+The catalog is authoritative for this connection. Routine toolsets restrict discovery and dispatch and do not create grants. A project organizes objects within a partition; knowing an ID does not grant access. Stop revokes the current run. After an approval wait, the host checks the live run, partition and target again. The approval broker decides the effective policy and records its receipt before an effect.
+
+- Notes: list_notes/create_note/update_note/delete_note. Read get_note.revision before update_note and supply expectedRevision; note_conflict requires rereading, never blind retry. list_note_transcripts includes all sessions and legacy records, with replaced aggregates omitted by identity, not text. Continue both nextOffset and nextTextOffset. search_notes returns a matching transcript ID and snippet.
+- Conversations: list_conversations/get_conversation; list_conversation_messages/search_conversation_messages page human/assistant messages in total run/sequence/ID order, excluding tool payloads. Continue nextCursor and nextTextOffset for long messages. list_conversation_artifacts/read_conversation_artifact require conversationId plus artifactId; UTF-8 pages count bytes and binary content is an explicit error. get_conversation_run/cancel_conversation_run target an exact conversation/run pair. A turn cannot cancel itself or delete its conversation. Creating/managing conversations does not start another model turn.
+- Projects: list_projects/get_project/create_project/update_project/delete_project and assign/remove note/conversation project operations. Associations are plural. update_project applies the compound change atomically. delete_project requires explicit deleteNotes and previews affected data; a changed preview needs another approval.
+- Routines: CRUD/pause/resume plus run_routine/list_routine_runs. Timing includes an IANA timezone, resolved CLI model and enabledToolsets. Running can return started, busy or blocked; only started means a run was actually admitted. History is paginated. Configuration never creates connector, browser or execution grants. Running a routine can invoke the configured CLI/provider and incur its normal usage.
+- Memory: save_memory/update_memory/forget_memory/search_memories/list_memories. Updates preserve identity, source, creation and scope. Disabled or deleted projects are filtered before paging. Changing scope is not supported.
+- Activity: get_activity_settings/update_activity_settings/pause_activity/resume_activity/generate_day_summary. Settings work while capture is off and cannot alter internal MCP/default fields. Generation requires local day (YYYY-MM-DD), may call the configured activity provider and preserves provider, empty-data, database and pending-hour errors. These settings belong to the installation. No manual category editing or database rebuild is offered.
+- Dictation: list/get/delete_dictation and start_dictation/get_dictation_status/stop_dictation/cancel_dictation. Start pins a take, destination composer and window; status confirms actual helper state. Stop delivers to that same destination; cancel discards. No arbitrary target app or helper command passthrough is accepted. Audio may use the user's configured transcription provider; cleanup may incur OpenRouter usage.
+- Recorder: start_recording/recording_status/stop_recording/pause_recording/resume_recording/recover_recording/retry_note_processing/list_recording_artifacts. IDs, source mode and duration refer to the actual session. Recovery is explicitly validate or discard. Finalizing/retrying can use configured transcription and note providers; listing metadata does not grant paths. Recording controls use the real main-window bridge and may need native permissions.
+- Skills: list_skills/load_skill describe active skills; list_skill_settings/read_skill also inspect disabled settings for administration. update_skill/enable_skill/disable_skill use approval. Only managed skills are editable; global roots are read-only. Reading presence or content does not execute instructions. Hidden entries and objective editor backups are excluded; legitimate foo-backup names remain valid.
+
+Reads above are local and do not activate capture, login, permissions or a feature. Native mutations ask the approval broker; clarification always requires an answer. Browser actions use their own policy/tray. Media generation/editing is the existing exception: direct provider usage can be charged without another broker card. Status is not authorization. Inspect error codes and delivery state; never resend an effect whose delivery is uncertain.
 "#;

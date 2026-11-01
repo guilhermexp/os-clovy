@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { messageFromError } from "../lib/errors";
 import {
   getNote,
+  listNotes,
   NOTE_PROCESSING_PROGRESS_EVENT,
   type NoteListItemDto,
   type NoteProcessingProgressDto,
@@ -10,6 +11,7 @@ import {
 } from "../lib/tauri";
 import { PROCESSING_DEMO_NOTE_ID } from "./processing-demo-ids";
 import type { UseNoteProcessingEventsDependencies } from "./use-note-processing-events-types";
+import { getCurrentDataPartitionName } from "../lib/data-partition";
 
 export const NOTE_PROCESSING_RECONCILE_INTERVAL_MS = 12_000;
 
@@ -31,6 +33,8 @@ function activeProcessingNotes(notes: NoteListItemDto[]) {
 
 export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDependencies) {
   const { dispatch, noteSaveController, notes, setError } = dependencies;
+  const visibleNotesRef = useRef(notes);
+  visibleNotesRef.current = notes;
   const activeNotesRef = useRef(new Map<string, NoteListItemDto>());
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
   const pendingTerminalHydrationsRef = useRef(new Map<string, NoteProcessingProgressDto>());
@@ -45,6 +49,85 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
     .map((note) => note.id)
     .sort()
     .join("\0");
+
+  useEffect(() => {
+    let disposed = false;
+    let latestRequest = 0;
+    const noteRequests = new Map<string, number>();
+    let unlisten: (() => void) | undefined;
+    void listen<{ profile: string; kind: string; id?: string; deleted?: boolean }>(
+      "clovy-data-changed",
+      ({ payload }) => {
+        if (payload.kind !== "notes" || payload.profile !== getCurrentDataPartitionName()) return;
+        const request = ++latestRequest;
+        if (payload.id) noteRequests.set(payload.id, request);
+        const isCurrent = () => !disposed && payload.profile === getCurrentDataPartitionName();
+        if (payload.id && payload.deleted) {
+          noteSaveController.discard(payload.id);
+          dispatch({ type: "noteDeleted", noteId: payload.id });
+        }
+        void (async () => {
+          try {
+            if (payload.id && !payload.deleted) {
+              await noteSaveController.flush(payload.id);
+              if (!isCurrent() || noteRequests.get(payload.id) !== request) return;
+              const editVersion = noteSaveController.getEditVersion(payload.id);
+              const note = await getNote(payload.id);
+              if (
+                isCurrent() &&
+                noteRequests.get(payload.id) === request &&
+                editVersion === noteSaveController.getEditVersion(payload.id) &&
+                !noteSaveController.hasPending(payload.id)
+              )
+                dispatch({ type: "noteUpdated", note });
+            }
+            const editVersions = new Map(
+              visibleNotesRef.current.map((note) => [
+                note.id,
+                noteSaveController.getEditVersion(note.id),
+              ]),
+            );
+            const pendingAtRead = new Set(
+              visibleNotesRef.current
+                .filter((note) => noteSaveController.hasPending(note.id))
+                .map((note) => note.id),
+            );
+            const response = await listNotes();
+            if (isCurrent() && request === latestRequest) {
+              dispatch({
+                type: "notesInvalidated",
+                notes: response.items,
+                preserveIds: response.items
+                  .filter(
+                    (note) =>
+                      pendingAtRead.has(note.id) ||
+                      noteSaveController.hasPending(note.id) ||
+                      (editVersions.get(note.id) ?? 0) !==
+                        noteSaveController.getEditVersion(note.id),
+                  )
+                  .map((note) => note.id),
+                deletedId: payload.deleted ? payload.id : undefined,
+              });
+            }
+          } catch (error) {
+            if (isCurrent() && (!payload.id || noteRequests.get(payload.id) === request))
+              setError(messageFromError(error));
+          }
+        })();
+      },
+    )
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => {
+        if (!disposed) console.warn("Clovy note refresh subscription is unavailable.");
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dispatch, noteSaveController, setError]);
 
   useEffect(() => {
     activeNotesRef.current = new Map(activeProcessingNotes(notes).map((note) => [note.id, note]));
@@ -214,10 +297,17 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
         const pending = pendingTerminalHydrationsRef.current.get(progress.noteId);
         if (pending) clearTerminalHydration(pending);
       }
-    }).then((cleanup) => {
-      if (disposed) cleanup();
-      else unlisten = cleanup;
-    });
+    })
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => {
+        if (!disposed)
+          console.warn(
+            "Clovy note processing subscription is unavailable; reconciliation remains active.",
+          );
+      });
 
     return () => {
       disposed = true;

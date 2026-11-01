@@ -12,10 +12,12 @@ const mocks = vi.hoisted(() => ({
   clovyPersona: vi.fn(),
   listAgentSkills: vi.fn(),
   setClovyPersona: vi.fn(),
+  listen: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: mocks.emit,
+  listen: mocks.listen,
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -32,6 +34,7 @@ vi.mock("../lib/tauri", () => ({
 describe("AgentSettingsSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.listen.mockResolvedValue(() => {});
     localStorage.clear();
     mocks.listAgentSkills.mockResolvedValue([]);
     mocks.clovyPersona.mockResolvedValue({

@@ -86,6 +86,12 @@ fn new_token() -> String {
 }
 
 impl TurnRegistry {
+    /// Recheck the exact host binding after an approval or another wait.
+    /// A matching database row alone does not keep a revoked turn alive.
+    pub fn contains_binding(&self, binding: &TurnBinding) -> bool {
+        self.turns().values().any(|live| *live.binding == *binding)
+    }
+
     fn turns(&self) -> MutexGuard<'_, HashMap<String, Live>> {
         self.turns.lock().unwrap_or_else(PoisonError::into_inner)
     }

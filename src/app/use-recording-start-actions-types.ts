@@ -10,6 +10,7 @@ export type UseRecordingStartActionsDependencies = {
   bootstrapped: boolean;
   calendarContextNotePartitionsRef: React.MutableRefObject<Map<string, string>>;
   calendarContextNoteUpdatesRef: React.MutableRefObject<Map<string, NoteDto>>;
+  crossPartitionRecordingNoteIdRef: React.MutableRefObject<string | undefined>;
   dispatch: React.Dispatch<NotesAction>;
   handleEmptyNotesAfterDelete: () => void;
   pendingCalendarContextAdoptionsRef: React.MutableRefObject<Set<string>>;

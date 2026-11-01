@@ -413,3 +413,93 @@ async fn forget_memory_revalidates_concurrent_project_toggle_in_delete_transacti
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn update_preserves_memory_identity_and_search_filters_before_paging() {
+    let broker = TestBroker::new([Scripted::Approve]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let data = McpData {
+        notes: broker.pool().clone(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: ActivityAccess::Off,
+        now: chrono::Utc::now(),
+    };
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+        ..ToolCtx::unbound(&data)
+    };
+    let root = tempfile::tempdir().unwrap();
+    let settings = root.path().join("memory.json");
+    let repos = Repositories::new(data.notes.clone());
+    let folder = repos
+        .create_folder("default", "Enabled", None)
+        .await
+        .unwrap();
+    let hidden = repos
+        .create_folder("default", "Disabled", None)
+        .await
+        .unwrap();
+    let original = repos
+        .create_memory("default", Some(&folder.id), "Before", "user")
+        .await
+        .unwrap();
+    repos
+        .create_memory("foreign", None, "needle foreign", "user")
+        .await
+        .unwrap();
+    repos
+        .create_memory("default", Some(&hidden.id), "needle disabled", "user")
+        .await
+        .unwrap();
+    repos
+        .set_folder_memory_disabled(&hidden.id, true)
+        .await
+        .unwrap();
+    let edited = super::memory::call_with_settings(
+        &ctx,
+        "update_memory",
+        &json!({"id":original.id,"content":"needle changed"}),
+        &settings,
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited["id"], original.id);
+    assert_eq!(edited["folderId"], folder.id);
+    assert_eq!(edited["createdAt"], original.created_at);
+    assert_eq!(edited["source"], "user");
+    let found = super::memory::call_with_settings(
+        &ctx,
+        "search_memories",
+        &json!({"query":"needle","limit":1}),
+        &settings,
+    )
+    .await
+    .unwrap();
+    assert_eq!(found["items"][0]["id"], original.id);
+    assert_eq!(found["hasMore"], false);
+    assert_eq!(broker.requests().len(), 1);
+    repos
+        .set_folder_memory_disabled(&folder.id, true)
+        .await
+        .unwrap();
+    let found = super::memory::call_with_settings(
+        &ctx,
+        "search_memories",
+        &json!({"query":"needle","limit":1}),
+        &settings,
+    )
+    .await
+    .unwrap();
+    assert_eq!(found["count"], 0);
+    let error = super::memory::call_with_settings(
+        &ctx,
+        "update_memory",
+        &json!({"id":original.id,"content":"Denied"}),
+        &settings,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "memory_disabled");
+}

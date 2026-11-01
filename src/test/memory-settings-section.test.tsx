@@ -1,8 +1,9 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemorySettingsSection } from "../components/settings/MemorySettingsSection";
 import type { FolderDto, MemoryDto } from "../lib/tauri";
+import { setCurrentDataPartitionName } from "../lib/data-partition";
 
 const mocks = vi.hoisted(() => ({
   listMemories: vi.fn(),
@@ -11,7 +12,10 @@ const mocks = vi.hoisted(() => ({
   createMemory: vi.fn(),
   updateMemory: vi.fn(),
   deleteMemory: vi.fn(),
+  listen: vi.fn(),
 }));
+
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
 vi.mock("../lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/tauri")>();
@@ -53,6 +57,8 @@ const memories: MemoryDto[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  setCurrentDataPartitionName("default");
+  mocks.listen.mockResolvedValue(() => {});
   mocks.listMemories.mockResolvedValue(memories);
   mocks.memorySettings.mockResolvedValue({ enabled: true });
   mocks.setMemoryEnabled.mockImplementation(async (enabled: boolean) => ({ enabled }));
@@ -75,6 +81,47 @@ beforeEach(() => {
 });
 
 describe("MemorySettingsSection", () => {
+  it("refreshes the visible memory after a native mutation and ignores other partitions", async () => {
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_name, callback) => {
+      changed = callback;
+      return () => {};
+    });
+    render(<MemorySettingsSection folders={folders} />);
+    expect(await screen.findByText("Use concise answers")).toBeInTheDocument();
+    mocks.listMemories.mockResolvedValue([
+      { ...memories[0], content: "Updated by the bound conversation" },
+    ]);
+    act(() => changed?.({ payload: { profile: "other", kind: "memories" } }));
+    expect(screen.queryByText("Updated by the bound conversation")).not.toBeInTheDocument();
+    act(() => changed?.({ payload: { profile: "default", kind: "memories" } }));
+    expect(await screen.findByText("Updated by the bound conversation")).toBeInTheDocument();
+    expect(screen.queryByText("Use concise answers")).not.toBeInTheDocument();
+  });
+
+  it("does not hydrate a different partition after an invalidation read waits", async () => {
+    let changed: ((event: { payload: { profile: string; kind: string } }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_name, callback) => {
+      changed = callback;
+      return () => {};
+    });
+    render(<MemorySettingsSection folders={folders} />);
+    await screen.findByText("Use concise answers");
+    let finish: ((items: MemoryDto[]) => void) | undefined;
+    mocks.listMemories.mockImplementationOnce(
+      () =>
+        new Promise<MemoryDto[]>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    act(() => changed?.({ payload: { profile: "default", kind: "memories" } }));
+    await act(async () => {
+      setCurrentDataPartitionName("other");
+      finish?.([{ ...memories[0], content: "Must not cross the partition switch" }]);
+    });
+    expect(screen.queryByText("Must not cross the partition switch")).not.toBeInTheDocument();
+  });
+
   it("allows the user to add the first memory from the empty state", async () => {
     mocks.listMemories.mockResolvedValueOnce([]);
     const user = userEvent.setup();

@@ -36,6 +36,7 @@ use super::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 
 pub const SEARCH_NOTES: &str = "search_notes";
 pub const GET_NOTE: &str = "get_note";
+pub const LIST_NOTE_TRANSCRIPTS: &str = "list_note_transcripts";
 pub const LIST_DICTATIONS: &str = "list_dictations";
 pub const LIST_MEMORIES: &str = "list_memories";
 pub const GET_ACTIVITY_STATS: &str = "get_activity_stats";
@@ -60,7 +61,13 @@ pub const ACTIVITY_TOOLS: [&str; 10] = [
     GET_DAY_PANELS,
     GET_DAY_SCHEDULE,
 ];
-const DATA_TOOLS: [&str; 4] = [SEARCH_NOTES, GET_NOTE, LIST_DICTATIONS, LIST_MEMORIES];
+const DATA_TOOLS: [&str; 5] = [
+    SEARCH_NOTES,
+    GET_NOTE,
+    LIST_NOTE_TRANSCRIPTS,
+    LIST_DICTATIONS,
+    LIST_MEMORIES,
+];
 
 const SNIPPET_RADIUS_CHARS: usize = 160;
 const NOTE_CONTENT_MAX_CHARS: usize = 20_000;
@@ -189,7 +196,7 @@ fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
         ),
         read_only(
             GET_NOTE,
-            "Read one Clovy note by id: title, note text, and its latest transcript. Long content and transcripts come in pages; continue with `contentOffset` or `transcriptOffset` from the corresponding next offset.",
+            "Read one Clovy note by id, including its authoritative transcripts. Long text comes in character pages.",
             json!({
                 "type": "object",
                 "properties": {
@@ -201,6 +208,7 @@ fn descriptors(activity: &ActivityAccess) -> Vec<Value> {
                 "additionalProperties": false
             }),
         ),
+        read_only(LIST_NOTE_TRANSCRIPTS, "List authoritative transcript records for a note, in recording order. Page long record text with textOffset.", json!({"type":"object","properties":{"id":{"type":"string"},"offset":{"type":"integer","minimum":0},"textOffset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}},"required":["id"],"additionalProperties":false})),
         read_only(
             LIST_DICTATIONS,
             "List the user's recent Clovy dictations (kept for 7 days), newest first, optionally only those containing `query`.",
@@ -328,6 +336,7 @@ async fn call(data: &McpData, name: &str, arguments: &Value) -> Result<Value, Ap
     match name {
         SEARCH_NOTES => search_notes(data, arguments).await,
         GET_NOTE => get_note(data, arguments).await,
+        LIST_NOTE_TRANSCRIPTS => list_note_transcripts(data, arguments).await,
         LIST_DICTATIONS => list_dictations(data, arguments).await,
         LIST_MEMORIES => list_memories(data, arguments).await,
         name if is_activity_tool(name) => {
@@ -428,24 +437,23 @@ fn snippet(text: &str, needle: &str) -> Option<String> {
     Some(excerpt)
 }
 
-const LATEST_TRANSCRIPT: &str =
-    "COALESCE((SELECT text FROM transcripts t WHERE t.note_id = n.id ORDER BY t.created_at DESC LIMIT 1), '')";
-
 async fn search_notes(data: &McpData, arguments: &Value) -> Result<Value, AppError> {
     let needle = required_text(arguments, "query")?;
     let limit = bounded(arguments, "limit", 10, 1, 20);
     let pattern = like_pattern(needle);
     let rows = query(&format!(
         "SELECT n.id, n.title, COALESCE(n.edited_content, n.generated_content, '') AS note,
-                {LATEST_TRANSCRIPT} AS transcript, n.created_at, n.updated_at
-         FROM notes n
+                COALESCE(n.generated_content, '') AS generated,
+                COALESCE(hit.text, '') AS transcript, hit.id AS transcript_id, n.created_at, n.updated_at
+         FROM notes n LEFT JOIN transcripts hit ON hit.id = (SELECT t.id FROM transcripts t WHERE t.note_id = n.id AND t.text LIKE ? ESCAPE '\\' AND {} ORDER BY t.created_at, t.id LIMIT 1)
          WHERE n.profile = ? AND (
             n.title LIKE ? ESCAPE '\\' OR n.generated_content LIKE ? ESCAPE '\\'
             OR n.edited_content LIKE ? ESCAPE '\\'
-            OR EXISTS (SELECT 1 FROM transcripts t WHERE t.note_id = n.id AND t.text LIKE ? ESCAPE '\\')
+            OR EXISTS (SELECT 1 FROM transcripts t WHERE t.note_id = n.id AND t.text LIKE ? ESCAPE '\\' AND {})
          )
-         ORDER BY n.updated_at DESC LIMIT ?"
+         ORDER BY n.updated_at DESC, n.id DESC LIMIT ?", super::notes::AUTHORITATIVE_TRANSCRIPT, super::notes::AUTHORITATIVE_TRANSCRIPT
     ))
+    .bind(&pattern)
     .bind(&data.profile)
     .bind(&pattern)
     .bind(&pattern)
@@ -459,13 +467,16 @@ async fn search_notes(data: &McpData, arguments: &Value) -> Result<Value, AppErr
         .map(|row| {
             let title: String = row.get("title");
             let note: String = row.get("note");
+            let generated: String = row.get("generated");
             let transcript: String = row.get("transcript");
             let (matched_in, excerpt) = if let Some(excerpt) = snippet(&note, needle) {
                 ("note", excerpt)
+            } else if let Some(excerpt) = snippet(&generated, needle) {
+                ("note", excerpt)
             } else if let Some(excerpt) = snippet(&transcript, needle) {
                 ("transcript", excerpt)
-            } else if snippet(&title, needle).is_some() {
-                ("title", clip(&note, SNIPPET_RADIUS_CHARS * 2).0)
+            } else if let Some(excerpt) = snippet(&title, needle) {
+                ("title", excerpt)
             } else {
                 ("transcript", clip(&note, SNIPPET_RADIUS_CHARS * 2).0)
             };
@@ -474,6 +485,7 @@ async fn search_notes(data: &McpData, arguments: &Value) -> Result<Value, AppErr
                 "title": title,
                 "snippet": excerpt,
                 "matchedIn": matched_in,
+                "transcriptId": if matched_in == "transcript" { row.get::<Option<String>, _>("transcript_id") } else { None },
                 "createdAt": row.get::<String, _>("created_at"),
                 "updatedAt": row.get::<String, _>("updated_at"),
             })
@@ -484,17 +496,19 @@ async fn search_notes(data: &McpData, arguments: &Value) -> Result<Value, AppErr
 
 async fn get_note(data: &McpData, arguments: &Value) -> Result<Value, AppError> {
     let id = required_text(arguments, "id")?;
-    let offset = arguments
-        .get("transcriptOffset")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let offset = super::notes::character_offset(arguments, "transcriptOffset")?;
     let row = super::notes::read_note(&data.notes, &data.profile, id).await?;
     let content_offset = super::notes::character_offset(arguments, "contentOffset")?;
     let note: String = row.get("note");
     let (content, content_total, next_content_offset) =
         super::notes::character_page(&note, content_offset, NOTE_CONTENT_MAX_CHARS);
     let content_truncated = content.chars().count() < content_total;
-    let transcript: String = row.get("transcript");
+    let transcript = super::notes::authoritative_transcripts(&data.notes, id, &data.profile, 0, -1)
+        .await?
+        .into_iter()
+        .map(|row| row.get::<String, _>("text"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let total = transcript.chars().count();
     let page: String = transcript
         .chars()
@@ -507,6 +521,7 @@ async fn get_note(data: &McpData, arguments: &Value) -> Result<Value, AppError> 
         "title": row.get::<String, _>("title"),
         "createdAt": row.get::<String, _>("created_at"),
         "updatedAt": row.get::<String, _>("updated_at"),
+        "revision": row.get::<i64, _>("revision"),
         "content": content,
         "contentTruncated": content_truncated,
         "contentOffset": content_offset,
@@ -517,6 +532,42 @@ async fn get_note(data: &McpData, arguments: &Value) -> Result<Value, AppError> 
         "transcriptTotalChars": total,
         "nextTranscriptOffset": (end < total).then_some(end),
     }))
+}
+
+async fn list_note_transcripts(data: &McpData, arguments: &Value) -> Result<Value, AppError> {
+    let id = required_text(arguments, "id")?;
+    super::notes::read_note(&data.notes, &data.profile, id).await?;
+    let offset = super::notes::character_offset(arguments, "offset")?;
+    let text_offset = super::notes::character_offset(arguments, "textOffset")?;
+    let limit = bounded(arguments, "limit", 20, 1, 50) as usize;
+    let sql_offset = i64::try_from(offset).unwrap_or(i64::MAX);
+    let rows = super::notes::authoritative_transcripts(
+        &data.notes,
+        id,
+        &data.profile,
+        sql_offset,
+        (limit + 1) as i64,
+    )
+    .await?;
+    let mut items = Vec::new();
+    let mut next_offset = None;
+    let mut next_text_offset = None;
+    for (index, row) in rows.iter().enumerate().take(limit) {
+        let start = if index == 0 { text_offset } else { 0 };
+        let (text, total, next) = super::notes::character_page(
+            &row.get::<String, _>("text"),
+            start,
+            TRANSCRIPT_PAGE_CHARS,
+        );
+        items.push(json!({"id":row.get::<String,_>("id"),"recordingSessionId":row.get::<Option<String>,_>("recording_session_id"),"source":row.get::<Option<String>,_>("source"),"startMs":row.get::<Option<i64>,_>("start_ms"),"endMs":row.get::<Option<i64>,_>("end_ms"),"turnIndex":row.get::<Option<i64>,_>("turn_index"),"status":row.get::<String,_>("status"),"lastError":row.get::<Option<String>,_>("last_error"),"createdAt":row.get::<String,_>("created_at"),"text":text,"textOffset":start,"textTotalChars":total}));
+        if let Some(next) = next {
+            next_offset = Some(offset.saturating_add(index));
+            next_text_offset = Some(next);
+            break;
+        }
+        next_offset = (index + 1 < rows.len()).then_some(offset.saturating_add(index + 1));
+    }
+    Ok(json!({"items":items,"nextOffset":next_offset,"nextTextOffset":next_text_offset}))
 }
 
 async fn list_dictations(data: &McpData, arguments: &Value) -> Result<Value, AppError> {
@@ -533,7 +584,7 @@ async fn list_dictations(data: &McpData, arguments: &Value) -> Result<Value, App
     .bind(needle)
     .bind(needle.map(like_pattern))
     .bind((limit + 1) as i64)
-    .bind(offset as i64)
+    .bind(i64::try_from(offset).unwrap_or(i64::MAX))
     .fetch_all(&data.notes)
     .await?;
     let has_more = rows.len() as u64 > limit;
@@ -591,9 +642,23 @@ async fn list_memories(data: &McpData, arguments: &Value) -> Result<Value, AppEr
         .unwrap_or(true);
     let limit = bounded(arguments, "limit", 8, 1, 20) as usize;
     let offset = arguments.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let memories = Repositories::new(data.notes.clone())
+    let mut memories = Repositories::new(data.notes.clone())
         .list_memories(&data.profile, project_id, include_global)
         .await?;
+    let enabled_projects: Vec<String> = sqlx::query_scalar::query_scalar(
+        "SELECT id FROM folders WHERE profile = ? AND deleted_at IS NULL AND memory_disabled = 0",
+    )
+    .bind(&data.profile)
+    .fetch_all(&data.notes)
+    .await?;
+    // Filter before counting or paging; a disabled project's memory is not
+    // disclosed by a global search and must not consume a page slot.
+    memories.retain(|memory| {
+        memory
+            .folder_id
+            .as_ref()
+            .is_none_or(|id| enabled_projects.contains(id))
+    });
     let has_more = memories.len() > offset.saturating_add(limit);
     let items: Vec<Value> = memories
         .into_iter()
@@ -604,6 +669,9 @@ async fn list_memories(data: &McpData, arguments: &Value) -> Result<Value, AppEr
                 "id": memory.id,
                 "content": clip(&memory.content, MEMORY_MAX_CHARS).0,
                 "createdAt": memory.created_at,
+                "updatedAt": memory.updated_at,
+                "source": memory.source,
+                "projectId": memory.folder_id,
                 "scope": if memory.folder_id.is_some() { "project" } else { "global" },
             })
         })

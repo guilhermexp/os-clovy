@@ -1,10 +1,11 @@
 import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
   type AgentSessionsChangedDetail,
 } from "../lib/agent-events";
-import { assignSessionToFolder } from "../lib/tauri";
+import { assignSessionToFolder, listAgentSessions } from "../lib/tauri";
 import { AGENT_SESSION_STATUS_EVENT, type AgentSessionStatusDetail } from "../lib/agent-events";
 import { getCurrentDataPartitionName } from "../lib/data-partition";
 import { invalidateAgentSessionDraft } from "../lib/agent-session-drafts";
@@ -45,6 +46,37 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
     // Only the latest broadcast commits its list: an older one whose map read
     // resolves last must not overwrite it.
     let latestRequest = 0;
+    let unlistenDataChanged: (() => void) | undefined;
+    void listen<{ profile: string; kind: string; id?: string; deleted?: boolean }>(
+      "clovy-data-changed",
+      ({ payload }) => {
+        if (payload.kind !== "conversations" || payload.profile !== getCurrentDataPartitionName())
+          return;
+        if (payload.deleted && payload.id) {
+          window.dispatchEvent(
+            new CustomEvent(AGENT_DELETE_SESSION_EVENT, { detail: { sessionId: payload.id } }),
+          );
+        }
+        const request = ++latestRequest;
+        void Promise.all([listAgentSessions(), refreshSessionPartitions()])
+          .then(([sessions, partitions]) => {
+            if (
+              !cancelled &&
+              request === latestRequest &&
+              payload.profile === getCurrentDataPartitionName()
+            )
+              commitAgentSessions(sessions, partitions);
+          })
+          .catch(() => {});
+      },
+    )
+      .then((cleanup) => {
+        if (cancelled) cleanup();
+        else unlistenDataChanged = cleanup;
+      })
+      .catch(() => {
+        if (!cancelled) console.warn("Clovy conversation refresh subscription is unavailable.");
+      });
 
     function handleSessionsChanged(event: Event) {
       const detail = (event as CustomEvent<AgentSessionsChangedDetail>).detail;
@@ -139,6 +171,7 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
     window.addEventListener(AGENT_DELETE_SESSION_EVENT, handleAgentSessionDeleted);
     return () => {
       cancelled = true;
+      unlistenDataChanged?.();
       window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, handleSessionsChanged);
       window.removeEventListener(AGENT_SESSION_STATUS_EVENT, handleAgentStatusForMenuBar);
       window.removeEventListener(AGENT_DELETE_SESSION_EVENT, handleAgentSessionDeleted);

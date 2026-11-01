@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { invalidateNoteTabs } from "./tabs/tabs";
 import { getNote, listAgentSessions, listFolders, listNotes } from "../lib/tauri";
 import { messageFromError } from "../lib/errors";
+import { useClovyDataChanged } from "../lib/clovy-data-events";
 import type { UseDataPartitionRefreshDependencies } from "./use-data-partition-refresh-types";
 
 export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDependencies) {
@@ -29,6 +30,32 @@ export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDep
     setTabs,
     tabsRef,
   } = dependencies;
+
+  useClovyDataChanged("notes", (change) => {
+    if (!change.deleted || !change.id) return;
+    const next = invalidateNoteTabs(tabsRef.current, new Set([change.id]));
+    if (next !== tabsRef.current) {
+      tabsRef.current = next;
+      setTabs(next);
+    }
+  });
+
+  useClovyDataChanged("projects", async (_change, isCurrent) => {
+    try {
+      const [folders, notesResponse, sessions, partitions] = await Promise.all([
+        listFolders(),
+        listNotes(),
+        listAgentSessions(),
+        refreshSessionPartitions(),
+      ]);
+      if (!isCurrent()) return;
+      dispatch({ type: "foldersLoaded", folders });
+      dispatch({ type: "notesInvalidated", notes: notesResponse.items });
+      commitAgentSessions(sessions, partitions);
+    } catch (error) {
+      if (isCurrent()) setError(messageFromError(error));
+    }
+  });
 
   useEffect(() => {
     if (appBlocked || !bootstrapped) return;

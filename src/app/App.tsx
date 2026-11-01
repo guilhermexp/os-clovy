@@ -1,3 +1,4 @@
+import { useAgentDictationDelivery } from "./use-agent-dictation-delivery";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -165,6 +166,7 @@ import { useAppState } from "./use-app-state";
 import { renderAppOnboarding } from "./app-onboarding";
 
 export function App() {
+  useAgentDictationDelivery();
   // Subscribes the shell to the interface language: the render helpers and
   // tab titles below read `t` at render time.
   const locale = useLocale();
@@ -1514,6 +1516,7 @@ export function App() {
     bootstrapped,
     calendarContextNotePartitionsRef,
     calendarContextNoteUpdatesRef,
+    crossPartitionRecordingNoteIdRef,
     dispatch,
     handleEmptyNotesAfterDelete,
     pendingCalendarContextAdoptionsRef,

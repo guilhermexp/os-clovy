@@ -107,6 +107,7 @@ impl ComputerUseTools {
             )
             .await;
         decision.map_err(|denial| AppError::new(denial.code(), denial.message()))?;
+        ctx.revalidate().await?;
         let result = host.execute(arguments.clone()).await;
         if is_error(&result) {
             return Err(AppError::new("computer_use_failed", error_text(&result)));

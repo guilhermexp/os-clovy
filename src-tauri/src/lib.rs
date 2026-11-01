@@ -217,6 +217,8 @@ pub fn run() {
             agent_sessions::persona::clovy_persona,
             agent_sessions::persona::set_clovy_persona,
             agent_recorder::resolve_agent_recorder_request,
+            agent_recorder::validate_agent_recorder_request,
+            dictation::claim_agent_dictation_delivery,
             browser_broker::browser_approvals_pending,
             browser_broker::browser_approval_respond,
             agent_mcp::list_agent_mcp_servers,

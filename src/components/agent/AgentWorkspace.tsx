@@ -79,6 +79,8 @@ import {
   rememberSessionModel,
 } from "../../lib/agent-session-models";
 import {
+  AGENT_DICTATION_DRAFT_CHANGED,
+  AGENT_DICTATION_DRAFT_WILL_CHANGE,
   clearAgentSessionDraftRevision,
   clearPendingAgentSessionDraft,
   invalidateAgentSessionDraft,
@@ -372,6 +374,15 @@ export function AgentWorkspace({
     setDraft(value);
     setDraftRevision((revision) => revision + 1);
   }, []);
+  useEffect(() => {
+    const onDictation = (event: Event) => {
+      const detail = (event as CustomEvent<{ conversationId: string }>).detail;
+      if (detail.conversationId !== selectedIdRef.current) return;
+      setComposerDraft(readAgentSessionDraft(detail.conversationId) ?? "", { persist: false });
+    };
+    window.addEventListener(AGENT_DICTATION_DRAFT_CHANGED, onDictation);
+    return () => window.removeEventListener(AGENT_DICTATION_DRAFT_CHANGED, onDictation);
+  }, [setComposerDraft]);
   const [attachments, setAttachments] = useState<string[]>([]);
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
@@ -2288,6 +2299,20 @@ function AgentComposer({
   const t = useT();
   const editorRef = useRef<ComposerEditorHandle>(null);
   const [editorDraftOwnerId, setEditorDraftOwnerId] = useState(draftOwnerId);
+  useEffect(() => {
+    const flushDictationDestination = (event: Event) => {
+      const detail = (event as CustomEvent<{ conversationId: string }>).detail;
+      if (
+        detail.conversationId === editorDraftOwnerId &&
+        editorRef.current?.flushPendingChange() === false
+      )
+        event.preventDefault();
+    };
+    window.addEventListener(AGENT_DICTATION_DRAFT_WILL_CHANGE, flushDictationDestination);
+    return () =>
+      window.removeEventListener(AGENT_DICTATION_DRAFT_WILL_CHANGE, flushDictationDestination);
+  }, [editorDraftOwnerId]);
+
   const ownerTransitionHandledRef = useRef(false);
   const publishedDraftRef = useRef(draft);
   const appliedDraftRevisionRef = useRef(draftRevision);

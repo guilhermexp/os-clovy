@@ -44,6 +44,13 @@ export type NotesAction =
   | { type: "folderSelected"; folderId?: string }
   | { type: "foldersLoaded"; folders: FolderDto[] }
   | { type: "notesLoaded"; notes: NoteListItemDto[] }
+  | {
+      type: "notesInvalidated";
+      notes: NoteListItemDto[];
+      deletedId?: string;
+      preserveIds?: string[];
+    }
+  | { type: "noteDeleted"; noteId: string }
   | { type: "recoveriesUpdated"; recoveries: RecoverableRecordingDto[] }
   | { type: "recoveryRemoved"; sessionId: string };
 
@@ -156,6 +163,25 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
         notes: action.notes,
         selectedNoteId: action.notes[0]?.id,
         selectedNote: undefined,
+      };
+    case "noteDeleted":
+      return {
+        ...state,
+        notes: state.notes.filter((note) => note.id !== action.noteId),
+        selectedNoteId: state.selectedNoteId === action.noteId ? undefined : state.selectedNoteId,
+        selectedNote: state.selectedNoteId === action.noteId ? undefined : state.selectedNote,
+      };
+    case "notesInvalidated":
+      return {
+        ...state,
+        notes: action.notes.map((note) =>
+          action.preserveIds?.includes(note.id)
+            ? (state.notes.find((current) => current.id === note.id) ?? note)
+            : note,
+        ),
+        selectedNoteId:
+          state.selectedNoteId === action.deletedId ? undefined : state.selectedNoteId,
+        selectedNote: state.selectedNoteId === action.deletedId ? undefined : state.selectedNote,
       };
     case "recoveriesUpdated":
       return {

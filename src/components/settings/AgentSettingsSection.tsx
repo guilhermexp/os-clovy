@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import type { AgentSkillDto } from "../../lib/agent-runtime-contract";
 import {
   listAgentSkills,
@@ -53,6 +54,18 @@ export function AgentSettingsSection({
   const [skillDraft, setSkillDraft] = useState("");
   const [skillSaving, setSkillSaving] = useState(false);
   const [error, setError] = useState<string>();
+  useClovyDataChanged(
+    "skills",
+    async (_change, isCurrent) => {
+      try {
+        const next = await listAgentSkills();
+        if (isCurrent()) setSkills(next);
+      } catch (cause) {
+        if (isCurrent()) setError(messageFromError(cause));
+      }
+    },
+    true,
+  );
 
   useEffect(() => {
     void listAgentSkills()
@@ -229,7 +242,7 @@ export function AgentSettingsSection({
                   ) : null}
                   <Switch
                     checked={skill.enabled}
-                    disabled={savingSkillId === skill.id}
+                    disabled={savingSkillId === skill.id || !skill.editable}
                     onCheckedChange={(enabled) => void changeSkill(skill, enabled)}
                     aria-label={
                       skill.enabled

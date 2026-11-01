@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { listCompletedSessions, listSessionFolders } from "../lib/tauri";
 import { messageFromError } from "../lib/errors";
+import { useClovyDataChanged } from "../lib/clovy-data-events";
 import type { UseSessionMetadataDependencies } from "./use-session-metadata-types";
 
 export function useSessionMetadata(dependencies: UseSessionMetadataDependencies) {
@@ -12,6 +13,58 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
     setError,
     setSessionFolders,
   } = dependencies;
+  const invalidatedCompletions = useRef(new Set<string>());
+
+  async function refreshAssignments(isCurrent: () => boolean) {
+    try {
+      const assignments = await listSessionFolders();
+      if (!isCurrent()) return;
+      const next: Record<string, string[]> = {};
+      for (const assignment of assignments) {
+        next[assignment.sessionId] ??= [];
+        next[assignment.sessionId].push(assignment.folderId);
+      }
+      setSessionFolders(next);
+    } catch (error) {
+      if (isCurrent()) setError(messageFromError(error));
+    }
+  }
+
+  useClovyDataChanged("projects", (_change, isCurrent) => refreshAssignments(isCurrent));
+  useClovyDataChanged("conversations", async (change, isCurrent) => {
+    if (change.id) {
+      invalidatedCompletions.current.add(change.id);
+      // This persisted event supersedes an earlier local toggle. A toggle
+      // made during the asynchronous reload will mark the ID again.
+      sessionCompletionTouchedRef.current.delete(change.id);
+    }
+    await refreshAssignments(isCurrent);
+    try {
+      const rows = await listCompletedSessions();
+      if (!isCurrent()) return;
+      // The latest reload reconciles every pending target, including those
+      // whose earlier reads were superseded by a second native event.
+      const invalidated = new Set(invalidatedCompletions.current);
+      setCompletedSessions((previous) => {
+        if (!isCurrent()) return previous;
+        const next = { ...previous };
+        const targets = change.id
+          ? invalidated
+          : new Set([...Object.keys(previous), ...rows.map((row) => row.sessionId)]);
+        for (const id of targets) {
+          if (!sessionCompletionTouchedRef.current.has(id)) {
+            const row = rows.find((row) => row.sessionId === id);
+            if (row) next[id] = row.completedAt;
+            else delete next[id];
+          }
+          invalidatedCompletions.current.delete(id);
+        }
+        return next;
+      });
+    } catch (error) {
+      if (isCurrent()) setError(messageFromError(error));
+    }
+  });
 
   useEffect(() => {
     if (appBlocked || !bootstrapped) return;

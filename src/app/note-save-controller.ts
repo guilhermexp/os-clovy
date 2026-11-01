@@ -25,6 +25,7 @@ export class NoteSaveController {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlight = new Map<string, Promise<NoteSaveResult>>();
   private readonly retryAttempts = new Map<string, number>();
+  private readonly editVersions = new Map<string, number>();
   private readonly debounceMs: number;
 
   constructor(private readonly options: NoteSaveControllerOptions) {
@@ -33,6 +34,7 @@ export class NoteSaveController {
 
   queue(noteId: string, patch: NoteEditablePatch) {
     if (!hasPatchFields(patch)) return;
+    this.editVersions.set(noteId, this.getEditVersion(noteId) + 1);
     this.retryAttempts.delete(noteId);
     this.pending.set(noteId, {
       ...this.pending.get(noteId),
@@ -95,9 +97,15 @@ export class NoteSaveController {
   }
 
   discard(noteId: string) {
+    this.editVersions.set(noteId, this.getEditVersion(noteId) + 1);
     this.clearTimer(noteId);
     this.pending.delete(noteId);
     this.retryAttempts.delete(noteId);
+  }
+
+  /** Local edit ordering for asynchronous native-event hydration. */
+  getEditVersion(noteId: string) {
+    return this.editVersions.get(noteId) ?? 0;
   }
 
   private async drain(noteId: string): Promise<NoteSaveResult> {

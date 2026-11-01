@@ -176,6 +176,164 @@ pub fn set_manual_pause(app: &AppHandle, paused: bool) {
     publish(app);
 }
 
+/// Installation-wide settings port shared with bound MCP tools. Capture may be off.
+pub(crate) fn tool_status(app: &AppHandle) -> ActivityStatusDto {
+    status_of(app.state::<ActivityState>().0.as_ref())
+}
+
+/// Partial, typed user settings update. Unknown and internal fields are rejected.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ActivitySettingsPatch {
+    enabled: Option<bool>,
+    secondary_monitors: Option<bool>,
+    input_events: Option<bool>,
+    pause_on_protected_video: Option<bool>,
+    ignored_apps: Option<Vec<String>>,
+    ignored_domains: Option<Vec<String>>,
+    retention_days: Option<u32>,
+    work_hours: Option<WorkHoursPatch>,
+    day_summary: Option<DaySummaryPatch>,
+    notifications: Option<NotificationsPatch>,
+    coding_agents: Option<CodingAgentsPatch>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkHoursPatch {
+    enabled: Option<bool>,
+    days: Option<Vec<u8>>,
+    start: Option<String>,
+    end: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DaySummaryPatch {
+    time: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QuietHoursPatch {
+    enabled: Option<bool>,
+    start: Option<String>,
+    end: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NotificationsPatch {
+    enabled: Option<bool>,
+    quiet_hours: Option<QuietHoursPatch>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CodingAgentsPatch {
+    claude_code: Option<bool>,
+    codex: Option<bool>,
+    copilot_cli: Option<bool>,
+    copilot_vscode: Option<bool>,
+    cursor: Option<bool>,
+    cursor_cli: Option<bool>,
+    antigravity: Option<bool>,
+}
+macro_rules! apply_activity_fields {
+    ($target:expr, $patch:expr, $($field:ident),+ $(,)?) => { $(if let Some(value) = $patch.$field { $target.$field = value; })+ };
+}
+impl ActivitySettingsPatch {
+    pub(crate) fn apply(self, current: &mut ActivitySettings) {
+        apply_activity_fields!(
+            current,
+            self,
+            enabled,
+            secondary_monitors,
+            input_events,
+            pause_on_protected_video,
+            ignored_apps,
+            ignored_domains,
+            retention_days
+        );
+        if let Some(patch) = self.work_hours {
+            apply_activity_fields!(current.work_hours, patch, enabled, days, start, end);
+        }
+        if let Some(patch) = self.day_summary {
+            apply_activity_fields!(current.day_summary, patch, time);
+        }
+        if let Some(patch) = self.notifications {
+            apply_activity_fields!(current.notifications, patch, enabled);
+            if let Some(patch) = patch.quiet_hours {
+                apply_activity_fields!(
+                    current.notifications.quiet_hours,
+                    patch,
+                    enabled,
+                    start,
+                    end
+                );
+            }
+        }
+        if let Some(patch) = self.coding_agents {
+            apply_activity_fields!(
+                current.coding_agents,
+                patch,
+                claude_code,
+                codex,
+                copilot_cli,
+                copilot_vscode,
+                cursor,
+                cursor_cli,
+                antigravity
+            );
+        }
+        *current = current.clone().normalized();
+    }
+}
+pub(crate) async fn tool_update_settings(
+    app: &AppHandle,
+    patch: ActivitySettingsPatch,
+    binding: &crate::mcp_server::turns::TurnBinding,
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+) -> Result<ActivityStatusDto, AppError> {
+    let app = app.clone();
+    let binding = binding.clone();
+    let pool = pool.clone();
+    let profile = profile.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<ActivityStatusDto, AppError> {
+        let state = app.state::<ActivityState>();
+        let runtime = runtime(&state)?;
+        // Notes authority and the activity settings lock have no reverse lock
+        // dependency. Await the real host/DB guard only on this blocking worker.
+        let settings = runtime.shared.update_settings_checked(
+            &runtime.settings_path,
+            || {
+                tauri::async_runtime::block_on(crate::mcp_server::tools::revalidate_binding(
+                    Some(&app),
+                    &pool,
+                    &binding,
+                    &profile,
+                ))
+            },
+            |current| patch.apply(current),
+        )?;
+        if !settings.enabled {
+            runtime.shared.set_manual_pause(false);
+        }
+        crate::coding_agents::wake(&app);
+        publish(&app);
+        Ok(status_of(Some(runtime)))
+    })
+    .await
+    .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?
+}
+
+pub(crate) fn tool_set_paused(
+    app: &AppHandle,
+    paused: bool,
+) -> Result<ActivityStatusDto, AppError> {
+    activity_set_paused(
+        app.clone(),
+        app.state::<ActivityState>(),
+        SetActivityPausedRequest { paused },
+    )
+}
+
 #[tauri::command]
 pub fn activity_status(state: State<'_, ActivityState>) -> ActivityStatusDto {
     status_of(state.0.as_ref())

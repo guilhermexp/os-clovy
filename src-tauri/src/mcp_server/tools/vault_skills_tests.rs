@@ -343,3 +343,226 @@ fn vault_result_preserves_discovery_contract_for_test_vault() {
     .unwrap();
     assert!(unavailable["vault"].get("path").is_none());
 }
+
+#[tokio::test]
+async fn skill_admin_uses_ui_catalog_disabled_state_and_managed_boundary() {
+    use crate::approval_broker::testing::Scripted;
+    let broker = TestBroker::new([Scripted::Approve, Scripted::Approve, Scripted::Approve]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let managed = tempfile::tempdir().unwrap();
+    let global = tempfile::tempdir().unwrap();
+    for (root, id, content) in [
+        (managed.path(), "managed", "Original"),
+        (global.path(), "global-only", "Global"),
+        (managed.path(), "foo-backup", "Legitimate"),
+        (managed.path(), ".creative-x.backup-1", "Hidden"),
+    ] {
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        std::fs::write(root.join(id).join("SKILL.md"), content).unwrap();
+    }
+    let roots = vec![managed.path().to_path_buf(), global.path().to_path_buf()];
+    let data = McpData {
+        notes: broker.pool().clone(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: ActivityAccess::Off,
+        now: chrono::Utc::now(),
+    };
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+        ..ToolCtx::unbound(&data)
+    };
+    let args = json!({"name":"managed"});
+    super::vault_skills::call_with_roots(&ctx, "disable_skill", &args, &roots)
+        .await
+        .unwrap();
+    let settings =
+        super::vault_skills::call_with_roots(&ctx, "list_skill_settings", &json!({}), &roots)
+            .await
+            .unwrap();
+    let ui_catalog = crate::agent_sessions::skills::catalog_from_roots(
+        vec![(roots[0].clone(), true), (roots[1].clone(), false)],
+        &std::collections::HashMap::from([("managed".to_string(), false)]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(settings["skills"], json!(ui_catalog));
+    assert!(
+        !super::vault_skills::call_with_roots(&ctx, "list_skills", &json!({}), &roots)
+            .await
+            .unwrap()["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|skill| skill["name"] == "managed")
+    );
+    assert_eq!(
+        super::vault_skills::call_with_roots(&ctx, "read_skill", &args, &roots)
+            .await
+            .unwrap()["content"],
+        "Original"
+    );
+    assert_eq!(
+        super::vault_skills::call_with_roots(&ctx, "load_skill", &args, &roots)
+            .await
+            .unwrap_err()
+            .code,
+        "agent_skill_disabled"
+    );
+    let edited = super::vault_skills::call_with_roots(
+        &ctx,
+        "update_skill",
+        &json!({"name":"managed","content":"Revised"}),
+        &roots,
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited["enabled"], false);
+    super::vault_skills::call_with_roots(&ctx, "enable_skill", &args, &roots)
+        .await
+        .unwrap();
+    assert!(
+        super::vault_skills::call_with_roots(&ctx, "load_skill", &args, &roots)
+            .await
+            .unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("Revised")
+    );
+    for name in ["update_skill", "enable_skill", "disable_skill"] {
+        assert_eq!(
+            super::vault_skills::call_with_roots(
+                &ctx,
+                name,
+                &json!({"name":"global-only","content":"Denied"}),
+                &roots
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "agent_skill_read_only"
+        );
+    }
+    assert_eq!(broker.requests().len(), 3);
+    assert!(managed
+        .path()
+        .join(".creative-x.backup-1/SKILL.md")
+        .exists());
+    assert_eq!(
+        std::fs::read_to_string(global.path().join("global-only/SKILL.md")).unwrap(),
+        "Global"
+    );
+}
+
+#[tokio::test]
+async fn conflicting_alias_settings_keep_canonical_disabled_and_invalid_content_in_admin_only() {
+    let broker = TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let managed = tempfile::tempdir().unwrap();
+    let global = tempfile::tempdir().unwrap();
+    for (root, id) in [
+        (managed.path(), "clovy-obsidian"),
+        (managed.path(), "valid"),
+        (global.path(), "oversized"),
+        (global.path(), "invalid-utf8"),
+    ] {
+        std::fs::create_dir(root.join(id)).unwrap();
+    }
+    std::fs::write(managed.path().join("clovy-obsidian/SKILL.md"), "Canonical").unwrap();
+    std::fs::write(managed.path().join("valid/SKILL.md"), "Valid").unwrap();
+    std::fs::write(
+        global.path().join("oversized/SKILL.md"),
+        vec![b'x'; 512 * 1024 + 1],
+    )
+    .unwrap();
+    std::fs::write(global.path().join("invalid-utf8/SKILL.md"), [0xff]).unwrap();
+    for (id, enabled) in [
+        ("clovy-obsidian", false),
+        ("june-obsidian", true),
+        ("oversized", false),
+    ] {
+        sqlx::query::query("INSERT INTO agent_skill_settings(skill_id,enabled,managed,updated_at) VALUES (?,?,1,'now')").bind(id).bind(enabled).execute(broker.pool()).await.unwrap();
+    }
+    let data = McpData {
+        notes: broker.pool().clone(),
+        profile: "default".into(),
+        memory_enabled: true,
+        activity: ActivityAccess::Off,
+        now: chrono::Utc::now(),
+    };
+    let ctx = ToolCtx {
+        binding: Some(&binding),
+        ..ToolCtx::unbound(&data)
+    };
+    let roots = vec![managed.path().into(), global.path().into()];
+    let active = super::vault_skills::call_with_roots(&ctx, "list_skills", &json!({}), &roots)
+        .await
+        .unwrap();
+    assert_eq!(
+        active["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|skill| skill["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["valid"]
+    );
+    let admin =
+        super::vault_skills::call_with_roots(&ctx, "list_skill_settings", &json!({}), &roots)
+            .await
+            .unwrap();
+    assert_eq!(admin["skills"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        admin["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["id"] == "clovy-obsidian")
+            .unwrap()["configuredEnabled"],
+        false
+    );
+    assert_eq!(
+        super::vault_skills::call_with_roots(
+            &ctx,
+            "load_skill",
+            &json!({"name":"june-obsidian"}),
+            &roots
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "agent_skill_disabled"
+    );
+    assert_eq!(
+        super::vault_skills::call_with_roots(
+            &ctx,
+            "read_skill",
+            &json!({"name":"oversized"}),
+            &roots
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "agent_skill_too_large"
+    );
+    assert_eq!(
+        super::vault_skills::call_with_roots(
+            &ctx,
+            "load_skill",
+            &json!({"name":"invalid-utf8"}),
+            &roots
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "agent_skill_read_failed"
+    );
+    let legacy: bool = sqlx::query_scalar::query_scalar(
+        "SELECT enabled FROM agent_skill_settings WHERE skill_id='june-obsidian'",
+    )
+    .fetch_one(broker.pool())
+    .await
+    .unwrap();
+    assert!(legacy);
+}

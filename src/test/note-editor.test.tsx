@@ -820,6 +820,49 @@ describe("NoteEditor", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
+  it("preserves authoritative recording order when a later session restarts its turn counter", () => {
+    const { container } = render(
+      <NoteEditor
+        {...props}
+        note={note({
+          activeTab: "transcription",
+          sourceTranscripts: [
+            {
+              id: "session-a-turn-3",
+              recordingSessionId: "session-a",
+              text: "Earlier recording",
+              source: "microphone",
+              startMs: 3000,
+              endMs: 4000,
+              turnIndex: 3,
+              status: "succeeded",
+            },
+            {
+              id: "session-b-turn-0",
+              recordingSessionId: "session-b",
+              text: "Later recording",
+              source: "system",
+              startMs: 0,
+              endMs: 1000,
+              turnIndex: 0,
+              status: "succeeded",
+            },
+            { id: "legacy-one", text: "Repeated legacy text", status: "succeeded" },
+            { id: "legacy-two", text: "Repeated legacy text", status: "succeeded" },
+          ],
+        })}
+      />,
+    );
+    expect(
+      Array.from(container.querySelectorAll(".transcript-turn-text"), (turn) => turn.textContent),
+    ).toEqual([
+      "Earlier recording",
+      "Later recording",
+      "Repeated legacy text",
+      "Repeated legacy text",
+    ]);
+  });
+
   it("orders source transcript turns by persisted turn metadata", () => {
     const { container } = render(
       <NoteEditor
@@ -830,6 +873,7 @@ describe("NoteEditor", () => {
             {
               id: "turn-3",
               text: "Second microphone turn",
+              recordingSessionId: "recording-a",
               source: "microphone",
               startMs: 5000,
               endMs: 6500,
@@ -839,6 +883,7 @@ describe("NoteEditor", () => {
             {
               id: "turn-1",
               text: "First microphone turn",
+              recordingSessionId: "recording-a",
               source: "microphone",
               startMs: 1000,
               endMs: 2000,
@@ -848,6 +893,7 @@ describe("NoteEditor", () => {
             {
               id: "turn-2",
               text: "System reply",
+              recordingSessionId: "recording-a",
               source: "system",
               startMs: 3000,
               endMs: 4000,

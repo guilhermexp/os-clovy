@@ -1,7 +1,4 @@
-use super::skill_identity::{
-    canonical_skill_id, canonical_skill_ids, read_skill_ids, skill_content_for_id, skill_file,
-    write_skill_ids,
-};
+use super::skill_identity::{canonical_skill_id, canonical_skill_ids};
 use super::{
     AgentItemDto, AgentItemPayload, AgentRepository, AgentSafetyMode, MessageAttachmentPayload,
 };
@@ -568,13 +565,6 @@ mod branch_tests {
 #[tauri::command]
 pub async fn delete_agent_session(app: AppHandle, session_id: String) -> Result<(), AppError> {
     let repository = repository(&app).await?;
-    let session = repository.get_session(&session_id).await?;
-    if matches!(session.status.as_str(), "running" | "waiting_for_user") {
-        return Err(AppError::new(
-            "agent_run_active",
-            "Stop or resolve the current turn before deleting this session.",
-        ));
-    }
     repository.delete_session(&session_id).await?;
     Ok(())
 }
@@ -837,29 +827,154 @@ fn cli_image_attachments(attachments: &[MessageAttachmentPayload]) -> Vec<PathBu
 pub async fn cancel_agent_run(app: AppHandle, run_id: String) -> Result<(), AppError> {
     let repository = repository(&app).await?;
     let run = repository.get_run(&run_id).await?;
+    let host = app.state::<crate::chat_engine::ChatEngineHost>();
+    // Stop and every bound mutation share SQLite's write lock. Persist Stop
+    // before revoking the turn or signalling the CLI process.
+    if !claim_ui_run_cancellation(&repository.pool, &run.session_id, &run.id).await? {
+        return Ok(());
+    }
     let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
     let mcp = app.try_state::<crate::mcp_server::McpServerState>();
-    if crate::chat_engine::cancel_cli_run(
-        &app.state::<crate::chat_engine::ChatEngineHost>(),
+    let running = crate::chat_engine::cancel_cli_run(
+        &host,
         broker.as_deref(),
         mcp.as_ref().map(|state| state.turns()),
         &run.id,
     )
-    .await
-    {
-        return Ok(());
+    .await;
+    retire_conversation_run_interruptions(&repository.pool, &run.session_id, &run.id).await?;
+    if let Err(error) = crate::routines::mark_agent_run_terminal(&repository.pool, &run.id).await {
+        tracing::warn!(error_code=%error.code, "routine cancellation projection failed");
     }
-    if run.status == "waiting_for_user" {
-        if let Some(cancelled) = repository.cancel_waiting_run(&run.id).await? {
-            super::events::emit_persisted_run_cancelled(&app, &cancelled)?;
-        }
-    } else if matches!(run.status.as_str(), "queued" | "running") {
-        let cancelled = repository
-            .update_run_status(&run.id, "cancelled", None, None, None)
-            .await?;
+    if !running {
+        let cancelled = repository.get_run(&run.id).await?;
         super::events::emit_persisted_run_cancelled(&app, &cancelled)?;
     }
     Ok(())
+}
+
+/// Pure admission boundary used by the UI Stop command before host teardown.
+pub(crate) async fn claim_ui_run_cancellation(
+    pool: &sqlx_sqlite::SqlitePool,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<bool, AppError> {
+    let mut tx = pool.begin().await?;
+    let changed = cancel_active_run_in_transaction(&mut tx, conversation_id, run_id).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+async fn cancel_active_run_in_transaction(
+    tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<bool, AppError> {
+    let now = crate::db::repositories::timestamp();
+    let changed = sqlx::query::query("UPDATE agent_runs SET status='cancelled',updated_at=?,completed_at=?,error_code=NULL,error_message=NULL WHERE id=? AND session_id=? AND status IN ('queued','running','waiting_for_user')")
+        .bind(&now).bind(&now).bind(run_id).bind(conversation_id).execute(&mut **tx).await?.rows_affected() != 0;
+    if changed {
+        sqlx::query::query("UPDATE agent_sessions SET status='idle',updated_at=?,last_error=NULL WHERE id=? AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE session_id=? AND status IN ('queued','running','waiting_for_user'))")
+            .bind(&now).bind(conversation_id).bind(conversation_id).execute(&mut **tx).await?;
+    }
+    Ok(changed)
+}
+
+/// Cancel an exact run in a host-selected partition. The database claim and
+/// caller validation share the write lock; no UI profile is consulted.
+pub(crate) async fn claim_conversation_run_cancellation(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    caller_session: &str,
+    caller_run: &str,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<bool, AppError> {
+    if run_id == caller_run {
+        return Err(AppError::new(
+            "conversation_self_cancel",
+            "A turn cannot cancel its own run.",
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    crate::db::repositories::guard_bound_turn(&mut tx, profile, caller_session, caller_run).await?;
+    let status: Option<String> = sqlx::query_scalar::query_scalar("SELECT r.status FROM agent_runs r JOIN agent_sessions s ON s.id=r.session_id LEFT JOIN session_profiles p ON p.session_id=s.id WHERE r.id=? AND r.session_id=? AND COALESCE(p.profile,'default')=?")
+        .bind(run_id).bind(conversation_id).bind(profile).fetch_optional(&mut *tx).await?;
+    let status = status
+        .ok_or_else(|| AppError::new("run_not_found", "Run was not found in this conversation."))?;
+    if !matches!(status.as_str(), "queued" | "running" | "waiting_for_user") {
+        tx.commit().await?;
+        return Ok(false);
+    }
+    let changed = cancel_active_run_in_transaction(&mut tx, conversation_id, run_id).await?;
+    crate::routines::project_agent_run_terminal(
+        &mut tx,
+        run_id,
+        &crate::db::repositories::timestamp(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Retire durable input cards only after the live approval broker has settled
+/// its waiters, preserving its cancellation receipts and UI updates.
+pub(crate) async fn retire_conversation_run_interruptions(
+    pool: &sqlx_sqlite::SqlitePool,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query::query("UPDATE agent_items SET payload_json=json_set(payload_json,'$.status','expired','$.resolvedAt',?) WHERE session_id=? AND run_id=? AND kind='interruption' AND json_extract(payload_json,'$.status')='pending' AND EXISTS (SELECT 1 FROM agent_runs r WHERE r.id=? AND r.session_id=? AND r.status='cancelled')")
+        .bind(crate::db::repositories::timestamp()).bind(conversation_id).bind(run_id).bind(run_id).bind(conversation_id).execute(pool).await?;
+    Ok(())
+}
+
+pub(crate) async fn cancel_conversation_run_in_profile(
+    app: &AppHandle,
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    caller_session: &str,
+    caller_run: &str,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<Value, AppError> {
+    let host = app
+        .try_state::<crate::chat_engine::ChatEngineHost>()
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_runtime_unavailable",
+                "The chat engine host is unavailable.",
+            )
+        })?;
+    let changed = claim_conversation_run_cancellation(
+        pool,
+        profile,
+        caller_session,
+        caller_run,
+        conversation_id,
+        run_id,
+    )
+    .await?;
+    if changed {
+        let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
+        let mcp = app.try_state::<crate::mcp_server::McpServerState>();
+        let running = crate::chat_engine::cancel_cli_run(
+            &host,
+            broker.as_deref(),
+            mcp.as_ref().map(|state| state.turns()),
+            run_id,
+        )
+        .await;
+        retire_conversation_run_interruptions(pool, conversation_id, run_id).await?;
+        if !running {
+            let run = AgentRepository::new(pool.clone()).get_run(run_id).await?;
+            super::events::emit_persisted_run_cancelled(app, &run)?;
+        }
+    }
+    let run = AgentRepository::new(pool.clone()).get_run(run_id).await?;
+    Ok(
+        json!({"conversationId":conversation_id,"runId":run_id,"cancelled":run.status=="cancelled","changed":changed,"status":run.status}),
+    )
 }
 
 #[tauri::command]
@@ -1186,23 +1301,7 @@ pub async fn list_agent_skills(app: AppHandle) -> Result<Vec<Value>, AppError> {
 
 #[tauri::command]
 pub async fn read_agent_skill(app: AppHandle, skill_id: String) -> Result<Value, AppError> {
-    validate_skill_id(&skill_id)?;
-    let canonical_id = canonical_skill_id(&skill_id);
-    for (root, managed) in skill_roots(&app) {
-        for read_id in read_skill_ids(canonical_id) {
-            let path = skill_file(&root, read_id);
-            if path.is_file() {
-                let content = tokio::fs::read_to_string(path)
-                    .await
-                    .map_err(|error| AppError::new("agent_skill_read_failed", error.to_string()))?;
-                return Ok(json!({ "content": content, "readOnly": !managed }));
-            }
-        }
-    }
-    Err(AppError::new(
-        "agent_skill_not_found",
-        "The requested skill was not found.",
-    ))
+    super::skills::read_from_roots(&super::skills::skill_roots(&app), &skill_id).await
 }
 
 #[tauri::command]
@@ -1210,139 +1309,39 @@ pub async fn update_agent_skill(
     app: AppHandle,
     request: UpdateSkillRequest,
 ) -> Result<Value, AppError> {
-    validate_skill_id(&request.skill_id)?;
-    let canonical_id = canonical_skill_id(&request.skill_id).to_string();
-    if request.content.len() > 512 * 1024 {
-        return Err(AppError::new(
-            "agent_skill_too_large",
-            "Skill instructions must be smaller than 512 KB.",
-        ));
-    }
-    let root = skill_roots(&app)
-        .into_iter()
-        .find_map(|(root, managed)| managed.then_some(root))
-        .ok_or_else(|| {
-            AppError::new(
-                "agent_skill_write_failed",
-                "Managed skill storage is unavailable.",
-            )
-        })?;
-    if !read_skill_ids(&canonical_id)
-        .into_iter()
-        .any(|read_id| skill_file(&root, read_id).is_file())
-    {
-        return Err(AppError::new(
-            "agent_skill_read_only",
-            "User-global skills are read-only in Clovy.",
-        ));
-    }
-    write_managed_skill_content(&root, &canonical_id, &request.content).await?;
-    let skill = repository(&app)
-        .await?
-        .skills()
-        .await?
-        .into_iter()
-        .find(|skill| skill.id == canonical_id)
-        .map(|skill| skill.enabled)
-        .unwrap_or(true);
-    let description =
-        skill_description(&request.content).unwrap_or_else(|| "Clovy agent skill".into());
-    Ok(
-        json!({ "id": canonical_id, "name": canonical_id, "description": description, "source": "managed", "enabled": skill, "editable": true }),
+    super::skills::update_from_roots(
+        &super::skills::skill_roots(&app),
+        &request.skill_id,
+        &request.content,
     )
-}
-
-async fn write_managed_skill_content(
-    root: &Path,
-    skill_id: &str,
-    content: &str,
-) -> Result<(), AppError> {
-    for write_id in write_skill_ids(skill_id) {
-        let content = skill_content_for_id(content, write_id);
-        let path = skill_file(root, write_id);
-        let parent = path.parent().ok_or_else(|| {
-            AppError::new(
-                "agent_skill_write_failed",
-                "Skill path has no parent directory.",
-            )
-        })?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| AppError::new("agent_skill_write_failed", error.to_string()))?;
-        let temporary = path.with_extension("md.tmp");
-        tokio::fs::write(&temporary, content)
-            .await
-            .map_err(|error| AppError::new("agent_skill_write_failed", error.to_string()))?;
-        if let Err(error) = tokio::fs::rename(&temporary, &path).await {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(AppError::new("agent_skill_write_failed", error.to_string()));
-        }
-    }
-    Ok(())
-}
-
-fn validate_skill_id(skill_id: &str) -> Result<(), AppError> {
-    if skill_id.is_empty()
-        || skill_id.len() > 128
-        || !skill_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        return Err(AppError::new(
-            "agent_skill_invalid",
-            "Skill ids may contain letters, numbers, hyphens, and underscores.",
-        ));
-    }
-    Ok(())
+    .await?;
+    let repository = repository(&app).await?;
+    agent_skill_catalog(&app, &repository)
+        .await?
+        .into_iter()
+        .find(|skill| skill["id"] == canonical_skill_id(&request.skill_id))
+        .ok_or_else(|| AppError::new("agent_skill_not_found", "Skill was not found."))
 }
 
 pub(crate) async fn agent_skill_catalog(
     app: &AppHandle,
     repository: &AgentRepository,
 ) -> Result<Vec<Value>, AppError> {
-    let overrides: HashMap<String, bool> = repository
-        .skills()
-        .await?
-        .into_iter()
-        .map(|skill| (canonical_skill_id(&skill.id).to_string(), skill.enabled))
-        .collect();
-    agent_skill_catalog_from_roots(skill_roots(app), &overrides).await
+    let overrides = super::skill_identity::skill_enabled_overrides(
+        repository
+            .skills()
+            .await?
+            .into_iter()
+            .map(|skill| (skill.id, skill.enabled)),
+    );
+    agent_skill_catalog_from_roots(super::skills::skill_roots(app), &overrides).await
 }
 
 async fn agent_skill_catalog_from_roots(
     roots: Vec<(PathBuf, bool)>,
     overrides: &HashMap<String, bool>,
 ) -> Result<Vec<Value>, AppError> {
-    let mut result = Vec::new();
-    for (root, managed) in roots {
-        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
-            continue;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let stored_skill_file = entry.path().join("SKILL.md");
-            if !stored_skill_file.is_file() {
-                continue;
-            }
-            let stored_id = entry.file_name().to_string_lossy().into_owned();
-            let id = canonical_skill_id(&stored_id).to_string();
-            if stored_id != id && skill_file(&root, &id).is_file() {
-                continue;
-            }
-            if result
-                .iter()
-                .any(|value: &Value| value.get("id").and_then(Value::as_str) == Some(&id))
-            {
-                continue;
-            }
-            let description = tokio::fs::read_to_string(&stored_skill_file)
-                .await
-                .ok()
-                .and_then(|text| skill_description(&text))
-                .unwrap_or_else(|| "Clovy agent skill".into());
-            result.push(json!({ "id": id, "name": id, "description": description, "source": if managed { "managed" } else { "user_global" }, "enabled": overrides.get(&id).copied().unwrap_or(true), "editable": managed }));
-        }
-    }
-    Ok(result)
+    super::skills::catalog_from_roots(roots, overrides).await
 }
 
 #[tauri::command]
@@ -1350,75 +1349,44 @@ pub async fn set_agent_skill_enabled(
     app: AppHandle,
     request: SetSkillEnabledRequest,
 ) -> Result<Value, AppError> {
-    validate_skill_id(&request.skill_id)?;
-    let canonical_id = canonical_skill_id(&request.skill_id).to_string();
-    let managed_root = skill_roots(&app)
-        .into_iter()
-        .find(|(_, managed)| *managed)
-        .map(|(root, _)| root)
-        .filter(|root| {
-            read_skill_ids(&canonical_id)
-                .into_iter()
-                .any(|read_id| skill_file(root, read_id).is_file())
-        });
-    let Some(managed_root) = managed_root else {
+    let repository = repository(&app).await?;
+    let catalog = agent_skill_catalog(&app, &repository).await?;
+    let id = canonical_skill_id(&request.skill_id);
+    if !super::skill_identity::valid_skill_id(&request.skill_id) {
+        return Err(AppError::new("agent_skill_invalid", "Skill id is invalid."));
+    }
+    let skill = catalog
+        .iter()
+        .find(|skill| skill["id"] == id)
+        .ok_or_else(|| AppError::new("agent_skill_not_found", "Skill was not found."))?;
+    if skill["editable"] != true {
         return Err(AppError::new(
             "agent_skill_read_only",
             "User-global skills are read-only in Clovy.",
         ));
-    };
-    let skill = repository(&app)
-        .await?
-        .set_skill_enabled(&canonical_id, request.enabled, true)
-        .await?;
-    let mut description = None;
-    for read_id in read_skill_ids(&canonical_id) {
-        if let Ok(text) = tokio::fs::read_to_string(skill_file(&managed_root, read_id)).await {
-            description = skill_description(&text);
-            break;
-        }
     }
-    let description = description.unwrap_or_else(|| "Clovy agent skill".into());
-    Ok(
-        json!({ "id": skill.id, "name": skill.id, "description": description, "source": "managed", "enabled": skill.enabled, "editable": true }),
+    super::skills::set_enabled_from_roots(
+        &repository.pool,
+        &super::skills::skill_roots(&app),
+        id,
+        request.enabled,
+        None,
     )
-}
-
-fn skill_description(text: &str) -> Option<String> {
-    let mut lines = text.lines().map(str::trim);
-    if lines.next() == Some("---") {
-        for line in &mut lines {
-            if line == "---" {
-                break;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                if key.trim() == "description" {
-                    let value = value
-                        .trim()
-                        .trim_matches(|character| character == '"' || character == '\'');
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
-                }
-            }
-        }
-    }
-    lines
-        .find(|line| !line.is_empty() && !line.starts_with('#') && *line != "---")
-        .map(str::to_string)
-}
-
-fn skill_roots(app: &AppHandle) -> Vec<(PathBuf, bool)> {
-    let mut roots = crate::app_paths::app_data_dir(app)
-        .ok()
-        .map(|path| (path.join("agents").join("skills"), true))
+    .await?;
+    agent_skill_catalog(&app, &repository)
+        .await?
         .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push((PathBuf::from(home).join(".agents").join("skills"), false));
-    }
-    roots
+        .find(|skill| skill["id"] == id)
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_skill_not_found",
+                "Skill was not found after changing its setting.",
+            )
+        })
 }
+
+#[cfg(test)]
+use super::{skill_identity::skill_file, skills::skill_description};
 
 /// Historical native/endpoint sessions continue through the selected local CLI.
 fn normalize_agent_model(model: &str) -> String {

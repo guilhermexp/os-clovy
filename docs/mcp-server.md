@@ -7,8 +7,10 @@ default (the switch in Settings, Agent turns it off, and the choice survives
 restarts) and answers only while Clovy is open. A client outside a Clovy chat
 turn (Cursor, `claude mcp add`) gets the read-only tools only. A CLI chat turn
 (Claude Code, Codex, or Copilot started by Clovy) connects with a **turn
-binding** and also gets the turn-bound tools: Clovy's write tools ask the
-in-app **approval broker** before any effect.
+binding** and also gets turn-bound tools in its saved policy. Domain mutations
+use the in-app **approval broker** and revalidate the host binding after waits.
+Media generation keeps its direct-provider charging policy without an extra
+broker card; Browser use keeps its own policy/tray.
 Requirements: the `clovy-mcp-server` specs of the OpenSpec changes
 `add-activity-intelligence` and `default-capture-and-session-mcp`, and the
 `clovy-mcp-server` delta of `cli-substitui-agente-nativo` (which owns the
@@ -22,6 +24,13 @@ decision records: [ADR-0058](adr/0058-clovy-mcp-server-relays-to-the-running-app
 parity proof). Terms are in
 [CONTEXT.md](../CONTEXT.md#activity-capture). The flags each CLI turn gets are
 in [llm-providers.md](llm-providers.md#cli-chat-engine).
+
+The management expansion names are fixed by D3-D5 of
+[melhorias-agente-audio-automacao](../openspec/changes/melhorias-agente-audio-automacao/design.md).
+Bound access follows the conversation's persisted data partition, including
+after a UI partition switch. External reads retain the current-view scope.
+Projects organize data; IDs never grant access across partitions. Stop revokes
+the host binding; every bound dispatch and post-approval mutation checks it.
 
 ## Where the code lives
 
@@ -205,7 +214,10 @@ Activity tools are listed only while activity capture is on and refuse with
 `activity_capture_off` otherwise; they apply the current app and domain
 exclusions and the retention period like the agent tools
 ([activity-timeline.md](activity-timeline.md)). Tool failures come back as
-`isError` results with `message (code)`.
+`isError` results with `message (code)`. `structuredContent.error` preserves
+the code, message and available details. Delivery/retry details also appear in
+a second text block so a client cannot lose `retrySafe: false` when a completed
+effect outlives turn revalidation.
 
 ### Tools for every client
 
@@ -216,11 +228,12 @@ revoked routine authorization hides these reads and denies their calls.
 
 | Tool | Arguments | Result and limits |
 | --- | --- | --- |
-| `search_notes` | `query`, `limit` (1-20, default 10) | Notes whose title, text, or a transcript contains `query`: id, title, snippet (about 160 characters around the match), `matchedIn`, dates |
-| `get_note` | `id`, `contentOffset`, `transcriptOffset` | Title, text in pages of 20,000 characters (`contentTruncated`, `contentTotalChars`, `nextContentOffset`), latest transcript in pages of 40,000 characters (`nextTranscriptOffset`); offsets count characters |
+| `search_notes` | `query`, `limit` (1-20, default 10) | Notes whose title, text, or an authoritative transcript contains `query`: id, title, snippet around the match, `matchedIn`, matching `transcriptId`, dates |
+| `get_note` | `id`, `contentOffset`, `transcriptOffset` | Title, text in pages of 20,000 characters and authoritative transcripts in pages of 40,000 characters; offsets count characters. |
+| `list_note_transcripts` | `id`, `offset`, `textOffset`, `limit` | Authoritative transcripts across sessions/sources and legacy records, with identity, status, error, creation and timing; continuation offsets include long text. Replaced aggregates are excluded by session/source identity, never text deduplication. Generation shares the same selection. |
 | `list_dictations` | `query`, `limit` (1-50, default 20), `offset` | Dictations of the last 7 days, newest first, text up to 4,000 characters each, `hasMore`/`nextOffset` |
 | `list_memories` | `projectId`, `includeGlobal`, `limit` (1-20, default 8), `offset` | Same as the agent tool; refuses while memory is off (globally or for the project) |
-| `get_activity_timeline` | `from`, `to` | The agent tool: sessions, gaps, stats (300 sessions/gaps at most, `truncated`) |
+| `get_activity_timeline` | `from`, `to` | Complete session and gap records overlapping `[from, to)`; stats count time clipped to that interval. Active state is materialized by the activity ETL, approximately every 30 seconds. At most 300 sessions/gaps; see `truncated`. |
 | `search_activity` | `query`, `from`, `to`, `limit` (1-50) | The agent tool: moments, app, window, URL, snippet |
 | `get_activity_stats` | `from`, `to` | Focused, idle, away minutes, top 5 apps, minutes per category |
 | `get_active_session` | none | The session in progress and the ongoing gap (looking back 12 hours); `lastSession` when nothing is active |
@@ -233,9 +246,12 @@ revoked routine authorization hides these reads and denies their calls.
 
 ### Tools for turn-bound connections
 
-The table describes the available catalog. Routine `get_dictation` reads need
-an enabled context toolset; `list_skills` and `load_skill` need `skills`.
-Missing or revoked routine authorization hides those tools and denies calls.
+The table describes the available catalog before saved routine restrictions.
+Routine context reads need an enabled context toolset; active skill discovery
+and loading need `skills`, routine history needs `routines`. Skill administration
+requires an attended turn. Missing or revoked routine authorization hides tools
+and denies calls; configuration does not create grants. Enabled toolsets never
+make an unattended mutation self-authorizing.
 
 Listed and callable only on a connection bound to a turn. "Listed to" says
 which turns see the tool: `every turn`, `attended turns` (chat; never
@@ -250,17 +266,62 @@ unattended turn every `yes` and `clarification` answers
 | Tool | Group | Listed to | Broker | Arguments and result |
 | --- | --- | --- | --- | --- |
 | `get_dictation` | notes | every turn | no | `id`, `textOffset`: one retained dictation (same 7-day floor as `list_dictations`) in pages of 40,000 characters (`textTotalChars`, `nextTextOffset`) |
+| `list_notes` | notes | every turn | no | Page notes in the bound partition; optional `projectId`, `limit`, `cursor`. |
+| `create_note` | notes | every turn | yes | Create a note with optional `projectId`. |
+| `update_note` | notes | every turn | yes | Update title or content with mandatory `expectedRevision`. |
+| `delete_note` | notes | every turn | yes | Delete a note and its recording files. |
+| `list_conversations` | conversations | every turn | no | Page conversation metadata in the bound partition. |
+| `get_conversation` | conversations | every turn | no | Read conversation metadata by `conversationId`. |
+| `get_conversation_run` | conversations | every turn | no | Read a run by `conversationId` and `runId`. |
+| `list_conversation_messages` | conversations | every turn | no | Page user and assistant text by run, sequence and ID; `nextCursor` and `nextTextOffset` continue the result. |
+| `search_conversation_messages` | conversations | every turn | no | Search and page user and assistant text in one conversation. |
+| `list_conversation_artifacts` | conversations | every turn | no | Page artifact metadata by `conversationId`; paths are not exposed. |
+| `read_conversation_artifact` | conversations | every turn | no | Read bounded UTF-8 text by conversation and artifact ID; offsets count bytes and binary content is rejected. |
+| `create_conversation` | conversations | every turn | yes | Create a conversation in the bound partition without starting a run. |
+| `rename_conversation` | conversations | every turn | yes | Rename a conversation. |
+| `archive_conversation` | conversations | every turn | yes | Mark a conversation completed. |
+| `restore_conversation` | conversations | every turn | yes | Remove the completed marker. |
+| `delete_conversation` | conversations | every turn | yes | Delete a conversation only while it has no active run; self-deletion is refused. |
+| `cancel_conversation_run` | conversations | every turn | yes | Exact `conversationId` and `runId`; cancel another run through its own session, never the caller's run. |
+| `list_projects` | projects | every turn | no | Page bound projects with `offset` and `limit`. |
+| `get_project` | projects | every turn | no | `projectId`: fields, association counts and notes. |
+| `create_project` | projects | every turn | yes | `name`, optional `description`, `instructions` (4,000 characters), `memoryDisabled`. |
+| `update_project` | projects | every turn | yes | `projectId` and compound fields applied in one transaction. |
+| `delete_project` | projects | every turn | yes | `projectId`, explicit `deleteNotes`; approval previews affected IDs/counts and a changed preview fails before deletion. Clean up associated memory, links and selected note audio; preserve conversations. |
+| `assign_note_project` | projects | every turn | yes | `projectId`, `noteId`: add an association, preserving others. |
+| `remove_note_project` | projects | every turn | yes | `projectId`, `noteId`: remove only that association. |
+| `assign_conversation_project` | projects | every turn | yes | `projectId`, `conversationId`: both must exist in the bound partition. |
+| `remove_conversation_project` | projects | every turn | yes | `projectId`, `conversationId`: preserve the conversation and other associations. |
 | `save_memory` | memory | every turn | yes | `content` (up to 4,000 characters), `projectId`: saves one memory (`source: "agent"`); refuses while memory is off globally or for the project, checked again after approval |
 | `forget_memory` | memory | every turn | yes | `id`: forgets one memory (with its tombstone); same gates |
+| `update_memory` | memory | every turn | yes | `id`, `content`; settings-locked update preserves ID, source, creation and project scope. |
+| `search_memories` | memory | every turn | no | `query`, `projectId`, `includeGlobal`, `offset`, `limit`; scope and disabled/deleted projects filtered before paging. |
 | `list_routines` | routines | every turn | no | none: routines and their schedules |
-| `create_routine` | routines | every turn | yes | `name`, `prompt`, `schedule` (RFC 3339, `every <n>m/h/d`, or five-field cron), `safetyMode` (`sandboxed`, `unrestricted`); `prompt`, `schedule`, `safetyMode` required |
-| `update_routine` | routines | every turn | yes | `routineId` and any of `name`, `prompt`, `schedule`, `safetyMode` |
+| `create_routine` | routines | every turn | yes | `name`, `prompt`, `schedule`, IANA `timezone`, CLI `model`, `enabledToolsets`, `safetyMode`; normal CLI/provider usage can incur cost. Configuration creates no grants. |
+| `update_routine` | routines | every turn | yes | `routineId` and supported configuration fields; same validation and no implicit grants. |
 | `pause_routine` | routines | every turn | yes | `routineId` |
 | `resume_routine` | routines | every turn | yes | `routineId` |
 | `delete_routine` | routines | every turn | yes | `routineId`: deletes it permanently |
+| `run_routine` | routines | every turn | yes | `routineId`: start through the real single-flight scheduler; report started/busy/blocked, not success for an unclaimed run. |
+| `list_routine_runs` | routines | every turn | no | Optional `routineId`, `offset`, `limit`; deterministic persisted run history. |
 | `get_obsidian_vault` | vault and skills | every turn | no | none: the selected Obsidian vault; discovery never authorizes writes (the CLI reads the files itself) |
 | `list_skills` | vault and skills | every turn | no | none: the globally enabled Clovy skills (`agent_skill_settings`) |
 | `load_skill` | vault and skills | every turn | no | `name`: instructions of one globally enabled skill; a disabled one is refused |
+| `list_skill_settings` | vault and skills | attended turns | no | Active, disabled and unavailable skill metadata, canonical identity, source and editability; effective `enabled`, saved/default `configuredEnabled`, `readable`, typed `error`. |
+| `read_skill` | vault and skills | attended turns | no | `name`: inspect content, including disabled skills, without executing it. |
+| `update_skill` | vault and skills | attended turns | yes | `name`, `content` up to 512 KiB; managed root only, canonical symlink guard. Global skills stay read-only. |
+| `enable_skill` | vault and skills | attended turns | yes | `name`: enable the canonical skill identity. |
+| `disable_skill` | vault and skills | attended turns | yes | `name`: disable it without deleting files or backups. |
+| `get_activity_settings` | activity | every turn | no | Installation settings/status; available even with capture off, no activation. |
+| `update_activity_settings` | activity | every turn | yes | Closed editable settings DTO; preserve internal MCP/default fields under the native settings lock. |
+| `pause_activity` | activity | every turn | yes | Pause installation capture without rebuilding history. |
+| `resume_activity` | activity | every turn | yes | Resume through the existing activity service. |
+| `generate_day_summary` | activity | every turn | yes | Required local `day` (`YYYY-MM-DD`); real configured-provider generation, preserving empty-data, database and pending-hour/provider errors and normal usage cost. |
+| `delete_dictation` | dictation | every turn | yes | `id`: deletion qualified by the bound partition. |
+| `start_dictation` | dictation | every turn | yes | Pin host take/composer/window destination, await real listening confirmation; transcription/cleanup use configured providers and may incur charges. |
+| `get_dictation_status` | dictation | every turn | no | Real correlated take/helper status; no start or permission effect. |
+| `stop_dictation` | dictation | every turn | yes | `takeId`: finalize and deliver once to the previously fixed composer, never a free target app. |
+| `cancel_dictation` | dictation | every turn | yes | `takeId`: discard that take and refuse late delivery. |
 | `start_session` | browser | attended turns | tray | none: starts an attended Browser use session |
 | `close_session` | browser | attended turns | tray | `session_id` |
 | `navigate` | browser | attended turns | tray | `session_id`, `url` |
@@ -282,6 +343,11 @@ unattended turn every `yes` and `clarification` answers
 | `start_recording` | recorder | every turn | yes | `sourceMode` (`microphoneOnly`, `microphonePlusSystem`): the frontend starts the visible recording (ADR-0013) after approval |
 | `stop_recording` | recorder | every turn | yes | none: stops the visible recording |
 | `recording_status` | recorder | every turn | no | none: whether Clovy is recording, with its metadata |
+| `pause_recording` | recorder | every turn | yes | Exact active `sessionId`; pause the real visible recorder. |
+| `resume_recording` | recorder | every turn | yes | Exact paused `sessionId`; resume the same note/session. |
+| `recover_recording` | recorder | every turn | yes | `sessionId`, `action` (`validate`, `discard`); preserve source, note and session correlation. |
+| `retry_note_processing` | recorder | every turn | yes | `noteId`, `sessionId`; real durable retry through the main-window bridge; normal provider usage may be charged. |
+| `list_recording_artifacts` | recorder | every turn | no | `sessionId`: artifact IDs, sources, status and duration without filesystem paths. |
 | `request_clarification` | interaction | every turn | clarification | `question`, `choices`: the user's answer is the result |
 | `approve_action` | interaction | Claude turns | yes | `tool_name`, `input`, `tool_use_id`: Claude Code's `--permission-prompt-tool`; answers `{"behavior":"allow","updatedInput":...}` or `{"behavior":"deny","message":...}`; kept from the model by `--disallowedTools` in every Claude turn |
 
@@ -291,6 +357,15 @@ them with `unattended_requires_approval`. Browser use runs over the same
 yet allowed parks in the browser approval tray
 (`browser_approvals_pending` / `browser_approval_respond`) and answers
 `{parked: true, actionId}`; the approval broker is not asked again.
+
+Skill administration isolates invalid, oversized or unreadable entries. They
+remain inspectable with `error: {code,message}` but do not enter the active
+catalog or chat-start selection. Explicit reading reports the typed failure;
+replacing a managed skill can repair it without enabling it. Canonical settings
+take precedence over legacy alias rows. Global storage remains read-only during
+startup seeding, legacy promotion and administration, including canonical-root
+aliases. Hidden entries and objective `.bak`, `.old` or `~` backups are excluded;
+legitimate names such as `foo-backup` remain discoverable.
 
 ### Connector tools
 
